@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "TrussPath: outward-certified truss optimum bounds plus an advisory endpoint-checked tropical load path."
+description = "TrussPath: outward-certified truss optimum bounds plus an endpoint-checked tropical load path that promotes only under interval active-set, weight, path, and bottleneck separation."
 
 [package.metadata.frankensim]
 layer = "L4"

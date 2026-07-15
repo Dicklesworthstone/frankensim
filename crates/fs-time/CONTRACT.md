@@ -2,15 +2,17 @@
 
 ## Purpose and layer
 
-Layer: **L3 FLUX** (deps: fs-ad, fs-la, fs-math — all L0–L2).
+Layer: **L3 FLUX** (deps: fs-ad, fs-ga, fs-la, fs-math — all L0–L2).
 Structure-preserving time integration (plan §8.5): integrators that
 preserve what the physics preserves — symplectic (Störmer–Verlet with
 its discrete-Lagrangian equivalence tested), Lie-group SO(3) via
-exponential-map updates, generalized-α with controllable dissipation,
-IMEX and exponential integrators for stiffness, and embedded-pair
-adaptivity with a PI controller. The two universal obligations
-(P7 + §8.7) — resumable state machines and discrete adjoints of the
-stepper — are discharged where claimed below.
+exponential-map updates and SE(3) on fs-ga PGA motors (exp-map lane
+plus a free-body discrete Euler–Poincaré variational lane),
+generalized-α with controllable dissipation, IMEX and exponential
+integrators for stiffness, and embedded-pair adaptivity with a PI
+controller. The two universal obligations (P7 + §8.7) — resumable
+state machines and discrete adjoints of the stepper — are discharged
+where claimed below.
 
 ## Public types and semantics
 
@@ -46,6 +48,31 @@ stepper — are discharged where claimed below.
   Dormand–Prince 5(4), max-norm error against atol + rtol·|u|, PI
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
   [0.2, 5.0]; rejections shrink with the classical −1/5 exponent.
+- `se3` module (bead 3ol0): `Twist` (body ω then v);
+  `se3_exp_step(M, twist, h)` — `M ← M ∘ exp(−(h/2)·B(ω, v))` through
+  fs-ga's screw exponential, returning the CANONICAL double-cover
+  representative (`canonicalize_motor`: first nonzero even component
+  in `EVEN_BLADES` order made positive; `M` and `−M` canonicalize
+  bit-identically; all-zero refuses). `se3_exp_step_renorm` adds
+  drift-controlled versor renormalization gated by `RenormPolicy` and
+  returns a `RenormReceipt` (defect before, whether renormalized,
+  reported drift) — drift is ledger fodder, never silently absorbed.
+  `se3_rigid_body_step` — free-body Euler equations + body transport
+  of the spatially constant velocity, midpoint RK2 in the algebra with
+  one exp update at the midpoint twist. `dep_free_step` — discrete
+  Euler–Poincaré free-body step in body-momentum form (fixed-point
+  solve controlled by `DepSolveParams`, per-step `DepStepReceipt`);
+  spatial angular momentum is conserved EXACTLY by construction.
+  `run_dep_free` returns a `BalanceReceipt` whose `Se3ClaimClass` is
+  decided by `claim_for(declaration, all_solves_converged)`: the
+  conservative variational theorem class only for declared smooth,
+  conservative, regular-constraint, fixed-step fixtures with every
+  solve converged — dissipation, adaptivity, or divergence demote to
+  `MeasuredOnly` with measured drift receipts. `dep_momentum_adjoint`
+  pulls a terminal cotangent through the transposed implicit-function
+  tangent of each step's ACTUAL residual. `RattleProjection` is the
+  constraint hook fs-mbd's constrained lanes plug into
+  (`Unconstrained` is the trivial impl).
 
 - `slabs` module (addendum Proposal 4, bead bk0o.7; [F], behind
   `time-slabs`): time slabs as CELLS. `SlabEntry` carries the TEMPORAL
@@ -139,12 +166,36 @@ budget-pie localization, adaptive-vs-uniform cost, G3 repartition
 envelope, activation gate, and fail-fast validation for invalid slab
 counts/substeps/tolerances/budgets, malformed public ledger entries,
 and non-finite couplings.
+`tests/se3.rs` (bead 3ol0, printed measurements on every gate):
+SO(3)-lane agreement for pure rotations (se3-001); constant-twist
+one-parameter composition exactness (se3-002); double-cover
+canonicalization determinism, `M`/`−M` bit-equality, and bitwise
+replay across a scalar-zero crossing (se3-003); free-body DEP spatial
+momentum to roundoff plus bounded energy over 10⁴ steps with the
+theorem claim class earned (se3-004); adjoint-vs-central-FD gate on
+the DEP momentum map, four directions, rel ≤ 1e−6 (se3-005); the
+honesty fixture — a damped run demotes to `MeasuredOnly` with nonzero
+measured drift despite converged solves (se3-006); 10⁵-step
+renormalization receipts bounding the final unit defect (se3-007);
+SE(3) rigid-body agreement with the SO(3) lane and spatial
+free-velocity drift at the measured-order level (se3-008).
 
 ## No-claim boundaries
 
-- No SE(3)/motor states (needs fs-ga; the SO(3) quaternion layer here
-  is the base). No higher-order compositions (Yoshida/Suzuki), no
-  splitting beyond kick–drift–kick, no forced/damped rigid-body step.
+- SE(3) motor states ship the exp-map lane and the FREE-BODY
+  variational lane only: no forced/damped/constrained variational
+  steps here (constrained lanes are fs-mbd's, through
+  `RattleProjection`); the backward-error/modified-energy THEOREM is
+  claimed only for the declared smooth conservative fixed-step class
+  with converged solves — impacts, adaptivity, and dissipation get
+  measured `BalanceReceipt`s, never the theorem. The
+  `dep_momentum_adjoint` residual Jacobians are central differences of
+  the actual residual (3×3), not analytic tangents; the analytic
+  derivation and revolve checkpointing (O(N) memory today) are
+  follow-up work. The variational lane's group update solves the
+  midpoint transported-momentum fixed point; no claim of equivalence
+  to any OTHER published DEP variant. No higher-order compositions
+  (Yoshida/Suzuki), no splitting beyond kick–drift–kick.
 - No Krylov φ-actions for large nonsymmetric A (needs Arnoldi);
   `ExpEuler` is dense-symmetric only. No Rosenbrock/SDIRK families,
   no BDF/multistep.

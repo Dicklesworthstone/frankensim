@@ -18,20 +18,23 @@
 //!   bars from the load node to a support, and names a bottleneck only when the
 //!   rounded task graph has a unique heaviest chain.
 //! - **Honest colors** ([`fs_evidence`]): optimality becomes `Verified` only
-//!   from the retained outward primal/dual certificate. The load path remains
-//!   `Estimated` until active-set membership and member volumes carry interval
-//!   separation through the tropical analysis.
+//!   from the retained outward primal/dual certificate. A load path becomes
+//!   `Verified` only when the same solver receipt supplies separated member-
+//!   force intervals, every active-set decision and support-ward orientation
+//!   separates, and interval path/bottleneck comparisons are unique. Otherwise
+//!   the rounded advisory path remains `Estimated`.
 //!
 //! Deterministic; no dependencies beyond the composed crates.
 
-use fs_evidence::Color;
+use fs_evidence::{Color, ProvenanceHash};
 use fs_exec::Cx;
 use fs_ivl::Interval;
 use fs_tropical::{MAX_TASK_DAG_EDGES, MAX_TASK_DAG_NODES, TaskDag, TropicalError};
 use fs_truss::{
     GroundLimits, GroundRules, GroundStructure, LayoutCase, LayoutCertificateError,
-    LayoutCertificateLimits, LayoutCertificateProblem, LayoutCertificateStatus, LayoutLimits,
-    LayoutLp, PdhgError, PdhgSettings, TrussConstructionError,
+    LayoutCertificateIdentity, LayoutCertificateLimits, LayoutCertificateProblem,
+    LayoutCertificateStatus, LayoutLimits, LayoutLp, PdhgError, PdhgSettings,
+    TrussConstructionError,
 };
 use std::collections::BTreeSet;
 
@@ -43,6 +46,12 @@ pub const MAX_TRUSS_GROUND_CHECKS: usize = 262_144;
 pub const MAX_TRUSS_CANDIDATE_MEMBERS: usize = 512;
 /// Maximum conservative scalar operations admitted to the fixed PDHG solve.
 pub const MAX_TRUSS_PDHG_SCALAR_STEPS: usize = 1 << 27;
+/// Version of the exact-input load-path certificate receipt.
+pub const LOAD_PATH_CERTIFICATE_VERSION: u32 = 1;
+/// Relative member-force threshold used by the certified active-set policy.
+pub const LOAD_PATH_ACTIVE_RELATIVE_THRESHOLD: f64 = 1e-3;
+/// Positive scale floor used before applying the relative threshold.
+pub const LOAD_PATH_ACTIVE_FORCE_FLOOR: f64 = 1e-12;
 
 const TRUSS_PDHG_MAX_ITERS: usize = 60_000;
 const TRUSS_PDHG_CHECK_EVERY: usize = 500;
@@ -164,7 +173,8 @@ impl From<TrussConstructionError> for TrussError {
 pub struct TrussReport {
     /// Candidate bars in the ground structure.
     pub num_members: usize,
-    /// Bars carrying meaningful force in the returned iterate.
+    /// Bars in the separated certificate active set, or the rounded advisory
+    /// active set when certification is unavailable.
     pub num_active: usize,
     /// Approximate primal volume of the returned PDHG iterate.
     pub total_volume: f64,
@@ -185,8 +195,11 @@ pub struct TrussReport {
     /// Certified optimum bounds, or an honest diagnostic estimate when the
     /// outward proof is unavailable.
     pub optimality_color: Color,
-    /// Load-path evidence (currently `Estimated`; see no-claim boundary).
+    /// Load-path evidence. `Verified` is reachable only through
+    /// [`LoadPathCertificateStatus::Certified`].
     pub load_path_color: Color,
+    /// Retained proof or an exact reason the advisory path was not promoted.
+    pub load_path_status: LoadPathCertificateStatus,
 }
 
 /// Checked advisory load-path analysis shared by native and browser campaigns.
@@ -200,6 +213,199 @@ pub struct LoadPathAnalysis {
     pub bottleneck_member: Option<usize>,
     /// Whether directed rounding separates the selected path from all rivals.
     pub path_is_unique: bool,
+}
+
+/// Sound reason an otherwise well-formed advisory path could not be promoted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadPathCertificateRefusal {
+    /// The underlying optimum certificate was numerically unavailable.
+    OptimumCertificateUnavailable,
+    /// The optimum receipt did not bind the supplied LP, iterates, and settings.
+    SolverIdentityMismatch,
+    /// One member-force box straddled the interval active-set threshold.
+    ActiveSetUnseparated {
+        /// Physical member index.
+        member: usize,
+    },
+    /// An active member's endpoint distances could not be strictly ordered.
+    OrientationUnseparated {
+        /// Physical member index.
+        member: usize,
+    },
+    /// No complete multi-bar load-to-support path survived certified filtering.
+    NoCompleteLoadPath,
+    /// The selected path's lower weight did not exceed every rival upper weight.
+    CriticalPathUnseparated,
+    /// The selected bottleneck's lower weight did not exceed every peer upper weight.
+    BottleneckUnseparated,
+    /// Outward arithmetic became non-finite.
+    NonFiniteArithmetic {
+        /// Stable proof stage.
+        stage: &'static str,
+    },
+}
+
+impl LoadPathCertificateRefusal {
+    const fn estimator(&self) -> &'static str {
+        match self {
+            Self::OptimumCertificateUnavailable => {
+                "interval-load-path-optimum-certificate-unavailable-v1"
+            }
+            Self::SolverIdentityMismatch => "interval-load-path-solver-identity-mismatch-v1",
+            Self::ActiveSetUnseparated { .. } => "interval-load-path-active-set-unseparated-v1",
+            Self::OrientationUnseparated { .. } => "interval-load-path-orientation-unseparated-v1",
+            Self::NoCompleteLoadPath => "interval-load-path-incomplete-v1",
+            Self::CriticalPathUnseparated => "interval-load-path-critical-tie-v1",
+            Self::BottleneckUnseparated => "interval-load-path-bottleneck-tie-v1",
+            Self::NonFiniteArithmetic { .. } => "interval-load-path-non-finite-v1",
+        }
+    }
+}
+
+/// Exact native/browser input identity retained by a load-path proof.
+///
+/// The solver identities are collision-resistant BLAKE3 receipts from
+/// `fs-truss`. Geometry, endpoint, and threshold identity is retained in full
+/// canonical form, avoiding a second hash trust boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadPathInputIdentity {
+    version: u32,
+    problem: LayoutCertificateIdentity,
+    solver_input: LayoutCertificateIdentity,
+    solver_certificate: LayoutCertificateIdentity,
+    nodes: Vec<[u64; 2]>,
+    members: Vec<(usize, usize)>,
+    load_node: usize,
+    support_nodes: Vec<usize>,
+    relative_threshold: u64,
+    force_floor: u64,
+}
+
+/// Private-by-construction interval certificate for one load-to-support path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadPathCertificate {
+    identity: LoadPathInputIdentity,
+    analysis: LoadPathAnalysis,
+    path_weight: Interval,
+    active_threshold: Interval,
+    active_members: Vec<usize>,
+    member_weights: Vec<Interval>,
+    replay_golden: u64,
+}
+
+impl LoadPathCertificate {
+    /// Certified advisory path and its deterministic representative weight.
+    #[must_use]
+    pub const fn analysis(&self) -> &LoadPathAnalysis {
+        &self.analysis
+    }
+
+    /// Outward interval enclosing the complete selected path weight.
+    #[must_use]
+    pub const fn path_weight_bounds(&self) -> Interval {
+        self.path_weight
+    }
+
+    /// Outward active-force threshold used for every membership comparison.
+    #[must_use]
+    pub const fn active_threshold(&self) -> Interval {
+        self.active_threshold
+    }
+
+    /// Exactly separated active member identities.
+    #[must_use]
+    pub fn active_members(&self) -> &[usize] {
+        &self.active_members
+    }
+
+    /// Outward material-volume product for every physical member.
+    #[must_use]
+    pub fn member_weight_bounds(&self) -> &[Interval] {
+        &self.member_weights
+    }
+
+    /// Collision-resistant identity of the complete lower-level solver proof.
+    #[must_use]
+    pub const fn solver_certificate_identity(&self) -> LayoutCertificateIdentity {
+        self.identity.solver_certificate
+    }
+
+    /// Deterministic 64-bit replay sentinel over the exact receipt.
+    ///
+    /// This legacy FNV golden detects native/browser drift; it is not authority
+    /// and cannot replace the retained exact fields or the BLAKE3 solver receipt.
+    #[must_use]
+    pub const fn replay_golden(&self) -> u64 {
+        self.replay_golden
+    }
+
+    /// Re-run the bounded proof and require exact receipt equality.
+    ///
+    /// # Errors
+    /// Returns a structured malformed-input, cancellation, or allocation
+    /// error. A clean `false` means the supplied geometry, endpoints, solver
+    /// state, threshold implementation, or proof output differs.
+    #[allow(clippy::too_many_arguments)] // Exact proof identity has no implicit inputs.
+    pub fn verifies_for(
+        &self,
+        problem: &LayoutCertificateProblem<'_>,
+        x: &[f64],
+        y: &[f64],
+        settings: PdhgSettings,
+        optimum_status: &LayoutCertificateStatus,
+        nodes: &[[f64; 2]],
+        members: &[(usize, usize)],
+        load_node: usize,
+        support_nodes: &[usize],
+        cx: &Cx<'_>,
+    ) -> Result<bool, TrussError> {
+        let replayed = certify_load_path(
+            problem,
+            x,
+            y,
+            settings,
+            optimum_status,
+            nodes,
+            members,
+            load_node,
+            support_nodes,
+            cx,
+        )?;
+        Ok(matches!(
+            &replayed,
+            LoadPathCertificateStatus::Certified(candidate) if candidate == self
+        ))
+    }
+}
+
+/// Result of a well-formed interval load-path certificate attempt.
+#[derive(Debug, Clone, PartialEq)]
+// Boxing the successful receipt would add an unreported allocation to a path
+// whose other retained-state allocations are explicit.
+#[allow(clippy::large_enum_variant)]
+pub enum LoadPathCertificateStatus {
+    /// Every promotion obligation separated and the exact receipt was retained.
+    Certified(LoadPathCertificate),
+    /// The rounded advisory path remains useful but cannot be called verified.
+    Unavailable(LoadPathCertificateRefusal),
+}
+
+/// Convert a load-path certificate status into the sole evidence-promotion gate.
+#[must_use]
+pub fn load_path_color_from_certificate(status: &LoadPathCertificateStatus) -> Color {
+    match status {
+        LoadPathCertificateStatus::Certified(certificate) => {
+            let bounds = certificate.path_weight_bounds();
+            Color::Verified {
+                lo: bounds.lo(),
+                hi: bounds.hi(),
+            }
+        }
+        LoadPathCertificateStatus::Unavailable(reason) => Color::Estimated {
+            estimator: reason.estimator().to_string(),
+            dispersion: f64::INFINITY,
+        },
+    }
 }
 
 /// Convert one outward certificate result into the sole optimality-promotion
@@ -501,6 +707,646 @@ pub fn analyze_load_path(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CertifiedOrientedMember {
+    original: usize,
+    from: usize,
+    to: usize,
+    weight: Interval,
+}
+
+fn path_poll(cx: &Cx<'_>, stage: &'static str) -> Result<(), TrussError> {
+    cx.checkpoint()
+        .map_err(|_| TrussError::Certificate(LayoutCertificateError::Cancelled { stage }))
+}
+
+fn finite_interval(interval: Interval) -> bool {
+    interval.lo().is_finite() && interval.hi().is_finite() && interval.lo() <= interval.hi()
+}
+
+fn distance_interval(a: [f64; 2], b: [f64; 2]) -> Interval {
+    if a[0].to_bits() == b[0].to_bits() && a[1].to_bits() == b[1].to_bits() {
+        return Interval::point(0.0);
+    }
+    let dx = if a[0].to_bits() == b[0].to_bits() {
+        Interval::point(0.0)
+    } else {
+        Interval::point(a[0]) - Interval::point(b[0])
+    };
+    let dy = if a[1].to_bits() == b[1].to_bits() {
+        Interval::point(0.0)
+    } else {
+        Interval::point(a[1]) - Interval::point(b[1])
+    };
+    let abs_x = dx.abs();
+    let abs_y = dy.abs();
+    (abs_x * abs_x + abs_y * abs_y).sqrt()
+}
+
+fn nearest_support_distances(
+    nodes: &[[f64; 2]],
+    supports: &BTreeSet<usize>,
+    cx: &Cx<'_>,
+) -> Result<Vec<Interval>, TrussError> {
+    let mut distances = Vec::new();
+    distances.try_reserve_exact(nodes.len()).map_err(|_| {
+        TrussError::Certificate(LayoutCertificateError::AllocationFailed {
+            resource: "load-path support distances",
+            requested: nodes.len(),
+        })
+    })?;
+    for (node_index, &node) in nodes.iter().enumerate() {
+        if node_index.is_multiple_of(64) {
+            path_poll(cx, "load-path support-distance enclosure")?;
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::INFINITY;
+        for &support in supports {
+            let distance = distance_interval(node, nodes[support]);
+            lo = lo.min(distance.lo());
+            hi = hi.min(distance.hi());
+        }
+        if !lo.is_finite() || !hi.is_finite() || lo < 0.0 || lo > hi {
+            return Err(TrussError::InvalidLoadPath {
+                reason: "support-distance enclosure must be finite and nonnegative",
+            });
+        }
+        distances.push(Interval::new(lo, hi));
+    }
+    Ok(distances)
+}
+
+fn checked_upper_sum(left: f64, right: f64) -> Option<f64> {
+    let sum = (Interval::point(left) + Interval::point(right)).hi();
+    sum.is_finite().then_some(sum)
+}
+
+fn update_max(slot: &mut Option<f64>, candidate: f64) {
+    *slot = Some(slot.map_or(candidate, |current| current.max(candidate)));
+}
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_usize(bytes: &mut Vec<u8>, value: usize) {
+    push_u64(bytes, u64::try_from(value).unwrap_or(u64::MAX));
+}
+
+fn replay_golden(
+    identity: &LoadPathInputIdentity,
+    analysis: &LoadPathAnalysis,
+    path_weight: Interval,
+    active_threshold: Interval,
+    active_members: &[usize],
+    member_weights: &[Interval],
+) -> u64 {
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(b"fs-truss-e2e-load-path-replay-golden-v1");
+    canonical.extend_from_slice(&identity.version.to_le_bytes());
+    canonical.extend_from_slice(identity.problem.as_bytes());
+    canonical.extend_from_slice(identity.solver_input.as_bytes());
+    canonical.extend_from_slice(identity.solver_certificate.as_bytes());
+    push_usize(&mut canonical, identity.nodes.len());
+    for node in &identity.nodes {
+        push_u64(&mut canonical, node[0]);
+        push_u64(&mut canonical, node[1]);
+    }
+    push_usize(&mut canonical, identity.members.len());
+    for &(a, b) in &identity.members {
+        push_usize(&mut canonical, a);
+        push_usize(&mut canonical, b);
+    }
+    push_usize(&mut canonical, identity.load_node);
+    push_usize(&mut canonical, identity.support_nodes.len());
+    for &support in &identity.support_nodes {
+        push_usize(&mut canonical, support);
+    }
+    push_u64(&mut canonical, identity.relative_threshold);
+    push_u64(&mut canonical, identity.force_floor);
+    push_u64(&mut canonical, active_threshold.lo().to_bits());
+    push_u64(&mut canonical, active_threshold.hi().to_bits());
+    push_usize(&mut canonical, active_members.len());
+    for &member in active_members {
+        push_usize(&mut canonical, member);
+    }
+    push_usize(&mut canonical, member_weights.len());
+    for &weight in member_weights {
+        push_u64(&mut canonical, weight.lo().to_bits());
+        push_u64(&mut canonical, weight.hi().to_bits());
+    }
+    push_usize(&mut canonical, analysis.members.len());
+    for &member in &analysis.members {
+        push_usize(&mut canonical, member);
+    }
+    push_u64(&mut canonical, analysis.weight.to_bits());
+    push_usize(
+        &mut canonical,
+        analysis.bottleneck_member.unwrap_or(usize::MAX),
+    );
+    canonical.push(u8::from(analysis.path_is_unique));
+    push_u64(&mut canonical, path_weight.lo().to_bits());
+    push_u64(&mut canonical, path_weight.hi().to_bits());
+    ProvenanceHash::of_bytes(&canonical).0
+}
+
+fn validate_certified_path_inputs(
+    problem: &LayoutCertificateProblem<'_>,
+    nodes: &[[f64; 2]],
+    members: &[(usize, usize)],
+    load_node: usize,
+    support_nodes: &[usize],
+) -> Result<BTreeSet<usize>, TrussError> {
+    if nodes.is_empty() || nodes.len() > MAX_TRUSS_CAMPAIGN_NODES {
+        return Err(TrussError::InvalidLoadPath {
+            reason: "node count must be within the campaign bound",
+        });
+    }
+    if members.is_empty()
+        || members.len() > MAX_TASK_DAG_NODES
+        || problem.c().len() != 2 * members.len()
+    {
+        return Err(TrussError::InvalidLoadPath {
+            reason: "member count must match the split-variable certificate problem",
+        });
+    }
+    if load_node >= nodes.len() {
+        return Err(TrussError::InvalidLoadPath {
+            reason: "load node is out of range",
+        });
+    }
+    if support_nodes.is_empty() || support_nodes.len() > nodes.len() {
+        return Err(TrussError::InvalidLoadPath {
+            reason: "support count must be within 1..=node count",
+        });
+    }
+    if nodes
+        .iter()
+        .flatten()
+        .any(|coordinate| !coordinate.is_finite())
+    {
+        return Err(TrussError::InvalidLoadPath {
+            reason: "node coordinates must be finite",
+        });
+    }
+    for &(a, b) in members {
+        if a >= nodes.len() || b >= nodes.len() || a == b {
+            return Err(TrussError::InvalidLoadPath {
+                reason: "member endpoints must be distinct and in range",
+            });
+        }
+    }
+    let supports: BTreeSet<usize> = support_nodes.iter().copied().collect();
+    if supports.len() != support_nodes.len()
+        || supports.iter().any(|&node| node >= nodes.len())
+        || supports.contains(&load_node)
+    {
+        return Err(TrussError::InvalidLoadPath {
+            reason: "supports must be unique, in range, and exclude the load node",
+        });
+    }
+    Ok(supports)
+}
+
+/// Attempt the positive interval certificate for a load-to-support path.
+///
+/// The lower-layer optimum receipt supplies outward signed and split member-
+/// force boxes. This gate intervalizes the relative active threshold and every
+/// cost-times-split-force weight, requires every included and excluded member
+/// to separate, orients every active member only across disjoint support-
+/// distance boxes, removes disconnected/interior tasks, and proves one path
+/// and one bottleneck by strict lower-versus-rival-upper comparisons.
+///
+/// # Errors
+/// Returns a structured malformed-input, allocation, cancellation, or tropical
+/// error. Sound inability to separate is [`LoadPathCertificateStatus::Unavailable`].
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Full exact receipt and proof story.
+pub fn certify_load_path(
+    problem: &LayoutCertificateProblem<'_>,
+    x: &[f64],
+    y: &[f64],
+    settings: PdhgSettings,
+    optimum_status: &LayoutCertificateStatus,
+    nodes: &[[f64; 2]],
+    members: &[(usize, usize)],
+    load_node: usize,
+    support_nodes: &[usize],
+    cx: &Cx<'_>,
+) -> Result<LoadPathCertificateStatus, TrussError> {
+    let supports =
+        validate_certified_path_inputs(problem, nodes, members, load_node, support_nodes)?;
+    path_poll(cx, "load-path certificate admission")?;
+    let LayoutCertificateStatus::Certified(optimum) = optimum_status else {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::OptimumCertificateUnavailable,
+        ));
+    };
+    if !optimum.verifies_for_problem(problem, x, y, settings, cx)? {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::SolverIdentityMismatch,
+        ));
+    }
+
+    let member_count = members.len();
+    if optimum.repaired_member_forces().len() != member_count
+        || optimum.repaired_split_forces().len() != 2 * member_count
+    {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::SolverIdentityMismatch,
+        ));
+    }
+
+    let mut absolute_forces = Vec::new();
+    let mut member_weights = Vec::new();
+    absolute_forces
+        .try_reserve_exact(member_count)
+        .map_err(|_| {
+            TrussError::Certificate(LayoutCertificateError::AllocationFailed {
+                resource: "load-path absolute-force intervals",
+                requested: member_count,
+            })
+        })?;
+    member_weights
+        .try_reserve_exact(member_count)
+        .map_err(|_| {
+            TrussError::Certificate(LayoutCertificateError::AllocationFailed {
+                resource: "load-path member-volume intervals",
+                requested: member_count,
+            })
+        })?;
+    let mut max_force_lo = 0.0f64;
+    let mut max_force_hi = 0.0f64;
+    for member in 0..member_count {
+        if member.is_multiple_of(64) {
+            path_poll(cx, "load-path member interval construction")?;
+        }
+        let cost = problem.c()[member];
+        if !cost.is_finite()
+            || cost <= 0.0
+            || cost.to_bits() != problem.c()[member_count + member].to_bits()
+        {
+            return Err(TrussError::InvalidLoadPath {
+                reason: "member costs must be finite, positive, and symmetric",
+            });
+        }
+        let force = optimum.repaired_member_forces()[member].abs();
+        if !finite_interval(force) || force.lo() < 0.0 {
+            return Ok(LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::NonFiniteArithmetic {
+                    stage: "absolute member force",
+                },
+            ));
+        }
+        max_force_lo = max_force_lo.max(force.lo());
+        max_force_hi = max_force_hi.max(force.hi());
+        absolute_forces.push(force);
+
+        let split_sum = optimum.repaired_split_forces()[member]
+            + optimum.repaired_split_forces()[member_count + member];
+        let raw_weight = Interval::point(cost) * split_sum;
+        if !finite_interval(raw_weight) || raw_weight.hi() < 0.0 {
+            return Ok(LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::NonFiniteArithmetic {
+                    stage: "member-volume product",
+                },
+            ));
+        }
+        member_weights.push(Interval::new(raw_weight.lo().max(0.0), raw_weight.hi()));
+    }
+
+    let force_scale = Interval::new(
+        max_force_lo.max(LOAD_PATH_ACTIVE_FORCE_FLOOR),
+        max_force_hi.max(LOAD_PATH_ACTIVE_FORCE_FLOOR),
+    );
+    let raw_threshold = Interval::point(LOAD_PATH_ACTIVE_RELATIVE_THRESHOLD) * force_scale;
+    if !finite_interval(raw_threshold) || raw_threshold.hi() <= 0.0 {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NonFiniteArithmetic {
+                stage: "active-set threshold",
+            },
+        ));
+    }
+    let active_threshold = Interval::new(raw_threshold.lo().max(0.0), raw_threshold.hi());
+    let mut active = Vec::new();
+    active.try_reserve_exact(member_count).map_err(|_| {
+        TrussError::Certificate(LayoutCertificateError::AllocationFailed {
+            resource: "load-path active set",
+            requested: member_count,
+        })
+    })?;
+    for (member, force) in absolute_forces.iter().copied().enumerate() {
+        if force.lo() > active_threshold.hi() {
+            active.push(member);
+        } else if force.hi() > active_threshold.lo() {
+            return Ok(LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::ActiveSetUnseparated { member },
+            ));
+        }
+    }
+    if active.len() < 2 {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NoCompleteLoadPath,
+        ));
+    }
+
+    let distances = nearest_support_distances(nodes, &supports, cx)?;
+    let mut oriented = Vec::new();
+    oriented.try_reserve_exact(active.len()).map_err(|_| {
+        TrussError::Certificate(LayoutCertificateError::AllocationFailed {
+            resource: "load-path oriented active members",
+            requested: active.len(),
+        })
+    })?;
+    for (active_position, &member) in active.iter().enumerate() {
+        if active_position.is_multiple_of(64) {
+            path_poll(cx, "load-path active-member orientation")?;
+        }
+        let (a, b) = members[member];
+        let (from, to) = if distances[a].lo() > distances[b].hi() {
+            (a, b)
+        } else if distances[b].lo() > distances[a].hi() {
+            (b, a)
+        } else {
+            return Ok(LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::OrientationUnseparated { member },
+            ));
+        };
+        let weight = member_weights[member];
+        if !finite_interval(weight) || weight.lo() <= 0.0 {
+            return Ok(LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::NonFiniteArithmetic {
+                    stage: "active member-volume interval",
+                },
+            ));
+        }
+        oriented.push(CertifiedOrientedMember {
+            original: member,
+            from,
+            to,
+            weight,
+        });
+    }
+
+    let mut reachable = vec![false; nodes.len()];
+    reachable[load_node] = true;
+    loop {
+        path_poll(cx, "load-path forward reachability")?;
+        let mut changed = false;
+        for member in &oriented {
+            if reachable[member.from] && !reachable[member.to] {
+                reachable[member.to] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut reaches_support = vec![false; nodes.len()];
+    for &support in &supports {
+        reaches_support[support] = true;
+    }
+    loop {
+        path_poll(cx, "load-path reverse reachability")?;
+        let mut changed = false;
+        for member in oriented.iter().rev() {
+            if reaches_support[member.to] && !reaches_support[member.from] {
+                reaches_support[member.from] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    oriented.retain(|member| reachable[member.from] && reaches_support[member.to]);
+    oriented.sort_by(|a, b| {
+        distances[b.from]
+            .midpoint()
+            .total_cmp(&distances[a.from].midpoint())
+            .then(a.original.cmp(&b.original))
+    });
+    if oriented.len() < 2 {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NoCompleteLoadPath,
+        ));
+    }
+
+    let mut starts_at = vec![Vec::new(); nodes.len()];
+    for (index, member) in oriented.iter().enumerate() {
+        starts_at[member.from].push(index);
+    }
+    let mut predecessors = vec![Vec::new(); oriented.len()];
+    let mut dag = TaskDag::new(
+        oriented
+            .iter()
+            .map(|member| member.weight.midpoint())
+            .collect(),
+    );
+    let mut edge_count = 0usize;
+    for (index, member) in oriented.iter().enumerate() {
+        if index.is_multiple_of(64) {
+            path_poll(cx, "load-path task-edge construction")?;
+        }
+        for &successor in &starts_at[member.to] {
+            if successor <= index {
+                return Ok(LoadPathCertificateStatus::Unavailable(
+                    LoadPathCertificateRefusal::OrientationUnseparated {
+                        member: member.original,
+                    },
+                ));
+            }
+            edge_count = edge_count.checked_add(1).ok_or(TrussError::WorkBudget {
+                resource: "load-path edge count",
+                limit: MAX_TASK_DAG_EDGES,
+                observed: usize::MAX,
+            })?;
+            if edge_count > MAX_TASK_DAG_EDGES {
+                return Err(TrussError::WorkBudget {
+                    resource: "load-path edge count",
+                    limit: MAX_TASK_DAG_EDGES,
+                    observed: edge_count,
+                });
+            }
+            predecessors[successor].push(index);
+            dag = dag.with_edge(index, successor);
+        }
+    }
+
+    let critical = dag.critical_path()?;
+    if critical.path.len() < 2 {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NoCompleteLoadPath,
+        ));
+    }
+    let path: Vec<CertifiedOrientedMember> =
+        critical.path.iter().map(|&index| oriented[index]).collect();
+    if path.first().is_none_or(|member| member.from != load_node)
+        || path
+            .last()
+            .is_none_or(|member| !supports.contains(&member.to))
+        || path.windows(2).any(|pair| pair[0].to != pair[1].from)
+    {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NoCompleteLoadPath,
+        ));
+    }
+
+    let mut path_weight = Interval::point(0.0);
+    for (position, member) in path.iter().enumerate() {
+        if position.is_multiple_of(64) {
+            path_poll(cx, "load-path selected-weight sum")?;
+        }
+        path_weight = path_weight + member.weight;
+    }
+    if !finite_interval(path_weight) || path_weight.lo() <= 0.0 {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NonFiniteArithmetic {
+                stage: "critical-path weight sum",
+            },
+        ));
+    }
+
+    let mut witness_position = vec![None; oriented.len()];
+    for (position, &member) in critical.path.iter().enumerate() {
+        witness_position[member] = Some(position);
+    }
+    let mut exact_prefix_upper = vec![None; oriented.len()];
+    let mut alternative_upper = vec![None; oriented.len()];
+    for index in 0..oriented.len() {
+        if index.is_multiple_of(64) {
+            path_poll(cx, "load-path interval rival comparison")?;
+        }
+        let member = oriented[index];
+        if member.from == load_node {
+            if witness_position[index] == Some(0) {
+                exact_prefix_upper[index] = Some(member.weight.hi());
+            } else {
+                alternative_upper[index] = Some(member.weight.hi());
+            }
+        }
+        for &predecessor in &predecessors[index] {
+            if let Some(prefix) = alternative_upper[predecessor] {
+                let Some(candidate) = checked_upper_sum(prefix, member.weight.hi()) else {
+                    return Ok(LoadPathCertificateStatus::Unavailable(
+                        LoadPathCertificateRefusal::NonFiniteArithmetic {
+                            stage: "rival path upper sum",
+                        },
+                    ));
+                };
+                update_max(&mut alternative_upper[index], candidate);
+            }
+            if let (Some(prefix), Some(previous_position)) = (
+                exact_prefix_upper[predecessor],
+                witness_position[predecessor],
+            ) {
+                let Some(candidate) = checked_upper_sum(prefix, member.weight.hi()) else {
+                    return Ok(LoadPathCertificateStatus::Unavailable(
+                        LoadPathCertificateRefusal::NonFiniteArithmetic {
+                            stage: "witness-prefix upper sum",
+                        },
+                    ));
+                };
+                if witness_position[index] == Some(previous_position + 1) {
+                    exact_prefix_upper[index] = Some(candidate);
+                } else {
+                    update_max(&mut alternative_upper[index], candidate);
+                }
+            }
+        }
+    }
+    let witness_last = critical.path.last().copied();
+    let mut rival_upper = None;
+    for (index, member) in oriented.iter().enumerate() {
+        if supports.contains(&member.to) {
+            if let Some(candidate) = alternative_upper[index] {
+                update_max(&mut rival_upper, candidate);
+            }
+            if Some(index) != witness_last
+                && let Some(candidate) = exact_prefix_upper[index]
+            {
+                update_max(&mut rival_upper, candidate);
+            }
+        }
+    }
+    if rival_upper.is_some_and(|rival| path_weight.lo() <= rival) {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::CriticalPathUnseparated,
+        ));
+    }
+
+    let Some(bottleneck_task) = critical.path.iter().copied().max_by(|&left, &right| {
+        oriented[left]
+            .weight
+            .midpoint()
+            .total_cmp(&oriented[right].weight.midpoint())
+            .then(oriented[right].original.cmp(&oriented[left].original))
+    }) else {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NoCompleteLoadPath,
+        ));
+    };
+    let bottleneck = oriented[bottleneck_task];
+    if critical
+        .path
+        .iter()
+        .copied()
+        .any(|task| task != bottleneck_task && oriented[task].weight.hi() >= bottleneck.weight.lo())
+    {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::BottleneckUnseparated,
+        ));
+    }
+
+    let analysis = LoadPathAnalysis {
+        members: path.iter().map(|member| member.original).collect(),
+        weight: critical.makespan,
+        bottleneck_member: Some(bottleneck.original),
+        path_is_unique: true,
+    };
+    if !path_weight.contains(analysis.weight) {
+        return Ok(LoadPathCertificateStatus::Unavailable(
+            LoadPathCertificateRefusal::NonFiniteArithmetic {
+                stage: "representative path weight containment",
+            },
+        ));
+    }
+    path_poll(cx, "load-path receipt identity")?;
+    let identity = LoadPathInputIdentity {
+        version: LOAD_PATH_CERTIFICATE_VERSION,
+        problem: optimum.problem_identity(),
+        solver_input: optimum.input_identity(),
+        solver_certificate: optimum.certificate_identity(),
+        nodes: nodes
+            .iter()
+            .map(|node| [node[0].to_bits(), node[1].to_bits()])
+            .collect(),
+        members: members.to_vec(),
+        load_node,
+        support_nodes: support_nodes.to_vec(),
+        relative_threshold: LOAD_PATH_ACTIVE_RELATIVE_THRESHOLD.to_bits(),
+        force_floor: LOAD_PATH_ACTIVE_FORCE_FLOOR.to_bits(),
+    };
+    let replay_golden = replay_golden(
+        &identity,
+        &analysis,
+        path_weight,
+        active_threshold,
+        &active,
+        &member_weights,
+    );
+    path_poll(cx, "load-path receipt publication")?;
+    Ok(LoadPathCertificateStatus::Certified(LoadPathCertificate {
+        identity,
+        analysis,
+        path_weight,
+        active_threshold,
+        active_members: active,
+        member_weights,
+        replay_golden,
+    }))
+}
+
 /// Run the TrussPath campaign: a cantilever on an `nx×ny` grid over `[0,w]×[0,h]`,
 /// left edge supported, a unit downward load at the free bottom corner.
 ///
@@ -709,13 +1555,12 @@ pub fn run_campaign(
     let force = |k: usize| x[k] - x[m + k];
     let volume = |k: usize| lp.c()[k] * x[k] + lp.c()[m + k] * x[m + k];
     let max_force = (0..m).map(|k| force(k).abs()).fold(0.0, f64::max);
-    let active_tol = 1e-3 * max_force.max(1e-12);
+    let active_tol =
+        LOAD_PATH_ACTIVE_RELATIVE_THRESHOLD * max_force.max(LOAD_PATH_ACTIVE_FORCE_FLOOR);
 
     let active: Vec<usize> = (0..m).filter(|&k| force(k).abs() > active_tol).collect();
-    let num_active = active.len();
-
     let volumes: Vec<f64> = (0..m).map(volume).collect();
-    let load_path = analyze_load_path(
+    let advisory_load_path = analyze_load_path(
         gs.nodes(),
         gs.members(),
         &active,
@@ -723,16 +1568,27 @@ pub fn run_campaign(
         load_node,
         &support_nodes,
     )?;
-    let load_path_color = Color::Estimated {
-        estimator: if load_path.path_is_unique {
-            "pdhg-thresholded-tropical-load-path-v1"
-        } else {
-            "ambiguous-pdhg-thresholded-tropical-load-path-v1"
-        }
-        .to_string(),
-        // No interval active-set or product enclosure exists yet.
-        dispersion: f64::INFINITY,
+    let load_path_status = certify_load_path(
+        &certificate_problem,
+        &x,
+        &y,
+        settings,
+        &certificate_status,
+        gs.nodes(),
+        gs.members(),
+        load_node,
+        &support_nodes,
+        cx,
+    )?;
+    let load_path = match &load_path_status {
+        LoadPathCertificateStatus::Certified(certificate) => certificate.analysis().clone(),
+        LoadPathCertificateStatus::Unavailable(_) => advisory_load_path,
     };
+    let num_active = match &load_path_status {
+        LoadPathCertificateStatus::Certified(certificate) => certificate.active_members().len(),
+        LoadPathCertificateStatus::Unavailable(_) => active.len(),
+    };
+    let load_path_color = load_path_color_from_certificate(&load_path_status);
 
     let solver_converged = report.gap.is_finite()
         && report.eq_residual.is_finite()
@@ -764,5 +1620,6 @@ pub fn run_campaign(
         bottleneck_member: load_path.bottleneck_member,
         optimality_color,
         load_path_color,
+        load_path_status,
     })
 }

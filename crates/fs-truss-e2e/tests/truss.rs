@@ -8,8 +8,9 @@ use fs_truss::{
     LayoutCertificateProblem, LayoutCertificateRefusal, LayoutCertificateStatus, PdhgSettings,
 };
 use fs_truss_e2e::{
-    TrussError, analyze_load_path, optimality_color_from_certificate, rescale_optimality_color,
-    run_campaign,
+    LoadPathCertificateRefusal, LoadPathCertificateStatus, TrussError, analyze_load_path,
+    certify_load_path, load_path_color_from_certificate, optimality_color_from_certificate,
+    rescale_optimality_color, run_campaign,
 };
 
 fn with_gate_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -81,12 +82,33 @@ fn the_converged_truss_has_a_bounded_unique_load_path() {
             .critical_path
             .contains(&report.bottleneck_member.unwrap())
     );
-    let Color::Estimated { dispersion, .. } = report.load_path_color else {
-        panic!("thresholded load path must remain estimated");
-    };
-    assert!(dispersion.is_infinite());
-    // the critical path carries no more than the whole structure.
-    assert!(report.critical_path_volume <= report.total_volume + 1e-6);
+    match (&report.load_path_status, &report.load_path_color) {
+        (
+            LoadPathCertificateStatus::Certified(path_certificate),
+            Color::Verified {
+                lo: path_lo,
+                hi: path_hi,
+            },
+        ) => {
+            assert!(path_lo.is_finite() && path_hi.is_finite() && *path_lo > 0.0);
+            assert!(*path_lo <= report.critical_path_volume);
+            assert!(report.critical_path_volume <= *path_hi);
+            assert_eq!(path_certificate.analysis().members, report.critical_path);
+            assert_eq!(
+                path_certificate.analysis().bottleneck_member,
+                report.bottleneck_member
+            );
+            assert_ne!(path_certificate.replay_golden(), 0);
+        }
+        (LoadPathCertificateStatus::Unavailable(_), Color::Estimated { dispersion, .. }) => {
+            assert!(dispersion.is_infinite())
+        }
+        other => panic!("load-path color/status mismatch: {other:?}"),
+    }
+    // The selected path is a subset of the exactly feasible repaired design;
+    // compare it to the certified whole-structure upper bound, not the nearby
+    // rounded PDHG diagnostic.
+    assert!(report.critical_path_volume <= hi + 1e-6);
     println!(
         "{{\"campaign\":\"trusspath\",\"members\":{},\"active\":{},\"volume\":{:.4},\"gap\":{:.2e},\
          \"eq_res\":{:.2e},\"iters\":{},\"path_len\":{},\"path_volume\":{:.4},\"bottleneck\":{:?}}}",
@@ -110,6 +132,8 @@ fn the_campaign_is_deterministic() {
     assert_eq!(a.critical_path, b.critical_path);
     assert_eq!(a.bottleneck_member, b.bottleneck_member);
     assert_eq!(a.optimality_color, b.optimality_color);
+    assert_eq!(a.load_path_color, b.load_path_color);
+    assert_eq!(a.load_path_status, b.load_path_status);
 }
 
 #[test]
@@ -205,6 +229,365 @@ fn certificate_promotion_rejects_another_problem_and_rescales_outward() {
     assert!(matches!(
         rescale_optimality_color(&Color::Verified { lo: 1.0, hi: 2.0 }, 0.0),
         Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+}
+
+#[test]
+fn separated_member_intervals_mint_an_exact_path_receipt() {
+    // Physical B = [[1, 0], [-1, 1]], followed by its negation for the
+    // tension/compression split. q = [1, 1] is exactly equilibrated.
+    let matrix = Csr::from_parts(
+        2,
+        4,
+        vec![0, 2, 6],
+        vec![0, 2, 0, 1, 2, 3],
+        vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
+    );
+    let costs = [2.0, 1.0, 2.0, 1.0];
+    let loads = [1.0, 0.0];
+    let x = [1.0, 1.0, 0.0, 0.0];
+    let y = [0.0, 0.0];
+    let nodes = [[2.0, 0.0], [1.0, 0.0], [0.0, 0.0]];
+    let members = [(0, 1), (1, 2)];
+    let settings = PdhgSettings::default();
+    let problem = LayoutCertificateProblem::try_new(&matrix, &costs, &loads)
+        .expect("well-formed two-member fixture");
+
+    with_cx(|cx| {
+        let optimum = problem
+            .certify_optimum(
+                &x,
+                &y,
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("bounded optimum proof");
+        let status = certify_load_path(
+            &problem,
+            &x,
+            &y,
+            settings,
+            &optimum,
+            &nodes,
+            &members,
+            0,
+            &[2],
+            cx,
+        )
+        .expect("bounded path proof");
+        let LoadPathCertificateStatus::Certified(certificate) = &status else {
+            panic!("strictly separated chain must certify: {status:?}");
+        };
+        assert_eq!(certificate.analysis().members, vec![0, 1]);
+        assert_eq!(certificate.analysis().bottleneck_member, Some(0));
+        assert!(certificate.path_weight_bounds().contains(3.0));
+        assert!(certificate.member_weight_bounds()[0].contains(2.0));
+        assert!(certificate.member_weight_bounds()[1].contains(1.0));
+        assert!(certificate.active_threshold().hi() < 1.0);
+        assert!(matches!(
+            load_path_color_from_certificate(&status),
+            Color::Verified { lo, hi } if lo <= 3.0 && hi >= 3.0
+        ));
+        assert!(
+            certificate
+                .verifies_for(
+                    &problem,
+                    &x,
+                    &y,
+                    settings,
+                    &optimum,
+                    &nodes,
+                    &members,
+                    0,
+                    &[2],
+                    cx,
+                )
+                .expect("exact receipt replay")
+        );
+        assert!(
+            !certificate
+                .verifies_for(
+                    &problem,
+                    &x,
+                    &y,
+                    settings,
+                    &optimum,
+                    &nodes,
+                    &members,
+                    0,
+                    &[1],
+                    cx,
+                )
+                .expect("altered endpoint must fail closed")
+        );
+    });
+}
+
+#[test]
+fn tied_bottlenecks_and_direct_one_bar_paths_remain_estimated() {
+    let matrix = Csr::from_parts(
+        2,
+        4,
+        vec![0, 2, 6],
+        vec![0, 2, 0, 1, 2, 3],
+        vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
+    );
+    let costs = [1.0, 1.0, 1.0, 1.0];
+    let loads = [1.0, 0.0];
+    let x = [1.0, 1.0, 0.0, 0.0];
+    let y = [0.0, 0.0];
+    let settings = PdhgSettings::default();
+    let problem = LayoutCertificateProblem::try_new(&matrix, &costs, &loads)
+        .expect("well-formed tied fixture");
+    with_cx(|cx| {
+        let optimum = problem
+            .certify_optimum(
+                &x,
+                &y,
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("bounded optimum proof");
+        let tied = certify_load_path(
+            &problem,
+            &x,
+            &y,
+            settings,
+            &optimum,
+            &[[2.0, 0.0], [1.0, 0.0], [0.0, 0.0]],
+            &[(0, 1), (1, 2)],
+            0,
+            &[2],
+            cx,
+        )
+        .expect("tied path proof attempt");
+        assert!(matches!(
+            tied,
+            LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::BottleneckUnseparated
+            )
+        ));
+
+        let direct_matrix = Csr::from_parts(1, 2, vec![0, 2], vec![0, 1], vec![1.0, -1.0]);
+        let direct_costs = [1.0, 1.0];
+        let direct_loads = [1.0];
+        let direct_problem =
+            LayoutCertificateProblem::try_new(&direct_matrix, &direct_costs, &direct_loads)
+                .expect("well-formed direct fixture");
+        let direct_status = direct_problem
+            .certify_optimum(
+                &[1.0, 0.0],
+                &[0.0],
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("direct optimum proof");
+        let direct = certify_load_path(
+            &direct_problem,
+            &[1.0, 0.0],
+            &[0.0],
+            settings,
+            &direct_status,
+            &[[1.0, 0.0], [0.0, 0.0]],
+            &[(0, 1)],
+            0,
+            &[1],
+            cx,
+        )
+        .expect("direct path proof attempt");
+        assert!(matches!(
+            direct,
+            LoadPathCertificateStatus::Unavailable(LoadPathCertificateRefusal::NoCompleteLoadPath)
+        ));
+    });
+}
+
+#[test]
+fn equal_parallel_path_intervals_do_not_mint_a_unique_witness() {
+    let matrix = Csr::from_parts(
+        2,
+        8,
+        vec![0, 2, 6],
+        vec![0, 4, 0, 1, 4, 5],
+        vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
+    );
+    // Members 2 and 3 are equilibrium-neutral in this synthetic falsifier,
+    // but their retained positive forces form the second geometric route.
+    let costs = [2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0];
+    let loads = [1.0, 0.0];
+    let x = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let y = [0.0, 0.0];
+    let settings = PdhgSettings::default();
+    let problem = LayoutCertificateProblem::try_new(&matrix, &costs, &loads)
+        .expect("well-formed parallel-path fixture");
+    let nodes = [[2.0, 0.0], [1.0, 1.0], [1.0, -1.0], [0.0, 0.0]];
+    let members = [(0, 1), (1, 3), (0, 2), (2, 3)];
+    with_cx(|cx| {
+        let optimum = problem
+            .certify_optimum(
+                &x,
+                &y,
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("parallel-path optimum proof");
+        let status = certify_load_path(
+            &problem,
+            &x,
+            &y,
+            settings,
+            &optimum,
+            &nodes,
+            &members,
+            0,
+            &[3],
+            cx,
+        )
+        .expect("parallel-path proof attempt");
+        assert!(matches!(
+            status,
+            LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::CriticalPathUnseparated
+            )
+        ));
+    });
+}
+
+#[test]
+fn near_threshold_members_and_equal_distance_orientation_fail_closed() {
+    // The third physical column is structurally zero, so its exact retained
+    // force can probe threshold/orientation admission without changing the
+    // independently equilibrated two-member chain.
+    let matrix = Csr::from_parts(
+        2,
+        6,
+        vec![0, 2, 6],
+        vec![0, 3, 0, 1, 3, 4],
+        vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
+    );
+    let costs = [2.0, 1.0, 1.0, 2.0, 1.0, 1.0];
+    let loads = [1.0, 0.0];
+    let y = [0.0, 0.0];
+    let settings = PdhgSettings::default();
+    let problem = LayoutCertificateProblem::try_new(&matrix, &costs, &loads)
+        .expect("well-formed threshold fixture");
+    let nodes = [[2.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]];
+    let members = [(0, 1), (1, 2), (1, 3)];
+    with_cx(|cx| {
+        let near_x = [1.0, 1.0, 1e-3, 0.0, 0.0, 0.0];
+        let near_optimum = problem
+            .certify_optimum(
+                &near_x,
+                &y,
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("near-threshold optimum proof");
+        let near = certify_load_path(
+            &problem,
+            &near_x,
+            &y,
+            settings,
+            &near_optimum,
+            &nodes,
+            &members,
+            0,
+            &[2],
+            cx,
+        )
+        .expect("near-threshold proof attempt");
+        assert!(matches!(
+            near,
+            LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::ActiveSetUnseparated { member: 2 }
+            )
+        ));
+
+        let equal_x = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+        let equal_optimum = problem
+            .certify_optimum(
+                &equal_x,
+                &y,
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("equal-distance optimum proof");
+        let equal = certify_load_path(
+            &problem,
+            &equal_x,
+            &y,
+            settings,
+            &equal_optimum,
+            &nodes,
+            &members,
+            0,
+            &[2],
+            cx,
+        )
+        .expect("equal-distance proof attempt");
+        assert!(matches!(
+            equal,
+            LoadPathCertificateStatus::Unavailable(
+                LoadPathCertificateRefusal::OrientationUnseparated { member: 2 }
+            )
+        ));
+    });
+}
+
+#[test]
+fn cancelled_path_replay_publishes_no_certificate() {
+    let matrix = Csr::from_parts(
+        2,
+        4,
+        vec![0, 2, 6],
+        vec![0, 2, 0, 1, 2, 3],
+        vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
+    );
+    let costs = [2.0, 1.0, 2.0, 1.0];
+    let loads = [1.0, 0.0];
+    let x = [1.0, 1.0, 0.0, 0.0];
+    let y = [0.0, 0.0];
+    let settings = PdhgSettings::default();
+    let problem = LayoutCertificateProblem::try_new(&matrix, &costs, &loads)
+        .expect("well-formed cancellation fixture");
+    let optimum = with_cx(|cx| {
+        problem
+            .certify_optimum(
+                &x,
+                &y,
+                settings,
+                fs_truss::LayoutCertificateLimits::default(),
+                cx,
+            )
+            .expect("source optimum proof")
+    });
+    let gate = CancelGate::new();
+    gate.request();
+    let result = with_gate_cx(&gate, |cx| {
+        certify_load_path(
+            &problem,
+            &x,
+            &y,
+            settings,
+            &optimum,
+            &[[2.0, 0.0], [1.0, 0.0], [0.0, 0.0]],
+            &[(0, 1), (1, 2)],
+            0,
+            &[2],
+            cx,
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(TrussError::Certificate(
+            fs_truss::LayoutCertificateError::Cancelled { .. }
+        ))
     ));
 }
 

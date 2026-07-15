@@ -1794,6 +1794,7 @@ dependencies = [
  "fs-opdsl",
  "fs-rand",
  "fs-sparse",
+ "fs-spectral",
  "fs-tilelang",
 ]
 
@@ -1825,7 +1826,9 @@ version = "0.0.1"
 name = "fs-spectral"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-evidence",
+ "fs-qty",
 ]
 
 [[package]]
@@ -1879,6 +1882,7 @@ name = "fs-time"
 version = "0.0.1"
 dependencies = [
  "fs-ad",
+ "fs-ga",
  "fs-la",
  "fs-math",
 ]

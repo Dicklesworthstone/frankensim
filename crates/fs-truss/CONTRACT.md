@@ -198,5 +198,8 @@ truss-006 rod spot check.
   systems are feasible. Generic rectangular exact-feasibility certificates are
   follow-up scope; no residual-containing-zero shortcut is claimed.
 - Active-set membership and tropical load-path weights are not implied by an
-  optimum interval. They remain estimated until their separate interval proof
-  lands.
+  optimum interval. `fs-truss-e2e` owns their separate proof: it consumes this
+  certificate's repaired signed/split-force intervals and identities, then
+  independently requires threshold, member-product, orientation, endpoint,
+  unique-path, and unique-bottleneck separation before promotion. This crate
+  alone makes no load-path claim.

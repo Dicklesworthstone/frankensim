@@ -42,7 +42,9 @@ use fs_shapeprog::{max_sdf_discrepancy, simplify};
 use fs_sparse::{Coo, Csr};
 use fs_truss::{LayoutCertificateLimits, LayoutCertificateProblem, PdhgSettings};
 use fs_truss_e2e::{
-    analyze_load_path, estimated_optimality_color, optimality_color_from_certificate,
+    LOAD_PATH_ACTIVE_FORCE_FLOOR, LOAD_PATH_ACTIVE_RELATIVE_THRESHOLD, LoadPathCertificateStatus,
+    analyze_load_path, certify_load_path, estimated_optimality_color,
+    load_path_color_from_certificate, optimality_color_from_certificate,
 };
 use fs_viz::Grid2;
 use fs_voi::{Action, ActionKind, DesignEstimate, Uncertainty};
@@ -733,6 +735,10 @@ impl LeanLp {
 /// - then `M` blocks of 5: `[node_a, node_b, force, volume, is_active]`.
 /// - then `P` critical-path member indices (original bar indices, load →
 ///   support).
+/// - then 6 load-path proof fields: `[path_rank, path_verified, path_lo,
+///   path_hi, replay_golden_low32, replay_golden_high32]`. The two golden words
+///   are an exact wire representation of the non-authoritative drift sentinel;
+///   authority remains the retained exact receipt and BLAKE3 solver identity.
 /// - final 4 fields: `[optimality_rank, verified_flag, optimum_lo,
 ///   optimum_hi]`, where rank `2` and finite endpoints can come only from the
 ///   shared native/browser certificate-promotion gate.
@@ -773,7 +779,18 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
             out.push(p[0]);
             out.push(p[1]);
         }
-        out.extend_from_slice(&[0.0, 0.0, f64::NAN, f64::NAN]);
+        out.extend_from_slice(&[
+            0.0,
+            0.0,
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+            0.0,
+            0.0,
+            f64::NAN,
+            f64::NAN,
+        ]);
         return out;
     }
 
@@ -784,52 +801,93 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
         check_every: 500,
     };
     let (x, y, report) = lp.solve(settings.max_iters, settings.gap_tol, settings.check_every);
-    let optimality_color = match LayoutCertificateProblem::try_new(&lp.a, &lp.c, &lp.b) {
-        Ok(problem) => with_certificate_cx(|cx| {
-            problem
-                .certify_optimum(&x, &y, settings, LayoutCertificateLimits::default(), cx)
-                .map_or_else(
-                    |_| estimated_optimality_color(report.gap, report.eq_residual),
-                    |status| {
-                        optimality_color_from_certificate(
-                            &problem,
-                            &x,
-                            &y,
-                            settings,
-                            &status,
-                            report.gap,
-                            report.eq_residual,
-                            cx,
-                        )
-                        .unwrap_or_else(|_| {
-                            estimated_optimality_color(report.gap, report.eq_residual)
-                        })
-                    },
-                )
-        }),
-        Err(_) => estimated_optimality_color(report.gap, report.eq_residual),
-    };
-
     let force = |k: usize| x[k] - x[m + k];
     let volume = |k: usize| lp.c[k] * x[k] + lp.c[m + k] * x[m + k];
     let max_force = (0..m).map(|k| force(k).abs()).fold(0.0, f64::max);
-    let active_tol = 1e-3 * max_force.max(1e-12);
+    let active_tol =
+        LOAD_PATH_ACTIVE_RELATIVE_THRESHOLD * max_force.max(LOAD_PATH_ACTIVE_FORCE_FLOOR);
 
     let active: Vec<usize> = (0..m).filter(|&k| force(k).abs() > active_tol).collect();
-    let num_active = active.len();
 
     let volumes: Vec<f64> = (0..m).map(volume).collect();
-    let (critical_path, critical_path_volume, bottleneck_member) = match analyze_load_path(
+    let advisory_load_path = analyze_load_path(
         &gs.nodes,
         &gs.members,
         &active,
         &volumes,
         load_node,
         &support_nodes,
-    ) {
-        Ok(path) => (path.members, path.weight, path.bottleneck_member),
-        Err(_) => (Vec::new(), f64::NAN, None),
+    )
+    .ok();
+
+    let (optimality_color, load_path_status) =
+        match LayoutCertificateProblem::try_new(&lp.a, &lp.c, &lp.b) {
+            Ok(problem) => with_certificate_cx(|cx| {
+                let Ok(status) = problem.certify_optimum(
+                    &x,
+                    &y,
+                    settings,
+                    LayoutCertificateLimits::default(),
+                    cx,
+                ) else {
+                    return (
+                        estimated_optimality_color(report.gap, report.eq_residual),
+                        None,
+                    );
+                };
+                let optimality = optimality_color_from_certificate(
+                    &problem,
+                    &x,
+                    &y,
+                    settings,
+                    &status,
+                    report.gap,
+                    report.eq_residual,
+                    cx,
+                )
+                .unwrap_or_else(|_| estimated_optimality_color(report.gap, report.eq_residual));
+                let load_path = certify_load_path(
+                    &problem,
+                    &x,
+                    &y,
+                    settings,
+                    &status,
+                    &gs.nodes,
+                    &gs.members,
+                    load_node,
+                    &support_nodes,
+                    cx,
+                )
+                .ok();
+                (optimality, load_path)
+            }),
+            Err(_) => (
+                estimated_optimality_color(report.gap, report.eq_residual),
+                None,
+            ),
+        };
+    let certified_path = load_path_status.as_ref().and_then(|status| match status {
+        LoadPathCertificateStatus::Certified(certificate) => Some(certificate),
+        LoadPathCertificateStatus::Unavailable(_) => None,
+    });
+    let selected_active = certified_path.map_or(active.as_slice(), |certificate| {
+        certificate.active_members()
+    });
+    let num_active = selected_active.len();
+    let selected_path = certified_path
+        .map(|certificate| certificate.analysis().clone())
+        .or(advisory_load_path);
+    let (critical_path, critical_path_volume, bottleneck_member) = match selected_path {
+        Some(path) => (path.members, path.weight, path.bottleneck_member),
+        None => (Vec::new(), f64::NAN, None),
     };
+    let load_path_color = load_path_status.as_ref().map_or_else(
+        || Color::Estimated {
+            estimator: "interval-load-path-hard-refusal-v1".to_string(),
+            dispersion: f64::INFINITY,
+        },
+        load_path_color_from_certificate,
+    );
 
     let solver_converged = report.gap.is_finite()
         && report.eq_residual.is_finite()
@@ -839,7 +897,7 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
         && report.eq_residual < gap_tol;
 
     let p = critical_path.len();
-    let mut out = Vec::with_capacity(12 + 2 * nn + 5 * m + p + 4);
+    let mut out = Vec::with_capacity(12 + 2 * nn + 5 * m + p + 10);
     out.push(m as f64);
     out.push(num_active as f64);
     out.push(fon(report.volume));
@@ -856,7 +914,7 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
         out.push(pnode[0]);
         out.push(pnode[1]);
     }
-    let active_set: std::collections::BTreeSet<usize> = active.iter().copied().collect();
+    let active_set: std::collections::BTreeSet<usize> = selected_active.iter().copied().collect();
     for k in 0..m {
         let (a, b) = gs.members[k];
         out.push(a as f64);
@@ -868,6 +926,20 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     for &k in &critical_path {
         out.push(k as f64);
     }
+    let (path_verified, path_lo, path_hi) = verified_bounds(&load_path_color);
+    let (golden_low, golden_high) = certified_path.map_or((f64::NAN, f64::NAN), |certificate| {
+        let golden = certificate.replay_golden();
+        (
+            f64::from(golden as u32),
+            f64::from(u32::try_from(golden >> 32).unwrap_or(u32::MAX)),
+        )
+    });
+    out.push(rank_code(load_path_color.rank()));
+    out.push(path_verified);
+    out.push(path_lo);
+    out.push(path_hi);
+    out.push(golden_low);
+    out.push(golden_high);
     let (verified, optimum_lo, optimum_hi) = verified_bounds(&optimality_color);
     out.push(rank_code(optimality_color.rank()));
     out.push(verified);
@@ -1679,6 +1751,7 @@ mod tests {
         assert_eq!(v[6], 1.0, "solver_converged");
         assert!(v[7] >= 2.0, "connected path length {}", v[7]);
         assert!(v[8].is_finite() && v[8] > 0.0, "path weight {}", v[8]);
+        let path_claim = &v[v.len() - 10..v.len() - 4];
         let claim = &v[v.len() - 4..];
         assert_eq!(claim[0], 2.0, "optimality rank must be Verified");
         assert_eq!(claim[1], 1.0, "verified interval flag");
@@ -1693,13 +1766,35 @@ mod tests {
         assert_eq!(claim[1], native_claim.0);
         assert_eq!(claim[2].to_bits(), native_claim.1.to_bits());
         assert_eq!(claim[3].to_bits(), native_claim.2.to_bits());
+        let native_path_claim = verified_bounds(&native.load_path_color);
+        assert_eq!(path_claim[0], rank_code(native.load_path_color.rank()));
+        assert_eq!(path_claim[1], native_path_claim.0);
+        assert_eq!(path_claim[2].to_bits(), native_path_claim.1.to_bits());
+        assert_eq!(path_claim[3].to_bits(), native_path_claim.2.to_bits());
+        match &native.load_path_status {
+            LoadPathCertificateStatus::Certified(native_path) => {
+                assert!(path_claim[4].is_finite() && path_claim[5].is_finite());
+                let serialized_golden = (path_claim[4] as u64) | ((path_claim[5] as u64) << 32);
+                assert_eq!(serialized_golden, native_path.replay_golden());
+            }
+            LoadPathCertificateStatus::Unavailable(_) => {
+                assert_eq!(path_claim[1], 0.0);
+                assert!(path_claim[2..].iter().all(|value| value.is_nan()));
+            }
+        }
     }
 
     #[test]
     fn trusspath_non_finite_tolerance_uses_the_bounded_default() {
         let default = trusspath(4, 3, 1e-4);
         let non_finite = trusspath(4, 3, f64::NAN);
-        assert_eq!(non_finite, default);
+        assert_eq!(non_finite.len(), default.len());
+        assert!(
+            non_finite
+                .iter()
+                .zip(default.iter())
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        );
     }
 
     #[test]

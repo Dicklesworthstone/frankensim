@@ -10,6 +10,7 @@
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
+//! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
 //! - `check-citable-producers` — exhaustively inventory authority-gated `citation_eligible` sinks.
@@ -31,6 +32,7 @@ mod closures;
 mod constellation_cleanliness;
 mod depgraph;
 mod identities;
+mod manifest_fixture;
 
 use bootstrap_provenance::{
     BootstrapProvenanceRow, bootstrap_provenance_support_preflight, provenance_path_text,
@@ -185,6 +187,14 @@ struct Manifest {
 struct Violation {
     check: &'static str,
     crate_name: String,
+    detail: String,
+}
+
+#[derive(Debug)]
+struct PolicyNote {
+    check: &'static str,
+    crate_name: String,
+    verdict: &'static str,
     detail: String,
 }
 
@@ -1683,6 +1693,7 @@ fn json_escape(s: &str) -> String {
 fn emit(
     violations: &[Violation],
     dev_notes: &[(String, String)],
+    policy_notes: &[PolicyNote],
     checks_run: &[&str],
     crates_checked: usize,
 ) -> ExitCode {
@@ -1692,6 +1703,15 @@ fn emit(
             "{{\"check\":\"dev-dependency-note\",\"crate\":\"{}\",\"verdict\":\"note\",\"detail\":\"external dev-dependency {} (exempt; must be an isolated, documented oracle)\"}}",
             json_escape(krate),
             json_escape(dep)
+        );
+    }
+    for note in policy_notes {
+        println!(
+            "{{\"check\":\"{}\",\"crate\":\"{}\",\"verdict\":\"{}\",\"detail\":\"{}\"}}",
+            json_escape(note.check),
+            json_escape(&note.crate_name),
+            json_escape(note.verdict),
+            json_escape(&note.detail)
         );
     }
     for v in violations {
@@ -2896,6 +2916,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut policy_notes = Vec::new();
     let (violations, checks): (Vec<Violation>, Vec<&str>) = match cmd.as_str() {
         "check-layers" => (check_layers(&manifests), vec!["layers"]),
         "check-deps" => (check_deps(&manifests), vec!["dependency-policy"]),
@@ -2907,6 +2928,11 @@ fn main() -> ExitCode {
             identities::check_identities(&root),
             vec!["semantic-identities"],
         ),
+        "check-manifest-fixture" => {
+            let report = manifest_fixture::check_manifest_fixture(&root);
+            policy_notes = report.decisions;
+            (report.violations, vec!["manifest-fixture"])
+        }
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
         "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
@@ -2918,6 +2944,9 @@ fn main() -> ExitCode {
             v.extend(check_powi(&root));
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
+            let manifest_report = manifest_fixture::check_manifest_fixture(&root);
+            v.extend(manifest_report.violations);
+            policy_notes = manifest_report.decisions;
             v.extend(claims::check_claims(&root));
             v.extend(closures::check_closures(&root));
             v.extend(check_citable_producers(&root));
@@ -2931,6 +2960,7 @@ fn main() -> ExitCode {
                     "powi-determinism",
                     "golden-couplings",
                     "semantic-identities",
+                    "manifest-fixture",
                     "claim-state",
                     "closure-evidence",
                     CITABLE_PRODUCER_CHECK,
@@ -2941,7 +2971,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-goldens|check-claims|check-closures|\
-                 check-identities|check-citable-producers|check-all|generate-identities|\
+                 check-identities|check-manifest-fixture|check-citable-producers|check-all|generate-identities|\
                  lock-constellation|check-constellation"
             );
             return ExitCode::FAILURE;
@@ -2950,6 +2980,7 @@ fn main() -> ExitCode {
     emit(
         &violations,
         &dev_dep_notes(&manifests),
+        &policy_notes,
         &checks,
         manifests.len(),
     )

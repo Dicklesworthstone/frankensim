@@ -105,11 +105,23 @@ criteria.
 | `check-powi` | optimization-level-dependent `f64::powi` on determinism paths |
 | `check-goldens` | golden hashes whose upstream semantic surfaces drifted without a deliberate re-freeze (`golden-couplings.json`, docs/GOLDEN_POLICY.md) |
 | `check-identities` | persisted/replayed identity schemas with unclassified source fields, missing exact-field mutations or replay-version refusal guard targets, stale generated coverage, or schema/domain drift without a golden-coupling bump (`identity-schemas.json`) |
+| `check-manifest-fixture` | a new-domain package/edge omitted from `proposed-manifest-fixture.json`, an observed undeclared or forbidden edge, a missing declared-present edge, same-layer cycle/order drift, a root/standalone-`fs-wasm` metadata mismatch, or duplicate ownership of a registered domain type |
 | `check-claims` | claim-state drift in the tracker mirror |
 
 Each is also runnable alone (same names). Golden re-pins follow
 docs/GOLDEN_POLICY.md: committed tree, BOTH build modes, plausible root
 cause, coupling row updated in the same commit.
+
+The proposed-manifest gate is deliberately ahead of crate implementation.
+Edges marked `present` must resolve now; edges marked `proposed` are reserved
+and may be absent until their owner lands, but no other edge may appear. Its
+same-layer order and minimal compile-root inventory cover the exact 15-crate
+new-domain set, while `cargo metadata --locked --no-deps` observes both the
+root workspace and the standalone `crates/fs-wasm` workspace. Every admitted
+or rejected edge decision is emitted as a structured JSONL row. The xtask unit
+target retains seeded cycle, undeclared-edge, shorthand, and duplicate-type
+falsifiers; the real gate remains part of `check-all`, so the configured DSR
+quality lane executes it without a separate GitHub workflow.
 
 ## Required quality lanes
 
