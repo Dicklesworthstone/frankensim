@@ -39,7 +39,8 @@ impl Value {
 /// # Errors
 /// [`OptError::Unevaluable`] / [`OptError::UnknownVar`] /
 /// [`OptError::UnknownNode`] / [`OptError::BindingCount`] /
-/// [`OptError::BindingLen`] / [`OptError::CapExceeded`].
+/// [`OptError::BindingLen`] / [`OptError::BindingNonFinite`] /
+/// [`OptError::CapExceeded`].
 pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Value, OptError> {
     if node.0 as usize >= problem.exprs.len() {
         return Err(OptError::UnknownNode { id: node.0 });
@@ -78,6 +79,15 @@ pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Va
                 expected,
                 got: binding.len() as u64,
             });
+        }
+        for (component_index, component) in binding.iter().enumerate() {
+            if !component.is_finite() {
+                return Err(OptError::BindingNonFinite {
+                    var: i as u32,
+                    component: component_index as u32,
+                    bits: component.to_bits(),
+                });
+            }
         }
     }
     // Arena order guarantees every dependency has a lower id, so a

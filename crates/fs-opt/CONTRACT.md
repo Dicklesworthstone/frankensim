@@ -143,7 +143,10 @@ structure; FLUX/UQ execute it.
   numbers.
 - `eval`: memoized evaluation of algebraic subgraphs; the sealed root
   depth and aggregate-work receipts are checked against the default
-  admission schedule before memo allocation, and the walk itself is
+  admission schedule before memo allocation. Supplied runtime bindings
+  are checked for exact manifold point length and finite components first;
+  a refusal identifies the exact variable, component, and IEEE-754 bits.
+  The walk itself is
   EXPLICIT-STACK (reachability worklist + bottom-up arena-order sweep;
   bead frankensim-xf8v7) so no admitted graph — at the depth cap or
   otherwise — can overflow the call stack. `ir::children` is public so

@@ -454,9 +454,10 @@ fn adm_009_checked_id_accessors() {
     ));
 }
 
-/// adm-010 — binding validation: surplus bindings and wrong-length
+/// adm-010 — binding validation: surplus, wrong-length, and non-finite
 /// bindings refuse with typed errors; a missing prefix binding teaches
-/// through `UnknownVar` when actually referenced.
+/// through `UnknownVar` when actually referenced. Runtime points are
+/// rejected before their components can acquire graph authority.
 #[test]
 fn adm_010_binding_validation() {
     let p = simple_problem(1.0);
@@ -477,6 +478,17 @@ fn adm_010_binding_validation() {
         eval(&p, root, &[]),
         Err(OptError::UnknownVar { id: 0 })
     ));
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            eval(&p, root, &[vec![0.0, bad]]),
+            Err(OptError::BindingNonFinite {
+                var: 0,
+                component: 1,
+                bits: bad.to_bits(),
+            }),
+            "the exact malformed binding coordinate and bits must be retained"
+        );
+    }
     eval(&p, root, &[vec![0.5, -0.5]]).expect("exact binding evaluates");
 }
 

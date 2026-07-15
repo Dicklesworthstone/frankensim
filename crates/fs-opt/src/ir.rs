@@ -553,6 +553,15 @@ pub enum OptError {
         /// The offending value's IEEE-754 bit pattern.
         bits: u64,
     },
+    /// A runtime variable binding contains a NaN or infinity.
+    BindingNonFinite {
+        /// The variable whose point is malformed.
+        var: u32,
+        /// The component within that manifold point.
+        component: u32,
+        /// The offending value's exact IEEE-754 bit pattern.
+        bits: u64,
+    },
     /// A per-item or aggregate admission cap was exceeded.
     CapExceeded {
         /// Which cap.
@@ -666,6 +675,16 @@ impl core::fmt::Display for OptError {
                 f,
                 "`{what}` must be finite; got {} (bits {bits:016X}) — non-finite \
                  payloads cannot carry graph authority",
+                f64::from_bits(*bits)
+            ),
+            OptError::BindingNonFinite {
+                var,
+                component,
+                bits,
+            } => write!(
+                f,
+                "binding for variable {var} has non-finite component {component}: {} \
+                 (bits {bits:016X}); runtime points must be finite before evaluation",
                 f64::from_bits(*bits)
             ),
             OptError::CapExceeded { what, count, cap } => write!(
