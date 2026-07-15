@@ -240,12 +240,13 @@ fn uq_005_cvar_and_adaptive_mlmc_rate_recovery() {
     );
     println!(
         "{{\"metric\":\"adaptive-mlmc\",\"levels\":{},\"alpha\":{:.2},\"beta\":{:.2},\
-         \"estimate\":{:.4},\"bias\":{:.2e}}}",
+         \"estimate\":{:.4},\"bias\":{:.2e},\"variance\":{:.2e}}}",
         report.levels.len(),
         report.alpha,
         report.beta,
         report.estimate,
-        report.bias_estimate
+        report.bias_estimate,
+        report.estimator_variance
     );
     assert!(report.levels.len() >= 3, "levels were ADDED adaptively");
     assert!(
@@ -260,11 +261,34 @@ fn uq_005_cvar_and_adaptive_mlmc_rate_recovery() {
         report.estimate
     );
     assert!(report.bias_estimate <= 1e-3, "the bias stop criterion held");
+    let audited_variance: f64 = report
+        .levels
+        .iter()
+        .map(|level| level.var / level.n as f64)
+        .sum();
+    assert_eq!(
+        report.estimator_variance.to_bits(),
+        audited_variance.to_bits()
+    );
+    assert!(
+        report.estimator_variance <= 1e-6,
+        "the variance half of the tolerance must be enforced: {}",
+        report.estimator_variance
+    );
+    assert!(
+        report.levels.iter().any(|level| level.n > 400),
+        "the pilot ladder alone is not variance evidence"
+    );
+    assert!(
+        report.levels.first().expect("coarse level").n
+            > report.levels.last().expect("fine level").n,
+        "Giles allocation must spend more samples on cheap high-variance levels"
+    );
     verdict(
         "uq-005",
         "CVaR matches the analytic tail mean; adaptive MLMC adds levels on its own, \
-         recovers alpha~2/beta~3 from level statistics, and stops when the extrapolated \
-         bias fits the tolerance",
+         recovers alpha~2/beta~3 from level statistics, and controls both the extrapolated \
+         bias and estimator-variance halves of the tolerance",
     );
 }
 
@@ -337,5 +361,16 @@ fn adaptive_mlmc_rejects_invalid_admission_inputs() {
     assert!(
         std::panic::catch_unwind(|| adaptive_mlmc(sampler, |_| 1.0, 1e-3, 4, 0)).is_err(),
         "max_level below 1 cannot host the required level-0/1 pilot ladder"
+    );
+    for cost in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            std::panic::catch_unwind(|| adaptive_mlmc(sampler, |_| cost, 1e-3, 4, 2)).is_err(),
+            "non-positive or non-finite cost must fail before allocation: {cost}"
+        );
+    }
+    assert!(
+        std::panic::catch_unwind(|| { adaptive_mlmc(|_, _| f64::NAN, |_| 1.0, 1e-3, 4, 2) })
+            .is_err(),
+        "non-finite samples must not enter adaptive evidence"
     );
 }
