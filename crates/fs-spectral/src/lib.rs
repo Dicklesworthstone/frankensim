@@ -23,6 +23,9 @@
 //!   [`compose_conditioning`], [`route`].
 //! - validates versioned spectral problem descriptors, proposition-bound
 //!   authority, and exact method-family prerequisites — [`admission`];
+//! - validates one-way, content-addressed physical-domain crosswalks without
+//!   importing higher-layer physical models or inventing reverse maps —
+//!   [`adapter`];
 //! - validates orthogonal set-valued result truth (authority, algebraic
 //!   coverage, cluster/internal separation, projective accounting, and
 //!   termination) against the complete admitted problem — [`truth`].
@@ -31,6 +34,7 @@
 
 use fs_evidence::{Color, ColorRank};
 
+pub mod adapter;
 pub mod admission;
 pub mod service;
 pub mod truth;

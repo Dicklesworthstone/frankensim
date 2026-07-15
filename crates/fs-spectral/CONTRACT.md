@@ -77,6 +77,69 @@ immediately before sorting, hashing, or pairwise inspection, so hostile
 oversized input cannot force deeper work merely to accumulate secondary
 diagnostics.
 
+## Physical-domain adapter API (RB.8a)
+
+The `adapter` module is the one-way boundary by which rotordynamics, control,
+acoustic, electromagnetic, and periodic-domain crates describe an induced
+spectral problem. Dependency direction remains downward: domain crates may
+construct adapter descriptors using `fs-spectral` types, while `fs-spectral`
+does not import, wrap, mutate, or assign scientific authority to their model
+objects.
+
+`SpectralAdapterSpecV1` binds all of the following to the exact
+`SpectralProblemId` of a complete `ValidatedSpectralProblemV1`:
+
+- source artifact and immutable physical-model version;
+- source operator class plus primal/state and dual/test space identities and
+  dimensions;
+- unit/scaling, frame, metric, and norm crosswalks with named map artifacts;
+- constraints, nullspace/gauge data, parameter/held-variable schema, and
+  boundary-condition schema;
+- a model-version-bound frozen linearization point or an explicit
+  non-applicability artifact;
+- periodic phase, Poincare section, or event-word semantics;
+- retained source structure evidence when the target problem carries
+  structure claims;
+- exact forward fidelity and an explicit reverse-interpretation/no-claim
+  boundary; and
+- source-to-spectral QoI crosswalks.
+
+Every semantic component is retained, explicitly non-applicable with a
+content-addressed justification, or unresolved. `Unknown` never admits.
+Descriptor targets require retained constraint data. Monodromy/Floquet targets
+require a periodic source and a retained phase/section map. An alleged identity
+frame map must name the same source and target frame. A frozen linearization
+must name the current source-model version. Target space dimensions, metric
+IDs, scaling ID, representation, descriptor role, origin, and problem identity
+are cross-checked against the sealed target token.
+
+`validate_adapter_v1` is the sole constructor for
+`ValidatedSpectralAdapterV1`. It refuses lossy or ambiguous mappings, unresolved
+bindings, stale linearizations, missing descriptor constraints, phase/origin
+mismatches, unsupported structure, duplicate QoI interpretations, and all
+target mismatches. Exact quotient fidelity must name the same retained
+nullspace artifact, and neither a one-way nor a quotient adapter may claim an
+exact whole-mode reverse interpretation. The QoI resource cap is enforced
+before sorting or identity work. Successful validation canonicalizes QoI order and returns a
+domain-separated `SpectralAdapterIdV1` plus its canonical-preimage receipt, so
+schema replay is deterministic and changes to any bound model, map, frame,
+convention, target, or no-claim artifact are byte-visible.
+
+The adapter receipt proves only stable schema identity and successful local
+cross-checks. Opaque source artifact, model, map, witness, and no-claim IDs are
+references to upstream evidence; choosing their bytes does not prove physical
+correctness, unit-transform correctness, model fidelity, or a theorem. Exact
+one-way and quotient adapters deliberately carry an explicit absent-inverse
+statement. No caller may reinterpret one as an inverse, lift, reconstruction,
+mode-shape theorem, stability theorem, or completeness certificate. Numerical
+spectral truth remains governed separately by the admission and truth APIs.
+
+G0/G3/G5 adapter tests cover canonical QoI ordering and replay, identity
+sensitivity to model/frame changes, wrong metric and scaling targets, identity
+frame mismatch, lossy frames and forward maps, stale linearization, omitted
+boundaries, duplicate and oversized QoIs, descriptor constraints,
+periodic-phase mismatch, and source-structure retention.
+
 ### Authority boundary
 
 A favorable proposition cannot be created by selecting an enum value.
