@@ -5,6 +5,8 @@
 //! non-smooth through that min()" is knowable at BUILD time and
 //! optimizer routing can refuse with the offending node named.
 
+use crate::admission::{self, AdmissionCaps, AdmissionReport, ProblemAdmission};
+use crate::serial::{LegacyProblemHash, ProblemSemanticId};
 use fs_qty::Dims;
 use std::collections::BTreeMap;
 
@@ -43,26 +45,49 @@ pub enum Manifold {
 }
 
 impl Manifold {
-    /// Storage length of one point.
+    /// Storage length of one point, computed with CHECKED arithmetic.
+    /// `None` means the descriptor's formulas leave the `u32` domain
+    /// (e.g. `Stiefel` with `n * p` overflow) — such a descriptor can
+    /// never enter a [`Problem`] because [`ProblemBuilder::var`]
+    /// validates through [`Manifold::validate`] first.
     #[must_use]
-    pub fn point_dim(&self) -> u32 {
+    pub fn point_dim(&self) -> Option<u32> {
         match *self {
-            Manifold::Rn { dim } => dim,
-            Manifold::Sphere { ambient } => ambient,
-            Manifold::So3 => 4,
-            Manifold::Stiefel { n, p } => n * p,
+            Manifold::Rn { dim } => Some(dim),
+            Manifold::Sphere { ambient } => Some(ambient),
+            Manifold::So3 => Some(4),
+            Manifold::Stiefel { n, p } => n.checked_mul(p),
         }
     }
 
-    /// Tangent-space dimension (what a Riemannian gradient has).
+    /// Tangent-space dimension (what a Riemannian gradient has),
+    /// computed with CHECKED arithmetic; `None` when the formula is
+    /// not representable or meaningful for the raw descriptor.
     #[must_use]
-    pub fn tangent_dim(&self) -> u32 {
+    pub fn tangent_dim(&self) -> Option<u32> {
         match *self {
-            Manifold::Rn { dim } => dim,
-            Manifold::Sphere { ambient } => ambient - 1,
-            Manifold::So3 => 3,
-            Manifold::Stiefel { n, p } => n * p - p * (p + 1) / 2,
+            Manifold::Rn { dim } => Some(dim),
+            Manifold::Sphere { ambient } => ambient.checked_sub(1),
+            Manifold::So3 => Some(3),
+            Manifold::Stiefel { n, p } => {
+                let np = u64::from(n).checked_mul(u64::from(p))?;
+                let correction = u64::from(p).checked_mul(u64::from(p) + 1)? / 2;
+                u32::try_from(np.checked_sub(correction)?).ok()
+            }
         }
+    }
+
+    /// Validate this descriptor against the versioned admission policy:
+    /// `Rn` needs `dim >= 1` (a zero-storage variable cannot bind a
+    /// point), `Sphere` needs `ambient >= 2` (the 0/1-dimensional
+    /// "spheres" have empty/degenerate tangent spaces), `Stiefel` needs
+    /// `1 <= p <= n`, and every point/tangent formula must stay inside
+    /// the checked `u32` domain and the per-variable dimension cap.
+    ///
+    /// # Errors
+    /// [`OptError::ManifoldInvalid`] naming the violated rule.
+    pub fn validate(&self, caps: &AdmissionCaps) -> Result<(), OptError> {
+        admission::validate_manifold(self, caps)
     }
 }
 
@@ -200,23 +225,39 @@ pub enum ConstraintKind {
     LeZero,
 }
 
+/// A reference to a bilevel inner problem. The two variants are
+/// deliberately NON-INTERCHANGEABLE: a full-width BLAKE3-backed
+/// [`ProblemSemanticId`] is the only strong spelling, while a legacy
+/// 64-bit FNV identity parsed from a historical artifact stays
+/// QUARANTINED — it is inspectable provenance with no execution or
+/// certificate authority, and no API widens or reinterprets it as
+/// strong (admission lists it in
+/// [`ProblemAdmission::quarantined_legacy_identities`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BilevelRef {
+    /// Full-width semantic identity of the inner problem.
+    Semantic(ProblemSemanticId),
+    /// Quarantined legacy FNV-64 identity from a v1/v2 artifact.
+    LegacyFnv(LegacyProblemHash),
+}
+
 /// Problem-structure annotations (representable, not yet executed).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProblemTag {
     /// Multiple fidelity levels are available.
     MultiFidelity {
-        /// Number of levels.
+        /// Number of levels (validated: `1..=` the admission cap).
         levels: u32,
     },
     /// Chance constraint: `P(g ≤ 0) ≥ prob`.
     ChanceConstrained {
-        /// Required probability.
+        /// Required probability (validated: finite, strictly in (0, 1)).
         prob: f64,
     },
-    /// Bilevel structure (inner problem referenced by hash).
+    /// Bilevel structure (inner problem referenced by typed identity).
     Bilevel {
-        /// Inner problem hash.
-        inner_hash: u64,
+        /// Inner problem reference.
+        inner: BilevelRef,
     },
 }
 
@@ -290,6 +331,16 @@ pub enum OptError {
         /// Left dims (fs-qty exponent vector).
         left: [i8; 6],
         /// Right dims.
+        right: [i8; 6],
+    },
+    /// Combining two operand dimension vectors would leave the
+    /// representable i8 exponent domain (mul/div/dot/norm_sq).
+    DimSumOverflow {
+        /// Operation that combined the dimensions.
+        op: &'static str,
+        /// Left operand dims.
+        left: [i8; 6],
+        /// Right operand dims.
         right: [i8; 6],
     },
     /// Dimension exponents would leave the representable runtime domain.
@@ -371,6 +422,44 @@ pub enum OptError {
         /// Evaluations spent.
         spent: u64,
     },
+    /// A manifold descriptor violates the admission policy.
+    ManifoldInvalid {
+        /// The violated rule, teaching text.
+        what: String,
+    },
+    /// A payload that must be finite is NaN or infinite. The exact bit
+    /// pattern is retained because NaN payloads do not survive Display.
+    NonFinite {
+        /// Which payload.
+        what: &'static str,
+        /// The offending value's IEEE-754 bit pattern.
+        bits: u64,
+    },
+    /// A per-item or aggregate admission cap was exceeded.
+    CapExceeded {
+        /// Which cap.
+        what: &'static str,
+        /// Count that was attempted.
+        count: u64,
+        /// The versioned cap.
+        cap: u64,
+    },
+    /// More variable bindings were supplied than the problem declares.
+    BindingCount {
+        /// Declared variable count.
+        vars: u32,
+        /// Bindings supplied.
+        got: u64,
+    },
+    /// A supplied binding's length does not match its manifold storage.
+    BindingLen {
+        /// The variable.
+        var: u32,
+        /// Its manifold point storage length.
+        expected: u32,
+        /// The binding length supplied.
+        got: u64,
+    },
 }
 
 impl core::fmt::Display for OptError {
@@ -390,6 +479,11 @@ impl core::fmt::Display for OptError {
                 f,
                 "`{op}` got incompatible dimensions {left:?} vs {right:?}; only \
                  same-dimension quantities add or compare"
+            ),
+            OptError::DimSumOverflow { op, left, right } => write!(
+                f,
+                "`{op}` would combine dimensions {left:?} and {right:?} outside the \
+                 supported i8 exponent domain; rescale the formulation"
             ),
             OptError::DimOverflow { op, dims, exponent } => write!(
                 f,
@@ -444,6 +538,30 @@ impl core::fmt::Display for OptError {
                 f,
                 "evaluation budget exhausted after {spent} evaluations (P4 receipt)"
             ),
+            OptError::ManifoldInvalid { what } => {
+                write!(f, "manifold descriptor rejected: {what}")
+            }
+            OptError::NonFinite { what, bits } => write!(
+                f,
+                "`{what}` must be finite; got {} (bits {bits:016X}) — non-finite \
+                 payloads cannot carry graph authority",
+                f64::from_bits(*bits)
+            ),
+            OptError::CapExceeded { what, count, cap } => write!(
+                f,
+                "admission cap exceeded: {what} = {count} > {cap}; split the problem \
+                 or raise the cap through an explicit AdmissionCaps"
+            ),
+            OptError::BindingCount { vars, got } => write!(
+                f,
+                "{got} bindings supplied for {vars} declared variable(s); bindings \
+                 are indexed by VarId and must not exceed the declaration list"
+            ),
+            OptError::BindingLen { var, expected, got } => write!(
+                f,
+                "binding for variable {var} has length {got}, but its manifold \
+                 stores points of length {expected}"
+            ),
         }
     }
 }
@@ -463,44 +581,132 @@ pub enum OptimizerFamily {
     GradientFree,
 }
 
-/// The finished problem: graph + roots + metadata. Construct through
-/// [`ProblemBuilder`]; every accessor is cheap.
+/// The finished problem: graph + roots + metadata. SEALED — fields are
+/// crate-private, so the only public paths into a `Problem` are the
+/// validating [`ProblemBuilder`] and the parser (which rebuilds through
+/// the builder). Accessors are read-only and cheap; ID-indexed
+/// accessors are CHECKED and refuse unknown ids instead of panicking.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
-    /// Declared variables.
-    pub vars: Vec<Variable>,
-    /// Expression nodes (hash-consed; ids index this list).
-    pub exprs: Vec<Expr>,
-    /// Objectives (multi-objective representable).
-    pub objectives: Vec<Objective>,
-    /// Constraints.
-    pub constraints: Vec<Constraint>,
-    /// Structure annotations.
-    pub tags: Vec<ProblemTag>,
-    /// Evaluation budget (P4).
-    pub budget: EvalBudget,
+    pub(crate) vars: Vec<Variable>,
+    pub(crate) exprs: Vec<Expr>,
+    pub(crate) objectives: Vec<Objective>,
+    pub(crate) constraints: Vec<Constraint>,
+    pub(crate) tags: Vec<ProblemTag>,
+    pub(crate) budget: EvalBudget,
     pub(crate) shapes: Vec<Shape>,
     pub(crate) dims: Vec<Dims>,
     pub(crate) classes: Vec<Class>,
 }
 
 impl Problem {
-    /// Shape of a node.
+    /// Declared variables (read-only).
     #[must_use]
-    pub fn shape(&self, n: NodeId) -> Shape {
-        self.shapes[n.0 as usize]
+    pub fn vars(&self) -> &[Variable] {
+        &self.vars
     }
 
-    /// Dimensions of a node.
+    /// Expression nodes (read-only; ids index this list).
     #[must_use]
-    pub fn node_dims(&self, n: NodeId) -> Dims {
-        self.dims[n.0 as usize]
+    pub fn exprs(&self) -> &[Expr] {
+        &self.exprs
     }
 
-    /// Propagated differentiability class of a node.
+    /// Objectives (read-only).
     #[must_use]
-    pub fn class(&self, n: NodeId) -> Class {
-        self.classes[n.0 as usize]
+    pub fn objectives(&self) -> &[Objective] {
+        &self.objectives
+    }
+
+    /// Constraints (read-only).
+    #[must_use]
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    /// Structure annotations (read-only).
+    #[must_use]
+    pub fn tags(&self) -> &[ProblemTag] {
+        &self.tags
+    }
+
+    /// Evaluation budget (P4).
+    #[must_use]
+    pub fn budget(&self) -> EvalBudget {
+        self.budget
+    }
+
+    /// Checked expression accessor.
+    ///
+    /// # Errors
+    /// [`OptError::UnknownNode`].
+    pub fn expr(&self, n: NodeId) -> Result<&Expr, OptError> {
+        self.exprs
+            .get(n.0 as usize)
+            .ok_or(OptError::UnknownNode { id: n.0 })
+    }
+
+    /// Checked variable accessor.
+    ///
+    /// # Errors
+    /// [`OptError::UnknownVar`].
+    pub fn variable(&self, v: VarId) -> Result<&Variable, OptError> {
+        self.vars
+            .get(v.0 as usize)
+            .ok_or(OptError::UnknownVar { id: v.0 })
+    }
+
+    /// Shape of a node (checked).
+    ///
+    /// # Errors
+    /// [`OptError::UnknownNode`].
+    pub fn shape(&self, n: NodeId) -> Result<Shape, OptError> {
+        self.shapes
+            .get(n.0 as usize)
+            .copied()
+            .ok_or(OptError::UnknownNode { id: n.0 })
+    }
+
+    /// Dimensions of a node (checked).
+    ///
+    /// # Errors
+    /// [`OptError::UnknownNode`].
+    pub fn node_dims(&self, n: NodeId) -> Result<Dims, OptError> {
+        self.dims
+            .get(n.0 as usize)
+            .copied()
+            .ok_or(OptError::UnknownNode { id: n.0 })
+    }
+
+    /// Propagated differentiability class of a node (checked).
+    ///
+    /// # Errors
+    /// [`OptError::UnknownNode`].
+    pub fn class(&self, n: NodeId) -> Result<Class, OptError> {
+        self.classes
+            .get(n.0 as usize)
+            .copied()
+            .ok_or(OptError::UnknownNode { id: n.0 })
+    }
+
+    /// Re-validate the complete problem through the versioned common
+    /// admission validator and mint its [`ProblemSemanticId`]. Builder
+    /// output always admits (the builder enforces the same leaf rules);
+    /// this is the defense-in-depth chokepoint for deserialized,
+    /// migrated, or future foreign constructions.
+    ///
+    /// # Errors
+    /// A complete, deterministically ordered [`AdmissionReport`].
+    pub fn admit(&self) -> Result<ProblemAdmission, AdmissionReport> {
+        admission::admit_with_caps(self, &AdmissionCaps::default())
+    }
+
+    /// [`Problem::admit`] under explicit caps.
+    ///
+    /// # Errors
+    /// A complete, deterministically ordered [`AdmissionReport`].
+    pub fn admit_with_caps(&self, caps: &AdmissionCaps) -> Result<ProblemAdmission, AdmissionReport> {
+        admission::admit_with_caps(self, caps)
     }
 
     /// The class-propagation trace: one line per node (build order),
@@ -540,7 +746,7 @@ impl Problem {
             .chain(self.constraints.iter().map(|c| c.node))
             .collect();
         for root in roots {
-            for n in self.reachable(root) {
+            for n in self.reachable(root)? {
                 let i = n.0 as usize;
                 if self.classes[i] < min_class && own_class(&self.exprs[i]) < min_class {
                     return Err(OptError::NonsmoothForFamily {
@@ -567,9 +773,15 @@ impl Problem {
         Ok(())
     }
 
-    /// Nodes reachable from `root` (build order).
-    #[must_use]
-    pub fn reachable(&self, root: NodeId) -> Vec<NodeId> {
+    /// Nodes reachable from `root` (build order). The root is CHECKED;
+    /// interior child ids are valid by the sealed-arena invariant.
+    ///
+    /// # Errors
+    /// [`OptError::UnknownNode`] when `root` is not in this problem.
+    pub fn reachable(&self, root: NodeId) -> Result<Vec<NodeId>, OptError> {
+        if root.0 as usize >= self.exprs.len() {
+            return Err(OptError::UnknownNode { id: root.0 });
+        }
         let mut seen = vec![false; self.exprs.len()];
         let mut stack = vec![root];
         let mut out = Vec::new();
@@ -583,7 +795,7 @@ impl Problem {
             }
         }
         out.sort_unstable();
-        out
+        Ok(out)
     }
 }
 
@@ -655,8 +867,11 @@ pub(crate) fn expr_kind_name(e: &Expr) -> &'static str {
 
 /// Incremental, validating builder. Every `Result` is a teaching error;
 /// hash-consing makes repeated subexpressions return the SAME id (the
-/// G0 common-subexpression identity).
-#[derive(Debug, Default)]
+/// G0 common-subexpression identity). Every constructor validates
+/// through the SAME versioned leaf rules the admission validator uses
+/// (`admission::derive_expr` and friends), and every rejection leaves
+/// the intern table, ids, budget, and ordering unchanged.
+#[derive(Debug)]
 pub struct ProblemBuilder {
     vars: Vec<Variable>,
     exprs: Vec<Expr>,
@@ -668,75 +883,151 @@ pub struct ProblemBuilder {
     constraints: Vec<Constraint>,
     tags: Vec<ProblemTag>,
     budget: EvalBudget,
+    caps: AdmissionCaps,
+    total_point_storage: u64,
+}
+
+impl Default for ProblemBuilder {
+    fn default() -> Self {
+        ProblemBuilder::new()
+    }
 }
 
 impl ProblemBuilder {
-    /// Empty builder (unlimited budget).
+    /// Empty builder (unlimited budget, versioned default caps).
     #[must_use]
     pub fn new() -> Self {
+        ProblemBuilder::with_caps(AdmissionCaps::default())
+    }
+
+    /// Empty builder under explicit admission caps (tests, sandboxes).
+    #[must_use]
+    pub fn with_caps(caps: AdmissionCaps) -> Self {
         ProblemBuilder {
+            vars: Vec::new(),
+            exprs: Vec::new(),
+            shapes: Vec::new(),
+            dims: Vec::new(),
+            classes: Vec::new(),
+            intern: BTreeMap::new(),
+            objectives: Vec::new(),
+            constraints: Vec::new(),
+            tags: Vec::new(),
             budget: EvalBudget { max_evals: 0 },
-            ..ProblemBuilder::default()
+            caps,
+            total_point_storage: 0,
         }
     }
 
-    /// Declare a variable.
-    pub fn var(&mut self, name: &str, manifold: Manifold, dims: Dims) -> VarId {
+    /// Declare a variable. Validates the manifold descriptor (checked
+    /// point/tangent formulas, per-variable dimension cap), the name
+    /// length, and the variable-count and total-storage caps BEFORE
+    /// assigning a `VarId`.
+    ///
+    /// # Errors
+    /// [`OptError::ManifoldInvalid`] / [`OptError::CapExceeded`].
+    pub fn var(&mut self, name: &str, manifold: Manifold, dims: Dims) -> Result<VarId, OptError> {
+        admission::validate_name("variable name", name, &self.caps)?;
+        admission::validate_manifold(&manifold, &self.caps)?;
+        if self.vars.len() as u64 >= u64::from(self.caps.max_vars) {
+            return Err(OptError::CapExceeded {
+                what: "variables",
+                count: self.vars.len() as u64 + 1,
+                cap: u64::from(self.caps.max_vars),
+            });
+        }
+        let storage = u64::from(
+            manifold
+                .point_dim()
+                .expect("validate_manifold proved the point formula representable"),
+        );
+        let total = self
+            .total_point_storage
+            .checked_add(storage)
+            .unwrap_or(u64::MAX);
+        if total > self.caps.max_total_point_storage {
+            return Err(OptError::CapExceeded {
+                what: "total point storage",
+                count: total,
+                cap: self.caps.max_total_point_storage,
+            });
+        }
+        self.total_point_storage = total;
         self.vars.push(Variable {
             name: name.to_string(),
             manifold,
             dims,
         });
-        VarId((self.vars.len() - 1) as u32)
+        Ok(VarId((self.vars.len() - 1) as u32))
     }
 
-    /// Attach the evaluation budget (P4).
+    /// Attach the evaluation budget (P4). Any `u64` is valid (0 =
+    /// unlimited), so this stays infallible.
     pub fn set_budget(&mut self, max_evals: u64) {
         self.budget.max_evals = max_evals;
     }
 
-    /// Attach a structure tag.
-    pub fn tag(&mut self, tag: ProblemTag) {
+    /// Attach a structure tag (validated: fidelity levels in `1..=cap`,
+    /// chance probability finite and strictly inside (0, 1), bilevel
+    /// references typed).
+    ///
+    /// # Errors
+    /// [`OptError::BadParam`] / [`OptError::CapExceeded`].
+    pub fn tag(&mut self, tag: ProblemTag) -> Result<(), OptError> {
+        admission::validate_tag(&tag, &self.caps)?;
+        if self.tags.len() as u64 >= u64::from(self.caps.max_tags) {
+            return Err(OptError::CapExceeded {
+                what: "tags",
+                count: self.tags.len() as u64 + 1,
+                cap: u64::from(self.caps.max_tags),
+            });
+        }
         self.tags.push(tag);
+        Ok(())
     }
 
-    fn check_node(&self, n: NodeId) -> Result<(), OptError> {
-        if (n.0 as usize) < self.exprs.len() {
-            Ok(())
-        } else {
-            Err(OptError::UnknownNode { id: n.0 })
+    fn require_scalar_root(&self, node: NodeId) -> Result<(), OptError> {
+        let shape = self
+            .shapes
+            .get(node.0 as usize)
+            .ok_or(OptError::UnknownNode { id: node.0 })?;
+        if *shape != Shape::Scalar {
+            return Err(OptError::NotScalar { node: node.0 });
         }
+        Ok(())
     }
 
-    fn scalar(&self, op: &'static str, n: NodeId) -> Result<(), OptError> {
-        match self.shapes[n.0 as usize] {
-            Shape::Scalar => Ok(()),
-            v @ Shape::Vector(_) => Err(OptError::ShapeMismatch {
-                op,
-                left: v,
-                right: Shape::Scalar,
-            }),
-        }
-    }
-
-    fn push(&mut self, e: Expr, shape: Shape, dims: Dims) -> NodeId {
+    /// Validate a candidate expression through the shared admission
+    /// rules, then intern it. Interned hits return the EXISTING id
+    /// (identical expressions were valid when first admitted); every
+    /// rejection happens before any mutation.
+    fn push_checked(&mut self, e: Expr) -> Result<NodeId, OptError> {
         let key = crate::serial::expr_key(&e);
         if let Some(&id) = self.intern.get(&key) {
-            return id;
+            return Ok(id);
         }
-        let class = children(&e)
-            .iter()
-            .map(|c| self.classes[c.0 as usize])
-            .chain([own_class(&e)])
-            .min()
-            .unwrap_or(Class::Smooth);
+        let derived = {
+            let lookup = |n: NodeId| {
+                let i = n.0 as usize;
+                (i < self.exprs.len()).then(|| (self.shapes[i], self.dims[i], self.classes[i]))
+            };
+            admission::derive_expr(&e, &lookup, &self.vars, &self.caps)?
+        };
+        if self.exprs.len() as u64 >= u64::from(self.caps.max_nodes) {
+            return Err(OptError::CapExceeded {
+                what: "expression nodes",
+                count: self.exprs.len() as u64 + 1,
+                cap: u64::from(self.caps.max_nodes),
+            });
+        }
+        let (shape, dims, class) = derived;
         self.exprs.push(e);
         self.shapes.push(shape);
         self.dims.push(dims);
         self.classes.push(class);
         let id = NodeId((self.exprs.len() - 1) as u32);
         self.intern.insert(key, id);
-        id
+        Ok(id)
     }
 
     /// Variable reference node.
@@ -744,12 +1035,7 @@ impl ProblemBuilder {
     /// # Errors
     /// [`OptError::UnknownVar`].
     pub fn var_ref(&mut self, v: VarId) -> Result<NodeId, OptError> {
-        let var = self
-            .vars
-            .get(v.0 as usize)
-            .ok_or(OptError::UnknownVar { id: v.0 })?;
-        let (shape, dims) = (Shape::Vector(var.manifold.point_dim()), var.dims);
-        Ok(self.push(Expr::Var(v), shape, dims))
+        self.push_checked(Expr::Var(v))
     }
 
     /// Component extraction.
@@ -757,52 +1043,16 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/index teaching errors.
     pub fn component(&mut self, of: NodeId, index: u32) -> Result<NodeId, OptError> {
-        self.check_node(of)?;
-        match self.shapes[of.0 as usize] {
-            Shape::Vector(len) if index < len => {
-                let dims = self.dims[of.0 as usize];
-                Ok(self.push(Expr::Component { of, index }, Shape::Scalar, dims))
-            }
-            Shape::Vector(len) => Err(OptError::IndexOut { index, len }),
-            Shape::Scalar => Err(OptError::ShapeMismatch {
-                op: "component",
-                left: Shape::Scalar,
-                right: Shape::Vector(index + 1),
-            }),
-        }
+        self.push_checked(Expr::Component { of, index })
     }
 
-    /// Dimensioned constant.
-    pub fn konst(&mut self, value: f64, dims: Dims) -> NodeId {
-        self.push(Expr::Const { value, dims }, Shape::Scalar, dims)
-    }
-
-    fn binary_same(
-        &mut self,
-        op: &'static str,
-        make: fn(NodeId, NodeId) -> Expr,
-        a: NodeId,
-        b: NodeId,
-    ) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.check_node(b)?;
-        let (sa, sb) = (self.shapes[a.0 as usize], self.shapes[b.0 as usize]);
-        if sa != sb {
-            return Err(OptError::ShapeMismatch {
-                op,
-                left: sa,
-                right: sb,
-            });
-        }
-        let (da, db) = (self.dims[a.0 as usize], self.dims[b.0 as usize]);
-        if da != db {
-            return Err(OptError::DimMismatch {
-                op,
-                left: da.0,
-                right: db.0,
-            });
-        }
-        Ok(self.push(make(a, b), sa, da))
+    /// Dimensioned constant. The value must be FINITE — non-finite
+    /// constants cannot acquire graph authority.
+    ///
+    /// # Errors
+    /// [`OptError::NonFinite`].
+    pub fn konst(&mut self, value: f64, dims: Dims) -> Result<NodeId, OptError> {
+        self.push_checked(Expr::Const { value, dims })
     }
 
     /// Sum.
@@ -810,7 +1060,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn add(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.binary_same("add", Expr::Add, a, b)
+        self.push_checked(Expr::Add(a, b))
     }
 
     /// Difference.
@@ -818,7 +1068,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn sub(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.binary_same("sub", Expr::Sub, a, b)
+        self.push_checked(Expr::Sub(a, b))
     }
 
     /// Pointwise minimum (C0 — poisons smooth routing, on purpose).
@@ -826,7 +1076,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn min_of(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.binary_same("min", Expr::Min, a, b)
+        self.push_checked(Expr::Min(a, b))
     }
 
     /// Pointwise maximum (C0).
@@ -834,52 +1084,24 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn max_of(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.binary_same("max", Expr::Max, a, b)
+        self.push_checked(Expr::Max(a, b))
     }
 
-    /// Product (scalar×scalar or scalar×vector).
+    /// Product (scalar×scalar or scalar×vector; dimensions add,
+    /// CHECKED against the i8 exponent domain).
     ///
     /// # Errors
-    /// Shape teaching errors.
+    /// Shape/dimension teaching errors.
     pub fn mul(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.check_node(b)?;
-        let (sa, sb) = (self.shapes[a.0 as usize], self.shapes[b.0 as usize]);
-        let dims = self.dims[a.0 as usize].plus(self.dims[b.0 as usize]);
-        let shape = match (sa, sb) {
-            (Shape::Scalar, Shape::Scalar) => Shape::Scalar,
-            (Shape::Scalar, Shape::Vector(n)) | (Shape::Vector(n), Shape::Scalar) => {
-                Shape::Vector(n)
-            }
-            (l, r) => {
-                return Err(OptError::ShapeMismatch {
-                    op: "mul",
-                    left: l,
-                    right: r,
-                });
-            }
-        };
-        Ok(self.push(Expr::Mul(a, b), shape, dims))
+        self.push_checked(Expr::Mul(a, b))
     }
 
-    /// Quotient (scalars).
+    /// Quotient (scalars; dimensions subtract, CHECKED).
     ///
     /// # Errors
-    /// Shape teaching errors.
+    /// Shape/dimension teaching errors.
     pub fn div(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.check_node(b)?;
-        self.scalar("div", a)?;
-        self.scalar("div", b)?;
-        let dims = Dims([
-            self.dims[a.0 as usize].0[0].saturating_sub(self.dims[b.0 as usize].0[0]),
-            self.dims[a.0 as usize].0[1].saturating_sub(self.dims[b.0 as usize].0[1]),
-            self.dims[a.0 as usize].0[2].saturating_sub(self.dims[b.0 as usize].0[2]),
-            self.dims[a.0 as usize].0[3].saturating_sub(self.dims[b.0 as usize].0[3]),
-            self.dims[a.0 as usize].0[4].saturating_sub(self.dims[b.0 as usize].0[4]),
-            self.dims[a.0 as usize].0[5].saturating_sub(self.dims[b.0 as usize].0[5]),
-        ]);
-        Ok(self.push(Expr::Div(a, b), Shape::Scalar, dims))
+        self.push_checked(Expr::Div(a, b))
     }
 
     /// Negation.
@@ -887,9 +1109,7 @@ impl ProblemBuilder {
     /// # Errors
     /// [`OptError::UnknownNode`].
     pub fn neg(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        let (s, d) = (self.shapes[a.0 as usize], self.dims[a.0 as usize]);
-        Ok(self.push(Expr::Neg(a), s, d))
+        self.push_checked(Expr::Neg(a))
     }
 
     /// Integer power (scalar).
@@ -897,24 +1117,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape or dimension-overflow teaching errors.
     pub fn powi(&mut self, base: NodeId, exp: i32) -> Result<NodeId, OptError> {
-        self.check_node(base)?;
-        self.scalar("powi", base)?;
-        let d = self.dims[base.0 as usize].0;
-        let mut scaled = [0i8; 6];
-        for (out, &e) in scaled.iter_mut().zip(&d) {
-            let product = i32::from(e).checked_mul(exp).ok_or(OptError::DimOverflow {
-                op: "powi",
-                dims: d,
-                exponent: exp,
-            })?;
-            *out = i8::try_from(product).map_err(|_| OptError::DimOverflow {
-                op: "powi",
-                dims: d,
-                exponent: exp,
-            })?;
-        }
-        let dims = Dims(scaled);
-        Ok(self.push(Expr::Powi { base, exp }, Shape::Scalar, dims))
+        self.push_checked(Expr::Powi { base, exp })
     }
 
     /// Square root (even dimension exponents halve).
@@ -922,28 +1125,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/[`OptError::OddDims`] teaching errors.
     pub fn sqrt(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.scalar("sqrt", a)?;
-        let d = self.dims[a.0 as usize].0;
-        if d.iter().any(|e| e % 2 != 0) {
-            return Err(OptError::OddDims { dims: d });
-        }
-        Ok(self.push(Expr::Sqrt(a), Shape::Scalar, Dims(d.map(|e| e / 2))))
-    }
-
-    fn transcendental(
-        &mut self,
-        op: &'static str,
-        make: fn(NodeId) -> Expr,
-        a: NodeId,
-    ) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.scalar(op, a)?;
-        let d = self.dims[a.0 as usize];
-        if d != Dims::NONE {
-            return Err(OptError::NonDimensionless { op, dims: d.0 });
-        }
-        Ok(self.push(make(a), Shape::Scalar, Dims::NONE))
+        self.push_checked(Expr::Sqrt(a))
     }
 
     /// Exponential (dimensionless).
@@ -951,7 +1133,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn exp(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.transcendental("exp", Expr::Exp, a)
+        self.push_checked(Expr::Exp(a))
     }
 
     /// Natural log (dimensionless).
@@ -959,7 +1141,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn ln(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.transcendental("ln", Expr::Ln, a)
+        self.push_checked(Expr::Ln(a))
     }
 
     /// Hyperbolic tangent (dimensionless).
@@ -967,7 +1149,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/dimension teaching errors.
     pub fn tanh(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.transcendental("tanh", Expr::Tanh, a)
+        self.push_checked(Expr::Tanh(a))
     }
 
     /// Inner product of same-length vectors.
@@ -975,19 +1157,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape teaching errors.
     pub fn dot(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.check_node(b)?;
-        match (self.shapes[a.0 as usize], self.shapes[b.0 as usize]) {
-            (Shape::Vector(n), Shape::Vector(m)) if n == m => {
-                let dims = self.dims[a.0 as usize].plus(self.dims[b.0 as usize]);
-                Ok(self.push(Expr::Dot(a, b), Shape::Scalar, dims))
-            }
-            (l, r) => Err(OptError::ShapeMismatch {
-                op: "dot",
-                left: l,
-                right: r,
-            }),
-        }
+        self.push_checked(Expr::Dot(a, b))
     }
 
     /// Squared norm of a vector.
@@ -995,18 +1165,7 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape teaching errors.
     pub fn norm_sq(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        match self.shapes[a.0 as usize] {
-            Shape::Vector(_) => {
-                let d = self.dims[a.0 as usize];
-                Ok(self.push(Expr::NormSq(a), Shape::Scalar, d.plus(d)))
-            }
-            s @ Shape::Scalar => Err(OptError::ShapeMismatch {
-                op: "norm_sq",
-                left: s,
-                right: Shape::Vector(1),
-            }),
-        }
+        self.push_checked(Expr::NormSq(a))
     }
 
     /// Absolute value (C0).
@@ -1014,16 +1173,13 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape teaching errors.
     pub fn abs(&mut self, a: NodeId) -> Result<NodeId, OptError> {
-        self.check_node(a)?;
-        self.scalar("abs", a)?;
-        let d = self.dims[a.0 as usize];
-        Ok(self.push(Expr::Abs(a), Shape::Scalar, d))
+        self.push_checked(Expr::Abs(a))
     }
 
     /// PDE residual node (FLUX study reference + adjoint metadata).
     ///
     /// # Errors
-    /// [`OptError::UnknownVar`].
+    /// [`OptError::UnknownVar`] / [`OptError::CapExceeded`].
     pub fn pde_residual(
         &mut self,
         study: &str,
@@ -1031,19 +1187,12 @@ impl ProblemBuilder {
         adjoint_available: bool,
         dims: Dims,
     ) -> Result<NodeId, OptError> {
-        if (over.0 as usize) >= self.vars.len() {
-            return Err(OptError::UnknownVar { id: over.0 });
-        }
-        Ok(self.push(
-            Expr::PdeResidual {
-                study: study.to_string(),
-                over,
-                adjoint_available,
-                dims,
-            },
-            Shape::Scalar,
+        self.push_checked(Expr::PdeResidual {
+            study: study.to_string(),
+            over,
+            adjoint_available,
             dims,
-        ))
+        })
     }
 
     /// Expectation over a UQ configuration.
@@ -1051,17 +1200,10 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape teaching errors.
     pub fn expectation(&mut self, of: NodeId, uq_config: &str) -> Result<NodeId, OptError> {
-        self.check_node(of)?;
-        self.scalar("expectation", of)?;
-        let d = self.dims[of.0 as usize];
-        Ok(self.push(
-            Expr::Expectation {
-                of,
-                uq_config: uq_config.to_string(),
-            },
-            Shape::Scalar,
-            d,
-        ))
+        self.push_checked(Expr::Expectation {
+            of,
+            uq_config: uq_config.to_string(),
+        })
     }
 
     /// CVaR at tail level `alpha` (C0).
@@ -1069,24 +1211,11 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/[`OptError::BadParam`] teaching errors.
     pub fn cvar(&mut self, of: NodeId, alpha: f64, uq_config: &str) -> Result<NodeId, OptError> {
-        self.check_node(of)?;
-        self.scalar("cvar", of)?;
-        if !(alpha > 0.0 && alpha < 1.0) {
-            return Err(OptError::BadParam {
-                what: "cvar alpha",
-                value: alpha,
-            });
-        }
-        let d = self.dims[of.0 as usize];
-        Ok(self.push(
-            Expr::Cvar {
-                of,
-                alpha,
-                uq_config: uq_config.to_string(),
-            },
-            Shape::Scalar,
-            d,
-        ))
+        self.push_checked(Expr::Cvar {
+            of,
+            alpha,
+            uq_config: uq_config.to_string(),
+        })
     }
 
     /// Quantile at level `q` (C0).
@@ -1094,34 +1223,31 @@ impl ProblemBuilder {
     /// # Errors
     /// Shape/[`OptError::BadParam`] teaching errors.
     pub fn quantile(&mut self, of: NodeId, q: f64, uq_config: &str) -> Result<NodeId, OptError> {
-        self.check_node(of)?;
-        self.scalar("quantile", of)?;
-        if !(q > 0.0 && q < 1.0) {
-            return Err(OptError::BadParam {
-                what: "quantile q",
-                value: q,
-            });
-        }
-        let d = self.dims[of.0 as usize];
-        Ok(self.push(
-            Expr::Quantile {
-                of,
-                q,
-                uq_config: uq_config.to_string(),
-            },
-            Shape::Scalar,
-            d,
-        ))
+        self.push_checked(Expr::Quantile {
+            of,
+            q,
+            uq_config: uq_config.to_string(),
+        })
     }
 
-    /// Declare an objective (scalar root).
+    /// Declare an objective (scalar root; weight FINITE and
+    /// NONNEGATIVE — `Sense` already carries direction, so signed
+    /// weights are refused rather than silently flipping it; `-0.0` is
+    /// refused because bit-pattern serialization would give two wire
+    /// identities to one meaning).
     ///
     /// # Errors
-    /// [`OptError::NotScalar`].
+    /// [`OptError::NotScalar`] / [`OptError::BadParam`] /
+    /// [`OptError::CapExceeded`].
     pub fn objective(&mut self, node: NodeId, sense: Sense, weight: f64) -> Result<(), OptError> {
-        self.check_node(node)?;
-        if self.shapes[node.0 as usize] != Shape::Scalar {
-            return Err(OptError::NotScalar { node: node.0 });
+        self.require_scalar_root(node)?;
+        admission::validate_weight(weight)?;
+        if self.objectives.len() as u64 >= u64::from(self.caps.max_objectives) {
+            return Err(OptError::CapExceeded {
+                what: "objectives",
+                count: self.objectives.len() as u64 + 1,
+                cap: u64::from(self.caps.max_objectives),
+            });
         }
         self.objectives.push(Objective {
             node,
@@ -1135,16 +1261,21 @@ impl ProblemBuilder {
     /// fs-constraint).
     ///
     /// # Errors
-    /// [`OptError::NotScalar`].
+    /// [`OptError::NotScalar`] / [`OptError::CapExceeded`].
     pub fn constraint(
         &mut self,
         node: NodeId,
         kind: ConstraintKind,
         name: &str,
     ) -> Result<(), OptError> {
-        self.check_node(node)?;
-        if self.shapes[node.0 as usize] != Shape::Scalar {
-            return Err(OptError::NotScalar { node: node.0 });
+        self.require_scalar_root(node)?;
+        admission::validate_name("constraint name", name, &self.caps)?;
+        if self.constraints.len() as u64 >= u64::from(self.caps.max_constraints) {
+            return Err(OptError::CapExceeded {
+                what: "constraints",
+                count: self.constraints.len() as u64 + 1,
+                cap: u64::from(self.caps.max_constraints),
+            });
         }
         self.constraints.push(Constraint {
             node,
@@ -1154,7 +1285,10 @@ impl ProblemBuilder {
         Ok(())
     }
 
-    /// Finish (the graph is valid by construction).
+    /// Finish. The graph is valid by construction: fields are sealed
+    /// and every mutating path above validated through the same
+    /// versioned rules [`Problem::admit`] re-checks, so builder output
+    /// always admits (the conformance suite pins that agreement).
     #[must_use]
     pub fn finish(self) -> Problem {
         Problem {

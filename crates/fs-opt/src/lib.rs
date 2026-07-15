@@ -23,23 +23,28 @@
 //!   parsing REBUILDS through the validating builder, so tampered
 //!   files cannot smuggle ill-typed graphs.
 
+mod admission;
 mod eval;
 mod guard;
 mod ir;
 mod serial;
 
+pub use admission::{
+    ADMISSION_SCHEMA_VERSION, AdmissionCaps, AdmissionReport, AdmissionViolation, ProblemAdmission,
+};
 pub use eval::{DescentOptions, DescentReport, Value, descend_fn, descend_ir, eval};
 pub use guard::{
     DeltaPerturbationStep, Endpoint, EscalationKind, EscalationStep, GoodhartGuard, GuardFinding,
     GuardReport, GuardStatus, StepOutcome, StepReport, converged_and_guard_cleared,
 };
 pub use ir::{
-    Class, Constraint, ConstraintKind, EvalBudget, Expr, Manifold, NodeId, Objective, OptError,
-    OptimizerFamily, Problem, ProblemBuilder, ProblemTag, Sense, Shape, VarId, Variable,
+    BilevelRef, Class, Constraint, ConstraintKind, EvalBudget, Expr, Manifold, NodeId, Objective,
+    OptError, OptimizerFamily, Problem, ProblemBuilder, ProblemTag, Sense, Shape, VarId, Variable,
 };
 pub use serial::{
-    ContentHash, DimensionCrosswalkReceipt, FiveToSixRule, ParsedProblem, WireVersion, parse,
-    parse_with_version, problem_hash, serialize,
+    ContentHash, DimensionCrosswalkReceipt, FiveToSixRule, LegacyProblemHash, ParsedProblem,
+    ProblemSemanticId, WireContentId, WireVersion, canonical_v2_migration_target, parse,
+    parse_with_version, problem_hash, serialize, serialize_with_id,
 };
 
 /// Crate version, re-exported for provenance stamping.

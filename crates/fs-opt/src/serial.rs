@@ -1,21 +1,151 @@
 //! Canonical serialization: problems round-trip through the six-base
-//! `fsopt v2` line form whose floats are BIT PATTERNS (exact round-trip),
-//! and the problem HASH (FNV-1a 64 over the canonical body) is the study
-//! identity. The receipt-bearing reader also decodes exact explicit five-base
-//! v1 inputs emitted by either known historical v1 string encoding, appends
-//! `mol = 0`, and binds the complete old/new artifacts with BLAKE3. Parsing
-//! rebuilds THROUGH the validating builder, so a tampered file cannot smuggle
-//! in an ill-typed graph — revalidation is free.
+//! `fsopt v3` line form whose floats are BIT PATTERNS (exact round-trip).
+//! Identity is DOMAIN-SEPARATED: [`ProblemSemanticId`] (BLAKE3, minted by
+//! admission over the canonical body) is semantic identity,
+//! [`WireContentId`] (BLAKE3, minted only by serialization/strict parsing)
+//! is artifact identity, and [`LegacyProblemHash`] (FNV-1a 64) is the
+//! quarantined legacy correlation value with no authority. The
+//! receipt-bearing reader also decodes exact explicit five-base v1 inputs
+//! emitted by either known historical v1 string encoding, appends
+//! `mol = 0`, and binds the complete old/new artifacts with BLAKE3; v2
+//! input is readable with its bilevel identities quarantined in the type.
+//! Parsing rebuilds THROUGH the validating builder, so a tampered file
+//! cannot smuggle in an ill-typed graph — revalidation is free.
 
 use crate::ir::{
-    ConstraintKind, Expr, Manifold, NodeId, OptError, Problem, ProblemBuilder, ProblemTag, Sense,
-    VarId,
+    BilevelRef, ConstraintKind, Expr, Manifold, NodeId, OptError, Problem, ProblemBuilder,
+    ProblemTag, Sense, VarId,
 };
-use fs_blake3::hash_bytes;
+use fs_blake3::{hash_bytes, hash_domain};
 use fs_qty::Dims;
 use std::fmt::Write as _;
 
 pub use fs_blake3::ContentHash;
+
+/// Domain-separation string for [`ProblemSemanticId`] minting. Bump the
+/// suffix with the admission schema when the preimage changes meaning.
+const PROBLEM_SEMANTIC_DOMAIN_V1: &str = "fs-opt/ProblemSemanticId/v1";
+
+/// Domain-separation string for [`WireContentId`] minting.
+const WIRE_CONTENT_DOMAIN_V1: &str = "fs-opt/WireContentId/v1";
+
+/// Full-width semantic identity of an ADMITTED problem: BLAKE3 over the
+/// domain-separated canonical v3 body (normalized admitted meaning —
+/// bit-pattern floats, canonical ordering, six-base dimensions).
+/// MINTED by admission; publicly constructible from a full-width hash
+/// only so bilevel tags can REFERENCE inner problems — holding one is
+/// identity, never admission authority (that lives in the sealed
+/// [`crate::ProblemAdmission`]). There is deliberately NO conversion
+/// to/from [`WireContentId`] or [`LegacyProblemHash`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProblemSemanticId(ContentHash);
+
+impl ProblemSemanticId {
+    pub(crate) fn mint(canonical_v3_body: &str) -> ProblemSemanticId {
+        ProblemSemanticId(hash_domain(
+            PROBLEM_SEMANTIC_DOMAIN_V1,
+            canonical_v3_body.as_bytes(),
+        ))
+    }
+
+    /// Wrap a full-width hash as a semantic-id REFERENCE (for bilevel
+    /// tags). This does not claim the referenced problem was admitted.
+    #[must_use]
+    pub fn from_hash(hash: ContentHash) -> ProblemSemanticId {
+        ProblemSemanticId(hash)
+    }
+
+    /// Parse from 64 hex characters.
+    #[must_use]
+    pub fn from_hex(s: &str) -> Option<ProblemSemanticId> {
+        ContentHash::from_hex(s).map(ProblemSemanticId)
+    }
+
+    /// The underlying full-width hash.
+    #[must_use]
+    pub fn as_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    /// Lowercase hex spelling (the v3 wire token).
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl core::fmt::Display for ProblemSemanticId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0.to_hex())
+    }
+}
+
+/// Content identity of one exact serialized wire artifact:
+/// domain-separated BLAKE3 over the COMPLETE artifact bytes (headers,
+/// body, and terminal integrity line). Exists ONLY after canonical
+/// wire serialization or strict parsing — programmatic construction of
+/// a `Problem` never manufactures one, and there is no public
+/// constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WireContentId(ContentHash);
+
+impl WireContentId {
+    fn mint(artifact: &str) -> WireContentId {
+        WireContentId(hash_domain(WIRE_CONTENT_DOMAIN_V1, artifact.as_bytes()))
+    }
+
+    /// The underlying full-width hash.
+    #[must_use]
+    pub fn as_hash(&self) -> &ContentHash {
+        &self.0
+    }
+
+    /// Lowercase hex spelling.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl core::fmt::Display for WireContentId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0.to_hex())
+    }
+}
+
+/// The QUARANTINED legacy 64-bit FNV-1a identity. It remains useful for
+/// deterministic correlation and accidental-corruption detection, but
+/// it is not collision-resistant and carries NO execution or
+/// certificate authority. No API here widens or reinterprets it as a
+/// strong identity; admission lists every carried instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LegacyProblemHash(u64);
+
+impl LegacyProblemHash {
+    /// Wrap a raw legacy value (parsing, historical comparisons).
+    #[must_use]
+    pub const fn new(value: u64) -> LegacyProblemHash {
+        LegacyProblemHash(value)
+    }
+
+    /// The raw 64-bit value.
+    #[must_use]
+    pub const fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for LegacyProblemHash {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:016X}", self.0)
+    }
+}
+
+impl core::fmt::UpperHex for LegacyProblemHash {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::UpperHex::fmt(&self.0, f)
+    }
+}
 
 /// Escape a string for single-token embedding. Percent-encodes the token
 /// delimiters AND every control / non-ASCII byte, so ANY value (including
@@ -105,8 +235,14 @@ pub enum WireVersion {
     /// Legacy five-base dimensions `(m, kg, s, K, A)` with an explicit v1
     /// header.
     V1,
-    /// Canonical six-base dimensions `(m, kg, s, K, A, mol)`.
+    /// Six-base dimensions `(m, kg, s, K, A, mol)`; bilevel tags carry a
+    /// legacy 64-bit FNV identity (quarantined on read).
     V2,
+    /// Canonical schema: six-base dimensions plus TYPED bilevel
+    /// identities — `tag bilevel <64-hex BLAKE3>` for semantic
+    /// references and `tag bilevel_legacy <16-hex FNV>` for explicitly
+    /// quarantined legacy references.
+    V3,
 }
 
 /// The only admitted semantic rule for converting a v1 dimension vector.
@@ -168,13 +304,14 @@ impl DimensionCrosswalkReceipt {
     }
 }
 
-/// A parsed problem together with its source provenance and mandatory v1
-/// semantic-crosswalk receipt.
+/// A parsed problem together with its source provenance, wire content
+/// identity, and mandatory v1 semantic-crosswalk receipt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedProblem {
     problem: Problem,
     source_version: WireVersion,
-    source_hash: u64,
+    source_hash: LegacyProblemHash,
+    wire_content_id: WireContentId,
     migration: Option<DimensionCrosswalkReceipt>,
 }
 
@@ -191,10 +328,17 @@ impl ParsedProblem {
         self.source_version
     }
 
-    /// FNV-1a integrity hash embedded in the exact accepted source artifact.
+    /// The QUARANTINED legacy FNV-1a integrity value embedded in the
+    /// exact accepted source artifact (corruption tripwire only).
     #[must_use]
-    pub const fn source_hash(&self) -> u64 {
+    pub const fn source_hash(&self) -> LegacyProblemHash {
         self.source_hash
+    }
+
+    /// Content identity of the exact accepted source artifact bytes.
+    #[must_use]
+    pub const fn wire_content_id(&self) -> WireContentId {
+        self.wire_content_id
     }
 
     /// Five-to-six migration evidence; present exactly for v1 input.
@@ -206,11 +350,20 @@ impl ParsedProblem {
     /// Consume the parsed result without allowing any provenance component to
     /// disappear implicitly.
     #[must_use]
-    pub fn into_parts(self) -> (Problem, WireVersion, u64, Option<DimensionCrosswalkReceipt>) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        Problem,
+        WireVersion,
+        LegacyProblemHash,
+        WireContentId,
+        Option<DimensionCrosswalkReceipt>,
+    ) {
         (
             self.problem,
             self.source_version,
             self.source_hash,
+            self.wire_content_id,
             self.migration,
         )
     }
@@ -219,7 +372,7 @@ impl ParsedProblem {
 fn dims_str(d: Dims, version: WireVersion) -> String {
     match version {
         WireVersion::V1 => format!("({},{},{},{},{})", d.0[0], d.0[1], d.0[2], d.0[3], d.0[4]),
-        WireVersion::V2 => format!(
+        WireVersion::V2 | WireVersion::V3 => format!(
             "({},{},{},{},{},{})",
             d.0[0], d.0[1], d.0[2], d.0[3], d.0[4], d.0[5]
         ),
@@ -231,7 +384,7 @@ fn parse_dims(s: &str, version: WireVersion) -> Option<Dims> {
     let parts: Vec<&str> = inner.split(',').collect();
     let expected_len = match version {
         WireVersion::V1 => 5,
-        WireVersion::V2 => 6,
+        WireVersion::V2 | WireVersion::V3 => 6,
     };
     if parts.len() != expected_len {
         return None;
@@ -285,10 +438,11 @@ fn parse_manifold(s: &str) -> Option<Manifold> {
 }
 
 /// Canonical single-token form of one expression (the hash-consing key
-/// AND the serialized body).
+/// AND the serialized body). Expression tokens are identical under the
+/// v2 and v3 grammars (both are six-base).
 #[must_use]
 pub(crate) fn expr_key(e: &Expr) -> String {
-    expr_key_for_wire(e, WireVersion::V2, TokenEncoding::PercentBytes)
+    expr_key_for_wire(e, WireVersion::V3, TokenEncoding::PercentBytes)
 }
 
 fn expr_key_for_wire(e: &Expr, version: WireVersion, encoding: TokenEncoding) -> String {
@@ -367,6 +521,7 @@ fn body_for_wire(problem: &Problem, version: WireVersion, encoding: TokenEncodin
     let version_tag = match version {
         WireVersion::V1 => "v1",
         WireVersion::V2 => "v2",
+        WireVersion::V3 => "v3",
     };
     let mut s = format!("fsopt {version_tag}\n");
     for (i, v) in problem.vars.iter().enumerate() {
@@ -408,8 +563,27 @@ fn body_for_wire(problem: &Problem, version: WireVersion, encoding: TokenEncodin
             ProblemTag::ChanceConstrained { prob } => {
                 let _ = writeln!(s, "tag chance {}", f64_hex(*prob));
             }
-            ProblemTag::Bilevel { inner_hash } => {
-                let _ = writeln!(s, "tag bilevel {inner_hash:016X}");
+            // Legacy writers (v1/v2) can only express the quarantined
+            // FNV spelling. A Semantic reference under a legacy writer
+            // deliberately emits the v3 token: legacy writers exist
+            // only to recognize exact historical artifacts, none of
+            // which can contain a semantic id, so the mismatch forces
+            // the canonical-byte refusal instead of silently
+            // downcasting a full-width identity to 64 bits.
+            ProblemTag::Bilevel {
+                inner: BilevelRef::LegacyFnv(h),
+            } => match version {
+                WireVersion::V1 | WireVersion::V2 => {
+                    let _ = writeln!(s, "tag bilevel {h}");
+                }
+                WireVersion::V3 => {
+                    let _ = writeln!(s, "tag bilevel_legacy {h}");
+                }
+            },
+            ProblemTag::Bilevel {
+                inner: BilevelRef::Semantic(id),
+            } => {
+                let _ = writeln!(s, "tag bilevel {}", id.to_hex());
             }
         }
     }
@@ -418,7 +592,13 @@ fn body_for_wire(problem: &Problem, version: WireVersion, encoding: TokenEncodin
 }
 
 fn body(problem: &Problem) -> String {
-    body_for_wire(problem, WireVersion::V2, TokenEncoding::PercentBytes)
+    body_for_wire(problem, WireVersion::V3, TokenEncoding::PercentBytes)
+}
+
+/// The canonical v3 body (no integrity line) — the semantic-id
+/// preimage used by admission.
+pub(crate) fn canonical_body_v3(problem: &Problem) -> String {
+    body(problem)
 }
 
 fn serialize_for_wire(problem: &Problem, version: WireVersion, encoding: TokenEncoding) -> String {
@@ -426,16 +606,37 @@ fn serialize_for_wire(problem: &Problem, version: WireVersion, encoding: TokenEn
     format!("{body}hash {:016X}\n", fnv1a(body.as_bytes()))
 }
 
-/// The problem hash: FNV-1a 64 over the canonical body (study
-/// identity; two structurally identical builds hash identically).
+/// The QUARANTINED legacy problem hash: FNV-1a 64 over the canonical v3
+/// body. Deterministic correlation only — use
+/// [`crate::Problem::admit`]'s [`ProblemSemanticId`] for identity with
+/// collision resistance, and [`WireContentId`] for artifact identity.
 #[must_use]
-pub fn problem_hash(problem: &Problem) -> u64 {
-    fnv1a(body(problem).as_bytes())
+pub fn problem_hash(problem: &Problem) -> LegacyProblemHash {
+    LegacyProblemHash(fnv1a(body(problem).as_bytes()))
 }
 
-/// Serialize to the canonical text form (hash line appended).
+/// Serialize to the canonical v3 text form (hash line appended).
 #[must_use]
 pub fn serialize(problem: &Problem) -> String {
+    serialize_for_wire(problem, WireVersion::V3, TokenEncoding::PercentBytes)
+}
+
+/// Serialize to the canonical v3 text form AND mint the artifact's
+/// [`WireContentId`] — the only programmatic path to a wire identity.
+#[must_use]
+pub fn serialize_with_id(problem: &Problem) -> (String, WireContentId) {
+    let text = serialize(problem);
+    let id = WireContentId::mint(&text);
+    (text, id)
+}
+
+/// The exact canonical **v2** encoding — the target artifact the v1
+/// five-to-six [`DimensionCrosswalkReceipt`] binds. This is the legacy
+/// MIGRATION surface, not the current canonical form ([`serialize`]
+/// emits v3); it exists so receipt holders can re-derive and verify
+/// the pinned v2 bytes.
+#[must_use]
+pub fn canonical_v2_migration_target(problem: &Problem) -> String {
     serialize_for_wire(problem, WireVersion::V2, TokenEncoding::PercentBytes)
 }
 
@@ -501,8 +702,11 @@ fn terminal_hash_line(lines: &[&str]) -> Result<usize, OptError> {
     Ok(line_index)
 }
 
-/// Parse the current canonical v2 form, REBUILDING through the validating
-/// builder and verifying its integrity hash.
+/// Parse the canonical v3 (or receipt-free v2) form, REBUILDING through
+/// the validating builder and verifying its integrity hash. A v2
+/// bilevel identity arrives QUARANTINED in the type
+/// ([`BilevelRef::LegacyFnv`]), so no evidence is lost by dropping the
+/// provenance wrapper.
 ///
 /// Legacy v1 input is rejected here because returning only [`Problem`] would
 /// discard mandatory migration evidence. Use [`parse_with_version`] for
@@ -572,10 +776,11 @@ pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
                 source_version = match tok.next() {
                     Some("v1") => WireVersion::V1,
                     Some("v2") => WireVersion::V2,
+                    Some("v3") => WireVersion::V3,
                     _ => {
                         return Err(perr(
                             ln,
-                            "unsupported version (expected `fsopt v1` or `fsopt v2`)",
+                            "unsupported version (expected `fsopt v1`, `fsopt v2`, or `fsopt v3`)",
                         ));
                     }
                 };
@@ -598,7 +803,7 @@ pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
                     .and_then(|value| parse_dims(value, source_version))
                     .ok_or_else(|| perr(ln, "var: bad dims"))?;
                 require_end(&mut tok, ln, "var")?;
-                let assigned = b.var(&name, manifold, dims);
+                let assigned = b.var(&name, manifold, dims)?;
                 if assigned.0 != ix {
                     return Err(perr(
                         ln,
@@ -678,17 +883,49 @@ pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
                             .ok_or_else(|| perr(ln, "tag: bad prob"))?;
                         ProblemTag::ChanceConstrained { prob }
                     }
-                    Some("bilevel") => {
+                    Some("bilevel") => match source_version {
+                        // Historical spellings carry the 64-bit FNV
+                        // identity; it stays QUARANTINED in the type.
+                        WireVersion::V1 | WireVersion::V2 => {
+                            let inner_hash = tok
+                                .next()
+                                .and_then(|t| u64::from_str_radix(t, 16).ok())
+                                .ok_or_else(|| perr(ln, "tag: bad hash"))?;
+                            ProblemTag::Bilevel {
+                                inner: BilevelRef::LegacyFnv(LegacyProblemHash::new(inner_hash)),
+                            }
+                        }
+                        WireVersion::V3 => {
+                            let id = tok
+                                .next()
+                                .and_then(ProblemSemanticId::from_hex)
+                                .ok_or_else(|| {
+                                    perr(ln, "tag: bilevel needs a 64-hex semantic id in v3")
+                                })?;
+                            ProblemTag::Bilevel {
+                                inner: BilevelRef::Semantic(id),
+                            }
+                        }
+                    },
+                    Some("bilevel_legacy") => {
+                        if source_version != WireVersion::V3 {
+                            return Err(perr(
+                                ln,
+                                "bilevel_legacy is a v3 spelling; historical versions write `tag bilevel`",
+                            ));
+                        }
                         let inner_hash = tok
                             .next()
                             .and_then(|t| u64::from_str_radix(t, 16).ok())
-                            .ok_or_else(|| perr(ln, "tag: bad hash"))?;
-                        ProblemTag::Bilevel { inner_hash }
+                            .ok_or_else(|| perr(ln, "tag: bad legacy hash"))?;
+                        ProblemTag::Bilevel {
+                            inner: BilevelRef::LegacyFnv(LegacyProblemHash::new(inner_hash)),
+                        }
                     }
                     _ => return Err(perr(ln, "unknown tag")),
                 };
                 require_end(&mut tok, ln, "tag")?;
-                b.tag(tag);
+                b.tag(tag)?;
             }
             "budget" => {
                 if saw_budget {
@@ -743,8 +980,12 @@ pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
             "artifact is not an exact encoding emitted by a known writer for its declared wire version; refusing to certify unrelated normalization as AppendMoleZero",
         ));
     }
+    // The five-to-six crosswalk receipt binds the exact canonical V2
+    // target bytes (where the dimension-semantics change lands); the
+    // v2 -> v3 step is a pure identity-typing re-encoding and needs no
+    // separate semantic receipt.
     let migration = if source_version == WireVersion::V1 {
-        let canonical = serialize(&problem);
+        let canonical = canonical_v2_migration_target(&problem);
         Some(DimensionCrosswalkReceipt {
             source_version,
             target_version: WireVersion::V2,
@@ -758,7 +999,8 @@ pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
     Ok(ParsedProblem {
         problem,
         source_version,
-        source_hash: h,
+        source_hash: LegacyProblemHash::new(h),
+        wire_content_id: WireContentId::mint(text),
         migration,
     })
 }
@@ -813,7 +1055,7 @@ fn parse_expr(
             require_arity(3, "const")?;
             let value = parse_f64_hex(get(1)?).ok_or_else(|| perr(ln, "const: bad value"))?;
             let dims = parse_dims(get(2)?, version).ok_or_else(|| perr(ln, "const: bad dims"))?;
-            Ok(b.konst(value, dims))
+            b.konst(value, dims)
         }
         "add" => {
             require_arity(3, "add")?;
@@ -922,8 +1164,8 @@ fn parse_expr(
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentHash, FiveToSixRule, TokenEncoding, WireVersion, esc, fnv1a, parse,
-        parse_with_version, problem_hash, serialize, serialize_for_wire, unesc,
+        ContentHash, FiveToSixRule, TokenEncoding, WireVersion, canonical_v2_migration_target,
+        esc, fnv1a, parse, parse_with_version, problem_hash, serialize, serialize_for_wire, unesc,
     };
     use crate::ir::{NodeId, ProblemBuilder, Sense};
     use fs_qty::Dims;
@@ -983,9 +1225,12 @@ mod tests {
 
         let decoded = parse_with_version(&legacy_text).expect("exact v1 bytes decode");
         assert_eq!(decoded.source_version(), WireVersion::V1);
-        assert_eq!(decoded.source_hash(), legacy_hash);
+        assert_eq!(decoded.source_hash().get(), legacy_hash);
         assert_eq!(
-            decoded.problem().node_dims(NodeId(0)),
+            decoded
+                .problem()
+                .node_dims(NodeId(0))
+                .expect("node 0 exists"),
             Dims([1, 2, 3, 4, 5, 0]),
             "legacy inputs acquire an explicit zero amount exponent"
         );
@@ -999,7 +1244,9 @@ mod tests {
             "the explicit-v1 canonical serializer preserves the pinned artifact"
         );
 
-        let canonical = serialize(decoded.problem());
+        // The crosswalk receipt binds the exact canonical V2 target
+        // bytes (where the five-to-six semantics change lands).
+        let canonical = canonical_v2_migration_target(decoded.problem());
         assert!(canonical.starts_with("fsopt v2\n"));
         assert!(canonical.contains("(1,2,3,4,5,0)"));
         let receipt = decoded.migration().expect("v1 receipt is mandatory");
@@ -1042,9 +1289,22 @@ mod tests {
         );
         let reparsed = parse_with_version(&canonical).expect("canonical v2 bytes decode");
         assert_eq!(reparsed.source_version(), WireVersion::V2);
-        assert_eq!(reparsed.source_hash(), problem_hash(decoded.problem()));
         assert!(reparsed.migration().is_none());
         assert_eq!(reparsed.problem(), decoded.problem());
+        assert_eq!(
+            problem_hash(reparsed.problem()),
+            problem_hash(decoded.problem()),
+            "legacy correlation hash agrees across the v2 re-read"
+        );
+
+        // The CURRENT canonical form is v3 and round-trips with a
+        // minted wire content identity.
+        let (v3, wire_id) = super::serialize_with_id(decoded.problem());
+        assert!(v3.starts_with("fsopt v3\n"));
+        let re3 = parse_with_version(&v3).expect("canonical v3 bytes decode");
+        assert_eq!(re3.source_version(), WireVersion::V3);
+        assert_eq!(re3.problem(), decoded.problem());
+        assert_eq!(re3.wire_content_id(), wire_id);
     }
 
     #[test]
@@ -1064,10 +1324,10 @@ mod tests {
         let historical = with_hash(historical_body);
         let decoded = parse_with_version(&historical).expect("literal-UTF-8 v1 decodes");
         assert_eq!(decoded.source_version(), WireVersion::V1);
-        assert_eq!(decoded.source_hash(), HISTORICAL_V1_HASH);
-        assert_eq!(decoded.problem().vars[0].name, "café");
-        assert_eq!(decoded.problem().vars[0].dims, Dims::NONE);
-        assert_eq!(decoded.problem().constraints[0].name, "tail\r");
+        assert_eq!(decoded.source_hash().get(), HISTORICAL_V1_HASH);
+        assert_eq!(decoded.problem().vars()[0].name, "café");
+        assert_eq!(decoded.problem().vars()[0].dims, Dims::NONE);
+        assert_eq!(decoded.problem().constraints()[0].name, "tail\r");
         assert_eq!(
             serialize_for_wire(
                 decoded.problem(),
@@ -1077,7 +1337,7 @@ mod tests {
             historical,
             "the original-v1 writer preserves the pinned artifact"
         );
-        let canonical = serialize(decoded.problem());
+        let canonical = canonical_v2_migration_target(decoded.problem());
         assert!(canonical.contains("caf%C3%A9"));
         assert!(canonical.contains("tail%0D"));
         let receipt = decoded.migration().expect("historical v1 receipt");
@@ -1217,18 +1477,20 @@ mod tests {
     }
 
     #[test]
-    fn v2_writer_and_parser_preserve_amount_dimensions() {
+    fn canonical_writer_and_parser_preserve_amount_dimensions() {
         let mut builder = ProblemBuilder::new();
-        let amount = builder.konst(2.0, Dims([0, 0, 0, 0, 0, 1]));
+        let amount = builder
+            .konst(2.0, Dims([0, 0, 0, 0, 0, 1]))
+            .expect("finite constant");
         builder
             .objective(amount, Sense::Minimize, 1.0)
             .expect("amount-valued scalar objective");
         let problem = builder.finish();
 
         let text = serialize(&problem);
-        assert!(text.starts_with("fsopt v2\n"));
+        assert!(text.starts_with("fsopt v3\n"));
         assert!(text.contains("(0,0,0,0,0,1)"));
-        assert_eq!(parse(&text).expect("v2 round-trip"), problem);
+        assert_eq!(parse(&text).expect("v3 round-trip"), problem);
 
         let v1_with_six_dims = with_hash(concat!(
             "fsopt v1\n",
@@ -1251,7 +1513,7 @@ mod tests {
     #[test]
     fn exactly_one_terminal_hash_directive_is_required() {
         let mut builder = ProblemBuilder::new();
-        let scalar = builder.konst(1.0, Dims::NONE);
+        let scalar = builder.konst(1.0, Dims::NONE).expect("finite constant");
         builder
             .objective(scalar, Sense::Minimize, 1.0)
             .expect("scalar objective");

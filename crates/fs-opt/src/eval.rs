@@ -29,14 +29,39 @@ impl Value {
 }
 
 /// Evaluate `node` with variable `bindings` (one point per variable,
-/// stored per its manifold). PDE and stochastic nodes are NOT
+/// stored per its manifold; bindings are indexed by `VarId` and may be
+/// a PREFIX of the declaration list — referencing an unbound variable
+/// teaches with `UnknownVar`). PDE and stochastic nodes are NOT
 /// evaluable here — they refuse with a teaching error (their execution
 /// belongs to FLUX/UQ runners; the IR only carries them).
 ///
 /// # Errors
-/// [`OptError::Unevaluable`] / [`OptError::UnknownVar`] (binding
-/// length mismatches teach too).
+/// [`OptError::Unevaluable`] / [`OptError::UnknownVar`] /
+/// [`OptError::UnknownNode`] / [`OptError::BindingCount`] /
+/// [`OptError::BindingLen`].
 pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Value, OptError> {
+    if node.0 as usize >= problem.exprs.len() {
+        return Err(OptError::UnknownNode { id: node.0 });
+    }
+    if bindings.len() > problem.vars.len() {
+        return Err(OptError::BindingCount {
+            vars: problem.vars.len() as u32,
+            got: bindings.len() as u64,
+        });
+    }
+    for (i, (binding, var)) in bindings.iter().zip(&problem.vars).enumerate() {
+        let expected = var
+            .manifold
+            .point_dim()
+            .expect("sealed problems carry validated manifolds");
+        if binding.len() as u64 != u64::from(expected) {
+            return Err(OptError::BindingLen {
+                var: i as u32,
+                expected,
+                got: binding.len() as u64,
+            });
+        }
+    }
     let mut memo: Vec<Option<Value>> = vec![None; problem.exprs.len()];
     eval_at(problem, node, bindings, &mut memo)
 }
@@ -136,11 +161,13 @@ fn eval_at(
 impl Manifold {
     /// Descent parameter dimension (what the FD gradient has): ambient
     /// storage for Rn/Sphere/Stiefel (projection happens inside the
-    /// retraction), axis-angle 3 for SO(3).
+    /// retraction), axis-angle 3 for SO(3). CHECKED like
+    /// [`Manifold::point_dim`]; `None` only for descriptors a sealed
+    /// problem can never contain.
     #[must_use]
-    pub fn param_dim(&self) -> u32 {
+    pub fn param_dim(&self) -> Option<u32> {
         match *self {
-            Manifold::So3 => 3,
+            Manifold::So3 => Some(3),
             m => m.point_dim(),
         }
     }
@@ -273,7 +300,12 @@ pub fn descend_fn(
     let mut budget_stopped = false;
     let f0 = f(&x);
     evals += 1;
-    let pd = manifold.param_dim() as usize;
+    let pd = manifold
+        .param_dim()
+        .and_then(|d| usize::try_from(d).ok())
+        .ok_or_else(|| OptError::ManifoldInvalid {
+            what: format!("{manifold:?} has no representable descent parameter dimension"),
+        })?;
     let mut steps_taken = 0;
     'outer: for _ in 0..opts.steps {
         if cx.checkpoint().is_err() {
