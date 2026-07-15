@@ -14,7 +14,8 @@
 //! section scale, then catalog snap with independent re-check).
 //!
 //! SMOKE TIER, honestly: one story, two fiber-hinge columns, synthetic
-//! motions only. The full-resolution lanes (distributed-plasticity
+//! motions for fragility/CVaR plus one provenance-pinned El Centro diagnostic
+//! fixture. The full-resolution lanes (distributed-plasticity
 //! frames, recorded-motion suites, million-member ground structures,
 //! variational integrators) are recorded successors in the CONTRACT —
 //! named, not pretended.

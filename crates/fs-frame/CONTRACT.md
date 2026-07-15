@@ -45,6 +45,11 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   integrates a staged clone; a refusal publishes neither response nor committed
   hinge state. The original `run(&[f64], dt)` remains the compatibility surface
   for the synthetic smoke studies and preserves its fixed 30-correction behavior.
+  `frame-008` additionally pins the PEER/OpenSees Gallery Peknold El Centro 1940
+  NS record (1,559 samples, 0.02 s, values in g), converts by exactly
+  9.80665 m/s² per g, and produces a bounded diagnostic response. Its source
+  revision, upstream/repository hashes, terminal-LF normalization, license,
+  external model, and comparison authority are retained beside the fixture.
 - `fragility::e_stopped_fragility` → `FragilityReport`: exceedance
   P(peak drift ratio > limit) over an fs-scenario ensemble, estimated
   by an fs-eproc Gaussian-mixture confidence sequence (σ = ½ is the
@@ -95,6 +100,11 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
 6. Replay: bitwise-identical reruns; budget exhaustion reports
    honest indecision (no early stop claimed); infeasible CVaR limits
    fire the diagnostic instead of returning a design (frame-006).
+7. Recorded-input integrity: the normalized Peknold fixture has 16,032 bytes,
+   FNV-1a identity `9eda012ee82cb084`, 1,559 finite samples, 0.02 s spacing,
+   and 0.31882 g peak magnitude. Its checked response publishes 1,558 step-end
+   displacement/restoring-shear pairs after explicitly designating source row 0
+   as initial forcing, or returns a structured refusal (frame-008).
 
 ## Error model
 
@@ -159,7 +169,9 @@ history, and admission refusals;
 frame-004 e-stopped fragility coverage + ledgered savings; frame-005
 CVaR monotonicity + design; frame-006 replay, infeasibility, and structured
 canonical-CVaR refusal drills; frame-007 wrong-physics and empty-ensemble
-refusals at the realization boundary.
+refusals at the realization boundary; frame-008 pinned El Centro record,
+provenance/license lint, checked diagnostic response, and diagnostic-only
+OpenSees displacement rounding envelope.
 
 ## No-claim boundaries
 
@@ -167,12 +179,15 @@ refusals at the realization boundary.
   Distributed-plasticity frames (fs-solid `ForceBasedElement`
   columns), multi-story assemblies, and joint modeling are recorded
   successors.
-- The checked integrator can consume a unit-explicit recorded-motion
-  vector and retain the two response quantities needed by a comparison, but no
-  recorded suite, source/provenance binding, spectral matching, or published
-  El Centro acceptance envelope is claimed yet. In particular, restoring shear
-  is not mislabeled as a published total support reaction. Those data artifacts
-  remain staged with fs-scenario/fs-vvreg; the current batteries are synthetic.
+- One source- and license-pinned Peknold El Centro NS record now exercises the
+  checked integrator, but it is a diagnostic fixture, not a recorded-motion
+  suite or spectral-matching lane. The OpenSees Example 3 peak roof displacement
+  is retained with its source-rounding interval, but its distributed-column
+  model is materially non-equivalent to the shipped concentrated-hinge fixture,
+  so the interval is not applied as a FrankenSim acceptance gate. Example 3
+  publishes no total dynamic support reaction; restoring shear is not mislabeled
+  as that missing oracle. Admitted model mapping, a support-reaction artifact,
+  and fs-vvreg authority remain pending.
 - Newmark average acceleration ships; the fs-time VARIATIONAL
   integrator swap (the plan's long-duration drift story) is a named
   successor — the 10×-duration stability gate stands in.

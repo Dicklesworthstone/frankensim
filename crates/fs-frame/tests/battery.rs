@@ -21,6 +21,60 @@ fn verdict(name: &str, pass: bool, details: &str) {
 
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const EL_CENTRO_AT2: &[u8] = include_bytes!("data/el_centro_1940_ns.at2");
+const EL_CENTRO_PROVENANCE: &str = include_str!("data/EL_CENTRO_PROVENANCE.md");
+const STANDARD_GRAVITY_M_S2: f64 = 9.806_65;
+
+struct At2Fixture {
+    samples_g: Vec<f64>,
+    dt_s: f64,
+}
+
+fn parse_pinned_el_centro(text: &str) -> Result<At2Fixture, String> {
+    let mut lines = text.lines();
+    let title = lines.next().ok_or("missing AT2 title")?;
+    let layout = lines.next().ok_or("missing AT2 layout")?;
+    let units = lines.next().ok_or("missing AT2 units")?;
+    let card = lines.next().ok_or("missing AT2 NPTS/DT card")?;
+    if title != "Data for El Centro 1940 North South Component (Peknold Version)" {
+        return Err("unexpected AT2 title".to_string());
+    }
+    if layout
+        != "1559 points at equal spacing of 0.02 sec Points are listed in the format of 8F10.5, i.e., 8 points across in a row with 5 decimal places"
+    {
+        return Err("unexpected AT2 layout declaration".to_string());
+    }
+    if units != "The units are (g)" || card != "NPTS=  1559, DT= .02000 SEC" {
+        return Err("unexpected AT2 units or NPTS/DT card".to_string());
+    }
+
+    let mut samples_g = Vec::with_capacity(1_559);
+    for token in lines.flat_map(|line| line.split_ascii_whitespace()) {
+        let value = token
+            .parse::<f64>()
+            .map_err(|_| "non-numeric AT2 sample".to_string())?;
+        if !value.is_finite() {
+            return Err("non-finite AT2 sample".to_string());
+        }
+        samples_g.push(value);
+    }
+    if samples_g.len() != 1_559 {
+        return Err(format!(
+            "AT2 sample count {} does not match 1559",
+            samples_g.len()
+        ));
+    }
+    Ok(At2Fixture {
+        samples_g,
+        dt_s: 0.02,
+    })
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
 
 fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
@@ -506,5 +560,100 @@ fn frame_007_refuses_non_ground_motion_and_empty_ensembles() {
     assert!(
         material_as_motion.is_err(),
         "Carreau viscosity parameters must never become a structural acceleration history"
+    );
+}
+
+/// G2 input slice: pin and lint the redistributable PEER/OpenSees Peknold
+/// record, then drive it through the bounded frame path. The committed
+/// OpenSees roof-displacement envelope remains diagnostic because its
+/// distributed-column model is materially different from this concentrated-
+/// hinge fixture; no public total support-reaction oracle exists there.
+#[test]
+#[allow(clippy::too_many_lines)] // Integrity, real-motion response, and authority boundary.
+fn frame_008_el_centro_record_and_response_diagnostic() {
+    let text = std::str::from_utf8(EL_CENTRO_AT2).expect("pinned AT2 is UTF-8");
+    let fixture = parse_pinned_el_centro(text).expect("pinned AT2 contract parses");
+    let peak_g = fixture
+        .samples_g
+        .iter()
+        .fold(0.0f64, |peak, sample| peak.max(sample.abs()));
+    let provenance_linted = [
+        "fd3958fde8a3d0a350321b3fbdd3f415ee16e2a2",
+        "e096f0458ae7565ac8e9fac80eda018e4715a357ea4c14504ce1cfa6556c53a6",
+        "e9ae5a8c2163c28a2e52f29f8b363e2f19a3eac400e61ff73c547f8eb309b6ab",
+        "b5b6e08cec39d6b1826a9d27778c3aa1f76adfb115d7ba66fb6eaf1bc7c6dd02",
+        "b1f6f933b71e543e85deea342aca54d3389e0435fd6bccdf9e0da595490efdef",
+        "Committed peak roof displacement: `2.47158 in = 0.062778132 m`",
+        "public total-base-reaction oracle is unavailable",
+        "BSD 3-Clause License",
+    ]
+    .iter()
+    .all(|required| EL_CENTRO_PROVENANCE.contains(required));
+    verdict(
+        "frame-008-el-centro-record-integrity",
+        EL_CENTRO_AT2.len() == 16_032
+            && fnv1a64(EL_CENTRO_AT2) == 0x9eda_012e_e82c_b084
+            && fixture.samples_g.len() == 1_559
+            && fixture.dt_s.to_bits() == 0.02f64.to_bits()
+            && peak_g.to_bits() == 0.31882f64.to_bits()
+            && provenance_linted,
+        "PEER/OpenSees Peknold record: 1559 samples, dt 0.02 s, PGA 0.31882 g, provenance/license pinned",
+    );
+
+    // GroundMotion uses step-end samples. This diagnostic explicitly designates
+    // source row 0 as its initial forcing, then advances from index 1. That
+    // timing convention is part of this artifact and is not OpenSees parity.
+    let acceleration_m_s2: Vec<f64> = fixture.samples_g[1..]
+        .iter()
+        .map(|sample_g| sample_g * STANDARD_GRAVITY_M_S2)
+        .collect();
+    let params = StoryParams::default();
+    let mut frame = StoryFrame::new(params);
+    let limits = HistoryLimits::new(acceleration_m_s2.len(), 100, 1e-10, 1.0);
+    let response = frame
+        .run_checked(GroundMotion::new(&acceleration_m_s2, fixture.dt_s), limits)
+        .expect("pinned record converges within its explicit response budget");
+    verdict(
+        "frame-008-el-centro-response-artifact",
+        response.displacement_m.len() == 1_558
+            && response.restoring_shear_n.len() == 1_558
+            && response.peak_abs_displacement_m.is_finite()
+            && response.peak_abs_displacement_m > 0.0
+            && response.peak_abs_restoring_shear_n.is_finite()
+            && response.peak_abs_restoring_shear_n > 0.0
+            && response.max_abs_equilibrium_residual_n < limits.equilibrium_tolerance_n
+            && response.max_newton_iterations_used <= limits.max_newton_iterations,
+        &format!(
+            "diagnostic-only concentrated-hinge response: peak |x| {:.8e} m, \
+             peak |V_restore| {:.8e} N, residual {:.3e} N, max Newton {}",
+            response.peak_abs_displacement_m,
+            response.peak_abs_restoring_shear_n,
+            response.max_abs_equilibrium_residual_n,
+            response.max_newton_iterations_used
+        ),
+    );
+
+    // The five-decimal OpenSees output defines a rounding envelope around the
+    // external model's peak. It is pinned and linted, never applied to the
+    // non-equivalent FrankenSim model.
+    let external_peak_m = 2.47158 * 0.0254;
+    let external_lo_m = 2.471575 * 0.0254;
+    let external_hi_m = 2.471585 * 0.0254;
+    let external_drift_ratio = external_peak_m / (144.0 * 0.0254);
+    verdict(
+        "frame-008-el-centro-reference-envelope-lint",
+        external_lo_m < external_peak_m
+            && external_peak_m < external_hi_m
+            && (external_peak_m - 0.062_778_132).abs() < 1e-15
+            && (external_drift_ratio - 0.017_163_75).abs() < 1e-15,
+        "OpenSees Example 3 displacement rounding envelope pinned; model equivalence=false; support-reaction oracle=unavailable",
+    );
+    println!(
+        "{{\"test\":\"frame-008-el-centro-model-comparison\",\"pass\":null,\
+         \"authority\":\"diagnostic_only\",\"model_equivalence\":false,\
+         \"frankensim_peak_displacement_m\":{:.9e},\
+         \"opensees_peak_displacement_m\":{external_peak_m:.9e},\
+         \"published_total_base_reaction\":null}}",
+        response.peak_abs_displacement_m
     );
 }
