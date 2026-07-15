@@ -301,6 +301,37 @@ impl<'clock> AdmittedBudget<'clock> {
         Ok(())
     }
 
+    /// Enforce only cancellation and the deadline, without consuming
+    /// poll quota (bead sj31i.6). For workflows whose poll ledger is
+    /// shared with nested science and enforced elsewhere.
+    ///
+    /// # Errors
+    /// Returns the first refusal and latches it, like
+    /// [`AdmittedBudget::checkpoint`].
+    pub fn observe_deadline(
+        &mut self,
+        phase: &'static str,
+        cx: &Cx<'_>,
+    ) -> Result<(), BudgetRefusal> {
+        if let Some(refusal) = self.refusal {
+            return Err(refusal);
+        }
+        if cx.is_cancel_requested() {
+            return Err(self.latch(BudgetRefusal::Cancelled { phase }));
+        }
+        if let (Some(deadline), Some(clock)) = (self.admitted.deadline, self.clock) {
+            let now = clock.now();
+            if now >= deadline {
+                return Err(self.latch(BudgetRefusal::DeadlineExpired {
+                    phase,
+                    deadline_ns: deadline.as_nanos(),
+                    observed_ns: now.as_nanos(),
+                }));
+            }
+        }
+        Ok(())
+    }
+
     /// Convenience: checkpoint then charge one completed tile's cost.
     ///
     /// # Errors

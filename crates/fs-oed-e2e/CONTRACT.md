@@ -104,6 +104,16 @@ by the retained expectation-rule cost before campaign allocation or iteration.
 Derived posterior variances, posterior means, expected EVPI, and value-per-cost
 must remain finite.
 
+`BudgetRefused` (bead sj31i.6) retains the ambient accountant's typed refusal
+verbatim: `run_campaign` admits `cx.budget()` plus the admitted work plan
+through `fs_exec::AdmittedBudget` before any work (an expired deadline —
+`Budget::ZERO` included — a deadline without an ambient time source, or a
+plan exceeding the cost quota refuses at admission), observes
+cancellation/deadline at every campaign checkpoint, and accrues completed
+work as retained cost consumption. The poll ledger remains the raw shared
+counter because nested assimilation consumes the same slice; its exhaustion
+keeps the structured `Cancelled` shape.
+
 ## Determinism class
 
 Same-process deterministic for a fixed implementation/toolchain manifest (G5).

@@ -220,6 +220,10 @@ impl Candidate {
 /// A rejected campaign or failed campaign computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OedError {
+    /// The ambient admitted budget refused admission or further work
+    /// (deadline or cost); the typed refusal is retained verbatim and
+    /// no partial report is published (bead sj31i.6).
+    BudgetRefused(fs_exec::BudgetRefusal),
     /// At least one candidate is required.
     NoCandidates,
     /// The synchronous candidate cap was exceeded.
@@ -334,6 +338,9 @@ pub enum OedError {
 impl fmt::Display for OedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BudgetRefused(refusal) => {
+                write!(f, "campaign budget refused: {refusal}")
+            }
             Self::NoCandidates => write!(f, "SensorForge needs at least one candidate"),
             Self::TooManyCandidates { count, max } => {
                 write!(f, "candidate count {count} exceeds synchronous cap {max}")
@@ -423,6 +430,7 @@ impl std::error::Error for OedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::BeliefInvariant(source) | Self::Assimilation { source, .. } => Some(source),
+            Self::BudgetRefused(refusal) => Some(refusal),
             Self::AssimilationCancelled { source, .. } => Some(source.as_ref()),
             _ => None,
         }
@@ -765,22 +773,28 @@ impl CampaignWorkPlan {
 }
 
 #[derive(Debug)]
-struct CampaignProgress {
+struct CampaignProgress<'s> {
     completed_placements: usize,
     completed_work_units: u128,
     // Private invocation-global ledger: only `checkpoint` and the nested
     // assimilation transaction can decrease this value, and no caller can
     // replace it between campaign phases.
     polls_remaining: u32,
+    // Ambient deadline/cost authority (bead sj31i.6); polls stay in the
+    // raw ledger above because nested assimilation shares it.
+    ambient: fs_exec::AdmittedBudget<'s>,
 }
 
-impl CampaignProgress {
-    fn new(cx: &Cx<'_>, completed_work_units: u128) -> Self {
-        Self {
+impl<'s> CampaignProgress<'s> {
+    fn admit(cx: &Cx<'s>, completed_work_units: u128, planned_cost: u64) -> Result<Self, OedError> {
+        let ambient = fs_exec::AdmittedBudget::admit_ambient(cx, planned_cost)
+            .map_err(OedError::BudgetRefused)?;
+        Ok(Self {
             completed_placements: 0,
             completed_work_units,
             polls_remaining: cx.budget().poll_quota,
-        }
+            ambient,
+        })
     }
 
     fn advance(&mut self, units: u128) {
@@ -788,6 +802,12 @@ impl CampaignProgress {
             .completed_work_units
             .checked_add(units)
             .expect("admitted campaign progress cannot exceed u128");
+        // Cost accrues with admitted work; exhaustion beyond the admitted
+        // plan is impossible because admission bounded the plan, so the
+        // charge only feeds retained consumption evidence.
+        let _ = self
+            .ambient
+            .charge_cost("campaign-work", u64::try_from(units).unwrap_or(u64::MAX));
     }
 
     fn checkpoint(
@@ -796,6 +816,14 @@ impl CampaignProgress {
         plan: CampaignWorkPlan,
         phase: &'static str,
     ) -> Result<(), OedError> {
+        // Deadline and cancellation first (sj31i.6); the poll ledger below
+        // stays a raw counter because nested assimilation shares it.
+        self.ambient
+            .observe_deadline(phase, cx)
+            .map_err(|refusal| match refusal {
+                fs_exec::BudgetRefusal::Cancelled { .. } => self.cancelled(plan, phase),
+                other => OedError::BudgetRefused(other),
+            })?;
         if self.polls_remaining == 0 {
             return Err(self.cancelled(plan, phase));
         }
@@ -1787,7 +1815,11 @@ pub fn run_campaign(
 ) -> Result<OedReport, OedError> {
     let (threshold, plan, candidates) = validate_campaign(candidates, threshold, max_sensors)?;
     let candidates = candidates.as_slice();
-    let mut progress = CampaignProgress::new(cx, candidates.len() as u128);
+    let mut progress = CampaignProgress::admit(
+        cx,
+        candidates.len() as u128,
+        u64::try_from(plan.admitted_work_units).unwrap_or(u64::MAX),
+    )?;
     progress.checkpoint(cx, plan, "campaign admission")?;
     let beliefs: Vec<Belief> = candidates
         .iter()
@@ -1987,7 +2019,8 @@ mod tests {
     fn report_identities(fixture: &IdentityFixture, rule: &[(f64, f64)]) -> (String, String) {
         with_test_cx(|cx| {
             let source = fixture.source();
-            let mut progress = CampaignProgress::new(cx, 0);
+            let mut progress =
+                CampaignProgress::admit(cx, 0, 0).expect("identity fixture budget admits");
             let variance =
                 report_identity_with_rule("posterior-variance", &source, rule, &mut progress, cx)
                     .expect("variance identity");

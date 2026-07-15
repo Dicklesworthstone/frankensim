@@ -24,9 +24,11 @@ fn with_stream_cx<R>(
     stream: StreamKey,
     f: impl FnOnce(&Cx<'_>) -> R,
 ) -> R {
+    let owned_clock = fs_exec::VirtualClock::new();
+    let clock = &owned_clock;
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let result = pool.scope(|arena| {
-        let cx = Cx::new(gate, arena, stream, budget, mode);
+        let cx = Cx::new(gate, arena, stream, budget, mode).with_time_source(clock);
         f(&cx)
     });
     let stats = pool.stats();
@@ -725,7 +727,9 @@ fn g5_execution_mode_and_complete_budget_are_bound_into_evidence() {
     let fast = run(Budget::INFINITE, ExecMode::Fast, TEST_STREAM);
 
     let mut deadline_budget = Budget::INFINITE;
-    deadline_budget.deadline = Budget::ZERO.deadline;
+    // A zero deadline can never admit under the sj31i.6 accountant; a
+    // future deadline still mutates the identity hash the same way.
+    deadline_budget.deadline = Budget::with_deadline_at_ns(123_456).deadline;
     let mut poll_budget = Budget::INFINITE;
     poll_budget.poll_quota = 10_000;
     let mut cost_budget = Budget::INFINITE;
