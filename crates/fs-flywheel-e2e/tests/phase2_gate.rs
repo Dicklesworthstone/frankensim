@@ -40,23 +40,85 @@ impl Lcg {
     }
 }
 
-/// One wedge design task: fit the conductivity field so the FULL
-/// displacement field matches a hidden target — a genuinely 81-D
-/// objective (a scalar-QoI target is effectively 1-D and flatters
-/// derivative-free search; the first fixture draft did exactly that
-/// and DFO won 9/10 — the benchmark must be the honest shape).
-/// Budget accounting is PER SOLVE: the adjoint route pays 2 solves per
-/// iterate (primal + adjoint) plus 1 per backtrack; the ES pays 1 per
-/// candidate. Returns (adjoint misfit, DFO misfit) at equal budgets.
+/// Checked solve accountant (bead sj31i.28): ONE shared type drives
+/// both arms. Every solve is PRE-charged — a refused charge stops the
+/// arm before the operation runs, so neither arm can exceed its budget
+/// by construction — and the retained ledger supports independent cost
+/// recomputation.
+struct SolveAccountant {
+    cap: u32,
+    ledger: Vec<(&'static str, u32)>,
+}
+
+impl SolveAccountant {
+    fn new(cap: u32) -> Self {
+        Self {
+            cap,
+            ledger: Vec::new(),
+        }
+    }
+
+    fn spent(&self) -> u32 {
+        self.ledger.iter().map(|(_, units)| units).sum()
+    }
+
+    /// True only when the FULL charge fits under the cap; the charge is
+    /// recorded before the operation runs.
+    fn try_charge(&mut self, op: &'static str, units: u32) -> bool {
+        if self.spent() + units > self.cap {
+            return false;
+        }
+        self.ledger.push((op, units));
+        true
+    }
+
+    /// Independent recomputation: the ledger re-sums to the spend and
+    /// sits under the cap.
+    fn recomputed_ok(&self) -> bool {
+        let resum: u32 = self.ledger.iter().map(|(_, units)| units).sum();
+        resum == self.spent() && resum <= self.cap
+    }
+}
+
+/// One arm\'s outcome: best misfit, exact spend, and any failure —
+/// failures are retained, never silently dropped into survivor-only
+/// ratios.
+struct ArmReport {
+    best: f64,
+    spent: u32,
+    recomputed_ok: bool,
+    failure: Option<&'static str>,
+}
+
+/// One retained-corpus design task realized as the wedge inverse
+/// problem: fit the conductivity field so the FULL solution field
+/// matches a hidden target (a scalar-QoI target is effectively 1-D and
+/// flatters derivative-free search; the first fixture draft did exactly
+/// that and DFO won 9/10). The task\'s retained identity fixes the grid
+/// (5 cells per design dimension) and the preregistered seed stream;
+/// budget accounting is PER SOLVE through one [`SolveAccountant`] per
+/// arm at the same cap.
+///
+/// BASELINE HONESTY (bead sj31i.28): the derivative-free baseline IS a
+/// (1+1)-ES with 1/5th-style adaptation — the strongest derivative-free
+/// optimizer admitted in this Franken-only workspace (no CMA-ES/BO
+/// implementation exists to run). Every claim names it as exactly that.
 #[allow(clippy::too_many_lines)] // one linear benchmark harness: adjoint route + ES baseline
-fn run_task(seed: u64, budget: usize) -> (f64, f64) {
-    let fixture = Elliptic1d::new(80).expect("bounded phase-2 elliptic fixture");
+fn run_paired_task(
+    task: &fs_benchmark::DesignTask,
+    seed: u64,
+    budget: u32,
+) -> (ArmReport, ArmReport) {
+    let cells = task.dimension * 5;
+    let fixture = Elliptic1d::new(cells).expect("bounded phase-2 elliptic fixture");
+    let design = cells + 1;
     let mut rng = Lcg(seed);
-    let a_target: Vec<f64> = (0..=80).map(|_| 0.7 + 0.9 * rng.next()).collect();
+    let a_target: Vec<f64> = (0..design).map(|_| 0.7 + 0.9 * rng.next()).collect();
     let u_target = fixture
         .solve(&a_target)
         .expect("positive target conductivity solves");
-    let h = 1.0 / 81.0;
+    #[allow(clippy::cast_precision_loss)]
+    let h = 1.0 / (design as f64);
     let misfit = |u: &[f64]| -> f64 {
         u.iter()
             .zip(&u_target)
@@ -65,23 +127,9 @@ fn run_task(seed: u64, budget: usize) -> (f64, f64) {
     };
     let slope = |u: &[f64], e: usize| -> f64 {
         let lo = if e == 0 { 0.0 } else { u[e - 1] };
-        let hi = if e == 80 { 0.0 } else { u[e] };
+        let hi = if e == cells { 0.0 } else { u[e] };
         (hi - lo) / h
     };
-    // ADJOINT route: K(a)u = f, J = ||u − u*||²_h; the adjoint solves
-    // K(a)λ = 2(u − u*)h (self-adjoint operator, same tridiagonal
-    // machinery via a scaled RHS trick: solve with modified loads by
-    // superposing unit solves is overkill — here K is the SAME matrix,
-    // so reuse solve() on the residual by linearity of the fixture:
-    // solve() uses f = h, so we assemble λ from the identity
-    // K λ = r via one extra tridiagonal solve implemented inline).
-    // Adjoint gradients feed a compact L-BFGS (memory 6, two-loop
-    // recursion, Armijo backtracking) — "adjoint-driven optimization"
-    // means gradients PLUS a quasi-Newton optimizer; plain steepest
-    // descent squanders them on an ill-conditioned inverse problem
-    // (the first draft did, and lost).
-    let mut a = vec![1.0f64; 81];
-    let mut spent = 0usize;
     let grad_at = |a: &Vec<f64>, u: &[f64]| -> Vec<f64> {
         let r: Vec<f64> = u
             .iter()
@@ -89,123 +137,217 @@ fn run_task(seed: u64, budget: usize) -> (f64, f64) {
             .map(|(x, y)| 2.0 * (x - y) * h)
             .collect();
         let lambda = solve_with_rhs(a, &r);
-        (0..=80)
+        (0..design)
             .map(|e| -slope(u, e) * slope(&lambda, e) * h)
             .collect()
     };
-    let u0 = fixture.solve(&a).expect("positive conductivity solves");
-    spent += 1;
-    let mut j0 = misfit(&u0);
-    let mut best_adj = j0;
-    let mut g = grad_at(&a, &u0);
-    spent += 1;
-    let mut s_hist: Vec<Vec<f64>> = Vec::new();
-    let mut y_hist: Vec<Vec<f64>> = Vec::new();
-    while spent + 2 <= budget {
-        // Two-loop recursion for the search direction.
-        let mut q = g.clone();
-        let mut alphas = Vec::with_capacity(s_hist.len());
-        for (sv, yv) in s_hist.iter().zip(&y_hist).rev() {
-            let rho = 1.0 / yv.iter().zip(sv).map(|(y, s)| y * s).sum::<f64>();
-            let alpha = rho * sv.iter().zip(&q).map(|(s, q)| s * q).sum::<f64>();
-            for (qi, yi) in q.iter_mut().zip(yv) {
-                *qi -= alpha * yi;
-            }
-            alphas.push((rho, alpha));
+
+    // ---- ADJOINT ARM (L-BFGS memory 6, Armijo backtracking) ----
+    let mut acct = SolveAccountant::new(budget);
+    let adjoint = 'adjoint: {
+        let mut a = vec![1.0f64; design];
+        if !acct.try_charge("setup-primal-solve", 1) {
+            break 'adjoint ArmReport {
+                best: f64::INFINITY,
+                spent: acct.spent(),
+                recomputed_ok: acct.recomputed_ok(),
+                failure: Some("budget cannot afford the setup solve"),
+            };
         }
-        if let (Some(sv), Some(yv)) = (s_hist.last(), y_hist.last()) {
-            let sy: f64 = sv.iter().zip(yv).map(|(s, y)| s * y).sum();
-            let yy: f64 = yv.iter().map(|y| y * y).sum();
-            let gamma = sy / yy.max(1e-300);
-            for qi in &mut q {
-                *qi *= gamma;
-            }
-        } else {
-            for qi in &mut q {
-                *qi *= 4.0;
-            }
+        let Ok(u0) = fixture.solve(&a) else {
+            break 'adjoint ArmReport {
+                best: f64::INFINITY,
+                spent: acct.spent(),
+                recomputed_ok: acct.recomputed_ok(),
+                failure: Some("setup solve failed"),
+            };
+        };
+        let mut j0 = misfit(&u0);
+        let mut best_adj = j0;
+        if !acct.try_charge("setup-gradient-solve", 1) {
+            break 'adjoint ArmReport {
+                best: best_adj,
+                spent: acct.spent(),
+                recomputed_ok: acct.recomputed_ok(),
+                failure: None,
+            };
         }
-        for ((sv, yv), (rho, alpha)) in s_hist.iter().zip(&y_hist).zip(alphas.iter().rev()) {
-            let beta = rho * yv.iter().zip(&q).map(|(y, q)| y * q).sum::<f64>();
-            for (qi, si) in q.iter_mut().zip(sv) {
-                *qi += (alpha - beta) * si;
-            }
-        }
-        // Armijo backtracking along −q.
-        let mut step = 1.0f64;
-        let mut accepted = false;
-        while spent < budget {
-            let cand: Vec<f64> = a
-                .iter()
-                .zip(&q)
-                .map(|(v, d)| (v - step * d).clamp(0.3, 2.5))
-                .collect();
-            let uc = fixture
-                .solve(&cand)
-                .expect("bounded positive candidate solves");
-            spent += 1;
-            let jc = misfit(&uc);
-            if jc < j0 {
-                let g_new = grad_at(&cand, &uc);
-                spent += 1;
-                let sv: Vec<f64> = cand.iter().zip(&a).map(|(x, y)| x - y).collect();
-                let yv: Vec<f64> = g_new.iter().zip(&g).map(|(x, y)| x - y).collect();
-                if sv.iter().zip(&yv).map(|(s, y)| s * y).sum::<f64>() > 1e-14 {
-                    s_hist.push(sv);
-                    y_hist.push(yv);
-                    if s_hist.len() > 6 {
-                        s_hist.remove(0);
-                        y_hist.remove(0);
-                    }
+        let mut g = grad_at(&a, &u0);
+        let mut s_hist: Vec<Vec<f64>> = Vec::new();
+        let mut y_hist: Vec<Vec<f64>> = Vec::new();
+        'outer: loop {
+            // Two-loop recursion for the search direction.
+            let mut q = g.clone();
+            let mut alphas = Vec::with_capacity(s_hist.len());
+            for (sv, yv) in s_hist.iter().zip(&y_hist).rev() {
+                let rho = 1.0 / yv.iter().zip(sv).map(|(y, s)| y * s).sum::<f64>();
+                let alpha = rho * sv.iter().zip(&q).map(|(s, q)| s * q).sum::<f64>();
+                for (qi, yi) in q.iter_mut().zip(yv) {
+                    *qi -= alpha * yi;
                 }
-                a = cand;
-                j0 = jc;
-                g = g_new;
-                best_adj = best_adj.min(jc);
-                accepted = true;
+                alphas.push((rho, alpha));
+            }
+            if let (Some(sv), Some(yv)) = (s_hist.last(), y_hist.last()) {
+                let sy: f64 = sv.iter().zip(yv).map(|(s, y)| s * y).sum();
+                let yy: f64 = yv.iter().map(|y| y * y).sum();
+                let gamma = sy / yy.max(1e-300);
+                for qi in &mut q {
+                    *qi *= gamma;
+                }
+            } else {
+                for qi in &mut q {
+                    *qi *= 4.0;
+                }
+            }
+            for ((sv, yv), (rho, alpha)) in s_hist.iter().zip(&y_hist).zip(alphas.iter().rev()) {
+                let beta = rho * yv.iter().zip(&q).map(|(y, q)| y * q).sum::<f64>();
+                for (qi, si) in q.iter_mut().zip(sv) {
+                    *qi += (alpha - beta) * si;
+                }
+            }
+            // Armijo backtracking along −q. Every candidate solve is
+            // pre-charged; an improving candidate\'s follow-up gradient
+            // is charged ONLY if affordable — otherwise the improvement
+            // is retained and the arm stops AT the cap, never past it.
+            let mut step = 1.0f64;
+            let mut accepted = false;
+            loop {
+                if !acct.try_charge("line-search-solve", 1) {
+                    break 'outer;
+                }
+                let Ok(uc) = fixture.solve(
+                    &a.iter()
+                        .zip(&q)
+                        .map(|(v, d)| (v - step * d).clamp(0.3, 2.5))
+                        .collect::<Vec<f64>>(),
+                ) else {
+                    break 'adjoint ArmReport {
+                        best: best_adj,
+                        spent: acct.spent(),
+                        recomputed_ok: acct.recomputed_ok(),
+                        failure: Some("line-search solve failed"),
+                    };
+                };
+                let cand: Vec<f64> = a
+                    .iter()
+                    .zip(&q)
+                    .map(|(v, d)| (v - step * d).clamp(0.3, 2.5))
+                    .collect();
+                let jc = misfit(&uc);
+                if jc < j0 {
+                    best_adj = best_adj.min(jc);
+                    if !acct.try_charge("gradient-solve", 1) {
+                        // Improvement on the last affordable evaluation:
+                        // retained, no gradient overcharge (bead sj31i.28).
+                        break 'outer;
+                    }
+                    let g_new = grad_at(&cand, &uc);
+                    let sv: Vec<f64> = cand.iter().zip(&a).map(|(x, y)| x - y).collect();
+                    let yv: Vec<f64> = g_new.iter().zip(&g).map(|(x, y)| x - y).collect();
+                    if sv.iter().zip(&yv).map(|(s, y)| s * y).sum::<f64>() > 1e-14 {
+                        s_hist.push(sv);
+                        y_hist.push(yv);
+                        if s_hist.len() > 6 {
+                            s_hist.remove(0);
+                            y_hist.remove(0);
+                        }
+                    }
+                    a = cand;
+                    j0 = jc;
+                    g = g_new;
+                    accepted = true;
+                    break;
+                }
+                step *= 0.35;
+                if step < 1e-8 {
+                    break;
+                }
+            }
+            if !accepted {
                 break;
             }
-            step *= 0.35;
-            if step < 1e-8 {
-                break;
+        }
+        ArmReport {
+            best: best_adj,
+            spent: acct.spent(),
+            recomputed_ok: acct.recomputed_ok(),
+            failure: None,
+        }
+    };
+
+    // ---- DERIVATIVE-FREE ARM: (1+1)-ES, dimension-normalized
+    // mutation, 1/5th-style adaptation, 1 pre-charged solve per
+    // candidate, SAME accountant type at the SAME cap. ----
+    let mut acct = SolveAccountant::new(budget);
+    let baseline = 'baseline: {
+        let mut a_es = vec![1.0f64; design];
+        if !acct.try_charge("baseline-setup-solve", 1) {
+            break 'baseline ArmReport {
+                best: f64::INFINITY,
+                spent: acct.spent(),
+                recomputed_ok: acct.recomputed_ok(),
+                failure: Some("budget cannot afford the setup solve"),
+            };
+        }
+        let Ok(u_es) = fixture.solve(&a_es) else {
+            break 'baseline ArmReport {
+                best: f64::INFINITY,
+                spent: acct.spent(),
+                recomputed_ok: acct.recomputed_ok(),
+                failure: Some("baseline setup solve failed"),
+            };
+        };
+        let mut best_es = misfit(&u_es);
+        #[allow(clippy::cast_precision_loss)]
+        let mut sigma = 0.15 / (design as f64).sqrt();
+        while acct.try_charge("baseline-candidate-solve", 1) {
+            let cand: Vec<f64> = a_es
+                .iter()
+                .map(|v| (v + sigma * (rng.next() * 2.0 - 1.0)).clamp(0.3, 2.5))
+                .collect();
+            let Ok(uc) = fixture.solve(&cand) else {
+                break 'baseline ArmReport {
+                    best: best_es,
+                    spent: acct.spent(),
+                    recomputed_ok: acct.recomputed_ok(),
+                    failure: Some("baseline candidate solve failed"),
+                };
+            };
+            let m = misfit(&uc);
+            if m < best_es {
+                a_es = cand;
+                best_es = m;
+                sigma *= 1.4;
+            } else {
+                sigma *= 0.96;
             }
         }
-        if !accepted {
-            break;
+        ArmReport {
+            best: best_es,
+            spent: acct.spent(),
+            recomputed_ok: acct.recomputed_ok(),
+            failure: None,
         }
-    }
-    // DERIVATIVE-FREE baseline: (1+1)-ES, dimension-normalized
-    // mutation, 1/5th-style adaptation, 1 solve per candidate.
-    let mut a_es = vec![1.0f64; 81];
-    let mut best_es = misfit(&fixture.solve(&a_es).expect("positive ES baseline solves"));
-    let mut sigma = 0.15 / (81.0f64).sqrt();
-    for _ in 0..budget.saturating_sub(1) {
-        let cand: Vec<f64> = a_es
-            .iter()
-            .map(|v| (v + sigma * (rng.next() * 2.0 - 1.0)).clamp(0.3, 2.5))
-            .collect();
-        let m = misfit(
-            &fixture
-                .solve(&cand)
-                .expect("bounded positive ES candidate solves"),
-        );
-        if m < best_es {
-            a_es = cand;
-            best_es = m;
-            sigma *= 1.4;
-        } else {
-            sigma *= 0.96;
-        }
-    }
-    (best_adj, best_es)
+    };
+    (adjoint, baseline)
+}
+
+/// Preregistered per-task seed stream: derived from the retained task
+/// id, never ad-hoc.
+fn task_seed(task_id: &str, index: u64) -> u64 {
+    let hash = fs_ledger::hash_bytes(task_id.as_bytes());
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&hash.as_bytes()[..8]);
+    u64::from_le_bytes(bytes) ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// Tridiagonal solve of the fixture operator `K(a) x = r` (the adjoint
 /// share of the machinery — same assembly as Elliptic1d::solve, custom
 /// right-hand side).
 fn solve_with_rhs(a: &[f64], r: &[f64]) -> Vec<f64> {
-    let n = 80usize;
-    let h = 1.0 / 81.0;
+    let n = a.len() - 1;
+    #[allow(clippy::cast_precision_loss)]
+    let h = 1.0 / (a.len() as f64);
     let mut diag = vec![0.0f64; n];
     let mut off = vec![0.0f64; n - 1];
     for (e, &ae) in a.iter().enumerate() {
@@ -240,32 +382,128 @@ fn solve_with_rhs(a: &[f64], r: &[f64]) -> Vec<f64> {
 
 #[test]
 fn p2_001_adjoint_beats_derivative_free() {
-    // THE EXIT BENCHMARK: >= 70% wins across the battery at equal
-    // solve budget, else Proposal 1 scopes down (its kill criterion).
-    let budget = 40usize;
-    let mut wins = 0usize;
+    // THE EXIT BENCHMARK (reworked under bead sj31i.28): paired runs on
+    // the RETAINED fs-benchmark design-task corpus with preregistered
+    // per-task seed streams, both arms under one checked pre-charged
+    // accountant at an equal 40-solve cap. The claim is gated BOTH ways
+    // it was preregistered: >= 70% paired wins (Proposal 1\'s kill
+    // criterion) AND an anytime-valid e-process rejection of
+    // H0: P(win) <= 1/2 at delta = 0.05 — losses and failures are
+    // retained in the printed rows, never survivor-filtered.
+    let budget = 40u32;
+    let seeds_per_task = 8u64;
+    let mut outcomes: std::collections::BTreeMap<(usize, u64), bool> =
+        std::collections::BTreeMap::new();
     let mut rows = Vec::new();
-    for k in 0..10u64 {
-        let (adj, dfo) = run_task(0x9000 + k, budget);
-        if adj < dfo {
-            wins += 1;
+    for (t, task) in fs_benchmark::design_tasks().iter().enumerate() {
+        for k in 0..seeds_per_task {
+            let (adjoint, baseline) = run_paired_task(task, task_seed(task.id, k), budget);
+            assert!(
+                adjoint.spent <= budget && baseline.spent <= budget,
+                "no arm may exceed its declared budget: {} adjoint={} baseline={}",
+                task.id,
+                adjoint.spent,
+                baseline.spent
+            );
+            assert!(
+                adjoint.recomputed_ok && baseline.recomputed_ok,
+                "independent ledger recomputation must agree"
+            );
+            assert!(
+                adjoint.failure.is_none() && baseline.failure.is_none(),
+                "retained failure on {}: {:?}/{:?}",
+                task.id,
+                adjoint.failure,
+                baseline.failure
+            );
+            let win = adjoint.best < baseline.best;
+            assert!(
+                outcomes.insert((t, k), win).is_none(),
+                "duplicate (task, seed) row must be impossible"
+            );
+            rows.push(format!(
+                "{{\"task\":\"{}\",\"seed_index\":{k},\"adjoint\":{:.3e},\
+                 \"baseline\":{:.3e},\"adjoint_spent\":{},\"baseline_spent\":{},\
+                 \"win\":{win}}}",
+                task.id, adjoint.best, baseline.best, adjoint.spent, baseline.spent
+            ));
         }
-        rows.push(format!("[{adj:.2e},{dfo:.2e}]"));
     }
+    let total = outcomes.len();
+    let wins = outcomes.values().filter(|w| **w).count();
+    // Anytime-valid paired claim: shares the activation module\'s
+    // preregistered e-process primitive (canonical row order; the
+    // running maximum makes optional stopping sound).
+    let e_value = fs_flywheel_e2e::activation::e_process(outcomes.values().copied(), 0.5, 0.5);
+    // Order invariance: the canonical BTreeMap order IS the preregistered
+    // path; rebuilding from shuffled insertion replays identically.
+    let mut shuffled: Vec<((usize, u64), bool)> = outcomes.iter().map(|(k, v)| (*k, *v)).collect();
+    shuffled.rotate_left(7);
+    let replay: std::collections::BTreeMap<(usize, u64), bool> = shuffled.into_iter().collect();
+    let replay_e = fs_flywheel_e2e::activation::e_process(replay.values().copied(), 0.5, 0.5);
+    assert!(
+        (e_value - replay_e).abs() == 0.0,
+        "row order must not move the claim"
+    );
     println!(
-        "{{\"metric\":\"adjoint-vs-dfo\",\"budget\":{budget},\"tasks\":10,\"wins\":{wins},\
-         \"pairs\":[{}]}}",
+        "{{\"metric\":\"adjoint-vs-dfo\",\"budget\":{budget},\"corpus\":\"fs-benchmark design_tasks\",\
+         \"pairs\":{total},\"wins\":{wins},\"e_value\":{e_value:.2},\"e_target\":20.0,\
+         \"baseline\":\"(1+1)-ES 1/5th-rule (strongest admitted derivative-free)\",\
+         \"rows\":[{}]}}",
         rows.join(",")
     );
+    #[allow(clippy::cast_precision_loss)]
+    let win_rate = wins as f64 / total as f64;
     assert!(
-        wins >= 7,
-        "adjoint wins on >=70% of the wedge battery: {wins}/10"
+        win_rate >= 0.70,
+        "adjoint wins on >=70% of the retained corpus battery: {wins}/{total}"
+    );
+    assert!(
+        e_value >= 20.0,
+        "the paired claim must clear the anytime-valid e-threshold 1/delta=20: {e_value}"
     );
     verdict(
         "p2-001",
-        "adjoint-driven optimization beats the (1+1)-ES derivative-free baseline at an \
-         equal 40-solve budget on the required fraction of the 10-task battery — \
-         Proposal 1's exit benchmark recorded",
+        "adjoint-driven optimization beats the named (1+1)-ES derivative-free baseline at an \
+         equal pre-charged 40-solve budget across the retained design-task corpus; the paired \
+         claim is anytime-valid at delta=0.05 and losses are retained",
+    );
+}
+
+#[test]
+fn p2_004_budget_boundaries_hold_exactly() {
+    // Exact-budget discipline (bead sj31i.28): tiny caps exercise the
+    // last-affordable-evaluation and gradient-unaffordable boundaries.
+    let task = &fs_benchmark::design_tasks()[0];
+    for budget in [1u32, 2, 3, 4, 40] {
+        let (adjoint, baseline) = run_paired_task(task, task_seed(task.id, 0), budget);
+        assert!(
+            adjoint.spent <= budget,
+            "adjoint spent {} of {budget}",
+            adjoint.spent
+        );
+        assert!(
+            baseline.spent <= budget,
+            "baseline spent {} of {budget}",
+            baseline.spent
+        );
+        assert!(adjoint.recomputed_ok && baseline.recomputed_ok);
+        // The baseline consumes exactly its cap (every candidate is one
+        // pre-charged solve).
+        assert_eq!(baseline.spent, budget, "baseline parity at cap {budget}");
+    }
+    // budget=3: setup (2 solves) + one line-search solve; an improving
+    // final evaluation cannot afford its follow-up gradient and must
+    // stop AT the cap with the improvement retained.
+    let (adjoint, _) = run_paired_task(task, task_seed(task.id, 0), 3);
+    assert_eq!(
+        adjoint.spent, 3,
+        "the improving last-affordable evaluation is charged and nothing after it"
+    );
+    verdict(
+        "p2-004",
+        "both arms hold their caps exactly at every boundary; the improving final \
+         evaluation never triggers a gradient overcharge",
     );
 }
 

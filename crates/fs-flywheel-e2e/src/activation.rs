@@ -269,8 +269,13 @@ pub struct ActivationReport {
 /// `W ← W · (1 + λ · (x − p0) / m)` with `m = max(p0, 1 − p0)` so the
 /// per-step factor stays in (0, 2) for λ ∈ (0, 1). Ville's inequality
 /// gives `P(sup W ≥ 1/δ) ≤ δ` under H0 at the boundary, uniformly over
-/// stopping times.
-fn e_process(observations: impl Iterator<Item = bool>, p0: f64, lambda: f64) -> f64 {
+/// stopping times. Returns the running-maximum wealth; a caller
+/// comparing it against `1/δ` gets an anytime-valid level-δ test.
+/// Public so paired comparisons elsewhere in the harness (the phase-2
+/// adjoint-vs-baseline gate, bead sj31i.28) share one preregistered
+/// statistical primitive.
+#[must_use]
+pub fn e_process(observations: impl Iterator<Item = bool>, p0: f64, lambda: f64) -> f64 {
     let scale = p0.max(1.0 - p0);
     let mut wealth = 1.0_f64;
     let mut max_wealth = 1.0_f64;
