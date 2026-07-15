@@ -21,8 +21,9 @@ use fs_ir::planner::{
 use fs_ir::{admission, sexpr};
 use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_verify::estimator::{
-    AdmittedVerifierReceipt, VERIFIER_RECEIPT_QOI, VERIFIER_RECEIPT_UNITS,
-    VerifierProducerSourceIdentity, VerifierReceipt, admit_verifier_receipt,
+    AdmittedVerifierReceipt, PresentedVerifierReceipt, VERIFIER_RECEIPT_QOI,
+    VERIFIER_RECEIPT_UNITS, VerifierProducerSourceIdentity, VerifierReceipt,
+    admit_verifier_receipt,
 };
 use fs_verify::fem1d::Poly;
 
@@ -61,7 +62,7 @@ fn hash_f64_slice(domain: &str, values: &[f64]) -> fs_checker::ContentHash {
 }
 #[derive(Debug, Clone)]
 struct AuthenticReceiptResolver {
-    receipt: VerifierReceipt,
+    receipt: PresentedVerifierReceipt,
     family: ProblemFamily,
     theta: f64,
     tolerance: f64,
@@ -74,22 +75,23 @@ struct ResolvedVerifierReceipt<'a> {
     admitted: AdmittedVerifierReceipt<'a>,
 }
 
-fn retain_original_receipt(receipt: VerifierReceipt) -> VerifierReceipt {
+fn retain_original_receipt(receipt: VerifierReceipt) -> PresentedVerifierReceipt {
     let bytes = receipt
         .canonical_bytes()
         .expect("bounded original receipt transport bytes");
-    let presented = VerifierReceipt::from_retained_bytes(&bytes, receipt.artifact_root())
+    let presented = PresentedVerifierReceipt::from_retained_bytes(&bytes, receipt.artifact_root())
         .expect("independently rooted original receipt transport");
     assert_eq!(
-        presented, receipt,
-        "retained transport must preserve the exact original verifier receipt"
+        presented.artifact_root(),
+        receipt.artifact_root(),
+        "retained transport must preserve the original verifier receipt identity"
     );
     presented
 }
 
 impl ResolvedVerifierReceipt<'_> {
-    fn receipt(&self) -> &VerifierReceipt {
-        self.admitted.receipt()
+    fn receipt(&self) -> &AdmittedVerifierReceipt<'_> {
+        &self.admitted
     }
 
     fn claim(&self) -> Claim {
@@ -161,6 +163,26 @@ impl AuthenticReceiptResolver {
         }
     }
 
+    fn from_presented_step(
+        family: &ProblemFamily,
+        theta: f64,
+        tolerance: f64,
+        planner_budget: f64,
+        planner_spent: f64,
+        rungs: &[usize],
+        receipt: PresentedVerifierReceipt,
+    ) -> Self {
+        Self {
+            receipt,
+            family: family.clone(),
+            theta,
+            tolerance,
+            planner_budget,
+            planner_spent,
+            rungs: rungs.to_vec(),
+        }
+    }
+
     fn resolve(&self) -> Result<ResolvedVerifierReceipt<'_>, &'static str> {
         let mut cache = MemCache::default();
         let mut costs = CostTable::new(200.0).map_err(|_| "replay cost table refused")?;
@@ -179,7 +201,7 @@ impl AuthenticReceiptResolver {
         if spent.to_bits() != self.planner_spent.to_bits() {
             return Err("independent planner consumption differs from the original step");
         }
-        if replay_receipt != self.receipt {
+        if replay_receipt.artifact_root() != self.receipt.artifact_root() {
             return Err("original planner receipt differs from deterministic planner replay");
         }
         let problem = self
@@ -612,33 +634,35 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         &RUNGS,
         last.verifier_receipt.clone(),
     );
+    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(Some(&resolver)) else {
+        panic!("the authentic final receipt must resolve before package construction");
+    };
+    let admitted_receipt = resolved.receipt();
     assert_eq!(
-        resolver.receipt.bound_lo().to_bits(),
+        admitted_receipt.bound_lo().to_bits(),
         lo.to_bits(),
         "the package interval is the authentic verifier interval"
     );
     assert_eq!(
-        resolver.receipt.bound_hi().to_bits(),
+        admitted_receipt.bound_hi().to_bits(),
         hi.to_bits(),
         "the package interval is the authentic verifier interval"
     );
     assert_eq!(
-        resolver.receipt.flux_hash(),
+        admitted_receipt.flux_hash(),
         last.flux_hash,
         "the package retains the planner's authentic flux reconstruction"
     );
     assert_eq!(
-        resolver.receipt.verifier_family(),
+        admitted_receipt.verifier_family(),
         last.verifier_family.as_str(),
         "the package cannot relabel the verifier family"
     );
     assert_eq!(
-        resolver.receipt, last.verifier_receipt,
+        resolver.receipt.artifact_root(),
+        last.verifier_receipt.artifact_root(),
         "package construction consumes the original anytime receipt, not a fresh mint"
     );
-    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(Some(&resolver)) else {
-        panic!("the authentic final receipt must resolve before package construction");
-    };
     let qoi_claim = resolved.claim();
     let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
     let pkg = signed_fixture(
@@ -763,7 +787,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         resolved.claim()
     ));
 
-    let receipt = &resolver.receipt;
+    let receipt = resolved.receipt();
     let fake_hash = Claim::from_certificate(
         receipt.qoi(),
         receipt.statement(),
@@ -813,7 +837,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         "the same receipt address cannot authenticate a different QoI subject"
     );
 
-    let cross_problem = AuthenticReceiptResolver::from_original_step(
+    let cross_problem = AuthenticReceiptResolver::from_presented_step(
         &family,
         0.75,
         resolver.tolerance,
@@ -826,7 +850,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         cross_problem.resolve().is_err(),
         "an authentic receipt cannot replay against a substituted problem parameter"
     );
-    let cross_tolerance = AuthenticReceiptResolver::from_original_step(
+    let cross_tolerance = AuthenticReceiptResolver::from_presented_step(
         &family,
         resolver.theta,
         7e-3,
@@ -1261,21 +1285,24 @@ fn ac_004_g5_whole_path_replay() -> Result<(), PlanError> {
                 &RUNGS,
                 step.verifier_receipt.clone(),
             );
-            assert!(
-                resolver.resolve().is_ok(),
-                "every original trajectory receipt independently replays"
-            );
+            let resolved = resolver
+                .resolve()
+                .expect("every original trajectory receipt independently replays");
+            let admitted_receipt = resolved.receipt();
             assert_eq!(
-                resolver.receipt.bound_hi().to_bits(),
+                admitted_receipt.bound_hi().to_bits(),
                 step.bound.to_bits(),
                 "receipt sequence binds every interval endpoint"
             );
-            assert_eq!(resolver.receipt.flux_hash(), step.flux_hash);
+            assert_eq!(admitted_receipt.flux_hash(), step.flux_hash);
             assert_eq!(
-                resolver.receipt.verifier_family(),
+                admitted_receipt.verifier_family(),
                 step.verifier_family.as_str()
             );
-            assert_eq!(resolver.receipt, step.verifier_receipt);
+            assert_eq!(
+                resolver.receipt.artifact_root(),
+                step.verifier_receipt.artifact_root()
+            );
             for root in [
                 resolver.receipt.artifact_root().content_hash(),
                 resolver.receipt.problem_root(),

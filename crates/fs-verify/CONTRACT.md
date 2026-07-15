@@ -72,6 +72,18 @@ quadrature.
   exact antiderivative coefficients. The bound `‖σ − u_h′‖` is then
   interval-evaluated. Accept ⟺ `bound.hi ≤ tolerance`; an accept
   carries `Color::Verified`; a reject carries no color.
+- `estimator::verify_with_receipt` emits an immutable private-field production
+  receipt only after successful verifier publication. Canonical retained bytes
+  decode to the distinct `PresentedVerifierReceipt`, whose private production
+  record exposes routing identity only: it has no bounds, acceptance bit,
+  statement, color, or raw-`VerifierReceipt` accessor. Only
+  `admit_verifier_receipt`'s exact independent replay returns
+  `AdmittedVerifierReceipt`, whose replay-authenticated result getters and
+  `color()` yield `Verified` authority for an accepted receipt and `None` for
+  an ordinary above-tolerance reject. A direct in-memory consumer of the
+  freshly returned production result may pass its finite enclosure through
+  fs-evidence's guarded constructor without replay; that producer trust does
+  not survive retention.
 - `VerifierWorkPlan::for_inputs` is the constant-time public shape preflight.
   For mesh nodes `n`, cells `c=n-1`, and canonical coefficient counts `u`, `f`,
   and `a`, it charges validation `3+2n+c+3u+3f+2a`, tightness `c`,
@@ -334,6 +346,10 @@ ledger rows. Any reimplementation must pass the suite unchanged.
 The G4 additions specifically cover exact work-plan formulas, sparse callback
 traces, legacy equivalence, invocation-global boundaries, refusal progress,
 callback errors, and publication distinct from a boundary at the same count.
+The retained-receipt unit regressions lock exact replay before positive or
+rejected result access. The `PresentedVerifierReceipt` rustdoc compile-fail
+cases lock the absence of bounds, acceptance, and color APIs on presented
+transport data.
 
 ## No-claim boundaries
 

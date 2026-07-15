@@ -1197,32 +1197,20 @@ fn checked_verify(
             stage: "verifier acceptance consistency",
         });
     }
+    // This receipt is the direct result of the trusted verifier producer, not
+    // retained/presented transport. Its finite enclosure remains certified
+    // even when it does not discharge this tolerance, so mint the planner's
+    // color through fs-evidence's guarded constructor and track acceptance
+    // separately.
     let guarded_color = verified_from(&NumericalCertificate::enclosure(0.0, hi)).map_err(|_| {
         PlanError::NumericalFailure {
             stage: "verifier evidence-color admission",
         }
     })?;
-    let receipt_color = receipt.color();
-    match (receipt_color.as_ref(), expected_accept) {
-        (
-            Some(Color::Verified {
-                lo: color_lo,
-                hi: color_hi,
-            }),
-            true,
-        ) if canonical_f64_bits(*color_lo) == 0
-            && canonical_f64_bits(*color_hi) == canonical_f64_bits(hi) => {}
-        (None, false) => {}
-        _ => {
-            return Err(PlanError::NumericalFailure {
-                stage: "verifier color consistency",
-            });
-        }
-    }
     Ok(CheckedVerification {
         certificate: VerifierCertificate {
             receipt,
-            color: receipt_color.unwrap_or(guarded_color),
+            color: guarded_color,
         },
         accept: expected_accept,
     })

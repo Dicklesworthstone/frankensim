@@ -79,11 +79,11 @@ pub const VERIFIER_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=canonical-magic,digest-domain",
     "semantic_fields=canonical-magic,digest-domain,schema-version,theorem,producer-crate,producer-version,producer-features,producer-source-root,dependency-source-root,workspace-manifest-root,workspace-lock-root,toolchain-root,problem-identity-version,problem-root,candidate-root,mesh-root,operator-root,coefficient-root,query-root,qoi,units,flux-hash,verifier-family,arithmetic,ordered-hypotheses,bound-lo-bits,bound-hi-bits,tolerance-bits,accepted,work-plan,observed-completed-work,observed-planned-work,final-phase,final-checkpoint,publication-observed",
     "excluded_fields=artifact-root:derived-recomputed-not-canonical-input,statement:derived-display-only,producer-label:derived-display-only,binary-artifact-identity:no-claim",
-    "consumers=VerifierReceipt::artifact_root,VerifierReceipt::from_retained_bytes,admit_verifier_receipt,fs-ir::planner::VerifierCertificate,fs-flywheel-e2e",
+    "consumers=VerifierReceipt::artifact_root,PresentedVerifierReceipt::from_retained_bytes,admit_verifier_receipt,fs-ir::planner::VerifierCertificate,fs-flywheel-e2e",
     "mutations=canonical-magic:crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay,digest-domain:crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay,schema-version:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,theorem:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-crate:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-version:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-features:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-source-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,dependency-source-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,workspace-manifest-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,workspace-lock-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,toolchain-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,problem-identity-version:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,problem-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,candidate-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,mesh-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,operator-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,coefficient-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,query-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,qoi:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,units:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,flux-hash:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,verifier-family:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,arithmetic:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,ordered-hypotheses:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,bound-lo-bits:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,bound-hi-bits:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,tolerance-bits:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,accepted:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,work-plan:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,observed-completed-work:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,observed-planned-work:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,final-phase:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,final-checkpoint:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,publication-observed:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay",
     "nonsemantic_mutations=artifact-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,statement:crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay,producer-label:crates/fs-verify/src/estimator.rs#producer_identity_reports_the_exact_compiled_feature_set,binary-artifact-identity:crates/fs-verify/src/estimator.rs#producer_identity_reports_the_exact_compiled_feature_set",
     "field_guard=classify_verifier_receipt_identity_fields",
-    "transport_guard=VerifierReceipt::from_retained_bytes",
+    "transport_guard=PresentedVerifierReceipt::from_retained_bytes",
     "version_guard=crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay",
     "coupling_surface=fs-verify:verifier-receipt",
 ];
@@ -565,6 +565,9 @@ impl VerifierProducerSourceIdentity {
                     include_bytes!("../../fs-evidence/src/color.rs"),
                     include_bytes!("../../fs-evidence/src/discrepancy.rs"),
                     include_bytes!("../../fs-evidence/src/falsify.rs"),
+                    include_bytes!("../../fs-evidence/src/vv.rs"),
+                    include_bytes!("../../fs-evidence/src/vv/codec.rs"),
+                    include_bytes!("../../fs-evidence/src/vv/model.rs"),
                     include_bytes!("../../fs-obs/Cargo.toml"),
                     include_bytes!("../../fs-obs/src/lib.rs"),
                     include_bytes!("../../fs-obs/src/ident.rs"),
@@ -736,9 +739,9 @@ impl std::error::Error for VerifierReceiptError {}
 
 /// Immutable production proof record emitted only by the real verifier.
 ///
-/// Fields are private. Retained bytes decode only into a presented receipt;
-/// positive authority is available exclusively through
-/// [`AdmittedVerifierReceipt`] after exact replay.
+/// Fields are private. This type is returned only by a successful in-process
+/// verifier publication. Retained bytes decode into the distinct
+/// [`PresentedVerifierReceipt`] transport type instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierReceipt {
     schema_version: u32,
@@ -770,9 +773,48 @@ pub struct VerifierReceipt {
     artifact_root: VerifierArtifactRoot,
 }
 
+/// Root-authenticated retained verifier data without scientific authority.
+///
+/// The decoded production record is deliberately private. Presented transport
+/// exposes identity fields needed to route and replay it, but not its claimed
+/// bounds, acceptance bit, statement, color, or the underlying
+/// [`VerifierReceipt`]. Exact independent replay through
+/// [`admit_verifier_receipt`] is the only public route to those result fields.
+///
+/// ```compile_fail
+/// use fs_verify::estimator::PresentedVerifierReceipt;
+///
+/// fn cannot_read_unadmitted_bounds(receipt: &PresentedVerifierReceipt) {
+///     let _ = receipt.bound_lo();
+///     let _ = receipt.bound_hi();
+///     let _ = receipt.accepted();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use fs_verify::estimator::PresentedVerifierReceipt;
+///
+/// fn cannot_mint_unadmitted_color(receipt: &PresentedVerifierReceipt) {
+///     let _ = receipt.color();
+/// }
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct PresentedVerifierReceipt {
+    receipt: VerifierReceipt,
+}
+
+impl core::fmt::Debug for PresentedVerifierReceipt {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_tuple("PresentedVerifierReceipt")
+            .field(&self.artifact_root())
+            .finish()
+    }
+}
+
 /// Opaque capability proving one exact receipt survived independent replay.
 pub struct AdmittedVerifierReceipt<'a> {
-    receipt: &'a VerifierReceipt,
+    presented: &'a PresentedVerifierReceipt,
 }
 
 #[allow(dead_code)]
@@ -1249,14 +1291,7 @@ impl VerifierReceipt {
         self.canonical_bytes_inner()
     }
 
-    /// Parse exact retained bytes authenticated by an independently supplied
-    /// collision-resistant root. This yields presented data only; callers must
-    /// use [`admit_verifier_receipt`] before treating it as authority.
-    ///
-    /// # Errors
-    /// Fails before decoding on a root mismatch, and otherwise rejects size,
-    /// schema, UTF-8, enum-tag, boolean, truncation, and trailing-byte defects.
-    pub fn from_retained_bytes(
+    fn decode_retained_bytes(
         bytes: &[u8],
         expected_root: VerifierArtifactRoot,
     ) -> Result<Self, VerifierReceiptError> {
@@ -1484,15 +1519,6 @@ impl VerifierReceipt {
         self.accepted
     }
 
-    /// Verified color only when the tolerance was discharged.
-    #[must_use]
-    pub fn color(&self) -> Option<Color> {
-        self.accepted.then(|| Color::Verified {
-            lo: self.bound_lo(),
-            hi: self.bound_hi(),
-        })
-    }
-
     /// Exact preflighted logical work shape.
     #[must_use]
     pub const fn work_plan(&self) -> [u128; 6] {
@@ -1538,11 +1564,153 @@ impl VerifierReceipt {
     }
 }
 
-impl<'a> AdmittedVerifierReceipt<'a> {
-    /// Exact presented receipt that survived replay.
+impl PresentedVerifierReceipt {
+    /// Parse exact retained bytes authenticated by an independently supplied
+    /// collision-resistant root. This yields presented transport data only;
+    /// callers must use [`admit_verifier_receipt`] before reading any claimed
+    /// scientific result.
+    ///
+    /// # Errors
+    /// Fails before decoding on a root mismatch, and otherwise rejects size,
+    /// schema, UTF-8, enum-tag, boolean, truncation, and trailing-byte defects.
+    pub fn from_retained_bytes(
+        bytes: &[u8],
+        expected_root: VerifierArtifactRoot,
+    ) -> Result<Self, VerifierReceiptError> {
+        Ok(Self {
+            receipt: VerifierReceipt::decode_retained_bytes(bytes, expected_root)?,
+        })
+    }
+
+    /// Collision-resistant identity of the exact retained bytes.
     #[must_use]
-    pub const fn receipt(&self) -> &'a VerifierReceipt {
-        self.receipt
+    pub const fn artifact_root(&self) -> VerifierArtifactRoot {
+        self.receipt.artifact_root
+    }
+
+    /// Production verifier-family identity used for replay routing.
+    #[must_use]
+    pub fn verifier_family(&self) -> &str {
+        &self.receipt.verifier_family
+    }
+
+    /// Honest producer source-cone identity (not binary attestation).
+    #[must_use]
+    pub const fn producer(&self) -> &VerifierProducerSourceIdentity {
+        &self.receipt.producer
+    }
+
+    /// Strong identity of the exact canonical manufactured problem.
+    #[must_use]
+    pub const fn problem_root(&self) -> ContentHash {
+        self.receipt.problem_root
+    }
+
+    /// Strong identity of exact candidate values.
+    #[must_use]
+    pub const fn candidate_root(&self) -> ContentHash {
+        self.receipt.candidate_root
+    }
+
+    /// Strong identity of exact mesh values.
+    #[must_use]
+    pub const fn mesh_root(&self) -> ContentHash {
+        self.receipt.mesh_root
+    }
+
+    /// Exact operator identity.
+    #[must_use]
+    pub const fn operator_root(&self) -> ContentHash {
+        self.receipt.operator_root
+    }
+
+    /// Strong identity of the manufactured coefficient class.
+    #[must_use]
+    pub const fn coefficient_root(&self) -> ContentHash {
+        self.receipt.coefficient_root
+    }
+
+    /// Exact verification-query identity.
+    #[must_use]
+    pub const fn query_root(&self) -> ContentHash {
+        self.receipt.query_root
+    }
+
+    /// Exact preflighted logical work-shape identity.
+    #[must_use]
+    pub const fn work_plan(&self) -> [u128; 6] {
+        self.receipt.work_plan
+    }
+}
+
+impl<'a> AdmittedVerifierReceipt<'a> {
+    fn authenticated(&self) -> &VerifierReceipt {
+        &self.presented.receipt
+    }
+
+    /// Whether the replay proved that the upper endpoint met the tested
+    /// tolerance.
+    #[must_use]
+    pub fn accepted(&self) -> bool {
+        self.authenticated().accepted
+    }
+
+    /// Replay-authenticated lower endpoint of the true-error interval.
+    #[must_use]
+    pub fn bound_lo(&self) -> f64 {
+        self.authenticated().bound_lo()
+    }
+
+    /// Replay-authenticated upper endpoint of the true-error interval.
+    #[must_use]
+    pub fn bound_hi(&self) -> f64 {
+        self.authenticated().bound_hi()
+    }
+
+    /// Replay-authenticated quantity identifier.
+    #[must_use]
+    pub fn qoi(&self) -> &str {
+        self.authenticated().qoi()
+    }
+
+    /// Replay-authenticated producer source-cone identity.
+    #[must_use]
+    pub fn producer(&self) -> &VerifierProducerSourceIdentity {
+        self.authenticated().producer()
+    }
+
+    /// Replay-authenticated reconstructed-flux identity.
+    #[must_use]
+    pub fn flux_hash(&self) -> u64 {
+        self.authenticated().flux_hash()
+    }
+
+    /// Replay-authenticated verifier-family identifier.
+    #[must_use]
+    pub fn verifier_family(&self) -> &str {
+        self.authenticated().verifier_family()
+    }
+
+    /// Address of the exact retained bytes that survived replay.
+    #[must_use]
+    pub fn artifact_root(&self) -> VerifierArtifactRoot {
+        self.authenticated().artifact_root()
+    }
+
+    /// Lower-owned deterministic statement, available only after replay.
+    #[must_use]
+    pub fn statement(&self) -> String {
+        self.authenticated().statement()
+    }
+
+    /// Verified color only when the replay-authenticated receipt discharged
+    /// its exact tested tolerance.
+    #[must_use]
+    pub fn color(&self) -> Option<Color> {
+        self.accepted().then(|| Color::Verified {
+            lo: self.bound_lo(),
+            hi: self.bound_hi(),
+        })
     }
 }
 
@@ -2247,7 +2415,8 @@ where
 /// # Errors
 /// Returns a structured verifier refusal or fail-closed receipt construction
 /// error. Above-tolerance finite reports still produce an unaccepted receipt;
-/// they cannot produce [`VerifierReceipt::color`].
+/// after exact replay they yield `None` from
+/// [`AdmittedVerifierReceipt::color`].
 pub fn verify_with_receipt(
     problem: &MmsProblem,
     candidate: &[f64],
@@ -2268,16 +2437,16 @@ pub fn admit_verifier_receipt<'a>(
     problem: &MmsProblem,
     candidate: &[f64],
     tolerance: f64,
-    receipt: &'a VerifierReceipt,
+    receipt: &'a PresentedVerifierReceipt,
 ) -> Result<AdmittedVerifierReceipt<'a>, VerifierReceiptError> {
-    if receipt.calculated_artifact_root()? != receipt.artifact_root {
+    if receipt.receipt.calculated_artifact_root()? != receipt.receipt.artifact_root {
         return Err(VerifierReceiptError::ArtifactRootMismatch);
     }
     let replay = verify_with_receipt(problem, candidate, tolerance)?;
-    if replay != *receipt {
+    if replay != receipt.receipt {
         return Err(VerifierReceiptError::ReplayMismatch);
     }
-    Ok(AdmittedVerifierReceipt { receipt })
+    Ok(AdmittedVerifierReceipt { presented: receipt })
 }
 
 const GAUSS5_REF: [(f64, f64); 5] = [
@@ -2502,28 +2671,88 @@ mod tests {
     fn production_receipt_retention_requires_independent_root_and_replay() {
         let (problem, candidate, tolerance, receipt) = receipt_fixture();
         let bytes = receipt.canonical_bytes().expect("canonical receipt bytes");
-        let presented = VerifierReceipt::from_retained_bytes(&bytes, receipt.artifact_root())
-            .expect("root-authenticated canonical receipt");
-        assert_eq!(presented, receipt);
+        let presented =
+            PresentedVerifierReceipt::from_retained_bytes(&bytes, receipt.artifact_root())
+                .expect("root-authenticated canonical receipt");
+        assert_eq!(presented.artifact_root(), receipt.artifact_root());
+        let presented_debug = format!("{presented:?}");
+        assert_eq!(
+            presented_debug,
+            format!("PresentedVerifierReceipt({:?})", receipt.artifact_root()),
+            "presented Debug is an artifact-identity allowlist"
+        );
+        for forbidden_field in [
+            "receipt:",
+            "theorem:",
+            "qoi:",
+            "units:",
+            "hypotheses:",
+            "bound_lo_bits:",
+            "bound_hi_bits:",
+            "tolerance_bits:",
+            "accepted:",
+        ] {
+            assert!(
+                !presented_debug.contains(forbidden_field),
+                "presented Debug must redact scientific field {forbidden_field}: {presented_debug}"
+            );
+        }
         let admitted = admit_verifier_receipt(&problem, &candidate, tolerance, &presented)
             .expect("exact independent replay admits the receipt");
-        assert_eq!(admitted.receipt(), &receipt);
+        assert_eq!(admitted.artifact_root(), receipt.artifact_root());
+        assert_eq!(admitted.qoi(), receipt.qoi());
+        assert_eq!(admitted.statement(), receipt.statement());
+        assert_eq!(
+            admitted.color(),
+            Some(Color::Verified {
+                lo: receipt.bound_lo(),
+                hi: receipt.bound_hi(),
+            }),
+            "only the replay-admitted retained receipt exposes color authority"
+        );
+
+        let rejected_tolerance = receipt.bound_hi() / 2.0;
+        assert!(rejected_tolerance.is_finite() && rejected_tolerance > 0.0);
+        let rejected = verify_with_receipt(&problem, &candidate, rejected_tolerance)
+            .expect("above-tolerance verification still publishes a receipt");
+        assert!(!rejected.accepted());
+        let rejected_bytes = rejected
+            .canonical_bytes()
+            .expect("canonical rejected receipt bytes");
+        let rejected_presented = PresentedVerifierReceipt::from_retained_bytes(
+            &rejected_bytes,
+            rejected.artifact_root(),
+        )
+        .expect("root-authenticated rejected transport");
+        let rejected_admitted = admit_verifier_receipt(
+            &problem,
+            &candidate,
+            rejected_tolerance,
+            &rejected_presented,
+        )
+        .expect("exact independent replay admits the rejected result data");
+        assert!(!rejected_admitted.accepted());
+        assert_eq!(
+            rejected_admitted.color(),
+            None,
+            "replay admission cannot color an above-tolerance result"
+        );
 
         let wrong_root = VerifierArtifactRoot(flipped(receipt.artifact_root().content_hash()));
         assert_eq!(
-            VerifierReceipt::from_retained_bytes(&bytes, wrong_root),
+            PresentedVerifierReceipt::from_retained_bytes(&bytes, wrong_root),
             Err(VerifierReceiptError::ArtifactRootMismatch)
         );
         let mut corrupted = bytes.clone();
         corrupted[0] ^= 1;
         assert_eq!(
-            VerifierReceipt::from_retained_bytes(&corrupted, receipt.artifact_root()),
+            PresentedVerifierReceipt::from_retained_bytes(&corrupted, receipt.artifact_root()),
             Err(VerifierReceiptError::ArtifactRootMismatch)
         );
         let corrupted_root =
             VerifierArtifactRoot(hash_domain(VERIFIER_RECEIPT_HASH_DOMAIN, &corrupted));
         assert_eq!(
-            VerifierReceipt::from_retained_bytes(&corrupted, corrupted_root),
+            PresentedVerifierReceipt::from_retained_bytes(&corrupted, corrupted_root),
             Err(VerifierReceiptError::MalformedRetained("magic"))
         );
 
@@ -2534,7 +2763,7 @@ mod tests {
             .expect("future-version root");
         let future_bytes = future.canonical_bytes().expect("future-version bytes");
         assert_eq!(
-            VerifierReceipt::from_retained_bytes(&future_bytes, future.artifact_root()),
+            PresentedVerifierReceipt::from_retained_bytes(&future_bytes, future.artifact_root()),
             Err(VerifierReceiptError::MalformedRetained("schema version"))
         );
 
@@ -2550,7 +2779,7 @@ mod tests {
             .canonical_bytes()
             .expect("foreign canonical receipt bytes");
         let foreign_presented =
-            VerifierReceipt::from_retained_bytes(&foreign_bytes, foreign.artifact_root())
+            PresentedVerifierReceipt::from_retained_bytes(&foreign_bytes, foreign.artifact_root())
                 .expect("self-consistent foreign bytes are presentable");
         assert!(matches!(
             admit_verifier_receipt(&problem, &candidate, tolerance, &foreign_presented),
@@ -2562,7 +2791,7 @@ mod tests {
         let trailing_root =
             VerifierArtifactRoot(hash_domain(VERIFIER_RECEIPT_HASH_DOMAIN, &trailing));
         assert_eq!(
-            VerifierReceipt::from_retained_bytes(&trailing, trailing_root),
+            PresentedVerifierReceipt::from_retained_bytes(&trailing, trailing_root),
             Err(VerifierReceiptError::MalformedRetained("trailing bytes"))
         );
     }
@@ -2582,9 +2811,10 @@ mod tests {
                     .expect("mutated canonical root");
                 assert_ne!(moved_root, original_root, "{} must move root", $field);
                 changed.artifact_root = moved_root;
+                let presented = PresentedVerifierReceipt { receipt: changed };
                 assert!(
                     matches!(
-                        admit_verifier_receipt(&problem, &candidate, tolerance, &changed),
+                        admit_verifier_receipt(&problem, &candidate, tolerance, &presented),
                         Err(VerifierReceiptError::ReplayMismatch)
                     ),
                     "{} must fail independent replay",
@@ -2696,6 +2926,9 @@ mod tests {
                 .expect("derived root is excluded from canonical bytes"),
             original_root
         );
+        let bad_derived_root = PresentedVerifierReceipt {
+            receipt: bad_derived_root,
+        };
         assert!(matches!(
             admit_verifier_receipt(&problem, &candidate, tolerance, &bad_derived_root),
             Err(VerifierReceiptError::ArtifactRootMismatch)
