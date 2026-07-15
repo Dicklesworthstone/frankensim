@@ -12,7 +12,7 @@ use fs_sparse::precond::Precond;
 
 /// Why a solve stopped short (the structured alternative to a
 /// timeout mystery).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StallDiagnosis {
     /// Residual plateaued: it stayed within ±5% of the window start over
     /// the last 50 iterations (flat, not diverging) — preconditioner

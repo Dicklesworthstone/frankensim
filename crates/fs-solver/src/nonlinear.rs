@@ -513,8 +513,8 @@ impl FgmresState {
             let mut basis = vec![residual];
             let mut preconditioned_basis: Vec<Vec<f64>> = Vec::with_capacity(m);
             let mut h = vec![0.0; (m + 1) * m];
-            let mut cs = vec![0.0; m];
-            let mut sn = vec![0.0; m];
+            let mut cs = vec![0.0f64; m];
+            let mut sn = vec![0.0f64; m];
             let mut g = vec![0.0; m + 1];
             g[0] = beta;
             let mut columns = 0usize;
