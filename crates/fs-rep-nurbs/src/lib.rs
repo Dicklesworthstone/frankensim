@@ -26,7 +26,7 @@ pub mod trim;
 pub use basis::{AdmittedKnotVector, BasisRun, KnotAdmissionRun, KnotVector, Scalar};
 pub use boolean::{BooleanOp, BooleanPolicy, BooleanRefusal, boolean};
 pub use closest::{DistanceBracketEstimate, closest_point_curve, closest_point_surface};
-pub use curve::{AdmittedNurbsCurve, CurveEvaluationRun, NurbsCurve};
+pub use curve::{AdmittedNurbsCurve, CurveBezierRun, CurveEvaluationRun, NurbsCurve};
 pub use rat::Rat;
 pub use surface::{AdmittedNurbsSurface, NurbsSurface};
 pub use trim::{AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimmedPatch};

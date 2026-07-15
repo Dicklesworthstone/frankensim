@@ -56,6 +56,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   and evaluation consumes its admitted knot view without a second structural
   scan. Its admitted-only `eval_with_cx` returns transactional
   `CurveEvaluationRun` state and never publishes a partial Cartesian point.
+  Its admitted-only `to_bezier_form_with_cx` returns transactional
+  `CurveBezierRun` state and publishes only a fully validated exact derived
+  generation.
   EXACT Boehm `insert_knot`; EXACT `remove_knot` (reconstruction checked
   with scalar EQUALITY — in `Rat` a proof); Bézier decomposition; EXACT
   `elevate_degree` (per-segment binomial elevation reassembled on a
@@ -201,6 +204,15 @@ basis construction, polls homogeneous accumulation every 64 logical scalar
 updates, and gates final Cartesian publication. `CurveEvaluationRun::Cancelled`
 contains no partial point; owning curve admission and caller-owned affine
 budget/drain/finalize semantics remain outside this primitive claim.
+`AdmittedNurbsCurve::to_bezier_form_with_cx` preserves the existing checked
+work and two-generation retained-byte envelope, then polls exact planning,
+source copies, repeated target scans, every insertion copy/blend, both derived
+knot-validation passes, control validation, and final publication at phase
+boundaries and after at most 64 logical operations. Cancellation drops all
+partial owned generations and returns `CurveBezierRun::Cancelled`. Individual
+allocator calls and scalar operations are not preemptible; the API claims a
+logical-operation bound, not a wall-time bound, and does not claim owning curve
+admission, `Cx` budget consumption, or executor drain/finalize authority.
 The owning `admit_with_cx` path applies the same fixed stride across finite,
 ordering, multiplicity, and clamping validation and gates admitted authority at
 publication; `KnotVector::new` construction remains outside that cancellation

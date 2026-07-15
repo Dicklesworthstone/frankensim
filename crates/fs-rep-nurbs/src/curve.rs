@@ -6,7 +6,9 @@
 //! knot vectors are a documented follow-up).
 
 use crate::NurbsError;
-use crate::basis::{AdmittedKnotVector, BASIS_MAX_WORK_UNITS, BasisRun, KnotVector, Scalar};
+use crate::basis::{
+    AdmittedKnotVector, BASIS_MAX_WORK_UNITS, BasisRun, KnotValidationOutcome, KnotVector, Scalar,
+};
 use fs_exec::Cx;
 
 // Conservative price for finite/weight/projection/canonical-lane validation of
@@ -32,6 +34,12 @@ fn curve_poll_due(
     }
     *operations_since_poll = 0;
     should_cancel()
+}
+
+#[derive(Debug)]
+enum CurveWorkRun<T> {
+    Complete(T),
+    Cancelled,
 }
 
 /// Checked shape/work/retained-memory plan for exact Bezier conversion.
@@ -180,6 +188,19 @@ fn bezier_pre_scan_work(knot_count: usize) -> Result<u128, NurbsError> {
 fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
     curve: AdmittedNurbsCurve<'_, S, DIM>,
 ) -> Result<BezierConversionPlan, NurbsError> {
+    let mut never_cancel = || false;
+    match plan_bezier_conversion_with_poll(curve, &mut never_cancel)? {
+        CurveWorkRun::Complete(plan) => Ok(plan),
+        CurveWorkRun::Cancelled => Err(NurbsError::Domain {
+            what: "non-cancelling Bezier planning observed cancellation".to_string(),
+        }),
+    }
+}
+
+fn plan_bezier_conversion_with_poll<S: Scalar, const DIM: usize>(
+    curve: AdmittedNurbsCurve<'_, S, DIM>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<CurveWorkRun<BezierConversionPlan>, NurbsError> {
     let knots = curve.knots();
     let degree = knots.degree();
     let (lo, hi) = knots.domain();
@@ -192,6 +213,11 @@ fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
             ),
         });
     }
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
     let mut insertions = 0usize;
     let mut run_start = 0usize;
     while run_start < entries.len() {
@@ -199,6 +225,9 @@ fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
         let mut run_end = run_start + 1;
         while run_end < entries.len() && entries[run_end] == knot {
             run_end += 1;
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
         }
         let multiplicity = run_end - run_start;
         if knot > lo && knot < hi && multiplicity < degree {
@@ -207,6 +236,9 @@ fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
                 .ok_or_else(|| NurbsError::Domain {
                     what: "Bezier insertion-count accounting overflows usize".to_string(),
                 })?;
+        }
+        if curve_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(CurveWorkRun::Cancelled);
         }
         run_start = run_end;
     }
@@ -258,14 +290,17 @@ fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
         });
     }
 
-    Ok(BezierConversionPlan {
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+    Ok(CurveWorkRun::Complete(BezierConversionPlan {
         insertions,
         final_knot_count,
         final_control_count,
         work_units,
         peak_allocated_bytes,
         converted_bytes,
-    })
+    }))
 }
 
 /// One span's Cartesian control box: (min, max, t0, t1).
@@ -362,6 +397,19 @@ pub enum CurveEvaluationRun<S: Scalar, const DIM: usize> {
     Cancelled,
 }
 
+/// Transactional terminal state of cancellation-aware exact Bezier conversion.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum CurveBezierRun<S: Scalar, const DIM: usize> {
+    /// The complete sealed and validated Bezier-form generation.
+    Complete {
+        /// Exact refinement of the admitted source curve.
+        curve: NurbsCurve<S, DIM>,
+    },
+    /// Cancellation was observed; all partial derived generations were dropped.
+    Cancelled,
+}
+
 impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     fn validation_work_for(
         knots: &KnotVector<S>,
@@ -393,36 +441,80 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     }
 
     pub(crate) fn validate_live_structure(&self) -> Result<(), NurbsError> {
+        let mut never_cancel = || false;
+        match self.validate_live_structure_with_poll(&mut never_cancel)? {
+            CurveWorkRun::Complete(()) => Ok(()),
+            CurveWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling curve validation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn validate_live_structure_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<()>, NurbsError> {
         if DIM > 3 {
             return Err(NurbsError::Structure {
                 what: format!("curve dimension {DIM} exceeds the homogeneous storage limit 3"),
             });
         }
         Self::enforce_validation_work(Self::validation_work_for(&self.knots, self.cpw.len())?)?;
-        self.knots.validate_live()?;
-        if self.cpw.len() != self.knots.control_count()
-            || self.cpw.iter().any(|control| {
-                !control[3].is_admissible_weight()
-                    || control
-                        .iter()
-                        .copied()
-                        .any(|component| !component.is_finite())
-                    || control[..DIM]
-                        .iter()
-                        .copied()
-                        .any(|component| !component.quotient_is_finite(control[3]))
-                    || control[DIM..3]
-                        .iter()
-                        .copied()
-                        .any(|component| component != S::zero())
-            })
-        {
-            return Err(NurbsError::Structure {
-                what: "live curve control net must match its knots, retain finite homogeneous coordinates with admissible weights, and zero inactive coordinate lanes"
-                    .to_string(),
-            });
+        match self.knots.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(CurveWorkRun::Cancelled),
         }
-        Ok(())
+
+        let invalid_control_net = || {
+            NurbsError::Structure {
+            what: "live curve control net must match its knots, retain finite homogeneous coordinates with admissible weights, and zero inactive coordinate lanes"
+                .to_string(),
+        }
+        };
+        if self.cpw.len() != self.knots.control_count() {
+            return Err(invalid_control_net());
+        }
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+
+        let mut operations_since_poll = 0usize;
+        for control in &self.cpw {
+            if !control[3].is_admissible_weight() {
+                return Err(invalid_control_net());
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+            for &component in control {
+                if !component.is_finite() {
+                    return Err(invalid_control_net());
+                }
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveWorkRun::Cancelled);
+                }
+            }
+            for &component in &control[..DIM] {
+                if !component.quotient_is_finite(control[3]) {
+                    return Err(invalid_control_net());
+                }
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveWorkRun::Cancelled);
+                }
+            }
+            for &component in &control[DIM..3] {
+                if component != S::zero() {
+                    return Err(invalid_control_net());
+                }
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveWorkRun::Cancelled);
+                }
+            }
+        }
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        Ok(CurveWorkRun::Complete(()))
     }
 
     /// Build from Cartesian control points + weights.
@@ -545,6 +637,54 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             })?;
         cpw.extend_from_slice(&self.cpw);
         Ok(NurbsCurve { knots, cpw })
+    }
+
+    fn try_clone_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Self>, NurbsError> {
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut knot_entries = Vec::new();
+        knot_entries
+            .try_reserve_exact(self.knots.knots.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-vector copy allocation was refused".to_string(),
+            })?;
+        let mut operations_since_poll = 0usize;
+        for &knot in &self.knots.knots {
+            knot_entries.push(knot);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(self.cpw.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "curve copy control-net allocation was refused".to_string(),
+            })?;
+        operations_since_poll = 0;
+        for &control in &self.cpw {
+            cpw.push(control);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        Ok(CurveWorkRun::Complete(NurbsCurve {
+            knots: KnotVector {
+                knots: knot_entries,
+                degree: self.knots.degree,
+            },
+            cpw,
+        }))
     }
 
     /// Validate this exact immutable curve snapshot once.
@@ -762,6 +902,28 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
         self.inner.to_bezier_form_after_validation()
     }
 
+    /// Convert this admitted generation to exact Bezier form with bounded
+    /// cancellation polling.
+    ///
+    /// Planning, source copies, target scans, insertion copies/blends, every
+    /// derived structural validation, and final publication observe the same
+    /// gate. Cancellation drops all partial derived generations. The caller
+    /// remains responsible for owning curve admission, `Cx` budget
+    /// consumption, and request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Propagates the synchronous conversion's checked work, retained-memory,
+    /// allocation, numeric-domain, and structural refusals when they win
+    /// before an observed cancellation.
+    pub fn to_bezier_form_with_cx(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<CurveBezierRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.inner
+            .to_bezier_form_after_validation_with_poll(&mut should_cancel)
+    }
+
     /// Return the checked Bezier conversion envelope without allocating.
     pub(crate) fn bezier_conversion_plan(&self) -> Result<BezierConversionPlan, NurbsError> {
         plan_bezier_conversion(*self)
@@ -862,6 +1024,124 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         new_knots.push(t);
         new_knots.extend_from_slice(&self.knots.knots[k + 1..]);
         NurbsCurve::from_homogeneous(KnotVector::new(new_knots, p)?, new_cpw)
+    }
+
+    fn insert_knot_at_span_with_poll(
+        &self,
+        t: S,
+        k: usize,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Self>, NurbsError> {
+        let (lo, hi) = self.knots.admitted_after_validation().domain();
+        if t <= lo || hi <= t {
+            return Err(NurbsError::Domain {
+                what: format!("insertion parameter {t:?} must be interior to {lo:?}..{hi:?}"),
+            });
+        }
+        let p = self.knots.degree;
+        let new_control_count =
+            self.cpw
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "inserted control count overflows usize".to_string(),
+                })?;
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut new_cpw = Vec::new();
+        new_cpw
+            .try_reserve_exact(new_control_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "inserted curve-control allocation was refused".to_string(),
+            })?;
+        let mut operations_since_poll = 0usize;
+        for &control in &self.cpw[..=k - p] {
+            new_cpw.push(control);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        for i in (k - p + 1)..=k {
+            let denom = self.knots.knots[i + p] - self.knots.knots[i];
+            let alpha = (t - self.knots.knots[i]) / denom;
+            let mut blended = [S::zero(); 4];
+            for ((slot, &left), &right) in
+                blended.iter_mut().zip(&self.cpw[i - 1]).zip(&self.cpw[i])
+            {
+                *slot = (S::one() - alpha) * left + alpha * right;
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveWorkRun::Cancelled);
+                }
+            }
+            new_cpw.push(blended);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        for &control in &self.cpw[k..] {
+            new_cpw.push(control);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+
+        let new_knot_count =
+            self.knots
+                .knots
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "inserted knot count overflows usize".to_string(),
+                })?;
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut new_knots = Vec::new();
+        new_knots
+            .try_reserve_exact(new_knot_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "inserted knot-vector allocation was refused".to_string(),
+            })?;
+        operations_since_poll = 0;
+        for &knot in &self.knots.knots[..=k] {
+            new_knots.push(knot);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        new_knots.push(t);
+        if curve_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        for &knot in &self.knots.knots[k + 1..] {
+            new_knots.push(knot);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+
+        let knots = KnotVector {
+            knots: new_knots,
+            degree: p,
+        };
+        KnotVector::<S>::enforce_work(knots.validation_work()?, "knot-vector construction")?;
+        match knots.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(CurveWorkRun::Cancelled),
+        }
+        let candidate = NurbsCurve {
+            knots,
+            cpw: new_cpw,
+        };
+        match candidate.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => {}
+            CurveWorkRun::Cancelled => return Ok(CurveWorkRun::Cancelled),
+        }
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        Ok(CurveWorkRun::Complete(candidate))
     }
 
     /// EXACT knot removal (inverse of [`Self::insert_knot`]) — succeeds
@@ -967,32 +1247,84 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     }
 
     fn to_bezier_form_after_validation(&self) -> Result<Self, NurbsError> {
-        self.admitted_after_validation().bezier_conversion_plan()?;
+        let mut never_cancel = || false;
+        match self.to_bezier_form_after_validation_with_poll(&mut never_cancel)? {
+            CurveBezierRun::Complete { curve } => Ok(curve),
+            CurveBezierRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling Bezier conversion observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn next_bezier_target_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> CurveWorkRun<Option<(S, usize)>> {
+        if should_cancel() {
+            return CurveWorkRun::Cancelled;
+        }
         let p = self.knots.degree;
-        let mut cur = self.try_clone()?;
-        loop {
-            // Find an interior knot with multiplicity < p.
-            let admitted = cur.admitted_after_validation();
-            let knots = admitted.knots();
-            let (lo, hi) = knots.domain();
-            let knot_entries = knots.knots();
-            let mut target = None;
-            let mut i = 0;
-            while i < knot_entries.len() {
-                let t = knot_entries[i];
-                let mut run_end = i + 1;
-                while run_end < knot_entries.len() && knot_entries[run_end] == t {
-                    run_end += 1;
+        let admitted_knots = self.knots.admitted_after_validation();
+        let (lo, hi) = admitted_knots.domain();
+        let entries = admitted_knots.knots();
+        let mut operations_since_poll = 0usize;
+        let mut run_start = 0usize;
+        while run_start < entries.len() {
+            let t = entries[run_start];
+            let mut run_end = run_start + 1;
+            while run_end < entries.len() && entries[run_end] == t {
+                run_end += 1;
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return CurveWorkRun::Cancelled;
                 }
-                if t > lo && t < hi && run_end - i < p {
-                    target = Some(t);
-                    break;
-                }
-                i = run_end;
             }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return CurveWorkRun::Cancelled;
+            }
+            if t > lo && t < hi && run_end - run_start < p {
+                if should_cancel() {
+                    return CurveWorkRun::Cancelled;
+                }
+                return CurveWorkRun::Complete(Some((t, run_end - 1)));
+            }
+            run_start = run_end;
+        }
+        if should_cancel() {
+            return CurveWorkRun::Cancelled;
+        }
+        CurveWorkRun::Complete(None)
+    }
+
+    fn to_bezier_form_after_validation_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveBezierRun<S, DIM>, NurbsError> {
+        match plan_bezier_conversion_with_poll(self.admitted_after_validation(), should_cancel)? {
+            CurveWorkRun::Complete(_) => {}
+            CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
+        }
+        let mut current = match self.try_clone_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(curve) => curve,
+            CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
+        };
+        loop {
+            let target = match current.next_bezier_target_with_poll(should_cancel) {
+                CurveWorkRun::Complete(target) => target,
+                CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
+            };
             match target {
-                Some(t) => cur = admitted.insert_knot(t)?,
-                None => return Ok(cur),
+                Some((t, span)) => {
+                    current = match current.insert_knot_at_span_with_poll(t, span, should_cancel)? {
+                        CurveWorkRun::Complete(curve) => curve,
+                        CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
+                    };
+                }
+                None => {
+                    if should_cancel() {
+                        return Ok(CurveBezierRun::Cancelled);
+                    }
+                    return Ok(CurveBezierRun::Complete { curve: current });
+                }
             }
         }
     }
@@ -1685,6 +2017,45 @@ mod tests {
         NurbsCurve::new(knots, &[[0.0], [1.0]], &[1.0, 1.0]).expect("line curve")
     }
 
+    fn long_linear_curve() -> NurbsCurve<f64, 1> {
+        let interior_count = 128usize;
+        let mut knots = Vec::with_capacity(interior_count + 4);
+        knots.extend([0.0, 0.0]);
+        for index in 1..=interior_count {
+            knots.push(index as f64 / (interior_count + 1) as f64);
+        }
+        knots.extend([1.0, 1.0]);
+        let control_count = interior_count + 2;
+        let points: Vec<[f64; 1]> = (0..control_count)
+            .map(|index| [index as f64 / (control_count - 1) as f64])
+            .collect();
+        let weights = vec![1.0; control_count];
+        NurbsCurve::new(
+            KnotVector::new(knots, 1).expect("long linear knots"),
+            &points,
+            &weights,
+        )
+        .expect("long linear curve")
+    }
+
+    fn high_degree_insertion_curve() -> NurbsCurve<f64, 1> {
+        let degree = 16usize;
+        let mut knots = vec![0.0; degree + 1];
+        knots.push(0.5);
+        knots.extend(vec![1.0; degree + 1]);
+        let control_count = degree + 2;
+        let points: Vec<[f64; 1]> = (0..control_count)
+            .map(|index| [index as f64 / (control_count - 1) as f64])
+            .collect();
+        let weights = vec![1.0; control_count];
+        NurbsCurve::new(
+            KnotVector::new(knots, degree).expect("high-degree insertion knots"),
+            &points,
+            &weights,
+        )
+        .expect("high-degree insertion curve")
+    }
+
     #[test]
     fn admitted_curve_evaluation_with_cx_is_transactional_and_exact() {
         let curve = line_curve();
@@ -1764,6 +2135,124 @@ mod tests {
             CurveEvaluationRun::Cancelled
         );
         assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn bezier_planning_and_known_span_insertion_cancel_inside_linear_work() {
+        let long_curve = long_linear_curve();
+        let admitted_long = long_curve.admit().expect("admitted long curve");
+        let plan_run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 2
+            };
+            let outcome = plan_bezier_conversion_with_poll(admitted_long, &mut should_cancel)
+                .expect("bounded Bezier plan");
+            (matches!(outcome, CurveWorkRun::Cancelled), polls)
+        };
+        assert_eq!(plan_run(), plan_run());
+        assert_eq!(plan_run(), (true, 2));
+
+        let insertion_curve = high_degree_insertion_curve();
+        let admitted_insertion = insertion_curve.admit().expect("admitted insertion curve");
+        let insertion_run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 2
+            };
+            let outcome = insertion_curve
+                .insert_knot_at_span_with_poll(0.5, 17, &mut should_cancel)
+                .expect("valid known-span insertion");
+            (matches!(outcome, CurveWorkRun::Cancelled), polls)
+        };
+        assert_eq!(insertion_run(), insertion_run());
+        assert_eq!(insertion_run(), (true, 2));
+
+        let mut never_cancel = || false;
+        let CurveWorkRun::Complete(cancellable) = insertion_curve
+            .insert_knot_at_span_with_poll(0.5, 17, &mut never_cancel)
+            .expect("healthy known-span insertion")
+        else {
+            panic!("healthy known-span insertion must complete");
+        };
+        assert_eq!(
+            cancellable,
+            admitted_insertion
+                .insert_knot(0.5)
+                .expect("legacy span-resolving insertion")
+        );
+    }
+
+    #[test]
+    fn bezier_conversion_with_cx_is_transactional_and_publication_gated() {
+        let half = Rat::new(1, 2);
+        let knots = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                half,
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("quadratic knots");
+        let curve = NurbsCurve::<Rat, 1>::new(
+            knots,
+            &[[Rat::int(0)], [Rat::int(1)], [Rat::int(2)], [Rat::int(3)]],
+            &[Rat::int(1); 4],
+        )
+        .expect("quadratic curve");
+        let admitted = curve.admit().expect("admitted curve");
+
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                admitted
+                    .to_bezier_form_with_cx(cx)
+                    .expect("pre-cancelled conversion"),
+                CurveBezierRun::Cancelled
+            ));
+        });
+        with_curve_cx(false, |cx| {
+            let CurveBezierRun::Complete { curve: converted } = admitted
+                .to_bezier_form_with_cx(cx)
+                .expect("healthy cancellable conversion")
+            else {
+                panic!("active context must complete conversion");
+            };
+            assert_eq!(
+                converted,
+                admitted
+                    .insert_knot(half)
+                    .expect("exact reference insertion")
+            );
+        });
+
+        let publication_curve = line_curve();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        let complete = publication_curve
+            .to_bezier_form_after_validation_with_poll(&mut never_cancel)
+            .expect("healthy conversion");
+        assert!(matches!(complete, CurveBezierRun::Complete { .. }));
+        assert_eq!(total_polls, 8);
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        let cancelled = publication_curve
+            .to_bezier_form_after_validation_with_poll(&mut cancel_at_publication)
+            .expect("publication cancellation");
+        assert!(matches!(cancelled, CurveBezierRun::Cancelled));
+        assert_eq!(replay_polls, 8);
     }
 
     #[test]

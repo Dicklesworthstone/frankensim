@@ -158,7 +158,7 @@ pub enum BasisRun<S: Scalar> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnotValidationOutcome {
+pub(crate) enum KnotValidationOutcome {
     Complete,
     Cancelled,
 }
@@ -210,7 +210,7 @@ impl<S: Scalar> KnotVector<S> {
             })
     }
 
-    fn enforce_work(units: u128, operation: &str) -> Result<(), NurbsError> {
+    pub(crate) fn enforce_work(units: u128, operation: &str) -> Result<(), NurbsError> {
         if units > BASIS_MAX_WORK_UNITS {
             return Err(NurbsError::Domain {
                 what: format!(
@@ -264,7 +264,7 @@ impl<S: Scalar> KnotVector<S> {
         }
     }
 
-    fn validate_live_with_poll(
+    pub(crate) fn validate_live_with_poll(
         &self,
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<KnotValidationOutcome, NurbsError> {
