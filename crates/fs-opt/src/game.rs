@@ -610,7 +610,7 @@ pub enum GameObjectiveV1 {
 pub enum GameProofPolarityV1 {
     /// Certified subset of the true winning/viability set.
     Inner,
-    /// Certified superset of the true losing/nonviable complement boundary.
+    /// Certified superset of the true winning/viability set.
     Outer,
     /// Exact equality is requested.
     Exact,
@@ -1073,7 +1073,7 @@ pub enum GameSemanticIssueV1 {
     Identity(CanonicalError),
 }
 
-/// Complete deterministic refusal report.
+/// Deterministic fail-closed refusal report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameSemanticReportV1 {
     issues: Vec<GameSemanticIssueV1>,
@@ -1196,6 +1196,7 @@ pub fn validate_game_problem_v1(
         return Err(GameSemanticReportV1::new(issues));
     }
 
+    checkpoint(cx)?;
     canonicalize_problem_zeros(&mut ir);
     if ir.schema_version != GAME_PROBLEM_SCHEMA_VERSION_V1 {
         issues.push(GameSemanticIssueV1::UnsupportedSchemaVersion {
@@ -1206,11 +1207,6 @@ pub fn validate_game_problem_v1(
     if ir.quantifiers.clauses.is_empty() {
         issues.push(GameSemanticIssueV1::EmptyCollection {
             collection: GameCollectionV1::Quantifiers,
-        });
-    }
-    if ir.information.grants.is_empty() {
-        issues.push(GameSemanticIssueV1::EmptyCollection {
-            collection: GameCollectionV1::InformationGrants,
         });
     }
     if ir.strategies.is_empty() {
@@ -1239,6 +1235,7 @@ pub fn validate_game_problem_v1(
     }
 
     for strategy in &mut ir.strategies {
+        checkpoint(cx)?;
         strategy
             .dependencies
             .sort_by_cached_key(strategy_dependency_bytes);
@@ -1264,11 +1261,8 @@ pub fn validate_game_problem_v1(
             );
         }
     }
-    for (index, strategy) in ir.strategies.iter().enumerate() {
-        if index.is_multiple_of(16) {
-            checkpoint(cx)?;
-        }
-        validate_strategy(strategy, &ir, &mut issues);
+    for strategy in &ir.strategies {
+        validate_strategy(strategy, &ir, cx, &mut issues)?;
     }
     if !ir
         .strategies
@@ -1278,7 +1272,7 @@ pub fn validate_game_problem_v1(
         issues.push(GameSemanticIssueV1::MissingControllerStrategy);
     }
     validate_clairvoyant_lowering(&ir, &mut issues);
-    canonicalize_and_validate_composition(&mut ir, &mut issues);
+    canonicalize_and_validate_composition(&mut ir, cx, &mut issues)?;
     if !issues.is_empty() {
         return Err(GameSemanticReportV1::new(issues));
     }
@@ -1450,9 +1444,6 @@ fn validate_horizon_budget_and_stopping(
                     field: GameFieldV1::SecondsPerUnit,
                 });
             }
-            if matches!(ir.stopping, GameStoppingSemanticsV1::Never) {
-                issues.push(GameSemanticIssueV1::StoppingSemanticsMismatch);
-            }
         }
         GameHorizonV1::Infinite {
             start,
@@ -1469,10 +1460,30 @@ fn validate_horizon_budget_and_stopping(
                     field: GameFieldV1::SecondsPerUnit,
                 });
             }
-            if matches!(ir.stopping, GameStoppingSemanticsV1::FixedHorizon) {
-                issues.push(GameSemanticIssueV1::StoppingSemanticsMismatch);
-            }
         }
+    }
+    let stopping_matches_claim = match (ir.claim.objective, ir.horizon) {
+        (GameObjectiveV1::ReachAvoid, GameHorizonV1::Finite { .. }) => matches!(
+            ir.stopping,
+            GameStoppingSemanticsV1::FixedHorizon
+                | GameStoppingSemanticsV1::FirstTarget
+                | GameStoppingSemanticsV1::FirstTargetOrUnsafe
+        ),
+        (GameObjectiveV1::ReachAvoid, GameHorizonV1::Infinite { .. }) => matches!(
+            ir.stopping,
+            GameStoppingSemanticsV1::FirstTarget
+                | GameStoppingSemanticsV1::FirstTargetOrUnsafe
+                | GameStoppingSemanticsV1::Never
+        ),
+        (GameObjectiveV1::Viability, GameHorizonV1::Finite { .. }) => {
+            matches!(ir.stopping, GameStoppingSemanticsV1::FixedHorizon)
+        }
+        (GameObjectiveV1::Viability, GameHorizonV1::Infinite { .. }) => {
+            matches!(ir.stopping, GameStoppingSemanticsV1::Never)
+        }
+    };
+    if !stopping_matches_claim {
+        push_once(issues, GameSemanticIssueV1::StoppingSemanticsMismatch);
     }
     if ir.budget.max_cells == 0 {
         issues.push(GameSemanticIssueV1::InvalidValue {
@@ -1505,7 +1516,7 @@ fn validate_horizon_budget_and_stopping(
                 ..
             } if admitted == events
         ) {
-            issues.push(GameSemanticIssueV1::StoppingSemanticsMismatch);
+            push_once(issues, GameSemanticIssueV1::StoppingSemanticsMismatch);
         }
     }
 }
@@ -1514,16 +1525,22 @@ fn validate_quantifiers(ir: &GameProblemIrV1, issues: &mut Vec<GameSemanticIssue
     let mut seen = Vec::new();
     for clause in &ir.quantifiers.clauses {
         if seen.contains(&clause.variable) {
-            issues.push(GameSemanticIssueV1::DuplicateQuantifiedVariable {
-                variable: clause.variable,
-            });
+            push_once(
+                issues,
+                GameSemanticIssueV1::DuplicateQuantifiedVariable {
+                    variable: clause.variable,
+                },
+            );
         } else {
             seen.push(clause.variable);
         }
         if !domain_matches(clause.variable, clause.domain, ir) {
-            issues.push(GameSemanticIssueV1::QuantifierDomainMismatch {
-                variable: clause.variable,
-            });
+            push_once(
+                issues,
+                GameSemanticIssueV1::QuantifierDomainMismatch {
+                    variable: clause.variable,
+                },
+            );
         }
         let required = match clause.variable {
             GameVariableV1::Control => Some(GameQuantifierV1::Exists),
@@ -1533,11 +1550,14 @@ fn validate_quantifiers(ir: &GameProblemIrV1, issues: &mut Vec<GameSemanticIssue
         if let Some(required) = required
             && clause.quantifier != required
         {
-            issues.push(GameSemanticIssueV1::QuantifierPolarityMismatch {
-                variable: clause.variable,
-                found: clause.quantifier,
-                required,
-            });
+            push_once(
+                issues,
+                GameSemanticIssueV1::QuantifierPolarityMismatch {
+                    variable: clause.variable,
+                    found: clause.quantifier,
+                    required,
+                },
+            );
         }
     }
     for required in [GameVariableV1::Control, GameVariableV1::Disturbance] {
@@ -1604,18 +1624,20 @@ fn validate_information_grant(
 fn validate_strategy(
     strategy: &GameStrategySpecV1,
     ir: &GameProblemIrV1,
+    cx: &Cx<'_>,
     issues: &mut Vec<GameSemanticIssueV1>,
-) {
-    if let StrategyRepresentationV1::NonanticipativeFeedback {
-        memory_states: 0, ..
-    } = strategy.representation
+) -> Result<(), GameSemanticReportV1> {
+    if let StrategyRepresentationV1::NonanticipativeFeedback { memory_states, .. } =
+        strategy.representation
     {
-        push_once(
-            issues,
-            GameSemanticIssueV1::InvalidValue {
-                field: GameFieldV1::StrategyMemory,
-            },
-        );
+        if memory_states == 0 || u64::from(memory_states) > ir.budget.max_strategy_nodes {
+            push_once(
+                issues,
+                GameSemanticIssueV1::InvalidValue {
+                    field: GameFieldV1::StrategyMemory,
+                },
+            );
+        }
     }
     if matches!(
         strategy.representation,
@@ -1627,7 +1649,10 @@ fn validate_strategy(
             GameSemanticIssueV1::HybridInformationForNonHybridModel,
         );
     }
-    for dependency in &strategy.dependencies {
+    for (index, dependency) in strategy.dependencies.iter().enumerate() {
+        if index.is_multiple_of(32) {
+            checkpoint(cx)?;
+        }
         if matches!(dependency.access, StrategyAccessV1::FutureTrajectory) {
             push_once(issues, GameSemanticIssueV1::AnticipativeStrategy);
         }
@@ -1676,6 +1701,7 @@ fn validate_strategy(
             push_once(issues, GameSemanticIssueV1::OpenLoopHasOnlineDependency);
         }
     }
+    Ok(())
 }
 
 fn access_is_permitted(access: StrategyAccessV1, availability: ObservationAvailabilityV1) -> bool {
@@ -1695,10 +1721,9 @@ fn access_is_permitted(access: StrategyAccessV1, availability: ObservationAvaila
             lag: observation_lag,
         } => match access {
             StrategyAccessV1::InitialOnly => observation_lag == 0.0,
+            StrategyAccessV1::Current => observation_lag == 0.0,
             StrategyAccessV1::Delayed { lag: strategy_lag } => strategy_lag >= observation_lag,
-            StrategyAccessV1::Current
-            | StrategyAccessV1::HistoryThroughCurrent
-            | StrategyAccessV1::FutureTrajectory => false,
+            StrategyAccessV1::HistoryThroughCurrent | StrategyAccessV1::FutureTrajectory => false,
         },
     }
 }
@@ -1729,33 +1754,32 @@ fn validate_clairvoyant_lowering(ir: &GameProblemIrV1, issues: &mut Vec<GameSema
 
 fn canonicalize_and_validate_composition(
     ir: &mut GameProblemIrV1,
+    cx: &Cx<'_>,
     issues: &mut Vec<GameSemanticIssueV1>,
-) {
-    let components = match &mut ir.composition {
-        GameCompositionV1::Atomic => return,
-        GameCompositionV1::Sequential { components, .. } => components,
+) -> Result<(), GameSemanticReportV1> {
+    let (components, require_unique_components) = match &mut ir.composition {
+        GameCompositionV1::Atomic => return Ok(()),
+        GameCompositionV1::Sequential { components, .. } => (components, false),
         GameCompositionV1::Parallel { components, .. }
         | GameCompositionV1::AdversarialProduct { components, .. } => {
             components.sort_by(|left, right| left.problem.as_bytes().cmp(right.problem.as_bytes()));
-            components
+            (components, true)
         }
     };
     if components.len() < 2 {
         issues.push(GameSemanticIssueV1::TooFewCompositionComponents);
     }
-    if components
-        .windows(2)
-        .any(|pair| pair[0].problem == pair[1].problem)
+    if require_unique_components
+        && components
+            .windows(2)
+            .any(|pair| pair[0].problem == pair[1].problem)
     {
         issues.push(GameSemanticIssueV1::DuplicateCompositionComponent);
-    } else {
-        let mut identities: Vec<_> = components.iter().map(|item| item.problem).collect();
-        identities.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        if identities.windows(2).any(|pair| pair[0] == pair[1]) {
-            issues.push(GameSemanticIssueV1::DuplicateCompositionComponent);
-        }
     }
-    for component in components {
+    for (index, component) in components.iter().enumerate() {
+        if index.is_multiple_of(32) {
+            checkpoint(cx)?;
+        }
         if component.model_version != ir.model.version
             || component.state_space != ir.model.state_space
             || component.frame != ir.model.frame
@@ -1769,6 +1793,7 @@ fn canonicalize_and_validate_composition(
             );
         }
     }
+    Ok(())
 }
 
 fn derive_claim_availability(ir: &GameProblemIrV1) -> GameClaimAvailabilityV1 {

@@ -169,17 +169,18 @@ structure; FLUX/UQ execute it.
   state-space, frame, unit, and time-unit context. The ordered quantifier
   prefix prints each exists/forall clause and full typed domain identity.
   Information patterns state hidden, initial, current, history, delayed, or
-  forbidden-future observations. Strategy descriptions distinguish open-loop,
+  forbidden-future observations; a dependency-free open-loop strategy may
+  carry the empty pattern. Strategy descriptions distinguish open-loop,
   state-feedback, nonanticipative, hybrid-mode, set-valued, and unresolved
   policies and bind their exact temporal dependencies. Finite/infinite
   horizons, stopping rules, deterministic, differential-game, finite-hybrid,
   and admitted-DAE model classes, proof polarity, composition, and analysis
   budgets are identity-bearing semantics. Admission canonicalizes unordered
   grants, dependencies, strategies, and parallel/product components while
-  retaining quantifier and sequential order. Its claim availability is only
-  later-checker eligibility: unsupported infinite horizons, unresolved Zeno
-  behavior, regularized hybrid models, unresolved or set-valued strategies,
-  and Unknown polarity remain explicitly Unknown.
+  retaining quantifier order and sequential order plus multiplicity. Its claim
+  availability is only later-checker eligibility: unsupported infinite
+  horizons, unresolved Zeno behavior, regularized hybrid models, unresolved or
+  set-valued strategies, and Unknown polarity remain explicitly Unknown.
 
 ## Invariants
 
@@ -225,15 +226,18 @@ structure; FLUX/UQ execute it.
    disturbance followed by an existential open-loop control refuses as a
    trajectory-clairvoyant lowering, while an explicitly nonanticipative policy
    may use only observations and delays granted by its information pattern.
-   A positive-lag grant never authorizes time-zero `InitialOnly` access; that
-   access is a subset only of initial, current, history, or zero-lag grants.
-   Future access always refuses. V1 fixes the player roles to existential
-   control and universal disturbance; opposite polarities refuse instead of
-   being sealed with contradictory strategy ownership. Hidden, delayed, mode,
-   event, model-version, frame, unit, and typed-domain mismatches fail closed
-   before publication. Equivalent ordering of semantic sets replays to one
-   receipt, but swapped quantifier order or strategy classes produce distinct
-   identities.
+   A positive-lag grant never authorizes time-zero `InitialOnly` or `Current`
+   access; a zero-lag grant authorizes both, but not retained history. Future
+   access always refuses. Finite viability uses fixed-horizon stopping so its
+   throughout-horizon obligation cannot be truncated, and custom/hybrid stops
+   without an encoded terminal outcome refuse. A nonanticipative policy's
+   finite memory bound must fit the retained-strategy-node budget. V1 fixes the
+   player roles to existential control and universal disturbance; opposite
+   polarities refuse instead of being sealed with contradictory strategy
+   ownership. Hidden, delayed, mode, event, model-version, frame, unit, and
+   typed-domain mismatches fail closed before publication. Equivalent ordering
+   of semantic sets replays to one receipt, but swapped quantifier order or
+   strategy classes produce distinct identities.
 
 ## Error model
 
@@ -280,9 +284,9 @@ return `OptError::Cancelled` between steps. Budget exhaustion is a
 RECEIPT (`budget_stopped` in the report), not an error — the iterate
 remains valid and `evals` never exceeds the positive cap (P4).
 
-Game admission polls before proportional scans, during bounded information and
-strategy traversal, and at identity publication. Cancellation returns a typed
-Cancelled issue and no receipt.
+Game admission polls before proportional scans, during bounded information,
+strategy-dependency, and composition traversal, and at identity publication.
+Cancellation returns a typed Cancelled issue and no receipt.
 
 ## Unsafe boundary
 
@@ -307,10 +311,12 @@ suite unchanged.
 
 The RE.Q1 game battery covers canonical schema replay and semantic-set
 permutation, quantifier-order and open-loop/feedback identity separation,
-clairvoyance refusal, hidden and delayed disturbance information,
-finite/infinite horizons, hybrid mode information, unresolved/excluded Zeno
-scope, unit/model/domain mismatch, future access, DAE/stopping failures,
-parallel-composition canonicalization, schema/cap mutation, and cancellation.
+clairvoyance refusal, empty open-loop information, hidden and delayed
+disturbance information, strategy-memory budgets, finite/infinite horizons,
+objective/stopping coherence, hybrid mode information, unresolved/excluded
+Zeno scope, unit/model/domain mismatch, future access, DAE/stopping failures,
+parallel-component uniqueness, sequential multiplicity, schema/cap mutation,
+canonical diagnostics, and cancellation.
 
 `tests/admission.rs` (beads sj31i.48 / xf8v7) — G0/G4/G5
 leaf-policy tables (manifold boundaries incl. checked `Stiefel`
@@ -371,8 +377,15 @@ discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
 - RE.Q1 admits game meaning but computes no winning, reachable, or viable set.
   Eligible means only that a later theorem module may attempt the requested
   polarity. Infinite-horizon results and hybrid games without retained Zeno
-  exclusion remain Unknown. Regularization is distinct model lineage, and
-  inner, outer, exact, and Unknown sets are never silently interchanged.
+  exclusion remain Unknown. A regularization witness identifies a declared
+  transformation but RE.Q1 does not resolve or prove distinct source/result
+  lineage. Inner, outer, exact, and Unknown sets are never silently
+  interchanged.
+- Component, witness, strategy, interface, observation, stopping-rule, and
+  cell-decomposition identities are unresolved replay references at this
+  layer. Admission preserves their exact bytes and local context but does not
+  prove that referenced artifacts exist or are scientifically authoritative;
+  later theorem checkers must resolve and validate them before making claims.
 - FrankenScript `ascent.optimize` lowering binds to this IR when the
   HELM surface lands.
 - Bilevel tags reference inner problems by TYPED identity; admission

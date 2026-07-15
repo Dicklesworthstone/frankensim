@@ -286,6 +286,44 @@ fn open_loop_feedback_and_prefix_order_are_not_confusable() {
 }
 
 #[test]
+fn dependency_free_open_loop_needs_no_dummy_information_grant() {
+    let mut open_loop = base_ir();
+    open_loop.information.grants.clear();
+    let strategy = controller_strategy(&mut open_loop);
+    strategy.representation = StrategyRepresentationV1::OpenLoop {
+        artifact: GameStrategyArtifactIdV1::from_bytes(bytes(50)),
+    };
+    strategy.dependencies.clear();
+
+    validate(open_loop);
+}
+
+#[test]
+fn nonanticipative_memory_must_fit_the_strategy_node_budget() {
+    let mut excessive = base_ir();
+    let limit = excessive.budget.max_strategy_nodes;
+    controller_strategy(&mut excessive).representation =
+        StrategyRepresentationV1::NonanticipativeFeedback {
+            artifact: GameStrategyArtifactIdV1::from_bytes(bytes(51)),
+            memory_states: u32::try_from(limit + 1).expect("fixture limit fits u32"),
+        };
+    assert_issue(
+        excessive,
+        GameSemanticIssueV1::InvalidValue {
+            field: GameFieldV1::StrategyMemory,
+        },
+    );
+
+    let mut boundary = base_ir();
+    controller_strategy(&mut boundary).representation =
+        StrategyRepresentationV1::NonanticipativeFeedback {
+            artifact: GameStrategyArtifactIdV1::from_bytes(bytes(52)),
+            memory_states: u32::try_from(limit).expect("fixture limit fits u32"),
+        };
+    validate(boundary);
+}
+
+#[test]
 fn hidden_and_delayed_disturbances_enforce_information_timing() {
     let mut hidden = base_ir();
     let strategy = controller_strategy(&mut hidden);
@@ -330,6 +368,25 @@ fn hidden_and_delayed_disturbances_enforce_information_timing() {
         GameSemanticIssueV1::ObservationTimingMismatch,
     );
 
+    let mut positive_lag_current = base_ir();
+    set_disturbance_grant(
+        &mut positive_lag_current,
+        ObservationAvailabilityV1::Delayed { lag: 0.5 },
+    );
+    let strategy = controller_strategy(&mut positive_lag_current);
+    strategy.representation = StrategyRepresentationV1::NonanticipativeFeedback {
+        artifact: GameStrategyArtifactIdV1::from_bytes(bytes(56)),
+        memory_states: 8,
+    };
+    strategy.dependencies.push(StrategyDependencyV1 {
+        subject: InformationSubjectV1::Disturbance,
+        access: StrategyAccessV1::Current,
+    });
+    assert_issue(
+        positive_lag_current,
+        GameSemanticIssueV1::ObservationTimingMismatch,
+    );
+
     let mut zero_lag_initial = base_ir();
     set_disturbance_grant(
         &mut zero_lag_initial,
@@ -344,6 +401,41 @@ fn hidden_and_delayed_disturbances_enforce_information_timing() {
         access: StrategyAccessV1::InitialOnly,
     }];
     validate(zero_lag_initial);
+
+    let mut zero_lag_current = base_ir();
+    set_disturbance_grant(
+        &mut zero_lag_current,
+        ObservationAvailabilityV1::Delayed { lag: 0.0 },
+    );
+    let strategy = controller_strategy(&mut zero_lag_current);
+    strategy.representation = StrategyRepresentationV1::NonanticipativeFeedback {
+        artifact: GameStrategyArtifactIdV1::from_bytes(bytes(53)),
+        memory_states: 8,
+    };
+    strategy.dependencies.push(StrategyDependencyV1 {
+        subject: InformationSubjectV1::Disturbance,
+        access: StrategyAccessV1::Current,
+    });
+    validate(zero_lag_current);
+
+    let mut zero_lag_history = base_ir();
+    set_disturbance_grant(
+        &mut zero_lag_history,
+        ObservationAvailabilityV1::Delayed { lag: 0.0 },
+    );
+    let strategy = controller_strategy(&mut zero_lag_history);
+    strategy.representation = StrategyRepresentationV1::NonanticipativeFeedback {
+        artifact: GameStrategyArtifactIdV1::from_bytes(bytes(57)),
+        memory_states: 8,
+    };
+    strategy.dependencies.push(StrategyDependencyV1 {
+        subject: InformationSubjectV1::Disturbance,
+        access: StrategyAccessV1::HistoryThroughCurrent,
+    });
+    assert_issue(
+        zero_lag_history,
+        GameSemanticIssueV1::ObservationTimingMismatch,
+    );
 
     let mut admitted = base_ir();
     set_disturbance_grant(
@@ -412,6 +504,29 @@ fn controller_and_disturbance_quantifiers_match_player_roles() {
 }
 
 #[test]
+fn repeated_quantifier_diagnostics_are_canonical() {
+    let mut repeated = base_ir();
+    let clauses = [
+        repeated.quantifiers.clauses()[0],
+        repeated.quantifiers.clauses()[1],
+        repeated.quantifiers.clauses()[2],
+    ];
+    repeated.quantifiers = GameQuantifierPrefixV1::new(vec![
+        clauses[0], clauses[0], clauses[0], clauses[1], clauses[2],
+    ]);
+
+    let report = with_cx(false, |cx| {
+        validate_game_problem_v1(repeated, cx).expect_err("duplicate control quantifiers refuse")
+    });
+    assert_eq!(
+        report.issues(),
+        &[GameSemanticIssueV1::DuplicateQuantifiedVariable {
+            variable: GameVariableV1::Control,
+        }]
+    );
+}
+
+#[test]
 fn infinite_horizon_is_admitted_only_as_unknown() {
     let mut infinite = base_ir();
     infinite.horizon = GameHorizonV1::Infinite {
@@ -446,6 +561,7 @@ fn objective_and_inner_outer_unknown_polarities_remain_distinct() {
     let mut outer = base_ir();
     outer.claim.objective = GameObjectiveV1::Viability;
     outer.claim.polarity = GameProofPolarityV1::Outer;
+    outer.stopping = GameStoppingSemanticsV1::FixedHorizon;
     let outer = validate(outer);
     assert_ne!(inner.problem_id(), outer.problem_id());
     assert_eq!(
@@ -464,6 +580,39 @@ fn objective_and_inner_outer_unknown_polarities_remain_distinct() {
         GameClaimAvailabilityV1::Unknown {
             reason: GameUnknownReasonV1::PolarityUnresolved,
         }
+    );
+}
+
+#[test]
+fn stopping_semantics_preserve_the_full_objective_obligation() {
+    let mut truncated_viability = base_ir();
+    truncated_viability.claim.objective = GameObjectiveV1::Viability;
+    assert_issue(
+        truncated_viability,
+        GameSemanticIssueV1::StoppingSemanticsMismatch,
+    );
+
+    let mut outcome_free_stop = base_ir();
+    outcome_free_stop.stopping = GameStoppingSemanticsV1::StateDependent {
+        rule: GameStoppingRuleIdV1::from_bytes(bytes(54)),
+    };
+    assert_issue(
+        outcome_free_stop,
+        GameSemanticIssueV1::StoppingSemanticsMismatch,
+    );
+
+    let mut infinite_viability = base_ir();
+    infinite_viability.claim.objective = GameObjectiveV1::Viability;
+    infinite_viability.horizon = GameHorizonV1::Infinite {
+        start: 0.0,
+        unit: GameTimeUnitIdV1::from_bytes(bytes(25)),
+        seconds_per_unit: 1.0,
+        no_claim: GameNoClaimIdV1::from_bytes(bytes(26)),
+    };
+    infinite_viability.stopping = GameStoppingSemanticsV1::FirstTarget;
+    assert_issue(
+        infinite_viability,
+        GameSemanticIssueV1::StoppingSemanticsMismatch,
     );
 }
 
@@ -658,6 +807,16 @@ fn parallel_composition_is_canonical_and_context_checked() {
     let second = validate(second);
     assert_eq!(first.identity_receipt(), second.identity_receipt());
 
+    let mut duplicate = base_ir();
+    duplicate.composition = GameCompositionV1::Parallel {
+        components: vec![component(40), component(40)],
+        interface: GameCompositionInterfaceIdV1::from_bytes(bytes(42)),
+    };
+    assert_issue(
+        duplicate,
+        GameSemanticIssueV1::DuplicateCompositionComponent,
+    );
+
     let mut mismatch = base_ir();
     let mut bad = component(43);
     bad.units = GameUnitSystemIdV1::from_bytes(bytes(44));
@@ -671,6 +830,25 @@ fn parallel_composition_is_canonical_and_context_checked() {
             role: GameContextRoleV1::Component,
         },
     );
+}
+
+#[test]
+fn sequential_composition_preserves_order_and_multiplicity() {
+    let mut repeated_first = base_ir();
+    repeated_first.composition = GameCompositionV1::Sequential {
+        components: vec![component(40), component(40), component(41)],
+        interface: GameCompositionInterfaceIdV1::from_bytes(bytes(55)),
+    };
+    let repeated_first = validate(repeated_first);
+
+    let mut repeated_last = base_ir();
+    repeated_last.composition = GameCompositionV1::Sequential {
+        components: vec![component(40), component(41), component(40)],
+        interface: GameCompositionInterfaceIdV1::from_bytes(bytes(55)),
+    };
+    let repeated_last = validate(repeated_last);
+
+    assert_ne!(repeated_first.problem_id(), repeated_last.problem_id());
 }
 
 fn with_schema(ir: GameProblemIrV1, schema_version: u32) -> GameProblemIrV1 {
