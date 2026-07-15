@@ -721,12 +721,22 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
     /// Returns the synchronous span lookup's parameter or work refusal when it
     /// wins before an observed cancellation.
     pub fn span_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<KnotSpanRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_with_poll(t, &mut should_cancel)
+    }
+
+    /// Resolve one admitted span while sharing a compound caller's
+    /// cancellation callback.
+    pub(crate) fn span_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<KnotSpanRun, NurbsError> {
         KnotVector::<S>::enforce_work(
             self.inner.span_search_work(),
             "admitted knot-span evaluation",
         )?;
-        self.inner
-            .span_after_validation_with_poll(t, || cx.checkpoint().is_err())
+        self.inner.span_after_validation_with_poll(t, should_cancel)
     }
 
     fn span_after_preflight(&self, t: S) -> Result<usize, NurbsError> {

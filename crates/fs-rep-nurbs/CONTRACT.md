@@ -115,7 +115,7 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   expanded by one ULP. Cartesian division, evaluation and norm
   arithmetic are ordinary f64, so dense-oracle containment is measured
   evidence rather than a rigorous enclosure.
-  An admitted curve also exposes `closest_point_with_cx`, whose
+  An admitted curve or surface also exposes `closest_point_with_cx`, whose
   `ClosestPointRun` publishes either that complete estimate or `Cancelled`;
   cancellation never publishes a partial frontier-derived bracket.
 - `boolean(op, policy)` — THE BOOLEAN POSITION: always a structured
@@ -372,6 +372,19 @@ frontier, and that retained search state plus final basis-evaluation workspace.
 The conversion bound covers surface row tables and the exact overlap of the
 largest old/new direct tensor insertion generations; it does not claim
 allocator metadata, rounding, or pre-existing spare source capacity.
+The admitted surface `closest_point_with_cx` path keeps request and count-only
+pre-scan refusals ahead of cancellation, then polls the ordered U/V planning
+scans, fallible source clone, alternating exact U-then-V conversion, U-major
+and V-minor seed copies/hulls, both patch-split axes, heap traversal, optional
+center evaluation, cleanup, and final publication. Fixed-stride loops observe
+the gate at most every 64 logical operations; `Cancelled` never carries a
+partial frontier or bracket, and cancellation from optional evaluation is not
+treated as an ordinary evaluation miss. Converted storage and the frontier
+remain live through final evaluation as admitted by the aggregate envelope.
+Individual allocations, heap calls, scalar operations, and nested-`Vec`
+destructors remain non-preemptible; cleanup latency, caller-budget consumption,
+wall-time preemption, resumability, and request-drain-finalize ownership remain
+explicit no-claims.
 Owning derivative and refit construction paths are not all
 migrated yet; they make no claim of caller-budgeted preflight or end-to-end
 validate-once execution. The SDF shell rejects malformed point/tolerance input

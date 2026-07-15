@@ -1271,6 +1271,103 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         Ok(work_units)
     }
 
+    /// Fallibly copy this admitted source while sharing a compound caller's
+    /// cancellation callback. `None` means no partial copy was published.
+    pub(crate) fn try_clone_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<NurbsSurface<S>>, NurbsError> {
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut knot_entries_u = Vec::new();
+        knot_entries_u
+            .try_reserve_exact(self.inner.knots_u.knots.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-vector copy allocation was refused".to_string(),
+            })?;
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut operations_since_poll = 0usize;
+        for &knot in &self.inner.knots_u.knots {
+            knot_entries_u.push(knot);
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(None);
+            }
+        }
+        let knots_u = KnotVector {
+            knots: knot_entries_u,
+            degree: self.inner.knots_u.degree,
+        };
+
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut knot_entries_v = Vec::new();
+        knot_entries_v
+            .try_reserve_exact(self.inner.knots_v.knots.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-vector copy allocation was refused".to_string(),
+            })?;
+        if should_cancel() {
+            return Ok(None);
+        }
+        for &knot in &self.inner.knots_v.knots {
+            knot_entries_v.push(knot);
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(None);
+            }
+        }
+        let knots_v = KnotVector {
+            knots: knot_entries_v,
+            degree: self.inner.knots_v.degree,
+        };
+
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(self.inner.cpw.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "surface copy row-table allocation was refused".to_string(),
+            })?;
+        if should_cancel() {
+            return Ok(None);
+        }
+        for source_row in &self.inner.cpw {
+            if should_cancel() {
+                return Ok(None);
+            }
+            let mut row = Vec::new();
+            row.try_reserve_exact(source_row.len())
+                .map_err(|_| NurbsError::Domain {
+                    what: "surface copy control-row allocation was refused".to_string(),
+                })?;
+            if should_cancel() {
+                return Ok(None);
+            }
+            for &control in source_row {
+                row.push(control);
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(None);
+                }
+            }
+            cpw.push(row);
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(None);
+            }
+        }
+        if should_cancel() {
+            return Ok(None);
+        }
+        Ok(Some(NurbsSurface {
+            knots_u,
+            knots_v,
+            cpw,
+        }))
+    }
+
     fn insert_knot(&self, t: S, axis: SurfaceInsertionAxis) -> Result<NurbsSurface<S>, NurbsError> {
         let plan = self.inner.insertion_plan_after_parameter(t, axis)?;
         let span = match axis {
@@ -1289,26 +1386,45 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         }
     }
 
-    fn insert_knot_with_cx(
+    fn insert_knot_with_poll(
         &self,
         t: S,
         axis: SurfaceInsertionAxis,
-        cx: &Cx<'_>,
+        should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<SurfaceInsertionRun<S>, NurbsError> {
         let plan = self.inner.insertion_plan_after_parameter(t, axis)?;
         let span = match axis {
-            SurfaceInsertionAxis::U => match self.knots_u().span_with_cx(t, cx)? {
+            SurfaceInsertionAxis::U => match self.knots_u().span_with_poll(t, should_cancel)? {
                 KnotSpanRun::Complete { span } => span,
                 KnotSpanRun::Cancelled => return Ok(SurfaceInsertionRun::Cancelled),
             },
-            SurfaceInsertionAxis::V => match self.knots_v().span_with_cx(t, cx)? {
+            SurfaceInsertionAxis::V => match self.knots_v().span_with_poll(t, should_cancel)? {
                 KnotSpanRun::Complete { span } => span,
                 KnotSpanRun::Cancelled => return Ok(SurfaceInsertionRun::Cancelled),
             },
         };
-        let mut should_cancel = || cx.checkpoint().is_err();
         self.inner
-            .insert_knot_at_span_with_plan_and_poll(t, span, plan, &mut should_cancel)
+            .insert_knot_at_span_with_plan_and_poll(t, span, plan, should_cancel)
+    }
+
+    /// Insert one exact U knot while sharing a compound caller's cancellation
+    /// callback.
+    pub(crate) fn insert_knot_u_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceInsertionRun<S>, NurbsError> {
+        self.insert_knot_with_poll(t, SurfaceInsertionAxis::U, should_cancel)
+    }
+
+    /// Insert one exact V knot while sharing a compound caller's cancellation
+    /// callback.
+    pub(crate) fn insert_knot_v_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceInsertionRun<S>, NurbsError> {
+        self.insert_knot_with_poll(t, SurfaceInsertionAxis::V, should_cancel)
     }
 
     /// Insert one exact knot in the U direction without rescanning the source.
@@ -1345,7 +1461,8 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         t: S,
         cx: &Cx<'_>,
     ) -> Result<SurfaceInsertionRun<S>, NurbsError> {
-        self.insert_knot_with_cx(t, SurfaceInsertionAxis::U, cx)
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.insert_knot_u_with_poll(t, &mut should_cancel)
     }
 
     /// Insert one exact V knot with bounded cancellation polling.
@@ -1361,7 +1478,8 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         t: S,
         cx: &Cx<'_>,
     ) -> Result<SurfaceInsertionRun<S>, NurbsError> {
-        self.insert_knot_with_cx(t, SurfaceInsertionAxis::V, cx)
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.insert_knot_v_with_poll(t, &mut should_cancel)
     }
 
     /// Homogeneous evaluation without rescanning surface or knot structure.
@@ -1436,17 +1554,27 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         v: S,
         cx: &Cx<'_>,
     ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
-        let (span_u, basis_u) = match self.knots_u().basis_with_cx(u, cx)? {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.eval_with_poll(u, v, &mut should_cancel)
+    }
+
+    /// Evaluate an admitted point while sharing a compound caller's
+    /// cancellation callback.
+    pub(crate) fn eval_with_poll(
+        &self,
+        u: S,
+        v: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
+        let (span_u, basis_u) = match self.knots_u().basis_with_poll(u, should_cancel)? {
             BasisRun::Complete { span, values } => (span, values),
             BasisRun::Cancelled => return Ok(SurfaceEvaluationRun::Cancelled),
         };
-        let (span_v, basis_v) = match self.knots_v().basis_with_cx(v, cx)? {
+        let (span_v, basis_v) = match self.knots_v().basis_with_poll(v, should_cancel)? {
             BasisRun::Complete { span, values } => (span, values),
             BasisRun::Cancelled => return Ok(SurfaceEvaluationRun::Cancelled),
         };
-        self.eval_from_basis_with_poll(span_u, &basis_u, span_v, &basis_v, || {
-            cx.checkpoint().is_err()
-        })
+        self.eval_from_basis_with_poll(span_u, &basis_u, span_v, &basis_v, should_cancel)
     }
 
     fn eval_from_basis_with_poll(
