@@ -67,6 +67,19 @@ colors or promotion authority.
   completeness; 2 [M]: certified hidden-constraint discovery and a
   refutation-polarity globally-optimal-tearing falsifier lane), 7
   fixture pins (2 held-out), 6 obligation rows, 1 waiver.
+- `i04_draft()` — the I04 (conservation-defect microscope) instance:
+  8 claims (4/2/2 with a counterfactual-completeness falsifier), 8
+  fixture pins (2 held-out), 5 obligation rows, 1 waiver.
+- `i08_draft()` — the I08 (evidence-budget co-design planner) instance:
+  8 claims (5/2/1 with a robust multi-horizon optimality falsifier), 9
+  fixture pins (2 held-out), 6 obligation rows, 1 waiver.
+- `i15_draft()` — the I15 (executable standards compiler) instance:
+  9 claims (5/2/2 with a transitive-impact completeness falsifier and a
+  human-authority preservation moonshot), 8 fixture pins (2 held-out), 6
+  obligation rows, 1 waiver. LICENSING BOUNDARY: all I15 fixtures are
+  synthetic standard-shaped packs; no licensed standard text is embedded;
+  real editions enter only through the waived external slot pinned via
+  fs-vvreg.
 
 ## Invariants
 

@@ -667,3 +667,61 @@ fn i08_draft_freezes_with_the_declared_lattice_and_coverage() {
         frozen.digest()
     );
 }
+
+#[test]
+fn i15_draft_freezes_with_the_declared_lattice_and_coverage() {
+    let frozen = fs_vmanifest::i15_draft()
+        .freeze()
+        .expect("the I15 seed must freeze");
+    assert_eq!(frozen.initiative(), "I15");
+    assert_eq!(frozen.claims().len(), 9);
+    let solid = frozen
+        .claims()
+        .iter()
+        .filter(|c| c.ambition == Ambition::Solid)
+        .count();
+    let frontier = frozen
+        .claims()
+        .iter()
+        .filter(|c| c.ambition == Ambition::Frontier)
+        .count();
+    let moonshot = frozen
+        .claims()
+        .iter()
+        .filter(|c| c.ambition == Ambition::Moonshot)
+        .count();
+    assert_eq!((solid, frontier, moonshot), (5, 2, 2));
+    assert_eq!(frozen.fixtures().len(), 8);
+    let held_out = frozen
+        .fixtures()
+        .iter()
+        .filter(|x| x.partition == Partition::HeldOut)
+        .count();
+    assert_eq!(
+        held_out, 2,
+        "edition and judgment-chain held-out partitions"
+    );
+    assert_eq!(frozen.obligations().len(), 6);
+    assert_eq!(frozen.waivers().len(), 1);
+    let impact = frozen
+        .claim("i15-transitive-impact-completeness")
+        .expect("moonshot impact claim");
+    assert_eq!(impact.polarity, ClaimPolarity::Refutation);
+    // Distinct from all prior initiatives; stable; order-invariant.
+    for other in [
+        i01_draft().freeze().expect("freeze").digest(),
+        fs_vmanifest::i02_draft().freeze().expect("freeze").digest(),
+        fs_vmanifest::i04_draft().freeze().expect("freeze").digest(),
+        fs_vmanifest::i08_draft().freeze().expect("freeze").digest(),
+    ] {
+        assert_ne!(frozen.digest(), other);
+    }
+    let mut reordered = fs_vmanifest::i15_draft();
+    reordered.claims.reverse();
+    reordered.fixtures.reverse();
+    reordered.obligations.reverse();
+    assert_eq!(
+        reordered.freeze().expect("freeze").digest(),
+        frozen.digest()
+    );
+}
