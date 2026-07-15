@@ -36,6 +36,7 @@ use fs_blake3::hash_domain;
 use std::{collections::BTreeSet, fmt};
 
 mod cp;
+mod em;
 mod i01;
 mod i02;
 mod i03;
@@ -52,6 +53,7 @@ mod pd;
 mod rl;
 
 pub use cp::cp_draft;
+pub use em::em_draft;
 pub use i01::i01_draft;
 pub use i02::i02_draft;
 pub use i03::i03_draft;
