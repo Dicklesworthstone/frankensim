@@ -94,7 +94,7 @@ pub fn jacobi_eigh(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     // Sort ascending, lowest original index first on ties.
     let mut order: Vec<usize> = (0..n).collect();
     let vals: Vec<f64> = (0..n).map(|i| m[i * n + i]).collect();
-    order.sort_by(|&x, &y| vals[x].partial_cmp(&vals[y]).unwrap().then(x.cmp(&y)));
+    order.sort_by(|&x, &y| vals[x].total_cmp(&vals[y]).then(x.cmp(&y)));
     let mut evals = vec![0.0f64; n];
     let mut evecs = vec![0.0f64; n * n];
     for (slot, &src) in order.iter().enumerate() {
@@ -119,6 +119,10 @@ pub struct LanczosState {
     betas: Vec<f64>,
     /// Residual direction for the next expansion step.
     next: Vec<f64>,
+    /// Sticky breakdown marker: the Krylov space is invariant and MUST
+    /// NOT be re-expanded (re-entering with the zeroed residual would
+    /// push a zero basis vector and corrupt the Ritz extraction).
+    exhausted: bool,
 }
 
 impl LanczosState {
@@ -142,13 +146,47 @@ impl LanczosState {
             alphas: Vec::new(),
             betas: Vec::new(),
             next: v0,
+            exhausted: false,
         }
+    }
+
+    /// Fresh state seeded with a CALLER-SUPPLIED start direction
+    /// (normalized here) — the warm-start hook for parameter
+    /// continuation: seed with the previous parameter point's Ritz
+    /// vector. Returns `None` for an empty, non-finite, or
+    /// numerically zero seed instead of guessing.
+    #[must_use]
+    pub fn with_start(v0: &[f64]) -> Option<LanczosState> {
+        let n = v0.len();
+        if n == 0 || v0.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        let nrm = norm2(v0);
+        if !(nrm.is_finite() && nrm > 0.0) {
+            return None;
+        }
+        let start: Vec<f64> = v0.iter().map(|x| x / nrm).collect();
+        Some(LanczosState {
+            n,
+            basis: Vec::new(),
+            alphas: Vec::new(),
+            betas: Vec::new(),
+            next: start,
+            exhausted: false,
+        })
     }
 
     /// Krylov dimension built so far.
     #[must_use]
     pub fn dim(&self) -> usize {
         self.basis.len()
+    }
+
+    /// Whether the Krylov space is exhausted (invariant subspace
+    /// found); further expansion requests are no-ops.
+    #[must_use]
+    pub fn exhausted(&self) -> bool {
+        self.exhausted
     }
 }
 
@@ -181,6 +219,9 @@ where
     let n = state.n;
     let mut w = vec![0.0f64; n];
     for _ in 0..steps {
+        if state.exhausted {
+            break;
+        }
         let v = state.next.clone();
         op(&v, &mut w);
         let alpha = dot(&v, &w);
@@ -206,10 +247,12 @@ where
         }
         let beta = norm2(&w);
         if beta < 1e-300 {
-            // Invariant subspace found: restart direction is irrelevant;
-            // stop expanding (dim() stops growing; callers see it).
+            // Invariant subspace found: mark the state STICKILY
+            // exhausted so a later call cannot re-enter and push the
+            // zeroed residual as a basis vector.
             state.betas.push(0.0);
             state.next = vec![0.0; n];
+            state.exhausted = true;
             break;
         }
         state.betas.push(beta);
@@ -319,6 +362,71 @@ impl LobpcgState {
             iters: 0,
         }
     }
+
+    /// Fresh state seeded with a CALLER-SUPPLIED row-major n×b block
+    /// (QR-cleaned here) — the warm-start hook for parameter
+    /// continuation: seed with the previous parameter point's Ritz
+    /// block. Returns `None` for a wrong-size, non-finite block, a
+    /// block size violating `1 <= b`, `3b <= n`, or hostile sizes
+    /// whose products overflow `usize` (checked arithmetic; refusal,
+    /// never a wrap or panic).
+    #[must_use]
+    pub fn with_block(n: usize, b: usize, x0: &[f64]) -> Option<LobpcgState> {
+        if b < 1 {
+            return None;
+        }
+        let three_b = b.checked_mul(3)?;
+        if three_b > n {
+            return None;
+        }
+        let len = n.checked_mul(b)?;
+        if x0.len() != len || x0.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        // Refusal semantics: a rank-deficient seed must refuse rather
+        // than be silently completed with arbitrary orthogonal
+        // directions.
+        if independent_columns(x0, n, b).len() < b {
+            return None;
+        }
+        Some(LobpcgState {
+            n,
+            b,
+            x: orthonormalize(x0, n, b),
+            x_prev: Vec::new(),
+            iters: 0,
+        })
+    }
+}
+
+/// Indices of numerically independent columns of a row-major n×k
+/// block, detected by two-pass modified Gram–Schmidt on a SCRATCH copy
+/// (relative tolerance 1e-12). The caller's block is untouched, so
+/// full-rank paths keep bit-identical downstream behavior.
+fn independent_columns(block: &[f64], n: usize, k: usize) -> Vec<usize> {
+    let mut kept: Vec<usize> = Vec::new();
+    let mut qcols: Vec<Vec<f64>> = Vec::new();
+    for j in 0..k {
+        let mut col: Vec<f64> = (0..n).map(|i| block[i * k + j]).collect();
+        let orig = norm2(&col);
+        for _ in 0..2 {
+            for q in &qcols {
+                let c = dot(&col, q);
+                for (x, &qi) in col.iter_mut().zip(q) {
+                    *x = (-c).mul_add(qi, *x);
+                }
+            }
+        }
+        let nrm = norm2(&col);
+        if nrm > 1e-300 && nrm > 1e-12 * orig {
+            for x in &mut col {
+                *x /= nrm;
+            }
+            qcols.push(col);
+            kept.push(j);
+        }
+    }
+    kept
 }
 
 /// Orthonormalize the columns of a row-major n×k block via QR (returns
@@ -387,6 +495,28 @@ where
                 z[i * zc + 2 * b + j] = state.x[i * b + j] - state.x_prev[i * b + j];
             }
         }
+        // Drop numerically dependent Z columns BEFORE QR: at
+        // convergence W ~ 0 and Householder completion would otherwise
+        // inject arbitrary directions outside span(Z) into the Ritz
+        // space. Full-rank iterations keep every column and remain
+        // bit-identical to the untruncated path.
+        let kept = independent_columns(&z, n, zc);
+        let zc = kept.len();
+        if zc < b {
+            // Search space collapsed to the converged block: stop.
+            break;
+        }
+        let z = if kept.len() == 2 * b + p_cols {
+            z
+        } else {
+            let mut zk = vec![0.0f64; n * zc];
+            for i in 0..n {
+                for (slot, &j) in kept.iter().enumerate() {
+                    zk[i * zc + slot] = z[i * (2 * b + p_cols) + j];
+                }
+            }
+            zk
+        };
         let zq = orthonormalize(&z, n, zc);
         // Rayleigh–Ritz on the reduced space.
         let az = apply_block(op, &zq, n, zc);
@@ -451,9 +581,9 @@ where
     // Deterministic presentation: ascending (or descending for largest).
     out.sort_by(|a, c| {
         if largest {
-            c.value.partial_cmp(&a.value).unwrap()
+            c.value.total_cmp(&a.value)
         } else {
-            a.value.partial_cmp(&c.value).unwrap()
+            a.value.total_cmp(&c.value)
         }
     });
     out
