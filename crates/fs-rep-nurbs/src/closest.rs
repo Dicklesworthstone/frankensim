@@ -32,9 +32,9 @@ pub(crate) const CLOSEST_MAX_BASE_WORK_UNITS: u128 = 16_777_216;
 /// Defensive aggregate split-work ceiling for the legacy APIs.
 const CLOSEST_MAX_SPLIT_WORK_UNITS: u128 = 1_073_741_824;
 
-/// Defensive retained-payload ceiling. Curve admission composes source,
-/// conversion, search frontier, and post-release polish phases; the legacy
-/// surface path currently applies it to frontier/scratch payload.
+/// Defensive retained-payload ceiling. Curve and surface admission compose
+/// their borrowed source, exact-conversion allocations, search frontier, and
+/// final evaluation or post-release polish phases.
 const CLOSEST_MAX_RETAINED_BYTES: u128 = 256 * 1024 * 1024;
 
 // Keep the source-snapshot charge aligned with the admitted curve/knot
@@ -158,6 +158,125 @@ fn checked_sum(values: &[u128], what: &str) -> Result<u128, NurbsError> {
     })
 }
 
+// Requested heap payload for the two knot arrays, the outer control-row table,
+// and each row's control allocation. Allocator metadata, rounding, and the
+// inline `Vec` headers owned by the surface itself are intentionally excluded.
+fn surface_storage_bytes(
+    knot_count_u: u128,
+    knot_count_v: u128,
+    control_count_u: u128,
+    control_count_v: u128,
+) -> Result<u128, NurbsError> {
+    let knot_bytes = checked_product(
+        &[
+            knot_count_u
+                .checked_add(knot_count_v)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "surface knot-storage count overflows u128".to_string(),
+                })?,
+            size_of::<f64>() as u128,
+        ],
+        "surface knot storage",
+    )?;
+    let row_table_bytes = checked_product(
+        &[control_count_u, size_of::<Vec<[f64; 4]>>() as u128],
+        "surface row-table storage",
+    )?;
+    let control_bytes = checked_product(
+        &[
+            control_count_u,
+            control_count_v,
+            size_of::<[f64; 4]>() as u128,
+        ],
+        "surface control storage",
+    )?;
+    checked_sum(
+        &[knot_bytes, row_table_bytes, control_bytes],
+        "surface storage",
+    )
+}
+
+// During insertion, the borrowed source, old derived surface, output grid,
+// old/refined one-dimensional curves, and prior/current refined knot buffers
+// overlap. Final dimensions conservatively dominate every intermediate grid.
+fn surface_conversion_peak_allocated_bytes(
+    insertions_u: u128,
+    insertions_v: u128,
+    final_knot_count_u: u128,
+    final_knot_count_v: u128,
+    final_control_count_u: u128,
+    final_control_count_v: u128,
+) -> Result<(u128, u128), NurbsError> {
+    let converted_bytes = surface_storage_bytes(
+        final_knot_count_u,
+        final_knot_count_v,
+        final_control_count_u,
+        final_control_count_v,
+    )?;
+    if insertions_u == 0 && insertions_v == 0 {
+        return Ok((converted_bytes, converted_bytes));
+    }
+
+    let grid_bytes = checked_sum(
+        &[
+            checked_product(
+                &[final_control_count_u, size_of::<Vec<[f64; 4]>>() as u128],
+                "surface conversion output row table",
+            )?,
+            checked_product(
+                &[
+                    final_control_count_u,
+                    final_control_count_v,
+                    size_of::<[f64; 4]>() as u128,
+                ],
+                "surface conversion output controls",
+            )?,
+        ],
+        "surface conversion output grid",
+    )?;
+    let u_scratch = checked_sum(
+        &[
+            grid_bytes,
+            checked_product(
+                &[final_knot_count_u, 3, size_of::<f64>() as u128],
+                "surface u-insertion knot scratch",
+            )?,
+            checked_product(
+                &[final_control_count_u, 2, size_of::<[f64; 4]>() as u128],
+                "surface u-insertion curve scratch",
+            )?,
+        ],
+        "surface u-insertion scratch",
+    )?;
+    let v_scratch = checked_sum(
+        &[
+            grid_bytes,
+            checked_product(
+                &[final_knot_count_v, 3, size_of::<f64>() as u128],
+                "surface v-insertion knot scratch",
+            )?,
+            checked_product(
+                &[final_control_count_v, 2, size_of::<[f64; 4]>() as u128],
+                "surface v-insertion curve scratch",
+            )?,
+        ],
+        "surface v-insertion scratch",
+    )?;
+    let mut insertion_scratch = converted_bytes;
+    if insertions_u > 0 {
+        insertion_scratch = insertion_scratch.max(u_scratch);
+    }
+    if insertions_v > 0 {
+        insertion_scratch = insertion_scratch.max(v_scratch);
+    }
+    let peak_allocated_bytes = converted_bytes
+        .checked_add(insertion_scratch)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface conversion peak allocated-byte accounting overflows u128".to_string(),
+        })?;
+    Ok((converted_bytes, peak_allocated_bytes))
+}
+
 fn curve_source_admission_work<const DIM: usize>(
     curve: &NurbsCurve<f64, DIM>,
 ) -> Result<u128, NurbsError> {
@@ -226,6 +345,13 @@ struct SurfaceBasePlan {
     seed_leaves: u128,
     order_u: u128,
     order_v: u128,
+    source_bytes: u128,
+    converted_bytes: u128,
+    conversion_peak_allocated_bytes: u128,
+    final_knot_count_u: u128,
+    final_knot_count_v: u128,
+    final_control_count_u: u128,
+    final_control_count_v: u128,
 }
 
 pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u128, NurbsError> {
@@ -285,6 +411,21 @@ fn surface_base_plan_from_admitted(
         .ok_or_else(|| NurbsError::Domain {
             what: "surface v Bézier knot-count accounting overflows u128".to_string(),
         })?;
+    let source_bytes = surface_storage_bytes(
+        knots_u.knots().len() as u128,
+        knots_v.knots().len() as u128,
+        expected_u as u128,
+        expected_v as u128,
+    )?;
+    let (converted_bytes, conversion_peak_allocated_bytes) =
+        surface_conversion_peak_allocated_bytes(
+            insertions_u,
+            insertions_v,
+            expanded_knots_u,
+            expanded_knots_v,
+            expanded_u,
+            expanded_v,
+        )?;
     let expanded_grid = checked_product(&[expanded_u, expanded_v], "surface Bézier grid")?;
     let patch_controls =
         checked_product(&[seed_leaves, order_u, order_v], "surface patch seeding")?;
@@ -366,6 +507,13 @@ fn surface_base_plan_from_admitted(
         seed_leaves,
         order_u,
         order_v,
+        source_bytes,
+        converted_bytes,
+        conversion_peak_allocated_bytes,
+        final_knot_count_u: expanded_knots_u,
+        final_knot_count_v: expanded_knots_v,
+        final_control_count_u: expanded_u,
+        final_control_count_v: expanded_v,
     })
 }
 
@@ -442,6 +590,51 @@ fn enforce_curve_retained_envelope(
             .max(traversal_peak)
             .max(polish_peak_bytes),
         "curve",
+    )
+}
+
+fn surface_final_eval_workspace_bytes(order_u: u128, order_v: u128) -> Result<u128, NurbsError> {
+    let u_basis_peak = order_u.checked_mul(3).ok_or_else(|| NurbsError::Domain {
+        what: "closest-surface u-basis workspace overflows u128".to_string(),
+    })?;
+    let v_basis_peak = order_v
+        .checked_mul(3)
+        .and_then(|workspace| workspace.checked_add(order_u))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface v-basis workspace overflows u128".to_string(),
+        })?;
+    u_basis_peak
+        .max(v_basis_peak)
+        .checked_mul(size_of::<f64>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface final-evaluation workspace overflows u128".to_string(),
+        })
+}
+
+fn enforce_surface_retained_envelope(
+    source_bytes: u128,
+    conversion_peak_allocated_bytes: u128,
+    converted_bytes: u128,
+    frontier_bytes: u128,
+    final_eval_workspace_bytes: u128,
+) -> Result<(), NurbsError> {
+    let conversion_peak = source_bytes
+        .checked_add(conversion_peak_allocated_bytes)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface conversion peak accounting overflows u128".to_string(),
+        })?;
+    let traversal_peak = checked_sum(
+        &[source_bytes, converted_bytes, frontier_bytes],
+        "closest-surface traversal retained bytes",
+    )?;
+    let final_eval_peak = traversal_peak
+        .checked_add(final_eval_workspace_bytes)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface final-evaluation peak accounting overflows u128".to_string(),
+        })?;
+    enforce_retained_bytes(
+        conversion_peak.max(traversal_peak).max(final_eval_peak),
+        "surface",
     )
 }
 
@@ -711,6 +904,7 @@ struct SurfaceClosestPlan {
     seed_leaves: usize,
     queue_capacity: usize,
     seed_heap_work: u128,
+    frontier_bytes: u128,
 }
 
 fn surface_queue_shape(
@@ -793,6 +987,7 @@ fn surface_closest_plan(
         seed_leaves,
         queue_capacity,
         seed_heap_work,
+        frontier_bytes,
     })
 }
 
@@ -1385,7 +1580,26 @@ fn closest_point_surface_after_request(
             })?,
         "surface",
     )?;
+    let final_eval_workspace_bytes =
+        surface_final_eval_workspace_bytes(base_plan.order_u, base_plan.order_v)?;
+    enforce_surface_retained_envelope(
+        base_plan.source_bytes,
+        base_plan.conversion_peak_allocated_bytes,
+        base_plan.converted_bytes,
+        plan.frontier_bytes,
+        final_eval_workspace_bytes,
+    )?;
     let work = to_bezier_surface(surface)?;
+    let actual_control_count_v = work.cpw.first().map_or(0, Vec::len) as u128;
+    if work.knots_u.knots.len() as u128 != base_plan.final_knot_count_u
+        || work.knots_v.knots.len() as u128 != base_plan.final_knot_count_v
+        || work.cpw.len() as u128 != base_plan.final_control_count_u
+        || actual_control_count_v != base_plan.final_control_count_v
+    {
+        return Err(NurbsError::Structure {
+            what: "closest-surface conversion did not match its admitted plan".to_string(),
+        });
+    }
     let mut queue: BinaryHeap<MinEntry<Patch>> = BinaryHeap::new();
     queue
         .try_reserve_exact(plan.queue_capacity)
@@ -1555,10 +1769,13 @@ mod tests {
     use super::{
         BinaryHeap, CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_RETAINED_BYTES, MinEntry,
         closest_point_curve, closest_point_surface, curve_subdivision_work_per_split,
-        enforce_curve_retained_envelope, preflight_surface_subdivision, subdivision_frontier_bytes,
-        surface_base_work_units,
+        enforce_curve_retained_envelope, enforce_surface_retained_envelope,
+        preflight_surface_subdivision, subdivision_frontier_bytes, surface_base_work_units,
+        surface_conversion_peak_allocated_bytes, surface_final_eval_workspace_bytes,
+        surface_storage_bytes,
     };
     use crate::{KnotVector, NurbsCurve, NurbsSurface};
+    use std::mem::size_of;
 
     #[test]
     fn min_heap_order_is_key_then_logical_identity() {
@@ -1647,6 +1864,112 @@ mod tests {
         let overflow = enforce_curve_retained_envelope(0, u128::MAX, 1, 0)
             .expect_err("aggregate retained-byte overflow must refuse");
         assert!(matches!(overflow, crate::NurbsError::Domain { .. }));
+    }
+
+    #[test]
+    fn surface_payload_model_accounts_for_rows_conversion_and_eval_overlap() {
+        let expected_storage = (7 + 8) * size_of::<f64>()
+            + 4 * size_of::<Vec<[f64; 4]>>()
+            + 4 * 5 * size_of::<[f64; 4]>();
+        assert_eq!(
+            surface_storage_bytes(7, 8, 4, 5).expect("representable surface storage"),
+            expected_storage as u128
+        );
+
+        let no_insertion_bytes = (4 + 4) * size_of::<f64>() as u128
+            + 2 * size_of::<Vec<[f64; 4]>>() as u128
+            + 2 * 2 * size_of::<[f64; 4]>() as u128;
+        assert_eq!(
+            surface_conversion_peak_allocated_bytes(0, 0, 4, 4, 2, 2)
+                .expect("no-insertion conversion"),
+            (no_insertion_bytes, no_insertion_bytes)
+        );
+        let converted_bytes = (5 + 5) * size_of::<f64>() as u128
+            + 3 * size_of::<Vec<[f64; 4]>>() as u128
+            + 3 * 3 * size_of::<[f64; 4]>() as u128;
+        let grid_bytes =
+            3 * size_of::<Vec<[f64; 4]>>() as u128 + 3 * 3 * size_of::<[f64; 4]>() as u128;
+        let insertion_scratch =
+            grid_bytes + 5 * 3 * size_of::<f64>() as u128 + 3 * 2 * size_of::<[f64; 4]>() as u128;
+        assert_eq!(
+            surface_conversion_peak_allocated_bytes(1, 1, 5, 5, 3, 3)
+                .expect("two-direction conversion"),
+            (
+                converted_bytes,
+                converted_bytes + converted_bytes.max(insertion_scratch),
+            )
+        );
+
+        assert_eq!(
+            surface_final_eval_workspace_bytes(8, 1).expect("u-dominant workspace"),
+            24 * size_of::<f64>() as u128
+        );
+        assert_eq!(
+            surface_final_eval_workspace_bytes(1, 8).expect("v-dominant workspace"),
+            25 * size_of::<f64>() as u128
+        );
+    }
+
+    #[test]
+    fn surface_retained_envelope_composes_every_live_phase() {
+        assert!(
+            enforce_surface_retained_envelope(1, CLOSEST_MAX_RETAINED_BYTES - 1, 0, 0, 0,).is_ok(),
+            "source plus conversion allocation may reach the exact cap"
+        );
+        let conversion_error =
+            enforce_surface_retained_envelope(1, CLOSEST_MAX_RETAINED_BYTES, 0, 0, 0)
+                .expect_err("conversion residency one byte above the cap must refuse");
+        assert!(matches!(conversion_error, crate::NurbsError::Domain { .. }));
+
+        assert!(
+            enforce_surface_retained_envelope(1, 0, 2, CLOSEST_MAX_RETAINED_BYTES - 4, 1,).is_ok(),
+            "source, converted surface, frontier, and eval workspace compose at the exact cap"
+        );
+        let eval_error =
+            enforce_surface_retained_envelope(1, 0, 2, CLOSEST_MAX_RETAINED_BYTES - 4, 2)
+                .expect_err("aggregate final evaluation one byte above the cap must refuse");
+        assert!(matches!(eval_error, crate::NurbsError::Domain { .. }));
+
+        for overflow in [
+            enforce_surface_retained_envelope(1, u128::MAX, 0, 0, 0),
+            enforce_surface_retained_envelope(1, 0, u128::MAX, 0, 0),
+            enforce_surface_retained_envelope(0, 0, 0, u128::MAX, 1),
+        ] {
+            assert!(
+                matches!(overflow, Err(crate::NurbsError::Domain { .. })),
+                "aggregate retained-byte overflow must refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn surface_payload_model_refuses_arithmetic_overflow() {
+        for overflow in [
+            surface_storage_bytes(u128::MAX, 1, 1, 1),
+            surface_storage_bytes(1, 1, u128::MAX, 2),
+        ] {
+            assert!(
+                matches!(overflow, Err(crate::NurbsError::Domain { .. })),
+                "surface storage overflow must refuse"
+            );
+        }
+        assert!(matches!(
+            surface_conversion_peak_allocated_bytes(1, 1, u128::MAX, 1, 1, 1),
+            Err(crate::NurbsError::Domain { .. })
+        ));
+        let late_peak_overflow_knot_count = u128::MAX / 32 + 1;
+        assert!(matches!(
+            surface_conversion_peak_allocated_bytes(1, 0, late_peak_overflow_knot_count, 0, 0, 0,),
+            Err(crate::NurbsError::Domain { .. })
+        ));
+        assert!(matches!(
+            surface_final_eval_workspace_bytes(u128::MAX, 1),
+            Err(crate::NurbsError::Domain { .. })
+        ));
+        assert!(matches!(
+            surface_final_eval_workspace_bytes(1, u128::MAX),
+            Err(crate::NurbsError::Domain { .. })
+        ));
     }
 
     #[test]

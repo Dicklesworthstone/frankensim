@@ -211,9 +211,14 @@ the exact `seed_leaves + max_splits` heap extent, bounds every push, and prices
 log-height heap operations. Its stage-faithful knot-insertion, expanded-grid,
 run-scan, and queue-seeding estimate is charged before conversion, including
 when the requested split budget is zero; degree-scaled de Casteljau split work
-and the worst retained queue/scratch frontier are admitted separately. Surface
-conversion storage is not yet composed with that frontier under one retained
-payload ceiling. Owning derivative and refit construction paths are not all
+and the worst retained queue/scratch frontier are admitted before allocation.
+Its 256 MiB requested-payload ceiling composes the borrowed source with the
+maximum of exact-conversion allocations, the converted surface plus traversal
+frontier, and that retained search state plus final basis-evaluation workspace.
+The conversion bound covers surface row tables, old/new surface overlap, and
+the simultaneously live one-dimensional knot-insertion buffers; it does not
+claim allocator metadata, rounding, or pre-existing spare source capacity.
+Owning derivative and refit construction paths are not all
 migrated yet; they make no claim of caller-budgeted preflight or end-to-end
 validate-once execution. The SDF shell rejects malformed point/tolerance input
 before surface planning, admits each immutable surface once per distance query,
