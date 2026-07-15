@@ -17,8 +17,8 @@ use fs_evidence::falsify::{FalsifierRegistry, FalsifierSpec};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_verify::estimator::{EstimatorFamily, VerifierReport};
 use fs_verify::fem1d::{
-    Fem1dError, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS, MmsClass, MmsProblem, Poly,
-    solve_p1,
+    Fem1dError, MAX_FEM1D_CLASS_NAME_BYTES, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS,
+    MmsClass, MmsProblem, Poly, solve_p1,
 };
 use fs_verify::interval::Iv;
 
@@ -34,10 +34,17 @@ fn with_cx<R>(
         gate.request();
     }
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
-    pool.scope(|arena| {
+    let result = pool.scope(|arena| {
         let cx = Cx::new(&gate, arena, stream, budget, mode);
         f(&cx)
-    })
+    });
+    let stats = pool.stats();
+    assert!(
+        stats.quiescent(),
+        "Cx arena must be quiescent after scope: {}",
+        stats.to_json()
+    );
+    result
 }
 
 fn default_stream() -> StreamKey {
@@ -193,6 +200,36 @@ fn dw_001_g1_effectivity_and_estimated_accept() {
 }
 
 #[test]
+fn dw_001a_narrow_nonaligned_qoi_window_cannot_alias_to_zero() {
+    let problem = admitted_problem("narrow-window", vec![0.0, 0.5, -0.5], vec![0.0, 0.5, 1.0]);
+    let candidate = [0.0, 1.0, 0.0];
+    let output = dwr_integral_qoi(&problem, &candidate, 0.01, 0.011)
+        .expect("a representable nonaligned window is admitted");
+    let expected = 0.011_f64.powi(2) - 0.01_f64.powi(2);
+    assert!(
+        (output.j_primal() - expected).abs() <= 4.0 * f64::EPSILON * expected,
+        "exact clipped P1 integral {} differs from {expected}",
+        output.j_primal()
+    );
+    assert!(
+        output.eta() != 0.0,
+        "the clipped dual load must not disappear with the whole-cell Gauss nodes"
+    );
+
+    let refined_problem = admitted_problem(
+        "narrow-window-refined",
+        vec![0.0, 0.5, -0.5],
+        vec![0.0, 0.25, 0.5, 0.75, 1.0],
+    );
+    let refined = dwr_integral_qoi(&refined_problem, &[0.0, 0.5, 1.0, 0.5, 0.0], 0.01, 0.011)
+        .expect("mesh refinement preserves the same P1 field/window integral");
+    assert!(
+        (refined.j_primal() - output.j_primal()).abs() <= 32.0 * f64::EPSILON * expected,
+        "G3: inserting nodes outside the clipped window preserves the QoI"
+    );
+}
+
+#[test]
 fn dw_002_reverified_energy_product_does_not_promote_without_a_typed_dual_relation() {
     let problem = quartic_problem(24);
     let u_h = solve_p1(&problem).expect("quartic primal fixture must solve");
@@ -335,8 +372,9 @@ fn dw_004_refinement_concentrates_where_the_qoi_lives() {
 
 #[test]
 fn dw_005_falsifier_spot_check_and_pairing() {
-    // The high-fidelity spot check: a much finer solve's QoI is the
-    // reference; the DWR-corrected coarse QoI must land near it.
+    // Manufactured-solution oracle spot check: the fixture's analytic QoI is
+    // independent of the DWR dual calculation, and the corrected coarse QoI
+    // must land nearer it.
     let coarse = quartic_problem(12);
     let u_c = solve_p1(&coarse).expect("coarse falsifier fixture must solve");
     let out = dwr_integral_qoi(&coarse, &u_c, 0.25, 0.75).expect("valid DWR inputs");
@@ -346,33 +384,38 @@ fn dw_005_falsifier_spot_check_and_pairing() {
     let corr_err = (corrected - reference).abs();
     assert!(
         corr_err < 0.35 * raw_err,
-        "the DWR correction moves TOWARD the high-fidelity truth: {corr_err:.3e} vs \
+        "the DWR correction moves TOWARD the manufactured-solution oracle: {corr_err:.3e} vs \
          raw {raw_err:.3e}"
     );
-    // The falsifier pairing (Proposal 6): dwr-accept ships only once
-    // paired with the high-fidelity spot check.
+    // The declaration catalog (Proposal 6) reports dwr-accept until its
+    // manufactured-solution oracle is declared. This is not release authority.
     let mut registry = FalsifierRegistry::standard();
-    let blocked = registry.ship_gate(&["dwr-accept"]);
-    assert_eq!(blocked.len(), 1, "unpaired: blocked by name");
+    let blocked = registry
+        .catalog_gate(&["dwr-accept"])
+        .expect("bounded valid catalog query");
+    assert_eq!(blocked.len(), 1, "unpaired: reported by name");
     registry
         .register(
             "dwr-accept",
             vec![FalsifierSpec {
-                name: "high-fidelity-qoi-spot-check".to_string(),
-                method: "occasional full fine-grid QoI evaluation, independent of \
-                         the dual machinery"
+                name: "manufactured-solution-qoi-oracle".to_string(),
+                method: "analytic fixture QoI evaluation independently derived from \
+                         the manufactured solution, outside the dual machinery"
                     .to_string(),
             }],
         )
         .expect("pairing registers");
     assert!(
-        registry.ship_gate(&["dwr-accept"]).is_empty(),
-        "paired: ships"
+        registry
+            .catalog_gate(&["dwr-accept"])
+            .expect("bounded valid catalog query")
+            .is_empty(),
+        "paired: catalog metadata is complete"
     );
     verdict(
         "dw-005",
-        "DWR correction converges toward the reference (falsifier honesty); the class \
-         ships only once paired",
+        "DWR correction converges toward the manufactured-solution oracle; catalog \
+         completeness is distinct from exact-instance release admission",
     );
 }
 
@@ -631,7 +674,7 @@ fn dwr_refuses_invalid_windows_and_resource_counts_at_owner_boundaries() {
 }
 
 #[test]
-fn dwr_refuses_finite_inputs_that_overflow_derived_arithmetic() {
+fn dwr_refuses_finite_inputs_with_unrepresentable_or_unresolved_derived_arithmetic() {
     let overflowing_forcing =
         MmsClass::new("overflowing-forcing", poly(vec![0.0, f64::MAX, -f64::MAX]));
     assert!(matches!(
@@ -648,6 +691,38 @@ fn dwr_refuses_finite_inputs_that_overflow_derived_arithmetic() {
         Err(DwrError::NonFiniteDerived {
             quantity: "primal slope",
             index: Some(0)
+        })
+    ));
+
+    let subnormal = admitted_problem("subnormal-integral", vec![0.0], vec![0.0, 0.5, 1.0]);
+    assert!(matches!(
+        dwr_integral_qoi(&subnormal, &[0.0, f64::from_bits(1), 0.0], 0.0, 0.25,),
+        Err(DwrError::UnresolvedZeroIntegral {
+            quantity: "primal QoI",
+            cell: 0,
+        })
+    ));
+
+    let cancellation_problem =
+        admitted_problem("zero-cancellation", vec![0.0], vec![-1.0, 0.0, 1.0, 2.0]);
+    let exact_cancellation = dwr_integral_qoi(
+        &cancellation_problem,
+        &[0.0, 1.0, -1.0, 0.0],
+        0.25,
+        0.75,
+    )
+    .expect("an exactly symmetric clipped P1 integral is admitted");
+    assert_eq!(exact_cancellation.j_primal().to_bits(), 0.0_f64.to_bits());
+    assert!(matches!(
+        dwr_integral_qoi(
+            &cancellation_problem,
+            &[0.0, 1.0e-300, -1.0e-300, 0.0],
+            0.0005,
+            0.9995,
+        ),
+        Err(DwrError::UnresolvedZeroIntegral {
+            quantity: "primal QoI",
+            cell: 1,
         })
     ));
 }
@@ -680,6 +755,42 @@ fn dwr_consumes_canonical_mms_class_and_problem_identities() {
         MmsClass::new("dwr-identity", poly(vec![0.0, 2.0, -2.0])).expect("rescaled admitted class");
     assert_ne!(normalized.identity(), renamed.identity());
     assert_ne!(normalized.identity(), rescaled.identity());
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn g4_hostile_maximum_dwr_shape_preflights_before_initial_cancellation() {
+    let denominator = (MAX_DWR_MESH_NODES - 1) as f64;
+    let mesh = (0..MAX_DWR_MESH_NODES)
+        .map(|node| node as f64 / denominator)
+        .collect::<Vec<_>>();
+    let mut coefficients = vec![0.0; MAX_DWR_POLY_COEFFICIENTS];
+    coefficients[1] = -1.0;
+    *coefficients
+        .last_mut()
+        .expect("the admitted coefficient maximum is non-zero") = 1.0;
+    let maximum_name = "m".repeat(MAX_FEM1D_CLASS_NAME_BYTES);
+    let problem = MmsProblem::new(&maximum_name, poly(coefficients), mesh)
+        .expect("the hostile maximum public DWR shape is admitted");
+    let candidate = vec![0.0; MAX_DWR_MESH_NODES];
+
+    let cancelled = with_cx(
+        true,
+        ExecMode::Deterministic,
+        Budget::INFINITE,
+        default_stream(),
+        |cx| dwr_integral_qoi_with_cx(&problem, &candidate, 0.25, 0.75, cx),
+    );
+    assert!(matches!(
+        cancelled,
+        Err(DwrError::Cancelled {
+            phase: "dwr.initial",
+            completed_work_units: 0,
+            planned_work_units,
+        }) if planned_work_units == 45_004_590
+            && planned_work_units
+                <= u128::try_from(MAX_DWR_WORK_UNITS).expect("usize widens to u128")
+    ));
 }
 
 #[test]
@@ -826,6 +937,58 @@ fn g4_dwr_and_accept_cancellation_are_bounded_and_retryable() {
 }
 
 #[test]
+#[allow(clippy::cast_precision_loss)]
+fn g4_identity_hashing_resets_the_poll_stride_between_variable_streams() {
+    let mesh: Vec<f64> = (0..=257).map(|node| node as f64 / 257.0).collect();
+    let problem = admitted_problem("g4-identity-stride", vec![0.0], mesh);
+    let candidate = vec![0.0; 258];
+    assert!(problem.canonical_bytes().len() > DWR_POLL_STRIDE_ITEMS);
+    assert!(candidate.len() > DWR_POLL_STRIDE_ITEMS);
+
+    let mut identity_positions = Vec::new();
+    let mut completed = false;
+    for quota in 0..512 {
+        let attempt = with_cx(
+            false,
+            ExecMode::Deterministic,
+            Budget::INFINITE.with_poll_quota(quota),
+            default_stream(),
+            |cx| dwr_integral_qoi_with_cx(&problem, &candidate, 0.25, 0.75, cx),
+        );
+        match attempt {
+            Err(DwrError::Cancelled {
+                phase: "dwr.identity",
+                completed_work_units,
+                ..
+            }) => identity_positions.push(completed_work_units),
+            Err(DwrError::Cancelled { .. }) => {}
+            Ok(_) => {
+                completed = true;
+                break;
+            }
+            Err(error) => panic!("identity-stride sweep produced an unexpected refusal: {error}"),
+        }
+    }
+    assert!(
+        completed,
+        "a finite quota must complete the identity-stride fixture"
+    );
+    identity_positions.sort_unstable();
+    identity_positions.dedup();
+    assert!(
+        identity_positions.len() >= 3,
+        "the fixture must exercise multiple variable-length identity chunks"
+    );
+    for positions in identity_positions.windows(2) {
+        assert!(
+            positions[1] - positions[0] <= DWR_POLL_STRIDE_ITEMS as u128,
+            "identity work advanced {} items between checkpoints",
+            positions[1] - positions[0]
+        );
+    }
+}
+
+#[test]
 fn g4_bracket_cancellation_drains_each_nested_verifier_phase_and_is_retryable() {
     let problem = quartic_problem(16);
     let candidate = solve_p1(&problem).expect("G4 bracket fixture must solve");
@@ -910,6 +1073,40 @@ fn g4_bracket_cancellation_drains_each_nested_verifier_phase_and_is_retryable() 
     ] {
         assert!(phases.contains(phase), "quota sweep missed {phase}");
     }
+}
+
+#[test]
+fn g4_bracket_cancels_at_nested_verifier_global_work_boundary() {
+    let problem = quartic_problem(64);
+    let candidate = solve_p1(&problem).expect("G4 boundary fixture must solve");
+    let verifier_plan = fs_verify::estimator::VerifierWorkPlan::for_inputs(&problem, &candidate)
+        .expect("G4 boundary fixture has an admitted verifier plan");
+    assert_eq!(verifier_plan.identity_fields(), [229, 64, 64, 10, 1, 368]);
+
+    let baseline = cauchy_schwarz(&problem, &candidate, &problem, &candidate)
+        .expect("healthy >256-work bracket baseline");
+    // Six successful polls reach the primal tightness phase entry. The seventh
+    // callback is the nested verifier's invocation-global 256-unit boundary.
+    let cancelled = with_cx(
+        false,
+        ExecMode::Deterministic,
+        Budget::INFINITE.with_poll_quota(6),
+        default_stream(),
+        |cx| Bracket::cauchy_schwarz(&problem, &candidate, &problem, &candidate, cx),
+    );
+    assert!(matches!(
+        cancelled,
+        Err(BracketError::Cancelled {
+            phase: "dwr-bracket.primal-verifier.tightness",
+            completed_work_units: 450,
+            planned_work_units,
+        }) if planned_work_units > 450
+    ));
+
+    let retry = cauchy_schwarz(&problem, &candidate, &problem, &candidate)
+        .expect("nested boundary cancellation retains no partial bracket");
+    assert_same_bracket_semantics(&baseline, &retry);
+    assert_eq!(baseline.evidence_identity(), retry.evidence_identity());
 }
 
 #[test]
@@ -1195,7 +1392,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     assert_same_accept_semantics(&short, &long);
     assert_ne!(short.evidence_identity(), long.evidence_identity());
     assert_eq!(DWR_WORK_PLAN_VERSION, 2);
-    assert_eq!(DWR_POLL_POLICY_VERSION, 2);
-    assert_eq!(DWR_EVIDENCE_IDENTITY_VERSION, 2);
+    assert_eq!(DWR_POLL_POLICY_VERSION, 3);
+    assert_eq!(DWR_EVIDENCE_IDENTITY_VERSION, 5);
     assert_eq!(DWR_POLL_STRIDE_ITEMS, 256);
 }

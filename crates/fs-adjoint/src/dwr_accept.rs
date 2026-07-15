@@ -11,6 +11,7 @@
 
 use fs_evidence::Color;
 use fs_exec::Cx;
+use fs_ivl::expansion::two_diff;
 use fs_verify::estimator::{
     EstimatorFamily, VERIFIER_POLL_POLICY_VERSION, VERIFIER_POLL_STRIDE_WORK_UNITS,
     VERIFIER_WORK_PLAN_VERSION, VerifierCheckpointKind, VerifierPhase, VerifierProgress,
@@ -35,17 +36,17 @@ pub const MAX_DWR_QOI_BYTES: usize = 4_096;
 /// Version of the complete checked work-plan encoding bound into evidence.
 pub const DWR_WORK_PLAN_VERSION: u32 = 2;
 /// Version of the cancellation-poll policy bound into evidence.
-pub const DWR_POLL_POLICY_VERSION: u32 = 2;
+pub const DWR_POLL_POLICY_VERSION: u32 = 3;
 /// Maximum bounded items processed between cancellation checkpoints.
 pub const DWR_POLL_STRIDE_ITEMS: usize = 256;
 const DWR_POLL_STRIDE_IDENTITY: u64 = DWR_POLL_STRIDE_ITEMS as u64;
 /// Version of the retained DWR execution/evidence identity.
-pub const DWR_EVIDENCE_IDENTITY_VERSION: u32 = 2;
+pub const DWR_EVIDENCE_IDENTITY_VERSION: u32 = 5;
 const MAX_DWR_REFINED_NODES: usize = MAX_DWR_MESH_NODES * 2 - 1;
 
-const DWR_OUTPUT_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-output-identity-v2";
-const DWR_BRACKET_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-bracket-identity-v2";
-const DWR_ACCEPT_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-accept-identity-v2";
+const DWR_OUTPUT_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-output-identity-v5";
+const DWR_BRACKET_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-bracket-identity-v5";
+const DWR_ACCEPT_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-accept-identity-v5";
 
 const DWR_INITIAL_PHASE: &str = "dwr.initial";
 const DWR_VALIDATE_POLYNOMIAL_PHASE: &str = "dwr.validate-polynomial";
@@ -1285,7 +1286,6 @@ fn malformed_refusal(estimator: &str, audit: String) -> AcceptDraft {
 /// - DWR-only accept (`|η| ≤ tol`, no valid bracket) → ESTIMATED;
 /// - a sealed energy-product bracket is retained in the audit, but cannot
 ///   promote or veto because the v0 query does not bind its dual relation.
-#[must_use]
 pub fn accept(
     query: &DwrQuery,
     dwr_abs: f64,
@@ -1629,7 +1629,8 @@ pub enum DwrError {
         /// Row index.
         index: usize,
     },
-    /// Thomas elimination encountered a zero or non-finite pivot.
+    /// Thomas elimination encountered a non-positive or non-finite pivot in a
+    /// system whose exact stiffness matrix is positive definite.
     InvalidLinearPivot {
         /// Pivot row.
         row: usize,
@@ -1640,6 +1641,14 @@ pub enum DwrError {
         quantity: &'static str,
         /// Cell/coefficient index when applicable.
         index: Option<usize>,
+    },
+    /// A clipped P1 integral rounded to zero without an exact-zero proof and
+    /// therefore cannot safely drive an acceptance decision in binary64.
+    UnresolvedZeroIntegral {
+        /// Stable integral role.
+        quantity: &'static str,
+        /// Mesh-cell index.
+        cell: usize,
     },
 }
 
@@ -1758,12 +1767,16 @@ impl core::fmt::Display for DwrError {
                 "DWR linear-system {component} is non-finite at row {index}"
             ),
             Self::InvalidLinearPivot { row } => {
-                write!(f, "DWR Thomas pivot {row} is zero or non-finite")
+                write!(f, "DWR Thomas pivot {row} is non-positive or non-finite")
             }
             Self::NonFiniteDerived { quantity, index } => match index {
                 Some(index) => write!(f, "DWR derived {quantity} is non-finite at index {index}"),
                 None => write!(f, "DWR derived {quantity} is non-finite"),
             },
+            Self::UnresolvedZeroIntegral { quantity, cell } => write!(
+                f,
+                "DWR clipped {quantity} on cell {cell} is zero in binary64 without an exact-zero proof"
+            ),
         }
     }
 }
@@ -1944,7 +1957,7 @@ fn thomas_solve(
     let mut c = zeroed_vec(n, DWR_THOMAS_FORWARD_PHASE, progress, cx)?;
     dwr_checkpoint(DWR_THOMAS_FORWARD_PHASE, progress, cx)?;
     let mut d = diag[0];
-    if !d.is_finite() || d == 0.0 {
+    if !d.is_finite() || d <= 0.0 {
         return Err(DwrError::InvalidLinearPivot { row: 0 });
     }
     if n > 1 {
@@ -1967,7 +1980,7 @@ fn thomas_solve(
     for i in 1..n {
         poll_dwr_scan(i, DWR_THOMAS_FORWARD_PHASE, progress, cx)?;
         d = diag[i] - sub[i] * c[i - 1];
-        if !d.is_finite() || d == 0.0 {
+        if !d.is_finite() || d <= 0.0 {
             return Err(DwrError::InvalidLinearPivot { row: i });
         }
         if i < n - 1 {
@@ -2025,6 +2038,7 @@ fn dual_solve(
     let mut diag = zeroed_vec(free, DWR_DUAL_ASSEMBLY_PHASE, progress, cx)?;
     let mut sup = zeroed_vec(free, DWR_DUAL_ASSEMBLY_PHASE, progress, cx)?;
     let mut rhs = zeroed_vec(free, DWR_DUAL_ASSEMBLY_PHASE, progress, cx)?;
+    let interior_nodes = 1..=free;
     for e in 0..n - 1 {
         poll_dwr_scan(e, DWR_DUAL_ASSEMBLY_PHASE, progress, cx)?;
         let h = mesh[e + 1] - mesh[e];
@@ -2036,7 +2050,7 @@ fn dual_solve(
             });
         }
         for (a, b, v) in [(e, e, k), (e + 1, e + 1, k), (e, e + 1, -k), (e + 1, e, -k)] {
-            if a >= 1 && a <= free && b >= 1 && b <= free {
+            if interior_nodes.contains(&a) && interior_nodes.contains(&b) {
                 let (i, j) = (a - 1, b - 1);
                 if i == j {
                     diag[i] += v;
@@ -2047,28 +2061,29 @@ fn dual_solve(
                 }
             }
         }
-        // Load: ∫ w φ_a over the element (Gauss).
-        for (gx, gw) in gauss5(mesh[e], mesh[e + 1]) {
-            if !gx.is_finite() || !gw.is_finite() {
-                return Err(non_finite_derived("dual quadrature", Some(e)));
-            }
-            let w = f64::from(u8::from(gx >= w_lo && gx <= w_hi));
-            let xi = (gx - mesh[e]) / h;
-            if !xi.is_finite() {
-                return Err(non_finite_derived("dual reference coordinate", Some(e)));
-            }
-            for (node, shape) in [(e, 1.0 - xi), (e + 1, xi)] {
-                if node >= 1 && node <= free {
-                    let contribution = gw * w * shape;
-                    let updated = rhs[node - 1] + contribution;
-                    if !contribution.is_finite() || !updated.is_finite() {
-                        return Err(DwrError::NonFiniteLinearSystem {
-                            component: "assembled right-hand side",
-                            index: node - 1,
-                        });
-                    }
-                    rhs[node - 1] = updated;
+        // Load: use the closed-form P1 integral on the element/window
+        // intersection, evaluated in binary64. Sampling the discontinuous
+        // indicator at whole-cell Gauss nodes can alias a narrow
+        // non-mesh-aligned window to zero.
+        for (node, endpoint_values) in [(e, [1.0, 0.0]), (e + 1, [0.0, 1.0])] {
+            if interior_nodes.contains(&node) {
+                let contribution = integrate_clipped_p1(
+                    mesh[e],
+                    mesh[e + 1],
+                    endpoint_values,
+                    w_lo,
+                    w_hi,
+                    "dual load",
+                    e,
+                )?;
+                let updated = rhs[node - 1] + contribution;
+                if !updated.is_finite() {
+                    return Err(DwrError::NonFiniteLinearSystem {
+                        component: "assembled right-hand side",
+                        index: node - 1,
+                    });
                 }
+                rhs[node - 1] = updated;
             }
         }
         progress.advance(1)?;
@@ -2082,6 +2097,58 @@ fn dual_solve(
         progress.advance(1)?;
     }
     Ok(z)
+}
+
+fn integrate_clipped_p1(
+    x0: f64,
+    x1: f64,
+    endpoint_values: [f64; 2],
+    w_lo: f64,
+    w_hi: f64,
+    quantity: &'static str,
+    cell: usize,
+) -> Result<f64, DwrError> {
+    let a = x0.max(w_lo);
+    let b = x1.min(w_hi);
+    if a >= b {
+        return Ok(0.0);
+    }
+    let h = x1 - x0;
+    let interpolate = |x: f64| {
+        let xi = (x - x0) / h;
+        (1.0 - xi) * endpoint_values[0] + xi * endpoint_values[1]
+    };
+    let value_a = interpolate(a);
+    let value_b = interpolate(b);
+    let average = f64::midpoint(value_a, value_b);
+    let width = b - a;
+    let integral = width * average;
+    if !value_a.is_finite()
+        || !value_b.is_finite()
+        || !average.is_finite()
+        || !width.is_finite()
+        || width <= 0.0
+        || !integral.is_finite()
+    {
+        return Err(non_finite_derived(quantity, Some(cell)));
+    }
+    // `average != 0.0` is not a sufficient underflow guard: midpoint(0,
+    // MIN_POSITIVE_SUBNORMAL) itself rounds to zero. Nor may rounded clipped
+    // endpoint values authenticate their own cancellation: interpolation can
+    // round a nonzero exact P1 value to zero or manufacture additive inverses.
+    // Admit a zero only when it follows directly from the public P1 data:
+    // either the field is identically zero, or its original endpoint values
+    // are exact additive inverses and the clipped subinterval is exactly
+    // symmetric about the cell midpoint. `two_diff` compares the complete
+    // error-free expansions rather than rounded offsets. Other zero results
+    // remain fail-closed.
+    let zero_is_proven = (endpoint_values[0] == 0.0 && endpoint_values[1] == 0.0)
+        || (endpoint_values[0] == -endpoint_values[1]
+            && two_diff(a, x0) == two_diff(x1, b));
+    if integral == 0.0 && !zero_is_proven {
+        return Err(DwrError::UnresolvedZeroIntegral { quantity, cell });
+    }
+    Ok(integral)
 }
 
 fn refine(
@@ -2165,31 +2232,27 @@ pub fn dwr_integral_qoi(
         });
     }
 
-    // J(u_h): the P1 interpolant integrated over the window.
+    // J(u_h): evaluate the closed-form P1 integral in binary64 on every
+    // cell/window intersection. Whole-cell indicator sampling can miss narrow
+    // windows.
     dwr_checkpoint(DWR_PRIMAL_PHASE, &mut progress, cx)?;
     let mut j_primal = 0.0f64;
     for e in 0..mesh.len() - 1 {
         poll_dwr_scan(e, DWR_PRIMAL_PHASE, &mut progress, cx)?;
-        let h = mesh[e + 1] - mesh[e];
-        for (gx, gw) in gauss5(mesh[e], mesh[e + 1]) {
-            if !gx.is_finite() || !gw.is_finite() {
-                return Err(non_finite_derived("primal quadrature", Some(e)));
-            }
-            if gx >= w_lo && gx <= w_hi {
-                let xi = (gx - mesh[e]) / h;
-                let interpolated = (1.0 - xi) * candidate[e] + xi * candidate[e + 1];
-                let contribution = gw * interpolated;
-                let updated = j_primal + contribution;
-                if !xi.is_finite()
-                    || !interpolated.is_finite()
-                    || !contribution.is_finite()
-                    || !updated.is_finite()
-                {
-                    return Err(non_finite_derived("primal QoI", Some(e)));
-                }
-                j_primal = updated;
-            }
+        let contribution = integrate_clipped_p1(
+            mesh[e],
+            mesh[e + 1],
+            [candidate[e], candidate[e + 1]],
+            w_lo,
+            w_hi,
+            "primal QoI",
+            e,
+        )?;
+        let updated = j_primal + contribution;
+        if !updated.is_finite() {
+            return Err(non_finite_derived("primal QoI", Some(e)));
         }
+        j_primal = updated;
         progress.advance(1)?;
     }
     // Enriched dual on the refined mesh.
@@ -2286,6 +2349,11 @@ pub fn dwr_integral_qoi(
     hasher.update(&w_hi.to_bits().to_le_bytes());
     hasher.update(&j_primal.to_bits().to_le_bytes());
     hasher.update(&eta.to_bits().to_le_bytes());
+    // Reset the documented 256-item cancellation bound between the
+    // variable-length canonical problem bytes and the independent indicator
+    // stream. Without this boundary, a final problem chunk and the first 256
+    // indicators could consume almost 512 bounded items under one poll.
+    dwr_checkpoint(DWR_IDENTITY_PHASE, &mut progress, cx)?;
     for (index, indicator) in indicators.iter().enumerate() {
         poll_dwr_scan(index, DWR_IDENTITY_PHASE, &mut progress, cx)?;
         hasher.update(&indicator.to_bits().to_le_bytes());
@@ -2341,6 +2409,35 @@ mod execution_tests {
     }
 
     #[test]
+    fn hostile_nonuniform_mesh_refuses_a_rounded_negative_spd_pivot() {
+        with_cx(|cx| {
+            // The exact 1-D Dirichlet stiffness matrix is SPD, hence every
+            // exact Thomas pivot is positive. On this admitted finite mesh the
+            // binary64 recurrence suffers enough cancellation to produce a
+            // negative later pivot. Continuing would silently solve a
+            // numerically indefinite system and corrupt the DWR estimate.
+            let coarse = [
+                -1.0e175, -1.0e80, -1.0e-225, 1.0e-280, 1.0e-255, 1.0e-250, 1.0e-235, 1.0e-65,
+            ];
+            let mut progress = WorkProgress::new(100_000, cx);
+            let fine = refine(
+                &coarse,
+                refined_node_count(coarse.len()).expect("small hostile mesh"),
+                &mut progress,
+                cx,
+            )
+            .expect("hostile mesh still has finite interior midpoints");
+            // Use an admitted finite window disjoint from the mesh. Its zero
+            // load isolates stiffness elimination; a full-domain load on this
+            // deliberately extreme mesh overflows the forward right-hand side
+            // before the hostile pivot is reached.
+            let error = dual_solve(&fine, 1.0, 2.0, &mut progress, cx)
+                .expect_err("a non-positive SPD elimination pivot must fail closed");
+            assert!(matches!(error, DwrError::InvalidLinearPivot { .. }));
+        });
+    }
+
+    #[test]
     fn incomplete_work_plans_fail_closed_before_publication() {
         with_cx(|cx| {
             let progress = WorkProgress::new(2, cx);
@@ -2376,6 +2473,11 @@ mod execution_tests {
                 hasher.finalize()
             };
             let baseline = root(&fields, CURRENT_VERIFIER_POLICY_IDENTITY);
+            assert_eq!(
+                baseline.to_hex(),
+                "e53dcf11159b73d5516753630b8f0fd6572d08a8f0e60a6b6fba9672e6ceedac",
+                "fixed bracket work-policy preimage changed"
+            );
             for index in (4..=9).chain(14..=19) {
                 let mut changed = fields;
                 changed[index] += 1;
@@ -2443,6 +2545,24 @@ mod execution_tests {
                 cx,
             )
             .expect("canonical validation entry");
+            let premature_tightness = VerifierProgress {
+                kind: VerifierCheckpointKind::PhaseEntry,
+                phase: VerifierPhase::Tightness,
+                completed_work_units: 1,
+                planned_work_units: plan.planned_work_units(),
+            };
+            assert!(matches!(
+                observe_verifier_progress(
+                    "primal",
+                    BRACKET_PRIMAL_VERIFY_PHASE,
+                    plan,
+                    premature_tightness,
+                    &mut state,
+                    &mut outer,
+                    cx,
+                ),
+                Err(BracketError::WorkPlanMismatch { .. })
+            ));
             let omitted_boundary = VerifierProgress {
                 kind: VerifierCheckpointKind::RefusalFlush,
                 phase: VerifierPhase::Validation,
@@ -2601,7 +2721,7 @@ mod execution_tests {
             MAX_FEM1D_PROBLEM_CANONICAL_IDENTITY_BYTES,
         )
         .expect("maximum public shape is admitted without allocation");
-        assert_eq!(maximum.planned_work_units, 45_004_592);
+        assert_eq!(maximum.planned_work_units, 45_004_590);
         assert!(maximum.planned_work_units <= MAX_DWR_WORK_UNITS as u128);
         assert!(matches!(
             DwrWorkPlan::preflight(
@@ -2618,6 +2738,6 @@ mod execution_tests {
             Err(DwrError::PolynomialCoefficientCount { .. })
         ));
         assert_eq!(DWR_POLL_STRIDE_ITEMS, 256);
-        assert_eq!(DWR_POLL_POLICY_VERSION, 2);
+        assert_eq!(DWR_POLL_POLICY_VERSION, 3);
     }
 }

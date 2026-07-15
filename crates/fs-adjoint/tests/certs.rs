@@ -6,7 +6,8 @@
 //! BLOCKS merge; color assignment is correct across
 //! differentiable/flagged/anchored paths without converting raw inputs into
 //! authority; bounded input validation precedes allocation/indexing; the
-//! no-falsifier-no-ship gate covers the adjoint-gradient class.
+//! declaration catalog includes the adjoint-gradient class. Exact-instance
+//! release admission remains an authenticated package/checker responsibility.
 #![cfg(feature = "gradient-certs")]
 
 use std::collections::BTreeSet;
@@ -187,22 +188,27 @@ fn gc_003_color_assignment_property() {
 }
 
 #[test]
-fn gc_004_no_falsifier_no_ship_covers_gradients() {
+fn gc_004_falsifier_catalog_covers_gradients() {
     // The standard registry already pairs adjoint-gradient with the FD
-    // spot check (qmao.4): gradients ship.
+    // spot-check declaration (qmao.4). This proves metadata completeness only.
     let registry = FalsifierRegistry::standard();
     assert!(
-        registry.ship_gate(&["adjoint-gradient"]).is_empty(),
+        registry
+            .catalog_gate(&["adjoint-gradient"])
+            .expect("bounded valid catalog query")
+            .is_empty(),
         "the pairing exists in the standard registry"
     );
-    // A hypothetical unpaired gradient class is blocked by name.
-    let blocked = registry.ship_gate(&["adjoint-gradient", "hyper-gradient-v2"]);
+    // A hypothetical unpaired gradient class is reported by name.
+    let blocked = registry
+        .catalog_gate(&["adjoint-gradient", "hyper-gradient-v2"])
+        .expect("bounded valid catalog query");
     assert_eq!(blocked.len(), 1);
     assert!(blocked[0].contains("hyper-gradient-v2"));
     verdict(
         "gc-004",
-        "no-falsifier-no-ship applies to gradients: adjoint-gradient ships via its FD \
-         pairing, an unpaired class is blocked by name",
+        "adjoint-gradient has an FD catalog declaration; an unpaired class is reported by name \
+         without conferring release authority",
     );
 }
 

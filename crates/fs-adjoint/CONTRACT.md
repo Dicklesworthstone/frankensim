@@ -131,7 +131,15 @@ solver without a passing gradient check cannot merge.
   candidate shape/finite values and bit-canonical homogeneous `+0.0`
   endpoints, strict finite cell geometry and representable midpoints/QoI window, and a conservative
   mesh×polynomial aggregate budget of 100,000,000 work units before refined
-  allocation. Assembly, quadrature, forcing,
+  allocation. The discontinuous QoI indicator is never sampled over a whole
+  cell: primal P1 values and dual P1 loads use the closed-form formula on each
+  cell/window intersection, so narrow non-mesh-aligned windows cannot alias to
+  zero. The formula is evaluated in binary64, not exact-expansion or interval
+  arithmetic. A computed-zero overlap is accepted only when the original P1
+  data prove an identically-zero field or an exact full-cell endpoint
+  cancellation; every other zero is refused until exact-expansion integration
+  can distinguish true cancellation from binary64 underflow/rounding.
+  Assembly, residual quadrature, forcing,
   elimination pivots, slopes, residuals, and outputs refuse on any non-finite
   derived value; zero-interior-DOF dual systems are handled explicitly rather
   than indexed through an empty solver. `accept` encodes the color logic
@@ -266,7 +274,14 @@ verified on Threadripper (x86_64).
 
 Bounded synchronous computation over fs-solver's iteration-granular
 solvers; revolve sweeps checkpoint by construction (pause = keep the
-snapshot set). Cx wiring is driver scope (workspace discipline).
+snapshot set). The public DWR, bracket, and accept paths own explicit `Cx`
+wiring, checked complete work plans, caller poll quotas, and phase/publication
+checkpoints. Their variable scans poll at an identity-bound 256-item stride;
+independent variable-length identity streams are separated by a checkpoint so
+the stride cannot be reissued across a seam. Cancellation returns typed phase
+and exact completed/planned work and publishes no partial authoritative
+object. The retained DWR execution identity binds work-plan version 2,
+poll-policy version 3, and evidence/schema version 4.
 
 ## Unsafe boundary
 
