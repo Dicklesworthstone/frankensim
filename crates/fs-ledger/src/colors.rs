@@ -2863,6 +2863,1196 @@ impl core::fmt::Display for ColorReplayError {
 
 impl std::error::Error for ColorReplayError {}
 
+/// Evidence that a persisted color-row stream was independently reconstructed
+/// and rehashed without consulting a [`ColorGraph`] or any in-memory [`Color`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorRowVerification {
+    node_count: usize,
+    demotion_count: usize,
+    terminal_hash: Option<ContentHash>,
+}
+
+impl ColorRowVerification {
+    /// Number of schema-v7 `color-write` rows whose hashes were re-earned.
+    #[must_use]
+    pub fn node_count(self) -> usize {
+        self.node_count
+    }
+
+    /// Number of schema-v1 demotion rows incorporated into those preimages.
+    #[must_use]
+    pub fn demotion_count(self) -> usize {
+        self.demotion_count
+    }
+
+    /// Hash of the final accepted node, or `None` for an empty stream.
+    #[must_use]
+    pub fn terminal_hash(self) -> Option<ContentHash> {
+        self.terminal_hash
+    }
+}
+
+/// A fail-closed refusal from [`verify_color_row_stream`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColorRowVerificationError {
+    /// A row is not strict JSON or violates the canonical row shape/order.
+    Malformed {
+        /// Zero-based position in the supplied stream. A value equal to the
+        /// stream length denotes unfinished demotion rows at end of input.
+        row: usize,
+        /// Node named by the row, when it was decoded before the refusal.
+        node: Option<u64>,
+        /// Exact structural reason.
+        why: String,
+    },
+    /// Prior or future color/demotion row schemas are never interpreted as the
+    /// current preimage layout.
+    UnsupportedSchemaVersion {
+        /// Zero-based row position.
+        row: usize,
+        /// Node named by the row.
+        node: u64,
+        /// `"color-write"` or `"demotion"`.
+        event: &'static str,
+        /// Version found in storage.
+        found: u64,
+        /// Only version accepted by this build.
+        expected: u64,
+    },
+    /// The row names a node-hash encoding this build cannot reconstruct.
+    UnsupportedNodeHashVersion {
+        /// Zero-based row position.
+        row: usize,
+        /// Node named by the row.
+        node: u64,
+        /// Version found in storage.
+        found: u64,
+        /// Only version accepted by this build.
+        expected: u64,
+    },
+    /// The row names a color algebra this build cannot interpret.
+    UnsupportedColorAlgebraVersion {
+        /// Zero-based row position.
+        row: usize,
+        /// Node named by the row.
+        node: u64,
+        /// Version found in storage.
+        found: u64,
+        /// Only version accepted by this build.
+        expected: u64,
+    },
+    /// Every preimage field decoded, but the independently computed hash did
+    /// not match the row's claimed hash.
+    HashMismatch {
+        /// Zero-based row position.
+        row: usize,
+        /// Node named by the row.
+        node: u64,
+        /// Hash claimed by the persisted row.
+        stored: ContentHash,
+        /// Hash independently reconstructed from persisted fields.
+        reconstructed: ContentHash,
+    },
+}
+
+impl core::fmt::Display for ColorRowVerificationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Malformed { row, node, why } => {
+                if let Some(node) = node {
+                    write!(f, "color row {row} for node {node} is malformed: {why}")
+                } else {
+                    write!(f, "color row {row} is malformed: {why}")
+                }
+            }
+            Self::UnsupportedSchemaVersion {
+                row,
+                node,
+                event,
+                found,
+                expected,
+            } => write!(
+                f,
+                "color row {row} for node {node} has unsupported {event} schema {found}; expected {expected}"
+            ),
+            Self::UnsupportedNodeHashVersion {
+                row,
+                node,
+                found,
+                expected,
+            } => write!(
+                f,
+                "color row {row} for node {node} has unsupported node-hash version {found}; expected {expected}"
+            ),
+            Self::UnsupportedColorAlgebraVersion {
+                row,
+                node,
+                found,
+                expected,
+            } => write!(
+                f,
+                "color row {row} for node {node} has unsupported color-algebra version {found}; expected {expected}"
+            ),
+            Self::HashMismatch {
+                row,
+                node,
+                stored,
+                reconstructed,
+            } => write!(
+                f,
+                "color row {row} for node {node} claims hash {stored}, but persisted fields reconstruct {reconstructed}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ColorRowVerificationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowJson {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<RowJson>),
+    Object(BTreeMap<String, RowJson>),
+}
+
+struct RowJsonParser<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> RowJsonParser<'a> {
+    fn new(row: &'a str) -> Self {
+        Self {
+            bytes: row.as_bytes(),
+            cursor: 0,
+        }
+    }
+
+    fn parse(mut self) -> Result<RowJson, String> {
+        self.skip_whitespace();
+        let value = self.parse_value(0)?;
+        self.skip_whitespace();
+        if self.cursor != self.bytes.len() {
+            return Err("trailing bytes after JSON value".to_string());
+        }
+        Ok(value)
+    }
+
+    fn parse_value(&mut self, depth: usize) -> Result<RowJson, String> {
+        if depth > 64 {
+            return Err("JSON nesting exceeds 64 levels".to_string());
+        }
+        self.skip_whitespace();
+        match self.bytes.get(self.cursor).copied() {
+            Some(b'n') => {
+                self.consume_literal(b"null")?;
+                Ok(RowJson::Null)
+            }
+            Some(b't') => {
+                self.consume_literal(b"true")?;
+                Ok(RowJson::Bool(true))
+            }
+            Some(b'f') => {
+                self.consume_literal(b"false")?;
+                Ok(RowJson::Bool(false))
+            }
+            Some(b'"') => self.parse_string().map(RowJson::String),
+            Some(b'[') => self.parse_array(depth + 1),
+            Some(b'{') => self.parse_object(depth + 1),
+            Some(b'-' | b'0'..=b'9') => self.parse_number().map(RowJson::Number),
+            Some(_) => Err("unexpected JSON token".to_string()),
+            None => Err("unexpected end of JSON".to_string()),
+        }
+    }
+
+    fn consume_literal(&mut self, literal: &[u8]) -> Result<(), String> {
+        if self.bytes.get(self.cursor..self.cursor + literal.len()) == Some(literal) {
+            self.cursor += literal.len();
+            Ok(())
+        } else {
+            Err("malformed JSON literal".to_string())
+        }
+    }
+
+    fn parse_array(&mut self, depth: usize) -> Result<RowJson, String> {
+        self.cursor += 1;
+        self.skip_whitespace();
+        let mut values = Vec::new();
+        if self.bytes.get(self.cursor) == Some(&b']') {
+            self.cursor += 1;
+            return Ok(RowJson::Array(values));
+        }
+        loop {
+            values.push(self.parse_value(depth)?);
+            self.skip_whitespace();
+            match self.bytes.get(self.cursor) {
+                Some(b',') => {
+                    self.cursor += 1;
+                    self.skip_whitespace();
+                }
+                Some(b']') => {
+                    self.cursor += 1;
+                    return Ok(RowJson::Array(values));
+                }
+                _ => return Err("JSON array lacks comma or closing bracket".to_string()),
+            }
+        }
+    }
+
+    fn parse_object(&mut self, depth: usize) -> Result<RowJson, String> {
+        self.cursor += 1;
+        self.skip_whitespace();
+        let mut fields = BTreeMap::new();
+        if self.bytes.get(self.cursor) == Some(&b'}') {
+            self.cursor += 1;
+            return Ok(RowJson::Object(fields));
+        }
+        loop {
+            if self.bytes.get(self.cursor) != Some(&b'"') {
+                return Err("JSON object key is not a string".to_string());
+            }
+            let key = self.parse_string()?;
+            self.skip_whitespace();
+            if self.bytes.get(self.cursor) != Some(&b':') {
+                return Err("JSON object key lacks a colon".to_string());
+            }
+            self.cursor += 1;
+            let value = self.parse_value(depth)?;
+            if fields.insert(key, value).is_some() {
+                return Err("JSON object contains a duplicate key".to_string());
+            }
+            self.skip_whitespace();
+            match self.bytes.get(self.cursor) {
+                Some(b',') => {
+                    self.cursor += 1;
+                    self.skip_whitespace();
+                }
+                Some(b'}') => {
+                    self.cursor += 1;
+                    return Ok(RowJson::Object(fields));
+                }
+                _ => return Err("JSON object lacks comma or closing brace".to_string()),
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<String, String> {
+        self.cursor += 1;
+        let mut value = String::new();
+        loop {
+            let start = self.cursor;
+            while self
+                .bytes
+                .get(self.cursor)
+                .is_some_and(|byte| *byte != b'"' && *byte != b'\\' && *byte >= 0x20)
+            {
+                self.cursor += 1;
+            }
+            if self.cursor > start {
+                let segment = core::str::from_utf8(&self.bytes[start..self.cursor])
+                    .map_err(|_| "JSON string is not UTF-8".to_string())?;
+                value.push_str(segment);
+            }
+            match self.bytes.get(self.cursor).copied() {
+                Some(b'"') => {
+                    self.cursor += 1;
+                    return Ok(value);
+                }
+                Some(b'\\') => {
+                    self.cursor += 1;
+                    match self.bytes.get(self.cursor).copied() {
+                        Some(b'"') => value.push('"'),
+                        Some(b'\\') => value.push('\\'),
+                        Some(b'/') => value.push('/'),
+                        Some(b'b') => value.push('\u{0008}'),
+                        Some(b'f') => value.push('\u{000c}'),
+                        Some(b'n') => value.push('\n'),
+                        Some(b'r') => value.push('\r'),
+                        Some(b't') => value.push('\t'),
+                        Some(b'u') => {
+                            self.cursor += 1;
+                            let first = self.parse_hex_quad()?;
+                            let scalar = if (0xd800..=0xdbff).contains(&first) {
+                                if self.bytes.get(self.cursor..self.cursor + 2) != Some(b"\\u") {
+                                    return Err("high surrogate lacks a low surrogate".to_string());
+                                }
+                                self.cursor += 2;
+                                let second = self.parse_hex_quad()?;
+                                if !(0xdc00..=0xdfff).contains(&second) {
+                                    return Err("invalid low surrogate".to_string());
+                                }
+                                0x1_0000
+                                    + ((u32::from(first) - 0xd800) << 10)
+                                    + (u32::from(second) - 0xdc00)
+                            } else {
+                                if (0xdc00..=0xdfff).contains(&first) {
+                                    return Err("unpaired low surrogate".to_string());
+                                }
+                                u32::from(first)
+                            };
+                            value.push(
+                                char::from_u32(scalar)
+                                    .ok_or_else(|| "invalid Unicode scalar".to_string())?,
+                            );
+                            continue;
+                        }
+                        _ => return Err("invalid JSON string escape".to_string()),
+                    }
+                    self.cursor += 1;
+                }
+                Some(_) => return Err("JSON string contains an unescaped control".to_string()),
+                None => return Err("unterminated JSON string".to_string()),
+            }
+        }
+    }
+
+    fn parse_hex_quad(&mut self) -> Result<u16, String> {
+        let digits = self
+            .bytes
+            .get(self.cursor..self.cursor + 4)
+            .ok_or_else(|| "short Unicode escape".to_string())?;
+        let digits =
+            core::str::from_utf8(digits).map_err(|_| "Unicode escape is not ASCII".to_string())?;
+        let value = u16::from_str_radix(digits, 16)
+            .map_err(|_| "Unicode escape is not hexadecimal".to_string())?;
+        self.cursor += 4;
+        Ok(value)
+    }
+
+    fn parse_number(&mut self) -> Result<String, String> {
+        let start = self.cursor;
+        if self.bytes.get(self.cursor) == Some(&b'-') {
+            self.cursor += 1;
+        }
+        match self.bytes.get(self.cursor).copied() {
+            Some(b'0') => self.cursor += 1,
+            Some(b'1'..=b'9') => {
+                self.cursor += 1;
+                while self.bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+                    self.cursor += 1;
+                }
+            }
+            _ => return Err("JSON number has an invalid integer part".to_string()),
+        }
+        if self.bytes.get(self.cursor) == Some(&b'.') {
+            self.cursor += 1;
+            let fraction_start = self.cursor;
+            while self.bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+                self.cursor += 1;
+            }
+            if self.cursor == fraction_start {
+                return Err("JSON number has an empty fraction".to_string());
+            }
+        }
+        if matches!(self.bytes.get(self.cursor), Some(b'e' | b'E')) {
+            self.cursor += 1;
+            if matches!(self.bytes.get(self.cursor), Some(b'+' | b'-')) {
+                self.cursor += 1;
+            }
+            let exponent_start = self.cursor;
+            while self.bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+                self.cursor += 1;
+            }
+            if self.cursor == exponent_start {
+                return Err("JSON number has an empty exponent".to_string());
+            }
+        }
+        core::str::from_utf8(&self.bytes[start..self.cursor])
+            .map(str::to_string)
+            .map_err(|_| "JSON number is not ASCII".to_string())
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(
+            self.bytes.get(self.cursor),
+            Some(b' ' | b'\n' | b'\r' | b'\t')
+        ) {
+            self.cursor += 1;
+        }
+    }
+}
+
+fn row_object(value: &RowJson) -> Result<&BTreeMap<String, RowJson>, String> {
+    match value {
+        RowJson::Object(fields) => Ok(fields),
+        _ => Err("expected a JSON object".to_string()),
+    }
+}
+
+fn row_array(value: &RowJson) -> Result<&[RowJson], String> {
+    match value {
+        RowJson::Array(values) => Ok(values),
+        _ => Err("expected a JSON array".to_string()),
+    }
+}
+
+fn row_field<'a>(
+    fields: &'a BTreeMap<String, RowJson>,
+    field: &str,
+) -> Result<&'a RowJson, String> {
+    fields
+        .get(field)
+        .ok_or_else(|| format!("missing `{field}` field"))
+}
+
+fn row_string<'a>(value: &'a RowJson, field: &str) -> Result<&'a str, String> {
+    match value {
+        RowJson::String(value) => Ok(value),
+        _ => Err(format!("`{field}` is not a string")),
+    }
+}
+
+fn row_u64(value: &RowJson, field: &str) -> Result<u64, String> {
+    match value {
+        RowJson::Number(value) => value
+            .parse()
+            .map_err(|_| format!("`{field}` is not a canonical unsigned integer")),
+        _ => Err(format!("`{field}` is not a number")),
+    }
+}
+
+fn row_u32(value: &RowJson, field: &str) -> Result<u32, String> {
+    u32::try_from(row_u64(value, field)?).map_err(|_| format!("`{field}` does not fit in u32"))
+}
+
+fn row_bool(value: &RowJson, field: &str) -> Result<bool, String> {
+    match value {
+        RowJson::Bool(value) => Ok(*value),
+        _ => Err(format!("`{field}` is not a Boolean")),
+    }
+}
+
+fn row_lower_hex(value: &str, field: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    if value.len() > max_bytes.saturating_mul(2) {
+        return Err(format!(
+            "`{field}` exceeds the {max_bytes}-byte decoded limit"
+        ));
+    }
+    if !value.len().is_multiple_of(2)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "`{field}` is not even-length lowercase hexadecimal"
+        ));
+    }
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    pairs
+        .iter()
+        .map(|pair| {
+            let digits = core::str::from_utf8(pair)
+                .map_err(|_| format!("`{field}` is not ASCII hexadecimal"))?;
+            u8::from_str_radix(digits, 16).map_err(|_| format!("`{field}` is not hexadecimal"))
+        })
+        .collect()
+}
+
+fn row_fixed_lower_hex<const N: usize>(value: &str, field: &str) -> Result<[u8; N], String> {
+    if value.len() != N.saturating_mul(2) {
+        return Err(format!("`{field}` must encode exactly {N} bytes"));
+    }
+    let bytes = row_lower_hex(value, field, N)?;
+    bytes
+        .try_into()
+        .map_err(|_| format!("`{field}` must encode exactly {N} bytes"))
+}
+
+fn row_hash(value: &RowJson, field: &str) -> Result<ContentHash, String> {
+    let encoded = row_string(value, field)?;
+    Ok(ContentHash(row_fixed_lower_hex::<32>(encoded, field)?))
+}
+
+fn row_optional_hash(value: &RowJson, field: &str) -> Result<Option<ContentHash>, String> {
+    match value {
+        RowJson::Null => Ok(None),
+        _ => row_hash(value, field).map(Some),
+    }
+}
+
+fn row_operation(value: &RowJson, field: &str) -> Result<Option<u8>, String> {
+    match value {
+        RowJson::Null => Ok(None),
+        RowJson::String(operation) => match operation.as_str() {
+            "add" => Ok(Some(interval_op_tag(IntervalOp::Add))),
+            "mul" => Ok(Some(interval_op_tag(IntervalOp::Mul))),
+            "hull" => Ok(Some(interval_op_tag(IntervalOp::Hull))),
+            _ => Err(format!("`{field}` names an unknown interval operation")),
+        },
+        _ => Err(format!("`{field}` is neither null nor a string")),
+    }
+}
+
+fn row_waiver(value: &RowJson, field: &str) -> Result<Option<Waiver>, String> {
+    if matches!(value, RowJson::Null) {
+        return Ok(None);
+    }
+    let object = row_object(value).map_err(|_| format!("`{field}` is not an object or null"))?;
+    let waiver = Waiver {
+        id: row_string(row_field(object, "id")?, "id")?.to_string(),
+        signer: row_string(row_field(object, "signer")?, "signer")?.to_string(),
+        reason: row_string(row_field(object, "reason")?, "reason")?.to_string(),
+    };
+    if let Some((invalid_field, reason)) = waiver_annotation_reason(&waiver) {
+        return Err(format!(
+            "`{field}.{invalid_field}` violates the waiver grammar ({reason})"
+        ));
+    }
+    Ok(Some(waiver))
+}
+
+struct PersistedGrant {
+    signing_payload: Vec<u8>,
+    signature: Vec<u8>,
+    retained_bytes: usize,
+}
+
+#[allow(clippy::too_many_lines)] // Complete persisted grant reconstruction is one invariant.
+fn row_grant(
+    value: &RowJson,
+    field: &str,
+    operation: Option<u8>,
+    waiver: Option<&Waiver>,
+) -> Result<Option<PersistedGrant>, String> {
+    if matches!(value, RowJson::Null) {
+        return Ok(None);
+    }
+    let waiver = waiver.ok_or_else(|| format!("`{field}` lacks its waiver annotation"))?;
+    let object = row_object(value).map_err(|_| format!("`{field}` is not an object or null"))?;
+    let expected_version = if operation.is_some() { 3 } else { 4 };
+    let payload_version = row_u64(row_field(object, "payload_version")?, "payload_version")?;
+    if payload_version != expected_version {
+        return Err(format!(
+            "`{field}.payload_version` is {payload_version}, expected {expected_version}"
+        ));
+    }
+    if !row_bool(row_field(object, "authorized")?, "authorized")? {
+        return Err(format!("`{field}.authorized` is not true"));
+    }
+    let key_id = row_string(row_field(object, "key_id")?, "key_id")?;
+    let scope = row_string(row_field(object, "scope")?, "scope")?;
+    let node_name = row_string(row_field(object, "node_name")?, "node_name")?;
+    let claimed_color = row_lower_hex(
+        row_string(row_field(object, "claimed_color_hex")?, "claimed_color_hex")?,
+        "claimed_color_hex",
+        MAX_CLAIMED_COLOR_BYTES,
+    )?;
+    if claimed_color.is_empty() || claimed_color.len() > MAX_CLAIMED_COLOR_BYTES {
+        return Err(format!(
+            "`{field}.claimed_color_hex` has an invalid decoded length"
+        ));
+    }
+    let parent_values = row_array(row_field(object, "parent_hashes")?)?;
+    if parent_values.len() > MAX_COLOR_PARENTS {
+        return Err(format!("`{field}.parent_hashes` exceeds the parent limit"));
+    }
+    let parent_hashes = parent_values
+        .iter()
+        .map(|value| row_hash(value, "parent_hashes[]"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let expires_day = row_u32(row_field(object, "expires_day")?, "expires_day")?;
+    let signing_payload = row_lower_hex(
+        row_string(
+            row_field(object, "signing_payload_hex")?,
+            "signing_payload_hex",
+        )?,
+        "signing_payload_hex",
+        MAX_WAIVER_CLOSURE_BYTES,
+    )?;
+    let signature = row_lower_hex(
+        row_string(row_field(object, "signature_hex")?, "signature_hex")?,
+        "signature_hex",
+        MAX_WAIVER_SIGNATURE_BYTES,
+    )?;
+    if signature.is_empty() || signature.len() > MAX_WAIVER_SIGNATURE_BYTES {
+        return Err(format!(
+            "`{field}.signature_hex` has an invalid decoded length"
+        ));
+    }
+    let retained_bytes = [
+        waiver.id.len(),
+        waiver.signer.len(),
+        waiver.reason.len(),
+        key_id.len(),
+        scope.len(),
+        node_name.len(),
+        claimed_color.len(),
+        signature.len(),
+    ]
+    .into_iter()
+    .try_fold(256usize, usize::checked_add)
+    .and_then(|bytes| {
+        parent_hashes
+            .len()
+            .checked_mul(32)
+            .and_then(|hash_bytes| bytes.checked_add(hash_bytes))
+    })
+    .ok_or_else(|| format!("`{field}` retained-byte count overflowed"))?;
+
+    let mut reconstructed = vec![u8::try_from(expected_version).expect("version is 3 or 4")];
+    push_field(&mut reconstructed, WAIVER_PAYLOAD_DOMAIN);
+    reconstructed.push(operation.unwrap_or(0));
+    for text in [key_id, scope, node_name] {
+        push_field(&mut reconstructed, text.as_bytes());
+    }
+    push_field(&mut reconstructed, &claimed_color);
+    for text in [
+        waiver.id.as_str(),
+        waiver.signer.as_str(),
+        waiver.reason.as_str(),
+    ] {
+        push_field(&mut reconstructed, text.as_bytes());
+    }
+    push_len(&mut reconstructed, parent_hashes.len());
+    for hash in parent_hashes {
+        reconstructed.extend_from_slice(hash.as_bytes());
+    }
+    reconstructed.extend_from_slice(&expires_day.to_le_bytes());
+    if signing_payload != reconstructed {
+        return Err(format!(
+            "`{field}.signing_payload_hex` does not reconstruct from persisted grant fields"
+        ));
+    }
+    Ok(Some(PersistedGrant {
+        signing_payload,
+        signature,
+        retained_bytes,
+    }))
+}
+
+#[derive(Debug)]
+struct PersistedDemotion {
+    parent_index: usize,
+    parent_id: u64,
+    dataset: String,
+    axis: String,
+    value_bits: u64,
+}
+
+#[derive(Clone, Copy)]
+struct RowErrorContext {
+    row: usize,
+    node: Option<u64>,
+}
+
+impl RowErrorContext {
+    fn malformed(self, why: impl Into<String>) -> ColorRowVerificationError {
+        ColorRowVerificationError::Malformed {
+            row: self.row,
+            node: self.node,
+            why: why.into(),
+        }
+    }
+
+    fn decode<T>(self, result: Result<T, String>) -> Result<T, ColorRowVerificationError> {
+        result.map_err(|why| self.malformed(why))
+    }
+}
+
+/// Independently parse, reconstruct, and rehash a canonical persisted color
+/// row stream. This path consumes only JSON rows: it never consults a
+/// [`ColorGraph`], [`ColorNode`], or in-memory [`Color`]. Parent hashes come
+/// from earlier accepted `color-write` rows, while immediately preceding
+/// demotion rows are folded into the named node's exact v9 preimage.
+///
+/// Schema-v7 color rows, schema-v1 demotion rows, node-hash v9, and the current
+/// color algebra are accepted literally. Every other version is refused; no
+/// legacy display JSON is guessed or silently migrated. Exact lowercase
+/// `color_canonical_hex`, `origin_canonical_hex`, IEEE-754 demotion bits,
+/// grant payloads/signatures, policy fingerprints, and authority closure are
+/// the persisted preimage inputs.
+///
+/// # Errors
+/// [`ColorRowVerificationError`] names the first malformed, unsupported, or
+/// hash-divergent row.
+#[allow(clippy::too_many_lines)] // The field order mirrors the security-critical v9 preimage.
+pub fn verify_color_row_stream(
+    rows: &[String],
+) -> Result<ColorRowVerification, ColorRowVerificationError> {
+    let mut hashes = Vec::<ContentHash>::new();
+    let mut pending_demotions = Vec::<PersistedDemotion>::new();
+    let mut demotion_count = 0usize;
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let initial = RowErrorContext {
+            row: row_index,
+            node: None,
+        };
+        let parsed = initial.decode(RowJsonParser::new(row).parse())?;
+        let object = initial.decode(row_object(&parsed))?;
+        let event = initial.decode(
+            row_field(object, "event")
+                .and_then(|value| row_string(value, "event"))
+                .map(str::to_string),
+        )?;
+        let node =
+            initial.decode(row_field(object, "node").and_then(|value| row_u64(value, "node")))?;
+        let context = RowErrorContext {
+            row: row_index,
+            node: Some(node),
+        };
+        let expected_node = u64::try_from(hashes.len())
+            .map_err(|_| context.malformed("verified node count no longer fits in u64"))?;
+
+        match event.as_str() {
+            "demotion" => {
+                let schema = context.decode(
+                    row_field(object, "schema_version")
+                        .and_then(|value| row_u64(value, "schema_version")),
+                )?;
+                if schema != u64::from(COLOR_DEMOTION_ROW_SCHEMA_VERSION) {
+                    return Err(ColorRowVerificationError::UnsupportedSchemaVersion {
+                        row: row_index,
+                        node,
+                        event: "demotion",
+                        found: schema,
+                        expected: u64::from(COLOR_DEMOTION_ROW_SCHEMA_VERSION),
+                    });
+                }
+                if node != expected_node {
+                    return Err(context.malformed(format!(
+                        "demotion must precede the next node {expected_node}, not node {node}"
+                    )));
+                }
+                let parent_index_u64 = context.decode(
+                    row_field(object, "parent_index")
+                        .and_then(|value| row_u64(value, "parent_index")),
+                )?;
+                let parent_index = usize::try_from(parent_index_u64)
+                    .map_err(|_| context.malformed("parent_index does not fit in usize"))?;
+                if pending_demotions
+                    .last()
+                    .is_some_and(|previous| previous.parent_index >= parent_index)
+                {
+                    return Err(
+                        context.malformed("demotion parent indexes are not strictly increasing")
+                    );
+                }
+                let parent_id = context.decode(
+                    row_field(object, "parent").and_then(|value| row_u64(value, "parent")),
+                )?;
+                let dataset = context.decode(
+                    row_field(object, "dataset")
+                        .and_then(|value| row_string(value, "dataset"))
+                        .map(str::to_string),
+                )?;
+                let axis = context.decode(
+                    row_field(object, "axis")
+                        .and_then(|value| row_string(value, "axis"))
+                        .map(str::to_string),
+                )?;
+                let value_bits = context.decode(
+                    row_field(object, "value_bits")
+                        .and_then(|value| row_string(value, "value_bits"))
+                        .and_then(|value| row_fixed_lower_hex::<8>(value, "value_bits")),
+                )?;
+                match context.decode(row_field(object, "value"))? {
+                    RowJson::Number(_) | RowJson::String(_) => {}
+                    _ => {
+                        return Err(context.malformed(
+                            "demotion display value is neither a number nor a tagged string",
+                        ));
+                    }
+                }
+                pending_demotions.push(PersistedDemotion {
+                    parent_index,
+                    parent_id,
+                    dataset,
+                    axis,
+                    value_bits: u64::from_be_bytes(value_bits),
+                });
+                demotion_count += 1;
+            }
+            "color-write" => {
+                let schema = context.decode(
+                    row_field(object, "schema_version")
+                        .and_then(|value| row_u64(value, "schema_version")),
+                )?;
+                if schema != u64::from(COLOR_WRITE_ROW_SCHEMA_VERSION) {
+                    return Err(ColorRowVerificationError::UnsupportedSchemaVersion {
+                        row: row_index,
+                        node,
+                        event: "color-write",
+                        found: schema,
+                        expected: u64::from(COLOR_WRITE_ROW_SCHEMA_VERSION),
+                    });
+                }
+                if node != expected_node {
+                    return Err(context.malformed(format!(
+                        "node ids must be dense in stream order; expected {expected_node}"
+                    )));
+                }
+                let hash_version = context.decode(
+                    row_field(object, "node_hash_version")
+                        .and_then(|value| row_u64(value, "node_hash_version")),
+                )?;
+                if hash_version != u64::from(COLOR_NODE_HASH_ENCODING_VERSION) {
+                    return Err(ColorRowVerificationError::UnsupportedNodeHashVersion {
+                        row: row_index,
+                        node,
+                        found: hash_version,
+                        expected: u64::from(COLOR_NODE_HASH_ENCODING_VERSION),
+                    });
+                }
+                let algebra_version = context.decode(
+                    row_field(object, "color_algebra_version")
+                        .and_then(|value| row_u64(value, "color_algebra_version")),
+                )?;
+                if algebra_version != u64::from(COLOR_ALGEBRA_VERSION) {
+                    return Err(ColorRowVerificationError::UnsupportedColorAlgebraVersion {
+                        row: row_index,
+                        node,
+                        found: algebra_version,
+                        expected: u64::from(COLOR_ALGEBRA_VERSION),
+                    });
+                }
+
+                let operation = context.decode(
+                    row_field(object, "operation")
+                        .and_then(|value| row_operation(value, "operation")),
+                )?;
+                let name = context.decode(
+                    row_field(object, "name")
+                        .and_then(|value| row_string(value, "name"))
+                        .map(str::to_string),
+                )?;
+                if let Some(reason) = identity_reason(&name) {
+                    return Err(context.malformed(format!(
+                        "node name violates the canonical identity grammar ({reason})"
+                    )));
+                }
+                let color_name = context.decode(
+                    row_field(object, "color").and_then(|value| row_string(value, "color")),
+                )?;
+                if !matches!(color_name, "verified" | "validated" | "estimated") {
+                    return Err(context.malformed("color names an unknown evidence rank"));
+                }
+                context.decode(row_field(object, "payload").and_then(row_object))?;
+                let color_bytes = context.decode(
+                    row_field(object, "color_canonical_hex")
+                        .and_then(|value| row_string(value, "color_canonical_hex"))
+                        .and_then(|value| {
+                            row_lower_hex(value, "color_canonical_hex", MAX_CLAIMED_COLOR_BYTES)
+                        }),
+                )?;
+                if color_bytes.is_empty() || color_bytes.len() > MAX_CLAIMED_COLOR_BYTES {
+                    return Err(
+                        context.malformed("color_canonical_hex has an invalid decoded length")
+                    );
+                }
+                let rank_tag = match color_name {
+                    "verified" => 0,
+                    "validated" => 1,
+                    "estimated" => 2,
+                    _ => unreachable!("color rank was validated above"),
+                };
+                if color_bytes.first() != Some(&(COLOR_ALGEBRA_VERSION as u8))
+                    || color_bytes.get(1) != Some(&rank_tag)
+                {
+                    return Err(context
+                        .malformed("canonical color header disagrees with the row algebra/rank"));
+                }
+                let parent_values =
+                    context.decode(row_field(object, "parents").and_then(row_array))?;
+                if parent_values.len() > MAX_COLOR_PARENTS {
+                    return Err(context.malformed("parent list exceeds the verifier limit"));
+                }
+                let parents = parent_values
+                    .iter()
+                    .map(|value| row_u64(value, "parents[]"))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|why| context.malformed(why))?;
+                if parents.is_empty() != operation.is_none() {
+                    return Err(context.malformed(
+                        "source/derived parent shape disagrees with operation presence",
+                    ));
+                }
+                for &parent in &parents {
+                    let parent_index = usize::try_from(parent)
+                        .map_err(|_| context.malformed("parent id does not fit in usize"))?;
+                    if parent_index >= hashes.len() {
+                        return Err(context.malformed(format!(
+                            "parent {parent} does not name an earlier accepted row"
+                        )));
+                    }
+                }
+                for demotion in &pending_demotions {
+                    if parents.get(demotion.parent_index) != Some(&demotion.parent_id) {
+                        return Err(context.malformed(
+                            "demotion parent position/id disagrees with the color-write row",
+                        ));
+                    }
+                }
+
+                let origin_bytes =
+                    match context.decode(row_field(object, "origin_canonical_hex"))? {
+                        RowJson::Null => None,
+                        value => {
+                            let bytes = context.decode(
+                                row_string(value, "origin_canonical_hex").and_then(|value| {
+                                    row_lower_hex(
+                                        value,
+                                        "origin_canonical_hex",
+                                        MAX_CLAIMED_COLOR_BYTES,
+                                    )
+                                }),
+                            )?;
+                            if bytes.is_empty() {
+                                return Err(context
+                                    .malformed("origin_canonical_hex is empty instead of null"));
+                            }
+                            Some(bytes)
+                        }
+                    };
+                let origin_present = match context.decode(row_field(object, "origin"))? {
+                    RowJson::Null => false,
+                    value => {
+                        context.decode(row_object(value))?;
+                        true
+                    }
+                };
+                if origin_present != origin_bytes.is_some() {
+                    return Err(context.malformed(
+                        "origin display object disagrees with exact origin-byte presence",
+                    ));
+                }
+                let origin_policy = context.decode(
+                    row_field(object, "origin_policy_fingerprint")
+                        .and_then(|value| row_optional_hash(value, "origin_policy_fingerprint")),
+                )?;
+                if origin_bytes.is_some() != origin_policy.is_some() {
+                    return Err(context.malformed(
+                        "exact source origin and admitting policy must appear together",
+                    ));
+                }
+                if origin_bytes.is_some() && !parents.is_empty() {
+                    return Err(
+                        context.malformed("derived row carries source-only origin metadata")
+                    );
+                }
+
+                let dependency_values =
+                    context.decode(row_field(object, "waiver_dependencies").and_then(row_array))?;
+                if dependency_values.len() > MAX_WAIVER_DEPENDENCIES {
+                    return Err(
+                        context.malformed("waiver dependency list exceeds the verifier limit")
+                    );
+                }
+                let mut dependencies = Vec::with_capacity(dependency_values.len());
+                let mut previous_authority = None;
+                let mut closure_bytes = 0usize;
+                for dependency_value in dependency_values {
+                    let dependency = context.decode(row_object(dependency_value))?;
+                    let authorizing_node = context.decode(
+                        row_field(dependency, "authorizing_node")
+                            .and_then(|value| row_u64(value, "authorizing_node")),
+                    )?;
+                    if authorizing_node >= node
+                        || previous_authority.is_some_and(|previous| previous >= authorizing_node)
+                    {
+                        return Err(context.malformed(
+                            "waiver dependencies are not unique earlier nodes in ascending order",
+                        ));
+                    }
+                    previous_authority = Some(authorizing_node);
+                    let dependency_operation = context.decode(
+                        row_field(dependency, "operation")
+                            .and_then(|value| row_operation(value, "dependency.operation")),
+                    )?;
+                    let policy = context.decode(
+                        row_field(dependency, "policy_fingerprint")
+                            .and_then(|value| row_hash(value, "policy_fingerprint")),
+                    )?;
+                    let admission_day = context.decode(
+                        row_field(dependency, "admission_day")
+                            .and_then(|value| row_u32(value, "admission_day")),
+                    )?;
+                    let dependency_waiver = context.decode(
+                        row_field(dependency, "waiver")
+                            .and_then(|value| row_waiver(value, "dependency.waiver")),
+                    )?;
+                    let grant = context
+                        .decode(row_field(dependency, "grant").and_then(|value| {
+                            row_grant(
+                                value,
+                                "dependency.grant",
+                                dependency_operation,
+                                dependency_waiver.as_ref(),
+                            )
+                        }))?
+                        .ok_or_else(|| {
+                            context.malformed("waiver dependency carries a null grant")
+                        })?;
+                    closure_bytes = closure_bytes
+                        .checked_add(grant.retained_bytes)
+                        .ok_or_else(|| context.malformed("waiver closure byte count overflowed"))?;
+                    if closure_bytes > MAX_WAIVER_CLOSURE_BYTES {
+                        return Err(
+                            context.malformed("waiver closure exceeds the verifier byte limit")
+                        );
+                    }
+                    dependencies.push((
+                        authorizing_node,
+                        dependency_operation,
+                        grant,
+                        policy,
+                        admission_day,
+                    ));
+                }
+
+                let waiver = context.decode(
+                    row_field(object, "waiver").and_then(|value| row_waiver(value, "waiver")),
+                )?;
+                let grant = context.decode(
+                    row_field(object, "grant")
+                        .and_then(|value| row_grant(value, "grant", operation, waiver.as_ref())),
+                )?;
+                if let Some(grant) = &grant {
+                    closure_bytes = closure_bytes
+                        .checked_add(grant.retained_bytes)
+                        .ok_or_else(|| context.malformed("waiver closure byte count overflowed"))?;
+                    if closure_bytes > MAX_WAIVER_CLOSURE_BYTES {
+                        return Err(
+                            context.malformed("waiver closure exceeds the verifier byte limit")
+                        );
+                    }
+                }
+                let waiver_policy = context.decode(
+                    row_field(object, "waiver_policy_fingerprint")
+                        .and_then(|value| row_optional_hash(value, "waiver_policy_fingerprint")),
+                )?;
+                let waiver_day = match context.decode(row_field(object, "waiver_admission_day"))? {
+                    RowJson::Null => None,
+                    value => Some(context.decode(row_u32(value, "waiver_admission_day"))?),
+                };
+                if grant.is_some() != waiver_policy.is_some()
+                    || grant.is_some() != waiver_day.is_some()
+                {
+                    return Err(context.malformed(
+                        "direct grant, policy fingerprint, and admission day must appear together",
+                    ));
+                }
+                if parents.is_empty() && !dependencies.is_empty() {
+                    return Err(context
+                        .malformed("source row carries an impossible transitive waiver closure"));
+                }
+
+                let mut preimage = vec![COLOR_NODE_HASH_ENCODING_VERSION];
+                push_field(&mut preimage, COLOR_NODE_HASH_DOMAIN);
+                if let Some(operation) = operation {
+                    preimage.push(1);
+                    preimage.push(operation);
+                } else {
+                    preimage.push(0);
+                }
+                push_field(&mut preimage, name.as_bytes());
+                push_field(&mut preimage, &color_bytes);
+                push_len(&mut preimage, parents.len());
+                for parent in &parents {
+                    let index = usize::try_from(*parent)
+                        .map_err(|_| context.malformed("parent id does not fit in usize"))?;
+                    push_field(&mut preimage, hashes[index].as_bytes());
+                }
+                push_len(&mut preimage, pending_demotions.len());
+                for demotion in &pending_demotions {
+                    push_len(&mut preimage, demotion.parent_index);
+                    preimage.extend_from_slice(&demotion.parent_id.to_le_bytes());
+                    push_field(&mut preimage, demotion.dataset.as_bytes());
+                    push_field(&mut preimage, demotion.axis.as_bytes());
+                    preimage.extend_from_slice(&demotion.value_bits.to_le_bytes());
+                }
+                if let Some(origin_bytes) = &origin_bytes {
+                    preimage.push(1);
+                    preimage.extend_from_slice(origin_bytes);
+                } else {
+                    preimage.push(0);
+                }
+                if let Some(policy) = origin_policy {
+                    preimage.push(1);
+                    preimage.extend_from_slice(policy.as_bytes());
+                } else {
+                    preimage.push(0);
+                }
+                push_len(&mut preimage, dependencies.len());
+                for (authorizing_node, operation, grant, policy, admission_day) in dependencies {
+                    preimage.extend_from_slice(&authorizing_node.to_le_bytes());
+                    if let Some(operation) = operation {
+                        preimage.push(1);
+                        preimage.push(operation);
+                    } else {
+                        preimage.push(0);
+                    }
+                    push_field(&mut preimage, &grant.signing_payload);
+                    push_field(&mut preimage, &grant.signature);
+                    preimage.extend_from_slice(policy.as_bytes());
+                    preimage.extend_from_slice(&admission_day.to_le_bytes());
+                }
+                if let Some(waiver) = &waiver {
+                    preimage.push(1);
+                    push_field(&mut preimage, waiver.id.as_bytes());
+                    push_field(&mut preimage, waiver.signer.as_bytes());
+                    push_field(&mut preimage, waiver.reason.as_bytes());
+                } else {
+                    preimage.push(0);
+                }
+                if let Some(grant) = grant {
+                    preimage.push(1);
+                    push_field(&mut preimage, &grant.signing_payload);
+                    push_field(&mut preimage, &grant.signature);
+                } else {
+                    preimage.push(0);
+                }
+                if let Some(policy) = waiver_policy {
+                    preimage.push(1);
+                    preimage.extend_from_slice(policy.as_bytes());
+                } else {
+                    preimage.push(0);
+                }
+                if let Some(day) = waiver_day {
+                    preimage.push(1);
+                    preimage.extend_from_slice(&day.to_le_bytes());
+                } else {
+                    preimage.push(0);
+                }
+
+                let reconstructed = hash_bytes(&preimage);
+                let stored = context
+                    .decode(row_field(object, "hash").and_then(|value| row_hash(value, "hash")))?;
+                if reconstructed != stored {
+                    return Err(ColorRowVerificationError::HashMismatch {
+                        row: row_index,
+                        node,
+                        stored,
+                        reconstructed,
+                    });
+                }
+                hashes.push(stored);
+                pending_demotions.clear();
+            }
+            _ => {
+                return Err(context.malformed(format!("unsupported color-row event {event:?}")));
+            }
+        }
+    }
+
+    if !pending_demotions.is_empty() {
+        return Err(ColorRowVerificationError::Malformed {
+            row: rows.len(),
+            node: u64::try_from(hashes.len()).ok(),
+            why: "stream ended before pending demotions' color-write row".to_string(),
+        });
+    }
+    Ok(ColorRowVerification {
+        node_count: hashes.len(),
+        demotion_count,
+        terminal_hash: hashes.last().copied(),
+    })
+}
+
 /// Stable identity of the ledger color-admission policy (bead 6pf9): binds
 /// the row schema and algebra versions the authority mints receipts under.
 #[must_use]

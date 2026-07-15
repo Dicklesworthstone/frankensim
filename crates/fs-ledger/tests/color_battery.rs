@@ -5,16 +5,16 @@
 //! JSON-line verdicts; seeded cases carry seeds.
 
 use fs_evidence::{
-    Color, ColorError, ColorRank, IntervalOp, ModelEvidence, NumericalCertificate, ValidityDomain,
-    check_regime, color_of, compose, verified_from,
+    Color, ColorError, ColorRank, IntervalOp, MAX_COLOR_IDENTITY_BYTES, ModelEvidence,
+    NumericalCertificate, ValidityDomain, check_regime, color_of, compose, verified_from,
 };
 use fs_ledger::colors::MAX_COLOR_NODE_NAME_BYTES;
 use fs_ledger::{
-    ColorGraph, ColorStructureRejection, ColorWriteError, MAX_COLOR_PARENTS, MAX_VALIDITY_AXES,
-    NoSourceOriginVerifier, NoWaiverVerifier, PolicyDecision, SourceOrigin, SourceOriginRejection,
-    SourceOriginRequest, SourceOriginVerifier, WAIVER_SCOPE_COLOR_UPGRADE,
-    WAIVER_SCOPE_SOURCE_COLOR, Waiver, WaiverDependency, WaiverGrant, WaiverRejection,
-    WaiverVerifier, hash_bytes,
+    ColorGraph, ColorRowVerificationError, ColorStructureRejection, ColorWriteError,
+    MAX_COLOR_PARENTS, MAX_VALIDITY_AXES, NoSourceOriginVerifier, NoWaiverVerifier, PolicyDecision,
+    SourceOrigin, SourceOriginRejection, SourceOriginRequest, SourceOriginVerifier,
+    WAIVER_SCOPE_COLOR_UPGRADE, WAIVER_SCOPE_SOURCE_COLOR, Waiver, WaiverDependency, WaiverGrant,
+    WaiverRejection, WaiverVerifier, hash_bytes, verify_color_row_stream,
 };
 use std::cell::Cell;
 use std::collections::BTreeMap as KeyMap;
@@ -1372,6 +1372,18 @@ fn col_011_serialized_grant_reverifies_and_tamper_refuses() {
             .verify(serialized_key, &serialized_payload, &tampered_signature)
             .accepted()
     );
+    let row_verification = verify_color_row_stream(graph.rows())
+        .expect("row-only verifier reconstructs the signed-grant preimage");
+    assert_eq!(row_verification.node_count(), 2);
+    assert_eq!(
+        row_verification.terminal_hash(),
+        Some(
+            graph
+                .node(node)
+                .expect("waived node remains present")
+                .hash()
+        )
+    );
 
     verdict(
         "col-011",
@@ -2665,6 +2677,9 @@ fn col_016_waiver_dependencies_propagate_transitively() {
     graph
         .verify_replay()
         .expect("multi-generation waiver union replays");
+    let row_verification = verify_color_row_stream(graph.rows())
+        .expect("row-only verifier reconstructs the transitive waiver closure");
+    assert_eq!(row_verification.node_count(), graph.nodes().len());
 }
 
 /// col-017 — authenticated metadata is structural data, not something an
@@ -2795,6 +2810,246 @@ fn col_017_waiver_shape_taint_and_resource_limits_fail_closed() {
     graph.verify_replay().expect("accepted prefix replays");
 }
 
+/// col-018 — a persisted row stream independently reconstructs every v9
+/// provenance hash from exact row bytes alone. The frozen canonical-byte
+/// sentinels cover signed zero, non-finite dispersion/interval endpoints,
+/// a maximum-length identity, and both validated and derived nodes. Prior
+/// row/hash/algebra versions refuse instead of falling back to display JSON.
+#[test]
+#[allow(clippy::too_many_lines)] // one exact-byte golden and refusal matrix
+fn col_018_row_only_reconstruction_is_exact_and_versioned() {
+    const POSITIVE_ZERO_GOLDEN: &str =
+        "020208000000000000007a65726f2d726f6d08000000000000000000000000000000";
+    const NEGATIVE_ZERO_GOLDEN: &str =
+        "020208000000000000007a65726f2d726f6d08000000000000000000000000000080";
+    const INFINITE_DISPERSION_GOLDEN: &str =
+        "02020700000000000000696e662d726f6d0800000000000000000000000000f07f";
+    const INFINITE_INTERVAL_GOLDEN: &str =
+        "02000800000000000000000000000000f0ff0800000000000000000000000000f07f";
+    const VALIDATED_GOLDEN: &str = concat!(
+        "02010900000000000000646174617365742d61",
+        "010000000000000002000000000000007265",
+        "08000000000000000000000000000000",
+        "08000000000000000000000000002440",
+    );
+
+    let positive_zero = Color::Estimated {
+        estimator: "zero-rom".to_string(),
+        dispersion: 0.0,
+    };
+    let negative_zero = Color::Estimated {
+        estimator: "zero-rom".to_string(),
+        dispersion: -0.0,
+    };
+    let infinite_dispersion = Color::Estimated {
+        estimator: "inf-rom".to_string(),
+        dispersion: f64::INFINITY,
+    };
+    let infinite_interval = Color::Verified {
+        lo: f64::NEG_INFINITY,
+        hi: f64::INFINITY,
+    };
+    let validated_color = Color::Validated {
+        regime: ValidityDomain::unconstrained().with("re", 0.0, 10.0),
+        dataset: "dataset-a".to_string(),
+    };
+    let long_estimator = format!(
+        "long-estimator-{}",
+        "x".repeat(MAX_COLOR_IDENTITY_BYTES - "long-estimator-".len())
+    );
+    assert_eq!(long_estimator.len(), MAX_COLOR_IDENTITY_BYTES);
+    let long_color = Color::Estimated {
+        estimator: long_estimator,
+        dispersion: 0.25,
+    };
+
+    assert_eq!(
+        test_hex(&positive_zero.canonical_bytes()),
+        POSITIVE_ZERO_GOLDEN
+    );
+    assert_eq!(
+        test_hex(&negative_zero.canonical_bytes()),
+        NEGATIVE_ZERO_GOLDEN
+    );
+    assert_eq!(
+        test_hex(&infinite_dispersion.canonical_bytes()),
+        INFINITE_DISPERSION_GOLDEN
+    );
+    assert_eq!(
+        test_hex(&infinite_interval.canonical_bytes()),
+        INFINITE_INTERVAL_GOLDEN
+    );
+    assert_eq!(
+        test_hex(&validated_color.canonical_bytes()),
+        VALIDATED_GOLDEN
+    );
+
+    let mut graph = ColorGraph::new();
+    let positive_id = write_source(&mut graph, "signed-zero", positive_zero.clone());
+    let negative_id = write_source(&mut graph, "signed-zero", negative_zero.clone());
+    let infinite_dispersion_id = write_source(
+        &mut graph,
+        "non-finite-dispersion",
+        infinite_dispersion.clone(),
+    );
+    let infinite_interval_id =
+        write_source(&mut graph, "non-finite-interval", infinite_interval.clone());
+    let validated_id = write_source(&mut graph, "validated", validated_color.clone());
+    let derived_id = graph
+        .derive(
+            "validated-derived",
+            &[validated_id],
+            IntervalOp::Hull,
+            None,
+            &BTreeMap::from([("re".to_string(), 5.0)]),
+            None,
+        )
+        .expect("in-regime validated derivation");
+    graph
+        .derive(
+            "validated-demoted",
+            &[validated_id],
+            IntervalOp::Hull,
+            None,
+            &BTreeMap::from([("re".to_string(), 20.0)]),
+            None,
+        )
+        .expect("out-of-regime derivation retains exact demotion bits");
+    let long_id = write_source(&mut graph, "long-identity", long_color.clone());
+
+    let color_hex = |node: u64| {
+        graph
+            .rows()
+            .iter()
+            .find(|row| {
+                row.contains("\"event\":\"color-write\"")
+                    && row.contains(&format!("\"node\":{node},"))
+            })
+            .and_then(|row| json_string_field(row, "color_canonical_hex"))
+            .expect("node has one exact canonical-color field")
+    };
+    assert_eq!(color_hex(positive_id), POSITIVE_ZERO_GOLDEN);
+    assert_eq!(color_hex(negative_id), NEGATIVE_ZERO_GOLDEN);
+    assert_eq!(
+        color_hex(infinite_dispersion_id),
+        INFINITE_DISPERSION_GOLDEN
+    );
+    assert_eq!(color_hex(infinite_interval_id), INFINITE_INTERVAL_GOLDEN);
+    assert_eq!(color_hex(validated_id), VALIDATED_GOLDEN);
+    assert_eq!(color_hex(derived_id), VALIDATED_GOLDEN);
+    assert_eq!(
+        color_hex(long_id),
+        test_hex(&long_color.canonical_bytes()),
+        "the maximum-length identity round-trips without display truncation"
+    );
+    assert_ne!(
+        graph.node(positive_id).expect("positive zero node").hash(),
+        graph.node(negative_id).expect("negative zero node").hash(),
+        "same-name sources differ only in signed-zero canonical bytes"
+    );
+
+    let verification = verify_color_row_stream(graph.rows())
+        .expect("row-only verifier reconstructs every exact hash");
+    assert_eq!(verification.node_count(), graph.nodes().len());
+    assert_eq!(verification.demotion_count(), 1);
+    assert_eq!(
+        verification.terminal_hash(),
+        Some(graph.node(long_id).expect("terminal node").hash())
+    );
+
+    let positive_row = graph
+        .rows()
+        .iter()
+        .position(|row| {
+            row.contains("\"event\":\"color-write\"")
+                && row.contains(&format!("\"node\":{positive_id},"))
+        })
+        .expect("positive-zero row position");
+    let mut tampered_hex = POSITIVE_ZERO_GOLDEN.to_string();
+    tampered_hex.replace_range(tampered_hex.len() - 1.., "1");
+    let mut tampered_rows = graph.rows().to_vec();
+    tampered_rows[positive_row] = tampered_rows[positive_row].replacen(
+        &format!("\"color_canonical_hex\":\"{POSITIVE_ZERO_GOLDEN}\""),
+        &format!("\"color_canonical_hex\":\"{tampered_hex}\""),
+        1,
+    );
+    assert!(matches!(
+        verify_color_row_stream(&tampered_rows),
+        Err(ColorRowVerificationError::HashMismatch { node, .. }) if node == positive_id
+    ));
+
+    let mut prior_schema = graph.rows().to_vec();
+    prior_schema[positive_row] =
+        prior_schema[positive_row].replacen("\"schema_version\":7", "\"schema_version\":6", 1);
+    assert!(matches!(
+        verify_color_row_stream(&prior_schema),
+        Err(ColorRowVerificationError::UnsupportedSchemaVersion {
+            event: "color-write",
+            found: 6,
+            expected: 7,
+            ..
+        })
+    ));
+
+    let mut prior_hash = graph.rows().to_vec();
+    prior_hash[positive_row] =
+        prior_hash[positive_row].replacen("\"node_hash_version\":9", "\"node_hash_version\":8", 1);
+    assert!(matches!(
+        verify_color_row_stream(&prior_hash),
+        Err(ColorRowVerificationError::UnsupportedNodeHashVersion {
+            found: 8,
+            expected: 9,
+            ..
+        })
+    ));
+
+    let mut prior_algebra = graph.rows().to_vec();
+    prior_algebra[positive_row] = prior_algebra[positive_row].replacen(
+        "\"color_algebra_version\":2",
+        "\"color_algebra_version\":1",
+        1,
+    );
+    assert!(matches!(
+        verify_color_row_stream(&prior_algebra),
+        Err(ColorRowVerificationError::UnsupportedColorAlgebraVersion {
+            found: 1,
+            expected: 2,
+            ..
+        })
+    ));
+
+    let demotion_row = graph
+        .rows()
+        .iter()
+        .position(|row| row.contains("\"event\":\"demotion\""))
+        .expect("demotion row position");
+    let mut prior_demotion = graph.rows().to_vec();
+    prior_demotion[demotion_row] =
+        prior_demotion[demotion_row].replacen("\"schema_version\":1", "\"schema_version\":0", 1);
+    assert!(matches!(
+        verify_color_row_stream(&prior_demotion),
+        Err(ColorRowVerificationError::UnsupportedSchemaVersion {
+            event: "demotion",
+            found: 0,
+            expected: 1,
+            ..
+        })
+    ));
+
+    let uppercase_hex = POSITIVE_ZERO_GOLDEN.replacen('a', "A", 1);
+    let mut noncanonical_hex = graph.rows().to_vec();
+    noncanonical_hex[positive_row] = noncanonical_hex[positive_row].replacen(
+        &format!("\"color_canonical_hex\":\"{POSITIVE_ZERO_GOLDEN}\""),
+        &format!("\"color_canonical_hex\":\"{uppercase_hex}\""),
+        1,
+    );
+    assert!(matches!(
+        verify_color_row_stream(&noncanonical_hex),
+        Err(ColorRowVerificationError::Malformed { node, .. })
+            if node == Some(positive_id)
+    ));
+}
+
 /// col-007 — color rows remain strict JSON when fail-closed demotion emits
 /// non-finite sentinels and caller-controlled metadata contains JSON syntax or
 /// control characters. Validation goes through the ledger's SQLite `json_valid`
@@ -2853,6 +3108,10 @@ fn col_007_color_rows_are_strict_json_under_hostile_metadata() {
     };
 
     let rows = build(f64::NAN);
+    let row_verification = verify_color_row_stream(&rows)
+        .expect("row-only verifier accepts exact non-finite bits and escaped metadata");
+    assert_eq!(row_verification.node_count(), 4);
+    assert_eq!(row_verification.demotion_count(), 1);
     let deterministic = rows == build(f64::NAN);
     let alternate_nan_rows = build(f64::from_bits(0x7ff8_0000_0000_0001));
     let ledger = fs_ledger::Ledger::open(":memory:").expect("open validation ledger");

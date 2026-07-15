@@ -27,11 +27,12 @@ pub mod vcs;
 
 pub use colors::{
     COLOR_DEMOTION_ROW_SCHEMA_VERSION, COLOR_WRITE_ROW_SCHEMA_VERSION, ColorDemotion, ColorGraph,
-    ColorNode, ColorReplayError, ColorStructureRejection, ColorWriteError, MAX_COLOR_PARENTS,
-    MAX_VALIDITY_AXES, MAX_WAIVER_CLOSURE_BYTES, MAX_WAIVER_DEPENDENCIES, NoSourceOriginVerifier,
-    NoWaiverVerifier, PolicyDecision, SourceOrigin, SourceOriginRejection, SourceOriginRequest,
-    SourceOriginVerifier, WAIVER_SCOPE_COLOR_UPGRADE, WAIVER_SCOPE_SOURCE_COLOR, Waiver,
-    WaiverDependency, WaiverGrant, WaiverRejection, WaiverVerifier,
+    ColorNode, ColorReplayError, ColorRowVerification, ColorRowVerificationError,
+    ColorStructureRejection, ColorWriteError, MAX_COLOR_PARENTS, MAX_VALIDITY_AXES,
+    MAX_WAIVER_CLOSURE_BYTES, MAX_WAIVER_DEPENDENCIES, NoSourceOriginVerifier, NoWaiverVerifier,
+    PolicyDecision, SourceOrigin, SourceOriginRejection, SourceOriginRequest, SourceOriginVerifier,
+    WAIVER_SCOPE_COLOR_UPGRADE, WAIVER_SCOPE_SOURCE_COLOR, Waiver, WaiverDependency, WaiverGrant,
+    WaiverRejection, WaiverVerifier, verify_color_row_stream,
 };
 pub use hash::{Blake3, ContentHash, hash_bytes};
 pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};

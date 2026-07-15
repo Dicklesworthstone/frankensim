@@ -294,12 +294,16 @@ the transitive waiver closure, the canonical v3 derived or v4 source signing
 payload, signature, key id, node name, parent hashes, exact claimed-color bytes,
 operation, scope, expiry, admission day, and policy fingerprint. Demotion-row
 schema v1 stores the exact offending IEEE-754 bits in addition to display JSON.
-The in-module row reconstruction test strictly decodes the lowercase exact hex
-fields and substitutes them into the same hash reconstruction alongside the
-in-memory typed metadata for certificate, anchoring, Estimated, and derived
-rows. This proves exact color/origin field fidelity, not that a general
-persisted-row importer exists: this in-memory graph still does not parse event
-rows, resolve policy fingerprints, or dispatch external authority. Refusals are
+`verify_color_row_stream` is the independent persisted-row verifier: it parses
+strict JSON without any `ColorGraph`, `ColorNode`, or in-memory `Color`, resolves
+parent hashes only from earlier accepted rows, folds immediately preceding
+demotion rows in canonical parent-position order, reconstructs signed waiver
+payloads from their persisted fields, then rebuilds the exact v9 node preimage
+and compares the BLAKE3 hash. It accepts only color-write schema v7, demotion
+schema v1, node-hash v9, and color algebra v2; older/future formats are explicit
+structured refusals, never display-JSON fallbacks. This re-earns persisted hash
+identity; it does not rerun source/waiver authorities or import rows back into a
+scientifically admitted graph. Refusals are
 structured (`WaiverRejection`:
 malformed/bounded field, scope/node/color/lineage mismatch, expiry, policy
 refusal, or verifier panic).
@@ -476,6 +480,12 @@ match its hash.
 Canonical bulk fixtures exercise the exact and limit+1 read boundaries for the
 8,192-claim recovery probe, 4,096-submission pause fence, and 1,024-witness
 terminal lookup without weakening the production constants under test.
+`tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
+positive/negative zero, infinite dispersion, infinite interval endpoints, a
+maximum-length identity, and validated/derived rows; it independently rehashes
+the full row stream and proves schema/hash/algebra version refusal plus exact-byte
+tamper detection. Existing signed-grant, transitive-waiver, hostile-JSON, and
+non-finite demotion cases also pass through the public row-only verifier.
 `tests/travel.rs`: genuine-v1 →
 v2 migration with history intact, fork storage audit (N forks = 1× artifacts
 + deltas) + branch independence, replay audit battery (clean /
@@ -586,7 +596,11 @@ admission day. Canonical schema-v7 color rows include the color-algebra and
 node-hash versions, exact canonical color/origin bytes, typed origin and
 certificate artifact identity, direct policy/admission context, transitive
 dependencies, and the exact v3/v4 signed payload needed for an independent
-verifier. G3/G5 tests cover
+verifier. The row-only verifier treats those exact lowercase byte fields as the
+hash preimage and rejects duplicate JSON keys, sparse/out-of-order node ids,
+forward parents, mismatched demotion positions, non-canonical hex, malformed
+grant payload reconstruction, unsupported versions, and hash divergence.
+G3/G5 tests cover
 forged positive sources, source/derive grant separation, invalid ids,
 multi-parent demotion preservation, deterministic replay, origin substitution,
 policy and certificate-artifact substitution, callback panic, composed-bound
@@ -684,6 +698,11 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   non-authorizing meaning. Regime demotion records retain the offending value
   and its exact IEEE-754 bits and are hash-bound, but
   the complete execution-state map is not persisted by this in-memory gate.
+- `verify_color_row_stream` proves row-shape completeness and exact v9 hash
+  reconstruction only. It deliberately does not decode canonical color bytes
+  into scientific `Color` values, rerun typed-origin or waiver capabilities,
+  decide present-day grant expiry, or confer admission authority. A complete
+  persisted-row-to-`ColorGraph` importer remains unclaimed.
 - Waiver expiry is checked at the authorizing node's admission day. Descendants
   preserve that historical grant and remain tainted indefinitely; they do not
   silently renew it, and `verify_replay()` has no caller-supplied current day
@@ -691,8 +710,7 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
 - Transitive waiver visibility currently stores the complete unique grant
   closure on each descendant, bounded by `MAX_WAIVER_DEPENDENCIES` and
   `MAX_WAIVER_CLOSURE_BYTES`. This is deliberately inspectable and replayable;
-  compact/sublinear waiver-lineage storage and a general persisted-row importer
-  are not claimed.
+  compact/sublinear waiver-lineage storage is not claimed.
 
 ## No-claim boundaries (tombstones)
 
