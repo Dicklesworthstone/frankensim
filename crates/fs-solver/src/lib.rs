@@ -19,17 +19,36 @@
 //! Error transparency: every solve returns a residual HISTORY and a
 //! structured stall diagnosis instead of a timeout mystery.
 
+pub mod block;
 pub mod krylov;
 pub mod mixed;
+pub mod nonlinear;
 pub mod op;
 pub mod pmg;
 pub mod stokes;
 
+pub use block::{
+    BlockError, BlockOperator, BlockOperator2, BlockOperator3, BlockSchur2,
+    RealEquivalentComplexOp, RectLinearOp, SchurSolveSign, SquareBlock, ZeroBlock,
+};
 pub use krylov::{CgState, GmresState, MinresState, PminresState, SolveReport, StallDiagnosis};
 pub use mixed::{CsrF32, MixedReport, mixed_cg_refine};
+pub use nonlinear::{
+    AdmittedLinearSolver, DefinitenessEvidence, FgmresState, FlexiblePreconditioner, Globalization,
+    GlobalizationDecision, LineSearchConfig, LinearSolverKind, LinearSystemFinding,
+    LinearSystemVerifier, LinearVerificationError, NewtonError, NewtonIteration,
+    NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NewtonStallDiagnosis, NonlinearProblem,
+    NullspaceEvidence, PreconditionerClass, SolverAdmissionError, SourceCompatibility,
+    SymmetryEvidence, TrustRegionConfig, VerifiedLinearSystem, admit_linear_solver,
+    verify_linear_system,
+};
 pub use op::{CsrOp, LinearOp};
 pub use pmg::{MaskedTensorOp, PMultigrid};
 pub use stokes::{StokesBlockDiag, StokesOp, StokesSystem};
+
+/// The single L1 spectral service consumed by solver clients. This re-export
+/// prevents a second eigensolver/health namespace from growing in fs-solver.
+pub use fs_spectral as spectral_service;
 
 /// Deterministic inner product: elementwise products folded through
 /// the fixed-shape chunked combiner (shape = f(length) only).

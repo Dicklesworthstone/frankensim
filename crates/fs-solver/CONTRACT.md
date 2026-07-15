@@ -2,12 +2,18 @@
 
 ## Purpose and layer
 
-Layer: **L3 FLUX** (deps: fs-feec L3, fs-la/fs-sparse L1,
-fs-tilelang/fs-math L0). The solver stack (plan §8.9): matrix-free
-Krylov methods and p-multigrid bound by the four workspace contract
-obligations from day one — resumable, cancellable, deterministic,
-adjoint-equipped — with error transparency (residual histories and
-structured stall diagnoses, never timeout mysteries).
+Layer: **currently L3 FLUX** because the historical p-MG and Stokes
+fixtures import `fs-feec` (L3); the other dependencies are `fs-la`,
+`fs-sparse`, and `fs-spectral` (L1) plus `fs-tilelang` and `fs-math`
+(L0). The generic nonlinear, block-operator, verification/admission,
+and flexible-Krylov modules deliberately contain no `fs-feec` types
+and form the lower-layer solver spine. Moving the package metadata to
+L1 requires extracting the FEEC-specific adapters into an L3 crate;
+this contract does not claim that extraction is complete. The solver
+stack (plan §8.9) binds matrix-free methods to resumability,
+cancellation boundaries, deterministic execution, adjoint support,
+and error transparency (residual histories and structured stall
+diagnoses, never timeout mysteries).
 
 ## Public types and semantics
 
@@ -16,6 +22,15 @@ structured stall diagnoses, never timeout mysteries).
   symmetric operators; the transposed-solve battery catches
   violations). `CsrOp::symmetric/general` adapts assembled matrices
   (general materializes the transpose once, deterministically).
+- `RectLinearOp` and `BlockOperator<N>` (`BlockOperator2` and
+  `BlockOperator3` aliases) — dimension-checked rectangular block
+  algebra with fixed-order primal and transpose application.
+  `SquareBlock` explicitly adapts a `LinearOp` without a blanket
+  implementation that makes method names ambiguous; `ZeroBlock`
+  represents structural zeros. `RealEquivalentComplexOp`
+  maps `A + iB` to the real block form `[[A,-B],[B,A]]`.
+  `BlockSchur2` is an injected block-LDU preconditioner whose caller
+  supplies the two diagonal solves and chooses the Schur sign.
 - `CgState` — resumable preconditioned CG (SPD; fs-sparse `Precond`
   slot). `MinresState` — resumable MINRES (symmetric indefinite;
   Paige–Saunders with explicit two-level Givens memory in the state).
@@ -29,6 +44,27 @@ structured stall diagnoses, never timeout mysteries).
   is deliberately not checkpointed mid-cycle) — split runs at those
   boundaries are BITWISE-equal to straight runs, `clone()` is the
   checkpoint.
+- `FgmresState` — resumable restarted flexible GMRES. The
+  preconditioner is selected by logical iteration, so varying
+  preconditioners are explicit and checkpoint/replay at restart
+  boundaries remains bitwise deterministic.
+- `LinearSystemVerifier` → `VerifiedLinearSystem` →
+  `admit_linear_solver` — injected verification grammar and local
+  decision receipt. CG requires symmetric positive-definite evidence
+  and compatible/trivial nullspace evidence; MINRES requires verified
+  symmetric-indefinite evidence plus no or fixed-SPD preconditioning;
+  plain GMRES rejects variable preconditioners; FGMRES admits them.
+  Every method refuses unresolved nullspace or unverified source
+  compatibility. Refusals are structured and never silently widened.
+- `NonlinearProblem`, `NewtonKrylovConfig`, and `NewtonKrylovState` —
+  resumable inexact Newton-Krylov with Eisenstat-Walker forcing,
+  FGMRES inner solves, Armijo line search or trust-region
+  actual/predicted acceptance, and per-iteration telemetry. Outer
+  checkpoints are `clone()` boundaries; construction failures and
+  stalls are typed in `NewtonError`/`NewtonStallDiagnosis`.
+- `spectral_service` — re-export of the one workspace `fs-spectral`
+  authority. This is an ownership seam, not a claim that the generic
+  eigensolver service is already implemented.
 - `SolveReport { iters, rel_residual, converged, history, diagnosis }`
   with `StallDiagnosis::{Plateau, BudgetExhausted, Breakdown}`:
   Plateau = < 5% relative progress over the last 50-iteration window
@@ -90,19 +126,33 @@ structured stall diagnoses, never timeout mysteries).
 ## Invariants
 
 - Checkpoint = `clone()`; split runs bitwise-equal at the stated
-  granularity (tested at multiple cut points per method).
+  granularity (tested at multiple cut points per method). Newton
+  checkpoints are completed outer attempts; FGMRES checkpoints are
+  restart boundaries.
 - All inner products flow through the fixed-shape reduction — no
   thread- or tier-dependent bit patterns anywhere.
 - The V-cycle preconditioner is symmetric (identical pre/post
   smoothing, Galerkin-consistent transfers, near-exact coarse).
 - Transposed solves share every piece of primal infrastructure.
+- Block row/column partitions are validated once, then traversed in
+  stable index order for both primal and transpose applications.
+- A solver admission decision can only be constructed from a coherent
+  local verifier finding; the decision function cannot silently
+  upgrade missing or contradictory evidence into a stronger solver
+  class. Execution authorization remains a higher-layer concern.
 
 ## Error model
 
 Structured panics on dimension mismatches (programmer errors).
-Non-finite iteration quantities surface as
-`StallDiagnosis::Breakdown`, never UB or silent NaN propagation.
+Non-finite legacy Krylov iteration quantities surface as
+`StallDiagnosis::Breakdown`; Newton construction uses `NewtonError`
+and in-flight attempts use `NewtonStallDiagnosis::NonFinite`, never UB
+or silent NaN propagation.
 Un-converged solves return reports with history + diagnosis.
+Block construction returns `BlockError` for inconsistent partitions.
+Linear verification/admission returns structured findings naming the
+failed evidence rule. Nonlinear solves return typed dimension,
+non-finite, inner-solve, line-search, trust-region, and budget stalls.
 
 ## Determinism class
 
@@ -111,6 +161,10 @@ across thread counts; cross-ISA golden FNV-64 over CG/MINRES/GMRES
 solutions and a pMG-preconditioned solve:
 `0xbc00_5985_1f9c_4a8a`, recorded on Apple M4 Pro, verified on
 Threadripper (x86_64).
+Block traversal, verifier findings, FGMRES logical preconditioner
+selection, and Newton globalization decisions use fixed iteration
+orders. The new battery checks bitwise split/replay for FGMRES and
+Newton at their documented checkpoint boundaries.
 
 ## Cancellation behavior
 
@@ -118,6 +172,9 @@ Iteration-granular: every state is complete between `run` calls, so
 drivers interrupt by not continuing — request → drain (finish the
 current iteration) → finalize (state is the checkpoint). fs-exec Cx
 wiring lands with the drivers (workspace discipline).
+Newton drains its active inner solve/globalization decision before an
+outer checkpoint; FGMRES drains the active restart cycle. Neither new
+state yet accepts a `Cx` directly.
 
 ## Unsafe boundary
 
@@ -164,6 +221,13 @@ single-patch case is an EXACT solve and is gated as not-slower rather
 than rewarding the trivial minimum), plus the m = 6 window-sharing
 spot-check. `tests/diag_probe.rs`: the diagnosis-calibration
 regression (singular-system CG diverges — must never read Plateau).
+`tests/nonlinear_block_battery.rs` (G0/G1/G3/G5): 2x2 and 3x3 block
+primal/transpose equivalence, real-equivalent complex algebra, an
+exact manufactured Schur saddle solve, verifier/admission refusals,
+non-collinear iteration-varying diagonal FGMRES preconditioners that
+exercise stored `z_j` directions plus split replay, and Newton solves with
+line-search/trust-region globalization, an explicit rejected-search
+receipt, and outer split replay.
 
 ## No-claim boundaries
 
@@ -177,9 +241,10 @@ regression (singular-system CG diverges — must never read Plateau).
   Anisotropic/stretched meshes and non-tensor patches remain
   out-of-scope (the fast-diagonalization patch inverse requires the
   Kronecker structure).
-- Flexible-GMRES (varying preconditioners) is follow-up scope; plain
-  CG with a varying preconditioner is known-broken (observed) — use
-  GMRES or fix the preconditioner.
+- FGMRES now supports varying preconditioners at restart-boundary
+  checkpoint granularity. It does not serialize an in-flight Arnoldi
+  basis. Plain CG with a varying preconditioner remains known-broken
+  (observed), and plain GMRES admission refuses that configuration.
 - Saddle-point block preconditioners are implemented only for the
   unit-cube tensor Stokes fixture over Q_r^3/P_{r-1}^disc with
   pressure-mass Schur approximation. General fs-feec simplicial
@@ -193,6 +258,23 @@ regression (singular-system CG diverges — must never read Plateau).
 - No dense output of Krylov bases, no eigenvalue estimation service,
   no threading (fs-exec drivers own parallelism), no G4 cancellation
   storms yet (needs the Cx wiring).
+- The verifier is an injected evidence grammar, not an automatic
+  symmetry/definiteness/nullspace certifier. Its receipt retains only
+  dimension, verifier identity, and findings: it does not content-bind
+  an opaque operator/RHS, and raw Krylov states remain callable. A
+  ledgered caller must bind and consume the decision if it needs an
+  authorization capability. Newton convergence is empirical residual
+  evidence, not an interval enclosure or a proof of uniqueness. The
+  generic `fs-spectral` eigensolver service remains pending even though
+  its authority namespace is re-exported here.
+- FGMRES checkpoints assume the exact same operator, RHS, and logical
+  preconditioner policy on resume; Newton checkpoints assume the exact
+  same problem implementation and parameters. These opaque input
+  identities are caller/ledger invariants and are not authenticated by
+  the lower-layer state itself.
+- This package remains labeled L3 until its FEEC-specific p-MG/Stokes
+  adapters are extracted; the dependency-light modules alone do not
+  establish a completed architectural layer move.
 - The p-MG is specialized to the unit-cube tensor Poisson fixtures;
   general-operator p-MG arrives with the fs-opdsl matrix-free atom
   integration.
