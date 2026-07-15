@@ -8,7 +8,10 @@
 //! `#[ignore]`d release-lane test — run explicitly:
 //! `cargo test -p fs-lbm --release --test d3q19_battery -- --ignored`.
 
-use fs_lbm::d3q19::{D3Q19_BIT_SEMANTICS_VERSION, E3, OPP3, Q3, W3, W36};
+use fs_lbm::d3q19::{
+    CollisionError3, CollisionModel3, D3Q19_BIT_SEMANTICS_VERSION, E3, OPP3, Q3, W3, W36,
+    collide_cell3,
+};
 use fs_lbm::{Duct, duct_analytic, equilibrium3};
 
 fn verdict(name: &str, pass: bool, details: &str) {
@@ -137,6 +140,116 @@ fn equilibrium_recovers_moments() {
             && (m[2] - rho * u[2]).abs() < 1e-12,
         &format!("rho err {:.2e}", (sum - rho).abs()),
     );
+}
+
+/// lbm3-002b: the shared checked kernel retains the frozen general-force BGK
+/// arithmetic and conserves the collision invariants without forcing.
+#[test]
+fn shared_bgk_collision_is_bit_compatible_and_fail_closed() {
+    let rho = 1.03;
+    let velocity = [0.031, -0.017, 0.023];
+    let mut populations = equilibrium3(rho, velocity);
+    for (direction, value) in populations.iter_mut().enumerate() {
+        *value += (direction as f64 - 9.0) * 1e-6;
+    }
+    let tau = 0.83;
+    let force = [1e-6, -2e-6, 3e-6];
+
+    // Frozen BoundaryGrid3 formula before the shared-kernel extraction.
+    let mut measured_rho = 0.0;
+    let mut momentum = [0.0; 3];
+    for direction in 0..Q3 {
+        measured_rho += populations[direction];
+        momentum[0] += f64::from(E3[direction].0) * populations[direction];
+        momentum[1] += f64::from(E3[direction].1) * populations[direction];
+        momentum[2] += f64::from(E3[direction].2) * populations[direction];
+    }
+    let measured_velocity =
+        core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / measured_rho);
+    let equilibrium = equilibrium3(measured_rho, measured_velocity);
+    let coefficient = 1.0 - 0.5 / tau;
+    let cs2 = 1.0 / 3.0;
+    let cs4 = cs2 * cs2;
+    let mut reference = [0.0; Q3];
+    for direction in 0..Q3 {
+        let e = [
+            f64::from(E3[direction].0),
+            f64::from(E3[direction].1),
+            f64::from(E3[direction].2),
+        ];
+        let eu = e
+            .iter()
+            .zip(measured_velocity)
+            .map(|(component, u)| *component * u)
+            .sum::<f64>();
+        let projection = (0..3)
+            .map(|axis| {
+                ((e[axis] - measured_velocity[axis]) / cs2 + eu * e[axis] / cs4) * force[axis]
+            })
+            .sum::<f64>();
+        reference[direction] = populations[direction]
+            + (equilibrium[direction] - populations[direction]) / tau
+            + coefficient * W3[direction] * projection;
+    }
+    let shared = collide_cell3(populations, CollisionModel3::Bgk { tau }, force)
+        .expect("admissible shared BGK collision");
+    assert!(
+        shared
+            .iter()
+            .zip(reference)
+            .all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
+        "shared kernel must retain the frozen BoundaryGrid3 arithmetic"
+    );
+
+    let unforced = collide_cell3(populations, CollisionModel3::Bgk { tau }, [0.0; 3])
+        .expect("unforced BGK collision");
+    let conserved = |values: &[f64; Q3]| {
+        let density = values.iter().sum::<f64>();
+        let momentum: [f64; 3] = core::array::from_fn(|axis| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(direction, value)| {
+                    let component = match axis {
+                        0 => E3[direction].0,
+                        1 => E3[direction].1,
+                        _ => E3[direction].2,
+                    };
+                    f64::from(component) * value
+                })
+                .sum::<f64>()
+        });
+        (density, momentum)
+    };
+    let (before_rho, before_momentum) = conserved(&populations);
+    let (after_rho, after_momentum) = conserved(&unforced);
+    assert!((after_rho - before_rho).abs() < 1e-14);
+    for axis in 0..3 {
+        assert!((after_momentum[axis] - before_momentum[axis]).abs() < 1e-14);
+    }
+
+    assert!(matches!(
+        collide_cell3(populations, CollisionModel3::Bgk { tau: 0.5 }, force),
+        Err(CollisionError3::InvalidRelaxationTime { .. })
+    ));
+    let mut nonfinite = populations;
+    nonfinite[7] = f64::NAN;
+    assert!(matches!(
+        collide_cell3(nonfinite, CollisionModel3::Bgk { tau }, force),
+        Err(CollisionError3::NonFinitePopulation { direction: 7, .. })
+    ));
+    assert!(matches!(
+        collide_cell3(
+            populations,
+            CollisionModel3::Bgk { tau },
+            [0.0, f64::INFINITY, 0.0],
+        ),
+        Err(CollisionError3::NonFiniteForce { axis: 1, .. })
+    ));
+    assert!(matches!(
+        collide_cell3([0.0; Q3], CollisionModel3::Bgk { tau }, [0.0; 3]),
+        Err(CollisionError3::NonPositiveDensity { .. })
+    ));
 }
 
 /// lbm3-003: mass is conserved to the 2-D crate's roundoff bar (1e-11)

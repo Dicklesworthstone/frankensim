@@ -9,7 +9,9 @@
 //! density/velocity moments without maintaining six hand-specialized D3Q19
 //! formula tables.
 
-use super::{E3, OPP3, Q3, TILE, TILE_CELLS, Tile, W3, equilibrium3};
+use super::{
+    CollisionModel3, E3, OPP3, Q3, TILE, TILE_CELLS, Tile, W3, collide_cell3, equilibrium3,
+};
 use crate::CS2;
 
 /// Bit-semantics version for the D3Q19 boundary surface.
@@ -742,47 +744,20 @@ impl BoundaryGrid3 {
     }
 
     fn collide(&mut self) {
-        let coefficient = 1.0 - 0.5 / self.tau;
-        let cs4 = CS2 * CS2;
         for tile in 0..self.f[0].len() {
             for lane in 0..TILE_CELLS {
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;
                 }
-                let mut populations = [0.0; Q3];
-                let mut rho = 0.0;
-                let mut momentum = [0.0; 3];
-                for q in 0..Q3 {
-                    let value = self.f[q][tile].0[lane];
-                    populations[q] = value;
-                    rho += value;
-                    momentum[0] += f64::from(E3[q].0) * value;
-                    momentum[1] += f64::from(E3[q].1) * value;
-                    momentum[2] += f64::from(E3[q].2) * value;
-                }
-                assert!(
-                    rho.is_finite() && rho > 0.0,
-                    "fluid density must remain positive and finite"
-                );
-                let velocity =
-                    core::array::from_fn(|axis| (momentum[axis] + 0.5 * self.force[axis]) / rho);
-                let equilibrium = equilibrium3(rho, velocity);
-                for q in 0..Q3 {
-                    let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
-                    let eu = e
-                        .iter()
-                        .zip(velocity)
-                        .map(|(component, u)| *component * u)
-                        .sum::<f64>();
-                    let forcing = (0..3)
-                        .map(|axis| {
-                            ((e[axis] - velocity[axis]) / CS2 + eu * e[axis] / cs4)
-                                * self.force[axis]
-                        })
-                        .sum::<f64>();
-                    self.post[q][tile].0[lane] = populations[q]
-                        + (equilibrium[q] - populations[q]) / self.tau
-                        + coefficient * W3[q] * forcing;
+                let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
+                let post = collide_cell3(
+                    populations,
+                    CollisionModel3::Bgk { tau: self.tau },
+                    self.force,
+                )
+                .expect("BoundaryGrid3 constructor and prior state admit BGK/Guo collision");
+                for (field, value) in self.post.iter_mut().zip(post) {
+                    field[tile].0[lane] = value;
                 }
             }
         }

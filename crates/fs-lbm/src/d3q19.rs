@@ -125,6 +125,213 @@ pub fn equilibrium3(rho: f64, u: [f64; 3]) -> [f64; Q3] {
     f
 }
 
+/// Selectable D3Q19 collision law for the shared per-cell kernel.
+///
+/// The first rung contains only the frozen BGK law. Central-moment and
+/// reduced-cumulant rungs extend this enum without duplicating the cell
+/// authority path in [`Duct`] and [`BoundaryGrid3`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CollisionModel3 {
+    /// Single-relaxation-time BGK collision.
+    Bgk {
+        /// Relaxation time; must be finite and greater than one half.
+        tau: f64,
+    },
+}
+
+impl CollisionModel3 {
+    /// Validate all declared relaxation parameters.
+    ///
+    /// # Errors
+    /// [`CollisionError3::InvalidRelaxationTime`] when a parameter is outside
+    /// the finite positive-viscosity window.
+    pub fn validate(self) -> Result<(), CollisionError3> {
+        match self {
+            Self::Bgk { tau } if tau.is_finite() && tau > 0.5 => Ok(()),
+            Self::Bgk { tau } => Err(CollisionError3::InvalidRelaxationTime { tau }),
+        }
+    }
+
+    fn tau(self) -> f64 {
+        match self {
+            Self::Bgk { tau } => tau,
+        }
+    }
+}
+
+/// Fail-closed D3Q19 cell-collision diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CollisionError3 {
+    /// Relaxation time is non-finite or does not yield positive viscosity.
+    InvalidRelaxationTime {
+        /// Rejected relaxation time.
+        tau: f64,
+    },
+    /// A body-force component is non-finite.
+    NonFiniteForce {
+        /// Cartesian axis, `0..3`.
+        axis: usize,
+        /// Rejected component.
+        value: f64,
+    },
+    /// An incoming population is non-finite.
+    NonFinitePopulation {
+        /// D3Q19 direction index.
+        direction: usize,
+        /// Rejected population.
+        value: f64,
+    },
+    /// Incoming populations do not define positive finite mass.
+    NonPositiveDensity {
+        /// Computed density.
+        rho: f64,
+    },
+    /// A force-corrected velocity component is non-finite.
+    NonFiniteVelocity {
+        /// Cartesian axis, `0..3`.
+        axis: usize,
+        /// Computed component.
+        value: f64,
+    },
+    /// Collision produced a non-finite outgoing population.
+    NonFiniteOutput {
+        /// D3Q19 direction index.
+        direction: usize,
+        /// Computed population.
+        value: f64,
+    },
+}
+
+impl core::fmt::Display for CollisionError3 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidRelaxationTime { tau } => {
+                write!(f, "D3Q19 relaxation time {tau} must be finite and > 0.5")
+            }
+            Self::NonFiniteForce { axis, value } => {
+                write!(f, "D3Q19 force axis {axis} is non-finite ({value})")
+            }
+            Self::NonFinitePopulation { direction, value } => write!(
+                f,
+                "D3Q19 incoming population {direction} is non-finite ({value})"
+            ),
+            Self::NonPositiveDensity { rho } => {
+                write!(f, "D3Q19 density must be positive and finite (got {rho})")
+            }
+            Self::NonFiniteVelocity { axis, value } => {
+                write!(f, "D3Q19 velocity axis {axis} is non-finite ({value})")
+            }
+            Self::NonFiniteOutput { direction, value } => write!(
+                f,
+                "D3Q19 outgoing population {direction} is non-finite ({value})"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for CollisionError3 {}
+
+/// Collide one D3Q19 population vector under an explicit checked model and
+/// Guo body force.
+///
+/// The BGK arithmetic deliberately retains the two existing evaluation paths:
+/// this public entry point uses the frozen boundary-grid expression, while
+/// [`Duct`] delegates through its private frozen axial-force expression. This
+/// extraction therefore centralizes authority without silently refreezing
+/// either golden surface.
+///
+/// # Errors
+/// [`CollisionError3`] for inadmissible model parameters, force, incoming
+/// state, macroscopic state, or outgoing populations.
+pub fn collide_cell3(
+    populations: [f64; Q3],
+    model: CollisionModel3,
+    force: [f64; 3],
+) -> Result<[f64; Q3], CollisionError3> {
+    collide_cell3_with_projection(populations, model, force, false)
+}
+
+fn collide_axial_z_cell3(
+    populations: [f64; Q3],
+    model: CollisionModel3,
+    gz: f64,
+) -> Result<[f64; Q3], CollisionError3> {
+    collide_cell3_with_projection(populations, model, [0.0, 0.0, gz], true)
+}
+
+fn collide_cell3_with_projection(
+    populations: [f64; Q3],
+    model: CollisionModel3,
+    force: [f64; 3],
+    frozen_axial_z_projection: bool,
+) -> Result<[f64; Q3], CollisionError3> {
+    model.validate()?;
+    for (axis, value) in force.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CollisionError3::NonFiniteForce { axis, value });
+        }
+    }
+
+    let mut rho = 0.0;
+    let mut momentum = [0.0; 3];
+    for (direction, value) in populations.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CollisionError3::NonFinitePopulation { direction, value });
+        }
+        rho += value;
+        momentum[0] += f64::from(E3[direction].0) * value;
+        momentum[1] += f64::from(E3[direction].1) * value;
+        momentum[2] += f64::from(E3[direction].2) * value;
+    }
+    if !(rho.is_finite() && rho > 0.0) {
+        return Err(CollisionError3::NonPositiveDensity { rho });
+    }
+    let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho);
+    for (axis, value) in velocity.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CollisionError3::NonFiniteVelocity { axis, value });
+        }
+    }
+
+    let tau = model.tau();
+    let equilibrium = equilibrium3(rho, velocity);
+    let coefficient = 1.0 - 0.5 / tau;
+    let cs2 = 1.0 / 3.0;
+    let cs4 = cs2 * cs2;
+    let mut post = [0.0; Q3];
+    for direction in 0..Q3 {
+        let e = [
+            f64::from(E3[direction].0),
+            f64::from(E3[direction].1),
+            f64::from(E3[direction].2),
+        ];
+        let eu = if frozen_axial_z_projection {
+            e[0] * velocity[0] + e[1] * velocity[1] + e[2] * velocity[2]
+        } else {
+            e.iter()
+                .zip(velocity)
+                .map(|(component, u)| *component * u)
+                .sum::<f64>()
+        };
+        let forcing = if frozen_axial_z_projection {
+            coefficient * W3[direction] * (3.0 * (e[2] - velocity[2]) + 9.0 * eu * e[2]) * force[2]
+        } else {
+            let projection = (0..3)
+                .map(|axis| ((e[axis] - velocity[axis]) / cs2 + eu * e[axis] / cs4) * force[axis])
+                .sum::<f64>();
+            coefficient * W3[direction] * projection
+        };
+        let value = populations[direction]
+            + (equilibrium[direction] - populations[direction]) / tau
+            + forcing;
+        if !value.is_finite() {
+            return Err(CollisionError3::NonFiniteOutput { direction, value });
+        }
+        post[direction] = value;
+    }
+    Ok(post)
+}
+
 /// A D3Q19 duct: halfway bounce-back walls on the x and y boundaries,
 /// periodic in z, driven by a body force `gz` along z — the 3-D
 /// Poiseuille fixture (plan §14.1). Densities start at 1, velocities at
@@ -147,7 +354,8 @@ impl Duct {
     /// [`TILE`].
     ///
     /// # Panics
-    /// If any dimension is zero or not a multiple of [`TILE`].
+    /// If any dimension is zero or not a multiple of [`TILE`], if `tau` is not
+    /// finite and greater than one half, or if `gz` is not finite.
     #[must_use]
     pub fn new(nx: usize, ny: usize, nz: usize, tau: f64, gz: f64) -> Duct {
         assert!(
@@ -159,6 +367,10 @@ impl Duct {
                 && nz.is_multiple_of(TILE),
             "duct dimensions must be positive multiples of {TILE} (got {nx}x{ny}x{nz})"
         );
+        CollisionModel3::Bgk { tau }
+            .validate()
+            .expect("duct relaxation time must be finite and greater than 0.5");
+        assert!(gz.is_finite(), "duct body force must be finite");
         let tiles = (nx / TILE) * (ny / TILE) * (nz / TILE);
         let f0 = equilibrium3(1.0, [0.0; 3]);
         let f = core::array::from_fn(|i| vec![Tile::filled(f0[i]); tiles]);
@@ -262,29 +474,17 @@ impl Duct {
         // Collide + Guo forcing (pointwise): write post-collision
         // populations into `post`, visiting tiles then lanes ascending.
         let tiles = self.f[0].len();
-        let coef = 1.0 - 0.5 / self.tau;
         for tile in 0..tiles {
             for lane in 0..TILE_CELLS {
-                let mut fi = [0.0; Q3];
-                let mut rho = 0.0;
-                let mut m = [0.0; 3];
-                for i in 0..Q3 {
-                    let v = self.f[i][tile].0[lane];
-                    fi[i] = v;
-                    rho += v;
-                    m[0] += f64::from(E3[i].0) * v;
-                    m[1] += f64::from(E3[i].1) * v;
-                    m[2] += f64::from(E3[i].2) * v;
-                }
-                let u = [m[0] / rho, m[1] / rho, (m[2] + 0.5 * self.gz) / rho];
-                let feq = equilibrium3(rho, u);
-                for i in 0..Q3 {
-                    let (ex, ey, ez) = (f64::from(E3[i].0), f64::from(E3[i].1), f64::from(E3[i].2));
-                    let eu = ex * u[0] + ey * u[1] + ez * u[2];
-                    // Guo forcing with force (0, 0, gz):
-                    // S_i = (1 − 1/2τ) w_i [3(e_z − u_z) + 9(e·u)e_z] g_z.
-                    let force = coef * W3[i] * (3.0 * (ez - u[2]) + 9.0 * eu * ez) * self.gz;
-                    self.post[i][tile].0[lane] = fi[i] + (feq[i] - fi[i]) / self.tau + force;
+                let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
+                let post = collide_axial_z_cell3(
+                    populations,
+                    CollisionModel3::Bgk { tau: self.tau },
+                    self.gz,
+                )
+                .expect("Duct constructor and prior collision state admit BGK/Guo collision");
+                for (field, value) in self.post.iter_mut().zip(post) {
+                    field[tile].0[lane] = value;
                 }
             }
         }
