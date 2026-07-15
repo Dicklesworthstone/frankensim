@@ -76,6 +76,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   lifetime-bound structural authority after U-knot, V-knot, and row-major
   control-net validation. Its admitted-only `eval_with_cx` returns transactional
   `SurfaceEvaluationRun` state and never publishes a partial Cartesian point;
+  its f64-only admitted `partials_with_cx` returns transactional
+  `SurfacePartialsRun` state and publishes value plus both first partials only
+  as one complete result;
   directional knot insertion remains an owning transformation.
 - `TrimLoop`/`TrimmedPatch` — trim curves in EXACT RATIONAL form
   (closure and continuity validated by rational equality, including exact
@@ -254,6 +257,16 @@ and gates admitted authority at publication; `KnotVector::new` construction
 remains outside that cancellation claim. The production `fs-render` ray path
 preflights sealed metadata and cancellation, then binds one admitted surface
 across domain lookup, seed evaluation, and Newton partials.
+`AdmittedNurbsSurface::partials_with_cx` preserves U-then-V parameter,
+aggregate-envelope, and ordinary-derivative refusal order before carrying one
+gate through both basis rows, the sequential U and V isocurve contractions,
+both shared curve-derivative engines, and final tuple publication.
+`SurfacePartialsRun::Cancelled` exposes neither the value nor one directional
+jet and drops all temporary nets and derivative scratch. It proves only one f64
+value/first-partial request on an admitted surface: construction, owning
+admission, one-sided jets, regularity, normals/orientation, geometric
+certificates, exact caller-budget consumption, wall time, drain/finalize, and
+resumability remain outside the claim.
 Owning trim classification now binds one admitted patch/loop/curve generation
 through exact Bezier conversion, span boxes, and winding. Its checked conversion
 plan charges scan/insertion work and old-plus-new curve storage before the first

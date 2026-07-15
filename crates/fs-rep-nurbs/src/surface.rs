@@ -5,7 +5,7 @@
 
 use crate::NurbsError;
 use crate::basis::{BASIS_MAX_WORK_UNITS, BasisRun, KnotValidationOutcome, KnotVector, Scalar};
-use crate::curve::NurbsCurve;
+use crate::curve::{CurveDerivativesRun, NurbsCurve};
 use fs_exec::Cx;
 
 const SURFACE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
@@ -277,6 +277,19 @@ pub enum SurfaceEvaluationRun<S: Scalar> {
         point: [S; 3],
     },
     /// Cancellation was observed; no partial point was published.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware f64 surface partials.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SurfacePartialsRun {
+    /// The complete value and first directional partials.
+    Complete {
+        /// `(S, S_u, S_v)` at the requested parameter pair.
+        partials: SurfacePartials,
+    },
+    /// Cancellation was observed; no value or directional jet was published.
     Cancelled,
 }
 
@@ -956,15 +969,7 @@ impl NurbsSurface<f64> {
 }
 
 impl AdmittedNurbsSurface<'_, f64> {
-    /// Value and first partials without rescanning the source surface.
-    ///
-    /// # Errors
-    /// [`NurbsError::Domain`] outside the domain or when temporary isocurve
-    /// construction/evaluation is refused.
-    pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
-        // Refuse the complete request before the first basis-workspace or
-        // isocurve allocation. The U-first order is deterministic when both
-        // parameters are invalid.
+    fn preflight_partials_request(&self, u: f64, v: f64) -> Result<(), NurbsError> {
         let knots_u = self.knots_u();
         let knots_v = self.knots_v();
         self.inner
@@ -982,75 +987,208 @@ impl AdmittedNurbsSurface<'_, f64> {
             knots_v.degree(),
         )?;
         NurbsCurve::<f64, 3>::preflight_derivative_request(knots_u, u, 1)?;
-        NurbsCurve::<f64, 3>::preflight_derivative_request(knots_v, v, 1)?;
+        NurbsCurve::<f64, 3>::preflight_derivative_request(knots_v, v, 1)
+    }
 
+    /// Value and first partials without rescanning the source surface.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the domain or when temporary isocurve
+    /// construction/evaluation is refused.
+    pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
+        // Refuse the complete request before the first basis-workspace or
+        // isocurve allocation. The U-first order is deterministic when both
+        // parameters are invalid.
+        self.preflight_partials_request(u, v)?;
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
         let (su, bu) = knots_u.basis(u)?;
         let (sv, bv) = knots_v.basis(v)?;
-        let pu = knots_u.degree();
-        let pv = knots_v.degree();
+        let mut never_cancel = || false;
+        match self.partials_from_basis_with_poll(u, v, su, &bu, sv, &bv, &mut never_cancel)? {
+            SurfacePartialsRun::Complete { partials } => Ok(partials),
+            SurfacePartialsRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling surface partial evaluation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Evaluate the admitted surface's value and first partials with bounded
+    /// cancellation polling and transactional publication.
+    ///
+    /// U then V request, aggregate-envelope, and ordinary-derivative refusals
+    /// retain their synchronous precedence. One `Cx` then spans both basis
+    /// rows, sequential isocurve construction and differentiation, and final
+    /// publication. This method does not consume the `Cx` budget or finalize
+    /// its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous partial evaluator's parameter, continuity,
+    /// work, memory, allocation, and finite-arithmetic refusals when they win
+    /// before an observed cancellation.
+    pub fn partials_with_cx(
+        &self,
+        u: f64,
+        v: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SurfacePartialsRun, NurbsError> {
+        self.preflight_partials_request(u, v)?;
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        let (span_u, basis_u) = match knots_u.basis_with_cx(u, cx)? {
+            BasisRun::Complete { span, values } => (span, values),
+            BasisRun::Cancelled => return Ok(SurfacePartialsRun::Cancelled),
+        };
+        let (span_v, basis_v) = match knots_v.basis_with_cx(v, cx)? {
+            BasisRun::Complete { span, values } => (span, values),
+            BasisRun::Cancelled => return Ok(SurfacePartialsRun::Cancelled),
+        };
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.partials_from_basis_with_poll(
+            u,
+            v,
+            span_u,
+            &basis_u,
+            span_v,
+            &basis_v,
+            &mut should_cancel,
+        )
+    }
+
+    fn partials_from_basis_with_poll(
+        &self,
+        u: f64,
+        v: f64,
+        span_u: usize,
+        basis_u: &[f64],
+        span_v: usize,
+        basis_v: &[f64],
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfacePartialsRun, NurbsError> {
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        let degree_u = knots_u.degree();
+        let degree_v = knots_v.degree();
 
         // u-partial: build the v-evaluated control column, differentiate
         // as a u-curve; symmetrically for v. Each scope releases its temporary
         // control net before the next one is allocated.
         let du = {
+            if should_cancel() {
+                return Ok(SurfacePartialsRun::Cancelled);
+            }
             let mut u_net = Vec::new();
             u_net
                 .try_reserve_exact(self.inner.cpw.len())
                 .map_err(|_| NurbsError::Domain {
                     what: "surface u-isocurve allocation was refused".to_string(),
                 })?;
+            let mut operations_since_poll = 0usize;
             for row in &self.inner.cpw {
                 let mut acc = [0.0f64; 4];
-                for (c, &wv) in bv.iter().enumerate() {
-                    let cp = &row[sv - pv + c];
-                    for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                        *a += wv * x;
+                for (column_offset, &weight_v) in basis_v.iter().enumerate() {
+                    let control = &row[span_v - degree_v + column_offset];
+                    for (accumulator, &component) in acc.iter_mut().zip(control) {
+                        *accumulator += weight_v * component;
+                        if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                            return Ok(SurfacePartialsRun::Cancelled);
+                        }
                     }
                 }
-                if acc.iter().any(|component| !component.is_finite())
-                    || !acc[3].is_admissible_weight()
-                {
+                for &component in &acc {
+                    if !component.is_finite() {
+                        return Err(NurbsError::Domain {
+                            what: "surface u-isocurve left the admissible homogeneous domain"
+                                .to_string(),
+                        });
+                    }
+                    if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(SurfacePartialsRun::Cancelled);
+                    }
+                }
+                if !acc[3].is_admissible_weight() {
                     return Err(NurbsError::Domain {
                         what: "surface u-isocurve left the admissible homogeneous domain"
                             .to_string(),
                     });
                 }
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfacePartialsRun::Cancelled);
+                }
                 u_net.push(acc);
             }
-            NurbsCurve::<f64, 3>::derivatives_from_admitted_parts_after_preflight(
-                knots_u, &u_net, u, 1,
-            )?
+            match NurbsCurve::<f64, 3>::derivatives_from_admitted_parts_after_preflight_with_poll(
+                knots_u,
+                &u_net,
+                u,
+                1,
+                should_cancel,
+            )? {
+                CurveDerivativesRun::Complete { derivatives } => derivatives,
+                CurveDerivativesRun::Cancelled => return Ok(SurfacePartialsRun::Cancelled),
+            }
         };
         let dv = {
+            if should_cancel() {
+                return Ok(SurfacePartialsRun::Cancelled);
+            }
             let mut v_net = Vec::new();
             v_net
                 .try_reserve_exact(knots_v.control_count())
                 .map_err(|_| NurbsError::Domain {
                     what: "surface v-isocurve allocation was refused".to_string(),
                 })?;
+            let mut operations_since_poll = 0usize;
             for j in 0..knots_v.control_count() {
                 let mut acc = [0.0f64; 4];
-                for (r, &wu) in bu.iter().enumerate() {
-                    let cp = &self.inner.cpw[su - pu + r][j];
-                    for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                        *a += wu * x;
+                for (row_offset, &weight_u) in basis_u.iter().enumerate() {
+                    let control = &self.inner.cpw[span_u - degree_u + row_offset][j];
+                    for (accumulator, &component) in acc.iter_mut().zip(control) {
+                        *accumulator += weight_u * component;
+                        if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                            return Ok(SurfacePartialsRun::Cancelled);
+                        }
                     }
                 }
-                if acc.iter().any(|component| !component.is_finite())
-                    || !acc[3].is_admissible_weight()
-                {
+                for &component in &acc {
+                    if !component.is_finite() {
+                        return Err(NurbsError::Domain {
+                            what: "surface v-isocurve left the admissible homogeneous domain"
+                                .to_string(),
+                        });
+                    }
+                    if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(SurfacePartialsRun::Cancelled);
+                    }
+                }
+                if !acc[3].is_admissible_weight() {
                     return Err(NurbsError::Domain {
                         what: "surface v-isocurve left the admissible homogeneous domain"
                             .to_string(),
                     });
                 }
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfacePartialsRun::Cancelled);
+                }
                 v_net.push(acc);
             }
-            NurbsCurve::<f64, 3>::derivatives_from_admitted_parts_after_preflight(
-                knots_v, &v_net, v, 1,
-            )?
+            match NurbsCurve::<f64, 3>::derivatives_from_admitted_parts_after_preflight_with_poll(
+                knots_v,
+                &v_net,
+                v,
+                1,
+                should_cancel,
+            )? {
+                CurveDerivativesRun::Complete { derivatives } => derivatives,
+                CurveDerivativesRun::Cancelled => return Ok(SurfacePartialsRun::Cancelled),
+            }
         };
-        Ok((du[0], du[1], dv[1]))
+        if should_cancel() {
+            return Ok(SurfacePartialsRun::Cancelled);
+        }
+        Ok(SurfacePartialsRun::Complete {
+            partials: (du[0], du[1], dv[1]),
+        })
     }
 }
 
@@ -1263,6 +1401,127 @@ mod tests {
     }
 
     #[test]
+    fn admitted_surface_partials_with_cx_are_transactional_and_exact() {
+        let surface = bilinear_surface();
+        let admitted = surface.admit().expect("admitted bilinear plane");
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                admitted
+                    .partials_with_cx(0.25, 0.75, cx)
+                    .expect("valid partial request"),
+                SurfacePartialsRun::Cancelled
+            ));
+
+            let u_error = admitted
+                .partials(-1.0, 2.0)
+                .expect_err("legacy U-parameter refusal");
+            assert_eq!(
+                admitted
+                    .partials_with_cx(-1.0, 2.0, cx)
+                    .expect_err("U refusal must precede cancellation"),
+                u_error
+            );
+            let v_error = admitted
+                .partials(0.5, 2.0)
+                .expect_err("legacy V-parameter refusal");
+            assert_eq!(
+                admitted
+                    .partials_with_cx(0.5, 2.0, cx)
+                    .expect_err("V refusal must precede cancellation"),
+                v_error
+            );
+        });
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .partials_with_cx(0.25, 0.75, cx)
+                    .expect("active partial request"),
+                SurfacePartialsRun::Complete {
+                    partials: admitted
+                        .partials(0.25, 0.75)
+                        .expect("legacy partial request"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn surface_partial_cancellation_replays_inside_work_and_at_publication() {
+        let surface = high_degree_surface();
+        let admitted = surface.admit().expect("admitted high-degree surface");
+        let (span_u, basis_u) = admitted.knots_u().basis(0.25).expect("U basis");
+        let (span_v, basis_v) = admitted.knots_v().basis(0.75).expect("V basis");
+        let run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 2
+            };
+            let outcome = admitted
+                .partials_from_basis_with_poll(
+                    0.25,
+                    0.75,
+                    span_u,
+                    &basis_u,
+                    span_v,
+                    &basis_v,
+                    &mut should_cancel,
+                )
+                .expect("valid high-degree partial work");
+            (matches!(outcome, SurfacePartialsRun::Cancelled), polls)
+        };
+        assert_eq!(run(), run());
+        assert_eq!(run(), (true, 2));
+
+        let bilinear = bilinear_surface();
+        let admitted_bilinear = bilinear.admit().expect("admitted bilinear surface");
+        let (bilinear_span_u, bilinear_basis_u) =
+            admitted_bilinear.knots_u().basis(0.25).expect("U basis");
+        let (bilinear_span_v, bilinear_basis_v) =
+            admitted_bilinear.knots_v().basis(0.75).expect("V basis");
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            admitted_bilinear
+                .partials_from_basis_with_poll(
+                    0.25,
+                    0.75,
+                    bilinear_span_u,
+                    &bilinear_basis_u,
+                    bilinear_span_v,
+                    &bilinear_basis_v,
+                    &mut never_cancel,
+                )
+                .expect("healthy partial work"),
+            SurfacePartialsRun::Complete { .. }
+        ));
+        assert_eq!(total_polls, 31);
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == 31
+        };
+        assert!(matches!(
+            admitted_bilinear
+                .partials_from_basis_with_poll(
+                    0.25,
+                    0.75,
+                    bilinear_span_u,
+                    &bilinear_basis_u,
+                    bilinear_span_v,
+                    &bilinear_basis_v,
+                    &mut cancel_at_publication,
+                )
+                .expect("publication cancellation"),
+            SurfacePartialsRun::Cancelled
+        ));
+        assert_eq!(replay_polls, 31);
+    }
+
+    #[test]
     fn surface_evaluation_replays_inside_tensor_work_and_at_publication() {
         let surface = high_degree_surface();
         let admitted = surface.admit().expect("admitted high-degree plane");
@@ -1468,10 +1727,21 @@ mod tests {
         admitted
             .partials(0.25, 0.5)
             .expect("ordinary partial inside a smooth span");
+        let continuity_error = admitted
+            .partials(0.5, 0.5)
+            .expect_err("ordinary derivative at the C0 knot must refuse");
         assert!(matches!(
-            admitted.partials(0.5, 0.5),
-            Err(NurbsError::Domain { ref what }) if what.contains("multiplicity 2")
+            &continuity_error,
+            NurbsError::Domain { what } if what.contains("multiplicity 2")
         ));
+        with_surface_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .partials_with_cx(0.5, 0.5, cx)
+                    .expect_err("continuity refusal must precede cancellation"),
+                continuity_error
+            );
+        });
     }
 
     #[test]

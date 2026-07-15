@@ -31,7 +31,10 @@ pub use curve::{
     NurbsCurve,
 };
 pub use rat::Rat;
-pub use surface::{AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun};
+pub use surface::{
+    AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun,
+    SurfacePartialsRun,
+};
 pub use trim::{AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimmedPatch};
 
 use core::fmt;
