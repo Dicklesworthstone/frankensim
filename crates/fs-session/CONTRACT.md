@@ -169,6 +169,20 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   capacity atomically with completion.
   `events_page` is the only event reader and returns at most 1,024 rows under
   the permit's exact scope.
+- `grant` module (bead aeq7, increment 1): `CapabilityToken` is
+  demoted to an untrusted REQUEST; authority is an opaque
+  `SessionGrant` minted only by `mint_grant` through an injected
+  `IssuerPolicy` (deny-all `NoIssuerPolicy` default). The grant's
+  canonical digest binds issuer id, policy fingerprint, session,
+  ledger scope, sorted operator set, budgets, issuance/expiry, and the
+  policy's revocation generation; `verify_fresh` refuses forged,
+  altered, expired, revoked, and cross-issuer grants. `CoreLeaseBook`
+  meters concurrent cores per session and refuses ungranted verbs at
+  lease acquisition; leases release on drop. NO-CLAIM (increment
+  boundary): the governor's `open_session` still accepts the legacy
+  token and is not yet gated on grants; external issuer signature
+  verification is future scope landing at the `IssuerPolicy` trait
+  boundary.
 - `estimate(study, cost_models, cores)` — the dry run: p10/p50/p90 wall
   from fs-plan quantile models over `:dof`/`:size` features, declared
   memory ask, energy (p50 × cores × 45 W/core), and an HONEST

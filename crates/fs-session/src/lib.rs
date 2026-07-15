@@ -16,6 +16,7 @@
 pub mod estimate;
 pub mod gemm_tune;
 pub mod governor;
+pub mod grant;
 pub mod guidance;
 pub mod program_risk;
 pub mod token;
@@ -46,6 +47,10 @@ pub use governor::{
     RetainedEvidence, ScopeFlushPermit, SessionOpenId, SessionOpenReceipt, StepPhase,
     SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
 };
+pub use grant::{
+    CoreLease, CoreLeaseBook, IssuerIdentity, IssuerPolicy, MAX_ISSUER_FIELD_BYTES, NoIssuerPolicy,
+    PolicyDecision, SessionGrant, mint_grant,
+};
 pub use guidance::Guidance;
 pub use program_risk::{
     PROGRAM_RISK_REGISTER_ARTIFACT_KIND, PROGRAM_RISK_REPORT_CODEC_VERSION,
@@ -72,6 +77,61 @@ pub enum SessionError {
     UnknownSession {
         /// The id.
         id: u64,
+    },
+    /// An issuer identity field is unbounded or non-canonical (aeq7).
+    InvalidIssuerField {
+        /// Which field.
+        field: &'static str,
+        /// Observed byte length.
+        observed_bytes: usize,
+    },
+    /// The injected issuer policy refused to mint a grant (aeq7).
+    GrantDenied {
+        /// The policy's teaching reason.
+        reason: String,
+    },
+    /// A grant failed issuer/fingerprint/digest verification (aeq7).
+    GrantForged {
+        /// The session the grant claims.
+        session: u64,
+    },
+    /// A grant is past its admitted expiry (aeq7).
+    GrantExpired {
+        /// The session.
+        session: u64,
+        /// Admitted exclusive expiry, ledger nanoseconds.
+        expiry_ns: i64,
+        /// The refusing evaluation time.
+        now_ns: i64,
+    },
+    /// A grant's revocation generation is no longer current (aeq7).
+    GrantRevoked {
+        /// The session.
+        session: u64,
+        /// Generation admitted at mint time.
+        granted_generation: u64,
+        /// The policy's current generation.
+        current_generation: u64,
+    },
+    /// Execution asked for an operator the admitted grant never named
+    /// (aeq7).
+    UngrantedVerb {
+        /// The session.
+        session: u64,
+        /// The refused operator.
+        verb: String,
+    },
+    /// A core-lease acquisition would exceed the admitted concurrency
+    /// (aeq7).
+    CoreLeaseExceeded {
+        /// The session.
+        session: u64,
+        /// Admitted concurrent cores.
+        granted: u64,
+        /// Cores already leased.
+        active: u64,
+        /// Cores requested.
+        requested: u64,
     },
     /// A session-end snapshot was requested while caller work or a pause
     /// acknowledgement was still in flight.
@@ -460,6 +520,56 @@ impl fmt::Display for SessionError {
             } => write!(
                 f,
                 "session {resource} limit {limit} exceeded (observed at least {observed_at_least}); no partial authority mutation was committed"
+            ),
+            SessionError::InvalidIssuerField {
+                field,
+                observed_bytes,
+            } => write!(
+                f,
+                "issuer {field} must be 1..={} ASCII graphic bytes, got {observed_bytes}",
+                grant::MAX_ISSUER_FIELD_BYTES
+            ),
+            SessionError::GrantDenied { reason } => {
+                write!(f, "session grant denied by the injected policy: {reason}")
+            }
+            SessionError::GrantForged { session } => write!(
+                f,
+                "grant for session {session} failed issuer/digest verification; \
+                 no authority was extended"
+            ),
+            SessionError::GrantExpired {
+                session,
+                expiry_ns,
+                now_ns,
+            } => write!(
+                f,
+                "grant for session {session} expired at {expiry_ns} ns (evaluated at {now_ns} ns); \
+                 request re-issuance"
+            ),
+            SessionError::GrantRevoked {
+                session,
+                granted_generation,
+                current_generation,
+            } => write!(
+                f,
+                "grant for session {session} was minted under revocation generation \
+                 {granted_generation} but the policy is at {current_generation}; \
+                 request re-endorsement"
+            ),
+            SessionError::UngrantedVerb { session, verb } => write!(
+                f,
+                "session {session} asked to execute operator {verb:?} outside its admitted \
+                 grant; the lease was refused"
+            ),
+            SessionError::CoreLeaseExceeded {
+                session,
+                granted,
+                active,
+                requested,
+            } => write!(
+                f,
+                "session {session} core lease refused: {active} active + {requested} requested \
+                 exceeds the admitted {granted} concurrent cores"
             ),
             SessionError::InvalidResource {
                 resource,
