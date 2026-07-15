@@ -141,7 +141,8 @@ pub enum ValidationError {
     Cancelled {
         /// Deterministic checkpoint phase.
         phase: &'static str,
-        /// Completed logical work units.
+        /// Conservatively completed planned work units. In-phase checkpoints
+        /// report zero until the phase's plan is fully reconciled.
         completed: u128,
         /// Preflighted logical work units, or zero before preflight.
         planned: u128,
@@ -750,10 +751,13 @@ impl Scenario {
     #[must_use]
     pub fn validate(&self) -> Vec<Violation> {
         match self.validation_plan(ValidationBudget::default()) {
-            Ok(_) => match self.validate_admitted() {
-                Ok(findings) => findings,
-                Err(error) => vec![error.into_violation()],
-            },
+            Ok(_) => {
+                let mut checkpoint = |_: &'static str| Ok(());
+                match self.validate_admitted(&mut checkpoint) {
+                    Ok(findings) => findings,
+                    Err(error) => vec![error.into_violation()],
+                }
+            }
             Err(error) => vec![error.into_violation()],
         }
     }
@@ -761,9 +765,9 @@ impl Scenario {
     /// Validate under an explicit semantic budget and cancellation context.
     ///
     /// Cancellation is polled before preflight, after the work plan is known,
-    /// and after private validation but before findings are published. Thus a
-    /// request observed at any publication boundary returns a typed refusal,
-    /// never a partial or falsely green finding list.
+    /// across semantic phases and record boundaries, and after private
+    /// validation but before findings are published. Thus an observed request
+    /// returns a typed refusal, never a partial or falsely green finding list.
     pub fn validate_with_budget(
         &self,
         budget: ValidationBudget,
@@ -780,7 +784,14 @@ impl Scenario {
             completed: 0,
             planned: plan.planned_work,
         })?;
-        let findings = self.validate_admitted()?;
+        let mut checkpoint = |phase: &'static str| {
+            cx.checkpoint().map_err(|_| ValidationError::Cancelled {
+                phase,
+                completed: 0,
+                planned: plan.planned_work,
+            })
+        };
+        let findings = self.validate_admitted(&mut checkpoint)?;
         cx.checkpoint().map_err(|_| ValidationError::Cancelled {
             phase: "pre-publication",
             completed: plan.planned_work,
@@ -789,7 +800,10 @@ impl Scenario {
         Ok(findings)
     }
 
-    fn validate_admitted(&self) -> Result<Vec<Violation>, ValidationError> {
+    fn validate_admitted(
+        &self,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
+    ) -> Result<Vec<Violation>, ValidationError> {
         let mut out = Vec::new();
         if self.name.is_empty() {
             out.push(Violation {
@@ -798,12 +812,16 @@ impl Scenario {
                 fix: "give the scenario a nonempty exact UTF-8 name".to_string(),
             });
         }
+        checkpoint("scenario identity")?;
         self.environment.check(&mut out);
+        checkpoint("environment")?;
         self.frames.check(&mut out);
+        checkpoint("frames")?;
         let frame_ids: BTreeSet<u32> = self.frames.frames.iter().map(|frame| frame.id.0).collect();
         for bc in &self.base_bcs {
             bc.check(&mut out);
             Self::check_bc_frame(bc, &frame_ids, &mut out);
+            checkpoint("base boundary conditions")?;
         }
 
         let mut first_case_by_name = BTreeMap::new();
@@ -830,7 +848,9 @@ impl Scenario {
             for bc in &case.bcs {
                 bc.check(&mut out);
                 Self::check_bc_frame(bc, &frame_ids, &mut out);
+                checkpoint("case boundary conditions")?;
             }
+            checkpoint("load cases")?;
         }
 
         let mut first_combo_by_name = BTreeMap::new();
@@ -896,7 +916,9 @@ impl Scenario {
                         fix: "use finite combination factors".to_string(),
                     });
                 }
+                checkpoint("combination terms")?;
             }
+            checkpoint("combinations")?;
         }
 
         let mut first_ensemble_by_name = BTreeMap::new();
@@ -914,6 +936,7 @@ impl Scenario {
             } else {
                 first_ensemble_by_name.insert(e.name.as_str(), ensemble_index);
             }
+            checkpoint("ensembles")?;
         }
 
         let mut first_contact_by_pair = BTreeMap::new();
@@ -977,8 +1000,9 @@ impl Scenario {
                     fix: "require 0 <= mu_k <= mu_s < inf".to_string(),
                 });
             }
+            checkpoint("contacts")?;
         }
-        self.check_net_flux(&mut out)?;
+        self.check_net_flux(&mut out, checkpoint)?;
         Ok(out)
     }
 
@@ -1000,10 +1024,14 @@ impl Scenario {
     /// inlet declares `incompressible`, the declared mass flows must
     /// balance to tolerance at every deterministic signal checkpoint OR a
     /// pressure outlet must exist to absorb the imbalance.
-    fn check_net_flux(&self, out: &mut Vec<Violation>) -> Result<(), ValidationError> {
-        self.check_net_flux_set(None, out)?;
+    fn check_net_flux(
+        &self,
+        out: &mut Vec<Violation>,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
+    ) -> Result<(), ValidationError> {
+        self.check_net_flux_set(None, out, checkpoint)?;
         for case in &self.cases {
-            self.check_net_flux_set(Some(case), out)?;
+            self.check_net_flux_set(Some(case), out, checkpoint)?;
         }
         Ok(())
     }
@@ -1012,7 +1040,9 @@ impl Scenario {
         &self,
         case: Option<&LoadCase>,
         out: &mut Vec<Violation>,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
     ) -> Result<(), ValidationError> {
+        checkpoint("net-flux set")?;
         let case_bcs: &[BoundaryCondition] = case.map_or(&[], |case| case.bcs.as_slice());
         let declares_incompressible = self
             .base_bcs
@@ -1047,6 +1077,7 @@ impl Scenario {
         debug_assert_eq!(validation_times.len(), requested_times);
         validation_times.sort_by(|a, b| a.total_cmp(b));
         validation_times.dedup_by(|a, b| *a == *b);
+        checkpoint("net-flux checkpoints")?;
 
         let mut first_imbalance = None;
         let mut compatibility_failed = false;
@@ -1056,6 +1087,7 @@ impl Scenario {
             let mut aggregation_finite = true;
             let mut evaluation_failed = false;
             for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+                checkpoint("net-flux evaluation")?;
                 match bc.mass_flow_at(time) {
                     Ok(Some(flux)) => {
                         net += flux;
@@ -1079,6 +1111,7 @@ impl Scenario {
                         break;
                     }
                 }
+                checkpoint("net-flux evaluation")?;
             }
             if evaluation_failed {
                 compatibility_failed = true;
@@ -1121,13 +1154,16 @@ impl Scenario {
                     .to_string(),
             });
         }
+        checkpoint("net-flux set complete")?;
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod validation_allocation_tests {
-    use super::{ValidationError, reserve_validation_times};
+mod validation_internal_tests {
+    use super::{
+        Environment, Scenario, ValidationBudget, ValidationError, reserve_validation_times,
+    };
 
     #[test]
     fn checkpoint_capacity_overflow_is_a_typed_refusal() {
@@ -1140,5 +1176,35 @@ mod validation_allocation_tests {
             })
         ));
         assert!(times.is_empty());
+    }
+
+    #[test]
+    fn injected_phase_cancellation_discards_private_findings() {
+        let scenario = Scenario::new("phase-cancel", 1, Environment::earth_lab());
+        let plan = scenario
+            .validation_plan(ValidationBudget::default())
+            .expect("minimal semantic plan");
+        let mut visited = Vec::new();
+        let result = scenario.validate_admitted(&mut |phase| {
+            visited.push(phase);
+            if phase == "environment" {
+                Err(ValidationError::Cancelled {
+                    phase,
+                    completed: 0,
+                    planned: plan.planned_work,
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(ValidationError::Cancelled {
+                phase: "environment",
+                completed: 0,
+                planned,
+            }) if planned == plan.planned_work
+        ));
+        assert_eq!(visited, ["scenario identity", "environment"]);
     }
 }

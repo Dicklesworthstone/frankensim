@@ -185,11 +185,13 @@ without materializing a vector for every effective set; its exact raw
 checkpoint capacity is fallibly reserved before append/sort. Its
 identity/reference phase uses deterministic O(N log N) indexes and its
 frame-cycle traversal is linear after indexing. The explicit `Cx` lane polls
-before preflight, after planning, and after private validation before
-publication; a request observed at those boundaries publishes no partial
-findings. Finer in-phase polling and fallible index/output reservation remain
-active work under `frankensim-sj31i.24`. No loop is admitted from an unchecked
-float-to-size conversion.
+before preflight, after planning, after fixed phases, at BC/case/combination
+term/ensemble/contact boundaries, before and after each net-flux provider
+evaluation, and after private validation before publication. A request observed
+at any checkpoint publishes no partial findings. Polling inside the frame-index
+build and individual large table scans, plus fallible index/output reservation,
+remain active work under `frankensim-sj31i.24`. No loop is admitted from an
+unchecked float-to-size conversion.
 
 ## Unsafe boundary
 
@@ -241,6 +243,9 @@ None.
   and refuse one unit short; pre-requested cancellation publishes no findings.
 - A focused `scenario` unit regression forces checkpoint-capacity overflow and
   proves a typed `AllocationRefused` with the scratch vector left empty.
+- A deterministic injected-checkpoint regression cancels at the environment
+  phase and proves the private finding buffer is not returned; the public `Cx`
+  path uses the same checkpoint route.
 
 ## No-claim boundaries
 
