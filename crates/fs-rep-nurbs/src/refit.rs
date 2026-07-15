@@ -82,6 +82,43 @@ fn refit_structure_error(what: impl Into<String>) -> NurbsError {
     NurbsError::Structure { what: what.into() }
 }
 
+fn refit_allocation_error(what: &'static str) -> NurbsError {
+    NurbsError::Domain {
+        what: format!("{what} allocation was refused"),
+    }
+}
+
+fn try_vec_with_capacity<T>(capacity: usize, what: &'static str) -> Result<Vec<T>, NurbsError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| refit_allocation_error(what))?;
+    Ok(values)
+}
+
+fn try_filled_vec<T: Copy>(len: usize, value: T, what: &'static str) -> Result<Vec<T>, NurbsError> {
+    let mut values = try_vec_with_capacity(len, what)?;
+    for _ in 0..len {
+        values.push(value);
+    }
+    Ok(values)
+}
+
+fn try_filled_matrix<T: Copy>(
+    rows: usize,
+    cols: usize,
+    value: T,
+    what: &'static str,
+) -> Result<Vec<Vec<T>>, NurbsError> {
+    rows.checked_mul(cols)
+        .ok_or_else(|| refit_allocation_error(what))?;
+    let mut matrix = try_vec_with_capacity(rows, what)?;
+    for _ in 0..rows {
+        matrix.push(try_filled_vec(cols, value, what)?);
+    }
+    Ok(matrix)
+}
+
 /// Validate dimensions and derive all allocation/work sizes before the first
 /// field evaluation or allocation.
 fn validate_refit_request(
@@ -453,20 +490,36 @@ fn cholesky_solve_factored(a: &[Vec<f64>], b: &mut [f64]) -> Result<(), NurbsErr
 }
 
 fn open_uniform_knots(n: usize, degree: usize) -> Result<KnotVector<f64>, NurbsError> {
-    let inner = n - degree;
-    let mut knots = vec![0.0; degree + 1];
+    let order = degree
+        .checked_add(1)
+        .ok_or_else(|| refit_structure_error("refit knot order overflow"))?;
+    let inner = n
+        .checked_sub(degree)
+        .ok_or_else(|| refit_structure_error("refit degree exceeds control count"))?;
+    if inner == 0 {
+        return Err(refit_structure_error(
+            "refit degree must be less than the control count",
+        ));
+    }
+    let knot_count = n
+        .checked_add(order)
+        .ok_or_else(|| refit_structure_error("refit knot count overflow"))?;
+    let mut knots = try_vec_with_capacity(knot_count, "refit knot vector")?;
+    for _ in 0..order {
+        knots.push(0.0);
+    }
     #[allow(clippy::cast_precision_loss)]
     for k in 1..inner {
         knots.push(k as f64 / inner as f64);
     }
-    knots.extend(std::iter::repeat_n(1.0, degree + 1));
+    knots.extend(std::iter::repeat_n(1.0, order));
     KnotVector::new(knots, degree)
 }
 
 /// Row of basis values over the whole control axis (dense, small).
 fn basis_row(kv: &KnotVector<f64>, n: usize, t: f64) -> Result<Vec<f64>, NurbsError> {
     let (span, vals) = kv.basis(t)?;
-    let mut row = vec![0.0f64; n];
+    let mut row = try_filled_vec(n, 0.0f64, "refit dense basis row")?;
     let p = kv.degree;
     for (c, &b) in vals.iter().enumerate() {
         row[span - p + c] = b;
@@ -527,9 +580,16 @@ fn lipschitz_estimate(surface: &NurbsSurface<f64>) -> (f64, f64) {
 /// Fit one scalar/vector LSQ system: `(BᵀB + λ LᵀL) c = Bᵀy` where `L`
 /// is the discrete control-lattice Laplacian (thin-plate proxy).
 #[allow(clippy::needless_range_loop)]
-fn assemble_normal(rows_b: &[Vec<f64>], nu: usize, nv: usize, lambda: f64) -> Vec<Vec<f64>> {
-    let n = nu * nv;
-    let mut a = vec![vec![0.0f64; n]; n];
+fn assemble_normal(
+    rows_b: &[Vec<f64>],
+    nu: usize,
+    nv: usize,
+    lambda: f64,
+) -> Result<Vec<Vec<f64>>, NurbsError> {
+    let n = nu
+        .checked_mul(nv)
+        .ok_or_else(|| refit_structure_error("refit normal-matrix dimension overflow"))?;
+    let mut a = try_filled_matrix(n, n, 0.0f64, "refit normal matrix")?;
     for row in rows_b {
         for i in 0..n {
             if row[i] == 0.0 {
@@ -546,34 +606,39 @@ fn assemble_normal(rows_b: &[Vec<f64>], nu: usize, nv: usize, lambda: f64) -> Ve
     let idx = |i: usize, j: usize| i * nv + j;
     for i in 0..nu {
         for j in 0..nv {
-            let mut stencil: Vec<(usize, f64)> = vec![(idx(i, j), 0.0)];
+            let mut stencil = [(0usize, 0.0f64); 5];
+            let mut stencil_len = 1usize;
+            stencil[0] = (idx(i, j), 0.0);
             let mut degree = 0.0f64;
-            let mut push = |k: usize| stencil.push((k, -1.0));
             if i > 0 {
-                push(idx(i - 1, j));
+                stencil[stencil_len] = (idx(i - 1, j), -1.0);
+                stencil_len += 1;
                 degree += 1.0;
             }
             if i + 1 < nu {
-                push(idx(i + 1, j));
+                stencil[stencil_len] = (idx(i + 1, j), -1.0);
+                stencil_len += 1;
                 degree += 1.0;
             }
             if j > 0 {
-                push(idx(i, j - 1));
+                stencil[stencil_len] = (idx(i, j - 1), -1.0);
+                stencil_len += 1;
                 degree += 1.0;
             }
             if j + 1 < nv {
-                push(idx(i, j + 1));
+                stencil[stencil_len] = (idx(i, j + 1), -1.0);
+                stencil_len += 1;
                 degree += 1.0;
             }
             stencil[0].1 = degree;
-            for &(p, wp) in &stencil {
-                for &(q, wq) in &stencil {
+            for &(p, wp) in &stencil[..stencil_len] {
+                for &(q, wq) in &stencil[..stencil_len] {
                     a[p][q] += lambda * wp * wq;
                 }
             }
         }
     }
-    a
+    Ok(a)
 }
 
 /// The implicit-field → NURBS refit (radial pipeline; star-shaped domains).
@@ -595,17 +660,9 @@ pub fn refit_radial(
     let kv = open_uniform_knots(nv, config.degree)?;
     // Sample the field: radial projections on a (u, v) grid.
     let (mu, mv) = (config.samples_u, config.samples_v);
-    let mut rows_b: Vec<Vec<f64>> = Vec::new();
-    let mut targets: Vec<[f64; 3]> = Vec::new();
-    let mut uvs: Vec<[f64; 2]> = Vec::new();
-    rows_b
-        .try_reserve_exact(sample_points)
-        .map_err(|_| refit_structure_error("refit sample-row allocation refused"))?;
-    targets
-        .try_reserve_exact(sample_points)
-        .map_err(|_| refit_structure_error("refit target allocation refused"))?;
-    uvs.try_reserve_exact(sample_points)
-        .map_err(|_| refit_structure_error("refit parameter allocation refused"))?;
+    let mut rows_b = try_vec_with_capacity(sample_points, "refit sample rows")?;
+    let mut targets = try_vec_with_capacity(sample_points, "refit targets")?;
+    let mut uvs = try_vec_with_capacity(sample_points, "refit parameters")?;
     for a in 0..mu {
         for b in 0..mv {
             #[allow(clippy::cast_precision_loss)]
@@ -625,7 +682,7 @@ pub fn refit_radial(
             targets.push(target);
             let bu = basis_row(&ku, nu, u)?;
             let bv = basis_row(&kv, nv, v)?;
-            let mut row = vec![0.0f64; control_points];
+            let mut row = try_filled_vec(control_points, 0.0f64, "refit sample matrix row")?;
             for (i, &wu) in bu.iter().enumerate() {
                 if wu == 0.0 {
                     continue;
@@ -642,11 +699,11 @@ pub fn refit_radial(
     }
     // Assemble and factor once, then solve the three coordinate right-hand
     // sides against the same deterministic factor.
-    let mut net = vec![vec![[0.0f64; 3]; nv]; nu];
-    let mut factor = assemble_normal(&rows_b, nu, nv, config.lambda);
+    let mut net = try_filled_matrix(nu, nv, [0.0f64; 3], "refit control net")?;
+    let mut factor = assemble_normal(&rows_b, nu, nv, config.lambda)?;
     cholesky_factor(&mut factor)?;
     for axis in 0..3 {
-        let mut rhs = vec![0.0f64; control_points];
+        let mut rhs = try_filled_vec(control_points, 0.0f64, "refit right-hand side")?;
         for (row, t) in rows_b.iter().zip(&targets) {
             for (k, &w) in row.iter().enumerate() {
                 if w != 0.0 {
@@ -673,15 +730,12 @@ pub fn refit_radial(
         *c0 = avg;
         *c1 = avg;
     }
-    let weights = vec![vec![1.0f64; nv]; nu];
+    let weights = try_filled_matrix(nu, nv, 1.0f64, "refit unit weights")?;
     let surface = NurbsSurface::new(ku, kv, &net, &weights)?;
     // ---- The honest report -------------------------------------------
     let mut rms = 0.0f64;
     let mut max_res = 0.0f64;
-    let mut warnings = Vec::new();
-    warnings
-        .try_reserve_exact(sample_points)
-        .map_err(|_| refit_structure_error("refit warning allocation refused"))?;
+    let mut warnings = try_vec_with_capacity(sample_points, "refit warnings")?;
     for ((row, t), uv) in rows_b.iter().zip(&targets).zip(&uvs) {
         let mut p = [0.0f64; 3];
         for (k, &w) in row.iter().enumerate() {
@@ -869,6 +923,24 @@ mod tests {
         let error = refit_radial(&|_| f64::NAN, [0.0; 3], 1.0, &config)
             .expect_err("non-finite fields must refuse");
         assert!(error.to_string().contains("non-finite"));
+    }
+
+    #[test]
+    fn refit_owned_buffers_are_fallible_and_shape_preserving() {
+        let matrix = try_filled_matrix(2, 3, 7.0f64, "test matrix").expect("small matrix");
+        assert_eq!(matrix, vec![vec![7.0; 3]; 2]);
+
+        let error = try_filled_vec(usize::MAX, 0.0f64, "test vector")
+            .expect_err("unrepresentable capacity must be a typed refusal");
+        assert!(
+            matches!(error, NurbsError::Domain { ref what } if what == "test vector allocation was refused")
+        );
+
+        let error = try_filled_matrix(1, usize::MAX, 0.0f64, "test matrix")
+            .expect_err("unrepresentable inner capacity must be a typed refusal");
+        assert!(
+            matches!(error, NurbsError::Domain { ref what } if what == "test matrix allocation was refused")
+        );
     }
 
     #[test]

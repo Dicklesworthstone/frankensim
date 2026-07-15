@@ -299,11 +299,12 @@ refinement + partials vs central differences.
   not distinguish thin geometry from smoothing, inadequate global density,
   conditioning, noise, or stateful caller-field behavior.
 - The legacy closure API uses validated dimensions plus a conservative live-
-  payload allocation estimate, explicit checked reservations for its largest
-  side buffers, and fixed probe/algorithmic-work ceilings so malformed
-  configurations refuse before evaluating the field. Allocator metadata,
-  arbitrary closure cost, and every small transient are not a complete memory
-  or time budget. These caps are process constants, not caller budgets;
+  payload allocation estimate, fallible checked reservations before initializing
+  every stage-owned numerical `Vec`/matrix buffer, and fixed
+  probe/algorithmic-work ceilings so malformed configurations refuse before
+  evaluating the field. Allocator metadata, diagnostic strings, arbitrary
+  closure cost, and every small transient are not a complete memory or time
+  budget. These caps are process constants, not caller budgets;
   the dense fit has no `Cx` cancellation points. Typed admitted-field authority,
   ledgered caller budgets, bounded cancellation latency, and outward-rounded
   geometric certification remain explicit successor work.
