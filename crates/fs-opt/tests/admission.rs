@@ -838,6 +838,27 @@ fn adm_013_descent_leaf_gating() {
             );
         }
 
+        // The IR entry point must share the same ordering: invalid
+        // options refuse before even an unevaluable objective is asked
+        // to run.
+        let mut unevaluable_builder = ProblemBuilder::new();
+        let design = unevaluable_builder
+            .var("design", Manifold::Rn { dim: 1 }, Dims::NONE)
+            .expect("design variable");
+        let pde = unevaluable_builder
+            .pde_residual("leaf-gate-order", design, true, Dims::NONE)
+            .expect("PDE node");
+        unevaluable_builder
+            .objective(pde, Sense::Minimize, 1.0)
+            .expect("objective");
+        let unevaluable = unevaluable_builder.finish();
+        let mut invalid_options = opts;
+        invalid_options.fd_h = 0.0;
+        assert!(matches!(
+            fs_opt::descend_ir(&unevaluable, &[0.0], invalid_options, &cx),
+            Err(OptError::BadParam { .. })
+        ));
+
         // The IR-driven variant shares the seam: a NaN start refuses
         // typed instead of descending on garbage.
         let p = simple_problem(1.0);
@@ -911,4 +932,87 @@ fn adm_016_retraction_storage_lengths_are_exact() {
             point.len()
         );
     }
+}
+
+/// adm-017 — finite runtime bindings do not authorize NaN/Inf graph
+/// results. Evaluation identifies the exact node/component, and IR
+/// descent propagates a probe-domain refusal instead of panicking or
+/// publishing a non-finite report.
+#[test]
+fn adm_017_non_finite_runtime_results_refuse() {
+    let mut builder = ProblemBuilder::new();
+    let variable = builder
+        .var("x", Manifold::Rn { dim: 1 }, Dims::NONE)
+        .expect("variable");
+    let point = builder.var_ref(variable).expect("point");
+    let scalar = builder.component(point, 0).expect("component");
+    let logarithm = builder.ln(scalar).expect("dimensionless logarithm");
+    builder
+        .objective(logarithm, Sense::Minimize, 1.0)
+        .expect("objective");
+    let problem = builder.finish();
+
+    assert!(matches!(
+        eval(&problem, logarithm, &[vec![-1.0]]),
+        Err(OptError::EvalNonFinite {
+            node,
+            component: None,
+            bits,
+        }) if node == logarithm.0 && f64::from_bits(bits).is_nan()
+    ));
+
+    let mut vector_builder = ProblemBuilder::new();
+    let vector_var = vector_builder
+        .var("v", Manifold::Rn { dim: 2 }, Dims::NONE)
+        .expect("vector variable");
+    let vector = vector_builder.var_ref(vector_var).expect("vector point");
+    let doubled = vector_builder.add(vector, vector).expect("vector sum");
+    let vector_problem = vector_builder.finish();
+    assert!(matches!(
+        eval(&vector_problem, doubled, &[vec![f64::MAX, 0.0]]),
+        Err(OptError::EvalNonFinite {
+            node,
+            component: Some(0),
+            bits,
+        }) if node == doubled.0 && f64::from_bits(bits).is_infinite()
+    ));
+
+    let gate = fs_exec::CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 0x17,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            asupersync::types::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        let opts = fs_opt::DescentOptions {
+            steps: 1,
+            lr: 0.1,
+            fd_h: 1e-6,
+        };
+        assert!(matches!(
+            fs_opt::descend_ir(&problem, &[5e-7], opts, &cx),
+            Err(OptError::EvalNonFinite {
+                node,
+                component: None,
+                bits,
+            }) if node == logarithm.0 && f64::from_bits(bits).is_nan()
+        ));
+
+        let raw = |x: &[f64]| if x[0] < 0.0 { f64::NAN } else { x[0] };
+        assert!(matches!(
+            fs_opt::descend_fn(Manifold::Rn { dim: 1 }, &raw, &[5e-7], opts, 0, &cx),
+            Err(OptError::NonFinite {
+                what: "descent objective result",
+                bits,
+            }) if f64::from_bits(bits).is_nan()
+        ));
+    });
 }

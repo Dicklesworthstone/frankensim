@@ -790,9 +790,9 @@ fn opt_006_budget_and_cancellation() {
             && cap4.evals == 4
             && calls4.get() == cap4.evals;
 
-        // The IR preflight value is the initial evaluation; it is not
-        // discarded and charged a second time. A cap of one therefore
-        // stays exactly at one and returns the unchanged valid point.
+        // The first IR objective call is f0 inside the leaf-gated,
+        // counted descent seam. A cap of one therefore stays exactly
+        // at one and returns the unchanged valid point.
         let cap1_problem = build(1);
         let cap1 = descend_ir(
             &cap1_problem,

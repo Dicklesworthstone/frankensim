@@ -40,7 +40,7 @@ impl Value {
 /// [`OptError::Unevaluable`] / [`OptError::UnknownVar`] /
 /// [`OptError::UnknownNode`] / [`OptError::BindingCount`] /
 /// [`OptError::BindingLen`] / [`OptError::BindingNonFinite`] /
-/// [`OptError::CapExceeded`].
+/// [`OptError::EvalNonFinite`] / [`OptError::CapExceeded`].
 pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Value, OptError> {
     if node.0 as usize >= problem.exprs.len() {
         return Err(OptError::UnknownNode { id: node.0 });
@@ -215,6 +215,29 @@ fn eval_node(
             });
         }
     };
+    match &out {
+        Value::S(value) if !value.is_finite() => {
+            return Err(OptError::EvalNonFinite {
+                node: node.0,
+                component: None,
+                bits: value.to_bits(),
+            });
+        }
+        Value::V(values) => {
+            if let Some((component, value)) = values
+                .iter()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite())
+            {
+                return Err(OptError::EvalNonFinite {
+                    node: node.0,
+                    component: Some(component as u32),
+                    bits: value.to_bits(),
+                });
+            }
+        }
+        Value::S(_) => {}
+    }
     Ok(out)
 }
 
@@ -385,22 +408,35 @@ pub fn descend_fn(
     max_evals: u64,
     cx: &Cx<'_>,
 ) -> Result<DescentReport, OptError> {
-    descend_fn_with_initial(manifold, f, x0, opts, max_evals, cx, None)
+    let checked_f = |x: &[f64]| finite_descent_value(f(x), "descent objective result");
+    descend_fn_checked(manifold, &checked_f, x0, opts, max_evals, cx)
 }
 
-fn descend_fn_with_initial(
+fn finite_descent_value(value: f64, what: &'static str) -> Result<f64, OptError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(OptError::NonFinite {
+            what,
+            bits: value.to_bits(),
+        })
+    }
+}
+
+fn descend_fn_checked(
     manifold: Manifold,
-    f: &dyn Fn(&[f64]) -> f64,
+    f: &dyn Fn(&[f64]) -> Result<f64, OptError>,
     x0: &[f64],
     opts: DescentOptions,
     max_evals: u64,
     cx: &Cx<'_>,
-    initial: Option<f64>,
 ) -> Result<DescentReport, OptError> {
     manifold.validate(&AdmissionCaps::default())?;
     let point_dim = manifold
         .point_dim()
-        .expect("validated manifold has a representable point dimension");
+        .ok_or_else(|| OptError::ManifoldInvalid {
+            what: format!("{manifold:?} has no representable point dimension"),
+        })?;
     if x0.len() as u64 != u64::from(point_dim) {
         return Err(OptError::BindingLen {
             var: 0,
@@ -435,7 +471,7 @@ fn descend_fn_with_initial(
     let mut x = x0.to_vec();
     let mut evals = 0u64;
     let mut budget_stopped = false;
-    let f0 = initial.unwrap_or_else(|| f(&x));
+    let f0 = f(&x)?;
     evals += 1;
     let pd = manifold
         .param_dim()
@@ -461,10 +497,10 @@ fn descend_fn_with_initial(
             let mut t = vec![0.0; pd];
             t[i] = opts.fd_h;
             let xp = manifold.retract(&x, &t)?;
-            let fp = f(&xp);
+            let fp = f(&xp)?;
             t[i] = -opts.fd_h;
             let xm = manifold.retract(&x, &t)?;
-            let fm = f(&xm);
+            let fm = f(&xm)?;
             evals += 2;
             *gi = (fp - fm) / (2.0 * opts.fd_h);
         }
@@ -476,7 +512,7 @@ fn descend_fn_with_initial(
         f0
     } else {
         evals += 1;
-        f(&x)
+        f(&x)?
     };
     Ok(DescentReport {
         x,
@@ -515,24 +551,15 @@ pub fn descend_ir(
         .first()
         .ok_or(OptError::IndexOut { index: 0, len: 0 })?
         .manifold;
-    // Surface evaluation errors (PDE/stochastic nodes) once, and reuse
-    // that exact value as descent's initial objective. Counting a
-    // throwaway preflight and then evaluating f0 again would overspend
-    // a one-evaluation budget before the receipt could report it.
-    let initial = eval(problem, obj.node, &[x0.to_vec()])?
-        .scalar()
-        .expect("objective roots are scalar");
-    let f = |x: &[f64]| -> f64 {
-        let v = eval(problem, obj.node, &[x.to_vec()]).expect("checked evaluable above");
-        sign * obj.weight * v.scalar().expect("objective roots are scalar")
+    // The fallible objective runs only inside the shared descent seam,
+    // after manifold/start/options leaf validation. Its first successful
+    // invocation is f0 and is counted exactly once, including under a
+    // one-evaluation budget.
+    let f = |x: &[f64]| -> Result<f64, OptError> {
+        let scalar = eval(problem, obj.node, &[x.to_vec()])?
+            .scalar()
+            .ok_or(OptError::NotScalar { node: obj.node.0 })?;
+        finite_descent_value(sign * obj.weight * scalar, "weighted IR objective")
     };
-    descend_fn_with_initial(
-        manifold,
-        &f,
-        x0,
-        opts,
-        problem.budget.max_evals,
-        cx,
-        Some(sign * obj.weight * initial),
-    )
+    descend_fn_checked(manifold, &f, x0, opts, problem.budget.max_evals, cx)
 }

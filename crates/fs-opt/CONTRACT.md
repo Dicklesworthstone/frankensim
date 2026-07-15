@@ -86,13 +86,16 @@ structure; FLUX/UQ execute it.
   zip-based arithmetic; malformed slices refuse with a typed input and
   expected/actual lengths. `descend_fn`/`descend_ir` are the TOY
   consumers proving iterates stay ON their manifolds. Both descent
-  entry points are LEAF-GATED before any arithmetic (bead j3vb5 /
-  review High #6):
+  entry points are LEAF-GATED before the first objective evaluation or
+  any descent arithmetic (bead j3vb5 / review High #6):
   the manifold validates through the admission policy, the start
   point must match `point_dim` with FINITE components (offending bit
   pattern retained in the refusal), and `DescentOptions` must carry
   finite positive `fd_h` and `lr` (a NaN/zero step would divide
   through the FD quotient; a negative rate would silently ascend).
+  The internal objective seam is fallible: non-finite closure results
+  and typed IR evaluation failures propagate without publishing a
+  report or converting the refusal into a panic.
 - Structure: multi-objective (weights), constraint KINDS (`EqZero`,
   `LeZero` — semantics/repair are fs-constraint's), `ProblemTag`
   (multi-fidelity, chance-constrained, bilevel via typed
@@ -150,8 +153,10 @@ structure; FLUX/UQ execute it.
   admission schedule before memo allocation. Supplied runtime bindings
   are checked for exact manifold point length and finite components first;
   a refusal identifies the exact variable, component, and IEEE-754 bits.
-  The walk itself is
-  EXPLICIT-STACK (reachability worklist + bottom-up arena-order sweep;
+  Every computed scalar/vector node result is then checked for finiteness
+  with node/component attribution before it enters the memo or becomes a
+  public result. The walk itself is EXPLICIT-STACK (reachability worklist
+  + bottom-up arena-order sweep;
   bead frankensim-xf8v7) so no admitted graph — at the depth cap or
   otherwise — can overflow the call stack. `ir::children` is public so
   downstream evaluators can drive the same iterative traversal.

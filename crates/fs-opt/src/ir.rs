@@ -562,6 +562,15 @@ pub enum OptError {
         /// The offending value's exact IEEE-754 bit pattern.
         bits: u64,
     },
+    /// Runtime arithmetic produced a NaN or infinity at a graph node.
+    EvalNonFinite {
+        /// The node whose result is malformed.
+        node: u32,
+        /// Vector component, or `None` for a scalar result.
+        component: Option<u32>,
+        /// The offending value's exact IEEE-754 bit pattern.
+        bits: u64,
+    },
     /// A raw retraction point or step has the wrong storage length.
     RetractionLen {
         /// Which retraction input was malformed.
@@ -696,6 +705,24 @@ impl core::fmt::Display for OptError {
                  (bits {bits:016X}); runtime points must be finite before evaluation",
                 f64::from_bits(*bits)
             ),
+            OptError::EvalNonFinite {
+                node,
+                component,
+                bits,
+            } => match component {
+                Some(component) => write!(
+                    f,
+                    "node {node} produced non-finite vector component {component}: {} \
+                     (bits {bits:016X}); the result has no evaluation authority",
+                    f64::from_bits(*bits)
+                ),
+                None => write!(
+                    f,
+                    "node {node} produced a non-finite scalar: {} (bits {bits:016X}); \
+                     the result has no evaluation authority",
+                    f64::from_bits(*bits)
+                ),
+            },
             OptError::RetractionLen {
                 input,
                 expected,
