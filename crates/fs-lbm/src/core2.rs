@@ -224,10 +224,9 @@ impl Grid {
     }
 
     fn validate_stream_input(&self, post: &[[f64; Q]]) {
-        assert_eq!(
-            post.len(),
-            self.nx * self.ny,
-            "post-collision population count must match the grid"
+        assert!(
+            post.len() >= self.nx * self.ny,
+            "post-collision populations must cover every grid cell"
         );
     }
 

@@ -105,9 +105,11 @@ fn d2q9_wall_momentum_has_exact_link_sign_and_obstacle_selection() {
     let fluid = grid.idx(1, 1);
     let left_wall = grid.idx(0, 1);
     let right_wall = grid.idx(2, 1);
+    let top_wall = grid.idx(1, 2);
     grid.flags[fluid] = Cell::Fluid;
     grid.flags[left_wall] = Cell::Wall;
     grid.flags[right_wall] = Cell::Wall;
+    grid.flags[top_wall] = Cell::Wall;
 
     let mut post = vec![[0.0; Q]; grid.nx * grid.ny];
     // D2Q9 directions 1 and 3 point east and west. An east-going population
@@ -115,6 +117,9 @@ fn d2q9_wall_momentum_has_exact_link_sign_and_obstacle_selection() {
     post[fluid][1] = 0.25;
     // The west-going population would transfer -0.75 to the left wall.
     post[fluid][3] = 0.375;
+    // A north-going population of 0.125 transfers +0.25 y-momentum to the
+    // top wall, independently pinning the lift-axis sign.
+    post[fluid][2] = 0.125;
 
     let mut right_only = vec![false; grid.nx * grid.ny];
     right_only[right_wall] = true;
@@ -131,6 +136,14 @@ fn d2q9_wall_momentum_has_exact_link_sign_and_obstacle_selection() {
     assert_eq!(both_receipt.wall_impulse[0].to_bits(), (-0.25f64).to_bits());
     assert_eq!(both_receipt.wall_impulse[1].to_bits(), 0.0f64.to_bits());
     assert_eq!(grid.f[fluid][1].to_bits(), 0.375f64.to_bits());
+
+    let mut top_only = vec![false; grid.nx * grid.ny];
+    top_only[top_wall] = true;
+    let top_receipt = grid.stream_from_with_wall_momentum(&post, &top_only);
+    assert_eq!(top_receipt.measured_links, 1);
+    assert_eq!(top_receipt.wall_impulse[0].to_bits(), 0.0f64.to_bits());
+    assert_eq!(top_receipt.wall_impulse[1].to_bits(), 0.25f64.to_bits());
+    assert_eq!(grid.f[fluid][4].to_bits(), 0.125f64.to_bits());
 }
 
 #[test]
@@ -152,19 +165,31 @@ fn d2q9_wall_momentum_is_zero_at_rest_and_replays_bitwise() {
     first.flags[wall] = Cell::Wall;
     first.f[upstream] = equilibrium(1.0, 0.04, 0.01);
     let mut second = first.clone();
+    let mut legacy = first.clone();
     let mut mask = vec![false; first.nx * first.ny];
     mask[wall] = true;
     let (mut first_scratch, mut second_scratch) = (Vec::new(), Vec::new());
+    let mut legacy_scratch = Vec::new();
     let mut observed_nonzero_impulse = false;
 
     for _ in 0..12 {
         let first_receipt = first.step_with_wall_momentum(&mut first_scratch, &mask);
         let second_receipt = second.step_with_wall_momentum(&mut second_scratch, &mask);
+        legacy.step(&mut legacy_scratch);
         observed_nonzero_impulse |= first_receipt.wall_impulse != [0.0, 0.0];
-        assert_eq!(first_receipt, second_receipt);
+        assert_eq!(first_receipt.measured_links, second_receipt.measured_links);
+        assert_eq!(
+            first_receipt.wall_impulse.map(f64::to_bits),
+            second_receipt.wall_impulse.map(f64::to_bits)
+        );
     }
     assert!(observed_nonzero_impulse);
-    assert_eq!(first.f, second.f);
+    for (first_cell, (second_cell, legacy_cell)) in
+        first.f.iter().zip(second.f.iter().zip(&legacy.f))
+    {
+        assert_eq!(first_cell.map(f64::to_bits), second_cell.map(f64::to_bits));
+        assert_eq!(first_cell.map(f64::to_bits), legacy_cell.map(f64::to_bits));
+    }
 }
 
 #[test]
@@ -177,6 +202,14 @@ fn d2q9_wall_momentum_refuses_invalid_masks_before_advancing() {
         let _ = grid.step_with_wall_momentum(&mut scratch, &non_wall_mask);
     }));
     assert!(refusal.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
+
+    let short_mask = vec![false; grid.nx * grid.ny - 1];
+    let short_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = grid.step_with_wall_momentum(&mut scratch, &short_mask);
+    }));
+    assert!(short_refusal.is_err());
     assert_eq!(grid.f, original);
     assert!(scratch.is_empty());
 }
