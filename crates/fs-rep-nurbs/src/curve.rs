@@ -820,6 +820,7 @@ fn bezier_pre_scan_work(knot_count: usize) -> Result<u128, NurbsError> {
         })
 }
 
+#[cfg(test)]
 fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
     curve: AdmittedNurbsCurve<'_, S, DIM>,
 ) -> Result<BezierConversionPlan, NurbsError> {
@@ -1154,6 +1155,19 @@ pub enum CurveBezierRun<S: Scalar, const DIM: usize> {
         curve: NurbsCurve<S, DIM>,
     },
     /// Cancellation was observed; all partial derived generations were dropped.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware exact degree elevation.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum CurveElevationRun<S: Scalar, const DIM: usize> {
+    /// The complete sealed and validated elevated generation.
+    Complete {
+        /// Exact degree elevation of the admitted source curve.
+        curve: NurbsCurve<S, DIM>,
+    },
+    /// Cancellation was observed; all partial derived storage was dropped.
     Cancelled,
 }
 
@@ -1984,6 +1998,55 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
             .to_bezier_form_after_validation_with_poll(should_cancel)
     }
 
+    /// Elevate this admitted generation exactly by one degree without
+    /// repeating structural validation of the unchanged source.
+    ///
+    /// # Errors
+    /// Propagates checked work, retained-memory, allocation, numeric-domain,
+    /// and structural refusals from exact Bezier conversion and elevation.
+    pub fn elevate_degree(&self) -> Result<NurbsCurve<S, DIM>, NurbsError> {
+        let mut never_cancel = || false;
+        match self.elevate_degree_with_poll(&mut never_cancel)? {
+            CurveElevationRun::Complete { curve } => Ok(curve),
+            CurveElevationRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling degree elevation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Elevate this admitted generation exactly by one degree with bounded
+    /// cancellation polling and transactional publication.
+    ///
+    /// Checked conversion and elevation work/retained-memory refusals precede
+    /// elevation allocation. One gate then spans exact Bezier conversion,
+    /// metadata and output allocation, knot-run and span traversal, four-lane
+    /// binomial blends, knot replication, both derived validation passes, and
+    /// final publication. Cancellation drops all partial derived storage. The
+    /// caller remains responsible for owning admission, `Cx` budget
+    /// consumption, and request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous elevation's checked work, retained-memory,
+    /// allocation, numeric-domain, or structural refusal when it wins before
+    /// an observed cancellation.
+    pub fn elevate_degree_with_cx(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<CurveElevationRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.elevate_degree_with_poll(&mut should_cancel)
+    }
+
+    /// Elevate an admitted curve while sharing a compound caller's
+    /// cancellation callback across conversion and derived assembly.
+    pub(crate) fn elevate_degree_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveElevationRun<S, DIM>, NurbsError> {
+        self.inner
+            .elevate_degree_after_validation_with_poll(should_cancel)
+    }
+
     /// Constant-time charge required before scanning knot runs to construct a
     /// Bezier conversion plan.
     pub(crate) fn bezier_pre_scan_work(&self) -> Result<u128, NurbsError> {
@@ -2614,14 +2677,26 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         &self,
         should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<CurveBezierRun<S, DIM>, NurbsError> {
-        match plan_bezier_conversion_with_poll(self.admitted_after_validation(), should_cancel)? {
-            CurveWorkRun::Complete(_) => {}
+        let plan = match plan_bezier_conversion_with_poll(
+            self.admitted_after_validation(),
+            should_cancel,
+        )? {
+            CurveWorkRun::Complete(plan) => plan,
             CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
-        }
+        };
+        self.to_bezier_form_with_plan_and_poll(plan, should_cancel)
+    }
+
+    fn to_bezier_form_with_plan_and_poll(
+        &self,
+        plan: BezierConversionPlan,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveBezierRun<S, DIM>, NurbsError> {
         let mut current = match self.try_clone_with_poll(should_cancel)? {
             CurveWorkRun::Complete(curve) => curve,
             CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
         };
+        let mut completed_insertions = 0usize;
         loop {
             let target = match current.next_bezier_target_with_poll(should_cancel) {
                 CurveWorkRun::Complete(target) => target,
@@ -2629,12 +2704,33 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             };
             match target {
                 Some((t, span)) => {
+                    if completed_insertions >= plan.insertions {
+                        return Err(NurbsError::Structure {
+                            what: "Bezier conversion exceeded its checked insertion plan"
+                                .to_string(),
+                        });
+                    }
                     current = match current.insert_knot_at_span_with_poll(t, span, should_cancel)? {
                         CurveWorkRun::Complete(curve) => curve,
                         CurveWorkRun::Cancelled => return Ok(CurveBezierRun::Cancelled),
                     };
+                    completed_insertions =
+                        completed_insertions.checked_add(1).ok_or_else(|| {
+                            NurbsError::Structure {
+                                what: "Bezier conversion insertion traversal overflowed usize"
+                                    .to_string(),
+                            }
+                        })?;
                 }
                 None => {
+                    if completed_insertions != plan.insertions
+                        || current.knots.knots.len() != plan.final_knot_count
+                        || current.cpw.len() != plan.final_control_count
+                    {
+                        return Err(NurbsError::Structure {
+                            what: "Bezier conversion disagreed with its checked plan".to_string(),
+                        });
+                    }
                     if should_cancel() {
                         return Ok(CurveBezierRun::Cancelled);
                     }
@@ -2654,11 +2750,24 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// and structural refusals. The borrowed source generation is excluded
     /// from the 64 MiB simultaneously-live derived-payload envelope.
     pub fn elevate_degree(&self) -> Result<Self, NurbsError> {
-        let admitted = self.admit()?;
+        self.admit()?.elevate_degree()
+    }
+
+    fn elevate_degree_after_validation_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveElevationRun<S, DIM>, NurbsError> {
+        let admitted = self.admitted_after_validation();
         let p = admitted.knots().degree();
-        let bezier_plan = plan_bezier_conversion(admitted)?;
+        let bezier_plan = match plan_bezier_conversion_with_poll(admitted, should_cancel)? {
+            CurveWorkRun::Complete(plan) => plan,
+            CurveWorkRun::Cancelled => return Ok(CurveElevationRun::Cancelled),
+        };
         let plan = plan_curve_elevation::<S>(p, bezier_plan)?;
-        let bez = admitted.to_bezier_form()?;
+        let bez = match self.to_bezier_form_with_plan_and_poll(bezier_plan, should_cancel)? {
+            CurveBezierRun::Complete { curve } => curve,
+            CurveBezierRun::Cancelled => return Ok(CurveElevationRun::Cancelled),
+        };
         if bez.knots.knots.len() != bezier_plan.final_knot_count
             || bez.cpw.len() != bezier_plan.final_control_count
         {
@@ -2672,18 +2781,25 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         // Bezier-form joins have multiplicity p and share one endpoint; a
         // legal full break has multiplicity p+1 and owns two independent
         // endpoints. Elevation must preserve that distinction.
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
         let mut breaks: Vec<S> = Vec::new();
         breaks
             .try_reserve_exact(plan.distinct_knot_count)
             .map_err(|_| NurbsError::Domain {
                 what: "degree-elevation break-table allocation was refused".to_string(),
             })?;
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
         let mut multiplicities: Vec<usize> = Vec::new();
         multiplicities
             .try_reserve_exact(plan.distinct_knot_count)
             .map_err(|_| NurbsError::Domain {
                 what: "degree-elevation multiplicity-table allocation was refused".to_string(),
             })?;
+        let mut operations_since_poll = 0usize;
         for &u in &bez.knots.knots {
             if breaks.last() != Some(&u) {
                 push_curve_elevation_value(
@@ -2706,6 +2822,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                             what: "degree-elevation knot multiplicity overflowed usize".to_string(),
                         })?;
             }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveElevationRun::Cancelled);
+            }
         }
         if breaks.len() != plan.distinct_knot_count
             || multiplicities.len() != plan.distinct_knot_count
@@ -2713,6 +2832,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             return Err(NurbsError::Structure {
                 what: "degree-elevation knot runs disagreed with their checked plan".to_string(),
             });
+        }
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
         }
 
         // Elevate each Bézier segment: Q_0 = P_0; Q_{p+1} = P_p;
@@ -2723,9 +2845,16 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             .map_err(|_| NurbsError::Domain {
                 what: "degree-elevation control-net allocation was refused".to_string(),
             })?;
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
         let denominator = S::from_int(plan.elevated_degree_i64);
         let mut segment = 0usize;
+        operations_since_poll = 0;
         for span in p..bez.knots.control_count() {
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveElevationRun::Cancelled);
+            }
             if bez.knots.knots[span] >= bez.knots.knots[span + 1] {
                 continue;
             }
@@ -2766,6 +2895,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                     plan.final_control_count,
                     "control net",
                 )?;
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveElevationRun::Cancelled);
+                }
             }
             for i in 1..=p {
                 let numerator = i64::try_from(i).map_err(|_| NurbsError::Structure {
@@ -2775,6 +2907,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 let mut v = [S::zero(); 4];
                 for ((slot, &a), &b) in v.iter_mut().zip(&pts[i - 1]).zip(&pts[i]) {
                     *slot = alpha * a + (S::one() - alpha) * b;
+                    if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(CurveElevationRun::Cancelled);
+                    }
                 }
                 push_curve_elevation_value(
                     &mut new_cpw,
@@ -2782,6 +2917,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                     plan.final_control_count,
                     "control net",
                 )?;
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveElevationRun::Cancelled);
+                }
             }
             push_curve_elevation_value(
                 &mut new_cpw,
@@ -2789,6 +2927,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 plan.final_control_count,
                 "control net",
             )?;
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveElevationRun::Cancelled);
+            }
             segment = segment
                 .checked_add(1)
                 .ok_or_else(|| NurbsError::Structure {
@@ -2801,6 +2942,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                     .to_string(),
             });
         }
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
 
         // Elevation raises every multiplicity by one, preserving continuity
         // order. Endpoints therefore have p+2 copies, C0 joins p+1, and full
@@ -2811,6 +2955,10 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             .map_err(|_| NurbsError::Domain {
                 what: "degree-elevation knot allocation was refused".to_string(),
             })?;
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
+        operations_since_poll = 0;
         for (bi, (&b, &old_multiplicity)) in breaks.iter().zip(multiplicities.iter()).enumerate() {
             let mult = if bi == 0 || bi == breaks.len() - 1 {
                 plan.elevated_order
@@ -2828,6 +2976,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                     plan.final_knot_count,
                     "knot vector",
                 )?;
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveElevationRun::Cancelled);
+                }
             }
         }
         if new_knots.len() != plan.final_knot_count {
@@ -2835,12 +2986,33 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 what: "degree-elevation knot assembly disagreed with its checked plan".to_string(),
             });
         }
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
+        let knots = KnotVector {
+            knots: new_knots,
+            degree: plan.elevated_degree,
+        };
+        KnotVector::<S>::enforce_work(
+            knots.validation_work()?,
+            "degree-elevation knot construction",
+        )?;
+        match knots.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(CurveElevationRun::Cancelled),
+        }
         let elevated = NurbsCurve {
-            knots: KnotVector::new(new_knots, plan.elevated_degree)?,
+            knots,
             cpw: new_cpw,
         };
-        elevated.validate_live_structure()?;
-        Ok(elevated)
+        match elevated.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => {}
+            CurveWorkRun::Cancelled => return Ok(CurveElevationRun::Cancelled),
+        }
+        if should_cancel() {
+            return Ok(CurveElevationRun::Cancelled);
+        }
+        Ok(CurveElevationRun::Complete { curve: elevated })
     }
 
     /// Per-span control-point bounding boxes in Cartesian space (the
@@ -5272,6 +5444,119 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn degree_elevation_with_cx_is_transactional_and_exact() {
+        let curve = quadratic_join_curve();
+        let admitted = curve.admit().expect("admitted quadratic join");
+        let expected = admitted.elevate_degree().expect("synchronous elevation");
+        assert_eq!(expected, curve.elevate_degree().expect("owning elevation"));
+
+        with_curve_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .elevate_degree_with_cx(cx)
+                    .expect("pre-cancelled elevation"),
+                CurveElevationRun::Cancelled
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .elevate_degree_with_cx(cx)
+                    .expect("active elevation"),
+                CurveElevationRun::Complete {
+                    curve: expected.try_clone().expect("expected elevation copy"),
+                }
+            );
+        });
+
+        let zero = Rat::int(0);
+        let one = Rat::int(1);
+        let exact = NurbsCurve::<Rat, 1>::new(
+            KnotVector::new(vec![zero, zero, zero, Rat::new(1, 2), one, one, one], 2)
+                .expect("exact quadratic knots"),
+            &[[zero], [Rat::int(1)], [Rat::int(2)], [Rat::int(3)]],
+            &[one; 4],
+        )
+        .expect("exact quadratic curve");
+        let exact_admitted = exact.admit().expect("admitted exact curve");
+        let exact_expected = exact_admitted
+            .elevate_degree()
+            .expect("exact synchronous elevation");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                exact_admitted
+                    .elevate_degree_with_cx(cx)
+                    .expect("active exact elevation"),
+                CurveElevationRun::Complete {
+                    curve: exact_expected,
+                }
+            );
+        });
+
+        let full_break = linear_full_break_curve();
+        let full_break_elevated = full_break
+            .admit()
+            .expect("admitted full break")
+            .elevate_degree()
+            .expect("full-break elevation");
+        assert_eq!(full_break_elevated.knots.degree(), 2);
+        assert_eq!(
+            full_break_elevated
+                .knots
+                .knots()
+                .iter()
+                .filter(|&&knot| knot == 0.5)
+                .count(),
+            3
+        );
+        assert_eq!(full_break_elevated.cpw.len(), 6);
+        assert_eq!(full_break_elevated.cpw[2], [0.25, 0.0, 0.0, 1.0]);
+        assert_eq!(full_break_elevated.cpw[3], [0.75, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn degree_elevation_cancellation_replays_every_checkpoint() {
+        let curve = long_linear_curve();
+        let admitted = curve.admit().expect("admitted long curve");
+        let expected = admitted.elevate_degree().expect("reference elevation");
+
+        let complete_run = || {
+            let mut polls = 0usize;
+            let mut never_cancel = || {
+                polls += 1;
+                false
+            };
+            let outcome = admitted
+                .elevate_degree_with_poll(&mut never_cancel)
+                .expect("healthy cancellable elevation");
+            (outcome, polls)
+        };
+        let (complete, total_polls) = complete_run();
+        assert_eq!(complete, CurveElevationRun::Complete { curve: expected });
+        assert_eq!(complete_run().1, total_polls);
+        assert!(
+            total_polls > 16,
+            "long elevation must expose phase checkpoints"
+        );
+
+        for cancel_at in 1..=total_polls {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == cancel_at
+            };
+            assert_eq!(
+                admitted
+                    .elevate_degree_with_poll(&mut should_cancel)
+                    .expect("valid cancellation replay"),
+                CurveElevationRun::Cancelled,
+                "checkpoint {cancel_at} published a partial or complete curve"
+            );
+            assert_eq!(polls, cancel_at);
+        }
     }
 
     #[test]

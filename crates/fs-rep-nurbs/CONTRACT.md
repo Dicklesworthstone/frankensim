@@ -95,6 +95,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   Its admitted-only `to_bezier_form_with_cx` returns transactional
   `CurveBezierRun` state and publishes only a fully validated exact derived
   generation.
+  Its admitted-only `elevate_degree_with_cx` returns transactional
+  `CurveElevationRun` state and publishes only a fully validated exact elevated
+  generation.
   EXACT Boehm `insert_knot` under checked aggregate work and a 64 MiB derived
   output envelope; EXACT `remove_knot` under checked aggregate work and a
   64 MiB simultaneously-live derived-storage envelope (reconstruction checked
@@ -412,18 +415,21 @@ partial owned generations and returns `CurveBezierRun::Cancelled`. Individual
 allocator calls and scalar operations are not preemptible; the API claims a
 logical-operation bound, not a wall-time bound, and does not claim owning curve
 admission, `Cx` budget consumption, or executor drain/finalize authority.
-Synchronous `NurbsCurve::elevate_degree` validates and admits the immutable
-source once, then plans the complete Bezier-conversion and elevation envelope
-before conversion allocation. Its checked work covers conversion, knot-run and
-nonempty-span scans, four-lane binomial assembly, knot replication, and both
-derived validation passes. Its 64 MiB peak-live derived-payload ceiling is the
-maximum of the existing conversion peak and the assembly phase holding the
-converted curve, distinct-knot and multiplicity tables, and final knot/control
-payloads together. The borrowed source, vector headers, allocator rounding, and
-spare capacity are excluded. Every elevation-owned vector makes a fallible
-exact-length reservation request, and checked output limits prevent implicit
-growth beyond those requests. This synchronous primitive has no cancellation,
-wall-time, exact caller-budget, executor drain/finalize, or resumability claim.
+`AdmittedNurbsCurve::elevate_degree_with_cx` preserves the synchronous checked
+Bezier-conversion plus elevation work and 64 MiB peak-live derived-payload
+envelope. One gate spans the reused conversion plan, exact conversion, fallible
+metadata and output reservations, knot-run and candidate-span scans, every four
+homogeneous-lane blend, knot replication, both derived validation passes, and
+final publication, polling after at most 64 logical operations within linear
+phases. `CurveElevationRun::Cancelled` exposes no partial curve. The peak is the
+maximum of the conversion peak and the assembly phase holding the converted
+curve, distinct-knot and multiplicity tables, and final knot/control payloads
+together. The borrowed source, vector headers, allocator rounding, and spare
+capacity are excluded. Individual allocator calls, scalar operations, and
+destructors remain non-preemptible. The primitive does not claim owning source
+admission, wall-time bounds, exact caller-budget consumption, executor
+drain/finalize, or resumability. Synchronous owning and admitted elevation share
+the same non-cancelling core.
 `AdmittedNurbsSurface::eval_homogeneous_with_cx` evaluates the U basis and then
 the V basis under one cancellation gate, preserving the synchronous
 U-major/V-minor tensor arithmetic order. It polls the pair product and four
@@ -699,8 +705,7 @@ refinement + partials vs central differences.
   wqd.13 is intentionally insufficient for that authority.
 - **Degree elevation emits full-multiplicity knot vectors** (valid,
   evaluation-identical, with discontinuous full breaks preserved rather than
-  silently healed); minimal-multiplicity reassembly and a transactional
-  `Cx`-aware elevation path are follow-ups.
+  silently healed); minimal-multiplicity reassembly is a follow-up.
 - **Closest-point and NURBS→distance brackets are measured estimates.** The
   one-ULP hull expansion is heuristic and cannot authorize `Enclosure`, exact sign,
   a 1-Lipschitz field, or no-tunneling. The fs-ivl/Taylor path with outward
