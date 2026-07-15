@@ -4205,6 +4205,12 @@ impl Governor {
             .expect("materialization barrier lock")
             .clone();
         if let Some(barrier) = barrier {
+            // Two crossings: the first announces "materializing outside
+            // the governor lock", the second holds the worker PAUSED here
+            // until the test finishes probing hot paths and releases it.
+            // A single crossing lets the worker finish early and leaves
+            // the test's release-side wait() stranded forever.
+            barrier.wait();
             barrier.wait();
         }
     }

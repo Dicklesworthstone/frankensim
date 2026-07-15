@@ -1036,6 +1036,7 @@ fn branch_from_row(row: &fsqlite::Row) -> Result<BranchInfo, LedgerError> {
 mod tests {
     use super::*;
     use crate::{EdgeRole, Ledger, OpOutcome};
+    use fs_blake3::hash_bytes;
 
     const FX: FiveExplicits<'static> = FiveExplicits {
         seed: &[0xAB],
