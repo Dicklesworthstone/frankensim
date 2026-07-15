@@ -22,14 +22,18 @@
 //! - [`Site`] tags + [`SiteReport`]: allocation-site accounting whose JSON
 //!   is deterministic and diffable between runs, feeding the Ledger through
 //!   `fs-obs` events.
+//! - [`ReclaimPoison`]: opt-in seeded G4 mode that poisons retained chunks,
+//!   verifies them before reuse, and quarantines stale-write corruption with
+//!   a structured receipt.
 //!
 //! Error model: every fallible path returns a structured, teaching
 //! [`AllocError`] (Decalogue P10). Out-of-memory is a `Result`, not an
 //! abort.
 //!
-//! Unsafe boundary: exactly one registered capsule, `src/raw/mod.rs` (the
-//! bump-pointer core and chunk alloc/dealloc), behind this crate's safe
-//! facade — see `src/raw/SAFETY.md`.
+//! Unsafe boundary: two registered capsules behind this crate's safe facade:
+//! `src/raw/mod.rs` (bump-pointer core and chunk alloc/dealloc) and
+//! `src/raw/poison/mod.rs` (diagnostic byte fill/scan). See each adjacent
+//! SAFETY.md.
 //!
 //! See CONTRACT.md for invariants, determinism class, cancellation
 //! behavior, and no-claim boundaries.
@@ -42,7 +46,8 @@ mod pool;
 mod raw;
 
 pub use arena::{
-    AllocError, Arena, ArenaConfig, ArenaPool, ArenaStats, PoolStats, Site, SiteReport, SiteStats,
+    AllocError, Arena, ArenaConfig, ArenaPool, ArenaStats, PoolStats, RECLAIM_POISON_VERSION,
+    ReclaimPoison, ReclaimPoisonMutation, Site, SiteReport, SiteStats,
 };
 pub use hugepage::{HUGEPAGE_BYTES, HugepageDecision, HugepageOutcome, HugepagePolicy};
 pub use lease::{LeaseCharge, LeaseReceipt, LeaseRefusal, OperationMemoryLease};

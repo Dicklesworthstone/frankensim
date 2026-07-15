@@ -839,6 +839,10 @@ fn alloc_error_requested_bytes(error: &fs_alloc::AllocError) -> u128 {
         fs_alloc::AllocError::LeaseExhausted {
             requested_bytes, ..
         } => u128::from(*requested_bytes),
+        // The live TilePool path classifies this as an executor integrity
+        // failure below, never as memory pressure. Keep the affected block
+        // size total here so this helper stays exhaustive for generic callers.
+        fs_alloc::AllocError::ReclaimedChunkCorrupted { chunk_bytes, .. } => *chunk_bytes as u128,
     }
 }
 
@@ -1472,24 +1476,29 @@ where
                         memory,
                     )));
                 }
-                Err(fs_exec::RunError::TileFailed {
-                    failure: fs_exec::TileFailure::Allocation(error),
-                    ..
-                }) => {
-                    let refused_bytes = alloc_error_requested_bytes(&error);
-                    return Err(memory_refused(
-                        "a-pack-arena",
-                        refused_bytes,
-                        &completed,
-                        total_tiles,
-                        pool_runs,
-                        declared_run,
-                        memory,
-                        root_used_bytes,
-                        &arena_use,
-                    ));
-                }
                 Err(error) => {
+                    if let fs_exec::RunError::TileFailed {
+                        failure: fs_exec::TileFailure::Allocation(allocation),
+                        ..
+                    } = &error
+                        && !matches!(
+                            allocation,
+                            fs_alloc::AllocError::ReclaimedChunkCorrupted { .. }
+                        )
+                    {
+                        let refused_bytes = alloc_error_requested_bytes(allocation);
+                        return Err(memory_refused(
+                            "a-pack-arena",
+                            refused_bytes,
+                            &completed,
+                            total_tiles,
+                            pool_runs,
+                            declared_run,
+                            memory,
+                            root_used_bytes,
+                            &arena_use,
+                        ));
+                    }
                     return Err(GemmRunError::Executor {
                         error,
                         report: Box::new(report(

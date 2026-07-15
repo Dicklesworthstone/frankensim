@@ -27,6 +27,9 @@ use crate::ALLOC_ALIGN;
 use crate::hugepage::{HugepageDecision, HugepagePolicy};
 use crate::raw::{Chunk, RawArena};
 
+/// Version of the seeded reclaimed-chunk poison mapping and receipt.
+pub const RECLAIM_POISON_VERSION: u32 = 1;
+
 /// An allocation-site tag: a static name under which bytes are accounted,
 /// so memory usage feeds the Ledger and regressions are diffable between
 /// runs (plan §5.3). Cheap to copy; compare by name.
@@ -57,6 +60,61 @@ pub struct SiteStats {
     /// Cumulative allocation count under this site.
     /// Saturates at `u64::MAX` rather than wrapping.
     pub allocations: u64,
+}
+
+/// Opt-in seeded poison policy for reclaimed chunks.
+///
+/// Production pools created by [`ArenaPool::new`] do not pay the diagnostic
+/// fill/scan cost. A pool created with
+/// [`ArenaPool::new_with_reclaim_poison`] overwrites every retained chunk on
+/// reclaim and verifies it before reuse, turning stale writes into a
+/// structured [`AllocError::ReclaimedChunkCorrupted`] refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimPoison {
+    version: u32,
+    seed: u64,
+}
+
+impl ReclaimPoison {
+    /// Create a replayable poison policy. The seed is retained in every
+    /// injection and detection receipt.
+    #[must_use]
+    pub const fn seeded(seed: u64) -> Self {
+        Self {
+            version: RECLAIM_POISON_VERSION,
+            seed,
+        }
+    }
+
+    /// Version of the seed-to-pattern and seed-to-offset mapping.
+    #[must_use]
+    pub const fn version(self) -> u32 {
+        self.version
+    }
+
+    /// The replay seed carried by this policy.
+    #[must_use]
+    pub const fn seed(self) -> u64 {
+        self.seed
+    }
+}
+
+/// Receipt from the safe G4 hook that corrupts one exclusively free-listed
+/// chunk. This emulates a stale write without exposing a raw pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimPoisonMutation {
+    /// Version of the seed-to-pattern and seed-to-offset mapping.
+    pub version: u32,
+    /// Replay seed used to select the byte.
+    pub seed: u64,
+    /// Size of the retained chunk containing the byte.
+    pub chunk_bytes: usize,
+    /// Seed-selected byte offset within the retained chunk.
+    pub offset: usize,
+    /// Poison byte expected before and during the later reuse check.
+    pub expected: u8,
+    /// Replacement byte written by the fault hook.
+    pub actual: u8,
 }
 
 /// Pool configuration. Values are normalized (not rejected) by
@@ -143,6 +201,24 @@ pub enum AllocError {
         /// Additional bytes participating in the failed sum.
         additional_bytes: usize,
     },
+    /// A retained chunk changed after reclaim and before reuse. The chunk is
+    /// quarantined and deallocated before this refusal is returned.
+    ReclaimedChunkCorrupted {
+        /// Site whose attempted reuse triggered verification.
+        site: &'static str,
+        /// Version of the poison pattern and corruption-offset mapping.
+        poison_version: u32,
+        /// Seed defining the poison pattern and replay identity.
+        poison_seed: u64,
+        /// Size of the quarantined chunk.
+        chunk_bytes: usize,
+        /// First mismatching byte offset.
+        offset: usize,
+        /// Seed-derived byte expected at `offset`.
+        expected: u8,
+        /// Byte observed at `offset`.
+        actual: u8,
+    },
 }
 
 impl fmt::Display for AllocError {
@@ -202,6 +278,24 @@ impl fmt::Display for AllocError {
                  {additional_bytes} additional B exceeds the address space; reduce the allocation \
                  or arena chunk size"
             ),
+            AllocError::ReclaimedChunkCorrupted {
+                site,
+                poison_version,
+                poison_seed,
+                chunk_bytes,
+                offset,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "reclaimed arena chunk corruption detected at site `{site}`: poison \
+                 v{poison_version}, seed {poison_seed:#018x}, chunk {chunk_bytes} B, offset \
+                 {offset}, expected \
+                 poison byte {expected:#04x}, observed {actual:#04x}. The chunk was \
+                 quarantined. Fixes (ranked): (1) find stale pointers or writes after \
+                 scope reclaim; (2) replay with this poison seed; (3) run the fs-alloc \
+                 Miri and G4 batteries"
+            ),
         }
     }
 }
@@ -219,6 +313,7 @@ struct FreeList {
 struct PoolShared {
     config: ArenaConfig,
     hugepage: HugepageDecision,
+    reclaim_poison: Option<ReclaimPoison>,
     free: Mutex<FreeList>,
     /// Total OS-reserved bytes (in-use + free-listed).
     reserved_bytes: AtomicUsize,
@@ -366,6 +461,28 @@ impl PoolShared {
                             && lease.can_reserve_now(want as u64)
                     });
                     if !prefer_fresh {
+                        if let Some(poison) = self.reclaim_poison
+                            && let Some((offset, expected, actual)) =
+                                free.chunks[i].reclaimed_poison_mismatch(poison.seed())
+                        {
+                            let chunk = free.chunks.swap_remove(i);
+                            let chunk_bytes = chunk.len();
+                            free.bytes -= chunk_bytes;
+                            drop(free);
+                            // Deallocate before advertising capacity. The
+                            // quarantined block can never re-enter an arena.
+                            drop(chunk);
+                            self.reserved_bytes.fetch_sub(chunk_bytes, Ordering::AcqRel);
+                            return Err(AllocError::ReclaimedChunkCorrupted {
+                                site: site.name(),
+                                poison_version: poison.version(),
+                                poison_seed: poison.seed(),
+                                chunk_bytes,
+                                offset,
+                                expected,
+                                actual,
+                            });
+                        }
                         let charge = lease
                             .map(|lease| lease.reserve("arena-chunk", chunk_bytes as u64))
                             .transpose()
@@ -447,7 +564,7 @@ impl PoolShared {
         }
     }
 
-    fn release_chunk(&self, chunk: Chunk) {
+    fn release_chunk(&self, mut chunk: Chunk) {
         let mut free = self
             .free
             .lock()
@@ -457,6 +574,9 @@ impl PoolShared {
             .checked_add(chunk.len())
             .filter(|&bytes| bytes <= self.config.free_list_max_bytes)
         {
+            if let Some(poison) = self.reclaim_poison {
+                chunk.poison_for_reclaim(poison.seed());
+            }
             free.bytes = retained;
             free.chunks.push(chunk);
         } else {
@@ -472,12 +592,15 @@ impl PoolShared {
             .free
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for chunk in chunks {
+        for mut chunk in chunks {
             if let Some(retained) = free
                 .bytes
                 .checked_add(chunk.len())
                 .filter(|&bytes| bytes <= self.config.free_list_max_bytes)
             {
+                if let Some(poison) = self.reclaim_poison {
+                    chunk.poison_for_reclaim(poison.seed());
+                }
                 free.bytes = retained;
                 free.chunks.push(chunk);
             } else {
@@ -503,6 +626,21 @@ impl ArenaPool {
     /// Build a pool, probing and RECORDING the hugepage decision once.
     #[must_use]
     pub fn new(config: ArenaConfig) -> Self {
+        Self::build(config, None)
+    }
+
+    /// Build a pool with seeded reclaimed-chunk poisoning enabled.
+    ///
+    /// This is an opt-in verification mode: retained chunks are overwritten on
+    /// reclaim and scanned before reuse. A mismatch is quarantined and returned
+    /// as [`AllocError::ReclaimedChunkCorrupted`]. The byte-linear fill/scan
+    /// cost is intentionally absent from [`ArenaPool::new`].
+    #[must_use]
+    pub fn new_with_reclaim_poison(config: ArenaConfig, poison: ReclaimPoison) -> Self {
+        Self::build(config, Some(poison))
+    }
+
+    fn build(config: ArenaConfig, reclaim_poison: Option<ReclaimPoison>) -> Self {
         let mut config = config;
         config.chunk_bytes = config.chunk_bytes.max(4096);
         config.max_chunk_bytes = config.max_chunk_bytes.max(config.chunk_bytes);
@@ -510,6 +648,7 @@ impl ArenaPool {
         ArenaPool {
             shared: Arc::new(PoolShared {
                 hugepage,
+                reclaim_poison,
                 free: Mutex::new(FreeList {
                     chunks: Vec::new(),
                     bytes: 0,
@@ -522,6 +661,33 @@ impl ArenaPool {
                 config,
             }),
         }
+    }
+
+    /// Deterministically corrupt one exclusively free-listed chunk.
+    ///
+    /// This safe G4 fault hook returns `None` when poison mode is disabled or
+    /// no retained chunk exists. It never exposes an address: mutation occurs
+    /// under the free-list mutex, and the returned receipt carries the replay
+    /// seed and exact byte observation.
+    #[must_use]
+    pub fn inject_reclaimed_chunk_corruption(&self) -> Option<ReclaimPoisonMutation> {
+        let poison = self.shared.reclaim_poison?;
+        let mut free = self
+            .shared
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let chunk = free.chunks.iter_mut().min_by_key(|chunk| chunk.len())?;
+        let chunk_bytes = chunk.len();
+        let (offset, expected, actual) = chunk.inject_reclaimed_corruption(poison.seed());
+        Some(ReclaimPoisonMutation {
+            version: poison.version(),
+            seed: poison.seed(),
+            chunk_bytes,
+            offset,
+            expected,
+            actual,
+        })
     }
 
     /// Create a fresh arena for one unit of scoped work. Prefer

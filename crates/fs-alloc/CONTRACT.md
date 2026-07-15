@@ -25,6 +25,12 @@ recorded, sharded object pools, and diffable allocation-site accounting
 - `Site`, `SiteStats`, `SiteReport` — static allocation-site tags with
   cumulative padded-byte/count accounting; reports are sorted and
   deterministic (diffable between runs).
+- `ReclaimPoison` / `ReclaimPoisonMutation` — opt-in seeded G4 mode and its
+  versioned safe fault-injection receipt (`RECLAIM_POISON_VERSION = 1`).
+  `ArenaPool::new_with_reclaim_poison` poisons
+  retained chunks on reclaim, verifies before reuse, and
+  `inject_reclaimed_chunk_corruption` emulates one deterministic stale write
+  without exposing an address.
 - `HugepagePolicy` / `HugepageOutcome` / `HugepageDecision` — intent, probe
   outcome, and recorded reason; `HUGEPAGE_BYTES = 2 MiB`.
   `HugepageDecision::to_canonical_bytes` / `from_canonical_bytes` are the
@@ -46,7 +52,8 @@ recorded, sharded object pools, and diffable allocation-site accounting
 2. Dropping an arena (completion or cancellation) reclaims all its memory
    with cost proportional to its CHUNK count — O(log allocated-bytes) from
    geometric growth — never to its allocation count; chunks recycle through
-   the pool free list (alloc-002/alloc-009).
+   the pool free list (alloc-002/alloc-009). This production/default-path
+   bound excludes the explicitly enabled byte-linear poison diagnostic.
 3. Accounting is exact under the stated granularity: per-arena and per-site
    `bytes` equal the sum of 128-padded payload sizes while representable;
    cumulative byte/allocation counters saturate at `u64::MAX` rather than
@@ -104,6 +111,15 @@ recorded, sharded object pools, and diffable allocation-site accounting
    Payload bytes are tracked exactly; allocator rounding beyond the
    `try_reserve_exact`-sized buffer is a no-claim.
 
+8. Seeded reclaim poisoning is fail closed (alloc-010): every retained chunk
+   is filled before publication and checked under the same free-list mutex
+   before reuse. The first mismatch returns
+   `ReclaimedChunkCorrupted { site, poison_version, poison_seed, chunk_bytes,
+   offset, expected, actual }`; the block is removed and deallocated before its
+   reservation is released, so it cannot re-enter an arena and hard-budget
+   accounting never advertises memory still owned. The failing scope and a
+   subsequent healthy scope both return to `PoolStats::quiescent()`.
+
 ## Hugepage decision identity (v1)
 
 `HUGEPAGE_DECISION_IDENTITY_VERSION = 1` and the exact domain
@@ -129,8 +145,9 @@ detail, domain, version, and both declared byte-count prefixes independently.
 All fallible APIs return `Result<_, AllocError>`; `AllocError` is a
 structured enum (`Exhausted`, `OutOfMemory`, `LeaseExhausted`,
 `LayoutOverflow`,
-`ReservationOverflow`) carrying the allocation site, sizes, and budget
-context, with teaching `Display` text including ranked fixes (Decalogue P10).
+`ReservationOverflow`, `ReclaimedChunkCorrupted`) carrying the allocation
+site, sizes, budget context, or exact poison mismatch details, with teaching
+`Display` text including ranked fixes (Decalogue P10).
 Out-of-memory is a refusal, never an abort (`handle_alloc_error` is not
 reachable from this crate). Panics do not
 cross the API boundary except caller-supplied closures' own panics
@@ -153,6 +170,10 @@ quantities (`chunks_created` vs `chunks_recycled` split under contention)
 are schedule-dependent — callers wanting bit-stable reports across thread
 counts must aggregate per-worker pools keyed by logical identity (fs-exec's
 job, plan §5.4).
+The reclaim-poison pattern, injected byte offset, and mismatch receipt are
+deterministic for the retained mapping version, `ReclaimPoison` seed, and chunk
+size. alloc-010 golden-pins all three inputs plus the selected pattern/offset
+and prints them so the fault is replayable without an address or clock.
 
 ## Cancellation behavior
 No poll points inside this crate (no operation blocks unboundedly; chunk
@@ -161,26 +182,33 @@ RECLAIM: fs-exec binds one `Arena` per asupersync scope, and cancellation
 drops the arena — invariant 2 makes that O(chunks), leak-free (G4 storm),
 and independent of how much the cancelled work had allocated. Losing
 branches of speculative races reclaim through exactly this path.
+The opt-in reclaim-poison diagnostic deliberately scans/fills whole retained
+chunks and therefore makes diagnostic-mode reclaim O(reclaimed bytes); no
+production cancellation-latency claim is inferred from that mode.
 
 ## Unsafe boundary
-Exactly one registered capsule: `src/raw/mod.rs` (bump-pointer core, chunk
-alloc/dealloc; the "arena allocators" zone sanctioned by Decalogue P1),
-under 300 lines behind a safe facade, with `src/raw/SAFETY.md` documenting
-invariants, the lifetime-erasure argument, and Miri coverage (the capsule is
-plain Rust — Miri interprets every path). Registered in
+Exactly two registered capsules behind a safe facade:
+`src/raw/mod.rs` (bump-pointer core and chunk alloc/dealloc; the "arena
+allocators" zone sanctioned by Decalogue P1) and
+`src/raw/poison/mod.rs` (mutex-serialized fill/scan/one-byte fault injection).
+Each is under 300 lines with an adjacent SAFETY.md documenting invariants,
+lifetime/aliasing arguments, and Miri coverage. Both are registered in
 unsafe-capsules.json; enforced by `cargo run -p xtask -- check-unsafe`.
 
 ## Feature flags
 None. Everything here is `[S]` solid-tier.
 
 ## Conformance tests
-`tests/conformance.rs`, cases alloc-001..alloc-009 (JSON-line verdicts;
+`tests/conformance.rs`, cases alloc-001..alloc-010 (JSON-line verdicts;
 seeded cases carry their seed): unconditional alignment, scope reclaim,
 structured budget refusal, the 10^6-cancellation G4 storm (emits a
 `storm_assertion` event through fs-obs), shadow-model accounting +
 disjointness, concurrent leak-freedom, G5 deterministic reports, recorded
-hugepage decisions, and chunk-recycling bounds. Any reimplementation must
-pass this suite.
+hugepage decisions, chunk-recycling bounds, and seeded reclaimed-chunk
+corruption detection/quarantine/recovery. Any reimplementation must pass this
+suite. alloc-010 also proves that mismatch quarantine occurs before an
+operation-lease charge by requiring a fresh detection lease to retain an exact
+zero receipt.
 In-module tests additionally verify first-chunk preflight sizing, structured
 reservation overflow, concurrent hard-limit claims, the exhaustive v1
 hugepage-decision identity mutation battery, exact round trips, and fail-closed
@@ -198,6 +226,10 @@ fixed point required by the placement-v2 dependency.
   CCD-aware placement are fs-exec/fs-substrate territory.
 - NO cancel-latency claim (the ≤200 µs tile-boundary target is fs-exec's
   contract); this crate only guarantees reclaim cost and leak-freedom.
+- NO claim that reclaim poisoning is a race detector, prevents undefined
+  behavior from a real stale pointer, or observes corruption after a chunk is
+  deallocated instead of reused. It is an opt-in deterministic reuse-boundary
+  detector; concurrent stale writes are already outside Rust's safety model.
 - NO claim about accounting granularity finer than 128-byte padding;
   alignments above 128 may consume additional window padding visible only
   as reserved-vs-allocated slack.

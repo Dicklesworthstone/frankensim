@@ -8,7 +8,8 @@
 
 use fs_alloc::{
     ALLOC_ALIGN, AllocError, ArenaConfig, ArenaPool, HUGEPAGE_BYTES, HugepageOutcome,
-    HugepagePolicy, ShardedPool, Site, SiteStats,
+    HugepagePolicy, OperationMemoryLease, RECLAIM_POISON_VERSION, ReclaimPoison, ShardedPool, Site,
+    SiteStats,
 };
 
 fn verdict(case: &str, pass: bool, detail: &str) {
@@ -385,5 +386,138 @@ fn alloc_009_chunk_recycling_bounds_os_traffic() {
         "alloc-009",
         stats.chunks_created == created_after_warmup && stats.chunks_recycled >= 100,
         &format!("steady-state scopes recycle chunks: {}", stats.to_json()),
+    );
+}
+
+#[test]
+fn alloc_010_seeded_reclaim_poison_detects_and_quarantines_corruption() {
+    const SEED: u64 = 0xA110_C010_2026_0715;
+
+    let plain = ArenaPool::new(small_config());
+    plain.scope(|arena| {
+        arena
+            .alloc(Site::named("poison/default-off"), 1u8)
+            .expect("plain pool allocation");
+    });
+    assert!(
+        plain.inject_reclaimed_chunk_corruption().is_none(),
+        "reclaim poisoning must stay explicitly opt-in"
+    );
+    assert!(plain.stats().quiescent());
+
+    let pool = ArenaPool::new_with_reclaim_poison(small_config(), ReclaimPoison::seeded(SEED));
+
+    pool.scope(|arena| {
+        let buffer = arena
+            .alloc_slice_fill(Site::named("poison/seed"), 1024, 0x5au8)
+            .expect("seed allocation");
+        assert_eq!(buffer[511], 0x5a);
+    });
+    assert!(
+        pool.stats().quiescent(),
+        "reclaim must park the poisoned chunk"
+    );
+
+    let mutation = pool
+        .inject_reclaimed_chunk_corruption()
+        .expect("poison mode has one retained chunk");
+    assert_eq!(mutation.version, RECLAIM_POISON_VERSION);
+    assert_eq!(mutation.seed, SEED);
+    assert_eq!(mutation.chunk_bytes, 8192, "golden normalized chunk size");
+    assert_eq!(mutation.offset, 7565, "golden v1 corruption offset");
+    assert_eq!(mutation.expected, 0x26, "golden v1 poison byte");
+    assert_eq!(mutation.actual, 0xd9, "golden v1 corrupted byte");
+
+    let error = pool
+        .scope(|arena| arena.alloc(Site::named("poison/reuse"), 7u64).map(|_| ()))
+        .expect_err("the stale-write surrogate must fail before chunk reuse");
+    let receipt_matches = matches!(
+        error,
+        AllocError::ReclaimedChunkCorrupted {
+            site: "poison/reuse",
+            poison_version: RECLAIM_POISON_VERSION,
+            poison_seed: SEED,
+            chunk_bytes,
+            offset,
+            expected,
+            actual,
+        } if chunk_bytes == mutation.chunk_bytes
+            && offset == mutation.offset
+            && expected == mutation.expected
+            && actual == mutation.actual
+    );
+    let after_detection = pool.stats();
+
+    // Detection quarantines rather than re-parking the corrupt block. A fresh
+    // allocation must recover normally, and both states must be leak-clean.
+    pool.scope(|arena| {
+        let value = arena
+            .alloc(Site::named("poison/recovery"), 11u64)
+            .expect("pool remains usable after quarantine");
+        assert_eq!(*value, 11);
+    });
+    let after_recovery = pool.stats();
+
+    // A mismatch is quarantined before lease reservation. A fresh lease for
+    // the failing reuse must therefore remain exactly untouched.
+    let leased_pool =
+        ArenaPool::new_with_reclaim_poison(small_config(), ReclaimPoison::seeded(SEED));
+    let seed_lease = OperationMemoryLease::unbounded();
+    leased_pool.scope_leased(&seed_lease, |arena| {
+        arena
+            .alloc_slice_fill(Site::named("poison/leased-seed"), 1024, 0x5au8)
+            .expect("leased seed allocation");
+    });
+    assert_eq!(seed_lease.receipt().used_bytes, 0);
+    leased_pool
+        .inject_reclaimed_chunk_corruption()
+        .expect("leased poison pool has one retained chunk");
+    let detection_lease = OperationMemoryLease::unbounded();
+    let leased_error = leased_pool
+        .scope_leased(&detection_lease, |arena| {
+            arena
+                .alloc(Site::named("poison/leased-reuse"), 13u64)
+                .map(|_| ())
+        })
+        .expect_err("leased reuse must detect corruption before charging");
+    assert!(matches!(
+        leased_error,
+        AllocError::ReclaimedChunkCorrupted {
+            poison_version: RECLAIM_POISON_VERSION,
+            poison_seed: SEED,
+            ..
+        }
+    ));
+    let detection_receipt = detection_lease.receipt();
+    assert_eq!(detection_receipt.requested_bytes, 0);
+    assert_eq!(detection_receipt.peak_bytes, 0);
+    assert_eq!(detection_receipt.used_bytes, 0);
+    assert_eq!(detection_receipt.refusals, 0);
+    assert_eq!(detection_receipt.release_invariant_violations, 0);
+    assert!(leased_pool.stats().quiescent());
+
+    println!(
+        "{{\"suite\":\"fs-alloc/conformance\",\"case\":\"alloc-010\",\
+         \"poison_version\":{},\"seed\":{SEED},\"chunk_bytes\":{},\"offset\":{},\
+         \"expected\":{},\"actual\":{}}}",
+        mutation.version, mutation.chunk_bytes, mutation.offset, mutation.expected, mutation.actual
+    );
+    verdict(
+        "alloc-010",
+        receipt_matches
+            && after_detection.quiescent()
+            && after_detection.reserved_bytes == 0
+            && after_detection.free_bytes == 0
+            && after_recovery.quiescent()
+            && after_recovery.free_bytes > 0
+            && detection_receipt.requested_bytes == 0
+            && leased_pool.stats().quiescent(),
+        &format!(
+            "seeded reclaim poison detected exact corruption, quarantined it, and recovered: \
+             seed={SEED:#018x} offset={} detected={} recovered={}",
+            mutation.offset,
+            after_detection.to_json(),
+            after_recovery.to_json()
+        ),
     );
 }

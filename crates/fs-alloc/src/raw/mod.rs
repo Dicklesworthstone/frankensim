@@ -1,10 +1,10 @@
-//! The bump-pointer core: fs-alloc's ONLY unsafe capsule.
+//! The bump-pointer core: fs-alloc's primary unsafe capsule.
 //!
-//! Everything raw lives here: chunk allocation/deallocation against the
-//! global allocator and placement of values into bump-allocated memory.
-//! The safe facade (`crate::arena`) contains zero `unsafe` tokens; xtask
-//! `check-unsafe` enforces that this module stays registered, under 300
-//! lines, with the SAFETY.md beside it.
+//! Chunk allocation/deallocation against the global allocator and placement
+//! of values into bump-allocated memory live here. The separate reclaim-poison
+//! byte-access capsule is in `poison`; the safe facade (`crate::arena`)
+//! contains zero `unsafe` tokens. xtask `check-unsafe` enforces registration,
+//! size, and SAFETY.md coverage for both capsules.
 #![allow(unsafe_code)]
 // registered capsule — see SAFETY.md beside this file
 // `&self -> &mut` is the load-bearing arena shape (as in bumpalo): every
@@ -16,6 +16,8 @@ use core::cell::{Cell, RefCell};
 use core::mem::{align_of, needs_drop, size_of};
 use core::ptr::NonNull;
 use std::alloc::{Layout, alloc, dealloc};
+
+mod poison;
 
 /// One block of memory obtained from the global allocator. Exclusively owned:
 /// the block is freed exactly once, in [`Drop`].

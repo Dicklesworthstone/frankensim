@@ -38,8 +38,10 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   per active `min(pool.workers(), m_bands)` worker. No-product calls plan only
   C staging. Root capacities are fallibly pre-reserved before dispatch; every
   tile receives a finite cost quota equal to one arena reservation; typed arena
-  allocation refusal drains siblings and returns `MemoryRefused` rather than a
-  panic. `GemmMemoryReport` records the requested plan, conservative logical
+  resource refusal drains siblings and returns `MemoryRefused` rather than a
+  panic. A reclaim-poison integrity failure is not memory pressure: it retains
+  the fs-alloc receipt inside the structured `GemmRunError::Executor` path.
+  `GemmMemoryReport` records the requested plan, conservative logical
   reservation high-water (arena attempts count when entered), and refused
   component bytes. Arithmetic uses checked u128 accounting; unrepresentable
   layouts or totals fail closed. Legacy wrappers explicitly use the unbounded
@@ -253,7 +255,9 @@ exposes the pivot-growth statistic for ledgering. Pool GEMM returns
 `GemmRunError::MemoryRefused` when its checked plan exceeds the caller envelope
 or a fallible reservation is declined, retaining drained progress and memory
 accounting; `MemoryPlanOverflow` refuses before allocation when the plan cannot
-be represented. Cancellation and executor failures likewise retain the full
+be represented. Reclaimed-chunk poison corruption remains an executor
+integrity failure rather than being mislabeled as a memory refusal.
+Cancellation and executor failures likewise retain the full
 `GemmRunReport`, and caller-visible `C` is unchanged on every error path. The
 failure-only reports are boxed so the hot `Result` representation remains
 small; successful runs still return their report directly.
