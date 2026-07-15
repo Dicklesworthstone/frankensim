@@ -1,6 +1,9 @@
 {
 "schema": "frankensim-identity-authorities-v1",
 "required_ids": [
+{"id":"fs-adjoint:dwr-accept"},
+{"id":"fs-adjoint:dwr-bracket"},
+{"id":"fs-adjoint:dwr-output"},
 {"id":"fs-adjoint:explanation-node"},
 {"id":"fs-adjoint:explanation-receipt"},
 {"id":"fs-alloc:hugepage-decision"},
@@ -81,6 +84,7 @@
 {"id":"fs-session:submission-program"},
 {"id":"fs-session:submission-receipt"},
 {"id":"fs-session:submission-request-id"},
+{"id":"fs-verify:verifier-receipt"},
 {"id":"fs-verify:fem1d-mms-class"},
 {"id":"fs-verify:fem1d-mms-problem"},
 {"id":"fs-vskeleton:artifact-content"},
