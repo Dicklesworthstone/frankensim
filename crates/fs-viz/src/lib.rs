@@ -16,12 +16,19 @@
 //!   the circle.
 //! - [`Grid3::isosurface`] — bounded deterministic marching tetrahedra from an
 //!   owned x-fastest scalar grid to a renderer-ready indexed triangle mesh.
+//! - [`ScalarField3`] — a bounded versioned artifact codec with explicit
+//!   node/cell centering, quantity, and units for ledger composition.
 //!
 //! Deterministic; no dependencies.
 
 mod isosurface;
+mod scalar_field;
 
 pub use isosurface::{Grid3, Grid3Error, IsoMesh3, IsoSurfaceError, Vec3};
+pub use scalar_field::{
+    SCALAR_FIELD3_ARTIFACT_KIND, SCALAR_FIELD3_SCHEMA_VERSION, ScalarField3, ScalarField3Error,
+    ScalarFieldSemantics, ScalarLayout3,
+};
 
 /// A 2-D point / vector.
 pub type Vec2 = [f64; 2];

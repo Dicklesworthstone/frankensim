@@ -4,7 +4,9 @@
 //! type, and a circle-SDF isocontour lies on the circle.
 
 use fs_viz::{
-    CriticalKind, Grid2, Grid3, Grid3Error, IsoSurfaceError, classify_hessian, streamline,
+    CriticalKind, Grid2, Grid3, Grid3Error, IsoSurfaceError, SCALAR_FIELD3_ARTIFACT_KIND,
+    SCALAR_FIELD3_SCHEMA_VERSION, ScalarField3, ScalarField3Error, ScalarFieldSemantics,
+    ScalarLayout3, classify_hessian, streamline,
 };
 
 fn radius(p: [f64; 2]) -> f64 {
@@ -118,7 +120,11 @@ fn marching_tetrahedra_extracts_an_exact_oriented_plane() {
     assert_eq!(grid.dimensions(), dimensions);
     assert!((grid.at(0, 0, 0).expect("in bounds") + 1.13).abs() < 1e-15);
     let upper = grid.point(8, 9, 10).expect("upper node is in bounds");
-    assert!(upper.into_iter().all(|coordinate| (coordinate - 1.0).abs() < 1e-15));
+    assert!(
+        upper
+            .into_iter()
+            .all(|coordinate| (coordinate - 1.0).abs() < 1e-15)
+    );
     assert_eq!(grid.point(9, 0, 0), None);
 
     let mesh = grid.isosurface(0.0, 10_000).expect("plane isosurface");
@@ -264,5 +270,149 @@ fn grid3_admission_fails_before_unbounded_or_nonfinite_work() {
     assert!(matches!(
         grid.isosurface(0.0, 0),
         Err(IsoSurfaceError::ZeroTriangleLimit)
+    ));
+}
+
+fn density_semantics() -> ScalarFieldSemantics {
+    ScalarFieldSemantics {
+        quantity: "density".to_string(),
+        coordinate_unit: "m".to_string(),
+        value_unit: "kg/m^3".to_string(),
+    }
+}
+
+#[test]
+fn scalar_field_artifact_round_trips_bit_exactly_into_node_viz() {
+    assert_eq!(SCALAR_FIELD3_ARTIFACT_KIND, "frankensim.scalar-field3");
+    assert_eq!(SCALAR_FIELD3_SCHEMA_VERSION, 1);
+    let values: Vec<f64> = (0..12).map(|index| f64::from(index) * 0.125).collect();
+    let field = ScalarField3::new(
+        ScalarLayout3::NodeCentered,
+        [3, 2, 2],
+        [-1.0, -2.0, 0.0],
+        [0.5, 2.0, 1.0],
+        density_semantics(),
+        12,
+        values,
+    )
+    .expect("valid node field");
+    assert_eq!(field.world_bounds(), [[-1.0, -2.0, 0.0], [0.0, 0.0, 1.0]]);
+    let encoded = field.encode(4096).expect("bounded encode");
+    assert_eq!(encoded, field.encode(4096).expect("replay encode"));
+    let decoded = ScalarField3::decode(&encoded, 12, encoded.len()).expect("bounded decode");
+    assert_eq!(decoded, field);
+    assert_eq!(decoded.encode(encoded.len()).expect("re-encode"), encoded);
+    let grid = decoded.into_node_grid(12).expect("node-grid conversion");
+    assert_eq!(grid.dimensions(), [3, 2, 2]);
+    assert_eq!(grid.bounds(), [[-1.0, -2.0, 0.0], [0.0, 0.0, 1.0]]);
+    assert_eq!(grid.at(2, 1, 1), Some(11.0 * 0.125));
+}
+
+#[test]
+fn scalar_field_artifact_keeps_one_cell_thick_lbm_layout_honest() {
+    let values: Vec<f64> = (0..12).map(|index| f64::from(index) / 11.0).collect();
+    let field = ScalarField3::new(
+        ScalarLayout3::CellCentered,
+        [4, 3, 1],
+        [0.0; 3],
+        [1.0, 1.0, 24.0],
+        ScalarFieldSemantics {
+            quantity: "liquid_mass_fraction".to_string(),
+            coordinate_unit: "cell".to_string(),
+            value_unit: "1".to_string(),
+        },
+        12,
+        values,
+    )
+    .expect("valid one-cell-thick field");
+    assert_eq!(field.world_bounds(), [[0.0; 3], [4.0, 3.0, 24.0]]);
+    let encoded = field.encode(4096).expect("bounded encode");
+    let decoded = ScalarField3::decode(&encoded, 12, 4096).expect("bounded decode");
+    assert_eq!(decoded.layout(), ScalarLayout3::CellCentered);
+    assert_eq!(decoded.dimensions(), [4, 3, 1]);
+    assert_eq!(decoded.origin(), [0.0; 3]);
+    assert_eq!(decoded.spacing(), [1.0, 1.0, 24.0]);
+    assert_eq!(decoded.semantics().value_unit, "1");
+    assert!(matches!(
+        decoded.into_node_grid(12),
+        Err(ScalarField3Error::NotNodeCentered)
+    ));
+}
+
+#[test]
+fn scalar_field_codec_refuses_before_unbounded_or_ambiguous_work() {
+    assert!(matches!(
+        ScalarField3::new(
+            ScalarLayout3::NodeCentered,
+            [2, 2, 2],
+            [0.0; 3],
+            [1.0; 3],
+            density_semantics(),
+            7,
+            vec![0.0; 8],
+        ),
+        Err(ScalarField3Error::SampleBudgetExceeded {
+            required: 8,
+            limit: 7,
+        })
+    ));
+    assert!(matches!(
+        ScalarField3::new(
+            ScalarLayout3::CellCentered,
+            [1, 1, 1],
+            [0.0; 3],
+            [1.0; 3],
+            ScalarFieldSemantics {
+                quantity: String::new(),
+                coordinate_unit: "m".to_string(),
+                value_unit: "1".to_string(),
+            },
+            1,
+            vec![0.0],
+        ),
+        Err(ScalarField3Error::InvalidSemantic { field: "quantity" })
+    ));
+    let field = ScalarField3::new(
+        ScalarLayout3::CellCentered,
+        [1, 1, 1],
+        [0.0; 3],
+        [1.0; 3],
+        density_semantics(),
+        1,
+        vec![0.5],
+    )
+    .expect("small valid field");
+    let encoded = field.encode(1024).expect("bounded encode");
+    assert!(matches!(
+        field.encode(encoded.len() - 1),
+        Err(ScalarField3Error::ByteBudgetExceeded { .. })
+    ));
+    assert!(matches!(
+        ScalarField3::decode(&encoded, 1, encoded.len() - 1),
+        Err(ScalarField3Error::ByteBudgetExceeded { .. })
+    ));
+    assert!(matches!(
+        ScalarField3::decode(&encoded[..encoded.len() - 1], 1, encoded.len()),
+        Err(ScalarField3Error::Malformed { .. })
+    ));
+
+    let mut bad_magic = encoded.clone();
+    bad_magic[0] ^= 1;
+    assert!(matches!(
+        ScalarField3::decode(&bad_magic, 1, bad_magic.len()),
+        Err(ScalarField3Error::Malformed { what: "bad magic" })
+    ));
+    let mut future = encoded.clone();
+    future[8..12].copy_from_slice(&(SCALAR_FIELD3_SCHEMA_VERSION + 1).to_le_bytes());
+    assert!(matches!(
+        ScalarField3::decode(&future, 1, future.len()),
+        Err(ScalarField3Error::UnsupportedSchema { found: 2 })
+    ));
+    let mut nonfinite = encoded;
+    let tail = nonfinite.len() - 8;
+    nonfinite[tail..].copy_from_slice(&f64::NAN.to_bits().to_le_bytes());
+    assert!(matches!(
+        ScalarField3::decode(&nonfinite, 1, nonfinite.len()),
+        Err(ScalarField3Error::NonFiniteValue { index: 0 })
     ));
 }

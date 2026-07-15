@@ -24,6 +24,14 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
   edge/node vertex sharing, outward winding from `< iso` toward `>= iso`, and
   an explicit all-or-error triangle budget. `IsoMesh3::into_parts` yields the
   renderer-ready indexed arrays; `surface_area` measures the PL surface.
+- `ScalarField3` / `ScalarFieldSemantics` / `ScalarLayout3` — a versioned,
+  dependency-free scalar-field artifact codec with explicit quantity, domain
+  unit, value unit, node-vs-cell centering, x-fastest dimensions, origin, and
+  spacing. `SCALAR_FIELD3_ARTIFACT_KIND` and
+  `SCALAR_FIELD3_SCHEMA_VERSION` let an L6 caller validate the ledger envelope
+  before bounded decoding. Node-centered fields convert to `Grid3`;
+  cell-centered fields retain one-cell-thick LBM slabs without inventing fake
+  nodes.
 
 ## Invariants
 
@@ -37,6 +45,10 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
 - A planar `Grid3` level set has exact area and increasing-field winding.
   Sphere area error decreases under refinement, and gyroid extraction is
   indexed, centrally symmetric, and exactly replay-deterministic.
+- Scalar-field schema-v1 encoding and decoding are byte-exact and
+  replay-deterministic. Byte/sample budgets are checked before allocation;
+  dimensions, layout, world geometry, quantity/units, byte length, and sample
+  finiteness are validated before any downstream visualization claim.
 - All primitives are deterministic.
 
 ## Error model
@@ -47,12 +59,17 @@ invalid or non-finite bounds/samples, length mismatch, node-budget excess, and
 allocation refusal. Isosurface extraction refuses non-finite levels, a zero or
 exceeded triangle budget, `u32` index exhaustion, and non-finite geometry. It
 never returns a silently truncated mesh.
+`ScalarField3Error` distinguishes sample/byte budget refusal, malformed or
+unsupported schema bytes, ambiguous semantics, invalid geometry, non-finite
+values, allocation refusal, and node/cell layout mismatch.
 
 ## Determinism class
 
 Fully deterministic: RK4, classification, and contouring are pure functions.
 Grid3 sampling is z/y/x with x-fastest storage; isosurface traversal is
 z/y/x/cube-tetrahedron order and uses an ordered edge cache.
+Scalar-field artifacts use fixed little-endian IEEE-754 f64 bits and fixed
+length-prefixed UTF-8 semantics; their bytes are cross-ISA stable.
 
 ## Cancellation behavior
 
@@ -74,7 +91,10 @@ field conserves the hyperbola invariant; Hessian classification recovers the
 Morse type; a circle-SDF isocontour lies on the circle (+ empty out-of-range);
 2-D grid sampling/addressing; determinism; exact oriented plane extraction;
 sphere-area refinement; gyroid symmetry/indexing/replay; and fail-before-work
-Grid3 budget/non-finite admission.
+Grid3 budget/non-finite admission. The scalar-field artifact battery covers
+node-centered byte replay and Grid3 conversion, an honest one-cell-thick
+cell-centered LBM shape, byte/sample admission, schema-version refusal,
+truncation, semantic validation, and non-finite payload rejection.
 
 ## No-claim boundaries
 
@@ -90,7 +110,10 @@ Grid3 budget/non-finite admission.
   watertightness when the surface intersects the domain boundary, or an error
   certificate against an unsampled continuum field.
 - The API does not read ledgers or depend on L6. A higher-layer orchestrator
-  must validate/version a scalar-field artifact, call this L5 primitive, and
-  bind source/output content hashes into lineage.
+  must compare the ledger artifact kind, bounded-read the bytes by content
+  hash, decode this versioned schema, call the appropriate L5 primitive, and
+  bind source/output content hashes into lineage. The codec carries quantity
+  and units but makes no claim that a ledger hash exists or that the stated
+  semantics are physically appropriate.
 - Adaptive/embedded-pair integration (fs-time steppers) and Qty-labeled
   perceptually-uniform colormaps are staged with the rendering integration.
