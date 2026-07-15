@@ -340,6 +340,12 @@ adjoint-consistency property (seed `0x1A_4A48_0001`) over generated 1×1 through
 `gemm_f64_op(..., Trans::T, ...)` path for `Aᵀw`; the fixed GEMM golden
 `0x1d7a_a3c6_b631_7ef0` and all existing shape pins remain unchanged. This is
 a claim about the dense GEMM transpose action, not every operator in fs-la.
+`tests/metamorphic.rs` declares the G3 relation
+`gemv-vector-scale-equivariance` for `gemm_f64` (seed `0x2ACE_0001`, 384
+generated 2×2 matrix/vector/scale cases, `2e-12` absolute-relative component
+tolerance). It jointly shrinks the operator input and rescaling transform. The
+fixed shape/oracle/golden pins and the separate transpose-adjoint property above
+remain authoritative and independent.
 Batched battery (tests/batched_battery.rs): GEMM vs scalar oracle
 across size classes + β-accumulate path; batch-membership bitwise
 invariance for Cholesky and pivoted LU; L·Lᵀ reconstruction and solve
