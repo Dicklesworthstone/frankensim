@@ -21,10 +21,11 @@
 //! authority, a metric-error bound, nor directed-rounding evidence, and `|f|`
 //! is not generically an upper geometric distance. Retained projection-target
 //! coverage is likewise sampled. A future admitted-field API may promote these
-//! the required units, metric regularity, and interval evidence. Thin features
-//! encountered by retained projection rays can produce structured warnings
-//! with locations; features missed by every ray remain outside this API's
-//! visibility.
+//! with the required units, metric regularity, and interval evidence. Large
+//! localized paired-parameter fit residuals produce structured warnings with
+//! locations. Thin geometry is one possible cause, but smoothing, inadequate
+//! patch density, conditioning, or caller-field behavior can produce the same
+//! signal; features missed by every ray remain outside this API's visibility.
 
 use crate::NurbsError;
 use crate::basis::KnotVector;
@@ -49,7 +50,7 @@ pub struct RefitConfig {
     pub samples_u: usize,
     /// Sample-grid resolution along v.
     pub samples_v: usize,
-    /// Residuals above this trigger thin-feature warnings.
+    /// Residuals above this trigger localized fit-residual warnings.
     pub warn_residual: f64,
     /// Dense-probe resolution per axis for sampled field residuals and the
     /// separate geometric probe-spacing estimate.
@@ -170,7 +171,10 @@ fn validate_refit_request(
     add_bytes(bytes_for(sample_points, size_of::<Vec<f64>>())?)?;
     add_bytes(bytes_for(sample_points, size_of::<[f64; 3]>())?)?; // targets
     add_bytes(bytes_for(sample_points, size_of::<[f64; 2]>())?)?; // uvs
-    add_bytes(bytes_for(sample_points, size_of::<ThinFeatureWarning>())?)?;
+    add_bytes(bytes_for(
+        sample_points,
+        size_of::<LocalizedFitResidualWarning>(),
+    )?)?;
     add_bytes(bytes_for(dense_scalars, size_of::<f64>())?)?;
     add_bytes(bytes_for(control_points, size_of::<Vec<f64>>())?)?;
     add_bytes(bytes_for(control_points, size_of::<f64>())?)?; // rhs
@@ -202,6 +206,22 @@ fn validate_refit_request(
         .checked_add(1)
         .and_then(|value| value.checked_mul(value))
         .ok_or_else(|| refit_structure_error("refit active-basis size overflow"))?;
+    let basis_triangle = config
+        .degree
+        .checked_mul(config.degree + 1)
+        .map(|product| product / 2)
+        .ok_or_else(|| refit_structure_error("refit basis-work size overflow"))?;
+    let knots_per_axis = config
+        .degree
+        .checked_add(1)
+        .and_then(|order| config.nu.checked_add(order).map(|u_knots| (order, u_knots)))
+        .and_then(|(order, u_knots)| {
+            config
+                .nv
+                .checked_add(order)
+                .and_then(|v_knots| u_knots.checked_add(v_knots))
+        })
+        .ok_or_else(|| refit_structure_error("refit probe knot-scan size overflow"))?;
     let assembly_work = (sample_points as u128)
         .saturating_mul(active_basis as u128)
         .saturating_mul(control_points as u128);
@@ -215,12 +235,23 @@ fn validate_refit_request(
         .saturating_mul(control_points as u128)
         .saturating_mul(3);
     let projection_evaluations = (sample_points as u128).saturating_mul(42);
+    // Every retained probe calls the public surface evaluator. That path
+    // revalidates the whole mutable control net and knot vectors, builds two
+    // Cox-de Boor triangles, and accumulates the active tensor basis. Charge
+    // those stages rather than pretending one probe is one work unit. The
+    // arbitrary closure's own cost remains outside this legacy static model.
+    let per_probe_work = (control_points as u128)
+        .saturating_add(knots_per_axis as u128)
+        .saturating_add((basis_triangle as u128).saturating_mul(2))
+        .saturating_add((active_basis as u128).saturating_mul(8))
+        .saturating_add(16);
+    let probe_work = (probe_points as u128).saturating_mul(per_probe_work);
     let total_work = assembly_work
         .saturating_add(factor_work)
         .saturating_add(rhs_and_report_work)
         .saturating_add(triangular_solve_work)
         .saturating_add(projection_evaluations)
-        .saturating_add(probe_points as u128);
+        .saturating_add(probe_work);
     if total_work > REFIT_MAX_WORK_UNITS {
         return Err(refit_structure_error(format!(
             "refit work estimate {total_work} exceeds static cap {REFIT_MAX_WORK_UNITS}"
@@ -229,10 +260,12 @@ fn validate_refit_request(
     Ok((control_points, sample_points, probe))
 }
 
-/// A localized thin-feature warning: the fit could not follow the field
-/// here at this patch density (NOT silently smoothed).
+/// A localized paired-parameter fit residual above the configured threshold.
+/// This diagnoses a retained mismatch, not its cause: thin geometry,
+/// smoothing, global under-resolution, conditioning, or caller-field behavior
+/// can all produce the same observation.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ThinFeatureWarning {
+pub struct LocalizedFitResidualWarning {
     /// Parameter location of the offending sample.
     pub uv: [f64; 2],
     /// World-space location.
@@ -268,12 +301,22 @@ pub struct RefitReport {
     /// but the f64 result is not outward-rounded.
     pub spline_lipschitz_estimate: f64,
     /// Max G¹ seam deviation (angle proxy: 1 − cos between u-tangents
-    /// across the seam); G⁰ is exact by construction.
+    /// across the seam); G⁰ is exact by construction. Positive infinity is the
+    /// explicit no-claim value when either tangent direction is undefined.
     pub seam_g1_max: f64,
-    /// Thin-feature warnings. Empty means no retained projection sample
-    /// exceeded the configured residual threshold; it does not prove that an
-    /// unsampled feature is absent.
-    pub warnings: Vec<ThinFeatureWarning>,
+    /// Retained seam samples at which at least one tangent direction was
+    /// exactly degenerate. Such samples force `seam_g1_max = +∞` rather than
+    /// silently looking perfect.
+    pub seam_g1_degenerate_samples: usize,
+    /// Whether the current seam-direction diagnostic excludes `v=0` and
+    /// `v=1`. Pole tangent directions require a separate chart-aware audit;
+    /// the exclusion is machine-visible rather than implied coverage.
+    pub seam_g1_excludes_v_endpoints: bool,
+    /// Localized fit-residual warnings. Empty means only that no retained
+    /// paired-parameter sample exceeded the configured threshold; it neither
+    /// diagnoses fit quality between samples nor proves a geometric feature
+    /// absent.
+    pub warnings: Vec<LocalizedFitResidualWarning>,
 }
 
 /// The refit result.
@@ -293,7 +336,12 @@ pub struct Refit {
 fn direction(u: f64, v: f64) -> [f64; 3] {
     let theta = 2.0 * std::f64::consts::PI * u;
     let phi = std::f64::consts::PI * (1.0 - v);
-    [phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos()]
+    let sin_phi = det::sin(phi);
+    [
+        sin_phi * det::cos(theta),
+        sin_phi * det::sin(theta),
+        det::cos(phi),
+    ]
 }
 
 /// Bisect the implicit field along `center + r·dir` for a sign crossing.
@@ -445,9 +493,7 @@ fn lipschitz_estimate(surface: &NurbsSurface<f64>) -> (f64, f64) {
     let ku = &surface.knots_u.knots;
     let kv = &surface.knots_v.knots;
     let cart = |h: &[f64; 4]| [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
-    let dist = |a: [f64; 3], b: [f64; 3]| -> f64 {
-        norm3([a[0] - b[0], a[1] - b[1], a[2] - b[2]])
-    };
+    let dist = |a: [f64; 3], b: [f64; 3]| -> f64 { norm3([a[0] - b[0], a[1] - b[1], a[2] - b[2]]) };
     let rows = surface.cpw.len();
     let cols = surface.cpw[0].len();
     let mut lu = 0.0f64;
@@ -660,7 +706,7 @@ pub fn refit_radial(
         }
         max_res = max_res.max(r);
         if r > config.warn_residual {
-            warnings.push(ThinFeatureWarning {
+            warnings.push(LocalizedFitResidualWarning {
                 uv: *uv,
                 point: *t,
                 residual: r,
@@ -711,29 +757,7 @@ pub fn refit_radial(
             "refit report arithmetic is non-finite",
         ));
     }
-    // Seam G1: compare u-tangents across the (exactly closed) seam.
-    let mut seam_g1 = 0.0f64;
-    for b in 1..24 {
-        let v = f64::from(b) / 24.0;
-        let (_, du0, _) = surface.partials(0.0, v)?;
-        let (_, du1, _) = surface.partials(1.0 - 1e-12, v)?;
-        let n0 = norm3(du0);
-        let n1 = norm3(du1);
-        if !n0.is_finite() || !n1.is_finite() {
-            return Err(refit_structure_error(
-                "refit seam-derivative arithmetic is non-finite",
-            ));
-        }
-        if n0 > 1e-12 && n1 > 1e-12 {
-            let cosang = (du0[0] * du1[0] + du0[1] * du1[1] + du0[2] * du1[2]) / (n0 * n1);
-            if !cosang.is_finite() {
-                return Err(refit_structure_error(
-                    "refit seam-angle arithmetic is non-finite",
-                ));
-            }
-            seam_g1 = seam_g1.max(1.0 - cosang);
-        }
-    }
+    let (seam_g1, seam_g1_degenerate_samples) = seam_g1_diagnostic(&surface)?;
     Ok(Refit {
         surface,
         report: RefitReport {
@@ -744,9 +768,51 @@ pub fn refit_radial(
             spline_probe_spacing_estimate: probe_spacing_estimate,
             spline_lipschitz_estimate: lip,
             seam_g1_max: seam_g1,
+            seam_g1_degenerate_samples,
+            seam_g1_excludes_v_endpoints: true,
             warnings,
         },
     })
+}
+
+fn seam_g1_diagnostic(surface: &NurbsSurface<f64>) -> Result<(f64, usize), NurbsError> {
+    // Compare u-tangents across the exactly closed seam. Normalize each tangent
+    // separately to avoid overflow/underflow in n0*n1, and clamp the rounded dot
+    // product to the mathematical cosine range.
+    let mut seam_g1 = 0.0f64;
+    let mut degenerate = 0usize;
+    // `v=0` and `v=1` are deliberately outside this diagnostic's typed scope:
+    // radial/revolution fits commonly collapse them to poles where a tangent
+    // direction is undefined. The report makes that exclusion machine-visible
+    // pending a chart-aware pole audit.
+    for b in 1..24 {
+        let v = f64::from(b) / 24.0;
+        let (_, du0, _) = surface.partials(0.0, v)?;
+        let (_, du1, _) = surface.partials(1.0, v)?;
+        let n0 = norm3(du0);
+        let n1 = norm3(du1);
+        if !n0.is_finite() || !n1.is_finite() {
+            return Err(refit_structure_error(
+                "refit seam-derivative arithmetic is non-finite",
+            ));
+        }
+        if n0 == 0.0 || n1 == 0.0 {
+            degenerate = degenerate.saturating_add(1);
+            seam_g1 = f64::INFINITY;
+            continue;
+        }
+        let unit0 = du0.map(|value| value / n0);
+        let unit1 = du1.map(|value| value / n1);
+        let cosang =
+            (unit0[0] * unit1[0] + unit0[1] * unit1[1] + unit0[2] * unit1[2]).clamp(-1.0, 1.0);
+        if !cosang.is_finite() {
+            return Err(refit_structure_error(
+                "refit seam-angle arithmetic is non-finite",
+            ));
+        }
+        seam_g1 = seam_g1.max(1.0 - cosang);
+    }
+    Ok((seam_g1, degenerate))
 }
 
 #[cfg(test)]
@@ -839,5 +905,17 @@ mod tests {
             lu > closed_form + 1e-9,
             "the per-span estimate must exceed the closed-form under-estimate ({lu} vs {closed_form})"
         );
+    }
+
+    #[test]
+    fn degenerate_seam_tangents_are_explicitly_no_claim() {
+        let line = open_uniform_knots(2, 1).expect("linear knots");
+        let points = vec![vec![[0.0; 3]; 2]; 2];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface =
+            NurbsSurface::new(line.clone(), line, &points, &weights).expect("degenerate surface");
+        let (g1, degenerate) = seam_g1_diagnostic(&surface).expect("bounded diagnostic");
+        assert!(g1.is_infinite(), "undefined tangent direction is no-claim");
+        assert_eq!(degenerate, 23, "every retained seam sample is named");
     }
 }

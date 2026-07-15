@@ -4,7 +4,8 @@
 //! unblended regions); Boolean-then-refit produces sampled sheaf
 //! interface-agreement evidence on a CSG fixture (no continuum claim); seam continuity within tolerance
 //! with exact G⁰; reports retain their sampled/no-certificate boundary;
-//! thin features warn with locations instead of silently smoothing; the
+//! localized fit residuals warn with locations instead of being silently
+//! smoothed (without claiming that residual magnitude diagnoses thinness); the
 //! patch-density budget knob trades fidelity monotonically.
 #![cfg(feature = "nurbs-refit")]
 
@@ -14,6 +15,7 @@ use fs_geom::{Chart, ChartSample, Point3, SheafComplex, SheafVerdict};
 use fs_rep_nurbs::refit::{RefitConfig, refit_radial};
 use fs_rep_nurbs::sdf::{Orientation, ShellSdf, ShellSdfChart};
 use fs_rep_nurbs::{KnotVector, NurbsSurface};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -131,7 +133,7 @@ fn rf_001_round_trip_through_the_real_converter() {
     );
     assert!(
         refit.report.warnings.is_empty(),
-        "no thin features on a sphere"
+        "no retained sphere fit residual exceeds the warning threshold"
     );
     verdict(
         "rf-001",
@@ -216,7 +218,8 @@ fn rf_002_boolean_then_refit_sampled_interface_agreement() {
             1e-4,
             800,
             0.3,
-        );
+        )
+        .expect("admissible refit chart settings");
         let csg_chart = CsgChart {
             field: union,
             bound: 2.0,
@@ -258,6 +261,10 @@ fn rf_003_seam_g0_exact_g1_measured() {
         "seam tangent deviation: {}",
         refit.report.seam_g1_max
     );
+    assert!(
+        refit.report.seam_g1_excludes_v_endpoints,
+        "the interior seam diagnostic must explicitly disclose its pole/endpoint exclusion"
+    );
     verdict(
         "rf-003",
         "seam G0 exact by control tying; G1 deviation measured < 1e-2",
@@ -265,7 +272,7 @@ fn rf_003_seam_g0_exact_g1_measured() {
 }
 
 #[test]
-fn rf_004_thin_features_warn_not_smooth() {
+fn rf_004_localized_residual_warns_on_smoothed_spike() {
     // A sphere with a thin radial spike (capsule toward +x): far below
     // patch resolution at the default density.
     let spiky = |q: [f64; 3]| {
@@ -280,7 +287,7 @@ fn rf_004_thin_features_warn_not_smooth() {
     let refit = refit_radial(&spiky, [0.0, 0.0, 0.0], 2.2, &RefitConfig::default()).expect("refit");
     assert!(
         !refit.report.warnings.is_empty(),
-        "a sub-resolution spike must WARN, not silently smooth"
+        "a sub-resolution spike must leave a localized residual warning"
     );
     // The warnings localize to the spike (azimuth ~ 0, equator v ~ 0.5).
     let near_spike = refit
@@ -290,7 +297,7 @@ fn rf_004_thin_features_warn_not_smooth() {
         .all(|w| (w.uv[0] < 0.1 || w.uv[0] > 0.9) && (w.uv[1] - 0.5).abs() < 0.15);
     assert!(
         near_spike,
-        "warnings localized: {:?}",
+        "residual warnings localized: {:?}",
         refit.report.warnings
     );
     // And the report says the fit did NOT follow the spike.
@@ -301,7 +308,7 @@ fn rf_004_thin_features_warn_not_smooth() {
     );
     verdict(
         "rf-004",
-        "sub-resolution spike produces localized structured warnings with residuals",
+        "sub-resolution spike produces localized fit-residual warnings without overdiagnosing their cause",
     );
 }
 
@@ -359,5 +366,41 @@ fn rf_005_patch_density_budget_knob() {
     verdict(
         "rf-005",
         "the patch-density knob trades cost for fidelity monotonically (ledgered)",
+    );
+}
+
+#[test]
+fn rf_006_probe_work_is_admitted_before_calling_the_field() {
+    let calls = AtomicUsize::new(0);
+    let field = |_: [f64; 3]| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        -1.0
+    };
+    let refusal = refit_radial(
+        &field,
+        [0.0, 0.0, 0.0],
+        2.0,
+        &RefitConfig {
+            nu: 21,
+            nv: 21,
+            degree: 20,
+            samples_u: 1,
+            samples_v: 1,
+            probe: 2_048,
+            ..RefitConfig::default()
+        },
+    );
+    assert!(
+        refusal.is_err(),
+        "billions of degree-sensitive probe operations must exceed the static legacy cap"
+    );
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "work admission must fail before invoking an arbitrary caller closure"
+    );
+    verdict(
+        "rf-006",
+        "degree-sensitive dense-probe work refuses before the first field call",
     );
 }

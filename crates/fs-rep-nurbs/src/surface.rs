@@ -25,17 +25,48 @@ pub struct NurbsSurface<S: Scalar> {
 }
 
 impl<S: Scalar> NurbsSurface<S> {
+    fn validate_live_structure(&self) -> Result<(), NurbsError> {
+        self.knots_u.validate_live()?;
+        self.knots_v.validate_live()?;
+        let expected_u = self.knots_u.control_count();
+        let expected_v = self.knots_v.control_count();
+        if self.cpw.len() != expected_u
+            || self.cpw.iter().any(|row| {
+                row.len() != expected_v
+                    || row.iter().any(|control| {
+                        !control[3].is_admissible_weight()
+                            || control
+                                .iter()
+                                .copied()
+                                .any(|component| !component.is_finite())
+                            || control[..3]
+                                .iter()
+                                .copied()
+                                .any(|component| !component.quotient_is_finite(control[3]))
+                    })
+            })
+        {
+            return Err(NurbsError::Structure {
+                what: "live surface control net must match both knot vectors and retain finite homogeneous coordinates with admissible weights"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Build from Cartesian control net + weights.
     ///
     /// # Errors
-    /// [`NurbsError::Structure`] on grid/count mismatches or
-    /// non-positive weights.
+    /// [`NurbsError::Structure`] on grid/count mismatches, non-finite
+    /// coordinates, or non-positive/non-finite weights.
     pub fn new(
         knots_u: KnotVector<S>,
         knots_v: KnotVector<S>,
         points: &[Vec<[S; 3]>],
         weights: &[Vec<S>],
     ) -> Result<Self, NurbsError> {
+        knots_u.validate_live()?;
+        knots_v.validate_live()?;
         let (nu, nv) = (knots_u.control_count(), knots_v.control_count());
         if points.len() != nu || weights.len() != nu {
             return Err(NurbsError::Structure {
@@ -49,14 +80,48 @@ impl<S: Scalar> NurbsSurface<S> {
                     what: format!("expected {nv} control columns"),
                 });
             }
-            if wrow.iter().any(|&w| w <= S::zero()) {
+            if wrow.iter().copied().any(|w| !w.is_admissible_weight()) {
                 return Err(NurbsError::Structure {
-                    what: "weights must be positive".to_string(),
+                    what: "weights must be finite, positive, and numerically admissible"
+                        .to_string(),
+                });
+            }
+            if prow
+                .iter()
+                .flat_map(|point| point.iter())
+                .copied()
+                .any(|coordinate| !coordinate.is_finite())
+            {
+                return Err(NurbsError::Structure {
+                    what: "control-point coordinates must be finite".to_string(),
                 });
             }
             let mut row = Vec::with_capacity(nv);
             for (p, &w) in prow.iter().zip(wrow) {
-                row.push([p[0] * w, p[1] * w, p[2] * w, w]);
+                let homogeneous = [p[0] * w, p[1] * w, p[2] * w, w];
+                if p.iter()
+                    .zip(homogeneous.iter())
+                    .any(|(&coordinate, &weighted)| {
+                        coordinate != S::zero() && weighted == S::zero()
+                    })
+                {
+                    return Err(NurbsError::Structure {
+                        what:
+                            "Cartesian coordinate × weight underflowed a nonzero coordinate to zero"
+                                .to_string(),
+                    });
+                }
+                if homogeneous
+                    .iter()
+                    .copied()
+                    .any(|component| !component.is_finite())
+                {
+                    return Err(NurbsError::Structure {
+                        what: "Cartesian coordinate × weight overflowed the homogeneous numeric domain"
+                            .to_string(),
+                    });
+                }
+                row.push(homogeneous);
             }
             cpw.push(row);
         }
@@ -72,6 +137,7 @@ impl<S: Scalar> NurbsSurface<S> {
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn eval_homogeneous(&self, u: S, v: S) -> Result<[S; 4], NurbsError> {
+        self.validate_live_structure()?;
         let (su, bu) = self.knots_u.basis(u)?;
         let (sv, bv) = self.knots_v.basis(v)?;
         let (pu, pv) = (self.knots_u.degree, self.knots_v.degree);
@@ -85,6 +151,11 @@ impl<S: Scalar> NurbsSurface<S> {
                 }
             }
         }
+        if acc.iter().copied().any(|component| !component.is_finite()) {
+            return Err(NurbsError::Domain {
+                what: "homogeneous surface evaluation left the finite numeric domain".to_string(),
+            });
+        }
         Ok(acc)
     }
 
@@ -94,7 +165,23 @@ impl<S: Scalar> NurbsSurface<S> {
     /// [`NurbsError::Domain`] outside the domain.
     pub fn eval(&self, u: S, v: S) -> Result<[S; 3], NurbsError> {
         let h = self.eval_homogeneous(u, v)?;
-        Ok([h[0] / h[3], h[1] / h[3], h[2] / h[3]])
+        if !h[3].is_admissible_weight() {
+            return Err(NurbsError::Domain {
+                what: "surface evaluation produced an inadmissible rational denominator"
+                    .to_string(),
+            });
+        }
+        let point = [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
+        if point
+            .iter()
+            .copied()
+            .any(|component| !component.is_finite())
+        {
+            return Err(NurbsError::Domain {
+                what: "Cartesian surface evaluation left the finite numeric domain".to_string(),
+            });
+        }
+        Ok(point)
     }
 
     /// EXACT knot insertion in the u direction (Boehm on every column).
@@ -102,6 +189,7 @@ impl<S: Scalar> NurbsSurface<S> {
     /// # Errors
     /// [`NurbsError::Domain`] for a non-interior parameter.
     pub fn insert_knot_u(&self, t: S) -> Result<Self, NurbsError> {
+        self.validate_live_structure()?;
         // Reuse the curve algorithm column-wise via a 1-D homogeneous
         // "curve" whose control points are rows of the net.
         let nv = self.knots_v.control_count();
@@ -133,6 +221,7 @@ impl<S: Scalar> NurbsSurface<S> {
     /// # Errors
     /// [`NurbsError::Domain`] for a non-interior parameter.
     pub fn insert_knot_v(&self, t: S) -> Result<Self, NurbsError> {
+        self.validate_live_structure()?;
         let mut new_cpw = Vec::with_capacity(self.cpw.len());
         let mut new_knots = None;
         for row in &self.cpw {
@@ -153,8 +242,12 @@ impl<S: Scalar> NurbsSurface<S> {
 
     /// Per-(u-span × v-span) Cartesian control boxes: each patch of the
     /// surface lies inside its sub-net's box (convex-hull property).
-    #[must_use]
-    pub fn span_boxes(&self) -> Vec<SurfaceSpanBox<S>> {
+    ///
+    /// # Errors
+    /// Returns [`NurbsError::Structure`] when the mutable public representation
+    /// no longer satisfies its knot/control-net invariants.
+    pub fn span_boxes(&self) -> Result<Vec<SurfaceSpanBox<S>>, NurbsError> {
+        self.validate_live_structure()?;
         let (pu, pv) = (self.knots_u.degree, self.knots_v.degree);
         let mut out = Vec::new();
         for su in pu..self.knots_u.control_count() {
@@ -193,7 +286,7 @@ impl<S: Scalar> NurbsSurface<S> {
                 out.push((min, max, (u0, u1), (v0, v1)));
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -204,6 +297,7 @@ impl NurbsSurface<f64> {
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
+        self.validate_live_structure()?;
         // u-partial: build the v-evaluated control column, differentiate
         // as a u-curve; symmetrically for v.
         let (sv, bv) = self.knots_v.basis(v)?;

@@ -104,6 +104,9 @@ impl Scalar for TDual {
         #[allow(clippy::cast_precision_loss)]
         TDual::con(v as f64)
     }
+    fn is_finite(self) -> bool {
+        self.re.is_finite() && self.eps.is_finite()
+    }
 }
 
 /// A random exact-rational cubic curve fixture.
@@ -258,6 +261,91 @@ fn nb_002_refinement_is_exact_in_rational_arithmetic() {
             "round {round}: insert/remove must be a lossless round trip"
         );
     }
+
+    let existing_half = Rat::new(1, 2);
+    let repeated_seed = NurbsCurve::<Rat, 2>::new(
+        KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                existing_half,
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("repeated-knot seed"),
+        &[
+            [Rat::int(0), Rat::int(0)],
+            [Rat::int(1), Rat::int(2)],
+            [Rat::int(2), Rat::int(1)],
+            [Rat::int(3), Rat::int(0)],
+        ],
+        &[Rat::int(1); 4],
+    )
+    .expect("repeated-knot curve");
+    let raised_multiplicity = repeated_seed
+        .insert_knot(existing_half)
+        .expect("raise existing multiplicity");
+    assert_eq!(
+        raised_multiplicity
+            .remove_knot(existing_half)
+            .expect("remove inserted repeated knot"),
+        repeated_seed,
+        "insert/remove must remain exact when insertion raises an existing knot multiplicity"
+    );
+
+    // A full interior break is a legal discontinuous spline domain. Degree
+    // elevation must preserve both independent limiting endpoints instead of
+    // silently dropping the right one and manufacturing C0 continuity.
+    let half = Rat::new(1, 2);
+    let discontinuous = NurbsCurve::<Rat, 1>::new(
+        KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                half,
+                half,
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            1,
+        )
+        .expect("full-break knots"),
+        &[[Rat::int(0)], [Rat::int(1)], [Rat::int(3)], [Rat::int(4)]],
+        &[Rat::int(1); 4],
+    )
+    .expect("discontinuous curve");
+    let elevated_discontinuous = discontinuous
+        .elevate_degree()
+        .expect("full-break elevation");
+    assert_eq!(
+        elevated_discontinuous
+            .knots
+            .knots
+            .iter()
+            .filter(|&&knot| knot == half)
+            .count(),
+        3,
+        "degree-two elevation must preserve the full discontinuity"
+    );
+    for parameter in [
+        Rat::int(0),
+        Rat::new(1, 4),
+        half,
+        Rat::new(3, 4),
+        Rat::int(1),
+    ] {
+        assert_eq!(
+            discontinuous.eval(parameter).expect("original full break"),
+            elevated_discontinuous
+                .eval(parameter)
+                .expect("elevated full break"),
+            "degree elevation must be exact on both sides and at the selected knot value"
+        );
+    }
     verdict(
         "nb-002",
         "6 random rational curves: insertion/elevation evaluation-EXACT; insert+remove \
@@ -291,11 +379,57 @@ fn poly_loop(pts: &[[i64; 2]], scale_den: i64) -> TrimLoop {
 
 #[test]
 fn nb_003_trim_classification_adversarial_battery() {
+    let half = Rat::new(1, 2);
+    let full_break_knots = KnotVector::new(
+        vec![
+            Rat::int(0),
+            Rat::int(0),
+            half,
+            half,
+            Rat::int(1),
+            Rat::int(1),
+        ],
+        1,
+    )
+    .expect("full-break trim knots");
+    let discontinuous_closed = NurbsCurve::<Rat, 2>::new(
+        full_break_knots.clone(),
+        &[
+            [Rat::int(0), Rat::int(0)],
+            [Rat::int(1), Rat::int(0)],
+            [Rat::int(0), Rat::int(1)],
+            [Rat::int(0), Rat::int(0)],
+        ],
+        &[Rat::int(1); 4],
+    )
+    .expect("piecewise curve");
+    assert!(
+        TrimLoop::new(discontinuous_closed).is_err(),
+        "endpoint closure must not admit a discontinuous trim-loop interior"
+    );
+    let continuous_full_break = NurbsCurve::<Rat, 2>::new(
+        full_break_knots,
+        &[
+            [Rat::int(0), Rat::int(0)],
+            [Rat::int(1), Rat::int(0)],
+            [Rat::int(1), Rat::int(0)],
+            [Rat::int(0), Rat::int(0)],
+        ],
+        &[Rat::int(1); 4],
+    )
+    .expect("piecewise continuous curve");
+    assert!(
+        TrimLoop::new(continuous_full_break).is_ok(),
+        "coincident exact limits retain the expressive full-break representation"
+    );
+
     // Outer square CCW, diamond hole CW, plus a nested island inside the
     // hole (winding parity through three levels).
     let outer = poly_loop(&[[0, 0], [10, 0], [10, 10], [0, 10]], 1);
     // (5,2)->(7,5)->(5,8)->(3,5) is CCW; holes wind clockwise.
-    let hole_cw = poly_loop(&[[5, 2], [7, 5], [5, 8], [3, 5]], 1).reversed_for_hole();
+    let hole_cw = poly_loop(&[[5, 2], [7, 5], [5, 8], [3, 5]], 1)
+        .reversed_for_hole()
+        .expect("valid reversed hole");
     let island = poly_loop(&[[45, 45], [55, 45], [55, 55], [45, 55]], 10); // 4.5..5.5 square
     let patch = TrimmedPatch::new(vec![outer.clone(), hole_cw.clone(), island.clone()]);
     let q = |a: i64, b: i64, d: i64| {
@@ -340,12 +474,20 @@ fn nb_003_trim_classification_adversarial_battery() {
     // Sliver: an extremely thin triangle hole; a point midway between its
     // long edges is genuinely inside the sliver (outside the solid), and
     // a point just outside is solid.
-    let sliver = poly_loop(&[[80, 20], [80, 22], [20, 21]], 10).reversed_for_hole();
+    let sliver = poly_loop(&[[80, 20], [80, 22], [20, 21]], 10)
+        .reversed_for_hole()
+        .expect("valid reversed sliver hole");
     let patch2 = TrimmedPatch::new(vec![outer, sliver]);
     assert_eq!(
         patch2.classify(q(50, 21, 10)).expect("c"),
         Classification::Outside,
         "inside the sliver hole"
+    );
+    let mut caller_mutated = patch2.clone();
+    caller_mutated.loops[0].curve.knots.knots.clear();
+    assert!(
+        caller_mutated.classify(q(1, 1, 1)).is_err(),
+        "safe mutation of the early public representation must refuse instead of indexing"
     );
     assert_eq!(
         patch2.classify(q(50, 25, 10)).expect("c"),
@@ -373,6 +515,19 @@ fn nb_003_trim_classification_adversarial_battery() {
 }
 
 #[test]
+fn nb_003a_trim_classification_refuses_many_tiny_loops_before_deep_validation() {
+    let trim_loop = poly_loop(&[[0, 0], [1, 0], [1, 1], [0, 1]], 1);
+    let patch = TrimmedPatch::new(vec![trim_loop; 20_000]);
+    let error = patch
+        .classify([Rat::new(1, 2), Rat::new(1, 2)])
+        .expect_err("aggregate live validation must share the classification budget");
+    assert!(
+        error.to_string().contains("live validation"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[test]
 fn nb_004_measured_closest_point_brackets_the_oracle() {
     let mut seed = 0x9B_0004u64;
     // Curves.
@@ -391,7 +546,7 @@ fn nb_004_measured_closest_point_brackets_the_oracle() {
         }
         let estimate = closest_point_curve(&c, q, 1e-7, 4000).expect("estimate");
         // Dense-sampling oracle.
-        let (lo, hi) = c.knots.domain();
+        let (lo, hi) = c.knots.domain().expect("validated oracle domain");
         let mut oracle = f64::INFINITY;
         for k in 0..=100_000 {
             let t = lo + (hi - lo) * f64::from(k) / 100_000.0;
@@ -455,6 +610,55 @@ fn nb_004_measured_closest_point_brackets_the_oracle() {
 #[test]
 fn nb_004b_closest_point_numeric_edge_regressions() {
     let line_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+    assert!(
+        KnotVector::new(vec![0.0, 0.0, f64::NAN, 1.0], 1).is_err(),
+        "NaN knots must fail structural admission"
+    );
+    assert!(
+        NurbsCurve::new(
+            line_knots.clone(),
+            &[[f64::NAN, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            &[1.0, 1.0],
+        )
+        .is_err(),
+        "NaN control points must not become zero-distance geometry"
+    );
+    assert!(
+        NurbsCurve::new(
+            line_knots.clone(),
+            &[[f64::MAX, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            &[2.0, 1.0],
+        )
+        .is_err(),
+        "finite source values whose homogeneous product overflows must fail admission"
+    );
+    assert!(
+        NurbsCurve::new(
+            line_knots.clone(),
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            &[f64::from_bits(1), f64::from_bits(1)],
+        )
+        .is_err(),
+        "subnormal weights can underflow a positive rational denominator to zero"
+    );
+    assert!(
+        NurbsCurve::<f64, 4>::new(line_knots.clone(), &[[0.0; 4], [1.0; 4]], &[1.0, 1.0],).is_err(),
+        "unsupported dimensions must return a structural error rather than panic or reinterpret weight storage"
+    );
+    let surface_line = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("surface line");
+    assert!(
+        NurbsSurface::new(
+            surface_line.clone(),
+            surface_line,
+            &[
+                vec![[f64::MAX, 0.0, 0.0], [0.0; 3]],
+                vec![[0.0; 3], [0.0; 3]],
+            ],
+            &[vec![2.0, 1.0], vec![1.0, 1.0]],
+        )
+        .is_err(),
+        "surface homogeneous overflow must fail admission too"
+    );
     let line = NurbsCurve::new(
         line_knots.clone(),
         &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
@@ -463,12 +667,169 @@ fn nb_004b_closest_point_numeric_edge_regressions() {
     .expect("line");
     let line_estimate =
         closest_point_curve(&line, [1.0, 1.0, 0.0], 0.0, 64).expect("linear estimate");
-    assert!(line_estimate.upper.is_finite(), "degree-1 Newton must not index C''");
+    assert!(
+        line_estimate.upper.is_finite(),
+        "degree-1 Newton must not index C''"
+    );
+    let rational_line = NurbsCurve::new(
+        line_knots.clone(),
+        &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        &[1.0, 2.0],
+    )
+    .expect("unequal-weight rational line");
+    let jets = rational_line
+        .derivatives(0.25, 2)
+        .expect("rational derivatives above polynomial degree");
+    let expected_second = -8.0 / 1.25f64.powi(3);
+    assert!(
+        (jets[2][0] - expected_second).abs() < 1e-12,
+        "degree-1 rational quotient has nonzero C'': {} vs {expected_second}",
+        jets[2][0]
+    );
+    let kink_knots =
+        KnotVector::new(vec![0.0, 0.0, 0.5, 1.0, 1.0], 1).expect("piecewise-linear kink knots");
+    let kink = NurbsCurve::new(
+        kink_knots,
+        &[[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]],
+        &[1.0, 1.0, 1.0],
+    )
+    .expect("piecewise-linear kink");
+    assert!(
+        kink.derivatives(0.5, 1).is_err(),
+        "an ordinary derivative must not silently become a right-sided jet at a kink"
+    );
+    let c0_cubic_knots = KnotVector::new(
+        vec![0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0],
+        3,
+    )
+    .expect("C0 cubic knot vector");
+    let c0_cubic = NurbsCurve::new(
+        c0_cubic_knots,
+        &[
+            [0.0, 0.0, 0.0],
+            [0.1, 0.2, 0.0],
+            [0.2, 0.3, 0.0],
+            [0.5, 0.4, 0.0],
+            [0.7, -0.2, 0.0],
+            [0.9, -0.1, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        &[1.0; 7],
+    )
+    .expect("C0 cubic");
+    assert!(
+        c0_cubic.derivatives(0.25, 2).is_ok(),
+        "reduced derivative nets remain evaluable inside a smooth span even when an inherited remote knot multiplicity exceeds the reduced degree"
+    );
+    assert!(
+        closest_point_curve(&c0_cubic, [0.25, 0.5, 0.0], 0.0, 8).is_ok(),
+        "optional Newton polishing cannot erase a valid B&B estimate on a C0 curve"
+    );
+    assert!(
+        kink.derivatives(f64::NAN, 0).is_err(),
+        "NaN parameters must not pass comparison-based domain checks"
+    );
+    let signed_zero_knots =
+        KnotVector::new(vec![-0.0, 0.0, -0.0, 1.0, 1.0, 1.0], 2).expect("signed-zero clamp");
+    let signed_zero_curve = NurbsCurve::new(
+        signed_zero_knots,
+        &[[0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [1.0, 0.0, 0.0]],
+        &[1.0; 3],
+    )
+    .expect("signed-zero curve");
+    assert!(
+        closest_point_curve(&signed_zero_curve, [0.5, 0.25, 0.0], 0.0, 2).is_ok(),
+        "live validation uses the constructor's mathematical equality for signed zero"
+    );
+    let mut invalid_projection = line.clone();
+    invalid_projection.cpw[0] = [f64::MAX, 0.0, 0.0, 0.5];
+    assert!(
+        closest_point_curve(&invalid_projection, [0.0; 3], 0.0, 0).is_err(),
+        "live homogeneous controls with infinite Cartesian projection must fail closed"
+    );
+    assert!(
+        invalid_projection.span_boxes().is_err(),
+        "control boxes must not return infinite Cartesian bounds from finite homogeneous inputs"
+    );
+    let box_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("box knots");
+    let mut invalid_surface = NurbsSurface::new(
+        box_knots.clone(),
+        box_knots,
+        &vec![vec![[0.0, 0.0, 0.0]; 2]; 2],
+        &vec![vec![1.0; 2]; 2],
+    )
+    .expect("surface");
+    invalid_surface.cpw[0][0] = [f64::MAX, 0.0, 0.0, 0.5];
+    assert!(
+        invalid_surface.span_boxes().is_err(),
+        "surface boxes must reject division-overflow projections"
+    );
+    let minimum_subnormal = f64::from_bits(1);
+    let underflow_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("underflow knots");
+    assert!(
+        NurbsCurve::<f64, 1>::new(
+            underflow_knots.clone(),
+            &[[minimum_subnormal], [1.0]],
+            &[0.5, 1.0],
+        )
+        .is_err(),
+        "construction must not silently collapse a nonzero coordinate through multiplication underflow"
+    );
+    assert!(
+        NurbsSurface::new(
+            underflow_knots.clone(),
+            underflow_knots,
+            &vec![
+                vec![[minimum_subnormal, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            ],
+            &vec![vec![0.5, 1.0], vec![1.0, 1.0]],
+        )
+        .is_err(),
+        "surface construction shares the nonzero-underflow refusal"
+    );
+    let mut malformed_curve = line.clone();
+    malformed_curve.cpw.pop();
+    assert!(malformed_curve.eval(0.5).is_err());
+    assert!(malformed_curve.insert_knot(0.5).is_err());
+    assert!(malformed_curve.span_boxes().is_err());
+    let malformed_knots = KnotVector {
+        knots: Vec::new(),
+        degree: usize::MAX,
+    };
+    assert!(
+        malformed_knots.domain().is_err(),
+        "fallible domain access revalidates public fields before indexing"
+    );
+    assert!(
+        NurbsCurve::<f64, 3>::new(malformed_knots.clone(), &[], &[]).is_err(),
+        "fallible curve construction revalidates public knot fields before count arithmetic"
+    );
+    assert!(
+        NurbsSurface::new(malformed_knots.clone(), malformed_knots, &[], &[]).is_err(),
+        "fallible surface construction revalidates public knot fields before indexing"
+    );
+    let high_degree = 6_000usize;
+    let mut high_degree_knots = vec![0.0; high_degree + 1];
+    high_degree_knots.extend(vec![1.0; high_degree + 1]);
+    let high_degree_curve = NurbsCurve::<f64, 1>::new(
+        KnotVector::new(high_degree_knots, high_degree).expect("high-degree knots"),
+        &vec![[0.0]; high_degree + 1],
+        &vec![1.0; high_degree + 1],
+    )
+    .expect("memory-modest high-degree curve");
+    assert!(
+        high_degree_curve.derivatives(0.5, 0).is_err(),
+        "derivative admission must charge triangular basis work before evaluation"
+    );
+    assert!(
+        high_degree_curve.eval(0.5).is_err(),
+        "ordinary evaluation must share the defensive basis-work ceiling"
+    );
     let line_point = line.eval(line_estimate.param[0]).expect("line witness");
-    let witness_distance = ((line_point[0] - 1.0).powi(2)
-        + (line_point[1] - 1.0).powi(2)
-        + line_point[2].powi(2))
-    .sqrt();
+    let witness_distance =
+        ((line_point[0] - 1.0).powi(2) + (line_point[1] - 1.0).powi(2) + line_point[2].powi(2))
+            .sqrt();
     assert!((witness_distance - line_estimate.upper).abs() <= 4.0 * f64::EPSILON);
 
     let large = NurbsCurve::new(
@@ -477,16 +838,15 @@ fn nb_004b_closest_point_numeric_edge_regressions() {
         &[1.0, 1.0],
     )
     .expect("large-coordinate line");
-    let large_estimate = closest_point_curve(&large, [0.0, 1.0e200, 0.0], 0.0, 1)
-        .expect("scaled norm estimate");
+    let large_estimate =
+        closest_point_curve(&large, [0.0, 1.0e200, 0.0], 0.0, 1).expect("scaled norm estimate");
     assert!(
         large_estimate.upper.is_finite() && large_estimate.upper > 1.0e200,
         "representable large distance must not overflow during squaring"
     );
 
     let adjacent = f64::from_bits(1.0f64.to_bits() + 1);
-    let adjacent_u =
-        KnotVector::new(vec![1.0, 1.0, adjacent, adjacent], 1).expect("adjacent u");
+    let adjacent_u = KnotVector::new(vec![1.0, 1.0, adjacent, adjacent], 1).expect("adjacent u");
     let ordinary_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("ordinary v");
     let points = vec![
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -495,21 +855,30 @@ fn nb_004b_closest_point_numeric_edge_regressions() {
     let weights = vec![vec![1.0; 2]; 2];
     let one_axis = NurbsSurface::new(adjacent_u.clone(), ordinary_v, &points, &weights)
         .expect("one splittable axis");
-    let one_axis_estimate = closest_point_surface(&one_axis, [0.5, 1.0, 0.0], 0.0, 1)
-        .expect("fallback-axis split");
+    let one_axis_estimate =
+        closest_point_surface(&one_axis, [0.5, 1.0, 0.0], 0.0, 1).expect("fallback-axis split");
     assert_eq!(
         one_axis_estimate.iterations, 1,
         "an unsplittable preferred axis must fall back to the other axis"
     );
+    assert_eq!(one_axis_estimate.param[1], 0.5);
+    assert!(
+        (one_axis_estimate.upper - 1.0).abs() < 1e-12,
+        "the fallback v split must evaluate and retain the interior witness"
+    );
 
-    let adjacent_v =
-        KnotVector::new(vec![1.0, 1.0, adjacent, adjacent], 1).expect("adjacent v");
-    let neither = NurbsSurface::new(adjacent_u, adjacent_v, &points, &weights)
-        .expect("unsplittable axes");
+    let adjacent_v = KnotVector::new(vec![1.0, 1.0, adjacent, adjacent], 1).expect("adjacent v");
+    let neither =
+        NurbsSurface::new(adjacent_u, adjacent_v, &points, &weights).expect("unsplittable axes");
     let neither_estimate = closest_point_surface(&neither, [0.5, 1.0, 0.0], 0.0, 1)
         .expect("retained unsplittable frontier");
     assert_eq!(neither_estimate.iterations, 0);
-    assert!(neither_estimate.lower <= neither_estimate.upper);
+    assert!((neither_estimate.lower - 1.0).abs() < 1e-12);
+    assert!((neither_estimate.upper - 1.25f64.sqrt()).abs() < 1e-12);
+    assert!(
+        neither_estimate.upper - neither_estimate.lower > 0.1,
+        "an unsplittable limiting leaf must remain in the lower-bound frontier"
+    );
 
     verdict(
         "nb-004b",

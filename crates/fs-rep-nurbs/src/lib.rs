@@ -1,14 +1,15 @@
-//! fs-rep-nurbs (plan §7.2): rational B-spline charts — EXACT spline
-//! algebra (knot insertion and degree elevation in i128 rational
-//! arithmetic, so "identical before/after refinement" is provable
-//! equality, not tolerance), trimmed patches with CERTIFIED point
+//! fs-rep-nurbs (plan §7.2): rational B-spline charts — bounded EXACT spline
+//! algebra (knot insertion and degree elevation in i128 rational arithmetic,
+//! so "identical before/after refinement" is provable equality rather than a
+//! tolerance while every intermediate remains representable), trimmed patches with CERTIFIED point
 //! classification (convex-hull winding with exact subdivision), measured
 //! closest-point bracket estimates (f64 branch-and-bound pending an
 //! outward-rounded upgrade), and the
 //! HONEST Boolean position: route through SDF by default, refuse direct
 //! B-rep Booleans without a certificate.
 //!
-//! Layer: L2 (MORPH). Runtime deps: `std`, fs-ivl, fs-math.
+//! Layer: L2 (MORPH). Runtime deps: `std`, fs-evidence, fs-exec, fs-geom,
+//! fs-ivl, fs-math.
 
 pub mod basis;
 pub mod boolean;
@@ -49,7 +50,9 @@ pub enum NurbsError {
         /// Diagnosis.
         what: String,
     },
-    /// The exact-arithmetic domain was exceeded (i128 overflow).
+    /// The exact-arithmetic domain was exceeded (i128 overflow). Reserved for
+    /// the planned fallible exact backend; current `Rat` operators fail with a
+    /// named panic at that boundary rather than wrapping.
     Exactness {
         /// Diagnosis.
         what: String,

@@ -1,6 +1,6 @@
 # fs-rep-nurbs — CONTRACT
 
-Rational B-spline charts (plan §7.2): EXACT spline algebra, trimmed
+Rational B-spline charts (plan §7.2): bounded EXACT spline algebra, trimmed
 patches with certified classification, measured closest-point brackets,
 and the HONEST Boolean position.
 
@@ -10,7 +10,8 @@ deliberately NOT shipped (see the Boolean position).
 
 ## Purpose and layer
 
-Layer **L2** (MORPH). Runtime deps: `std`, fs-ivl, fs-math. Consumers:
+Layer **L2** (MORPH). Runtime deps: `std`, fs-evidence, fs-exec, fs-geom,
+fs-ivl, fs-math. Consumers:
 fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
 (shares the clipping/Newton machinery), the NURBS↔SDF converter beads
 (wqd.11/12).
@@ -18,24 +19,47 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
 ## Public types and semantics
 
 - `Rat` — exact i128 rational scalar (gcd-reduced, overflow-CHECKED:
-  leaving the exactness domain is a named panic, never wraparound).
+  leaving the exactness domain is currently a named panic, never wraparound).
+  `NurbsError::Exactness` is reserved for the successor fallible exact API; the
+  present operator traits cannot transport it.
 - `Scalar` — the field abstraction; the SAME generic basis/curve/surface
   code runs at `f64` (fast) and `Rat` (exact). The conformance suite
   also instantiates it at a test dual, so derivative checks flow through
-  the identical code path.
-- `KnotVector` (clamped, validated), Cox–de Boor basis (Piegl–Tiller
-  A2.2 shape).
-- `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation; f64 derivatives
-  to arbitrary order (homogeneous differencing + rational Leibniz);
+  the identical code path. Scalar domains explicitly define weight
+  admissibility; the f64 path rejects subnormal weights whose multiplication
+  by a basis value can underflow an otherwise positive denominator.
+- `KnotVector` (finite, nondecreasing, exact clamped-end multiplicity
+  `degree+1`, no knot run above `degree+1`), Cox–de Boor basis
+  (Piegl–Tiller A2.2 shape). Domain access is fallible because fields remain
+  publicly mutable in this early API; domain/span/basis calls price full live
+  knot validation and worst-case span search before scanning, basis allocation
+  is fallible, and triangular degree work shares the defensive legacy ceiling.
+- `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation in dimensions 0–3;
+  construction rejects non-finite homogeneous products rather than accepting
+  finite source values whose multiplication overflowed. f64 derivatives
+  pass both the explicit legacy order ceiling 64 and structure-sensitive
+  retained-net work plus 64 MiB payload ceilings, with fallible reservation
+  (homogeneous differencing +
+  rational Leibniz, including nonzero rational derivatives above polynomial
+  degree). At an interior repeated knot, this API returns only ordinary
+  derivatives through the knot's continuity order and refuses requests that
+  would silently mean a one-sided jet;
   EXACT Boehm `insert_knot`; EXACT `remove_knot` (reconstruction checked
   with scalar EQUALITY — in `Rat` a proof); Bézier decomposition; EXACT
   `elevate_degree` (per-segment binomial elevation reassembled on a
-  full-multiplicity knot vector — valid and evaluation-identical;
-  minimal-multiplicity elevation is a follow-up).
+  full-multiplicity knot vector — valid and evaluation-identical, including
+  legal discontinuous full breaks whose independent endpoints and raised
+  multiplicity are preserved; minimal-multiplicity elevation is a follow-up).
 - `NurbsSurface<S>` — tensor-product evaluation, EXACT directional knot
   insertion, first partials via isocurve nets, per-span control boxes.
 - `TrimLoop`/`TrimmedPatch` — trim curves in EXACT RATIONAL form
-  (closure validated by rational equality). `classify` is CERTIFIED:
+  (closure and continuity validated by rational equality, including exact
+  left/right-limit agreement at any full knot break). Mutable public early-stage
+  representations are revalidated at classification and shell-ingestion
+  boundaries. Aggregate loop-count/structure validation is admitted before
+  the first deep scan and spends the same defensive classification budget;
+  shell ingestion shares a bounded construction-validation ledger across all
+  trims. `classify` is CERTIFIED:
   outside every Bézier span hull ⇒ the exactly-computed control-polygon
   winding equals the curve winding (hull-homotopy argument); ambiguous
   points subdivide EXACTLY (rational midpoints) and become `Boundary`
@@ -63,14 +87,22 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   not outward-rounded. When the found point is trimmed away or in the boundary
   band, the query carries an infinite upper value and the chart returns
   `NoClaim`; distance-to-kept-region search remains successor work.
-  `ShellSdfChart` presents `nurbs-sdf/estimated-signed` under declared local
+  `ShellSdfChart` construction validates the configured aggregate query work
+  and support padding and returns a structured error if it could only refuse at
+  evaluation time. `ShellSdf::control_aabb` likewise rejects malformed padding
+  and any outward expansion that leaves the finite AABB domain through `Result`
+  rather than admitting unbounded support or panicking on public configuration.
+  It presents `nurbs-sdf/estimated-signed` under declared local
   orientation or `nurbs-sdf/estimated-unsigned` otherwise; it emits
   `NumericalKind::Estimate`, no Lipschitz authority, and no continuity claim:
   finite-budget best-first selection can switch sampled witnesses.
   `generate_tile` is effort-adaptive under defensive static sample/split
   ceilings, not caller-budgeted (P4 remains successor work): refinement fires
-  within two cell diagonals of the surface, and achieved measured widths plus
-  branch-and-bound splits are reported per tile. A trim-downgraded cell emits
+  within two cell diagonals of the surface, and achieved pre-storage measured
+  widths, outward-expanded f64→f32 quantization errors, and branch-and-bound
+  splits are reported per tile. Finite underflow may produce a signed-zero f32
+  sample, but its absolute loss remains visible in the storage-error field. A
+  trim-downgraded cell emits
   an infinite sentinel/no usable distance rather than the finite distance to a
   point that is not on the kept surface.
 
@@ -99,6 +131,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   projection rays can produce STRUCTURED WARNINGS with parameter and world
   locations; a feature missed by every ray is invisible to this API. The
   patch-density knobs are the ErrBudget trade, ledgered.
+  The G¹ seam-angle diagnostic evaluates the open `v` interior at the exact
+  two `u` seam endpoints. Its report explicitly marks `v=0,1` as excluded,
+  because pole-chart tangent directions may be undefined; those endpoints gain
+  no implied G¹ authority pending the chart-aware pole audit.
 
 ## Invariants
 
@@ -120,9 +156,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
 
 ## Error model
 
-`NurbsError`: `Structure`, `Domain`, `Exactness`. `Rat` overflow panics
-with a named message (exactness-domain exit — a documented boundary, not
-a data path).
+`NurbsError`: `Structure`, `Domain`, `Exactness`. `Exactness` is reserved for
+the planned fallible rational API; current `Rat` overflow panics with a named
+message (exactness-domain exit — a documented boundary, not a data path).
 
 ## Determinism class
 
@@ -132,8 +168,23 @@ everywhere; best-first ties broken by a monotone logical insertion identity.
 ## Cancellation behavior
 
 Trim and closest-point subdivision loops carry explicit static iteration
-limits. The legacy refit path has validated static work/allocation/probe caps
-but no `Cx`; it is not yet P7 cancellation-correct. The successor budgeted
+limits. Direct `KnotVector` domain/span/basis admission charges live-knot
+validation, worst-case span search, and Cox–de Boor triangular degree work
+before scanning, allocating, or iterating. Curve/surface wrappers and the
+derivative path still perform an initial live-structure scan before their
+operation-specific admission; the validate-once, preflight-first successor is
+tracked as a P0 execution-safety dependency and these paths make no claim of
+caller-budgeted preflight yet. Closest-point admission also validates the live public structure,
+including finite Cartesian projections and normal positive floating weights,
+and charges a stage-faithful knot-insertion, expanded-grid, run-scan, and
+queue-seeding estimate before conversion, including when the requested split
+budget is zero. Degree-scaled de Casteljau split work and the worst retained
+queue/scratch frontier are admitted separately. The SDF shell reuses that
+same split/frontier model and additionally charges structure-sensitive
+polishing, sign-repair, and trim coefficients; a shell for which even a
+zero-split query exceeds the ceiling is not constructible. The
+legacy refit path has validated static work/allocation/probe caps but no `Cx`;
+these APIs are not yet P7 cancellation-correct. The successor budgeted
 interfaces are tracked explicitly and must add bounded polling plus
 request→drain→finalize semantics before promotion.
 
@@ -157,8 +208,9 @@ nb-001 exact G0 laws + derivative-vs-dual through the generic evaluator;
 nb-002 six random rational curves: insertion/elevation evaluation-exact +
 insert/remove lossless round trip; nb-003 adversarial trim battery
 (nesting, tangency, slivers, boundary honesty); nb-004 measured curve +
-surface brackets vs dense oracles (iteration stats logged, no enclosure
-claim); nb-005 the
+surface brackets vs dense oracles plus non-finite, scaled-norm,
+adjacent-float termination, multiplicity, and rational-high-derivative
+regressions (iteration stats logged, no enclosure claim); nb-005 the
 Boolean policy refusals with teaching routes; nb-006 exact surface
 refinement + partials vs central differences.
 
@@ -169,7 +221,8 @@ refinement + partials vs central differences.
   continuum watertightness certificate. The sampled interface evidence from
   wqd.13 is intentionally insufficient for that authority.
 - **Degree elevation emits full-multiplicity knot vectors** (valid,
-  evaluation-identical); minimal-multiplicity reassembly is follow-up.
+  evaluation-identical, with discontinuous full breaks preserved rather than
+  silently healed); minimal-multiplicity reassembly is follow-up.
 - **Closest-point and NURBS→distance brackets are measured estimates.** The
   one-ULP hull expansion is heuristic and cannot authorize `Enclosure`, exact sign,
   a 1-Lipschitz field, or no-tunneling. The fs-ivl/Taylor path with outward
@@ -177,7 +230,9 @@ refinement + partials vs central differences.
 - **Greville/Gauss quadrature tables for IGA** land with the fs-iga
   consumer (tfz.9), which owns the quadrature accuracy claims.
 - **`Rat` is i128-bounded**: deep repeated refinement can exceed the
-  exactness domain; the failure is loud and named.
+  exactness domain; the current failure is loud and named. Converting that
+  boundary to a fully fallible exact-arithmetic API remains required before
+  hostile inputs can be treated as an ordinary data path.
 - Ray intersection shares this machinery but ships with the LUMEN
   chart-backend bead (qfx.2).
 
@@ -213,8 +268,10 @@ refinement + partials vs central differences.
 - Retained radial sign-bracket-target → spline evidence is sampled at the
   projection grid: a feature no ray hits is invisible, and without admitted
   continuity/root-existence evidence the target is not authorized as a point
-  on a source surface. Density is the caller's knob, and the warning channel
-  reports what the samples DID see.
+  on a source surface. Density is the caller's knob. The warning channel
+  reports only a retained paired-parameter residual above threshold; it does
+  not distinguish thin geometry from smoothing, inadequate global density,
+  conditioning, noise, or stateful caller-field behavior.
 - The legacy closure API uses validated dimensions plus a conservative live-
   payload allocation estimate, explicit checked reservations for its largest
   side buffers, and fixed probe/algorithmic-work ceilings so malformed

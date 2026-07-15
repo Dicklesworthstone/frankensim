@@ -107,6 +107,13 @@ fn sphere() -> NurbsSurface<f64> {
     )
 }
 
+fn collapsed_surface() -> NurbsSurface<f64> {
+    let line = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line");
+    let points = vec![vec![[0.0; 3]; 2]; 2];
+    let weights = vec![vec![1.0; 2]; 2];
+    NurbsSurface::new(line.clone(), line, &points, &weights).expect("collapsed surface")
+}
+
 /// Cylinder SIDE surface (radius r, z in [0, h]).
 fn cylinder(r: f64, h: f64) -> NurbsSurface<f64> {
     let line = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line");
@@ -197,9 +204,25 @@ fn ns_002_sign_follows_declared_orientation() {
             1e-6,
             4000,
             0.5,
-        );
+        )
+        .expect("admissible signed chart settings");
         let inside = signed.eval(Point3::new(0.3, 0.1, -0.2), cx);
         assert!(inside.signed_distance < 0.0, "inside is negative");
+        let center = signed.eval(Point3::new(0.0, 0.0, 0.0), cx);
+        assert!(
+            center.signed_distance < 0.0,
+            "a singular-pole closest witness must use a regular oriented fallback at the sphere center: {center:?}"
+        );
+        let axial_inside = signed.eval(Point3::new(0.0, 0.0, -0.5), cx);
+        assert!(
+            axial_inside.signed_distance < 0.0,
+            "inside axial query at a pole-degenerate closest parameter must remain negative"
+        );
+        let axial_outside = signed.eval(Point3::new(0.0, 0.0, -1.5), cx);
+        assert!(
+            axial_outside.signed_distance > 0.0,
+            "outside axial query at a pole-degenerate closest parameter must remain positive"
+        );
         let outside = signed.eval(Point3::new(1.5, 0.0, 0.0), cx);
         assert!(outside.signed_distance > 0.0, "outside is positive");
         assert!(
@@ -230,13 +253,28 @@ fn ns_002_sign_follows_declared_orientation() {
             1e-6,
             4000,
             0.5,
-        );
+        )
+        .expect("admissible unsigned chart settings");
         let u_inside = unsigned.eval(Point3::new(0.3, 0.1, -0.2), cx);
         assert!(
             u_inside.signed_distance > 0.0,
             "no sign claim: non-negative"
         );
         assert_eq!(unsigned.name(), "nurbs-sdf/estimated-unsigned");
+        let degenerate = ShellSdfChart::new(
+            ShellSdf::new(vec![collapsed_surface()], vec![None], Orientation::Outward)
+                .expect("degenerate shell remains diagnosable"),
+            1e-6,
+            8,
+            0.5,
+        )
+        .expect("admissible degenerate chart settings");
+        let no_sign = degenerate.eval(Point3::new(0.5, 0.0, 0.0), cx);
+        assert_eq!(no_sign.error.kind, NumericalKind::NoClaim);
+        assert!(
+            no_sign.signed_distance.is_infinite(),
+            "zero tangents/normals must fail closed instead of defaulting to outside"
+        );
         verdict(
             "ns-002",
             "outward orientation signs correctly with outward gradients; unknown \
@@ -271,13 +309,24 @@ fn poly_loop(pts: &[[i64; 2]], scale_den: i64) -> TrimLoop {
 
 #[test]
 fn ns_003_trim_downgrade_is_honest() {
-    // Keep only the NORTHERN parameter half (v in [0, 1/2] is the north
-    // on the sphere profile): CCW square in (u, v).
+    // Keep only the NORTHERN parameter half (v in [1/2, 1] is north because
+    // the sphere profile runs south to north): CCW square in (u, v).
     let keep_north = poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16);
     let trim = TrimmedPatch {
         loops: vec![keep_north],
         max_subdivision: 24,
     };
+    let mut malformed_trim = trim.clone();
+    malformed_trim.loops[0].curve.knots.knots.clear();
+    assert!(
+        ShellSdf::new(
+            vec![sphere()],
+            vec![Some(malformed_trim)],
+            Orientation::Outward,
+        )
+        .is_err(),
+        "shell ingestion must revalidate caller-mutable trim structure"
+    );
     let shell =
         ShellSdf::new(vec![sphere()], vec![Some(trim)], Orientation::Outward).expect("shell");
     // A point nearest the SOUTH pole: its closest point is trimmed away.
@@ -337,7 +386,8 @@ fn ns_003_trim_downgrade_is_honest() {
             1e-6,
             4000,
             0.5,
-        );
+        )
+        .expect("admissible trimmed chart settings");
         let s = chart.eval(Point3::new(0.0, 0.99, -0.99), cx);
         assert!(
             s.error.hi.is_infinite(),
@@ -408,15 +458,78 @@ fn ns_005_adaptive_tile_generation() {
         1e-5,
         4000,
         0.5,
-    );
+    )
+    .expect("admissible adaptive chart settings");
     let aabb = fs_geom::Aabb::new(Point3::new(-1.4, -1.4, -1.4), Point3::new(1.4, 1.4, 1.4));
     let tile = generate_tile(&chart, &aabb, 8, 1e-5, 2000).expect("tile");
     assert_eq!(tile.values.len(), 512);
     assert_eq!(tile.downgraded, 0, "untrimmed shell never downgrades");
+    assert_eq!(
+        (
+            tile.trim_downgraded,
+            tile.sign_downgraded,
+            tile.range_downgraded
+        ),
+        (0, 0, 0)
+    );
     assert!(generate_tile(&chart, &aabb, 1, 1e-5, 1).is_err());
     assert!(generate_tile(&chart, &aabb, usize::MAX, 1e-5, 1).is_err());
     assert!(generate_tile(&chart, &aabb, 2, f64::NAN, 1).is_err());
     assert!(generate_tile(&chart, &aabb, 2, 1e-5, u32::MAX).is_err());
+    assert!(
+        ShellSdfChart::new(
+            ShellSdf::new(vec![sphere()], vec![None], Orientation::Outward).expect("shell"),
+            1e-5,
+            1_048_576,
+            0.0,
+        )
+        .is_err(),
+        "chart construction must reject a configured query that can only fail its work ceiling"
+    );
+    let line = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear knots");
+    let linear_surface = NurbsSurface::new(
+        line.clone(),
+        line,
+        &vec![vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]; 2],
+        &vec![vec![1.0; 2]; 2],
+    )
+    .expect("linear surface");
+    let envelope_error = ShellSdfChart::new(
+        ShellSdf::new(vec![linear_surface], vec![None], Orientation::Unknown)
+            .expect("linear shell"),
+        1e-5,
+        1_048_576,
+        0.0,
+    )
+    .expect_err("chart admission must share the delegated closest frontier envelope");
+    assert!(
+        envelope_error.to_string().contains("retained"),
+        "closest frontier refusal must happen at chart construction: {envelope_error}"
+    );
+    assert!(
+        ShellSdfChart::new(
+            ShellSdf::new(vec![sphere()], vec![None], Orientation::Unknown).expect("shell"),
+            f64::NAN,
+            0,
+            0.0,
+        )
+        .is_err(),
+        "invalid chart settings must return a structured error, not panic"
+    );
+    let support_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("support test knots");
+    let extreme_surface = NurbsSurface::new(
+        support_knots.clone(),
+        support_knots,
+        &vec![vec![[f64::MAX, 0.0, 0.0]; 2]; 2],
+        &vec![vec![1.0; 2]; 2],
+    )
+    .expect("finite extreme surface");
+    let extreme_shell = ShellSdf::new(vec![extreme_surface], vec![None], Orientation::Unknown)
+        .expect("finite shell inputs remain diagnosable");
+    assert!(
+        extreme_shell.control_aabb(0.0).is_err(),
+        "one-ULP outward support at f64::MAX must refuse infinity rather than admit an unbounded chart"
+    );
     // Adaptive contract: near-surface cells are TIGHT; far cells may be
     // loose (that is the budget being spent where it matters).
     // The adaptive CONTRACT at the documented budget (2000 splits/cell):
@@ -440,11 +553,42 @@ fn ns_005_adaptive_tile_generation() {
     let corner = tile.values[0];
     assert!(corner > 0.0, "corner outside: {corner}");
     assert!(mid < 0.0, "center inside: {mid}");
+    let mut far_surface = sphere();
+    for row in &mut far_surface.cpw {
+        for control in row {
+            control[0] += 1.0e39 * control[3];
+        }
+    }
+    let far_chart = ShellSdfChart::new(
+        ShellSdf::new(vec![far_surface], vec![None], Orientation::Unknown)
+            .expect("finite far shell"),
+        1e-5,
+        0,
+        0.0,
+    )
+    .expect("admissible far-field chart settings");
+    let small_box = fs_geom::Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+    let far_tile = generate_tile(&far_chart, &small_box, 2, 1e-5, 0)
+        .expect("f64-finite distances outside f32 range downgrade");
+    assert_eq!(far_tile.values, vec![f32::INFINITY; 8]);
+    assert_eq!(far_tile.downgraded, 8);
+    assert_eq!(far_tile.range_downgraded, 8);
+    assert_eq!(far_tile.trim_downgraded, 0);
+    assert_eq!(far_tile.sign_downgraded, 0);
+    assert!(tile.worst_near_storage_error.is_finite());
+    assert!(tile.worst_far_storage_error.is_finite());
+    assert_eq!(far_tile.worst_near_storage_error, 0.0);
+    assert_eq!(far_tile.worst_far_storage_error, f64::INFINITY);
     // Throughput evidence for the ledger line.
     println!(
         "{{\"metric\":\"nurbs-sdf-tile\",\"cells\":512,\"total_splits\":{},\
-         \"near_width\":{:.2e},\"far_width\":{:.2e}}}",
-        tile.total_splits, tile.worst_near_width, tile.worst_far_width
+         \"near_width\":{:.2e},\"far_width\":{:.2e},\
+         \"near_storage_error\":{:.2e},\"far_storage_error\":{:.2e}}}",
+        tile.total_splits,
+        tile.worst_near_width,
+        tile.worst_far_width,
+        tile.worst_near_storage_error,
+        tile.worst_far_storage_error
     );
     verdict(
         "ns-005",
