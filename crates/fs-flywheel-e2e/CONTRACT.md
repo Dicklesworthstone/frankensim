@@ -108,7 +108,17 @@ refusals, and each gate is an anytime-valid betting e-process at the
 preregistered δ, per stratum, so optional stopping and favorable
 pooling cannot manufacture a pass (`tests/activation_stats.rs`);
 tests/cal.rs — the tolerance-calibration probe behind the gate's
-0.05/0.02 choices. `tests/phase3_gate.rs` retains the horizon activation
+0.05/0.02 choices. `tests/acceptance.rs` exercises a stronger receipt path for
+ac_003 and ac_004: the harness retains the verifier's original serialized
+receipt, resolves its presented artifact root, independently reruns exact
+verifier admission for the bound problem, candidate, tolerance, query/QoI,
+units, flux reconstruction, hypotheses, work disposition, and verifier family,
+and exposes only the lower-owned admitted claim to package promotion. Missing
+receipts, fixed/fake hashes, producer relabeling, changed interval endpoints,
+and cross-problem, cross-QoI, or cross-tolerance replay fail closed. ac_004 also
+binds those retained receipt/artifact roots and the verifier's source-cone and
+build-input identity into the whole-path replay commitment.
+`tests/phase3_gate.rs` retains the horizon activation
 ledger: Proposal A's single typed coverage battery is recomputed and stored as
 `Estimated` with exact value bits. Its domain-separated identity binds the
 schema and algorithm versions, model, truth dimension, exact range bits, RB
@@ -136,10 +146,16 @@ test cost.
   multi-process swarm trial is the xpck.3 milestone's territory.
 - The G4 storm is a deterministic stage-boundary cancel model, not the
   base plan's thread-storm harness (fs-exec owns that).
-- Acceptance/phase-gate certificate verifiers match exact in-memory fixture
-  declarations, and their signature/waiver verifiers accept deterministic,
-  publicly-derivable test strings. They prove typed capability plumbing,
+- ac_003 and ac_004 do resolve retained scientific verifier-receipt bytes and
+  independently replay exact verifier admission before promotion. Their
+  producer identity commits to the in-tree verifier source/dependency cone,
+  workspace manifest and lock, feature set, and toolchain inputs; it is
+  deliberately not a binary attestation and does not prove that a separately
+  deployed executable ran. External binary attestation and an external trust
+  root remain separate authority boundaries.
+- Other acceptance/phase-gate fixture certificate, signature, and waiver
+  verifiers still accept exact in-memory declarations or deterministic,
+  publicly derivable test strings. They prove typed capability plumbing,
   policy/request binding, waiver taint, color separation, and root-tamper
-  refusal. They do not resolve retained scientific artifacts, provide
-  cryptographic authentication, or establish vendor-independent third-party
-  review.
+  refusal, but do not provide cryptographic authentication, retained physical
+  experiment evidence, or vendor-independent third-party review.
