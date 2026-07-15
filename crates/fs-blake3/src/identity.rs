@@ -275,12 +275,22 @@ impl FieldSpec {
         }
     }
 
-    /// Declare one explicitly optional field.
+    /// Declare one explicitly optional byte field.
+    ///
+    /// Canonical-frame v1 deliberately exposes no generic optional constructor:
+    /// optional presence is representable only for [`WireType::Bytes`], the
+    /// wire grammar implemented by [`CanonicalEncoder::optional_bytes`].
+    ///
+    /// ```compile_fail
+    /// use fs_blake3::identity::{FieldSpec, WireType};
+    ///
+    /// let _ = FieldSpec::optional("value", WireType::U64);
+    /// ```
     #[must_use]
-    pub const fn optional(name: &'static str, wire_type: WireType) -> Self {
+    pub const fn optional_bytes(name: &'static str) -> Self {
         Self {
             name,
-            wire_type,
+            wire_type: WireType::Bytes,
             presence: Presence::Optional,
         }
     }

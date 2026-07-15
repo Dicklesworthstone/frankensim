@@ -73,7 +73,10 @@ without gaining solver, geometry, FFI, or license surface.
   schema and order, canonical field stream, and final field count.
 - Required field ordinal, name, wire type, and presence must match exactly.
   `None` differs from empty bytes, and variants bind both numeric tag and
-  payload.
+  payload. Canonical-frame v1 exposes optional presence only through
+  `FieldSpec::optional_bytes`, matching its one explicit optional encoder;
+  unsupported optional schema declarations are unrepresentable instead of
+  becoming admitted but unencodable schemas.
 - Ordered collections preserve caller order. Canonical sets must be strictly
   byte-lexicographic and duplicate-free. Each set item's byte and aggregate
   field budgets are admitted before potentially long ordering comparisons.

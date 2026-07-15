@@ -86,7 +86,16 @@ impl CanonicalSchema for OtherPresence {
     const NAME: &'static str = LeafV1::NAME;
     const VERSION: u32 = 1;
     const CONTEXT: &'static str = LeafV1::CONTEXT;
-    const FIELDS: &'static [FieldSpec] = &[FieldSpec::optional("value", WireType::U64)];
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::optional_bytes("value")];
+}
+
+enum RequiredBytesPresence {}
+impl CanonicalSchema for RequiredBytesPresence {
+    const DOMAIN: &'static str = LeafV1::DOMAIN;
+    const NAME: &'static str = LeafV1::NAME;
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = LeafV1::CONTEXT;
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("value", WireType::Bytes)];
 }
 
 enum HeaderOneField {}
@@ -128,7 +137,7 @@ impl CanonicalSchema for OptionalLeaf {
     const NAME: &'static str = "identity-test-optional";
     const VERSION: u32 = 1;
     const CONTEXT: &'static str = "G0 optional fixture";
-    const FIELDS: &'static [FieldSpec] = &[FieldSpec::optional("payload", WireType::Bytes)];
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::optional_bytes("payload")];
 }
 
 enum FloatLeaf {}
@@ -217,7 +226,7 @@ impl CanonicalSchema for AllFields {
         FieldSpec::required("signed", WireType::I64),
         FieldSpec::required("flag", WireType::Bool),
         FieldSpec::required("float", WireType::FiniteF64),
-        FieldSpec::optional("optional", WireType::Bytes),
+        FieldSpec::optional_bytes("optional"),
         FieldSpec::required("variant", WireType::Variant),
         FieldSpec::required("sequence", WireType::OrderedBytes),
         FieldSpec::required("set", WireType::CanonicalSet),
@@ -576,6 +585,14 @@ fn schema_descriptor_and_every_header_field_move_identity() {
         SchemaId::<HeaderTwoFields>::for_schema().to_hex(),
         SchemaId::<HeaderTwoFieldsReordered>::for_schema().to_hex(),
         "field order is semantic"
+    );
+}
+
+#[test]
+fn required_and_optional_byte_presence_have_distinct_schema_identities() {
+    assert_ne!(
+        SchemaId::<RequiredBytesPresence>::for_schema().to_hex(),
+        SchemaId::<OtherPresence>::for_schema().to_hex()
     );
 }
 
