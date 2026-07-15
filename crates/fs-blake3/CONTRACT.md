@@ -109,7 +109,23 @@ without gaining solver, geometry, FFI, or license surface.
   verifier, or policy presence alone is untrusted; verification and admission
   are separate consuming trait calls over the exact stored `AuthorityRef`. The
   same concrete capability may implement both interfaces; correctness of the
-  injected checks remains caller/policy responsibility.
+  injected checks remains caller/policy responsibility, and the resulting
+  `Admitted` state is therefore EXPLICITLY POLICY-RELATIVE
+  (`PolicyRelativeAdmitted`), never promotion authority (bead sj31i.52.9).
+- Promotion-capable admission is exclusively
+  `PromotionTrustRoot::admit_for_promotion`: the domain owner independently
+  configures exact verifier and key-policy identities WITH their
+  canonical-byte observations; admission re-adjudicates the presented binding
+  against those retained observations (foreign identities and
+  same-ID/different-bytes presentations are typed refusals retaining both
+  observations) and mints the `PromotionWitness` — private fields, no public
+  constructor, sealed typestates (`compile_fail`-proven), so a foreign
+  permit-everything capability can never fabricate one. The witness binds the
+  exact subject receipt/preimage, anchor, verifier/policy observations, and
+  root context; `audit()` yields bounded namespace + observation-root/length
+  metadata only. No-claim: the root's guarantees are relative to its
+  configuration authority — fs-blake3 cannot vouch that the configured
+  verifier is meaningful.
 - Same typed ID plus differing caller-supplied byte-root or length observations
   yields a refusal preserving both observations; it is not itself proof of a
   cryptographic collision.

@@ -2496,10 +2496,29 @@ pub struct Verified;
 pub struct Admitted;
 
 /// State marker for [`AuthorityRef`].
-pub trait AuthorityState: Copy + 'static {
+pub trait AuthorityState: Copy + 'static + authority_state_sealed::Sealed {
     /// Runtime log state corresponding to this typestate.
     const TRUST_STATE: TrustState;
 }
+
+mod authority_state_sealed {
+    /// Authority typestates are closed (bead sj31i.52.9): foreign crates
+    /// cannot introduce new trust states, so no downstream code can
+    /// fabricate a promotion-flavored state.
+    pub trait Sealed {}
+    impl Sealed for super::Presented {}
+    impl Sealed for super::Verified {}
+    impl Sealed for super::Admitted {}
+}
+
+/// Explicit alias making the [`Admitted`] semantics visible at use
+/// sites (bead sj31i.52.9): generic [`AuthorityVerifier`]/
+/// [`AuthorityAdmitter`] capabilities produce a POLICY-RELATIVE
+/// admission only — "the injected capabilities accepted this binding"
+/// — which is NOT promotion authority. Promotion-capable admission is
+/// exclusively [`PromotionTrustRoot::admit_for_promotion`], whose
+/// witness foreign code cannot mint.
+pub type PolicyRelativeAdmitted = Admitted;
 
 impl AuthorityState for Presented {
     const TRUST_STATE: TrustState = TrustState::Presented;
@@ -2714,6 +2733,359 @@ where
     type Error;
     /// Admit the exact verified subject/verifier/key-policy/context binding.
     fn admit(&self, verified: &AuthorityRef<I, V, P, Verified>) -> Result<(), Self::Error>;
+}
+
+/// Typed refusal from promotion-capable admission (bead sj31i.52.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionRefusal {
+    /// The trust root was configured with an empty context.
+    EmptyContext,
+    /// The presented verifier identity is not the independently
+    /// configured trust-root verifier.
+    ForeignVerifier,
+    /// The presented key-policy identity is not the independently
+    /// configured trust-root key policy.
+    ForeignKeyPolicy,
+    /// The verifier ID matches but its canonical-byte observation does
+    /// not; both observations are retained, neither is privileged.
+    VerifierObservationMismatch {
+        /// The trust root's independently retained observation.
+        configured: ByteObservation,
+        /// The presented observation.
+        presented: ByteObservation,
+    },
+    /// The key-policy ID matches but its canonical-byte observation
+    /// does not; both observations are retained.
+    KeyPolicyObservationMismatch {
+        /// The trust root's independently retained observation.
+        configured: ByteObservation,
+        /// The presented observation.
+        presented: ByteObservation,
+    },
+}
+
+impl fmt::Display for PromotionRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyContext => f.write_str("promotion trust root context is empty"),
+            Self::ForeignVerifier => {
+                f.write_str("presented verifier is not the configured trust-root verifier")
+            }
+            Self::ForeignKeyPolicy => {
+                f.write_str("presented key policy is not the configured trust-root key policy")
+            }
+            Self::VerifierObservationMismatch { .. } => f.write_str(
+                "verifier ID matches but its canonical-byte observation does not; \
+                 same-ID/different-bytes is refused, never adjudicated first-wins",
+            ),
+            Self::KeyPolicyObservationMismatch { .. } => f.write_str(
+                "key-policy ID matches but its canonical-byte observation does not; \
+                 same-ID/different-bytes is refused, never adjudicated first-wins",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for PromotionRefusal {}
+
+/// The domain owner's independently configured promotion trust root
+/// (bead sj31i.52.9).
+///
+/// Configuration names the EXACT verifier and key-policy identities —
+/// with their canonical-byte observations — that the owning domain
+/// trusts for promotion. Generic [`AuthorityVerifier`]/
+/// [`AuthorityAdmitter`] capabilities (including a foreign
+/// permit-everything implementation) can still drive
+/// `Presented → Verified → Admitted`, but that admission stays
+/// policy-relative: the ONLY path to a [`PromotionWitness`] runs
+/// through [`Self::admit_for_promotion`], which re-adjudicates the
+/// presented binding against this root's own retained observations.
+///
+/// No-claim boundary: the root's guarantees are relative to its
+/// configuration authority — fs-blake3 makes forgery of the witness
+/// type impossible and binding drift refusable; it cannot vouch that
+/// the domain owner configured a meaningful verifier.
+pub struct PromotionTrustRoot<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    verifier: ObservedIdentity<VerifierId<V>>,
+    key_policy: ObservedIdentity<KeyPolicyId<P>>,
+    context: &'static str,
+}
+
+impl<V, P> Clone for PromotionTrustRoot<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V, P> Copy for PromotionTrustRoot<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+}
+
+impl<V, P> fmt::Debug for PromotionTrustRoot<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PromotionTrustRoot")
+            .field("verifier_domain", &V::DOMAIN)
+            .field("key_policy_domain", &P::DOMAIN)
+            .field("context", &self.context)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, P> PromotionTrustRoot<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    /// Configure the root from independently retained verifier and
+    /// key-policy observations.
+    ///
+    /// # Errors
+    /// Refuses an empty context string.
+    pub const fn configure(
+        verifier: ObservedIdentity<VerifierId<V>>,
+        key_policy: ObservedIdentity<KeyPolicyId<P>>,
+        context: &'static str,
+    ) -> Result<Self, PromotionRefusal> {
+        if context.is_empty() {
+            return Err(PromotionRefusal::EmptyContext);
+        }
+        Ok(Self {
+            verifier,
+            key_policy,
+            context,
+        })
+    }
+
+    /// The opaque domain-owner decision: admit a policy-relative
+    /// admission for PROMOTION by re-adjudicating its exact verifier
+    /// and key-policy bindings against this root's independently
+    /// retained observations.
+    ///
+    /// The caller supplies the observations it retained for the
+    /// presented verifier/key-policy canonical bytes; a digest-only
+    /// presentation cannot skip the observation check.
+    ///
+    /// # Errors
+    /// [`PromotionRefusal::ForeignVerifier`]/[`PromotionRefusal::ForeignKeyPolicy`]
+    /// when the identities differ, and the observation-mismatch
+    /// variants (both observations retained) when an identity matches
+    /// over different canonical bytes.
+    pub fn admit_for_promotion<I>(
+        &self,
+        admitted: &AuthorityRef<I, V, P, Admitted>,
+        verifier_observation: ByteObservation,
+        key_policy_observation: ByteObservation,
+    ) -> Result<PromotionWitness<I, V, P>, PromotionRefusal>
+    where
+        I: StrongIdentity,
+    {
+        match adjudicate(
+            self.verifier,
+            ObservedIdentity::presented(admitted.verifier(), verifier_observation),
+        ) {
+            IdentityAdjudication::SameObservation => {}
+            IdentityAdjudication::DistinctIds => return Err(PromotionRefusal::ForeignVerifier),
+            IdentityAdjudication::Refused(refusal) => {
+                return Err(PromotionRefusal::VerifierObservationMismatch {
+                    configured: refusal.first(),
+                    presented: refusal.second(),
+                });
+            }
+        }
+        match adjudicate(
+            self.key_policy,
+            ObservedIdentity::presented(admitted.key_policy(), key_policy_observation),
+        ) {
+            IdentityAdjudication::SameObservation => {}
+            IdentityAdjudication::DistinctIds => return Err(PromotionRefusal::ForeignKeyPolicy),
+            IdentityAdjudication::Refused(refusal) => {
+                return Err(PromotionRefusal::KeyPolicyObservationMismatch {
+                    configured: refusal.first(),
+                    presented: refusal.second(),
+                });
+            }
+        }
+        Ok(PromotionWitness {
+            subject: admitted.receipt(),
+            anchor: admitted.anchor(),
+            verifier: self.verifier,
+            key_policy: self.key_policy,
+            context: self.context,
+        })
+    }
+}
+
+/// A non-forgeable promotion-capable admission (bead sj31i.52.9).
+///
+/// All fields are private and there is NO public constructor: the only
+/// producer is [`PromotionTrustRoot::admit_for_promotion`]. Foreign
+/// permit-everything capabilities can mint a policy-relative
+/// [`Admitted`] authority, never this witness.
+///
+/// ```compile_fail,E0451
+/// // Foreign code cannot mint a promotion witness: the fields are
+/// // private and no constructor is exported (E0451).
+/// use fs_blake3::identity::{
+///     CanonicalSchema, PromotionWitness, StrongIdentity,
+/// };
+/// fn forge<I, V, P>(
+///     subject: fs_blake3::identity::IdentityReceipt<I>,
+///     anchor: fs_blake3::identity::ExternalAnchorRef,
+///     verifier: fs_blake3::identity::ObservedIdentity<fs_blake3::identity::VerifierId<V>>,
+///     key_policy: fs_blake3::identity::ObservedIdentity<fs_blake3::identity::KeyPolicyId<P>>,
+/// ) -> PromotionWitness<I, V, P>
+/// where
+///     I: StrongIdentity,
+///     V: CanonicalSchema,
+///     P: CanonicalSchema,
+/// {
+///     PromotionWitness {
+///         subject,
+///         anchor,
+///         verifier,
+///         key_policy,
+///         context: "forged",
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail,E0277
+/// // The authority typestates are sealed (E0277): no foreign
+/// // promotion-flavored state can be introduced.
+/// #[derive(Clone, Copy)]
+/// struct RoguePromotionState;
+/// impl fs_blake3::identity::AuthorityState for RoguePromotionState {
+///     const TRUST_STATE: fs_blake3::identity::TrustState =
+///         fs_blake3::identity::TrustState::Admitted;
+/// }
+/// ```
+pub struct PromotionWitness<I, V, P>
+where
+    I: StrongIdentity,
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    subject: IdentityReceipt<I>,
+    anchor: ExternalAnchorRef,
+    verifier: ObservedIdentity<VerifierId<V>>,
+    key_policy: ObservedIdentity<KeyPolicyId<P>>,
+    context: &'static str,
+}
+
+impl<I, V, P> Clone for PromotionWitness<I, V, P>
+where
+    I: StrongIdentity,
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<I, V, P> Copy for PromotionWitness<I, V, P>
+where
+    I: StrongIdentity,
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+}
+
+impl<I, V, P> fmt::Debug for PromotionWitness<I, V, P>
+where
+    I: StrongIdentity,
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PromotionWitness")
+            .field("verifier_domain", &V::DOMAIN)
+            .field("key_policy_domain", &P::DOMAIN)
+            .field("context", &self.context)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<I, V, P> PromotionWitness<I, V, P>
+where
+    I: StrongIdentity,
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    /// Exact subject receipt (id, canonical preimage, byte length).
+    #[must_use]
+    pub const fn subject(&self) -> IdentityReceipt<I> {
+        self.subject
+    }
+
+    /// Exact presented external anchor.
+    #[must_use]
+    pub const fn anchor(&self) -> ExternalAnchorRef {
+        self.anchor
+    }
+
+    /// The trust root's verifier identity with its retained observation.
+    #[must_use]
+    pub const fn verifier(&self) -> ObservedIdentity<VerifierId<V>> {
+        self.verifier
+    }
+
+    /// The trust root's key-policy identity with its retained observation.
+    #[must_use]
+    pub const fn key_policy(&self) -> ObservedIdentity<KeyPolicyId<P>> {
+        self.key_policy
+    }
+
+    /// The root's configured context string.
+    #[must_use]
+    pub const fn context(&self) -> &'static str {
+        self.context
+    }
+
+    /// Bounded audit record: verifier/key-policy namespaces plus exact
+    /// observation roots and lengths survive logging without dumping
+    /// preimage bytes.
+    #[must_use]
+    pub fn audit(&self) -> PromotionAuditRecord {
+        PromotionAuditRecord {
+            verifier_domain: V::DOMAIN,
+            verifier_observation: self.verifier.bytes(),
+            key_policy_domain: P::DOMAIN,
+            key_policy_observation: self.key_policy.bytes(),
+            context: self.context,
+        }
+    }
+}
+
+/// Bounded promotion audit metadata (bead sj31i.52.9): namespaces and
+/// observation roots/lengths only — never unbounded preimage bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromotionAuditRecord {
+    /// Verifier schema domain.
+    pub verifier_domain: &'static str,
+    /// Verifier canonical-byte observation (root + exact length).
+    pub verifier_observation: ByteObservation,
+    /// Key-policy schema domain.
+    pub key_policy_domain: &'static str,
+    /// Key-policy canonical-byte observation (root + exact length).
+    pub key_policy_observation: ByteObservation,
+    /// The trust root's configured context.
+    pub context: &'static str,
 }
 
 /// Quarantined legacy identity types. They deliberately have no conversion,
