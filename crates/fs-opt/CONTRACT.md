@@ -159,10 +159,11 @@ structure; FLUX/UQ execute it.
 - `eval`: memoized evaluation of algebraic subgraphs; the sealed root
   depth and aggregate-work receipts are checked against the default
   admission schedule before memo allocation. Supplied runtime bindings
-  are checked for exact manifold point length, finite components, and the
-  same Sphere/SO(3)/Stiefel membership rules used by retraction; a refusal
-  identifies the exact variable, component or Gram location, and diagnostic
-  IEEE-754 bits.
+  must form one complete declaration-ordered frame even when evaluating an
+  arbitrary subgraph root, and are checked for exact manifold point length,
+  finite components, and the same Sphere/SO(3)/Stiefel membership rules used
+  by retraction; a refusal identifies the exact variable, component or Gram
+  location, and diagnostic IEEE-754 bits.
   Every computed scalar/vector node result is then checked for finiteness
   with node/component attribution before it enters the memo or becomes a
   public result. The walk itself is EXPLICIT-STACK (reachability worklist

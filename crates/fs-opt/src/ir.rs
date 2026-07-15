@@ -624,7 +624,7 @@ pub enum OptError {
         /// The versioned cap.
         cap: u64,
     },
-    /// More variable bindings were supplied than the problem declares.
+    /// The runtime binding count differs from the declaration count.
     BindingCount {
         /// Declared variable count.
         vars: u32,
@@ -827,7 +827,7 @@ impl core::fmt::Display for OptError {
             OptError::BindingCount { vars, got } => write!(
                 f,
                 "{got} bindings supplied for {vars} declared variable(s); bindings \
-                 are indexed by VarId and must not exceed the declaration list"
+                 are indexed by VarId and must exactly match the declaration list"
             ),
             OptError::BindingLen { var, expected, got } => write!(
                 f,

@@ -36,10 +36,11 @@ impl Value {
     }
 }
 
-/// Evaluate `node` with variable `bindings` (one point per variable,
-/// stored per its manifold; bindings are indexed by `VarId` and may be
-/// a PREFIX of the declaration list — referencing an unbound variable
-/// teaches with `UnknownVar`). PDE and stochastic nodes are NOT
+/// Evaluate `node` with variable `bindings` (exactly one point per
+/// declared variable, stored per its manifold and indexed by `VarId`).
+/// Arbitrary subgraph roots remain evaluable, but their runtime frame
+/// is still complete so an unused declaration cannot be silently
+/// omitted. PDE and stochastic nodes are NOT
 /// evaluable here — they refuse with a teaching error (their execution
 /// belongs to FLUX/UQ runners; the IR only carries them).
 ///
@@ -70,7 +71,7 @@ pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Va
             cap: caps.max_total_work,
         });
     }
-    if bindings.len() > problem.vars.len() {
+    if bindings.len() != problem.vars.len() {
         return Err(OptError::BindingCount {
             vars: problem.vars.len() as u32,
             got: bindings.len() as u64,
@@ -100,8 +101,8 @@ pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Va
         var.manifold.validate_binding_domain(binding, i as u32)?;
     }
     // Arena order guarantees every dependency has a lower id, so a
-    // prefix is sufficient; unrelated later nodes cannot force memo
-    // allocation for this evaluation.
+    // root-bounded memo prefix is sufficient; unrelated later nodes
+    // cannot force memo allocation for this evaluation.
     //
     // EXPLICIT-STACK EVALUATION (bead frankensim-xf8v7): the walk is
     // physically iterative so no admitted graph — at the depth cap or

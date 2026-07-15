@@ -477,10 +477,11 @@ fn adm_009_checked_id_accessors() {
     ));
 }
 
-/// adm-010 — binding validation: surplus, wrong-length, and non-finite
-/// bindings refuse with typed errors; a missing prefix binding teaches
-/// through `UnknownVar` when actually referenced. Runtime points are
-/// rejected before their components can acquire graph authority.
+/// adm-010 — binding validation: missing, surplus, wrong-length, and
+/// non-finite bindings refuse with typed errors. Even an arbitrary
+/// subgraph root requires the complete declared runtime frame. Runtime
+/// points are rejected before their components can acquire graph
+/// authority.
 #[test]
 fn adm_010_binding_validation() {
     let p = simple_problem(1.0);
@@ -499,7 +500,7 @@ fn adm_010_binding_validation() {
     ));
     assert!(matches!(
         eval(&p, root, &[]),
-        Err(OptError::UnknownVar { id: 0 })
+        Err(OptError::BindingCount { vars: 1, got: 0 })
     ));
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(
@@ -513,6 +514,24 @@ fn adm_010_binding_validation() {
         );
     }
     eval(&p, root, &[vec![0.5, -0.5]]).expect("exact binding evaluates");
+
+    let mut b = ProblemBuilder::new();
+    let x = b.var("x", Manifold::Rn { dim: 1 }, Dims::NONE).expect("x");
+    b.var("unused", Manifold::Rn { dim: 1 }, Dims::NONE)
+        .expect("unused declaration");
+    let xr = b.var_ref(x).expect("x ref");
+    let x0 = b.component(xr, 0).expect("x component");
+    b.objective(x0, Sense::Minimize, 1.0).expect("objective");
+    let two_var = b.finish();
+    assert_eq!(
+        eval(&two_var, x0, &[vec![3.0]]),
+        Err(OptError::BindingCount { vars: 2, got: 1 }),
+        "an unused declaration remains part of the exact runtime frame"
+    );
+    assert_eq!(
+        eval(&two_var, x0, &[vec![3.0], vec![7.0]]),
+        Ok(fs_opt::Value::S(3.0)),
+    );
 }
 
 /// adm-011 — caps bind incrementally: node/var caps refuse BEFORE
