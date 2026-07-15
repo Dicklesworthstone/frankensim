@@ -192,6 +192,152 @@ fn zeroed_output(len: usize, stage: &'static str) -> Result<Vec<f64>, SheafSkele
     Ok(values)
 }
 
+fn validate_skeleton_incidence(
+    n_patches: usize,
+    edges: &[(usize, usize)],
+    triangles: &[(usize, usize, usize)],
+) -> Result<(), SheafSkeletonError> {
+    if n_patches == 0 {
+        return Err(SheafSkeletonError::EmptyComplex);
+    }
+    for (stage, requested, cap) in [
+        ("patches", n_patches, SHEAF_MAX_CHARTS),
+        ("edges", edges.len(), SHEAF_MAX_PAIR_CANDIDATES),
+        ("triangles", triangles.len(), SHEAF_MAX_TRIPLE_CANDIDATES),
+    ] {
+        if requested > cap {
+            return Err(SheafSkeletonError::WorkLimit {
+                stage,
+                requested,
+                cap,
+            });
+        }
+    }
+
+    let mut previous_edge = None;
+    for (index, &(u, v)) in edges.iter().enumerate() {
+        if u >= v || v >= n_patches || previous_edge.is_some_and(|previous| previous >= (u, v)) {
+            return Err(SheafSkeletonError::InvalidEdge { index });
+        }
+        previous_edge = Some((u, v));
+    }
+
+    let mut previous_triangle = None;
+    for (index, &(a, b, c)) in triangles.iter().enumerate() {
+        if a >= b
+            || b >= c
+            || c >= n_patches
+            || previous_triangle.is_some_and(|previous| previous >= (a, b, c))
+            || edges.binary_search(&(a, b)).is_err()
+            || edges.binary_search(&(a, c)).is_err()
+            || edges.binary_search(&(b, c)).is_err()
+        {
+            return Err(SheafSkeletonError::InvalidTriangle { index });
+        }
+        previous_triangle = Some((a, b, c));
+    }
+    Ok(())
+}
+
+fn validate_raw_skeleton_shape(skeleton: &SheafSkeleton) -> Result<(), SheafSkeletonError> {
+    if skeleton.n_patches == 0 {
+        return Err(SheafSkeletonError::EmptyComplex);
+    }
+    for (stage, requested, cap) in [
+        ("patches", skeleton.n_patches, SHEAF_MAX_CHARTS),
+        ("edges", skeleton.edges.len(), SHEAF_MAX_PAIR_CANDIDATES),
+        (
+            "triangles",
+            skeleton.triangles.len(),
+            SHEAF_MAX_TRIPLE_CANDIDATES,
+        ),
+    ] {
+        if requested > cap {
+            return Err(SheafSkeletonError::WorkLimit {
+                stage,
+                requested,
+                cap,
+            });
+        }
+    }
+
+    for (index, &(u, v)) in skeleton.edges.iter().enumerate() {
+        if u >= v || v >= skeleton.n_patches {
+            return Err(SheafSkeletonError::InvalidEdge { index });
+        }
+    }
+    for (index, &(a, b, c)) in skeleton.triangles.iter().enumerate() {
+        if a >= b || b >= c || c >= skeleton.n_patches {
+            return Err(SheafSkeletonError::InvalidTriangle { index });
+        }
+    }
+    Ok(())
+}
+
+fn validate_raw_skeleton_cross_structure(
+    skeleton: &SheafSkeleton,
+) -> Result<(), SheafSkeletonError> {
+    let mut indexed_edges = Vec::new();
+    indexed_edges
+        .try_reserve_exact(skeleton.edges.len())
+        .map_err(|_| SheafSkeletonError::ResourceExhausted {
+            stage: "raw-validation-edges",
+        })?;
+    indexed_edges.extend(
+        skeleton
+            .edges
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, edge)| (edge, index)),
+    );
+    indexed_edges.sort_unstable();
+    if let Some(index) = indexed_edges
+        .windows(2)
+        .filter(|pair| pair[0].0 == pair[1].0)
+        .map(|pair| pair[1].1)
+        .min()
+    {
+        return Err(SheafSkeletonError::InvalidEdge { index });
+    }
+
+    let mut indexed_triangles = Vec::new();
+    indexed_triangles
+        .try_reserve_exact(skeleton.triangles.len())
+        .map_err(|_| SheafSkeletonError::ResourceExhausted {
+            stage: "raw-validation-triangles",
+        })?;
+    indexed_triangles.extend(
+        skeleton
+            .triangles
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, triangle)| (triangle, index)),
+    );
+    indexed_triangles.sort_unstable();
+    if let Some(index) = indexed_triangles
+        .windows(2)
+        .filter(|pair| pair[0].0 == pair[1].0)
+        .map(|pair| pair[1].1)
+        .min()
+    {
+        return Err(SheafSkeletonError::InvalidTriangle { index });
+    }
+
+    for (index, &(a, b, c)) in skeleton.triangles.iter().enumerate() {
+        for boundary in [(a, b), (a, c), (b, c)] {
+            if indexed_edges
+                .binary_search_by_key(&boundary, |(edge, _)| *edge)
+                .is_err()
+            {
+                return Err(SheafSkeletonError::InvalidTriangle { index });
+            }
+        }
+    }
+    Ok(())
+}
+
 impl AdmittedSheafSkeleton {
     /// Validate and seal canonical repair incidence supplied by a caller.
     ///
@@ -204,46 +350,7 @@ impl AdmittedSheafSkeleton {
         edges: Vec<(usize, usize)>,
         triangles: Vec<(usize, usize, usize)>,
     ) -> Result<Self, SheafSkeletonError> {
-        if n_patches == 0 {
-            return Err(SheafSkeletonError::EmptyComplex);
-        }
-        for (stage, requested, cap) in [
-            ("patches", n_patches, SHEAF_MAX_CHARTS),
-            ("edges", edges.len(), SHEAF_MAX_PAIR_CANDIDATES),
-            ("triangles", triangles.len(), SHEAF_MAX_TRIPLE_CANDIDATES),
-        ] {
-            if requested > cap {
-                return Err(SheafSkeletonError::WorkLimit {
-                    stage,
-                    requested,
-                    cap,
-                });
-            }
-        }
-
-        let mut previous_edge = None;
-        for (index, &(u, v)) in edges.iter().enumerate() {
-            if u >= v || v >= n_patches || previous_edge.is_some_and(|previous| previous >= (u, v))
-            {
-                return Err(SheafSkeletonError::InvalidEdge { index });
-            }
-            previous_edge = Some((u, v));
-        }
-
-        let mut previous_triangle = None;
-        for (index, &(a, b, c)) in triangles.iter().enumerate() {
-            if a >= b
-                || b >= c
-                || c >= n_patches
-                || previous_triangle.is_some_and(|previous| previous >= (a, b, c))
-                || edges.binary_search(&(a, b)).is_err()
-                || edges.binary_search(&(a, c)).is_err()
-                || edges.binary_search(&(b, c)).is_err()
-            {
-                return Err(SheafSkeletonError::InvalidTriangle { index });
-            }
-            previous_triangle = Some((a, b, c));
-        }
+        validate_skeleton_incidence(n_patches, &edges, &triangles)?;
 
         Ok(Self {
             n_patches,
@@ -516,6 +623,11 @@ pub struct BoundedHodgeSplit {
 pub enum SheafRepairError {
     /// The admitted skeleton or cochain failed a total incidence operation.
     Skeleton(SheafSkeletonError),
+    /// One per-patch gauge budget is non-finite or negative.
+    InvalidGaugeBudget {
+        /// First invalid budget in caller order.
+        index: usize,
+    },
     /// A budget field that must be positive was zero.
     InvalidBudget {
         /// Stable budget field name.
@@ -561,6 +673,10 @@ impl core::fmt::Display for SheafRepairError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Skeleton(source) => write!(f, "{source}"),
+            Self::InvalidGaugeBudget { index } => write!(
+                f,
+                "sheaf repair gauge budget {index} must be finite and non-negative"
+            ),
             Self::InvalidBudget { field } => {
                 write!(f, "sheaf repair budget field {field} must be positive")
             }
@@ -1310,30 +1426,59 @@ fn gauge_representative_within_budgets(
 /// (a repair must never silently distort geometry beyond budget).
 /// `reroute` optionally consults the Rep Router for a conversion-based
 /// alternative for the worst-offending patch.
+///
+/// Shape, topology, and scalar validation completes before decomposition or
+/// proposal allocation. A refusal returns no partial plan.
+///
+/// # Errors
+/// Returns [`SheafRepairError`] for malformed raw incidence, wrong cochain or
+/// budget cardinality, non-finite mismatch/gauge budgets, or finite arithmetic
+/// overflow.
 #[must_use]
 pub fn plan_repair(
     skeleton: &SheafSkeleton,
     mismatch: &[f64],
     budgets: &[f64],
     reroute: Option<(&Router, &dyn CostOracle, &RouteRequest)>,
-) -> RepairPlan {
-    // One gauge budget per patch. Without this, the per-patch budget check below
-    // (`potential.iter().zip(budgets)`) would silently TRUNCATE to the shorter
-    // length: a short `budgets` leaves the trailing patches unchecked, so
-    // `gauge_step_eligible` could report true while an unchecked patch's gauge
-    // offset exceeds its budget — silently distorting geometry beyond budget,
-    // the one thing this planner promises never to do. Fail closed, matching
-    // `hodge_decompose`'s cochain-size assertion.
-    assert_eq!(
-        budgets.len(),
-        skeleton.n_patches,
-        "one gauge budget per patch"
-    );
+) -> Result<RepairPlan, SheafRepairError> {
+    validate_raw_skeleton_shape(skeleton)?;
+    validate_finite_cochain(mismatch, skeleton.edges.len(), "mismatch")?;
+    if budgets.len() != skeleton.n_patches {
+        return Err(SheafSkeletonError::CochainLength {
+            role: "gauge-budget",
+            expected: skeleton.n_patches,
+            actual: budgets.len(),
+        }
+        .into());
+    }
+    if let Some(index) = budgets
+        .iter()
+        .position(|budget| !budget.is_finite() || *budget < 0.0)
+    {
+        return Err(SheafRepairError::InvalidGaugeBudget { index });
+    }
+    validate_raw_skeleton_cross_structure(skeleton)?;
+
     let split = hodge_decompose(skeleton, mismatch);
+    if split
+        .exact
+        .iter()
+        .chain(&split.potential)
+        .chain(&split.coexact)
+        .chain(&split.harmonic)
+        .any(|value| !value.is_finite())
+        || [split.fractions.0, split.fractions.1, split.fractions.2]
+            .into_iter()
+            .any(|value| !value.is_finite())
+    {
+        return Err(SheafRepairError::NumericalOverflow {
+            stage: "repair-decomposition",
+        });
+    }
     let feasible_gauge = gauge_representative_within_budgets(skeleton, &split.potential, budgets);
     let gauge_step_is_feasible = feasible_gauge.is_some();
     let gauge = feasible_gauge.unwrap_or_else(|| split.potential.clone());
-    let residual_after_exact = apply_gauge(skeleton, mismatch, &gauge);
+    let residual_after_exact = try_apply_gauge(skeleton, mismatch, &gauge)?;
     let expected_after_gauge = residual_after_exact
         .iter()
         .fold(0.0f64, |a, &b| a.max(b.abs()));
@@ -1405,14 +1550,14 @@ pub fn plan_repair(
             .total_cmp(&b.expected_post_norm)
             .then(a.cost_s.total_cmp(&b.cost_s))
     });
-    RepairPlan {
+    Ok(RepairPlan {
         gauge,
         split,
         proposals,
         gauge_step_eligible,
         harmonic_support,
         reroute_error,
-    }
+    })
 }
 
 /// The exact-component proposal: the concrete per-patch gauge projection.
@@ -1469,18 +1614,43 @@ fn coexact_proposal(skeleton: &SheafSkeleton, mismatch: &[f64]) -> RepairProposa
 /// `m ← m − δ⁰c`. Re-planning a converged repaired model can yield a zero
 /// follow-up gauge; applying the same nonzero gauge twice is not idempotent.
 /// This does not mutate or re-evaluate any source chart.
+///
+/// # Errors
+/// Returns [`SheafRepairError`] before allocation for malformed incidence,
+/// wrong cochain cardinality, or non-finite input, and during construction if
+/// output reservation or finite subtraction fails.
+#[must_use]
+pub fn try_apply_gauge(
+    skeleton: &SheafSkeleton,
+    mismatch: &[f64],
+    gauge: &[f64],
+) -> Result<Vec<f64>, SheafRepairError> {
+    validate_raw_skeleton_shape(skeleton)?;
+    validate_finite_cochain(mismatch, skeleton.edges.len(), "mismatch")?;
+    validate_finite_cochain(gauge, skeleton.n_patches, "gauge")?;
+    validate_raw_skeleton_cross_structure(skeleton)?;
+
+    let mut repaired = zeroed_output(skeleton.edges.len(), "apply-gauge-output")?;
+    for (edge, (value, &(u, v))) in repaired.iter_mut().zip(&skeleton.edges).enumerate() {
+        let correction = gauge[v] - gauge[u];
+        *value = mismatch[edge] - correction;
+        if !(correction.is_finite() && value.is_finite()) {
+            return Err(SheafRepairError::NumericalOverflow {
+                stage: "apply-gauge",
+            });
+        }
+    }
+    Ok(repaired)
+}
+
+/// Compatibility adapter for the original infallible diagnostic API.
+///
+/// Valid admitted-shape inputs preserve the historical result. Malformed
+/// inputs return a one-element non-finite refusal sentinel rather than
+/// panicking. Existing merge callers already fail closed on non-finite output;
+/// callers that need the exact refusal must use [`try_apply_gauge`]. New repair
+/// and authority paths must use the typed API.
 #[must_use]
 pub fn apply_gauge(skeleton: &SheafSkeleton, mismatch: &[f64], gauge: &[f64]) -> Vec<f64> {
-    assert_eq!(
-        mismatch.len(),
-        skeleton.edges.len(),
-        "one mismatch value per interface"
-    );
-    assert_eq!(gauge.len(), skeleton.n_patches, "one gauge value per patch");
-    let correction = skeleton.d0(gauge);
-    mismatch
-        .iter()
-        .zip(&correction)
-        .map(|(m, c)| m - c)
-        .collect()
+    try_apply_gauge(skeleton, mismatch, gauge).unwrap_or_else(|_| vec![f64::NAN])
 }

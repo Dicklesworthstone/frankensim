@@ -338,12 +338,15 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
 
 - `sheaf_repair` module (patch Rev L, bead wqd.14; [M], behind the
   `sheaf-repair` feature until certifier trials pass): DIAGNOSIS → ALGEBRAIC
-  GAUGE-CORRECTION PLANNING. `hodge_decompose` currently performs a deterministic,
+  GAUGE-CORRECTION PLANNING. The legacy `hodge_decompose` performs a deterministic,
   fixed-iteration sequence: least-squares fit to the coboundary image, then a
   least-squares fit of the residual to the retained triangle-coboundary image,
   followed by a remainder. The retained fixtures compare the first fit with an
   independent dense reference, but a generic result is not yet a certified
-  orthogonal Hodge decomposition. Its INTERPRETATION CONTRACT is: fitted exact
+  orthogonal Hodge decomposition. `hodge_decompose_bounded` runs that diagnostic
+  over an opaque admitted skeleton with explicit sweep/operator/memory/poll
+  budgets and `Cx` cancellation, returning retained usage or a typed refusal.
+  Its INTERPRETATION CONTRACT is: fitted exact
   component → a sampled-mismatch 0-cochain correction candidate
   ONLY when every per-patch offset fits that chart's declared error
   budget — a repair never silently distorts geometry); coexact → a circulation
@@ -358,13 +361,24 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   `plan_repair` does not generically certify non-exactness, impossibility of a
   gauge repair, or a required geometry-topology change. The ring conformance
   fixture separately checks a retained nonzero remainder for closure and
-  non-exactness before labeling that fixture H¹. `plan_repair` emits ranked
-  agent-facing proposals. A finite post-repair seam norm is attached only to
+  non-exactness before labeling that fixture H¹.
+  `plan_repair -> Result<RepairPlan, SheafRepairError>` validates raw incidence,
+  exact mismatch/budget cardinalities, finite mismatch values, and finite
+  non-negative per-patch budgets before decomposition or proposal allocation;
+  refusal publishes no partial plan. It emits ranked agent-facing proposals.
+  A finite post-repair seam norm is attached only to
   the constructive gauge proposal; diagnostic and reroute proposals use `+∞`
   to mean that no comparable post-state seam norm has been established.
-  Optional Rep-Router reroutes retain modeled cost. `apply_gauge` subtracts one
-  explicit coboundary from the retained mismatch vector; it does not edit or
-  re-evaluate a chart, commit geometry, or prove realization of that correction.
+  Optional Rep-Router reroutes retain modeled cost. `try_apply_gauge` validates
+  raw incidence plus finite, exact-length mismatch/gauge cochains and returns a
+  typed allocation/arithmetic refusal. The compatibility `apply_gauge` keeps
+  the original `Vec` result for downstream merge callers: valid inputs preserve
+  historical behavior, while malformed inputs return a fixed non-finite refusal
+  sentinel instead of panicking; existing merge callers fail closed on that
+  sentinel. New authority paths must use the typed API.
+  Gauge application subtracts one explicit coboundary from the retained mismatch
+  vector; it does not edit or re-evaluate a chart, commit geometry, or prove
+  realization of that correction.
   Applying the same nonzero correction twice is not idempotent, while re-planning
   a converged algebraic mismatch can produce a zero follow-up gauge. Transactional
   chart mutation plus revalidation remains explicit successor work.
@@ -448,9 +462,12 @@ structured `AgreementUnknownReason` for non-evaluable checks, and
 returns `ExecuteError` with a stable missing-runner/runner/oracle-record class;
 oracle evidence refusals use `CostOracleError`. Fallible sampling and conversion
 entry points return structured refusals, and `Aabb::new` is total and normalizes.
-Feature-gated public Hodge/repair and merge diagnostic APIs still assert some
-shape/index preconditions on caller-built skeletons; their total, budgeted
-`Result` replacements remain required before promotion. The base
+The feature-gated legacy raw `hodge_decompose` and merge diagnostic APIs still
+assert some shape/index preconditions on caller-built skeletons; their total,
+budgeted `Result` replacements remain required before promotion. `plan_repair`
+and `try_apply_gauge` are structured refusals; the source-compatible
+`apply_gauge` adapter is total but carries only a non-finite refusal sentinel,
+not the structured cause. The base
 `SheafComplex` incidence and section APIs are now structured refusals for
 malformed/oversized raw parts. RD.1a uses `DerivedAdmissionReportV1`:
 unsupported schema/category/scope/encoding, typed-reference defects, explicit
@@ -476,10 +493,12 @@ Chart evaluation and production sampling paths take `&Cx`.
 draws, triple discovery, the ray-sequence validator, and semantic-diff field
 draws poll `Cx` directly at deterministic bounded strides and return typed
 cancellation diagnostics without publishing partial authoritative output.
-Incidence assembly, mismatch assessment/section solve, Hodge/repair, and merge
-diagnostics do not yet accept `Cx`; base-complex work is statically bounded and
-fallibly allocated, but these APIs are not P7-complete. Chart-local polls remain
-an additional inner-kernel obligation. RD.1a admission takes `&Cx`, checks it
+Incidence assembly and mismatch assessment/section solve do not yet accept
+`Cx`. `hodge_decompose_bounded` does poll one caller context under explicit
+work/memory limits, but high-level proposal construction and merge diagnostics
+remain without `Cx` or complete fallible-allocation accounting, so these APIs
+are not P7-complete. Chart-local polls remain an additional inner-kernel
+obligation. RD.1a admission takes `&Cx`, checks it
 before sorting, at a fixed stride while preflighting nested graded spaces, after
 every bounded canonical sort, once per duplicate identity family, once per
 chart/constraint/complex/local-model/stratum/incidence/link, during nested

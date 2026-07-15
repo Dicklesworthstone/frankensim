@@ -17,6 +17,7 @@ use fs_geom::sheaf::{Interface, SheafComplex};
 use fs_geom::sheaf_repair::{
     AdmittedSheafSkeleton, COMPONENT_FLOOR, SheafRepairBudget, SheafRepairError, SheafSkeleton,
     SheafSkeletonError, apply_gauge, hodge_decompose, hodge_decompose_bounded, plan_repair,
+    try_apply_gauge,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -195,7 +196,7 @@ fn sr_002_exact_defect_auto_repairs_within_budget() {
     // Seed a pure gauge defect: patch 2 drifted by +0.012.
     let mismatch = sk.d0(&[0.0, 0.0, 0.012]);
     let budgets = [0.02, 0.02, 0.02];
-    let plan = plan_repair(&sk, &mismatch, &budgets, None);
+    let plan = plan_repair(&sk, &mismatch, &budgets, None).expect("valid repair plan");
     assert!(
         plan.gauge_step_eligible,
         "within budgets: gauge step eligible"
@@ -204,7 +205,7 @@ fn sr_002_exact_defect_auto_repairs_within_budget() {
     assert!(plan.harmonic_support.is_empty(), "no harmonic remainder");
     // Predicted-vs-actual: apply the gauge, re-measure.
     let predicted = plan.proposals[0].expected_post_norm;
-    let repaired = apply_gauge(&sk, &mismatch, &plan.gauge);
+    let repaired = try_apply_gauge(&sk, &mismatch, &plan.gauge).expect("valid gauge application");
     let actual = norm_inf(&repaired);
     assert!(
         (predicted - actual).abs() < 1e-9,
@@ -218,13 +219,13 @@ fn sr_002_exact_defect_auto_repairs_within_budget() {
     // Converged re-planning: planning from the repaired state yields a
     // near-zero follow-up gauge. Applying the original nonzero gauge twice is
     // deliberately not claimed to be idempotent.
-    let plan2 = plan_repair(&sk, &repaired, &budgets, None);
+    let plan2 = plan_repair(&sk, &repaired, &budgets, None).expect("valid follow-up plan");
     assert!(
         norm_inf(&plan2.gauge) < 1e-9,
         "no residual gauge on a passing model: {:?}",
         plan2.gauge
     );
-    let repaired2 = apply_gauge(&sk, &repaired, &plan2.gauge);
+    let repaired2 = try_apply_gauge(&sk, &repaired, &plan2.gauge).expect("valid follow-up gauge");
     assert!(
         (norm_inf(&repaired2) - actual).abs() < 1e-12,
         "no-op repair"
@@ -232,7 +233,7 @@ fn sr_002_exact_defect_auto_repairs_within_budget() {
     // Over-budget variant: the SAME defect with a tight budget must NOT
     // auto-apply (needs explicit acceptance).
     let tight = [0.001, 0.001, 0.001];
-    let gated = plan_repair(&sk, &mismatch, &tight, None);
+    let gated = plan_repair(&sk, &mismatch, &tight, None).expect("valid gated plan");
     assert!(
         !gated.gauge_step_eligible,
         "budget gate blocks silent distortion"
@@ -261,16 +262,20 @@ fn sr_002a_component_gauge_shift_finds_feasible_budget_representative() {
     // without changing either coboundary correction.
     let mismatch = vec![2.0, 4.0];
     let budgets = [1.0, 1.0, 2.0, 2.0];
-    let plan = plan_repair(&sk, &mismatch, &budgets, None);
+    let plan = plan_repair(&sk, &mismatch, &budgets, None).expect("valid component plan");
     assert!(
         plan.gauge_step_eligible,
         "a feasible gauge representative exists"
     );
     assert_eq!(plan.gauge, vec![-1.0, 1.0, -2.0, 2.0]);
     assert_eq!(sk.d0(&plan.gauge), mismatch);
-    assert_eq!(apply_gauge(&sk, &mismatch, &plan.gauge), vec![0.0; 2]);
+    assert_eq!(
+        try_apply_gauge(&sk, &mismatch, &plan.gauge).expect("valid component gauge"),
+        vec![0.0; 2]
+    );
 
-    let impossible = plan_repair(&sk, &mismatch, &[0.9, 0.9, 1.9, 1.9], None);
+    let impossible =
+        plan_repair(&sk, &mismatch, &[0.9, 0.9, 1.9, 1.9], None).expect("valid infeasible plan");
     assert!(
         !impossible.gauge_step_eligible,
         "a component difference larger than the sum of its patch budgets must refuse auto-apply"
@@ -281,7 +286,7 @@ fn sr_002a_component_gauge_shift_finds_feasible_budget_representative() {
         edges: vec![(0, 1)],
         triangles: Vec::new(),
     };
-    let slack = plan_repair(&one_edge, &[-2.0], &[f64::INFINITY, 1.0], None);
+    let slack = plan_repair(&one_edge, &[-2.0], &[10.0, 1.0], None).expect("valid slack plan");
     assert_eq!(
         slack.gauge,
         vec![2.0, 0.0],
@@ -289,7 +294,8 @@ fn sr_002a_component_gauge_shift_finds_feasible_budget_representative() {
     );
     assert_eq!(one_edge.d0(&slack.gauge), vec![-2.0]);
 
-    let centered = plan_repair(&one_edge, &[2.0], &[100.0, 100.0], None);
+    let centered =
+        plan_repair(&one_edge, &[2.0], &[100.0, 100.0], None).expect("valid centered plan");
     assert_eq!(
         centered.gauge,
         vec![-1.0, 1.0],
@@ -316,15 +322,156 @@ fn sr_002aa_skeleton_extraction_refuses_unvalidated_public_complex() {
 }
 
 #[test]
-#[should_panic(expected = "one gauge budget per patch")]
-fn sr_002b_short_budget_vector_hits_documented_precondition_guard() {
-    // Regression: a budgets slice shorter than n_patches was silently truncated
-    // by `potential.iter().zip(budgets)`, leaving trailing patches unchecked so
-    // `gauge_step_eligible` could bless an over-budget distortion — the one thing
-    // the planner promises never to do. Must fail closed.
+fn sr_002b_malformed_repair_inputs_refuse_without_partial_plan() {
     let sk = triangle(); // n_patches = 3
     let mismatch = vec![0.0; sk.edges.len()];
-    let _ = plan_repair(&sk, &mismatch, &[1.0, 1.0], None); // only 2 budgets
+    let baseline = plan_repair(&sk, &mismatch, &[1.0; 3], None).expect("valid baseline plan");
+
+    let malformed = SheafSkeleton {
+        n_patches: 3,
+        edges: vec![(0, 3)],
+        triangles: Vec::new(),
+    };
+    assert_eq!(
+        plan_repair(&malformed, &[], &[], None),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::InvalidEdge { index: 0 }
+        )),
+        "topology refuses before cochain and budget validation"
+    );
+    assert_eq!(
+        try_apply_gauge(&malformed, &[], &[]),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::InvalidEdge { index: 0 }
+        ))
+    );
+
+    assert_eq!(
+        plan_repair(&sk, &mismatch, &[1.0, 1.0], None),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "gauge-budget",
+                expected: 3,
+                actual: 2,
+            }
+        ))
+    );
+    assert_eq!(
+        plan_repair(&sk, &mismatch[..2], &[1.0; 3], None),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "mismatch",
+                expected: 3,
+                actual: 2,
+            }
+        ))
+    );
+    assert_eq!(
+        plan_repair(&sk, &[0.0; 4], &[1.0; 3], None),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "mismatch",
+                expected: 3,
+                actual: 4,
+            }
+        ))
+    );
+    assert_eq!(
+        plan_repair(&sk, &mismatch, &[1.0; 4], None),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "gauge-budget",
+                expected: 3,
+                actual: 4,
+            }
+        ))
+    );
+    assert_eq!(
+        plan_repair(&sk, &[0.0, f64::NAN, 0.0], &[1.0; 3], None),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::NonFiniteCochain {
+                role: "mismatch",
+                index: 1,
+            }
+        ))
+    );
+    assert_eq!(
+        plan_repair(&sk, &mismatch, &[1.0, f64::INFINITY, 1.0], None),
+        Err(SheafRepairError::InvalidGaugeBudget { index: 1 })
+    );
+    assert_eq!(
+        plan_repair(&sk, &mismatch, &[-1.0, 1.0, 1.0], None),
+        Err(SheafRepairError::InvalidGaugeBudget { index: 0 })
+    );
+
+    assert_eq!(
+        try_apply_gauge(&sk, &mismatch[..2], &[0.0; 3]),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "mismatch",
+                expected: 3,
+                actual: 2,
+            }
+        ))
+    );
+    assert_eq!(
+        try_apply_gauge(&sk, &mismatch, &[0.0; 2]),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "gauge",
+                expected: 3,
+                actual: 2,
+            }
+        ))
+    );
+    assert_eq!(
+        try_apply_gauge(&sk, &[0.0; 4], &[0.0; 3]),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "mismatch",
+                expected: 3,
+                actual: 4,
+            }
+        ))
+    );
+    assert_eq!(
+        try_apply_gauge(&sk, &mismatch, &[0.0; 4]),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: "gauge",
+                expected: 3,
+                actual: 4,
+            }
+        ))
+    );
+    assert_eq!(
+        try_apply_gauge(&sk, &mismatch, &[0.0, f64::NAN, 0.0]),
+        Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::NonFiniteCochain {
+                role: "gauge",
+                index: 1,
+            }
+        ))
+    );
+    assert_eq!(
+        try_apply_gauge(&sk, &mismatch, &[f64::MAX, -f64::MAX, 0.0]),
+        Err(SheafRepairError::NumericalOverflow {
+            stage: "apply-gauge",
+        })
+    );
+    assert!(
+        matches!(
+            apply_gauge(&sk, &mismatch[..2], &[0.0; 3]).as_slice(),
+            [value] if value.is_nan()
+        ),
+        "the compatibility adapter is total and preserves fail-closed downstream behavior"
+    );
+
+    let replay = plan_repair(&sk, &mismatch, &[1.0; 3], None).expect("valid retry plan");
+    assert_eq!(
+        replay, baseline,
+        "refusal cannot publish or retain a partial plan"
+    );
 }
 
 #[test]
@@ -333,7 +480,7 @@ fn sr_003_coexact_seeding_retains_noncausal_diagnostic() {
     // Seed a pure circulation (the flipped-orientation signature): the
     // image of δ¹ᵀ.
     let mismatch = sk.d1t(&[0.05]);
-    let plan = plan_repair(&sk, &mismatch, &[1.0; 3], None);
+    let plan = plan_repair(&sk, &mismatch, &[1.0; 3], None).expect("valid coexact plan");
     assert!(
         plan.split.fractions.1 > 0.999,
         "pure coexact defect: {:?}",
@@ -357,7 +504,7 @@ fn sr_003_coexact_seeding_retains_noncausal_diagnostic() {
         circulation_proposal.action
     );
     // Gauge repair CANNOT fix circulation: applying it leaves the norm.
-    let repaired = apply_gauge(&sk, &mismatch, &plan.gauge);
+    let repaired = try_apply_gauge(&sk, &mismatch, &plan.gauge).expect("valid coexact gauge");
     assert!(
         norm_inf(&repaired) > 0.9 * norm_inf(&mismatch),
         "circulation is not gauge-repairable"
@@ -378,7 +525,7 @@ fn sr_004_harmonic_seeding_retains_closed_nonexact_witness() {
     // (0,3) runs AGAINST it, so the loop cochain is (ε, ε, ε, −ε).
     let eps = 0.03;
     let mismatch = vec![eps, eps, eps, -eps];
-    let plan = plan_repair(&sk, &mismatch, &[1.0; 4], None);
+    let plan = plan_repair(&sk, &mismatch, &[1.0; 4], None).expect("valid harmonic plan");
     assert!(
         norm_inf(&plan.split.harmonic) > 0.9 * eps,
         "the retained harmonic witness must be nonzero: {:?}",
@@ -431,7 +578,7 @@ fn sr_004_harmonic_seeding_retains_closed_nonexact_witness() {
         "no fabricated repair-cost claim"
     );
     // And indeed gauge repair achieves nothing.
-    let repaired = apply_gauge(&sk, &mismatch, &plan.gauge);
+    let repaired = try_apply_gauge(&sk, &mismatch, &plan.gauge).expect("valid harmonic gauge");
     assert!(norm_inf(&repaired) > 0.9 * eps, "harmonic survives gauge");
     verdict(
         "sr-004",
@@ -447,7 +594,7 @@ fn sr_004a_subfloor_remainder_is_retained_but_not_promoted_to_support() {
     let eps = 1e-8;
     let cycle = [eps, eps, eps, -eps];
     let mismatch: Vec<f64> = exact.iter().zip(cycle).map(|(a, b)| a + b).collect();
-    let plan = plan_repair(&sk, &mismatch, &[2.0; 4], None);
+    let plan = plan_repair(&sk, &mismatch, &[2.0; 4], None).expect("valid subfloor plan");
     assert!(
         plan.split.harmonic.iter().any(|value| *value != 0.0),
         "the raw diagnostic split retains the nonzero remainder"
@@ -494,7 +641,8 @@ fn sr_005_router_reroute_proposal_ranks_by_expected_norm() {
         max_abs_error: 1e-3,
         max_cost_s: 100.0,
     };
-    let plan = plan_repair(&sk, &mismatch, &[1.0; 3], Some((&router, &oracle, &req)));
+    let plan = plan_repair(&sk, &mismatch, &[1.0; 3], Some((&router, &oracle, &req)))
+        .expect("valid reroute plan");
     let reroute = plan
         .proposals
         .iter()
