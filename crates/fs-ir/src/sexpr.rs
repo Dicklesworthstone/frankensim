@@ -101,6 +101,18 @@ impl Parser<'_> {
             self.skip_trivia();
             match self.bytes.get(self.pos) {
                 None => {
+                    // Over-depth wins over unclosed-paren at EOF so adversarial
+                    // nesting refuses as TooDeep in bounds, mirroring the JSON
+                    // route (which reaches its depth check before its EOF check).
+                    if depth + 1 > MAX_DEPTH {
+                        return Err(IrError {
+                            span: Span::new(self.pos, self.pos),
+                            kind: IrErrorKind::TooDeep,
+                            detail: format!("nesting exceeds the {MAX_DEPTH}-level cap"),
+                            hint: "flatten the program; adversarial nesting is refused by design"
+                                .to_string(),
+                        });
+                    }
                     return Err(IrError {
                         span: Span::new(start, self.pos),
                         kind: IrErrorKind::UnclosedParen,

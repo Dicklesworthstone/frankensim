@@ -885,6 +885,7 @@ fn total_variance(beliefs: &[Belief]) -> Result<f64, OedError> {
 /// the menu neither clones nor sorts: `fs_voi::evpi_by` runs the SAME
 /// top-two scan `fs_voi::evpi` runs, with canonical order supplying
 /// the equal-mean tie-break the old clone-and-sort imposed per call.
+#[derive(Debug)]
 struct CanonicalDesignMenu {
     estimates: Vec<DesignEstimate>,
 }
@@ -2250,7 +2251,8 @@ mod tests {
             super::OedError::CanonicalOrderViolated { position: 2 }
         ));
         let mut duplicated = canonical_sorted(fixture_estimates());
-        duplicated[1].name.clone_from(&duplicated[0].name);
+        let duplicate_name = duplicated[0].name.clone();
+        duplicated[1].name = duplicate_name;
         duplicated.sort_by(|left, right| left.name.cmp(&right.name));
         assert!(matches!(
             super::CanonicalDesignMenu::from_canonical(duplicated),

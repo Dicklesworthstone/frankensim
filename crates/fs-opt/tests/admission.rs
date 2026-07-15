@@ -725,7 +725,7 @@ fn graph_depth_boundary_is_closed_everywhere() {
         .expect("depth-gated evaluator accepts the boundary")
         .scalar()
         .expect("scalar chain");
-    let expected = if limit % 2 == 0 { -1.0 } else { 1.0 };
+    let expected: f64 = if limit % 2 == 0 { -1.0 } else { 1.0 };
     assert_eq!(value.to_bits(), expected.to_bits());
     parse(&serialize(&at_limit)).expect("wire parser accepts the exact boundary");
 
