@@ -30,7 +30,7 @@ pub use closest::{
 };
 pub use curve::{
     AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveDerivativesRun, CurveEvaluationRun,
-    CurveInsertionRun, CurveSpanBoxesRun, NurbsCurve,
+    CurveInsertionRun, CurveRemovalRun, CurveSpanBoxesRun, NurbsCurve,
 };
 pub use rat::Rat;
 pub use surface::{

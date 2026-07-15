@@ -23,6 +23,7 @@ const CURVE_BEZIER_BLEND_WORK_PER_CONTROL: u128 = 32;
 const CURVE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const CURVE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const CURVE_REMOVAL_MAX_DERIVED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_BEZIER_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_CANCELLATION_STRIDE: usize = 64;
 
@@ -65,6 +66,23 @@ pub(crate) struct BezierConversionPlan {
 struct CurveInsertionPlan {
     new_knot_count: usize,
     new_control_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CurveRemovalPlan {
+    new_knot_count: usize,
+    new_control_count: usize,
+    reconstruction_capacity: usize,
+    verification_insertion: CurveInsertionPlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CurveRemovalRange {
+    left_control: usize,
+    blend_start: usize,
+    blend_end: usize,
+    suffix_start: usize,
+    forward_count: usize,
 }
 
 fn curve_storage_bytes<S: Scalar>(
@@ -237,6 +255,185 @@ fn plan_curve_insertion<S: Scalar, const DIM: usize>(
     Ok(CurveInsertionPlan {
         new_knot_count,
         new_control_count,
+    })
+}
+
+fn curve_removal_work_units(
+    degree: usize,
+    knot_count: usize,
+    control_count: usize,
+    new_knot_count: usize,
+    new_control_count: usize,
+    reconstruction_capacity: usize,
+) -> Result<u128, NurbsError> {
+    // Cover occurrence discovery, knot/control copies, the exact forward
+    // recurrence, both derived validation passes, full representation
+    // comparison, and the restoring insertion at their largest shapes.
+    let knot_work = (knot_count as u128)
+        .checked_mul(16)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-removal knot work overflows u128".to_string(),
+        })?;
+    let control_work =
+        (control_count as u128)
+            .checked_mul(48)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-removal control work overflows u128".to_string(),
+            })?;
+    let reconstruction_work = (reconstruction_capacity as u128)
+        .checked_mul(CURVE_BEZIER_BLEND_WORK_PER_CONTROL)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-removal reconstruction work overflows u128".to_string(),
+        })?;
+    let derived_validation_work = (new_knot_count as u128)
+        .checked_mul(CURVE_KNOT_VALIDATION_WORK_PER_ENTRY)
+        .and_then(|work| work.checked_mul(2))
+        .and_then(|work| {
+            work.checked_add(
+                (new_control_count as u128).checked_mul(CURVE_VALIDATION_WORK_PER_CONTROL)?,
+            )
+        })
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-removal derived-validation work overflows u128".to_string(),
+        })?;
+    let verification_work =
+        refinement_work_upper_bound(degree, new_knot_count, new_control_count, 1, 0)?;
+    knot_work
+        .checked_add(control_work)
+        .and_then(|work| work.checked_add(reconstruction_work))
+        .and_then(|work| work.checked_add(derived_validation_work))
+        .and_then(|work| work.checked_add(verification_work))
+        .and_then(|work| work.checked_add(64))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-removal aggregate work overflows u128".to_string(),
+        })
+}
+
+fn enforce_curve_removal_envelope<S: Scalar>(
+    knot_count: usize,
+    control_count: usize,
+    new_knot_count: usize,
+    new_control_count: usize,
+    work_units: u128,
+) -> Result<(), NurbsError> {
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve knot removal requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+
+    // The removed candidate remains live while exact reinsertion constructs
+    // the restored verifier generation. Source storage is borrowed.
+    let derived_bytes = curve_storage_bytes::<S>(new_knot_count, new_control_count)?
+        .checked_add(curve_storage_bytes::<S>(knot_count, control_count)?)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-removal aggregate derived-byte accounting overflows u128".to_string(),
+        })?;
+    if derived_bytes > CURVE_REMOVAL_MAX_DERIVED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve knot removal requires {derived_bytes} simultaneously-live derived bytes above defensive ceiling {CURVE_REMOVAL_MAX_DERIVED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn plan_curve_removal<S: Scalar, const DIM: usize>(
+    curve: AdmittedNurbsCurve<'_, S, DIM>,
+) -> Result<CurveRemovalPlan, NurbsError> {
+    let knot_count = curve.knots().knots().len();
+    let control_count = curve.homogeneous_control_points().len();
+    let new_knot_count = knot_count
+        .checked_sub(1)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot removal requires at least one source knot".to_string(),
+        })?;
+    let new_control_count = control_count
+        .checked_sub(1)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot removal requires at least one source control".to_string(),
+        })?;
+    let degree = curve.knots().degree();
+    let reconstruction_capacity = degree.checked_add(1).ok_or_else(|| NurbsError::Structure {
+        what: "knot-removal reconstruction capacity overflows usize".to_string(),
+    })?;
+    let work_units = curve_removal_work_units(
+        degree,
+        knot_count,
+        control_count,
+        new_knot_count,
+        new_control_count,
+        reconstruction_capacity,
+    )?;
+    enforce_curve_removal_envelope::<S>(
+        knot_count,
+        control_count,
+        new_knot_count,
+        new_control_count,
+        work_units,
+    )?;
+    Ok(CurveRemovalPlan {
+        new_knot_count,
+        new_control_count,
+        reconstruction_capacity,
+        verification_insertion: CurveInsertionPlan {
+            new_knot_count: knot_count,
+            new_control_count: control_count,
+        },
+    })
+}
+
+fn curve_removal_range(
+    degree: usize,
+    removed_index: usize,
+    prior_multiplicity: usize,
+    reconstruction_capacity: usize,
+) -> Result<CurveRemovalRange, NurbsError> {
+    let span = removed_index
+        .checked_sub(1)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "interior knot removal has no left span".to_string(),
+        })?;
+    let left_control = span
+        .checked_sub(degree)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot-removal span is smaller than the degree".to_string(),
+        })?;
+    let blend_start = left_control
+        .checked_add(1)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot-removal blend start overflows usize".to_string(),
+        })?;
+    let blend_end = span
+        .checked_sub(prior_multiplicity)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot-removal multiplicity exceeds its span index".to_string(),
+        })?;
+    let suffix_start = blend_end
+        .checked_add(1)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot-removal suffix index overflows usize".to_string(),
+        })?;
+    let forward_count = blend_end
+        .checked_sub(left_control)
+        .and_then(|count| count.checked_add(1))
+        .ok_or_else(|| NurbsError::Structure {
+            what: "knot-removal reconstruction range is invalid".to_string(),
+        })?;
+    if forward_count > reconstruction_capacity {
+        return Err(NurbsError::Structure {
+            what: "knot-removal reconstruction exceeds its admitted capacity".to_string(),
+        });
+    }
+    Ok(CurveRemovalRange {
+        left_control,
+        blend_start,
+        blend_end,
+        suffix_start,
+        forward_count,
     })
 }
 
@@ -494,6 +691,19 @@ pub enum CurveInsertionRun<S: Scalar, const DIM: usize> {
     /// The complete sealed and validated derived generation.
     Complete {
         /// Exact refinement of the admitted source curve.
+        curve: NurbsCurve<S, DIM>,
+    },
+    /// Cancellation was observed; all partial derived storage was dropped.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware exact knot removal.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum CurveRemovalRun<S: Scalar, const DIM: usize> {
+    /// The complete sealed, validated, and reinsertion-verified generation.
+    Complete {
+        /// Exact coarsening of the admitted source curve.
         curve: NurbsCurve<S, DIM>,
     },
     /// Cancellation was observed; all partial derived storage was dropped.
@@ -1084,6 +1294,63 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
         }
     }
 
+    /// Remove one exactly redundant knot while reusing this source admission.
+    ///
+    /// The returned curve is a new sealed generation. Exact reinsertion must
+    /// reproduce every source knot and homogeneous control before publication.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when `t` is outside the open domain, absent, or
+    /// checked work/memory/allocation is refused; [`NurbsError::Structure`]
+    /// when the knot is not exactly removable or a derived generation fails
+    /// validation.
+    pub fn remove_knot(&self, t: S) -> Result<NurbsCurve<S, DIM>, NurbsError> {
+        let mut never_cancel = || false;
+        match self.remove_knot_with_poll(t, &mut never_cancel)? {
+            CurveRemovalRun::Complete { curve } => Ok(curve),
+            CurveRemovalRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling knot removal observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Remove one exactly redundant knot with bounded cancellation polling.
+    ///
+    /// The open-domain check and count-derived aggregate work/64 MiB
+    /// simultaneously-live derived-storage envelope precede cancellation.
+    /// One gate then covers occurrence discovery, fallible knot/control
+    /// allocation and copying, exact forward reconstruction, both candidate
+    /// validation passes, exact reinsertion, representation comparison, and
+    /// final publication. The restored verifier is dropped before the final
+    /// checkpoint, but that individual destructor is not preemptible.
+    /// Cancellation publishes no partial curve. The caller retains
+    /// responsibility for owning admission, `Cx` budget consumption, and
+    /// request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous removal's parameter, work, memory, allocation,
+    /// exact-reconstruction, or structural refusal when it wins before an
+    /// observed cancellation.
+    pub fn remove_knot_with_cx(
+        &self,
+        t: S,
+        cx: &Cx<'_>,
+    ) -> Result<CurveRemovalRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.remove_knot_with_poll(t, &mut should_cancel)
+    }
+
+    /// Remove an admitted knot while sharing a compound caller's cancellation
+    /// callback across reconstruction and exact reinsertion verification.
+    pub(crate) fn remove_knot_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveRemovalRun<S, DIM>, NurbsError> {
+        self.inner
+            .remove_knot_after_validation_with_poll(t, should_cancel)
+    }
+
     /// Convert this admitted generation to exact Bezier form without
     /// repeating structural validation of the unchanged source. Planning still
     /// scans knot runs once to determine the exact refinement envelope.
@@ -1363,86 +1630,355 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// [`NurbsError::Domain`] when `t` is not an interior knot;
     /// [`NurbsError::Structure`] when removal is not exact.
     pub fn remove_knot(&self, t: S) -> Result<Self, NurbsError> {
-        self.validate_live_structure()?;
-        let p = self.knots.degree;
-        let (lo, hi) = self.knots.domain()?;
-        if t <= lo || hi <= t || !self.knots.knots.contains(&t) {
+        self.admit()?.remove_knot(t)
+    }
+
+    fn removal_plan_after_parameter(&self, t: S) -> Result<CurveRemovalPlan, NurbsError> {
+        let admitted = self.admitted_after_validation();
+        let (lo, hi) = admitted.knots().domain();
+        if !t.is_finite() || t <= lo || hi <= t {
             return Err(NurbsError::Domain {
                 what: format!("{t:?} is not an interior knot"),
             });
         }
-        // Index of the LAST occurrence of t.
-        let r = self
-            .knots
-            .knots
-            .iter()
-            .rposition(|&u| u == t)
-            .expect("contains checked");
+        plan_curve_removal(admitted)
+    }
+
+    fn find_removal_site_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<(usize, usize)>, NurbsError> {
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut last_occurrence = None;
+        let mut multiplicity = 0usize;
+        let mut operations_since_poll = 0usize;
+        for (index, &knot) in self.knots.knots.iter().enumerate() {
+            if knot == t {
+                last_occurrence = Some(index);
+                multiplicity =
+                    multiplicity
+                        .checked_add(1)
+                        .ok_or_else(|| NurbsError::Structure {
+                            what: "knot-removal multiplicity overflows usize".to_string(),
+                        })?;
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        let Some(last_occurrence) = last_occurrence else {
+            return Err(NurbsError::Domain {
+                what: format!("{t:?} is not an interior knot"),
+            });
+        };
+        let prior_multiplicity =
+            multiplicity
+                .checked_sub(1)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: "knot-removal occurrence accounting underflowed".to_string(),
+                })?;
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        Ok(CurveWorkRun::Complete((
+            last_occurrence,
+            prior_multiplicity,
+        )))
+    }
+
+    fn copy_removed_knots_with_poll(
+        &self,
+        removed_index: usize,
+        plan: CurveRemovalPlan,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Vec<S>>, NurbsError> {
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
         let mut new_knots = Vec::new();
         new_knots
-            .try_reserve_exact(self.knots.knots.len())
+            .try_reserve_exact(plan.new_knot_count)
             .map_err(|_| NurbsError::Domain {
                 what: "knot-removal knot-vector allocation was refused".to_string(),
             })?;
-        new_knots.extend_from_slice(&self.knots.knots);
-        new_knots.remove(r);
-        let prior_multiplicity = new_knots.iter().filter(|&&knot| knot == t).count();
-        // Insertion produced: Q_i = (1−α_i) P_{i−1} + α_i P_i over the
-        // positive-alpha band i = k-p+1..=k-s, with α from the REMOVED
-        // knot vector and prior multiplicity s. Rows after that band are exact
-        // copies of the right suffix. Reconstruct the blended band forward;
-        // the first suffix copy is an independent exact meet check.
-        let k = r - 1; // span index of t in the removed vector
-        let q = &self.cpw;
-        let mut fwd: Vec<[S; 4]> = Vec::new(); // P_{k-p} .. computed forward
-        let mut prev = q[k - p]; // P_{k-p} = Q_{k-p}
-        fwd.push(prev);
-        let blend_start = k - p + 1;
-        let blend_end = k
-            .checked_sub(prior_multiplicity)
-            .ok_or_else(|| NurbsError::Structure {
-                what: "knot-removal multiplicity exceeds its span index".to_string(),
+        let mut operations_since_poll = 0usize;
+        for (index, &knot) in self.knots.knots.iter().enumerate() {
+            if index != removed_index {
+                new_knots.push(knot);
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        if new_knots.len() != plan.new_knot_count {
+            return Err(NurbsError::Structure {
+                what: "knot-removal knot copy produced the wrong length".to_string(),
+            });
+        }
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        Ok(CurveWorkRun::Complete(new_knots))
+    }
+
+    fn reconstruct_removed_controls_with_poll(
+        &self,
+        t: S,
+        removed_index: usize,
+        prior_multiplicity: usize,
+        new_knots: &[S],
+        plan: CurveRemovalPlan,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Vec<[S; 4]>>, NurbsError> {
+        let p = self.knots.degree;
+        let range = curve_removal_range(
+            p,
+            removed_index,
+            prior_multiplicity,
+            plan.reconstruction_capacity,
+        )?;
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut forward = Vec::new();
+        forward
+            .try_reserve_exact(range.forward_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-removal reconstruction allocation was refused".to_string(),
             })?;
-        for i in blend_start..=blend_end {
-            let denom = new_knots[i + p] - new_knots[i];
-            let alpha = (t - new_knots[i]) / denom;
+        let mut previous =
+            *self
+                .cpw
+                .get(range.left_control)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: "knot-removal left control is outside the source net".to_string(),
+                })?;
+        forward.push(previous);
+
+        let mut operations_since_poll = 0usize;
+        for index in range.blend_start..=range.blend_end {
+            let right_knot = index.checked_add(p).ok_or_else(|| NurbsError::Structure {
+                what: "knot-removal denominator index overflows usize".to_string(),
+            })?;
+            let denominator = *new_knots
+                .get(right_knot)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: "knot-removal denominator exceeds the derived knots".to_string(),
+                })?
+                - *new_knots.get(index).ok_or_else(|| NurbsError::Structure {
+                    what: "knot-removal blend index exceeds the derived knots".to_string(),
+                })?;
+            let alpha = (t - new_knots[index]) / denominator;
             if alpha == S::zero() {
                 return Err(NurbsError::Structure {
                     what: "degenerate removal alpha".to_string(),
                 });
             }
-            let mut pi = [S::zero(); 4];
-            for ((slot, &qi), &pm) in pi.iter_mut().zip(&q[i]).zip(&prev) {
-                *slot = (qi - (S::one() - alpha) * pm) / alpha;
+            let source = self.cpw.get(index).ok_or_else(|| NurbsError::Structure {
+                what: "knot-removal blend control exceeds the source net".to_string(),
+            })?;
+            let mut reconstructed = [S::zero(); 4];
+            for ((slot, &value), &prior) in reconstructed.iter_mut().zip(source).zip(&previous) {
+                *slot = (value - (S::one() - alpha) * prior) / alpha;
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(CurveWorkRun::Cancelled);
+                }
             }
-            fwd.push(pi);
-            prev = pi;
+            forward.push(reconstructed);
+            previous = reconstructed;
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
         }
-        let suffix_start = blend_end + 1;
-        // Consistency: reconstructed P_{k-s} must equal the first untouched
-        // suffix copy Q_{k-s+1} (= P_{k-s}).
-        if fwd.last() != Some(&q[suffix_start]) {
+
+        if forward.last() != self.cpw.get(range.suffix_start) {
             return Err(NurbsError::Structure {
                 what: "knot is not exactly removable (curve genuinely uses it)".to_string(),
             });
         }
-        let mut new_cpw: Vec<[S; 4]> = Vec::with_capacity(q.len() - 1);
-        new_cpw.extend_from_slice(&q[..k - p]);
-        new_cpw.extend_from_slice(&fwd[..fwd.len() - 1]);
-        new_cpw.extend_from_slice(&q[suffix_start..]);
-        let candidate = NurbsCurve {
-            knots: KnotVector::new(new_knots, p)?,
-            cpw: new_cpw,
-        };
-        // Exact end-to-end verifier: a successful removal must reproduce the
-        // entire source representation under the public insertion algorithm,
-        // not merely satisfy one local recurrence equation.
-        if candidate.insert_knot(t)? != *self {
+        self.assemble_removed_controls_with_poll(
+            range.left_control,
+            range.suffix_start,
+            &forward,
+            plan,
+            should_cancel,
+        )
+    }
+
+    fn assemble_removed_controls_with_poll(
+        &self,
+        left_control: usize,
+        suffix_start: usize,
+        forward: &[[S; 4]],
+        plan: CurveRemovalPlan,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Vec<[S; 4]>>, NurbsError> {
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        let mut new_cpw = Vec::new();
+        new_cpw
+            .try_reserve_exact(plan.new_control_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-removal control-net allocation was refused".to_string(),
+            })?;
+        let mut operations_since_poll = 0usize;
+        for &control in &self.cpw[..left_control] {
+            new_cpw.push(control);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        for &control in &forward[..forward.len() - 1] {
+            new_cpw.push(control);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        for &control in &self.cpw[suffix_start..] {
+            new_cpw.push(control);
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        if new_cpw.len() != plan.new_control_count {
             return Err(NurbsError::Structure {
-                what: "knot-removal candidate failed exact reinsertion verification".to_string(),
+                what: "knot-removal control reconstruction produced the wrong length".to_string(),
             });
         }
-        Ok(candidate)
+        if should_cancel() {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        Ok(CurveWorkRun::Complete(new_cpw))
+    }
+
+    fn representation_matches_with_poll(
+        &self,
+        other: &Self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> CurveWorkRun<bool> {
+        if self.knots.degree != other.knots.degree
+            || self.knots.knots.len() != other.knots.knots.len()
+            || self.cpw.len() != other.cpw.len()
+        {
+            return CurveWorkRun::Complete(false);
+        }
+        if should_cancel() {
+            return CurveWorkRun::Cancelled;
+        }
+        let mut operations_since_poll = 0usize;
+        for (&left, &right) in self.knots.knots.iter().zip(&other.knots.knots) {
+            if left != right {
+                return CurveWorkRun::Complete(false);
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return CurveWorkRun::Cancelled;
+            }
+        }
+        for (left, right) in self.cpw.iter().zip(&other.cpw) {
+            for (&left, &right) in left.iter().zip(right) {
+                if left != right {
+                    return CurveWorkRun::Complete(false);
+                }
+                if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                    return CurveWorkRun::Cancelled;
+                }
+            }
+        }
+        if should_cancel() {
+            return CurveWorkRun::Cancelled;
+        }
+        CurveWorkRun::Complete(true)
+    }
+
+    fn remove_knot_after_validation_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveRemovalRun<S, DIM>, NurbsError> {
+        let plan = self.removal_plan_after_parameter(t)?;
+        let (removed_index, prior_multiplicity) =
+            match self.find_removal_site_with_poll(t, should_cancel)? {
+                CurveWorkRun::Complete(site) => site,
+                CurveWorkRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+            };
+        let new_knots =
+            match self.copy_removed_knots_with_poll(removed_index, plan, should_cancel)? {
+                CurveWorkRun::Complete(knots) => knots,
+                CurveWorkRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+            };
+        let new_cpw = match self.reconstruct_removed_controls_with_poll(
+            t,
+            removed_index,
+            prior_multiplicity,
+            &new_knots,
+            plan,
+            should_cancel,
+        )? {
+            CurveWorkRun::Complete(controls) => controls,
+            CurveWorkRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+        };
+
+        let knots = KnotVector {
+            knots: new_knots,
+            degree: self.knots.degree,
+        };
+        KnotVector::<S>::enforce_work(knots.validation_work()?, "knot-vector construction")?;
+        match knots.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+        }
+        let candidate = NurbsCurve {
+            knots,
+            cpw: new_cpw,
+        };
+        match candidate.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => {}
+            CurveWorkRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+        }
+
+        let verification_plan = candidate.insertion_plan_after_parameter(t)?;
+        if verification_plan != plan.verification_insertion {
+            return Err(NurbsError::Structure {
+                what: "knot-removal reinsertion shape disagrees with its admitted plan".to_string(),
+            });
+        }
+        let span = match candidate
+            .knots
+            .admitted_after_validation()
+            .span_with_poll(t, should_cancel)?
+        {
+            KnotSpanRun::Complete { span } => span,
+            KnotSpanRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+        };
+        let restored = match candidate.insert_knot_at_span_with_plan_and_poll(
+            t,
+            span,
+            verification_plan,
+            should_cancel,
+        )? {
+            CurveWorkRun::Complete(restored) => restored,
+            CurveWorkRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+        };
+        let matches = self.representation_matches_with_poll(&restored, should_cancel);
+        drop(restored);
+        match matches {
+            CurveWorkRun::Complete(true) => {}
+            CurveWorkRun::Complete(false) => {
+                return Err(NurbsError::Structure {
+                    what: "knot-removal candidate failed exact reinsertion verification"
+                        .to_string(),
+                });
+            }
+            CurveWorkRun::Cancelled => return Ok(CurveRemovalRun::Cancelled),
+        }
+        if should_cancel() {
+            return Ok(CurveRemovalRun::Cancelled);
+        }
+        Ok(CurveRemovalRun::Complete { curve: candidate })
     }
 
     /// Decompose into Bézier segments by raising every interior knot to
@@ -2568,6 +3104,254 @@ mod tests {
                 }
             );
         });
+    }
+
+    #[test]
+    fn admitted_knot_removal_with_cx_is_transactional_and_exact() {
+        let original = line_curve();
+        let inserted = original.insert_knot(0.5).expect("insert midpoint");
+        let admitted = inserted.admit().expect("admitted refined line");
+        let legacy = admitted.remove_knot(0.5).expect("legacy removal");
+        assert_eq!(legacy, original);
+
+        let endpoint_error = admitted
+            .remove_knot(0.0)
+            .expect_err("legacy endpoint refusal");
+        with_curve_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .remove_knot_with_cx(0.5, cx)
+                    .expect("valid request reaches cancellation"),
+                CurveRemovalRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .remove_knot_with_cx(0.0, cx)
+                    .expect_err("endpoint refusal must beat cancellation"),
+                endpoint_error
+            );
+            assert_eq!(
+                admitted
+                    .remove_knot_with_cx(0.25, cx)
+                    .expect("cancellation wins before absent-knot scan refusal"),
+                CurveRemovalRun::Cancelled
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .remove_knot_with_cx(0.5, cx)
+                    .expect("active removal"),
+                CurveRemovalRun::Complete {
+                    curve: line_curve(),
+                }
+            );
+            assert!(matches!(
+                admitted.remove_knot_with_cx(0.25, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
+
+        let zero = Rat::int(0);
+        let one = Rat::int(1);
+        let half = Rat::new(1, 2);
+        let exact_original = NurbsCurve::<Rat, 1>::new(
+            KnotVector::new(vec![zero, zero, one, one], 1).expect("exact line knots"),
+            &[[zero], [one]],
+            &[one, one],
+        )
+        .expect("exact line");
+        let exact_inserted = exact_original
+            .insert_knot(half)
+            .expect("exact midpoint insertion");
+        let exact_admitted = exact_inserted.admit().expect("admitted exact refinement");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                exact_admitted
+                    .remove_knot_with_cx(half, cx)
+                    .expect("active exact removal"),
+                CurveRemovalRun::Complete {
+                    curve: exact_original,
+                }
+            );
+        });
+        let repeated = exact_inserted
+            .insert_knot(half)
+            .expect("raise midpoint multiplicity");
+        assert_eq!(
+            repeated
+                .admit()
+                .expect("admitted repeated knot")
+                .remove_knot(half)
+                .expect("remove inserted repeated knot"),
+            exact_inserted
+        );
+
+        let discontinuous = NurbsCurve::<Rat, 1>::new(
+            KnotVector::new(vec![zero, zero, half, half, one, one], 1).expect("full-break knots"),
+            &[[zero], [one], [Rat::int(3)], [Rat::int(4)]],
+            &[one; 4],
+        )
+        .expect("discontinuous curve");
+        assert!(matches!(
+            discontinuous
+                .admit()
+                .expect("admitted discontinuity")
+                .remove_knot(half),
+            Err(NurbsError::Structure { .. })
+        ));
+    }
+
+    #[test]
+    fn knot_removal_cancels_inside_scan_and_at_publication() {
+        let shape = long_linear_curve();
+        let points = vec![[0.0]; shape.cpw.len()];
+        let weights = vec![1.0; shape.cpw.len()];
+        let source = NurbsCurve::new(
+            shape.knots.try_clone().expect("long knot copy"),
+            &points,
+            &weights,
+        )
+        .expect("long constant curve");
+        let inserted = source.insert_knot(0.5).expect("insert absent midpoint");
+        let admitted = inserted.admit().expect("admitted long refinement");
+
+        let scan_run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 2
+            };
+            let outcome = admitted
+                .remove_knot_with_poll(0.5, &mut should_cancel)
+                .expect("valid removal scan");
+            (matches!(outcome, CurveRemovalRun::Cancelled), polls)
+        };
+        assert_eq!(scan_run(), scan_run());
+        assert_eq!(scan_run(), (true, 2));
+
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            admitted
+                .remove_knot_with_poll(0.5, &mut never_cancel)
+                .expect("healthy removal"),
+            CurveRemovalRun::Complete { .. }
+        ));
+        let mut comparison_polls = 0usize;
+        let comparison_target = total_polls
+            .checked_sub(1)
+            .expect("healthy removal has a pre-publication comparison checkpoint");
+        let mut cancel_after_reinsertion = || {
+            comparison_polls += 1;
+            comparison_polls == comparison_target
+        };
+        assert_eq!(
+            admitted
+                .remove_knot_with_poll(0.5, &mut cancel_after_reinsertion)
+                .expect("post-reinsertion comparison cancellation"),
+            CurveRemovalRun::Cancelled
+        );
+        assert_eq!(comparison_polls, comparison_target);
+
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert_eq!(
+            admitted
+                .remove_knot_with_poll(0.5, &mut cancel_at_publication)
+                .expect("publication cancellation"),
+            CurveRemovalRun::Cancelled
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn knot_removal_envelope_refuses_work_before_combined_derived_storage() {
+        let oversized = usize::MAX;
+        let work_error = enforce_curve_removal_envelope::<f64>(
+            oversized,
+            oversized,
+            oversized - 1,
+            oversized - 1,
+            BASIS_MAX_WORK_UNITS + 1,
+        )
+        .expect_err("work cap must refuse before derived-byte arithmetic");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
+
+        let memory_error = enforce_curve_removal_envelope::<f64>(
+            oversized,
+            oversized,
+            oversized - 1,
+            oversized - 1,
+            0,
+        )
+        .expect_err("combined derived storage must exceed 64 MiB");
+        assert!(matches!(
+            memory_error,
+            NurbsError::Domain { ref what } if what.contains("simultaneously-live derived bytes")
+        ));
+    }
+
+    #[test]
+    fn knot_removal_cancels_inside_exact_reconstruction() {
+        let degree = 16usize;
+        let mut knots = vec![0.0; degree + 1];
+        knots.extend(vec![1.0; degree + 1]);
+        let points = vec![[0.0]; degree + 1];
+        let weights = vec![1.0; degree + 1];
+        let source = NurbsCurve::new(
+            KnotVector::new(knots, degree).expect("high-degree knots"),
+            &points,
+            &weights,
+        )
+        .expect("high-degree constant curve");
+        let inserted = source.insert_knot(0.5).expect("high-degree insertion");
+        let plan = inserted
+            .removal_plan_after_parameter(0.5)
+            .expect("removal plan");
+        let mut never_cancel = || false;
+        let CurveWorkRun::Complete((removed_index, prior_multiplicity)) = inserted
+            .find_removal_site_with_poll(0.5, &mut never_cancel)
+            .expect("removal site")
+        else {
+            panic!("healthy site scan must complete");
+        };
+        let CurveWorkRun::Complete(new_knots) = inserted
+            .copy_removed_knots_with_poll(removed_index, plan, &mut never_cancel)
+            .expect("removed knot copy")
+        else {
+            panic!("healthy knot copy must complete");
+        };
+
+        let run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 2
+            };
+            let outcome = inserted
+                .reconstruct_removed_controls_with_poll(
+                    0.5,
+                    removed_index,
+                    prior_multiplicity,
+                    &new_knots,
+                    plan,
+                    &mut should_cancel,
+                )
+                .expect("valid exact reconstruction");
+            (matches!(outcome, CurveWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(), run());
+        assert_eq!(run(), (true, 2));
     }
 
     #[test]
