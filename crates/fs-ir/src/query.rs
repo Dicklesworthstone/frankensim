@@ -863,8 +863,8 @@ fn parse_target(node: &Node) -> Result<Target, IrError> {
                 }
             };
             let args = keyword_args(items, 2, "query.target.tolerance", &["confidence"])?;
-            if let Some(value) = args.get("confidence") {
-                let confidence = float_of(value)?;
+            if let Some(confidence_node) = args.get("confidence") {
+                let confidence = float_of(confidence_node)?;
                 Ok(Target::ToleranceAndConfidence {
                     value,
                     dims,
