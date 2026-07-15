@@ -231,17 +231,24 @@ release fixtures carry the full 10,000-step leak and 32x32 full-rim 3%
 pressure-Poiseuille gates.
 
 `tests/cylinder_re100.rs` (frankensim-wghy) keeps the inexpensive evidence
-machinery in the default suite: a checked Hann-window `fs-fft` lift-frequency
-estimator with exact-bin, affine-signal, replay, flat/non-finite/Nyquist, and
-resolution-refusal oracles; an exactly projected stair-step cylinder mask; and
-the two-width linear-blockage extrapolation identity. Its ignored release-scale
-`lbm-109` fixture runs Re=100 at diameter 10, nominal inlet speed 0.1, 32D
-streamwise extent, 12D and 16D periodic lateral spans, 8,192 warm-up steps, and
-16,384 retained force samples. It normalizes drag by the measured mean inlet
-density, extracts Strouhal from the complete non-DC spectrum, and gates the
-zero-blockage intercepts at Cd `[1.25, 1.45]` and St `[0.155, 0.175]`.
-Roshko NACA TR-1191, Posdziech-Grundmann 2007, Behr et al. 1995, and Maskell
-ARC R&M 3400 are cited at the executable gate; no publisher artifact is
+machinery in the default suite: a checked linear-detrended, Hann-window
+`fs-fft` lift-frequency estimator with peak-prominence, exact-bin,
+affine-trend, replay, flat/non-finite/ambiguous/Nyquist, and
+resolution-refusal oracles; and an exactly projected stair-step cylinder mask
+pinned by occupied cells, centroid, reflection symmetry, fluid-wall link count,
+and FNV-1a fingerprint. The ignored release-scale `lbm-109` fixture runs Re=100
+at diameter 10, nominal inlet speed 0.1, 32D streamwise extent, 12D and 16D
+periodic lateral spans, 8,192 warm-up steps, and 32,768 retained force samples.
+It normalizes drag by measured mean inlet density, requires raw-domain and
+split-window Cd guards before admitting a bounded empirical two-width
+zero-blockage Cd intercept, and requires the full-window and both half-window
+intercepts to stay in `[1.25, 1.45]` with at most 2% split drift. It does
+not extrapolate spectral bins: both widths and both half-windows must put St in
+`[0.155, 0.175]`, split windows must agree within `0.0062`, and the reported 16D
+St must agree with the 12D sensitivity run within `0.01`. The deterministic
+symmetry-breaking seed is disclosed as offset `(10, 6)` at transverse speed
+`1e-4`. Roshko NACA TR-1191, Posdziech-Grundmann 2007, Behr et al. 1995, and
+Maskell ARC R&M 3400 are cited at the executable gate; no publisher artifact is
 redistributed.
 
 ## No-claim boundaries
@@ -269,15 +276,24 @@ redistributed.
   interpolation, blockage correction, averaging, or shedding-frequency
   estimation; therefore it is not yet the Re=100 cylinder Cd/St validation.
 - The separate `lbm-109` release fixture encodes the intended normalization,
-  warm-up, FFT, primary-source envelopes, and empirical two-width blockage
-  treatment. Until that explicitly ignored release lane is executed green on
-  the combined batch snapshot, the crate still makes no completed Re=100
-  cylinder validation claim.
+  warm-up, detrended FFT, raw/split-window guards, primary-source envelopes,
+  and empirical two-width Cd sensitivity treatment. Maskell's closed-tunnel
+  law is not claimed to transfer to a periodic-y fixture; the linear-beta Cd
+  intercept merely eliminates one assumed leading coefficient from two
+  disclosed widths, and its magnitude is bounded. Strouhal uses the 16D result
+  plus 12D sensitivity rather than a frequency-bin extrapolation. Until that
+  explicitly ignored release lane is executed green on the combined batch
+  snapshot, the crate still makes no completed Re=100 cylinder validation
+  claim.
 - `VelocityPressureX2` is a low-Mach regularized fixture boundary with periodic
   lateral closure. It is not a characteristic or non-reflecting far-field
   condition, accepts no body force, and makes no unbounded-domain or blockage
   claim. The cylinder battery must disclose its domain, resolution, warm-up,
   averaging window, and lateral-domain sensitivity separately.
+- The cylinder fixture's diameter-10 stair step and `tau = 0.53` have no grid-
+  convergence certificate, curved-wall accuracy claim, or seed-independent
+  shedding-phase claim. Split-window and two-width agreement detect selected
+  transients and domain sensitivity; they do not replace a resolution family.
 - The face-generic regularized closure was selected instead of six
   face-specialized Zou-He tables because its Hermite stress projection has an
   independent second-moment oracle and preserves arbitrary tangential target
