@@ -334,6 +334,20 @@ every 64 logical entries in addition to the nested curve/loop gates.
 Individual exact-rational operations remain non-preemptible, and the primitive
 does not consume the `Cx` budget or own caller drain/finalize, wall-time, or
 resumability semantics.
+Owning and admitted trim `classify_with_cx`/`classify_box_with_cx` preserve the
+componentwise box-order and constant count-only work refusals ahead of
+cancellation. One caller gate then spans owning patch admission when needed,
+persistent-source accounting, exact U-then-V witness construction, Bezier plan
+and conversion scans, span-box assembly, ordered offending-interval scans,
+midpoint insertion and reconversion, exact control-polygon winding, cleanup,
+and terminal verdict publication. `TrimClassificationRun::Cancelled` carries
+neither a partial winding nor `Inside`, `Outside`, or `Boundary`. Linear loop,
+box, interval, and polygon traversal polls at most every 64 logical entries in
+addition to the nested curve gates. Individual allocations, exact-rational
+operations, and derived-curve/vector destructors remain non-preemptible. These
+paths retain the static defensive work ceiling and do not consume an affine
+`Cx` budget, own request drain/finalize, promise wall-time preemption, or expose
+resumable subdivision state.
 Owning trim classification now binds one admitted patch/loop/curve generation
 through exact Bezier conversion, span boxes, and winding. Its checked conversion
 plan charges scan/insertion work and old-plus-new curve storage before the first
@@ -403,13 +417,13 @@ winning admission into gradient, orientation, and regular-witness sign work.
 It reuses the same split/frontier model, exports worst-case seed and split heap
 coefficients into its aggregate work gate, and additionally charges
 structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
-which even a zero-split query exceeds the ceiling is not constructible. The SDF,
-legacy refit, and trim-classification paths retain static process ceilings
-rather than caller-owned affine budgets and have no effective `Cx`; these APIs
-are not yet P7
-cancellation-correct. The successor budgeted
-interfaces are tracked explicitly and must add bounded polling plus
-request→drain→finalize semantics before promotion.
+which even a zero-split query exceeds the ceiling is not constructible. The SDF
+and legacy refit paths retain static process ceilings with no effective `Cx`.
+Trim classification now has effective primitive checkpoints but still uses its
+static ceiling rather than a caller-owned affine budget. None of these APIs yet
+owns end-to-end request→drain→finalize semantics, so they are not P7
+cancellation-correct. Successor budgeted interfaces must close those remaining
+orchestration gaps before promotion.
 
 Structural admission proves representation well-formedness only. It does not
 grant enclosure, geometric certification, cancellation, caller-budget,

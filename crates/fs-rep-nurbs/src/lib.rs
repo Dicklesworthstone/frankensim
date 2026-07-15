@@ -38,8 +38,8 @@ pub use surface::{
     SurfaceInsertionRun, SurfacePartialsRun, SurfaceSpanBoxesRun,
 };
 pub use trim::{
-    AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimLoopAdmissionRun,
-    TrimmedPatch, TrimmedPatchAdmissionRun,
+    AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimClassificationRun, TrimLoop,
+    TrimLoopAdmissionRun, TrimmedPatch, TrimmedPatchAdmissionRun,
 };
 
 use core::fmt;

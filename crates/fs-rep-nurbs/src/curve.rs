@@ -248,6 +248,7 @@ fn bezier_pre_scan_work(knot_count: usize) -> Result<u128, NurbsError> {
         })
 }
 
+#[cfg(test)]
 fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
     curve: AdmittedNurbsCurve<'_, S, DIM>,
 ) -> Result<BezierConversionPlan, NurbsError> {
@@ -1058,18 +1059,26 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
         t: S,
         cx: &Cx<'_>,
     ) -> Result<CurveInsertionRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.insert_knot_with_poll(t, &mut should_cancel)
+    }
+
+    /// Insert one knot while sharing a compound caller's cancellation
+    /// callback across span lookup and derived-generation assembly.
+    pub(crate) fn insert_knot_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveInsertionRun<S, DIM>, NurbsError> {
         let plan = self.inner.insertion_plan_after_parameter(t)?;
-        let span = match self.knots().span_with_cx(t, cx)? {
+        let span = match self.knots().span_with_poll(t, should_cancel)? {
             KnotSpanRun::Complete { span } => span,
             KnotSpanRun::Cancelled => return Ok(CurveInsertionRun::Cancelled),
         };
-        let mut should_cancel = || cx.checkpoint().is_err();
-        match self.inner.insert_knot_at_span_with_plan_and_poll(
-            t,
-            span,
-            plan,
-            &mut should_cancel,
-        )? {
+        match self
+            .inner
+            .insert_knot_at_span_with_plan_and_poll(t, span, plan, should_cancel)?
+        {
             CurveWorkRun::Complete(curve) => Ok(CurveInsertionRun::Complete { curve }),
             CurveWorkRun::Cancelled => Ok(CurveInsertionRun::Cancelled),
         }
@@ -1111,6 +1120,7 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
     }
 
     /// Return the checked Bezier conversion envelope without allocating.
+    #[cfg(test)]
     pub(crate) fn bezier_conversion_plan(&self) -> Result<BezierConversionPlan, NurbsError> {
         plan_bezier_conversion(*self)
     }
@@ -1182,8 +1192,17 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
     /// refusals when they win before an observed cancellation.
     pub fn span_boxes_with_cx(&self, cx: &Cx<'_>) -> Result<CurveSpanBoxesRun<S, DIM>, NurbsError> {
         let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_boxes_with_poll(&mut should_cancel)
+    }
+
+    /// Build admitted span boxes while sharing a compound caller's
+    /// cancellation callback.
+    pub(crate) fn span_boxes_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveSpanBoxesRun<S, DIM>, NurbsError> {
         self.inner
-            .span_boxes_after_validation_with_poll(&mut should_cancel)
+            .span_boxes_after_validation_with_poll(should_cancel)
     }
 }
 

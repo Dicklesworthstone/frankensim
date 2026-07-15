@@ -42,6 +42,20 @@ fn trim_poll_due(
     should_cancel()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TrimWorkRun<T> {
+    Complete(T),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrimClassificationQuery {
+    min: [Rat; 2],
+    max: [Rat; 2],
+    witness: [Rat; 2],
+    max_depth: u32,
+}
+
 /// Minimum charge for admitting one sealed loop before inspecting its
 /// knot/control metadata. This makes a huge collection of individually tiny
 /// loops reject in O(1), rather than spending unbounded time merely discovering
@@ -298,6 +312,20 @@ pub enum Classification {
     Boundary,
 }
 
+/// Transactional terminal state of cancellation-aware certified trim
+/// classification.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimClassificationRun {
+    /// Classification completed and the entire terminal verdict is published.
+    Complete {
+        /// Certified in/out/boundary verdict.
+        classification: Classification,
+    },
+    /// Cancellation was observed; no classification verdict was published.
+    Cancelled,
+}
+
 /// A trimmed patch: parameter-space loops over any surface. (The surface
 /// itself is not needed for classification, which happens in parameter
 /// space; carrying it is the B-rep bookkeeping.)
@@ -523,6 +551,20 @@ impl TrimmedPatch {
         self.classify_box(q, q)
     }
 
+    /// Certified point classification with bounded cancellation polling.
+    ///
+    /// # Errors
+    /// Propagates the synchronous request, admission, work/memory,
+    /// allocation, structural, and exact-arithmetic refusals when they win
+    /// before an observed cancellation.
+    pub fn classify_with_cx(
+        &self,
+        q: [Rat; 2],
+        cx: &Cx<'_>,
+    ) -> Result<TrimClassificationRun, NurbsError> {
+        self.classify_box_with_cx(q, q, cx)
+    }
+
     /// Certified classification of every point in a closed parameter-space
     /// box. A verdict is returned only after every trim-curve Bézier hull is
     /// separated from the entire box, which proves that winding is constant
@@ -539,6 +581,49 @@ impl TrimmedPatch {
         let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
         let admitted = self.admit_with_budget(&mut work_remaining)?;
         admitted.classify_box_with_budget(min, max, &mut work_remaining)
+    }
+
+    /// Certified connected-box classification with bounded cancellation
+    /// polling from source admission through terminal verdict publication.
+    ///
+    /// The componentwise box-order refusal and constant-time patch-admission
+    /// work gate precede cancellation. One `Cx` then spans aggregate patch
+    /// admission and the complete exact classification pipeline. Cancellation
+    /// publishes neither partial admitted authority nor a partial verdict.
+    /// This method does not consume the `Cx` budget or finalize its executor
+    /// scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous path's request, work/memory, allocation,
+    /// structural, and exact-arithmetic refusals when they win before an
+    /// observed cancellation.
+    pub fn classify_box_with_cx(
+        &self,
+        min: [Rat; 2],
+        max: [Rat; 2],
+        cx: &Cx<'_>,
+    ) -> Result<TrimClassificationRun, NurbsError> {
+        validate_classification_box(min, max)?;
+        let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
+        let mut should_cancel = || cx.checkpoint().is_err();
+        let mut admit_loop = |trim_loop: &TrimLoop| match trim_loop.admit_with_cx(cx)? {
+            TrimLoopAdmissionRun::Complete { .. } => Ok(TrimmedPatchValidationOutcome::Complete),
+            TrimLoopAdmissionRun::Cancelled => Ok(TrimmedPatchValidationOutcome::Cancelled),
+        };
+        let admitted = match self.admit_with_budget_and_poll(
+            &mut work_remaining,
+            &mut should_cancel,
+            &mut admit_loop,
+        )? {
+            TrimmedPatchAdmissionRun::Complete { admitted } => admitted,
+            TrimmedPatchAdmissionRun::Cancelled => return Ok(TrimClassificationRun::Cancelled),
+        };
+        admitted.classify_box_with_budget_and_poll(
+            min,
+            max,
+            &mut work_remaining,
+            &mut should_cancel,
+        )
     }
 }
 
@@ -577,6 +662,21 @@ impl<'a> AdmittedTrimmedPatch<'a> {
         self.classify_box(q, q)
     }
 
+    /// Certified point classification with bounded cancellation polling while
+    /// reusing this exact patch admission.
+    ///
+    /// # Errors
+    /// Propagates the synchronous work/memory, allocation, structural, and
+    /// exact-arithmetic refusals when they win before an observed
+    /// cancellation.
+    pub fn classify_with_cx(
+        &self,
+        q: [Rat; 2],
+        cx: &Cx<'_>,
+    ) -> Result<TrimClassificationRun, NurbsError> {
+        self.classify_box_with_cx(q, q, cx)
+    }
+
     /// Certified connected-box classification reusing this exact patch
     /// admission.
     ///
@@ -590,52 +690,80 @@ impl<'a> AdmittedTrimmedPatch<'a> {
         self.classify_box_with_budget(min, max, &mut work_remaining)
     }
 
+    /// Certified connected-box classification with bounded cancellation
+    /// polling while reusing this exact patch admission.
+    ///
+    /// The componentwise box-order refusal precedes the first checkpoint. The
+    /// gate then spans retained-source accounting, exact witness construction,
+    /// every loop conversion/subdivision/winding phase, cleanup, and terminal
+    /// verdict publication. Cancellation publishes no partial verdict. This
+    /// method does not consume the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous path's request, work/memory, allocation,
+    /// structural, and exact-arithmetic refusals when they win before an
+    /// observed cancellation.
+    pub fn classify_box_with_cx(
+        &self,
+        min: [Rat; 2],
+        max: [Rat; 2],
+        cx: &Cx<'_>,
+    ) -> Result<TrimClassificationRun, NurbsError> {
+        validate_classification_box(min, max)?;
+        let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.classify_box_with_budget_and_poll(min, max, &mut work_remaining, &mut should_cancel)
+    }
+
     fn classify_box_with_budget(
         &self,
         min: [Rat; 2],
         max: [Rat; 2],
         work_remaining: &mut u128,
     ) -> Result<Classification, NurbsError> {
-        spend_trim_work(
-            work_remaining,
-            self.loops().len() as u128,
-            "persistent trim-source retained-byte accounting",
-        )?;
-        let mut persistent_source_bytes = 0u128;
-        for trim_loop in self.admitted_loops() {
-            let curve = trim_loop.curve();
-            let curve_bytes = trim_curve_storage_bytes(
-                curve.knots().knots().len(),
-                curve.homogeneous_control_points().len(),
-            )?;
-            persistent_source_bytes = persistent_source_bytes
-                .checked_add(curve_bytes)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "aggregate trim-source retained bytes overflow u128".to_string(),
-                })?;
+        let mut never_cancel = || false;
+        match self.classify_box_with_budget_and_poll(min, max, work_remaining, &mut never_cancel)? {
+            TrimClassificationRun::Complete { classification } => Ok(classification),
+            TrimClassificationRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling trim classification observed cancellation".to_string(),
+            }),
         }
-        enforce_trim_retained_bytes(persistent_source_bytes, "persistent source")?;
-        spend_trim_work(
+    }
+
+    fn classify_box_with_budget_and_poll(
+        &self,
+        min: [Rat; 2],
+        max: [Rat; 2],
+        work_remaining: &mut u128,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<TrimClassificationRun, NurbsError> {
+        let (persistent_source_bytes, witness) = match prepare_trim_classification_with_poll(
+            *self,
+            min,
+            max,
             work_remaining,
-            TRIM_EXACT_MIDPOINT_WORK_UNITS * 2,
-            "classification witness midpoints",
-        )?;
-        let witness = [
-            exact_midpoint(min[0], max[0], "classification witness u")?,
-            exact_midpoint(min[1], max[1], "classification witness v")?,
-        ];
+            should_cancel,
+        )? {
+            TrimWorkRun::Complete(prepared) => prepared,
+            TrimWorkRun::Cancelled => return Ok(TrimClassificationRun::Cancelled),
+        };
         let mut winding = 0i64;
+        let mut operations_since_poll = 0usize;
+        let query = TrimClassificationQuery {
+            min,
+            max,
+            witness,
+            max_depth: self.max_subdivision(),
+        };
         for trim_loop in self.admitted_loops() {
-            match loop_winding_box(
+            match loop_winding_box_with_poll(
                 trim_loop.curve(),
-                min,
-                max,
-                witness,
-                self.max_subdivision(),
+                &query,
                 persistent_source_bytes,
                 work_remaining,
+                should_cancel,
             )? {
-                Some(loop_winding) => {
+                TrimWorkRun::Complete(Some(loop_winding)) => {
                     winding =
                         winding
                             .checked_add(loop_winding)
@@ -643,15 +771,88 @@ impl<'a> AdmittedTrimmedPatch<'a> {
                                 what: "aggregate trim winding overflows i64".to_string(),
                             })?;
                 }
-                None => return Ok(Classification::Boundary),
+                TrimWorkRun::Complete(None) => {
+                    if should_cancel() {
+                        return Ok(TrimClassificationRun::Cancelled);
+                    }
+                    return Ok(TrimClassificationRun::Complete {
+                        classification: Classification::Boundary,
+                    });
+                }
+                TrimWorkRun::Cancelled => return Ok(TrimClassificationRun::Cancelled),
+            }
+            if trim_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(TrimClassificationRun::Cancelled);
             }
         }
-        Ok(if winding != 0 {
+        let classification = if winding != 0 {
             Classification::Inside
         } else {
             Classification::Outside
-        })
+        };
+        if should_cancel() {
+            return Ok(TrimClassificationRun::Cancelled);
+        }
+        Ok(TrimClassificationRun::Complete { classification })
     }
+}
+
+fn prepare_trim_classification_with_poll(
+    patch: AdmittedTrimmedPatch<'_>,
+    min: [Rat; 2],
+    max: [Rat; 2],
+    work_remaining: &mut u128,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<(u128, [Rat; 2])>, NurbsError> {
+    spend_trim_work(
+        work_remaining,
+        patch.loops().len() as u128,
+        "persistent trim-source retained-byte accounting",
+    )?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let mut persistent_source_bytes = 0u128;
+    let mut operations_since_poll = 0usize;
+    for trim_loop in patch.admitted_loops() {
+        let curve = trim_loop.curve();
+        let curve_bytes = trim_curve_storage_bytes(
+            curve.knots().knots().len(),
+            curve.homogeneous_control_points().len(),
+        )?;
+        persistent_source_bytes = persistent_source_bytes
+            .checked_add(curve_bytes)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "aggregate trim-source retained bytes overflow u128".to_string(),
+            })?;
+        if trim_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    enforce_trim_retained_bytes(persistent_source_bytes, "persistent source")?;
+    spend_trim_work(
+        work_remaining,
+        TRIM_EXACT_MIDPOINT_WORK_UNITS * 2,
+        "classification witness midpoints",
+    )?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let witness_u = exact_midpoint(min[0], max[0], "classification witness u")?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let witness_v = exact_midpoint(min[1], max[1], "classification witness v")?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete((
+        persistent_source_bytes,
+        [witness_u, witness_v],
+    )))
 }
 
 fn validate_classification_box(min: [Rat; 2], max: [Rat; 2]) -> Result<(), NurbsError> {
@@ -731,12 +932,27 @@ fn enforce_trim_retained_bytes(retained_bytes: u128, stage: &str) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 fn trim_bezier_conversion_plan(
     curve: AdmittedNurbsCurve<'_, Rat, 2>,
     persistent_source_bytes: u128,
     operation_source_is_persistent: bool,
 ) -> Result<BezierConversionPlan, NurbsError> {
     let plan = curve.bezier_conversion_plan()?;
+    trim_bezier_conversion_plan_from_plan(
+        curve,
+        plan,
+        persistent_source_bytes,
+        operation_source_is_persistent,
+    )
+}
+
+fn trim_bezier_conversion_plan_from_plan(
+    curve: AdmittedNurbsCurve<'_, Rat, 2>,
+    plan: BezierConversionPlan,
+    persistent_source_bytes: u128,
+    operation_source_is_persistent: bool,
+) -> Result<BezierConversionPlan, NurbsError> {
     let operation_source_bytes = trim_curve_storage_bytes(
         curve.knots().knots().len(),
         curve.homogeneous_control_points().len(),
@@ -781,20 +997,46 @@ fn trim_bezier_conversion_plan(
     Ok(plan)
 }
 
-fn preflight_trim_bezier_conversion(
+fn trim_bezier_conversion_plan_with_poll(
+    curve: AdmittedNurbsCurve<'_, Rat, 2>,
+    persistent_source_bytes: u128,
+    operation_source_is_persistent: bool,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<BezierConversionPlan>, NurbsError> {
+    let Some(plan) = curve.bezier_conversion_plan_with_poll(should_cancel)? else {
+        return Ok(TrimWorkRun::Cancelled);
+    };
+    let plan = trim_bezier_conversion_plan_from_plan(
+        curve,
+        plan,
+        persistent_source_bytes,
+        operation_source_is_persistent,
+    )?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete(plan))
+}
+
+fn preflight_trim_bezier_conversion_with_poll(
     curve: AdmittedNurbsCurve<'_, Rat, 2>,
     persistent_source_bytes: u128,
     operation_source_is_persistent: bool,
     work_remaining: &mut u128,
-) -> Result<(BezierConversionPlan, u128), NurbsError> {
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<(BezierConversionPlan, u128)>, NurbsError> {
     let pre_scan_work = curve.bezier_pre_scan_work()?;
     spend_trim_work(
         work_remaining,
         pre_scan_work,
         "Bezier conversion-plan knot scan",
     )?;
-    let plan = trim_bezier_conversion_plan(
+    let Some(plan) = curve.bezier_conversion_plan_with_poll(should_cancel)? else {
+        return Ok(TrimWorkRun::Cancelled);
+    };
+    let plan = trim_bezier_conversion_plan_from_plan(
         curve,
+        plan,
         persistent_source_bytes,
         operation_source_is_persistent,
     )?;
@@ -804,7 +1046,10 @@ fn preflight_trim_bezier_conversion(
             .ok_or_else(|| NurbsError::Domain {
                 what: "trim Bezier post-scan work accounting is inconsistent".to_string(),
             })?;
-    Ok((plan, unspent_work))
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete((plan, unspent_work)))
 }
 
 fn trim_classification_pass_work(control_count: usize, degree: usize) -> Result<u128, NurbsError> {
@@ -1006,21 +1251,147 @@ fn preflight_trim_subdivision_retained(
     )
 }
 
-/// Certified winding number of one closed rational curve about `q`, or
-/// `None` when `q` cannot be separated from the curve within the
-/// subdivision budget.
-fn loop_winding_box(
-    curve: AdmittedNurbsCurve<'_, Rat, 2>,
+fn collect_offending_intervals_with_poll(
+    boxes: &[SpanBox<Rat, 2>],
     query_min: [Rat; 2],
     query_max: [Rat; 2],
-    witness: [Rat; 2],
-    max_depth: u32,
+    span_capacity: usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<Vec<(Rat, Rat)>>, NurbsError> {
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let mut offending = Vec::new();
+    offending
+        .try_reserve_exact(span_capacity)
+        .map_err(|_| NurbsError::Domain {
+            what: "trim offending-interval allocation was refused".to_string(),
+        })?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let mut operations_since_poll = 0usize;
+    for &(min, max, t0, t1) in boxes {
+        if max[0] >= query_min[0]
+            && min[0] <= query_max[0]
+            && max[1] >= query_min[1]
+            && min[1] <= query_max[1]
+        {
+            offending.push((t0, t1));
+        }
+        if trim_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete(offending))
+}
+
+fn subdivide_offending_intervals_with_poll(
+    mut work: NurbsCurve<Rat, 2>,
+    boxes: Vec<SpanBox<Rat, 2>>,
+    offending: Vec<(Rat, Rat)>,
     persistent_source_bytes: u128,
     work_remaining: &mut u128,
-) -> Result<Option<i64>, NurbsError> {
-    // Work in Bézier form so each span's control hull tightly bounds it.
-    let (initial_plan, initial_conversion_work) =
-        preflight_trim_bezier_conversion(curve, persistent_source_bytes, true, work_remaining)?;
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<NurbsCurve<Rat, 2>>, NurbsError> {
+    let admitted_work = work.admitted_after_validation();
+    let (future_work, next_span_work, expected_conversion_insertions) =
+        projected_subdivision_work(admitted_work, offending.len())?;
+    require_trim_work(
+        work_remaining,
+        future_work
+            .checked_add(next_span_work)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "trim subdivision/downstream work overflows u128".to_string(),
+            })?,
+        "midpoint subdivision, Bezier reconversion, and next span-box construction",
+    )?;
+    spend_trim_work(
+        work_remaining,
+        future_work,
+        "midpoint subdivision and Bezier reconversion",
+    )?;
+    let interval_capacity = offending.capacity();
+    preflight_trim_subdivision_retained(
+        admitted_work,
+        offending.len(),
+        interval_capacity,
+        persistent_source_bytes,
+    )?;
+    drop(boxes);
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    for (t0, t1) in offending {
+        let admitted_work = work.admitted_after_validation();
+        if should_cancel() {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+        let mid = exact_midpoint(t0, t1, "subdivision parameter")?;
+        if should_cancel() {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+        // Exact midpoint insertion splits the offending span.
+        work = match admitted_work.insert_knot_with_poll(mid, should_cancel)? {
+            crate::curve::CurveInsertionRun::Complete { curve } => curve,
+            crate::curve::CurveInsertionRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+        };
+        // Dropping the superseded generation is not preemptible; gate the
+        // next interval immediately after replacement.
+        if should_cancel() {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+    }
+    let admitted_work = work.admitted_after_validation();
+    // The aggregate refinement charge was consumed before the first midpoint
+    // insertion and includes this external plan scan.
+    let conversion_plan = match trim_bezier_conversion_plan_with_poll(
+        admitted_work,
+        persistent_source_bytes,
+        false,
+        should_cancel,
+    )? {
+        TrimWorkRun::Complete(plan) => plan,
+        TrimWorkRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+    };
+    if conversion_plan.insertions != expected_conversion_insertions {
+        return Err(NurbsError::Structure {
+            what: format!(
+                "trim midpoint refinement projected {expected_conversion_insertions} Bezier insertions but derived generation requires {}",
+                conversion_plan.insertions
+            ),
+        });
+    }
+    work = match admitted_work.to_bezier_form_with_poll(should_cancel)? {
+        crate::curve::CurveBezierRun::Complete { curve } => curve,
+        crate::curve::CurveBezierRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+    };
+    // As above, derived-generation destruction is nonpreemptible.
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete(work))
+}
+
+fn initialize_trim_bezier_work_with_poll(
+    curve: AdmittedNurbsCurve<'_, Rat, 2>,
+    persistent_source_bytes: u128,
+    work_remaining: &mut u128,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<NurbsCurve<Rat, 2>>, NurbsError> {
+    let (initial_plan, initial_conversion_work) = match preflight_trim_bezier_conversion_with_poll(
+        curve,
+        persistent_source_bytes,
+        true,
+        work_remaining,
+        should_cancel,
+    )? {
+        TrimWorkRun::Complete(plan) => plan,
+        TrimWorkRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+    };
     let initial_span_work =
         trim_classification_pass_work(initial_plan.final_control_count, curve.knots().degree())?;
     require_trim_work(
@@ -1037,7 +1408,40 @@ fn loop_winding_box(
         initial_conversion_work,
         "initial Bézier conversion",
     )?;
-    let mut work = curve.to_bezier_form()?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let work = match curve.to_bezier_form_with_poll(should_cancel)? {
+        crate::curve::CurveBezierRun::Complete { curve } => curve,
+        crate::curve::CurveBezierRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+    };
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete(work))
+}
+
+/// Certified winding number of one closed rational curve about `q`, or
+/// `None` when `q` cannot be separated from the curve within the
+/// subdivision budget. Cancellation drops every partial derived generation,
+/// span table, and offending-interval table before returning.
+fn loop_winding_box_with_poll(
+    curve: AdmittedNurbsCurve<'_, Rat, 2>,
+    query: &TrimClassificationQuery,
+    persistent_source_bytes: u128,
+    work_remaining: &mut u128,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<Option<i64>>, NurbsError> {
+    // Work in Bézier form so each span's control hull tightly bounds it.
+    let mut work = match initialize_trim_bezier_work_with_poll(
+        curve,
+        persistent_source_bytes,
+        work_remaining,
+        should_cancel,
+    )? {
+        TrimWorkRun::Complete(work) => work,
+        TrimWorkRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+    };
     let mut depth = 0u32;
     loop {
         let admitted_work = work.admitted_after_validation();
@@ -1050,80 +1454,65 @@ fn loop_winding_box(
             "span-box construction",
         )?;
         let span_capacity = preflight_trim_span_scratch(admitted_work, persistent_source_bytes)?;
-        let boxes = admitted_work.span_boxes()?;
-        let mut offending = Vec::new();
-        offending
-            .try_reserve_exact(span_capacity)
-            .map_err(|_| NurbsError::Domain {
-                what: "trim offending-interval allocation was refused".to_string(),
-            })?;
-        for &(min, max, t0, t1) in &boxes {
-            if max[0] >= query_min[0]
-                && min[0] <= query_max[0]
-                && max[1] >= query_min[1]
-                && min[1] <= query_max[1]
-            {
-                offending.push((t0, t1));
-            }
-        }
+        let boxes = match admitted_work.span_boxes_with_poll(should_cancel)? {
+            crate::curve::CurveSpanBoxesRun::Complete { boxes } => boxes,
+            crate::curve::CurveSpanBoxesRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+        };
+        let offending = match collect_offending_intervals_with_poll(
+            &boxes,
+            query.min,
+            query.max,
+            span_capacity,
+            should_cancel,
+        )? {
+            TrimWorkRun::Complete(offending) => offending,
+            TrimWorkRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+        };
         if offending.is_empty() {
             // Separated from the whole connected query box: winding is
             // constant throughout it, so one exact witness is sufficient.
-            return Ok(Some(polygon_winding_homogeneous(
+            let winding = match polygon_winding_homogeneous_with_poll(
                 admitted_work.homogeneous_control_points(),
-                witness,
-            )));
+                query.witness,
+                should_cancel,
+            ) {
+                TrimWorkRun::Complete(winding) => winding,
+                TrimWorkRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+            };
+            drop(offending);
+            drop(boxes);
+            drop(work);
+            if should_cancel() {
+                return Ok(TrimWorkRun::Cancelled);
+            }
+            return Ok(TrimWorkRun::Complete(Some(winding)));
         }
-        if depth >= max_depth {
-            return Ok(None);
+        if depth >= query.max_depth {
+            drop(offending);
+            drop(boxes);
+            drop(work);
+            if should_cancel() {
+                return Ok(TrimWorkRun::Cancelled);
+            }
+            return Ok(TrimWorkRun::Complete(None));
         }
-        let (future_work, next_span_work, expected_conversion_insertions) =
-            projected_subdivision_work(admitted_work, offending.len())?;
-        require_trim_work(
-            work_remaining,
-            future_work
-                .checked_add(next_span_work)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "trim subdivision/downstream work overflows u128".to_string(),
-                })?,
-            "midpoint subdivision, Bezier reconversion, and next span-box construction",
-        )?;
-        spend_trim_work(
-            work_remaining,
-            future_work,
-            "midpoint subdivision and Bezier reconversion",
-        )?;
-        let interval_capacity = offending.capacity();
-        preflight_trim_subdivision_retained(
-            admitted_work,
-            offending.len(),
-            interval_capacity,
+        work = match subdivide_offending_intervals_with_poll(
+            work,
+            boxes,
+            offending,
             persistent_source_bytes,
-        )?;
-        drop(boxes);
-        for (t0, t1) in offending {
-            let admitted_work = work.admitted_after_validation();
-            let mid = exact_midpoint(t0, t1, "subdivision parameter")?;
-            // Exact midpoint insertion splits the offending span.
-            work = admitted_work.insert_knot(mid)?;
-        }
-        let admitted_work = work.admitted_after_validation();
-        // The aggregate refinement charge was consumed before the first
-        // midpoint insertion and includes this external plan scan.
-        let conversion_plan =
-            trim_bezier_conversion_plan(admitted_work, persistent_source_bytes, false)?;
-        if conversion_plan.insertions != expected_conversion_insertions {
-            return Err(NurbsError::Structure {
-                what: format!(
-                    "trim midpoint refinement projected {expected_conversion_insertions} Bezier insertions but derived generation requires {}",
-                    conversion_plan.insertions
-                ),
-            });
-        }
-        work = admitted_work.to_bezier_form()?;
+            work_remaining,
+            should_cancel,
+        )? {
+            TrimWorkRun::Complete(work) => work,
+            TrimWorkRun::Cancelled => return Ok(TrimWorkRun::Cancelled),
+        };
         depth = depth.checked_add(1).ok_or_else(|| NurbsError::Domain {
             what: "trim subdivision depth overflows u32".to_string(),
         })?;
+        if should_cancel() {
+            return Ok(TrimWorkRun::Cancelled);
+        }
     }
 }
 
@@ -1146,9 +1535,17 @@ fn spend_trim_work(remaining: &mut u128, requested: u128, stage: &str) -> Result
 
 /// EXACT winding number of the Cartesian control polygon without allocating
 /// a projected copy. Admission guarantees positive weights and at least one
-/// control.
-fn polygon_winding_homogeneous(cpw: &[[Rat; 4]], q: [Rat; 2]) -> i64 {
+/// control. Individual exact edge arithmetic is nonpreemptible.
+fn polygon_winding_homogeneous_with_poll(
+    cpw: &[[Rat; 4]],
+    q: [Rat; 2],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> TrimWorkRun<i64> {
+    if should_cancel() {
+        return TrimWorkRun::Cancelled;
+    }
     let mut winding = 0i64;
+    let mut operations_since_poll = 0usize;
     for index in 0..cpw.len() {
         let a_h = cpw[index];
         let b_h = cpw[(index + 1) % cpw.len()];
@@ -1161,8 +1558,14 @@ fn polygon_winding_homogeneous(cpw: &[[Rat; 4]], q: [Rat; 2]) -> i64 {
         } else if b[1] <= q[1] && q[1] < a[1] && orient < Rat::int(0) {
             winding -= 1;
         }
+        if trim_poll_due(&mut operations_since_poll, should_cancel) {
+            return TrimWorkRun::Cancelled;
+        }
     }
-    winding
+    if should_cancel() {
+        return TrimWorkRun::Cancelled;
+    }
+    TrimWorkRun::Complete(winding)
 }
 
 #[cfg(test)]
@@ -1212,6 +1615,28 @@ mod tests {
         let weights = vec![Rat::int(1); 130];
         let curve = NurbsCurve::new(knots, &points, &weights).expect("long point-loop curve");
         TrimLoop::new(curve).expect("closed long point loop")
+    }
+
+    fn poly_trim_loop(points: &[[i64; 2]]) -> TrimLoop {
+        let segment_count = points.len();
+        let mut knots = vec![Rat::int(0), Rat::int(0)];
+        let denominator = i128::try_from(segment_count).expect("test loop length fits i128");
+        knots.extend((1..segment_count).map(|index| {
+            Rat::new(
+                i128::try_from(index).expect("test knot index fits i128"),
+                denominator,
+            )
+        }));
+        knots.extend([Rat::int(1), Rat::int(1)]);
+        let knots = KnotVector::new(knots, 1).expect("polyline loop knots");
+        let mut controls: Vec<_> = points
+            .iter()
+            .map(|point| [Rat::int(point[0]), Rat::int(point[1])])
+            .collect();
+        controls.push(controls[0]);
+        let weights = vec![Rat::int(1); controls.len()];
+        let curve = NurbsCurve::new(knots, &controls, &weights).expect("polyline loop curve");
+        TrimLoop::new(curve).expect("closed polyline loop")
     }
 
     #[test]
@@ -1431,6 +1856,268 @@ mod tests {
             )
             .expect("cancelled empty-patch admission replay");
         assert!(matches!(replay, TrimmedPatchAdmissionRun::Cancelled));
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn trim_classification_owning_admitted_and_cx_paths_match_exactly() {
+        let patch = TrimmedPatch::with_max_subdivision(
+            vec![poly_trim_loop(&[[0, 0], [10, 0], [10, 10], [0, 10]])],
+            0,
+        );
+        let admitted = patch.admit().expect("admitted square trim patch");
+        for (query, expected) in [
+            ([Rat::int(5), Rat::int(5)], Classification::Inside),
+            ([Rat::int(20), Rat::int(20)], Classification::Outside),
+            ([Rat::int(0), Rat::int(5)], Classification::Boundary),
+        ] {
+            assert_eq!(
+                patch.classify(query).expect("owning classification"),
+                expected
+            );
+            assert_eq!(
+                admitted.classify(query).expect("admitted classification"),
+                expected
+            );
+            with_trim_cx(false, |cx| {
+                assert_eq!(
+                    patch
+                        .classify_with_cx(query, cx)
+                        .expect("owning cancellable classification"),
+                    TrimClassificationRun::Complete {
+                        classification: expected,
+                    }
+                );
+                assert_eq!(
+                    admitted
+                        .classify_with_cx(query, cx)
+                        .expect("admitted cancellable classification"),
+                    TrimClassificationRun::Complete {
+                        classification: expected,
+                    }
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn trim_classification_request_and_static_work_refusals_precede_cancellation() {
+        let patch = TrimmedPatch::new(vec![point_trim_loop()]);
+        let admitted = patch.admit().expect("admitted point trim patch");
+        with_trim_cx(true, |cx| {
+            assert_eq!(
+                patch
+                    .classify_with_cx([Rat::int(2), Rat::int(2)], cx)
+                    .expect("valid pre-cancelled owning classification"),
+                TrimClassificationRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .classify_with_cx([Rat::int(2), Rat::int(2)], cx)
+                    .expect("valid pre-cancelled classification"),
+                TrimClassificationRun::Cancelled
+            );
+            let synchronous = admitted
+                .classify_box([Rat::int(1), Rat::int(0)], [Rat::int(0), Rat::int(1)])
+                .expect_err("inverted synchronous box");
+            let cancellable = admitted
+                .classify_box_with_cx([Rat::int(1), Rat::int(0)], [Rat::int(0), Rat::int(1)], cx)
+                .expect_err("inverted box must precede cancellation");
+            assert_eq!(cancellable, synchronous);
+            let owning = patch
+                .classify_box_with_cx([Rat::int(1), Rat::int(0)], [Rat::int(0), Rat::int(1)], cx)
+                .expect_err("owning inverted box must precede cancellation");
+            assert_eq!(owning, synchronous);
+        });
+
+        let mut work_remaining = 0u128;
+        let mut polls = 0usize;
+        let error = admitted
+            .classify_box_with_budget_and_poll(
+                [Rat::int(2), Rat::int(2)],
+                [Rat::int(2), Rat::int(2)],
+                &mut work_remaining,
+                &mut || {
+                    polls += 1;
+                    true
+                },
+            )
+            .expect_err("constant loop-count work refusal must precede cancellation");
+        assert!(matches!(
+            error,
+            NurbsError::Domain { ref what } if what.contains("persistent trim-source")
+        ));
+        assert_eq!(polls, 0);
+    }
+
+    #[test]
+    fn trim_offending_and_winding_scans_cancel_at_replayable_strides() {
+        let boxes: Vec<SpanBox<Rat, 2>> = (0..130)
+            .map(|index| {
+                let t0 = Rat::new(index, 130);
+                let t1 = Rat::new(index + 1, 130);
+                ([Rat::int(0); 2], [Rat::int(1); 2], t0, t1)
+            })
+            .collect();
+        let run_boxes = || {
+            let mut polls = 0usize;
+            let outcome = collect_offending_intervals_with_poll(
+                &boxes,
+                [Rat::int(2); 2],
+                [Rat::int(2); 2],
+                boxes.len(),
+                &mut || {
+                    polls += 1;
+                    polls == 3
+                },
+            )
+            .expect("cancellable offending scan");
+            (matches!(outcome, TrimWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run_boxes(), run_boxes());
+        assert_eq!(run_boxes(), (true, 3));
+
+        let controls = vec![[Rat::int(0), Rat::int(0), Rat::int(0), Rat::int(1)]; 130];
+        let run_winding = || {
+            let mut polls = 0usize;
+            let outcome = polygon_winding_homogeneous_with_poll(
+                &controls,
+                [Rat::int(2), Rat::int(2)],
+                &mut || {
+                    polls += 1;
+                    polls == 2
+                },
+            );
+            (matches!(outcome, TrimWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run_winding(), run_winding());
+        assert_eq!(run_winding(), (true, 2));
+    }
+
+    #[test]
+    fn trim_conversion_plan_cancellation_preserves_consumed_pre_scan_charge() {
+        let trim_loop = long_trim_loop();
+        let curve = trim_loop.curve.admit().expect("admitted long trim curve");
+        let persistent_source_bytes = trim_curve_storage_bytes(
+            curve.knots().knots().len(),
+            curve.homogeneous_control_points().len(),
+        )
+        .expect("persistent trim bytes");
+        let pre_scan_work = curve.bezier_pre_scan_work().expect("pre-scan work");
+        let run = || {
+            let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
+            let mut polls = 0usize;
+            let outcome = preflight_trim_bezier_conversion_with_poll(
+                curve,
+                persistent_source_bytes,
+                true,
+                &mut work_remaining,
+                &mut || {
+                    polls += 1;
+                    polls == 2
+                },
+            )
+            .expect("cancellable trim conversion plan");
+            (
+                matches!(outcome, TrimWorkRun::Cancelled),
+                polls,
+                work_remaining,
+            )
+        };
+        assert_eq!(run(), run());
+        assert_eq!(
+            run(),
+            (true, 2, TRIM_CLASSIFY_MAX_WORK_UNITS - pre_scan_work)
+        );
+    }
+
+    #[test]
+    fn trim_loop_terminal_cleanup_and_outer_publication_replay_exactly() {
+        let trim_loop = point_trim_loop();
+        let curve = trim_loop.curve.admit().expect("admitted point trim curve");
+        let persistent_source_bytes = trim_curve_storage_bytes(
+            curve.knots().knots().len(),
+            curve.homogeneous_control_points().len(),
+        )
+        .expect("point trim bytes");
+        for (query, expected) in [
+            ([Rat::int(2), Rat::int(2)], Some(0i64)),
+            ([Rat::int(0), Rat::int(0)], None),
+        ] {
+            let request = TrimClassificationQuery {
+                min: query,
+                max: query,
+                witness: query,
+                max_depth: 0,
+            };
+            let mut healthy_work = TRIM_CLASSIFY_MAX_WORK_UNITS;
+            let mut total_polls = 0usize;
+            let healthy = loop_winding_box_with_poll(
+                curve,
+                &request,
+                persistent_source_bytes,
+                &mut healthy_work,
+                &mut || {
+                    total_polls += 1;
+                    false
+                },
+            )
+            .expect("healthy trim loop terminal path");
+            assert_eq!(healthy, TrimWorkRun::Complete(expected));
+            assert!(total_polls > 0);
+
+            let mut replay_work = TRIM_CLASSIFY_MAX_WORK_UNITS;
+            let mut replay_polls = 0usize;
+            let replay = loop_winding_box_with_poll(
+                curve,
+                &request,
+                persistent_source_bytes,
+                &mut replay_work,
+                &mut || {
+                    replay_polls += 1;
+                    replay_polls == total_polls
+                },
+            )
+            .expect("cancelled trim loop terminal replay");
+            assert_eq!(replay, TrimWorkRun::Cancelled);
+            assert_eq!(replay_polls, total_polls);
+        }
+
+        let patch = TrimmedPatch::new(Vec::new());
+        let admitted = patch.admit().expect("admitted empty patch");
+        let mut healthy_work = TRIM_CLASSIFY_MAX_WORK_UNITS;
+        let mut total_polls = 0usize;
+        let healthy = admitted
+            .classify_box_with_budget_and_poll(
+                [Rat::int(0); 2],
+                [Rat::int(0); 2],
+                &mut healthy_work,
+                &mut || {
+                    total_polls += 1;
+                    false
+                },
+            )
+            .expect("healthy empty classification");
+        assert_eq!(
+            healthy,
+            TrimClassificationRun::Complete {
+                classification: Classification::Outside,
+            }
+        );
+        let mut replay_work = TRIM_CLASSIFY_MAX_WORK_UNITS;
+        let mut replay_polls = 0usize;
+        let replay = admitted
+            .classify_box_with_budget_and_poll(
+                [Rat::int(0); 2],
+                [Rat::int(0); 2],
+                &mut replay_work,
+                &mut || {
+                    replay_polls += 1;
+                    replay_polls == total_polls
+                },
+            )
+            .expect("cancelled empty classification replay");
+        assert_eq!(replay, TrimClassificationRun::Cancelled);
         assert_eq!(replay_polls, total_polls);
     }
 
