@@ -350,10 +350,16 @@ impl FrameTree {
         let frame_count = self.frames.len();
         let mut state = Vec::new();
         reserve_frame_validation(&mut state, frame_count, "frame cycle states")?;
-        state.resize(frame_count, 0u8);
+        for _ in 0..frame_count {
+            checkpoint("frame cycle state initialization")?;
+            state.push(0u8);
+        }
         let mut reaches_cycle = Vec::new();
         reserve_frame_validation(&mut reaches_cycle, frame_count, "frame cycle result flags")?;
-        reaches_cycle.resize(frame_count, false);
+        for _ in 0..frame_count {
+            checkpoint("frame cycle result initialization")?;
+            reaches_cycle.push(false);
+        }
         let mut path = Vec::new();
         reserve_frame_validation(&mut path, frame_count, "frame cycle path")?;
         for start in 0..frame_count {

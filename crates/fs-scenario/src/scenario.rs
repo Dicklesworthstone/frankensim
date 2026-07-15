@@ -1554,7 +1554,10 @@ impl Scenario {
         let contact_count = self.contacts.len();
         let mut conflicts = Vec::new();
         reserve_validation(&mut conflicts, contact_count, "contact conflict flags")?;
-        conflicts.resize(contact_count, false);
+        for _ in 0..contact_count {
+            checkpoint("contact conflict initialization")?;
+            conflicts.push(false);
+        }
 
         let mut start = 0usize;
         while start < index.entries.len() {
@@ -2206,12 +2209,15 @@ mod validation_internal_tests {
             .expect("phase discovery validation");
 
         for required in [
+            "frame cycle state initialization",
+            "frame cycle result initialization",
             "frame cycle traversal",
             "signal table times",
             "base boundary conditions",
             "case boundary conditions",
             "combination terms",
             "ensembles",
+            "contact conflict initialization",
             "contact conflict groups",
             "contact conflict models",
             "contacts",

@@ -217,9 +217,11 @@ per-combination term entries and every net-flux checkpoint set. The explicit
 `Cx` lane polls
 before preflight, at every top-level and nested record visited while constructing
 the semantic plan, after planning, after fixed phases, at every frame-index row,
-frame-cycle traversal/finalization step, and frame validation row, at
+every frame-cycle scratch-initialization, traversal, and finalization step, and
+frame validation row, at
 BC/case/combination term/ensemble/contact boundaries, at every unordered
-contact-pair classification group (including all-unique inputs), before and
+contact-conflict scratch-initialization step and classification group (including
+all-unique inputs), before and
 after each net-flux provider evaluation, at every tabulated signal scalar and
 Chebyshev coefficient during structural scanning, before every nonconstant
 Chebyshev recurrence step during net-flux evaluation, throughout index
