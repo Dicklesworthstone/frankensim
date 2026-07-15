@@ -273,6 +273,10 @@ None.
   path uses the same checkpoint route.
 - A deterministic injected preflight regression cancels while counting nested
   case boundary conditions and proves no semantic plan is published.
+- A representative phase-matrix regression discovers every reached frame,
+  signal, BC/case/combination/ensemble/contact/index/net-flux checkpoint and
+  injects cancellation at each distinct phase, proving private findings never
+  escape.
 - A focused frame regression injects cancellation inside the tri-color cycle
   walk and proves frame findings remain private at that boundary.
 - A focused frame scratch regression forces a capacity overflow and proves a

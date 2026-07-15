@@ -1472,9 +1472,15 @@ impl Scenario {
 #[cfg(test)]
 mod validation_internal_tests {
     use super::{
-        Environment, LoadCase, Scenario, ValidationBudget, ValidationError,
-        reserve_validation_times, sort_validation_index,
+        Combination, ContactLaw, ContactModel, Environment, LoadCase, Scenario, ValidationBudget,
+        ValidationError, reserve_validation_times, sort_validation_index,
     };
+    use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
+    use crate::ensemble::{SpectrumModel, StochasticEnsemble};
+    use crate::frame::{Frame, FrameId, FrameMotion};
+    use crate::signal::{Interp, TimeSignal};
+    use fs_ga::{Quat, Vec3};
+    use fs_qty::{Dims, QtyAny};
 
     #[test]
     fn checkpoint_capacity_overflow_is_a_typed_refusal() {
@@ -1578,5 +1584,126 @@ mod validation_internal_tests {
             if calls == 2 { Err("cancelled") } else { Ok(()) }
         });
         assert_eq!(result, Err("cancelled"));
+    }
+
+    fn phase_matrix_flow(region: &str, value: f64) -> BoundaryCondition {
+        BoundaryCondition {
+            region: region.to_string(),
+            physics: Physics::IncompressibleFlow,
+            kind: BcKind::MassFlowInlet,
+            value: Some(BcValue::Signal(TimeSignal::Table {
+                times: vec![0.0, 1.0],
+                values: vec![value, value],
+                dims: Dims([0, 1, -1, 0, 0, 0]),
+                interp: Interp::Hold,
+            })),
+            compatibility: Some(Compat::Incompressible),
+            frame: 0,
+        }
+    }
+
+    fn phase_matrix_scenario() -> Scenario {
+        let mut scenario = Scenario::new("phase-matrix", 41, Environment::earth_lab());
+        scenario.frames.add(Frame {
+            id: FrameId(1),
+            name: "fixture".to_string(),
+            parent: FrameId(0),
+            motion: FrameMotion::Fixed {
+                orientation: Quat::identity(),
+                translation: Vec3::new(0.0, 0.0, 0.0),
+            },
+        });
+        scenario.base_bcs.push(phase_matrix_flow("base-inlet", 1.0));
+        scenario.cases.push(LoadCase {
+            name: "load".to_string(),
+            bcs: vec![phase_matrix_flow("case-outlet", -1.0)],
+        });
+        scenario.combinations.push(Combination {
+            name: "combo".to_string(),
+            terms: vec![("load".to_string(), 1.0)],
+        });
+        scenario.ensembles.push(StochasticEnsemble {
+            name: "ensemble".to_string(),
+            seed: 9,
+            members: 1,
+            duration: QtyAny::new(1.0, Dims([0, 0, 1, 0, 0, 0])),
+            dt: QtyAny::new(0.5, Dims([0, 0, 1, 0, 0, 0])),
+            model: SpectrumModel::KanaiTajimi {
+                s0: 1.0,
+                omega_g: QtyAny::new(2.0, Dims([0, 0, -1, 0, 0, 0])),
+                zeta_g: 0.5,
+            },
+        });
+        scenario.contacts.extend([
+            ContactLaw {
+                region_a: "a".to_string(),
+                region_b: "b".to_string(),
+                model: ContactModel::Frictionless,
+            },
+            ContactLaw {
+                region_a: "b".to_string(),
+                region_b: "a".to_string(),
+                model: ContactModel::Tied,
+            },
+        ]);
+        scenario
+    }
+
+    #[test]
+    fn every_representative_phase_discards_private_findings_on_cancellation() {
+        let scenario = phase_matrix_scenario();
+        let plan = scenario
+            .validation_plan(ValidationBudget::default())
+            .expect("representative semantic plan");
+        let mut phases = Vec::new();
+        scenario
+            .validate_admitted(plan.finding_capacity, &mut |phase| {
+                if !phases.contains(&phase) {
+                    phases.push(phase);
+                }
+                Ok(())
+            })
+            .expect("phase discovery validation");
+
+        for required in [
+            "frame cycle traversal",
+            "signal table times",
+            "base boundary conditions",
+            "case boundary conditions",
+            "combination terms",
+            "ensembles",
+            "contact conflict models",
+            "contacts",
+            "net-flux checkpoints",
+            "net-flux evaluation",
+            "net-flux set complete",
+        ] {
+            assert!(phases.contains(&required), "missing phase {required}");
+        }
+
+        for target in phases {
+            let mut injected = false;
+            let result = scenario.validate_admitted(plan.finding_capacity, &mut |phase| {
+                if !injected && phase == target {
+                    injected = true;
+                    Err(ValidationError::Cancelled {
+                        phase,
+                        completed: 0,
+                        planned: plan.planned_work,
+                    })
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(injected, "phase {target} was not revisited");
+            assert!(matches!(
+                result,
+                Err(ValidationError::Cancelled {
+                    phase,
+                    completed: 0,
+                    planned,
+                }) if phase == target && planned == plan.planned_work
+            ));
+        }
     }
 }
