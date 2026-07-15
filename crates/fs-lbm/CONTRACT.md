@@ -230,6 +230,20 @@ pressure-driven Poiseuille shape, and a boundary replay-hash candidate. Ignored
 release fixtures carry the full 10,000-step leak and 32x32 full-rim 3%
 pressure-Poiseuille gates.
 
+`tests/cylinder_re100.rs` (frankensim-wghy) keeps the inexpensive evidence
+machinery in the default suite: a checked Hann-window `fs-fft` lift-frequency
+estimator with exact-bin, affine-signal, replay, flat/non-finite/Nyquist, and
+resolution-refusal oracles; an exactly projected stair-step cylinder mask; and
+the two-width linear-blockage extrapolation identity. Its ignored release-scale
+`lbm-109` fixture runs Re=100 at diameter 10, nominal inlet speed 0.1, 32D
+streamwise extent, 12D and 16D periodic lateral spans, 8,192 warm-up steps, and
+16,384 retained force samples. It normalizes drag by the measured mean inlet
+density, extracts Strouhal from the complete non-DC spectrum, and gates the
+zero-blockage intercepts at Cd `[1.25, 1.45]` and St `[0.155, 0.175]`.
+Roshko NACA TR-1191, Posdziech-Grundmann 2007, Behr et al. 1995, and Maskell
+ARC R&M 3400 are cited at the executable gate; no publisher artifact is
+redistributed.
+
 ## No-claim boundaries
 
 - D3Q19 grids remain BGK + Guo on a dense set of aligned SoA tiles. The
@@ -254,6 +268,11 @@ pressure-Poiseuille gates.
   reference-area normalization, moving-wall correction, curved-boundary
   interpolation, blockage correction, averaging, or shedding-frequency
   estimation; therefore it is not yet the Re=100 cylinder Cd/St validation.
+- The separate `lbm-109` release fixture encodes the intended normalization,
+  warm-up, FFT, primary-source envelopes, and empirical two-width blockage
+  treatment. Until that explicitly ignored release lane is executed green on
+  the combined batch snapshot, the crate still makes no completed Re=100
+  cylinder validation claim.
 - `VelocityPressureX2` is a low-Mach regularized fixture boundary with periodic
   lateral closure. It is not a characteristic or non-reflecting far-field
   condition, accepts no body force, and makes no unbounded-domain or blockage
