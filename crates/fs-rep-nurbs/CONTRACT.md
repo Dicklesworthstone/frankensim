@@ -315,6 +315,13 @@ value/first-partial request on an admitted surface: construction, owning
 admission, one-sided jets, regularity, normals/orientation, geometric
 certificates, exact caller-budget consumption, wall time, drain/finalize, and
 resumability remain outside the claim.
+`TrimLoop::admit_with_cx` carries one gate through exact curve/knot admission,
+both endpoint evaluations, full-break continuity traversal, and final
+lifetime-bound authority publication. `TrimLoopAdmissionRun::Cancelled`
+publishes no admitted view. Polling is fixed-stride between logical knot-run
+and continuity checks; an individual exact-rational operation is not
+preemptible. The primitive does not consume caller budget or own surrounding
+request drain/finalize, wall-time, or resumability semantics.
 Owning trim classification now binds one admitted patch/loop/curve generation
 through exact Bezier conversion, span boxes, and winding. Its checked conversion
 plan charges scan/insertion work and old-plus-new curve storage before the first

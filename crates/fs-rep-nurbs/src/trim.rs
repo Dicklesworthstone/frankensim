@@ -9,8 +9,12 @@
 //! are honestly `Boundary`, never a guessed in/out.
 
 use crate::NurbsError;
-use crate::curve::{AdmittedNurbsCurve, BezierConversionPlan, NurbsCurve, SpanBox};
+use crate::curve::{
+    AdmittedNurbsCurve, BezierConversionPlan, CurveAdmissionRun, CurveEvaluationRun, NurbsCurve,
+    SpanBox,
+};
 use crate::rat::Rat;
+use fs_exec::Cx;
 
 /// Defensive work ceiling for one exact trim classification across all loops.
 /// This legacy cap bounds public allocation-bearing subdivision even when a
@@ -24,6 +28,19 @@ const TRIM_CLASSIFY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const TRIM_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const TRIM_WINDING_WORK_PER_CONTROL: u128 = 128;
 const TRIM_EXACT_MIDPOINT_WORK_UNITS: u128 = 1_024;
+const TRIM_CANCELLATION_STRIDE: usize = 64;
+
+fn trim_poll_due(
+    operations_since_poll: &mut usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> bool {
+    *operations_since_poll += 1;
+    if *operations_since_poll < TRIM_CANCELLATION_STRIDE {
+        return false;
+    }
+    *operations_since_poll = 0;
+    should_cancel()
+}
 
 /// Minimum charge for admitting one sealed loop before inspecting its
 /// knot/control metadata. This makes a huge collection of individually tiny
@@ -48,6 +65,85 @@ pub struct AdmittedTrimLoop<'a> {
     inner: &'a TrimLoop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrimLoopValidationOutcome {
+    Complete,
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware trim-loop admission.
+#[must_use]
+#[derive(Debug, Clone, Copy)]
+pub enum TrimLoopAdmissionRun<'a> {
+    /// The exact immutable loop snapshot was fully validated.
+    Complete {
+        /// Lifetime-bound authority for the validated trim-loop generation.
+        admitted: AdmittedTrimLoop<'a>,
+    },
+    /// Cancellation was observed; no admitted authority was published.
+    Cancelled,
+}
+
+fn validate_trim_loop_after_endpoints_with_poll(
+    curve: AdmittedNurbsCurve<'_, Rat, 2>,
+    start: [Rat; 2],
+    end: [Rat; 2],
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<TrimLoopValidationOutcome, NurbsError> {
+    if should_cancel() {
+        return Ok(TrimLoopValidationOutcome::Cancelled);
+    }
+    if start != end {
+        return Err(NurbsError::Structure {
+            what: "trim loop must close exactly (rational endpoint equality)".to_string(),
+        });
+    }
+
+    // A full interior knot break carries independent left and right limits.
+    // Permit it only when those limits agree exactly in Cartesian space.
+    let knots = curve.knots();
+    let p = knots.degree();
+    let knot_entries = knots.knots();
+    let controls = curve.homogeneous_control_points();
+    let mut operations_since_poll = 0usize;
+    let mut run_start = 0usize;
+    while run_start < knot_entries.len() {
+        let mut run_end = run_start + 1;
+        while run_end < knot_entries.len() && knot_entries[run_end] == knot_entries[run_start] {
+            run_end += 1;
+            if trim_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(TrimLoopValidationOutcome::Cancelled);
+            }
+        }
+        let is_interior = run_start != 0 && run_end != knot_entries.len();
+        if is_interior && run_end - run_start == p + 1 {
+            let left = controls[run_start - 1];
+            let right = controls[run_start];
+            for coordinate in 0..2 {
+                if left[coordinate] * right[3] != right[coordinate] * left[3] {
+                    return Err(NurbsError::Structure {
+                        what: format!(
+                            "trim loop is discontinuous at full knot break {:?}",
+                            knot_entries[run_start]
+                        ),
+                    });
+                }
+                if trim_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(TrimLoopValidationOutcome::Cancelled);
+                }
+            }
+        }
+        run_start = run_end;
+        if trim_poll_due(&mut operations_since_poll, &mut should_cancel) {
+            return Ok(TrimLoopValidationOutcome::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(TrimLoopValidationOutcome::Cancelled);
+    }
+    Ok(TrimLoopValidationOutcome::Complete)
+}
+
 impl TrimLoop {
     fn validate_live(&self) -> Result<(), NurbsError> {
         self.admit().map(|_| ())
@@ -61,48 +157,54 @@ impl TrimLoop {
     /// exact curve.
     pub fn admit(&self) -> Result<AdmittedTrimLoop<'_>, NurbsError> {
         let curve = self.curve.admit()?;
-        let knots = curve.knots();
-        let (lo, hi) = knots.domain();
+        let (lo, hi) = curve.knots().domain();
         let start = curve.eval(lo)?;
         let end = curve.eval(hi)?;
-        if start != end {
-            return Err(NurbsError::Structure {
-                what: "trim loop must close exactly (rational endpoint equality)".to_string(),
-            });
+        match validate_trim_loop_after_endpoints_with_poll(curve, start, end, || false)? {
+            TrimLoopValidationOutcome::Complete => Ok(AdmittedTrimLoop { inner: self }),
+            TrimLoopValidationOutcome::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling trim-loop admission observed cancellation".to_string(),
+            }),
         }
+    }
 
-        // A full interior knot break carries independent left and right
-        // limits. It is admissible in a general piecewise curve, but a trim
-        // loop must be continuous for the control-polygon homotopy/winding
-        // proof. Permit the expressive full-break representation only when
-        // those limits agree exactly in Cartesian space.
-        let p = knots.degree();
-        let knot_entries = knots.knots();
-        let controls = curve.homogeneous_control_points();
-        let mut run_start = 0usize;
-        while run_start < knot_entries.len() {
-            let mut run_end = run_start + 1;
-            while run_end < knot_entries.len() && knot_entries[run_end] == knot_entries[run_start] {
-                run_end += 1;
-            }
-            let is_interior = run_start != 0 && run_end != knot_entries.len();
-            if is_interior && run_end - run_start == p + 1 {
-                let left = controls[run_start - 1];
-                let right = controls[run_start];
-                for coordinate in 0..2 {
-                    if left[coordinate] * right[3] != right[coordinate] * left[3] {
-                        return Err(NurbsError::Structure {
-                            what: format!(
-                                "trim loop is discontinuous at full knot break {:?}",
-                                knot_entries[run_start]
-                            ),
-                        });
-                    }
-                }
-            }
-            run_start = run_end;
+    /// Validate this exact loop with bounded cancellation polling and publish
+    /// only a lifetime-bound admitted view.
+    ///
+    /// The gate spans curve/knot admission, both exact endpoint evaluations,
+    /// full-break continuity traversal, and final authority publication.
+    /// Individual exact-rational operations are not preemptible. This method
+    /// does not consume the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous admission's work, allocation, structural,
+    /// numeric-domain, closure, and continuity refusals when they win before
+    /// an observed cancellation.
+    pub fn admit_with_cx<'a>(
+        &'a self,
+        cx: &Cx<'_>,
+    ) -> Result<TrimLoopAdmissionRun<'a>, NurbsError> {
+        let curve = match self.curve.admit_with_cx(cx)? {
+            CurveAdmissionRun::Complete { admitted } => admitted,
+            CurveAdmissionRun::Cancelled => return Ok(TrimLoopAdmissionRun::Cancelled),
+        };
+        let (lo, hi) = curve.knots().domain();
+        let start = match curve.eval_with_cx(lo, cx)? {
+            CurveEvaluationRun::Complete { point } => point,
+            CurveEvaluationRun::Cancelled => return Ok(TrimLoopAdmissionRun::Cancelled),
+        };
+        let end = match curve.eval_with_cx(hi, cx)? {
+            CurveEvaluationRun::Complete { point } => point,
+            CurveEvaluationRun::Cancelled => return Ok(TrimLoopAdmissionRun::Cancelled),
+        };
+        match validate_trim_loop_after_endpoints_with_poll(curve, start, end, || {
+            cx.checkpoint().is_err()
+        })? {
+            TrimLoopValidationOutcome::Complete => Ok(TrimLoopAdmissionRun::Complete {
+                admitted: AdmittedTrimLoop { inner: self },
+            }),
+            TrimLoopValidationOutcome::Cancelled => Ok(TrimLoopAdmissionRun::Cancelled),
         }
-        Ok(AdmittedTrimLoop { inner: self })
     }
 
     /// Validate closure and construct.
@@ -975,6 +1077,138 @@ fn polygon_winding_homogeneous(cpw: &[[Rat; 4]], q: [Rat; 2]) -> i64 {
 mod tests {
     use super::*;
     use crate::basis::KnotVector;
+    use asupersync::types::Budget;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    fn with_trim_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        if cancelled {
+            gate.request();
+        }
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x7A1C_100F,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+
+    fn point_trim_loop() -> TrimLoop {
+        let knots = KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+            .expect("point-loop knots");
+        let curve = NurbsCurve::new(knots, &[[Rat::int(0), Rat::int(0)]; 2], &[Rat::int(1); 2])
+            .expect("point-loop curve");
+        TrimLoop::new(curve).expect("closed point loop")
+    }
+
+    fn long_trim_loop() -> TrimLoop {
+        let mut knots = vec![Rat::int(0); 2];
+        knots.extend((1..=128).map(|numerator| Rat::new(numerator, 129)));
+        knots.extend([Rat::int(1); 2]);
+        let knots = KnotVector::new(knots, 1).expect("long loop knots");
+        let points = vec![[Rat::int(0), Rat::int(0)]; 130];
+        let weights = vec![Rat::int(1); 130];
+        let curve = NurbsCurve::new(knots, &points, &weights).expect("long point-loop curve");
+        TrimLoop::new(curve).expect("closed long point loop")
+    }
+
+    #[test]
+    fn trim_loop_admission_with_cx_is_transactional_and_lifetime_bound() {
+        let trim_loop = point_trim_loop();
+        with_trim_cx(true, |cx| {
+            assert!(matches!(
+                trim_loop
+                    .admit_with_cx(cx)
+                    .expect("valid pre-cancelled loop"),
+                TrimLoopAdmissionRun::Cancelled
+            ));
+        });
+        with_trim_cx(false, |cx| {
+            let TrimLoopAdmissionRun::Complete { admitted } = trim_loop
+                .admit_with_cx(cx)
+                .expect("active trim-loop admission")
+            else {
+                panic!("active trim-loop admission must complete");
+            };
+            assert!(core::ptr::eq(admitted.source(), &trim_loop));
+            assert_eq!(admitted.curve().homogeneous_control_points().len(), 2);
+        });
+
+        let open_curve = NurbsCurve::new(
+            KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+                .expect("open-loop knots"),
+            &[[Rat::int(0), Rat::int(0)], [Rat::int(1), Rat::int(0)]],
+            &[Rat::int(1); 2],
+        )
+        .expect("open curve");
+        let open_loop = TrimLoop { curve: open_curve };
+        with_trim_cx(false, |cx| {
+            assert!(matches!(
+                open_loop.admit_with_cx(cx),
+                Err(NurbsError::Structure { ref what }) if what.contains("close exactly")
+            ));
+        });
+    }
+
+    #[test]
+    fn trim_loop_continuity_scan_cancels_at_a_deterministic_stride() {
+        let trim_loop = long_trim_loop();
+        let curve = trim_loop.curve.admit().expect("admitted long trim curve");
+        let (lo, hi) = curve.knots().domain();
+        let start = curve.eval(lo).expect("long loop start");
+        let end = curve.eval(hi).expect("long loop end");
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = validate_trim_loop_after_endpoints_with_poll(curve, start, end, || {
+                polls += 1;
+                polls == 2
+            })
+            .expect("valid cancellable continuity scan");
+            (outcome, polls)
+        };
+        assert_eq!(run(), run());
+        assert_eq!(run(), (TrimLoopValidationOutcome::Cancelled, 2));
+    }
+
+    #[test]
+    fn trim_loop_admission_final_checkpoint_gates_publication() {
+        let trim_loop = point_trim_loop();
+        let curve = trim_loop.curve.admit().expect("admitted point-loop curve");
+        let (lo, hi) = curve.knots().domain();
+        let start = curve.eval(lo).expect("point-loop start");
+        let end = curve.eval(hi).expect("point-loop end");
+        let mut total_polls = 0usize;
+        assert_eq!(
+            validate_trim_loop_after_endpoints_with_poll(curve, start, end, || {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy continuity scan"),
+            TrimLoopValidationOutcome::Complete
+        );
+        assert!(total_polls >= 2);
+
+        let mut replay_polls = 0usize;
+        assert_eq!(
+            validate_trim_loop_after_endpoints_with_poll(curve, start, end, || {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("publication cancellation"),
+            TrimLoopValidationOutcome::Cancelled
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
 
     #[test]
     fn inverted_box_refusal_precedes_trim_admission() {

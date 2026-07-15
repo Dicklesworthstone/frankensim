@@ -35,7 +35,10 @@ pub use surface::{
     AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun,
     SurfaceInsertionRun, SurfacePartialsRun, SurfaceSpanBoxesRun,
 };
-pub use trim::{AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimmedPatch};
+pub use trim::{
+    AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimLoopAdmissionRun,
+    TrimmedPatch,
+};
 
 use core::fmt;
 
