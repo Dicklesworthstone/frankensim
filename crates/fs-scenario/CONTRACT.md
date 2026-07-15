@@ -162,8 +162,8 @@ flagships.
 `ScenarioError`: `Dimensions { context, expected, got }`, `Frame`,
 `Evaluate`, `Parse { at, what }`. Parse/evaluation errors include deterministic
 budget refusals and allocation-refusal context. `ValidationError` distinguishes
-named limit refusal, work-plan overflow, total-work refusal, and cancellation
-with phase/completed/planned work. Admitted validation produces
+named limit refusal, work-plan overflow, total-work refusal, scratch-allocation
+refusal, and cancellation with phase/completed/planned work. Admitted validation produces
 `Vec<Violation>` (code + what + fix) rather than failing fast — agents get the
 whole repair list at once.
 
@@ -180,13 +180,16 @@ realization is O(samples × harmonics), admitted against explicit sample/work
 budgets before allocation; collection reservations are fallible. Semantic
 validation preflights all public collection families, dynamic signal payload,
 identity bytes, raw flux-checkpoint allocation shape, and deterministic work
-before executing. Its identity/reference phase uses deterministic O(N log N)
-indexes and its frame-cycle traversal is linear after indexing. The explicit
-`Cx` lane polls before preflight, after planning, and after private validation
-before publication; a request observed at those boundaries publishes no
-partial findings. Finer in-phase polling and fallible index/output reservation
-remain active work under `frankensim-sj31i.24`. No loop is admitted from an
-unchecked float-to-size conversion.
+before executing. Net-flux validation streams base and optional-case slices
+without materializing a vector for every effective set; its exact raw
+checkpoint capacity is fallibly reserved before append/sort. Its
+identity/reference phase uses deterministic O(N log N) indexes and its
+frame-cycle traversal is linear after indexing. The explicit `Cx` lane polls
+before preflight, after planning, and after private validation before
+publication; a request observed at those boundaries publishes no partial
+findings. Finer in-phase polling and fallible index/output reservation remain
+active work under `frankensim-sj31i.24`. No loop is admitted from an unchecked
+float-to-size conversion.
 
 ## Unsafe boundary
 
@@ -236,6 +239,8 @@ None.
   cases, combinations/terms, ensembles, contacts, signal scalars, raw flux
   checkpoints, identity bytes, and total work each admit at the exact boundary
   and refuse one unit short; pre-requested cancellation publishes no findings.
+- A focused `scenario` unit regression forces checkpoint-capacity overflow and
+  proves a typed `AllocationRefused` with the scratch vector left empty.
 
 ## No-claim boundaries
 

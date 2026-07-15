@@ -130,6 +130,13 @@ pub enum ValidationError {
         /// Admitted logical units.
         limit: u128,
     },
+    /// A preflighted scratch allocation was refused.
+    AllocationRefused {
+        /// Stable scratch-resource name.
+        resource: &'static str,
+        /// Requested elements.
+        requested: usize,
+    },
     /// Cancellation was observed before any result was published.
     Cancelled {
         /// Deterministic checkpoint phase.
@@ -158,6 +165,13 @@ impl fmt::Display for ValidationError {
             Self::WorkExceeded { requested, limit } => write!(
                 f,
                 "scenario validation work request {requested} exceeds limit {limit}"
+            ),
+            Self::AllocationRefused {
+                resource,
+                requested,
+            } => write!(
+                f,
+                "scenario validation allocation for {requested} {resource} elements was refused"
             ),
             Self::Cancelled {
                 phase,
@@ -409,6 +423,15 @@ fn bc_flux_checkpoints(bc: &BoundaryCondition) -> usize {
         Some(BcValue::Signal(signal)) => signal.net_flux_validation_time_count(),
         _ => 0,
     }
+}
+
+fn reserve_validation_times(times: &mut Vec<f64>, requested: usize) -> Result<(), ValidationError> {
+    times
+        .try_reserve_exact(requested)
+        .map_err(|_| ValidationError::AllocationRefused {
+            resource: "net-flux checkpoints",
+            requested,
+        })
 }
 
 /// The scenario root value.
@@ -727,7 +750,10 @@ impl Scenario {
     #[must_use]
     pub fn validate(&self) -> Vec<Violation> {
         match self.validation_plan(ValidationBudget::default()) {
-            Ok(_) => self.validate_admitted(),
+            Ok(_) => match self.validate_admitted() {
+                Ok(findings) => findings,
+                Err(error) => vec![error.into_violation()],
+            },
             Err(error) => vec![error.into_violation()],
         }
     }
@@ -754,7 +780,7 @@ impl Scenario {
             completed: 0,
             planned: plan.planned_work,
         })?;
-        let findings = self.validate_admitted();
+        let findings = self.validate_admitted()?;
         cx.checkpoint().map_err(|_| ValidationError::Cancelled {
             phase: "pre-publication",
             completed: plan.planned_work,
@@ -763,7 +789,7 @@ impl Scenario {
         Ok(findings)
     }
 
-    fn validate_admitted(&self) -> Vec<Violation> {
+    fn validate_admitted(&self) -> Result<Vec<Violation>, ValidationError> {
         let mut out = Vec::new();
         if self.name.is_empty() {
             out.push(Violation {
@@ -952,8 +978,8 @@ impl Scenario {
                 });
             }
         }
-        self.check_net_flux(&mut out);
-        out
+        self.check_net_flux(&mut out)?;
+        Ok(out)
     }
 
     fn check_bc_frame(bc: &BoundaryCondition, frame_ids: &BTreeSet<u32>, out: &mut Vec<Violation>) {
@@ -974,110 +1000,145 @@ impl Scenario {
     /// inlet declares `incompressible`, the declared mass flows must
     /// balance to tolerance at every deterministic signal checkpoint OR a
     /// pressure outlet must exist to absorb the imbalance.
-    fn check_net_flux(&self, out: &mut Vec<Violation>) {
-        let base: Vec<&BoundaryCondition> = self.base_bcs.iter().collect();
-        let mut sets: Vec<(String, Vec<&BoundaryCondition>)> =
-            vec![("base".to_string(), base.clone())];
+    fn check_net_flux(&self, out: &mut Vec<Violation>) -> Result<(), ValidationError> {
+        self.check_net_flux_set(None, out)?;
         for case in &self.cases {
-            let mut set = base.clone();
-            set.extend(case.bcs.iter());
-            sets.push((format!("base+{}", case.name), set));
+            self.check_net_flux_set(Some(case), out)?;
         }
-        for (label, set) in sets {
-            let declares_incompressible = set
-                .iter()
-                .any(|bc| bc.compatibility == Some(Compat::Incompressible));
-            if !declares_incompressible {
-                continue;
-            }
-            let has_pressure_outlet = set.iter().any(|bc| {
-                bc.physics == Physics::IncompressibleFlow && bc.kind == BcKind::PressureOutlet
-            });
-            let mut validation_times = vec![0.0f64];
-            for bc in &set {
-                if bc.kind == BcKind::MassFlowInlet
-                    && let Some(BcValue::Signal(signal)) = &bc.value
-                {
-                    signal.append_net_flux_validation_times(&mut validation_times);
-                }
-            }
-            validation_times.sort_by(|a, b| a.total_cmp(b));
-            validation_times.dedup_by(|a, b| *a == *b);
+        Ok(())
+    }
 
-            let mut first_imbalance = None;
-            let mut compatibility_failed = false;
-            for time in validation_times {
-                let mut net = 0.0f64;
-                let mut gross = 0.0f64;
-                let mut aggregation_finite = true;
-                let mut evaluation_failed = false;
-                for bc in &set {
-                    match bc.mass_flow_at(time) {
-                        Ok(Some(flux)) => {
-                            net += flux;
-                            gross += flux.abs();
-                            if !flux.is_finite() || !net.is_finite() || !gross.is_finite() {
-                                aggregation_finite = false;
-                                break;
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            out.push(Violation {
-                                code: "flux-evaluation",
-                                what: format!(
-                                    "set {label:?} at t={time:.6e} s: declared mass flow could not be evaluated: {error}"
-                                ),
-                                fix: "repair the total-flow value or use a uniform/time-signal kg/s declaration that is finite at every compatibility checkpoint"
-                                    .to_string(),
-                            });
-                            evaluation_failed = true;
+    fn check_net_flux_set(
+        &self,
+        case: Option<&LoadCase>,
+        out: &mut Vec<Violation>,
+    ) -> Result<(), ValidationError> {
+        let case_bcs: &[BoundaryCondition] = case.map_or(&[], |case| case.bcs.as_slice());
+        let declares_incompressible = self
+            .base_bcs
+            .iter()
+            .chain(case_bcs.iter())
+            .any(|bc| bc.compatibility == Some(Compat::Incompressible));
+        if !declares_incompressible {
+            return Ok(());
+        }
+        let has_pressure_outlet = self.base_bcs.iter().chain(case_bcs.iter()).any(|bc| {
+            bc.physics == Physics::IncompressibleFlow && bc.kind == BcKind::PressureOutlet
+        });
+        let label = case.map_or_else(|| "base".to_string(), |case| format!("base+{}", case.name));
+        let mut requested_times = 1usize;
+        for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+            requested_times = requested_times.checked_add(bc_flux_checkpoints(bc)).ok_or(
+                ValidationError::WorkPlanOverflow {
+                    phase: "net-flux checkpoint materialization",
+                },
+            )?;
+        }
+        let mut validation_times = Vec::new();
+        reserve_validation_times(&mut validation_times, requested_times)?;
+        validation_times.push(0.0);
+        for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+            if bc.kind == BcKind::MassFlowInlet
+                && let Some(BcValue::Signal(signal)) = &bc.value
+            {
+                signal.append_net_flux_validation_times(&mut validation_times);
+            }
+        }
+        debug_assert_eq!(validation_times.len(), requested_times);
+        validation_times.sort_by(|a, b| a.total_cmp(b));
+        validation_times.dedup_by(|a, b| *a == *b);
+
+        let mut first_imbalance = None;
+        let mut compatibility_failed = false;
+        for time in validation_times {
+            let mut net = 0.0f64;
+            let mut gross = 0.0f64;
+            let mut aggregation_finite = true;
+            let mut evaluation_failed = false;
+            for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
+                match bc.mass_flow_at(time) {
+                    Ok(Some(flux)) => {
+                        net += flux;
+                        gross += flux.abs();
+                        if !flux.is_finite() || !net.is_finite() || !gross.is_finite() {
+                            aggregation_finite = false;
                             break;
                         }
                     }
-                }
-                if evaluation_failed {
-                    compatibility_failed = true;
-                    break;
-                }
-                if !aggregation_finite {
-                    out.push(Violation {
-                        code: "flux-aggregation-nonfinite",
-                        what: format!(
-                            "set {label:?} at t={time:.6e} s: declared mass-flow aggregation overflowed or contained a non-finite value"
-                        ),
-                        fix: "rescale or partition the declared mass flows so their finite net/gross balance can be certified"
-                            .to_string(),
-                    });
-                    compatibility_failed = true;
-                    break;
-                }
-                if !has_pressure_outlet
-                    && first_imbalance.is_none()
-                    && gross > 0.0
-                    && net.abs() > FLUX_REL_TOL * gross
-                {
-                    first_imbalance = Some((time, net, gross));
+                    Ok(None) => {}
+                    Err(error) => {
+                        out.push(Violation {
+                            code: "flux-evaluation",
+                            what: format!(
+                                "set {label:?} at t={time:.6e} s: declared mass flow could not be evaluated: {error}"
+                            ),
+                            fix: "repair the total-flow value or use a uniform/time-signal kg/s declaration that is finite at every compatibility checkpoint"
+                                .to_string(),
+                        });
+                        evaluation_failed = true;
+                        break;
+                    }
                 }
             }
-            if compatibility_failed || has_pressure_outlet {
-                // The outlet may absorb every finite per-instant imbalance,
-                // but it cannot make malformed or unevaluable declarations
-                // admissible.
-                continue;
+            if evaluation_failed {
+                compatibility_failed = true;
+                break;
             }
-            if let Some((time, net, gross)) = first_imbalance {
+            if !aggregation_finite {
                 out.push(Violation {
-                    code: "flux-imbalance",
+                    code: "flux-aggregation-nonfinite",
                     what: format!(
-                        "set {label:?} at t={time:.6e} s: declared incompressible but net mass flow is \
-                         {net:+.6e} kg/s over gross {gross:.6e} kg/s with no pressure outlet"
+                        "set {label:?} at t={time:.6e} s: declared mass-flow aggregation overflowed or contained a non-finite value"
                     ),
-                    fix: "balance the declared inlet/outlet mass flows at every instant or add a \
-                          pressure outlet to absorb the imbalance"
+                    fix: "rescale or partition the declared mass flows so their finite net/gross balance can be certified"
                         .to_string(),
                 });
+                compatibility_failed = true;
+                break;
+            }
+            if !has_pressure_outlet
+                && first_imbalance.is_none()
+                && gross > 0.0
+                && net.abs() > FLUX_REL_TOL * gross
+            {
+                first_imbalance = Some((time, net, gross));
             }
         }
+        if compatibility_failed || has_pressure_outlet {
+            // The outlet may absorb every finite per-instant imbalance, but it
+            // cannot make malformed or unevaluable declarations admissible.
+            return Ok(());
+        }
+        if let Some((time, net, gross)) = first_imbalance {
+            out.push(Violation {
+                code: "flux-imbalance",
+                what: format!(
+                    "set {label:?} at t={time:.6e} s: declared incompressible but net mass flow is \
+                     {net:+.6e} kg/s over gross {gross:.6e} kg/s with no pressure outlet"
+                ),
+                fix: "balance the declared inlet/outlet mass flows at every instant or add a \
+                      pressure outlet to absorb the imbalance"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod validation_allocation_tests {
+    use super::{ValidationError, reserve_validation_times};
+
+    #[test]
+    fn checkpoint_capacity_overflow_is_a_typed_refusal() {
+        let mut times = Vec::new();
+        assert!(matches!(
+            reserve_validation_times(&mut times, usize::MAX),
+            Err(ValidationError::AllocationRefused {
+                resource: "net-flux checkpoints",
+                requested: usize::MAX,
+            })
+        ));
+        assert!(times.is_empty());
     }
 }
