@@ -1,9 +1,9 @@
 //! Typed structural morphisms between admitted RD.1a geometries (RD.1b).
 //!
 //! This RD.1b spine admits category identities, generic strict maps, typed
-//! declared chart maps, and finite-complex rank refinements; checks structural
-//! evidence restriction/corestriction; and composes ordered typed primitive
-//! paths with content-addressed lineage. It
+//! declared chart maps, finite-complex rank refinements, and whole-object
+//! inclusion declarations; checks structural evidence restriction/corestriction;
+//! and composes ordered typed primitive paths with content-addressed lineage. It
 //! deliberately cannot mint a non-identity equivalence: a witness digest is
 //! data, not a proof of an inverse, quasi-isomorphism, refinement theorem, or
 //! physical crosswalk.
@@ -108,6 +108,24 @@ impl DerivedComplexRefinementMapIdV1 {
     }
 }
 
+/// Nominal map-artifact identity for one declared whole-object inclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedInclusionMapIdV1([u8; 32]);
+
+impl DerivedInclusionMapIdV1 {
+    /// Construct a nominal inclusion-map artifact identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Caller-supplied primitive map class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivedMorphismKindV1 {
@@ -144,6 +162,13 @@ pub enum DerivedMorphismKindV1 {
         /// Nominal differential-commutation witness; not authenticated here.
         commutation: DerivedWitnessIdV1,
     },
+    /// A whole-object inclusion declaration without containment authority.
+    DeclaredInclusion {
+        /// Nominal declared source-to-target map artifact.
+        map: DerivedInclusionMapIdV1,
+        /// Nominal claimed-containment artifact; not authenticated here.
+        containment: DerivedWitnessIdV1,
+    },
 }
 
 /// Admitted map family. Composition flattens ordered typed primitive lineage.
@@ -157,6 +182,8 @@ pub enum AdmittedDerivedMorphismClassV1 {
     DeclaredChartMapPath,
     /// One or more ordered finite-complex refinement primitives.
     DeclaredComplexRefinementPath,
+    /// One or more ordered whole-object inclusion declarations.
+    DeclaredInclusionPath,
     /// An ordered path containing more than one nonidentity primitive family.
     HeterogeneousPath,
 }
@@ -208,6 +235,19 @@ pub struct DeclaredComplexRefinementPrimitiveV1 {
     pub commutation: DerivedWitnessIdV1,
 }
 
+/// One retained whole-object inclusion declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredInclusionPrimitiveV1 {
+    /// Exact admitted source geometry declared to be included.
+    pub source_geometry: DerivedGeometryIdV1,
+    /// Exact admitted target geometry declared to contain the source.
+    pub target_geometry: DerivedGeometryIdV1,
+    /// Nominal declared inclusion-map artifact.
+    pub map: DerivedInclusionMapIdV1,
+    /// Nominal claimed-containment artifact with zero theorem authority in v1.
+    pub containment: DerivedWitnessIdV1,
+}
+
 /// One typed nonidentity primitive retained in semantic path order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmittedDerivedPrimitiveV1 {
@@ -224,6 +264,8 @@ pub enum AdmittedDerivedPrimitiveV1 {
     DeclaredChartMap(DeclaredChartMapPrimitiveV1),
     /// One declared finite-complex refinement primitive.
     DeclaredComplexRefinement(DeclaredComplexRefinementPrimitiveV1),
+    /// One declared whole-object inclusion primitive.
+    DeclaredInclusion(DeclaredInclusionPrimitiveV1),
 }
 
 impl AdmittedDerivedPrimitiveV1 {
@@ -236,6 +278,7 @@ impl AdmittedDerivedPrimitiveV1 {
             } => *source_geometry,
             Self::DeclaredChartMap(primitive) => primitive.source_geometry,
             Self::DeclaredComplexRefinement(primitive) => primitive.source_geometry,
+            Self::DeclaredInclusion(primitive) => primitive.source_geometry,
         }
     }
 
@@ -248,6 +291,7 @@ impl AdmittedDerivedPrimitiveV1 {
             } => *target_geometry,
             Self::DeclaredChartMap(primitive) => primitive.target_geometry,
             Self::DeclaredComplexRefinement(primitive) => primitive.target_geometry,
+            Self::DeclaredInclusion(primitive) => primitive.target_geometry,
         }
     }
 }
@@ -631,6 +675,11 @@ enum ReceiptClassV1 {
         commutation: DerivedWitnessIdV1,
     },
     CompositeDeclaredComplexRefinement,
+    PrimitiveDeclaredInclusion {
+        map: DerivedInclusionMapIdV1,
+        containment: DerivedWitnessIdV1,
+    },
+    CompositeDeclaredInclusion,
 }
 
 fn is_zero(bytes: &[u8; 32]) -> bool {
@@ -720,6 +769,7 @@ fn evidence_bytes(evidence: DerivedEvidenceTransportV1) -> EvidenceBytesV1 {
 enum ClassBytesV1 {
     Tag([u8; 1]),
     Primitive([u8; 33]),
+    DeclaredInclusion([u8; 65]),
     DeclaredChartMap([u8; 129]),
     DeclaredComplexRefinement([u8; 193]),
 }
@@ -729,6 +779,7 @@ impl ClassBytesV1 {
         match self {
             Self::Tag(bytes) => bytes,
             Self::Primitive(bytes) => bytes,
+            Self::DeclaredInclusion(bytes) => bytes,
             Self::DeclaredChartMap(bytes) => bytes,
             Self::DeclaredComplexRefinement(bytes) => bytes,
         }
@@ -780,6 +831,14 @@ fn class_bytes(class: ReceiptClassV1) -> ClassBytesV1 {
             ClassBytesV1::DeclaredComplexRefinement(bytes)
         }
         ReceiptClassV1::CompositeDeclaredComplexRefinement => ClassBytesV1::Tag([7]),
+        ReceiptClassV1::PrimitiveDeclaredInclusion { map, containment } => {
+            let mut bytes = [0_u8; 65];
+            bytes[0] = 8;
+            bytes[1..33].copy_from_slice(map.as_bytes());
+            bytes[33..65].copy_from_slice(containment.as_bytes());
+            ClassBytesV1::DeclaredInclusion(bytes)
+        }
+        ReceiptClassV1::CompositeDeclaredInclusion => ClassBytesV1::Tag([9]),
     }
 }
 
@@ -1308,11 +1367,44 @@ fn validate_morphism_class(
                 chart_primitive: None,
             })
         }
+        (
+            DerivedMorphismKindV1::DeclaredInclusion { map, containment },
+            DerivedEquivalenceBoundaryV1::NoClaim { artifact },
+        ) => {
+            for (bytes, field) in [
+                (map.as_bytes(), "inclusion-map"),
+                (containment.as_bytes(), "inclusion-containment"),
+                (artifact.as_bytes(), "no-equivalence-claim"),
+            ] {
+                if is_zero(bytes) {
+                    return Err(DerivedMorphismErrorV1::MissingIdentity { field });
+                }
+            }
+            if ir.evidence == DerivedEvidenceTransportV1::Identity {
+                return Err(DerivedMorphismErrorV1::EvidenceOrientationMismatch);
+            }
+            shared_nonidentity_compatibility(source, target)?;
+            let primitive = DeclaredInclusionPrimitiveV1 {
+                source_geometry: source.id,
+                target_geometry: target.id,
+                map,
+                containment,
+            };
+            Ok(ValidatedMorphismClassV1 {
+                admitted: AdmittedDerivedMorphismClassV1::DeclaredInclusionPath,
+                receipt: ReceiptClassV1::PrimitiveDeclaredInclusion { map, containment },
+                no_claim: Some(artifact),
+                chart_path: None,
+                primitive: Some(AdmittedDerivedPrimitiveV1::DeclaredInclusion(primitive)),
+                chart_primitive: None,
+            })
+        }
         (DerivedMorphismKindV1::Identity, _) => Err(DerivedMorphismErrorV1::InvalidIdentity),
         (
             DerivedMorphismKindV1::Strict { .. }
             | DerivedMorphismKindV1::DeclaredChartMap { .. }
-            | DerivedMorphismKindV1::DeclaredComplexRefinement { .. },
+            | DerivedMorphismKindV1::DeclaredComplexRefinement { .. }
+            | DerivedMorphismKindV1::DeclaredInclusion { .. },
             _,
         ) => Err(DerivedMorphismErrorV1::EquivalenceLaundering),
     }
@@ -1432,14 +1524,15 @@ fn admit_between_endpoints(
     })
 }
 
-/// Admit one primitive identity, strict map, chart map, or complex refinement.
+/// Admit one primitive identity, strict map, chart map, complex refinement, or inclusion.
 ///
 /// This validates structural endpoint compatibility, caller-declared evidence
 /// rank monotonicity, and family-specific chart or finite graded-rank envelopes.
 /// Nominal evidence/map/witness identities are retained but not authenticated.
 /// No primitive can mint equivalence, inverse, quasi-isomorphism, chart-map
-/// invertibility, overlap coverage, chain commutation, injectivity, numerical
-/// error reduction, physical correspondence, or theorem authority.
+/// invertibility, overlap coverage, chain commutation, subset containment,
+/// injectivity, numerical error reduction, physical correspondence, or theorem
+/// authority.
 ///
 /// # Errors
 /// Returns a typed refusal for endpoint/model/category/coefficient/frame/unit,
@@ -1687,6 +1780,14 @@ fn compose_class(
             ReceiptClassV1::CompositeDeclaredComplexRefinement,
             None,
         )),
+        (
+            AdmittedDerivedMorphismClassV1::DeclaredInclusionPath,
+            AdmittedDerivedMorphismClassV1::DeclaredInclusionPath,
+        ) => Ok((
+            AdmittedDerivedMorphismClassV1::DeclaredInclusionPath,
+            ReceiptClassV1::CompositeDeclaredInclusion,
+            None,
+        )),
         (AdmittedDerivedMorphismClassV1::Identity, _)
         | (_, AdmittedDerivedMorphismClassV1::Identity) => {
             Err(DerivedMorphismErrorV1::CompositionClassMismatch)
@@ -1780,8 +1881,10 @@ fn compose_evidence(
 /// semantic order, so parenthesization does not change the receipt. Adjacent
 /// declared chart maps require an exact middle chart, and adjacent complex
 /// refinements require exact complex and resolution seams, even inside
-/// heterogeneous paths. Identity arrows are unique per geometry and
-/// rank-neutral, so they are exact composition units.
+/// heterogeneous paths. Inclusion declarations compose only through the exact
+/// middle geometry and retain factor-local map/containment artifacts without
+/// asserting transitive containment. Identity arrows are unique per geometry
+/// and rank-neutral, so they are exact composition units.
 ///
 /// # Errors
 /// Returns a typed refusal for endpoint, chart/refinement/variance/evidence
@@ -2117,6 +2220,21 @@ mod tests {
         ir
     }
 
+    fn inclusion_ir(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        artifact_seed: u8,
+        input_rank: ColorRank,
+        output_rank: ColorRank,
+    ) -> DerivedMorphismIrV1 {
+        let mut ir = strict_ir(source, target, artifact_seed, input_rank, output_rank);
+        ir.kind = DerivedMorphismKindV1::DeclaredInclusion {
+            map: DerivedInclusionMapIdV1::from_bytes([artifact_seed.wrapping_add(1); 32]),
+            containment: DerivedWitnessIdV1::from_bytes([artifact_seed.wrapping_add(2); 32]),
+        };
+        ir
+    }
+
     fn restriction_ir(
         source: GeometryEndpointV1<'_>,
         target: GeometryEndpointV1<'_>,
@@ -2213,6 +2331,23 @@ mod tests {
         .expect("valid declared finite-complex refinement")
     }
 
+    fn admit_inclusion(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        artifact_seed: u8,
+        input_rank: ColorRank,
+        output_rank: ColorRank,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedMorphismV1 {
+        admit_between_endpoints(
+            inclusion_ir(source, target, artifact_seed, input_rank, output_rank),
+            source,
+            target,
+            cx,
+        )
+        .expect("valid declared inclusion")
+    }
+
     fn try_complex_refinement(
         source: GeometryEndpointV1<'_>,
         target: GeometryEndpointV1<'_>,
@@ -2267,6 +2402,7 @@ mod tests {
             (ReceiptClassV1::CompositeDeclaredChartMap, 4),
             (ReceiptClassV1::CompositeHeterogeneous, 5),
             (ReceiptClassV1::CompositeDeclaredComplexRefinement, 7),
+            (ReceiptClassV1::CompositeDeclaredInclusion, 9),
         ] {
             assert_eq!(class_bytes(class).as_slice(), &[expected]);
         }
@@ -2320,6 +2456,15 @@ mod tests {
                     .all(|byte| *byte == expected)
             );
         }
+
+        let inclusion = class_bytes(ReceiptClassV1::PrimitiveDeclaredInclusion {
+            map: DerivedInclusionMapIdV1::from_bytes([18; 32]),
+            containment: DerivedWitnessIdV1::from_bytes([19; 32]),
+        });
+        assert_eq!(inclusion.as_slice().len(), 65);
+        assert_eq!(inclusion.as_slice()[0], 8);
+        assert!(inclusion.as_slice()[1..33].iter().all(|byte| *byte == 18));
+        assert!(inclusion.as_slice()[33..65].iter().all(|byte| *byte == 19));
     }
 
     #[test]
@@ -3459,6 +3604,266 @@ mod tests {
                     AdmittedDerivedPrimitiveV1::DeclaredComplexRefinement(_)
                 ]
             ));
+        });
+    }
+
+    #[test]
+    fn declared_inclusion_receipt_binds_nominal_artifacts_without_containment_authority() {
+        with_cx(false, |cx| {
+            let source = endpoint(180);
+            let target = endpoint(181);
+            let base_ir = inclusion_ir(
+                source,
+                target,
+                20,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+            );
+            let base = admit_between_endpoints(base_ir, source, target, cx)
+                .expect("base inclusion declaration");
+            let replay = admit_between_endpoints(base_ir, source, target, cx)
+                .expect("replayed inclusion declaration");
+            assert_eq!(base, replay);
+            assert_eq!(
+                base.primitive_path(),
+                &[AdmittedDerivedPrimitiveV1::DeclaredInclusion(
+                    DeclaredInclusionPrimitiveV1 {
+                        source_geometry: source.id,
+                        target_geometry: target.id,
+                        map: DerivedInclusionMapIdV1::from_bytes([21; 32]),
+                        containment: DerivedWitnessIdV1::from_bytes([22; 32]),
+                    }
+                )]
+            );
+
+            let mut strict_ir = strict_ir(
+                source,
+                target,
+                21,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+            );
+            strict_ir.equivalence = base_ir.equivalence;
+            let strict = admit_between_endpoints(strict_ir, source, target, cx)
+                .expect("strict comparator with the same no-claim artifact");
+            assert_eq!(base.evidence(), strict.evidence());
+            assert_eq!(base.no_equivalence_claims(), strict.no_equivalence_claims());
+            assert_ne!(base.id(), strict.id(), "map families require distinct tags");
+
+            let mut changed_map = base_ir;
+            if let DerivedMorphismKindV1::DeclaredInclusion { map, .. } = &mut changed_map.kind {
+                *map = DerivedInclusionMapIdV1::from_bytes([23; 32]);
+            }
+            let changed_map = admit_between_endpoints(changed_map, source, target, cx)
+                .expect("changed inclusion map remains a declaration");
+            assert_ne!(base.id(), changed_map.id());
+
+            let mut changed_containment = base_ir;
+            if let DerivedMorphismKindV1::DeclaredInclusion { containment, .. } =
+                &mut changed_containment.kind
+            {
+                *containment = DerivedWitnessIdV1::from_bytes([24; 32]);
+            }
+            let changed_containment =
+                admit_between_endpoints(changed_containment, source, target, cx)
+                    .expect("changed containment artifact remains a declaration");
+            assert_ne!(base.id(), changed_containment.id());
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Independent mutations for every inclusion authority boundary.
+    fn declared_inclusion_refuses_missing_ids_and_authority_laundering() {
+        with_cx(false, |cx| {
+            let source = endpoint(182);
+            let target = endpoint(183);
+            let base = inclusion_ir(
+                source,
+                target,
+                30,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+            );
+
+            let mut zero_map = base;
+            if let DerivedMorphismKindV1::DeclaredInclusion { map, .. } = &mut zero_map.kind {
+                *map = DerivedInclusionMapIdV1::from_bytes([0; 32]);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_map, source, target, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity {
+                    field: "inclusion-map"
+                })
+            );
+
+            let mut zero_containment = base;
+            if let DerivedMorphismKindV1::DeclaredInclusion { containment, .. } =
+                &mut zero_containment.kind
+            {
+                *containment = DerivedWitnessIdV1::from_bytes([0; 32]);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_containment, source, target, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity {
+                    field: "inclusion-containment"
+                })
+            );
+
+            let mut zero_no_claim = base;
+            if let DerivedEquivalenceBoundaryV1::NoClaim { artifact } =
+                &mut zero_no_claim.equivalence
+            {
+                *artifact = DerivedNoClaimIdV1::from_bytes([0; 32]);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_no_claim, source, target, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity {
+                    field: "no-equivalence-claim"
+                })
+            );
+
+            let mut identity_evidence = base;
+            identity_evidence.evidence = DerivedEvidenceTransportV1::Identity;
+            assert_eq!(
+                admit_between_endpoints(identity_evidence, source, target, cx),
+                Err(DerivedMorphismErrorV1::EvidenceOrientationMismatch)
+            );
+
+            let mut self_identity_evidence = inclusion_ir(
+                source,
+                source,
+                31,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+            );
+            self_identity_evidence.evidence = DerivedEvidenceTransportV1::Identity;
+            assert_eq!(
+                admit_between_endpoints(self_identity_evidence, source, source, cx),
+                Err(DerivedMorphismErrorV1::EvidenceOrientationMismatch)
+            );
+
+            let mut laundering = base;
+            laundering.equivalence = DerivedEquivalenceBoundaryV1::IdentityOnly;
+            assert_eq!(
+                admit_between_endpoints(laundering, source, target, cx),
+                Err(DerivedMorphismErrorV1::EquivalenceLaundering)
+            );
+
+            let incompatible_target = GeometryEndpointV1 {
+                model_version: DerivedModelVersionIdV1::from_bytes([5; 32]),
+                ..target
+            };
+            assert_eq!(
+                admit_between_endpoints(base, source, incompatible_target, cx),
+                Err(DerivedMorphismErrorV1::ModelVersionMismatch)
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Homogeneous and mixed inclusion composition laws.
+    fn declared_inclusions_compose_associatively_as_typed_paths() {
+        with_cx(false, |cx| {
+            let x = endpoint(184);
+            let y = endpoint(185);
+            let z = endpoint(186);
+            let w = endpoint(187);
+            let f = admit_inclusion(x, y, 40, ColorRank::Verified, ColorRank::Validated, cx);
+            let g = admit_inclusion(y, z, 41, ColorRank::Validated, ColorRank::Estimated, cx);
+            let h = admit_inclusion(z, w, 42, ColorRank::Estimated, ColorRank::Estimated, cx);
+            let fg = compose_derived_morphisms_v1(&f, &g, cx).expect("f then g");
+            let gh = compose_derived_morphisms_v1(&g, &h, cx).expect("g then h");
+            let left = compose_derived_morphisms_v1(&fg, &h, cx).expect("(fg)h");
+            let right = compose_derived_morphisms_v1(&f, &gh, cx).expect("f(gh)");
+            assert_eq!(left, right);
+            assert_eq!(
+                left.class(),
+                AdmittedDerivedMorphismClassV1::DeclaredInclusionPath
+            );
+            assert_eq!(
+                left.primitive_path(),
+                &[
+                    AdmittedDerivedPrimitiveV1::DeclaredInclusion(DeclaredInclusionPrimitiveV1 {
+                        source_geometry: x.id,
+                        target_geometry: y.id,
+                        map: DerivedInclusionMapIdV1::from_bytes([41; 32]),
+                        containment: DerivedWitnessIdV1::from_bytes([42; 32]),
+                    },),
+                    AdmittedDerivedPrimitiveV1::DeclaredInclusion(DeclaredInclusionPrimitiveV1 {
+                        source_geometry: y.id,
+                        target_geometry: z.id,
+                        map: DerivedInclusionMapIdV1::from_bytes([42; 32]),
+                        containment: DerivedWitnessIdV1::from_bytes([43; 32]),
+                    },),
+                    AdmittedDerivedPrimitiveV1::DeclaredInclusion(DeclaredInclusionPrimitiveV1 {
+                        source_geometry: z.id,
+                        target_geometry: w.id,
+                        map: DerivedInclusionMapIdV1::from_bytes([43; 32]),
+                        containment: DerivedWitnessIdV1::from_bytes([44; 32]),
+                    },),
+                ]
+            );
+            assert_eq!(left.primitive_factors(), &[f.id(), g.id(), h.id()]);
+            assert_eq!(
+                left.no_equivalence_claims(),
+                &[
+                    DerivedNoClaimIdV1::from_bytes([104; 32]),
+                    DerivedNoClaimIdV1::from_bytes([105; 32]),
+                    DerivedNoClaimIdV1::from_bytes([106; 32]),
+                ]
+            );
+            assert_eq!(
+                compose_derived_morphisms_v1(&admit_identity(x, cx), &f, cx)
+                    .expect("inclusion left identity"),
+                f
+            );
+            assert_eq!(
+                compose_derived_morphisms_v1(&h, &admit_identity(w, cx), cx)
+                    .expect("inclusion right identity"),
+                h
+            );
+            assert_eq!(
+                compose_derived_morphisms_v1(&f, &h, cx),
+                Err(DerivedMorphismErrorV1::CompositionEndpointMismatch)
+            );
+
+            let strict_xy = admit_strict(x, y, 50, ColorRank::Verified, ColorRank::Validated, cx);
+            let inclusion_yz =
+                admit_inclusion(y, z, 51, ColorRank::Validated, ColorRank::Estimated, cx);
+            let strict_zw = admit_strict(z, w, 52, ColorRank::Estimated, ColorRank::Estimated, cx);
+            let strict_inclusion = compose_derived_morphisms_v1(&strict_xy, &inclusion_yz, cx)
+                .expect("strict then inclusion");
+            let inclusion_strict = compose_derived_morphisms_v1(&inclusion_yz, &strict_zw, cx)
+                .expect("inclusion then strict");
+            let mixed_left = compose_derived_morphisms_v1(&strict_inclusion, &strict_zw, cx)
+                .expect("(strict-inclusion)-strict");
+            let mixed_right = compose_derived_morphisms_v1(&strict_xy, &inclusion_strict, cx)
+                .expect("strict-(inclusion-strict)");
+            assert_eq!(mixed_left, mixed_right);
+            assert_eq!(
+                mixed_left.class(),
+                AdmittedDerivedMorphismClassV1::HeterogeneousPath
+            );
+            assert!(matches!(
+                mixed_left.primitive_path(),
+                [
+                    AdmittedDerivedPrimitiveV1::Strict { .. },
+                    AdmittedDerivedPrimitiveV1::DeclaredInclusion(_),
+                    AdmittedDerivedPrimitiveV1::Strict { .. }
+                ]
+            ));
+            assert_eq!(
+                mixed_left.primitive_factors(),
+                &[strict_xy.id(), inclusion_yz.id(), strict_zw.id()]
+            );
+            assert_eq!(
+                mixed_left.no_equivalence_claims(),
+                &[
+                    DerivedNoClaimIdV1::from_bytes([114; 32]),
+                    DerivedNoClaimIdV1::from_bytes([115; 32]),
+                    DerivedNoClaimIdV1::from_bytes([116; 32]),
+                ]
+            );
         });
     }
 

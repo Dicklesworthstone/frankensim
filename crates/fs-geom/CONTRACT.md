@@ -181,6 +181,14 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   Homogeneous refinement paths compose only across exact middle complex and
   resolution IDs; the same seam remains enforced when a refinement is adjacent
   to another refinement inside a heterogeneous path.
+  `DeclaredInclusion` is a distinct whole-object directed-map family. It binds
+  one nominal declared inclusion-map ID and one nominal claimed-containment
+  artifact while reusing the exact subject, immutable model version, category,
+  coefficient, frame, unit, evidence-orientation/rank, and no-equivalence
+  gates. Admission deliberately does not infer containment from chart,
+  constraint, complex, local-model, or stratum collection syntax. Homogeneous
+  inclusion paths compose through the exact middle geometry; mixed paths retain
+  each inclusion primitive and its factor-local artifacts.
   Evidence transport is explicitly contravariant restriction or covariant
   balance corestriction and binds exact input/output geometry identities plus
   nominal caller-declared input/output evidence-artifact identities and ranks.
@@ -189,9 +197,9 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   identity/rank seam, flattens primitive factors and no-equivalence artifacts in
   semantic order, and produces an associative content-addressed receipt with
   exact endpoint identities and ordered typed primitive lineage. Homogeneous
-  strict, chart, and complex-refinement composites retain family-specific class
-  encoding; a distinct heterogeneous composite tag plus the flattened
-  primitive-factor identities binds mixed-family order. Immediate composite
+  strict, chart, complex-refinement, and inclusion composites retain family-
+  specific class encoding; a distinct heterogeneous composite tag plus the
+  flattened primitive-factor identities binds mixed-family order. Immediate composite
   operand IDs are intentionally
   not encoded because that would make the receipt depend on parenthesization.
   Only an identity arrow carries identity equivalence; every nonidentity
@@ -200,9 +208,10 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   declarations with zero payload authority: they do not authenticate evidence,
   establish payload preservation or validity-domain inclusion, prove theorem
   truth, or establish physical equivalence. Invertible chart transitions,
-  geometric/stratified refinements, inclusions, quasi-isomorphism witnesses,
-  constructible maps, spans/correspondences, and L6 Machine-IR crosswalks remain
-  typed RD.1b follow-ups rather than being represented as strict maps.
+  geometric/stratified refinements, authenticated subobject inclusions,
+  quasi-isomorphism witnesses, constructible maps, spans/correspondences, and L6
+  Machine-IR crosswalks remain typed RD.1b follow-ups rather than being
+  represented as strict maps.
 
 - `exit_path` module (RD.X1, `[M]`, behind `derived-geometry`) admits a bounded,
   executable statement language for maximal exit/entrance-path approximation
@@ -524,6 +533,11 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    commutation IDs. Homogeneous refinement paths require exact complex and
    resolution seams; heterogeneous paths preserve that obligation for adjacent
    refinement primitives.
+   Primitive whole-object inclusion receipts bind nominal declared-map and
+   claimed-containment IDs under a separate family tag. Homogeneous inclusion
+   paths require the exact geometry seam already enforced for every arrow;
+   composition retains ordered factor declarations but proves no containment
+   theorem.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -548,9 +562,10 @@ publish no admitted token.
 RD.1b uses `DerivedMorphismErrorV1` for schema/endpoint/convention defects,
 model-version drift, chart and complex ownership/shape defects, structural rank-
 envelope or truncation regression, evidence orientation, missing nominal
-artifact IDs, declared-rank strengthening, equivalence laundering, typed chart/
-refinement/evidence seams, bounded lineage, allocation, cancellation, and
-canonical identity failures. Refusal publishes no admitted morphism.
+artifact IDs (including inclusion map/containment declarations), declared-rank
+strengthening, equivalence laundering, typed chart/refinement/evidence seams,
+bounded lineage, allocation, cancellation, and canonical identity failures.
+Refusal publishes no admitted morphism.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -576,6 +591,10 @@ Finite-complex refinement primitives use a distinct tag and bind source/target
 complex, resolution, prolongation, and commutation IDs; homogeneous composites
 use another distinct tag while flattened factors preserve parenthesization-
 independent identity.
+Whole-object inclusion primitives likewise use a distinct tag and bind exact
+nominal map and containment-artifact IDs; their homogeneous composite tag plus
+flattened primitive factors preserves family, order, and parenthesization
+without authenticating either artifact.
 
 ## Cancellation behavior
 Chart evaluation and production sampling paths take `&Cx`.
@@ -682,6 +701,10 @@ Finite-complex refinement coverage adds exact selector/resolution ownership,
 role/chart/rank/quantity/truncation/progress refusals, nominal-artifact receipt
 movement, homogeneous associativity and identity, exact refinement seams, and
 seam retention across heterogeneous parenthesization.
+Whole-object inclusion coverage adds frozen family tags, nominal map and
+containment receipt movement, strict-family domain separation, missing-ID and
+authority-laundering refusals, inherited model-version compatibility, exact
+identity/endpoint laws, homogeneous associativity, and mixed-family typed order.
 `tests/exit_path.rs` supplies RD.X1 G0/G3 examples and a bounded-cancellation
 regression: regular-cell poset sufficiency, cone/cusp groupoid-enriched
 one-category fallback, circular-stratum local systems, finite-versus-full
@@ -778,14 +801,23 @@ claim those stronger G4/G5 results.
   reduction, convergence, constraints, strata, physics, or evidence authority
   are preserved. Nonzero prolongation and commutation IDs name nominal artifacts
   only, and `IdentityOnly` is refused.
+- `DeclaredInclusion` is a typed whole-object inclusion declaration, not a
+  containment certificate. It proves no actual subset or validity-domain
+  inclusion; map execution or payload truth; injectivity, monicity, embedding,
+  image characterization, dimension/codimension relation, or preservation of
+  charts, constraints, strata, local models, complexes, topology, physics, or
+  evidence. Composition retains an ordered path of nominal factor declarations
+  but does not prove transitive containment. Nonzero map and containment IDs are
+  nominal only, and `IdentityOnly` is refused.
 - The v1 sublanguage containing identities, generic strict maps, and declared
-  chart maps and finite-complex refinements closes mixed map-family composition
-  through ordered typed heterogeneous paths whenever its exact geometry,
-  evidence, adjacent-chart, and adjacent-refinement seams pass. This removes the
-  implemented-family closure gap but does not promote the full RD.1b category
-  claim. Inclusions, geometric/stratified refinements, correspondences, scoped
-  equivalences, and crosswalks still need distinct primitives and their own seam
-  laws before that broader claim is promotable.
+  chart maps, finite-complex refinements, and whole-object inclusion declarations
+  closes mixed map-family composition through ordered typed heterogeneous paths
+  whenever its exact geometry, evidence, adjacent-chart, and adjacent-refinement
+  seams pass. This removes the implemented-family closure gap but does not
+  promote the full RD.1b category claim. Authenticated subobject inclusions,
+  geometric/stratified refinements, correspondences, scoped equivalences, and
+  crosswalks still need distinct primitives and their own seam laws before that
+  broader claim is promotable.
 - V1 refuses unbounded and infinite-dimensional local models, opaque external
   analytic functions, unknown compactness/regularity, and infinite computation.
   These are admitted-class limits, not claims that the excluded mathematics is
