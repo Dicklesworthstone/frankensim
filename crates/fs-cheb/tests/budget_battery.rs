@@ -96,10 +96,11 @@ fn cb_001_admission_boundaries() {
             ..
         })
     ));
-    // usize::MAX degree: checked next_power_of_two refuses, no alloc.
+    // usize::MAX degree: the conservative cap or checked arithmetic refuses,
+    // depending on the caller's explicit cap schedule; neither path allocates.
     assert!(matches!(
         admit_adaptive_build(0.0, 1.0, usize::MAX, 16, &ChebBudget::default()),
-        Err(ChebError::Overflow { .. })
+        Err(ChebError::CapExceeded { .. }) | Err(ChebError::Overflow { .. })
     ));
     // Eigensolve: usize::MAX dimension refuses before allocation.
     assert!(matches!(
