@@ -1285,3 +1285,132 @@ fn g5_candidate_identity_binds_mode_budget_and_every_stream_field() {
     identities.dedup();
     assert_eq!(identities.len(), variant_count);
 }
+
+fn normalized_contract_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| *character != '`')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contract_drift(
+    contract: &str,
+    section: &str,
+    live_symbol: &str,
+    required_fact: &str,
+) -> Option<String> {
+    (!normalized_contract_text(contract).contains(&normalized_contract_text(required_fact))).then(
+        || {
+            format!(
+                "contract drift: section {section:?} is stale for live symbol {live_symbol:?}; missing fact {required_fact:?}"
+            )
+        },
+    )
+}
+
+#[track_caller]
+fn assert_contract_fact(contract: &str, section: &str, live_symbol: &str, required_fact: &str) {
+    if let Some(diagnostic) = contract_drift(contract, section, live_symbol, required_fact) {
+        panic!("{diagnostic}");
+    }
+}
+
+#[test]
+fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
+    let contract = include_str!("../CONTRACT.md");
+    let manifest = include_str!("../Cargo.toml");
+    let source = include_str!("../src/lib.rs");
+
+    for dependency in ["fs-blake3", "fs-evidence", "fs-exec", "fs-ivl"] {
+        assert!(
+            manifest.contains(&format!("{dependency} = {{ path =")),
+            "contract lint fixture is stale: manifest no longer declares {dependency:?}"
+        );
+        assert_contract_fact(contract, "Purpose and layer", dependency, dependency);
+    }
+
+    for (section, live_symbol, contract_fact) in [
+        (
+            "Public types and semantics",
+            "pub fn misfit(",
+            "misfit(&Belief, &[Observation], &Cx) -> Result<f64, AssimError>",
+        ),
+        (
+            "Public types and semantics",
+            "pub fn assimilate(prior: &Belief, obs: &Observation, cx: &Cx<'_>) -> Result<Belief, AssimError>",
+            "assimilate(&Belief, &Observation, &Cx)",
+        ),
+        (
+            "Public types and semantics",
+            "pub fn assimilate_colored(",
+            "assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx)",
+        ),
+        (
+            "Invariants",
+            "const CANDIDATE_ID_PREFIX: &str = \"assimilation-candidate:v4:\";",
+            "assimilation-candidate:v4:<64 lowercase hex>",
+        ),
+        (
+            "Invariants",
+            "const PSD_ADMISSION_POLICY_ID: &str = \"exact-2x2-interval-schur:v1\";",
+            "exact-2x2-interval-schur:v1",
+        ),
+        (
+            "Invariants",
+            "const POLL_POLICY_ID: &str = \"fixed-stride:v3\";",
+            "fixed-stride:v3",
+        ),
+        (
+            "Invariants",
+            "const SCALAR_POLL_STRIDE: u128 = 256;",
+            "scalar stride 256",
+        ),
+        (
+            "Invariants",
+            "const RECORD_POLL_STRIDE: u128 = 16;",
+            "record stride 16",
+        ),
+        (
+            "Invariants",
+            "const CANONICAL_COMPARE_BYTE_POLL_STRIDE: u128 = 1_024;",
+            "canonical-comparison byte stride 1,024",
+        ),
+        (
+            "Invariants",
+            "const HASH_BYTE_POLL_STRIDE: usize = 1_024;",
+            "identity-hash byte stride 1,024",
+        ),
+    ] {
+        assert!(
+            normalized_contract_text(source).contains(&normalized_contract_text(live_symbol)),
+            "contract lint fixture is stale: live symbol {live_symbol:?} moved or changed"
+        );
+        assert_contract_fact(contract, section, live_symbol, contract_fact);
+    }
+
+    for required_fact in [
+        "## Cancellation behavior",
+        "G0/G3/G4/G5",
+        "exact quota sweeps through validation, ordering, update, PSD, hash, and commit",
+        "## No-claim boundaries",
+        "not transform covariance",
+        "not cross-ISA bit stability",
+        "exposes no promotion API",
+    ] {
+        assert_contract_fact(
+            contract,
+            "Cancellation behavior / No-claim boundaries",
+            "dependency-facing contract",
+            required_fact,
+        );
+    }
+
+    let controlled = contract_drift("", "Invariants", "POLL_POLICY_ID", "fixed-stride:v3")
+        .expect("controlled drift must produce a diagnostic");
+    assert_eq!(
+        controlled,
+        "contract drift: section \"Invariants\" is stale for live symbol \"POLL_POLICY_ID\"; missing fact \"fixed-stride:v3\""
+    );
+}

@@ -101,7 +101,7 @@ linear-Gaussian core of weak-constraint assimilation.
   identity (all four `StreamKey` fields), every ambient budget field (deadline
   presence/value, poll quota, cost-quota presence/value, and priority), the
   effective poll-quota slice, every component of the checked work plan, and
-  poll policy `fixed-stride:v2` with scalar stride 256, record stride 16,
+  poll policy `fixed-stride:v3` with scalar stride 256, record stride 16,
   canonical-comparison byte stride 1,024,
   and identity-hash byte stride 1,024. The work plan itself has no separately
   claimed public “v4” version.

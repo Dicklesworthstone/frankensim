@@ -687,3 +687,116 @@ fn estimator_identity_canonicalizes_signed_zero() {
 
     assert_eq!(estimator_identity(&positive), estimator_identity(&negative));
 }
+
+fn normalized_contract_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| *character != '`')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contract_drift(
+    contract: &str,
+    section: &str,
+    live_symbol: &str,
+    required_fact: &str,
+) -> Option<String> {
+    (!normalized_contract_text(contract).contains(&normalized_contract_text(required_fact))).then(
+        || {
+            format!(
+                "contract drift: section {section:?} is stale for live symbol {live_symbol:?}; missing fact {required_fact:?}"
+            )
+        },
+    )
+}
+
+#[track_caller]
+fn assert_contract_fact(contract: &str, section: &str, live_symbol: &str, required_fact: &str) {
+    if let Some(diagnostic) = contract_drift(contract, section, live_symbol, required_fact) {
+        panic!("{diagnostic}");
+    }
+}
+
+#[test]
+fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
+    let contract = include_str!("../CONTRACT.md");
+    let manifest = include_str!("../Cargo.toml");
+    let source = include_str!("../src/lib.rs");
+
+    for dependency in ["fs-blake3", "fs-evidence", "fs-exec", "fs-ivl"] {
+        assert!(
+            manifest.contains(&format!("{dependency} = {{ path =")),
+            "contract lint fixture is stale: manifest no longer declares {dependency:?}"
+        );
+        assert_contract_fact(contract, "Purpose and layer", dependency, dependency);
+    }
+
+    for (section, live_symbol, contract_fact) in [
+        (
+            "Public types and semantics",
+            "pub fn register(fiducials: &[Fiducial], cx: &fs_exec::Cx<'_>) -> Result<Registration, RegError>",
+            "register(&[Fiducial], &fs_exec::Cx<'_>) -> Result<Registration, RegError>",
+        ),
+        (
+            "Public types and semantics",
+            "pub fn as_built_diff(",
+            "as_built_diff(&Registration, design, scanned, design_tolerance, measurement_noise, calibration_candidate, &fs_exec::Cx<'_>)",
+        ),
+        (
+            "Invariants",
+            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v4\";",
+            "asbuilt-diff-v4 identity",
+        ),
+        (
+            "Invariants",
+            "pub const AS_BUILT_WORK_PLAN_VERSION: u32 = 2;",
+            "work-plan v2",
+        ),
+        (
+            "Invariants",
+            "pub const AS_BUILT_POLL_POLICY_VERSION: u32 = 2;",
+            "poll-policy v2",
+        ),
+        (
+            "Cancellation behavior",
+            "pub const AS_BUILT_POLL_STRIDE_POINTS: usize = 256;",
+            "fixed 256-point stride",
+        ),
+    ] {
+        assert!(
+            normalized_contract_text(source).contains(&normalized_contract_text(live_symbol)),
+            "contract lint fixture is stale: live symbol {live_symbol:?} moved or changed"
+        );
+        assert_contract_fact(contract, section, live_symbol, contract_fact);
+    }
+
+    for required_fact in [
+        "## Cancellation behavior",
+        "G4 pre-cancel, exact stride-boundary, mid-phase, and publication cancellation",
+        "G5 execution/work/poll identity separation",
+        "## No-claim boundaries",
+        "not transform covariance or a pointwise spatial uncertainty bound",
+        "not an instruction count or a guarantee about wall-clock latency, memory pressure, deadline enforcement",
+    ] {
+        assert_contract_fact(
+            contract,
+            "Cancellation behavior / No-claim boundaries",
+            "dependency-facing contract",
+            required_fact,
+        );
+    }
+
+    let controlled = contract_drift(
+        "",
+        "Cancellation behavior",
+        "register(..., &fs_exec::Cx<'_>)",
+        "final checkpoint gates publication",
+    )
+    .expect("controlled drift must produce a diagnostic");
+    assert_eq!(
+        controlled,
+        "contract drift: section \"Cancellation behavior\" is stale for live symbol \"register(..., &fs_exec::Cx<'_>)\"; missing fact \"final checkpoint gates publication\""
+    );
+}

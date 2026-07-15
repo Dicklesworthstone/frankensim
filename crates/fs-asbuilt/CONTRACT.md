@@ -93,8 +93,8 @@ uses a closed-form 2-D rigid fit (no SVD).
   and final-publication checkpoints; cancellation never publishes a partial
   registration or diff.
 - The `asbuilt-diff-v4` identity binds execution mode, every field of the
-  ambient `fs_exec::Budget`, work-plan version and exact `3n` shape, poll-policy
-  version and 256-point stride, plus all scientific and provenance inputs.
+  ambient `fs_exec::Budget`, work-plan v2 and exact `3n` shape, poll-policy v2
+  and its 256-point/256-byte strides, plus all scientific and provenance inputs.
   `StreamKey` is intentionally not part of this identity. Registration has no
   retained execution identity in this crate.
 
