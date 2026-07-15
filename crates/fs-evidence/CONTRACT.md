@@ -329,6 +329,30 @@ are `ContextOfUse`, `ValidationPlan`, `ExperimentArtifact`, `CalibrationSplit`,
   representativeness. Missing monitors or violated predicates demote, escalate,
   or refuse according to the row; they never disappear from the lineage.
 
+Preregistered validation metrics are ENFORCED, not merely listed (bead
+gt1k3): every `QoiValidationPlan` spec is evaluated against the typed
+artifact numbers — interval agreement derives from
+`|observed - predicted|` vs the combined uncertainty, normalized
+discrepancy from the preregistered maximum (zero combined uncertainty
+admits only exact agreement), and every posterior-predictive check must
+carry EXACTLY the preregistered minimum tail probability and pass it.
+Outcomes are derived, never caller-asserted; failed outcomes stay
+visible as violations and additionally refuse any POSITIVE
+model-form-validation or comparison-to-experiment evidence axis.
+
+Observation identity is source-bound (bead xl3yi, schema v2): every
+experiment carries a canonical `ObservationManifest` mapping each
+observation id to an immutable, non-zero source-row locator identity —
+INJECTIVE, so two ids can never alias one source row, while genuinely
+distinct replicate rows with equal values keep distinct locators. The
+aggregate observations hash is DERIVED from the manifest, never
+transported. Blind-holdout partitions carry their (id, source) bindings;
+the sealed blind commitment (domain `…vv-blind-holdout.v2`) binds source
+identities, and case closure cross-checks every blind binding against
+the experiment manifest in addition to the exact id-coverage rule. The
+wire schema and commitment domain are deliberately bumped; v1 artifacts
+do not decode under v2.
+
 V&V artifacts have a versioned canonical bounded binary encoding. Fields are
 fixed-order and length-framed; maps/sets use canonical ordering; floating-point
 values preserve their exact IEEE-754 bits. Decoding caps total bytes, counts,

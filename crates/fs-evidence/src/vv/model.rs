@@ -10,7 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::ContentHash;
 
 /// Version of the seven V&V artifact schemas.
-pub const VV_SCHEMA_VERSION: u32 = 1;
+// v2 (bead xl3yi): experiments carry the canonical observation
+// manifest (id -> immutable source-row identity) on the wire, the
+// aggregate observations hash is derived rather than transported, and
+// the blind-holdout partition binds source identities into its sealed
+// commitment (domain ...vv-blind-holdout.v2). v1 artifacts do not
+// decode under v2.
+pub const VV_SCHEMA_VERSION: u32 = 2;
 /// Version of the structural rule matrix enforced by [`VvCase::admit`].
 pub const VV_RULESET_VERSION: u32 = 1;
 /// Stable family identity for canonical V&V payloads.
@@ -1761,6 +1767,100 @@ impl DataAuthenticity {
     }
 }
 
+/// Canonical observation manifest (bead xl3yi): every free-form
+/// [`ObservationId`] is bound to an IMMUTABLE source-row identity (a
+/// content-addressed locator/Merkle-leaf hash minted from the source
+/// coordinates, NOT from the row values — genuinely distinct replicate
+/// rows with equal values keep distinct locators). The map is
+/// INJECTIVE: two ids can never alias one source row, so relabeling a
+/// calibration row as a validation row is unrepresentable at the
+/// experiment. The aggregate `observations_hash` is DERIVED from this
+/// manifest, never caller-supplied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationManifest {
+    rows: BTreeMap<ObservationId, ContentHash>,
+}
+
+impl ObservationManifest {
+    pub fn try_new(rows: Vec<(ObservationId, ContentHash)>) -> Result<Self, VvErrors> {
+        if rows.is_empty() || rows.len() > MAX_VV_ITEMS {
+            return Err(invalid(
+                VvRule::SchemaCardinality,
+                None,
+                None,
+                "experiment.manifest",
+                "the observation manifest must be explicit and bounded",
+            ));
+        }
+        let row_count = rows.len();
+        let mut sources = BTreeSet::new();
+        let mut canonical = BTreeMap::new();
+        for (id, source) in rows {
+            if !source.as_bytes().iter().any(|byte| *byte != 0) {
+                return Err(invalid(
+                    VvRule::SchemaIdentity,
+                    None,
+                    None,
+                    "experiment.manifest",
+                    "a source-row identity cannot be the all-zero sentinel",
+                ));
+            }
+            if !sources.insert(source) {
+                return Err(invalid(
+                    VvRule::SchemaIdentity,
+                    None,
+                    None,
+                    "experiment.manifest",
+                    "distinct observation ids cannot alias one source row",
+                ));
+            }
+            if canonical.insert(id, source).is_some() {
+                return Err(invalid(
+                    VvRule::SchemaIdentity,
+                    None,
+                    None,
+                    "experiment.manifest",
+                    "observation identities must be unique",
+                ));
+            }
+        }
+        debug_assert_eq!(canonical.len(), row_count);
+        Ok(Self { rows: canonical })
+    }
+
+    #[must_use]
+    pub const fn rows(&self) -> &BTreeMap<ObservationId, ContentHash> {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn ids(&self) -> BTreeSet<ObservationId> {
+        self.rows.keys().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn source_of(&self, id: &ObservationId) -> Option<ContentHash> {
+        self.rows.get(id).copied()
+    }
+
+    /// The derived aggregate identity: domain-separated over every
+    /// length-framed `(id, source)` pair in canonical id order.
+    #[must_use]
+    pub fn canonical_hash(&self) -> ContentHash {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(self.rows.len() as u64).to_le_bytes());
+        for (id, source) in &self.rows {
+            bytes.extend_from_slice(&(id.as_str().len() as u64).to_le_bytes());
+            bytes.extend_from_slice(id.as_str().as_bytes());
+            bytes.extend_from_slice(source.as_bytes());
+        }
+        fs_blake3::hash_domain(
+            "org.frankensim.fs-evidence.vv-observation-manifest.v2",
+            &bytes,
+        )
+    }
+}
+
 /// Physical or synthetic observation artifact with metrology and authenticity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExperimentArtifact {
@@ -1770,6 +1870,7 @@ pub struct ExperimentArtifact {
     qois: BTreeSet<QoiId>,
     observation_ids: BTreeSet<ObservationId>,
     observations_hash: ContentHash,
+    manifest: ObservationManifest,
     instruments: Vec<InstrumentCalibration>,
     clocks: ClockSynchronization,
     repeatability: RepeatabilitySummary,
@@ -1783,8 +1884,7 @@ impl ExperimentArtifact {
         dataset_id: ArtifactId,
         origin: ExperimentOrigin,
         qois: Vec<QoiId>,
-        observation_ids: Vec<ObservationId>,
-        observations_hash: ContentHash,
+        manifest: ObservationManifest,
         instruments: Vec<InstrumentCalibration>,
         clocks: ClockSynchronization,
         repeatability: RepeatabilitySummary,
@@ -1819,26 +1919,11 @@ impl ExperimentArtifact {
                 "covariance dimension must equal the canonical QoI count",
             ));
         }
-        if observation_ids.is_empty() || observation_ids.len() > MAX_VV_ITEMS {
-            return Err(invalid(
-                VvRule::SchemaCardinality,
-                Some(header.id().as_str()),
-                None,
-                "experiment.observations",
-                "experiment observation identities must be explicit and bounded",
-            ));
-        }
-        let observation_count = observation_ids.len();
-        let observation_ids = observation_ids.into_iter().collect::<BTreeSet<_>>();
-        if observation_ids.len() != observation_count {
-            return Err(invalid(
-                VvRule::SchemaIdentity,
-                Some(header.id().as_str()),
-                None,
-                "experiment.observations",
-                "observation identities must be unique",
-            ));
-        }
+        // The manifest constructor already proved boundedness, id
+        // uniqueness, non-zero sources, and INJECTIVITY (bead xl3yi);
+        // both the id set and the aggregate hash are DERIVED from it.
+        let observation_ids = manifest.ids();
+        let observations_hash = manifest.canonical_hash();
         if instruments.is_empty()
             || instruments.len() > MAX_VV_ITEMS
             || instruments.iter().any(|instrument| !instrument.current)
@@ -1891,6 +1976,7 @@ impl ExperimentArtifact {
             qois,
             observation_ids,
             observations_hash,
+            manifest,
             instruments,
             clocks,
             repeatability,
@@ -1934,6 +2020,11 @@ impl ExperimentArtifact {
     }
 
     #[must_use]
+    pub const fn manifest(&self) -> &ObservationManifest {
+        &self.manifest
+    }
+
+    #[must_use]
     pub fn instruments(&self) -> &[InstrumentCalibration] {
         &self.instruments
     }
@@ -1954,18 +2045,23 @@ impl ExperimentArtifact {
     }
 }
 
+/// bead xl3yi: the blind commitment binds each held-out id TOGETHER
+/// with its immutable source-row identity — relabeling a source row
+/// under a fresh id changes the commitment, so the sealed holdout
+/// cannot be quietly re-pointed at already-seen data.
 fn commitment_for_blind_rows(
     preregistration_hash: ContentHash,
-    rows: &BTreeSet<ObservationId>,
+    rows: &BTreeMap<ObservationId, ContentHash>,
 ) -> ContentHash {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(preregistration_hash.as_bytes());
     bytes.extend_from_slice(&(rows.len() as u64).to_le_bytes());
-    for row in rows {
+    for (row, source) in rows {
         bytes.extend_from_slice(&(row.as_str().len() as u64).to_le_bytes());
         bytes.extend_from_slice(row.as_str().as_bytes());
+        bytes.extend_from_slice(source.as_bytes());
     }
-    fs_blake3::hash_domain("org.frankensim.fs-evidence.vv-blind-holdout.v1", &bytes)
+    fs_blake3::hash_domain("org.frankensim.fs-evidence.vv-blind-holdout.v2", &bytes)
 }
 
 /// Authority record required before blind holdout rows become validation input.
@@ -2095,6 +2191,7 @@ pub struct CalibrationSplit {
     calibration: BTreeSet<ObservationId>,
     validation: BTreeSet<ObservationId>,
     blind_holdout: BTreeSet<ObservationId>,
+    blind_sources: BTreeMap<ObservationId, ContentHash>,
     blind_commitment: ContentHash,
 }
 
@@ -2105,7 +2202,7 @@ impl CalibrationSplit {
         preregistration_hash: ContentHash,
         calibration: Vec<ObservationId>,
         validation: Vec<ObservationId>,
-        blind_holdout: Vec<ObservationId>,
+        blind_holdout: Vec<(ObservationId, ContentHash)>,
     ) -> Result<Self, VvErrors> {
         if experiment.kind != ArtifactKind::ExperimentArtifact {
             return Err(invalid(
@@ -2138,7 +2235,26 @@ impl CalibrationSplit {
         let blind_count = blind_holdout.len();
         let calibration = calibration.into_iter().collect::<BTreeSet<_>>();
         let validation = validation.into_iter().collect::<BTreeSet<_>>();
-        let blind_holdout = blind_holdout.into_iter().collect::<BTreeSet<_>>();
+        // bead xl3yi: the blind partition carries its immutable
+        // source-row identities; sources must be non-zero and unique
+        // within the partition (full injectivity is the experiment
+        // manifest's guarantee, cross-checked at case level).
+        let mut blind_sources = BTreeMap::new();
+        let mut blind_source_set = BTreeSet::new();
+        for (id, source) in blind_holdout {
+            if !source.as_bytes().iter().any(|byte| *byte != 0) || !blind_source_set.insert(source)
+            {
+                return Err(invalid(
+                    VvRule::SplitBlindHoldoutSealed,
+                    Some(header.id().as_str()),
+                    None,
+                    "split.blind_holdout",
+                    "blind rows need unique non-zero source-row identities",
+                ));
+            }
+            blind_sources.insert(id, source);
+        }
+        let blind_holdout = blind_sources.keys().cloned().collect::<BTreeSet<_>>();
         if calibration.len() != calibration_count
             || validation.len() != validation_count
             || blind_holdout.len() != blind_count
@@ -2163,7 +2279,7 @@ impl CalibrationSplit {
                 "calibration, validation, and blind holdout must be pairwise disjoint",
             ));
         }
-        let blind_commitment = commitment_for_blind_rows(preregistration_hash, &blind_holdout);
+        let blind_commitment = commitment_for_blind_rows(preregistration_hash, &blind_sources);
         Ok(Self {
             header,
             experiment,
@@ -2171,6 +2287,7 @@ impl CalibrationSplit {
             calibration,
             validation,
             blind_holdout,
+            blind_sources,
             blind_commitment,
         })
     }
@@ -2208,6 +2325,12 @@ impl CalibrationSplit {
     #[must_use]
     pub fn blind_holdout_len(&self) -> usize {
         self.blind_holdout.len()
+    }
+
+    /// The blind partition's immutable source-row bindings (bead xl3yi).
+    #[must_use]
+    pub const fn blind_sources(&self) -> &BTreeMap<ObservationId, ContentHash> {
+        &self.blind_sources
     }
 
     #[must_use]
@@ -2317,10 +2440,6 @@ impl CalibrationSplit {
             .cloned()
             .chain(self.blind_holdout.iter().cloned())
             .collect()
-    }
-
-    pub(crate) fn blind_holdout_ids_for_codec(&self) -> &BTreeSet<ObservationId> {
-        &self.blind_holdout
     }
 }
 
@@ -4590,6 +4709,21 @@ impl VvCase {
                         "the three partitions must cover the experiment observation identities exactly",
                     ));
                 }
+                // bead xl3yi: every sealed blind row must bind EXACTLY
+                // the source identity the experiment manifest declares
+                // for that id — a re-pointed holdout row refuses even
+                // when the id sets still cover exactly.
+                for (id, source) in split.blind_sources() {
+                    if experiment.manifest.source_of(id) != Some(*source) {
+                        violations.push(VvViolation::new(
+                            VvRule::SplitBlindHoldoutSealed,
+                            Some(split.id().as_str().to_owned()),
+                            None,
+                            "split.blind_holdout",
+                            "a blind row's source identity does not match the experiment manifest",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -5020,6 +5154,108 @@ impl VvCase {
                 "prediction.posterior_checks",
                 "the validation plan requires a posterior-predictive check",
             ));
+        }
+
+        // bead gt1k3: every preregistered metric spec is EVALUATED here,
+        // against the typed artifact numbers — outcomes are DERIVED, never
+        // caller-asserted. Plan specs are canonically sorted and deduped at
+        // construction and prediction metrics/checks are name-sorted, so the
+        // violation order is deterministic under input permutation.
+        let mut derived_failure = false;
+        for spec in &plan_row.metrics {
+            match spec {
+                ValidationMetricSpec::IntervalAgreement => {
+                    for metric in &prediction.validation_metrics {
+                        let discrepancy = (metric.observed - metric.predicted).abs();
+                        if !(discrepancy <= metric.combined_uncertainty) {
+                            derived_failure = true;
+                            violations.push(VvViolation::new(
+                                VvRule::ValidationMetricUncertainty,
+                                Some(prediction.id().as_str().to_owned()),
+                                Some(qoi.as_str().to_owned()),
+                                "prediction.validation_metrics.interval_agreement",
+                                "preregistered interval agreement fails: |observed - predicted|                                  exceeds the combined uncertainty",
+                            ));
+                        }
+                    }
+                }
+                ValidationMetricSpec::NormalizedDiscrepancy { maximum } => {
+                    for metric in &prediction.validation_metrics {
+                        let discrepancy = (metric.observed - metric.predicted).abs();
+                        // Zero combined uncertainty admits only exact
+                        // agreement; anything else is an unbounded
+                        // normalized discrepancy, not a pass.
+                        let failed = if metric.combined_uncertainty > 0.0 {
+                            discrepancy / metric.combined_uncertainty > *maximum
+                        } else {
+                            discrepancy > 0.0
+                        };
+                        if failed {
+                            derived_failure = true;
+                            violations.push(VvViolation::new(
+                                VvRule::ValidationMetricUncertainty,
+                                Some(prediction.id().as_str().to_owned()),
+                                Some(qoi.as_str().to_owned()),
+                                "prediction.validation_metrics.normalized_discrepancy",
+                                "normalized discrepancy exceeds the preregistered maximum",
+                            ));
+                        }
+                    }
+                }
+                ValidationMetricSpec::PosteriorPredictive {
+                    minimum_tail_probability,
+                } => {
+                    for check in &prediction.posterior_checks {
+                        if check
+                            .minimum_tail_probability
+                            .total_cmp(minimum_tail_probability)
+                            != core::cmp::Ordering::Equal
+                        {
+                            // The check carries its own threshold; only the
+                            // PREREGISTERED value binds — a weakened copy is
+                            // a refusal, not a pass.
+                            derived_failure = true;
+                            violations.push(VvViolation::new(
+                                VvRule::ValidationMetricUncertainty,
+                                Some(prediction.id().as_str().to_owned()),
+                                Some(qoi.as_str().to_owned()),
+                                "prediction.posterior_checks.minimum_tail_probability",
+                                "posterior check threshold is not the preregistered minimum",
+                            ));
+                        } else if !check.passed() {
+                            derived_failure = true;
+                            violations.push(VvViolation::new(
+                                VvRule::ValidationMetricUncertainty,
+                                Some(prediction.id().as_str().to_owned()),
+                                Some(qoi.as_str().to_owned()),
+                                "prediction.posterior_checks.tail_probability",
+                                "posterior-predictive check fails its preregistered minimum                                  tail probability",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // Failed derived outcomes stay visible in the violation list, but
+        // they cannot support POSITIVE validation/model-form axes.
+        if derived_failure {
+            for axis in [
+                EvidenceAxis::ModelFormValidation,
+                EvidenceAxis::ComparisonToExperiment,
+            ] {
+                if matches!(
+                    prediction.evidence_axes.axes.get(&axis),
+                    Some(EvidenceAxisStatus::Present { .. })
+                ) {
+                    violations.push(VvViolation::new(
+                        VvRule::ValidationMetricUncertainty,
+                        Some(prediction.id().as_str().to_owned()),
+                        Some(qoi.as_str().to_owned()),
+                        "prediction.evidence_axes",
+                        "a failed preregistered validation outcome cannot support a                          positive validation axis",
+                    ));
+                }
+            }
         }
     }
 

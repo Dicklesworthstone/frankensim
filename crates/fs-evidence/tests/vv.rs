@@ -85,12 +85,12 @@ fn experiment(
         artifact_id(&format!("{id}-dataset")),
         origin,
         vec![qoi_id("length")],
-        vec![
-            observation_id("cal-1"),
-            observation_id("val-1"),
-            observation_id("blind-1"),
-        ],
-        hash("observations"),
+        ObservationManifest::try_new(vec![
+            (observation_id("cal-1"), hash("row-cal-1")),
+            (observation_id("val-1"), hash("row-val-1")),
+            (observation_id("blind-1"), hash("row-blind-1")),
+        ])
+        .expect("injective manifest fixture"),
         vec![InstrumentCalibration::new(
             artifact_id("instrument-1"),
             hash("instrument-calibration"),
@@ -115,7 +115,10 @@ fn split_with(
         hash("preregistration"),
         calibration.into_iter().map(observation_id).collect(),
         validation.into_iter().map(observation_id).collect(),
-        blind.into_iter().map(observation_id).collect(),
+        blind
+            .into_iter()
+            .map(|id| (observation_id(id), hash(&format!("row-{id}"))))
+            .collect(),
     )
 }
 
@@ -178,6 +181,9 @@ struct CaseKnobs {
     process_as_uncertainty: bool,
     tamper_seed: Option<&'static str>,
     predicted: f64,
+    posterior_minimum: f64,
+    posterior_tail: f64,
+    blind_source_label: &'static str,
 }
 
 impl Default for CaseKnobs {
@@ -192,7 +198,13 @@ impl Default for CaseKnobs {
             force_in_domain_claim: false,
             process_as_uncertainty: false,
             tamper_seed: None,
-            predicted: 10.0,
+            // Genuinely agrees: |9.9 - 9.95| = 0.05 within the combined
+            // uncertainty (~0.09); bead gt1k3 now DERIVES this outcome,
+            // so a laundering fixture would refuse.
+            predicted: 9.95,
+            posterior_minimum: 0.05,
+            posterior_tail: 0.5,
+            blind_source_label: "row-blind-1",
         }
     }
 }
@@ -291,7 +303,7 @@ fn closed_case(knobs: CaseKnobs) -> VvCase {
         hash("preregistered-analysis"),
         vec![observation_id("cal-1")],
         vec![observation_id("val-1")],
-        vec![observation_id("blind-1")],
+        vec![(observation_id("blind-1"), hash(knobs.blind_source_label))],
     )
     .expect("closed-case split");
     let split_ref = artifact_reference(&split);
@@ -424,8 +436,8 @@ fn closed_case(knobs: CaseKnobs) -> VvCase {
         artifact_id("posterior-check"),
         qoi.clone(),
         validation_selection,
-        0.5,
-        0.05,
+        knobs.posterior_tail,
+        knobs.posterior_minimum,
         hash("posterior-check-artifact"),
     )
     .expect("posterior-predictive fixture");
@@ -1160,7 +1172,7 @@ fn admission_receipt_refuses_a_semantically_different_case() {
         .expect("source case admits")
         .into_parts();
     let changed = closed_case(CaseKnobs {
-        predicted: 10.25,
+        predicted: 9.94,
         ..CaseKnobs::default()
     });
     changed.validate().expect("changed case remains admissible");
@@ -1298,4 +1310,103 @@ fn context_qoi_without_prediction_is_not_a_closed_claim_graph() {
     )
     .expect("structurally representable incomplete case");
     assert_rule(missing_prediction.validate(), VvRule::QoiDependencyClosed);
+}
+
+#[test]
+fn preregistered_metric_outcomes_are_derived_not_asserted() {
+    // bead gt1k3: interval agreement is EVALUATED from the artifact
+    // numbers — a prediction whose discrepancy exceeds the combined
+    // uncertainty refuses even though its metric list is non-empty.
+    assert_rule(
+        closed_case(CaseKnobs {
+            predicted: 10.25,
+            ..CaseKnobs::default()
+        })
+        .validate(),
+        VvRule::ValidationMetricUncertainty,
+    );
+}
+
+#[test]
+fn weakened_posterior_threshold_refuses() {
+    // bead gt1k3: the check's own threshold must be EXACTLY the
+    // preregistered plan value; a weakened copy cannot substitute.
+    assert_rule(
+        closed_case(CaseKnobs {
+            posterior_minimum: 0.001,
+            ..CaseKnobs::default()
+        })
+        .validate(),
+        VvRule::ValidationMetricUncertainty,
+    );
+}
+
+#[test]
+fn failed_posterior_check_refuses() {
+    // bead gt1k3: PosteriorPredictiveCheck::passed() is REQUIRED — a
+    // tail probability below the preregistered minimum refuses.
+    assert_rule(
+        closed_case(CaseKnobs {
+            posterior_tail: 0.01,
+            ..CaseKnobs::default()
+        })
+        .validate(),
+        VvRule::ValidationMetricUncertainty,
+    );
+}
+
+#[test]
+fn observation_manifest_refuses_aliased_source_rows() {
+    // bead xl3yi: two ids pointing at ONE source row are
+    // unrepresentable at the experiment.
+    let aliased = ObservationManifest::try_new(vec![
+        (observation_id("cal-1"), hash("row-shared")),
+        (observation_id("val-1"), hash("row-shared")),
+    ]);
+    assert!(aliased.is_err(), "aliasing one source row must refuse");
+    let zero = ObservationManifest::try_new(vec![(observation_id("cal-1"), ContentHash([0; 32]))]);
+    assert!(zero.is_err(), "the all-zero source sentinel must refuse");
+    // Genuinely distinct replicate rows with equal VALUES stay valid:
+    // identity is the source locator, never the row value.
+    ObservationManifest::try_new(vec![
+        (observation_id("rep-1"), hash("locator-run-1")),
+        (observation_id("rep-2"), hash("locator-run-2")),
+    ])
+    .expect("distinct locators admit regardless of value equality");
+}
+
+#[test]
+fn blind_row_repointed_at_seen_source_refuses() {
+    // bead xl3yi: the id sets still cover exactly, but blind-1 binds
+    // cal-1's SOURCE row — the case-level manifest cross-check refuses.
+    assert_rule(
+        closed_case(CaseKnobs {
+            blind_source_label: "row-cal-1",
+            ..CaseKnobs::default()
+        })
+        .validate(),
+        VvRule::SplitBlindHoldoutSealed,
+    );
+}
+
+#[test]
+fn blind_commitment_binds_source_identities() {
+    // bead xl3yi: identical id partitions over different source rows
+    // seal DIFFERENT commitments.
+    let split_a =
+        split_with(vec!["cal-1"], vec!["val-1"], vec!["blind-1"]).expect("baseline split");
+    let split_b = CalibrationSplit::try_new(
+        header("split-1", "unitless"),
+        reference(ArtifactKind::ExperimentArtifact, "experiment-1"),
+        hash("preregistration"),
+        vec![observation_id("cal-1")],
+        vec![observation_id("val-1")],
+        vec![(observation_id("blind-1"), hash("row-blind-ALTERNATE"))],
+    )
+    .expect("repointed split");
+    assert_ne!(
+        split_a.blind_commitment(),
+        split_b.blind_commitment(),
+        "source identity is commitment-bearing"
+    );
 }

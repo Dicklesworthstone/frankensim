@@ -1515,11 +1515,7 @@ fn encode_experiment(
     for qoi in value.qois() {
         encode_qoi_id(encoder, qoi)?;
     }
-    encoder.count(value.observation_ids().len())?;
-    for observation in value.observation_ids() {
-        encode_observation_id(encoder, observation)?;
-    }
-    encoder.hash(value.observations_hash())?;
+    encode_manifest_rows(encoder, value.manifest().rows())?;
     encoder.count(value.instruments().len())?;
     for instrument in value.instruments() {
         encode_instrument_calibration(encoder, instrument)?;
@@ -1543,21 +1539,10 @@ fn decode_experiment(decoder: &mut Decoder<'_>) -> Result<ExperimentArtifact, Vv
         qois.push(qoi);
     }
 
-    let count = decoder.count()?;
-    let mut observations = bounded_vec(decoder, count, "experiment observations")?;
-    for _ in 0..count {
-        let offset = decoder.position();
-        let observation = decode_observation_id(decoder)?;
-        ensure_strictly_increasing(
-            observations.last(),
-            &observation,
-            offset,
-            "experiment observation",
-        )?;
-        observations.push(observation);
-    }
-
-    let observations_hash = decoder.hash()?;
+    let manifest_rows = decode_manifest_rows(decoder, "experiment manifest row")?;
+    let manifest_offset = decoder.position();
+    let manifest = ObservationManifest::try_new(manifest_rows)
+        .map_err(|_| VvCodecError::at(manifest_offset, "experiment manifest is invalid"))?;
     let count = decoder.count()?;
     let mut instruments = bounded_vec(decoder, count, "instrument calibrations")?;
     for _ in 0..count {
@@ -1582,8 +1567,7 @@ fn decode_experiment(decoder: &mut Decoder<'_>) -> Result<ExperimentArtifact, Vv
             dataset_id,
             origin,
             qois,
-            observations,
-            observations_hash,
+            manifest,
             instruments,
             clocks,
             repeatability,
@@ -1668,6 +1652,36 @@ fn decode_observation_selection(
     )
 }
 
+// bead xl3yi: length-framed (id, source) manifest rows in strict
+// canonical id order — the wire form of source-row binding.
+fn encode_manifest_rows(
+    encoder: &mut Encoder,
+    rows: &std::collections::BTreeMap<ObservationId, ContentHash>,
+) -> Result<(), VvCodecError> {
+    encoder.count(rows.len())?;
+    for (id, source) in rows {
+        encode_observation_id(encoder, id)?;
+        encoder.hash(*source)?;
+    }
+    Ok(())
+}
+
+fn decode_manifest_rows(
+    decoder: &mut Decoder<'_>,
+    context: &str,
+) -> Result<Vec<(ObservationId, ContentHash)>, VvCodecError> {
+    let count = decoder.count()?;
+    let mut rows: Vec<(ObservationId, ContentHash)> = bounded_vec(decoder, count, context)?;
+    for _ in 0..count {
+        let offset = decoder.position();
+        let id = decode_observation_id(decoder)?;
+        ensure_strictly_increasing(rows.last().map(|(last, _)| last), &id, offset, context)?;
+        let source = decoder.hash()?;
+        rows.push((id, source));
+    }
+    Ok(rows)
+}
+
 fn encode_observation_set(
     encoder: &mut Encoder,
     values: &std::collections::BTreeSet<ObservationId>,
@@ -1703,7 +1717,7 @@ fn encode_calibration_split(
     encoder.hash(value.preregistration_hash())?;
     encode_observation_set(encoder, value.calibration_ids())?;
     encode_observation_set(encoder, value.validation_ids())?;
-    encode_observation_set(encoder, value.blind_holdout_ids_for_codec())?;
+    encode_manifest_rows(encoder, value.blind_sources())?;
     encoder.hash(value.blind_commitment())
 }
 
@@ -1713,7 +1727,7 @@ fn decode_calibration_split(decoder: &mut Decoder<'_>) -> Result<CalibrationSpli
     let preregistration_hash = decoder.hash()?;
     let calibration = decode_observation_set(decoder, "calibration partition")?;
     let validation = decode_observation_set(decoder, "validation partition")?;
-    let blind_holdout = decode_observation_set(decoder, "blind-holdout partition")?;
+    let blind_holdout = decode_manifest_rows(decoder, "blind-holdout row")?;
     let encoded_commitment = decoder.hash()?;
     let split = decode_model(
         decoder,
