@@ -35,6 +35,7 @@ pub use fs_blake3::ContentHash;
 use fs_blake3::hash_domain;
 use std::{collections::BTreeSet, fmt};
 
+mod cp;
 mod i01;
 mod i02;
 mod i03;
@@ -47,8 +48,10 @@ mod i10;
 mod i11;
 mod i12;
 mod i15;
+mod pd;
 mod rl;
 
+pub use cp::cp_draft;
 pub use i01::i01_draft;
 pub use i02::i02_draft;
 pub use i03::i03_draft;
@@ -61,6 +64,7 @@ pub use i10::i10_draft;
 pub use i11::i11_draft;
 pub use i12::i12_draft;
 pub use i15::i15_draft;
+pub use pd::pd_draft;
 pub use rl::rl_draft;
 
 /// Manifest schema version (canonical bytes are comparable only within it).
