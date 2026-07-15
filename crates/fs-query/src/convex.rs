@@ -16,9 +16,9 @@
 //!
 //! Every iterate keeps both bounds valid, so an early stop (iteration
 //! cap, slow nonsmooth convergence) yields a WIDE enclosure, never a
-//! wrong one. Overlap is deliberately not claimed: a bracket that
-//! contains zero proves nothing beyond "separation unproven" —
-//! penetration-depth certificates (EPA-style) are a later rjnd part.
+//! wrong one. A separation bracket containing zero still proves no
+//! overlap; [`crate::convex_penetration_depth`] is a separate route that
+//! requires a strictly positive common-ball witness.
 
 use crate::{ContactInflation, QueryError};
 use fs_exec::Cx;
@@ -53,6 +53,18 @@ pub trait ConvexSupportMap: Send + Sync {
     /// Certified upper bound on the Euclidean error of
     /// [`Self::support_point`] results.
     fn support_slack(&self) -> f64;
+
+    /// Certified radius of a Euclidean ball around `center` contained in
+    /// this set.
+    ///
+    /// `None` means that this support-map implementation cannot prove the
+    /// containment (not that the point is necessarily outside). A positive
+    /// return is an overlap-proof capability used by the penetration route;
+    /// zero is never enough because touching does not prove penetration.
+    fn contained_ball_radius(&self, center: Point3) -> Option<f64> {
+        let _ = center;
+        None
+    }
 
     /// Stable name for refusal messages.
     fn name(&self) -> &'static str;
@@ -110,6 +122,18 @@ impl ConvexSupportMap for ConvexSphere {
 
     fn support_slack(&self) -> f64 {
         self.slack
+    }
+
+    fn contained_ball_radius(&self, center: Point3) -> Option<f64> {
+        if !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite()) {
+            return None;
+        }
+        let distance_hi = norm_upper(center.delta_from(self.center));
+        if !distance_hi.is_finite() {
+            return None;
+        }
+        let radius = (self.radius - distance_hi).next_down();
+        (radius > 0.0 && radius.is_finite()).then_some(radius)
     }
 
     fn name(&self) -> &'static str {
@@ -171,6 +195,23 @@ impl ConvexSupportMap for ConvexBox {
 
     fn support_slack(&self) -> f64 {
         0.0
+    }
+
+    fn contained_ball_radius(&self, center: Point3) -> Option<f64> {
+        if !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite()) {
+            return None;
+        }
+        let radius = [
+            (center.x - self.aabb.min.x).next_down(),
+            (self.aabb.max.x - center.x).next_down(),
+            (center.y - self.aabb.min.y).next_down(),
+            (self.aabb.max.y - center.y).next_down(),
+            (center.z - self.aabb.min.z).next_down(),
+            (self.aabb.max.z - center.z).next_down(),
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+        (radius > 0.0 && radius.is_finite()).then_some(radius)
     }
 
     fn name(&self) -> &'static str {
@@ -405,14 +446,22 @@ fn lerp(p: Point3, q: Point3, t: f64) -> Point3 {
 
 /// Upper bound on `|v|`: every squaring, sum, and root rounded up.
 fn norm_upper(v: Vec3) -> f64 {
-    ((v.x * v.x).next_up() + (v.y * v.y).next_up() + (v.z * v.z).next_up())
-        .next_up()
-        .sqrt()
-        .next_up()
+    let square_upper = |value: f64| {
+        let square = value * value;
+        if square == 0.0 { 0.0 } else { square.next_up() }
+    };
+    let sum = (square_upper(v.x) + square_upper(v.y)).next_up();
+    let sum = (sum + square_upper(v.z)).next_up();
+    if sum == 0.0 {
+        0.0
+    } else {
+        sum.sqrt().next_up()
+    }
 }
 
 /// Lower bound on `v·s`: the numerator of the support-plane bound,
 /// rounded down termwise.
 fn dot_lower(v: Vec3, s: Vec3) -> f64 {
-    ((v.x * s.x).next_down() + (v.y * s.y).next_down() + (v.z * s.z).next_down()).next_down()
+    let sum = ((v.x * s.x).next_down() + (v.y * s.y).next_down()).next_down();
+    (sum + (v.z * s.z).next_down()).next_down()
 }

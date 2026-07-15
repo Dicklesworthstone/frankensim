@@ -12,14 +12,15 @@
 //!   bodies (`dist(A,B) ≤ dist(p,A) + dist(p,B)`).
 //! - `overlap_inradius`: when `max(φ_A, φ_B)` is certified negative,
 //!   the ball of that radius around `p` lies inside BOTH bodies — a
-//!   pointwise overlap witness with a certified inradius, and nothing
-//!   more (it is NOT a penetration depth and never upgrades to one).
+//!   pointwise overlap witness with a certified inradius. It is not itself a
+//!   penetration depth; the sealed common-ball token must be revalidated
+//!   against the actual convex support maps before EPA can consume it.
 //! - `normal`: the Estimate-class contact-axis direction
 //!   `∇φ_A - ∇φ_B`, normalized; absent whenever either chart honestly
 //!   declines a gradient or the difference is degenerate. No
 //!   certificate accompanies it.
 
-use crate::{ContactInflation, QueryError};
+use crate::{ContactInflation, ConvexOverlapWitness, QueryError};
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::Cx;
 use fs_geom::{Chart, Point3, TraceStepClaim, Vec3};
@@ -41,6 +42,19 @@ pub struct GapSample {
     /// Carries no certificate; `None` when either gradient is honestly
     /// absent or the difference is degenerate/non-finite.
     pub normal: Option<[f64; 3]>,
+    overlap_witness: Option<ConvexOverlapWitness>,
+}
+
+impl GapSample {
+    /// Sealed pointwise common-ball proof, when one was certified.
+    ///
+    /// Penetration analysis revalidates this token against its concrete
+    /// support maps, so a token from an unrelated pair cannot authorize a
+    /// depth claim.
+    #[must_use]
+    pub const fn overlap_witness(&self) -> Option<ConvexOverlapWitness> {
+        self.overlap_witness
+    }
 }
 
 /// A pair of exact-distance charts answering local gap queries.
@@ -152,6 +166,8 @@ impl<'a> ImplicitGapOracle<'a> {
         } else {
             None
         };
+        let overlap_witness =
+            overlap_inradius.and_then(|radius| ConvexOverlapWitness::from_common_ball(p, radius));
         let normal = match (sample_a.gradient, sample_b.gradient) {
             (Some(ga), Some(gb)) => {
                 let d = Vec3::new(ga.x - gb.x, ga.y - gb.y, ga.z - gb.z);
@@ -175,6 +191,7 @@ impl<'a> ImplicitGapOracle<'a> {
             separation_upper,
             overlap_inradius,
             normal,
+            overlap_witness,
         })
     }
 }

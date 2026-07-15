@@ -49,6 +49,7 @@ mod features;
 mod gap;
 mod inflation;
 mod moments;
+mod penetration;
 
 pub use codim::{
     CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation,
@@ -70,6 +71,10 @@ pub use convex::{
 pub use moments::{
     GeometricMoments, MAX_MOMENT_CELLS, MomentEnclosure, SecondMoments, geometric_moments,
     geometric_moments_with_inflation,
+};
+pub use penetration::{
+    CONVEX_PENETRATION_DEFAULT_ITERATIONS, CONVEX_PENETRATION_MAX_ITERATIONS, ConvexOverlapWitness,
+    ConvexPenetration, convex_overlap_witness, convex_penetration_depth,
 };
 
 /// Crate version, re-exported for provenance stamping.
@@ -248,6 +253,11 @@ pub enum QueryError {
     ConvexInvalidSupport {
         /// The offending value triple.
         at: [f64; 3],
+    },
+    /// Strict overlap could not be proven for a penetration-depth request.
+    ConvexOverlapUnproven {
+        /// Actionable deterministic refusal reason.
+        reason: &'static str,
     },
     /// A feature complex exceeds the deterministic feature ceiling.
     FeatureComplexTooLarge {
@@ -440,6 +450,10 @@ impl core::fmt::Display for QueryError {
                 f,
                 "convex support evaluation produced non-finite values ({}, {}, {})",
                 at[0], at[1], at[2]
+            ),
+            QueryError::ConvexOverlapUnproven { reason } => write!(
+                f,
+                "convex penetration requires a strictly positive common-ball proof: {reason}"
             ),
             QueryError::FeatureComplexTooLarge { features, max } => write!(
                 f,

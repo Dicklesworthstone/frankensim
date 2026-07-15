@@ -64,6 +64,14 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   falsifies it. Constructors validate geometry; degraded arithmetic
   refuses typed. `convex_separation_with_inflation` subtracts the composed
   retained radius from `lo`, adds it to `hi`, and re-derives the verdict.
+  `contained_ball_radius` is an optional strict-overlap capability (default:
+  no claim). `convex_overlap_witness` seals the smaller positive ball admitted
+  by both maps. `convex_penetration_depth` revalidates that witness against the
+  concrete pair, seeds an inner Minkowski octahedron, and performs bounded,
+  deterministic EPA-style support expansion. The inner hull's closest-face
+  distance raises a monotone penetration lower bound; any retained support
+  plane lowers a monotone upper bound. A cap returns the honest open bracket,
+  while touching or unbound/mismatched witnesses refuse.
 - `FeatureComplex` (`Feature::{Vertex, Edge, Face}`) and
   `ccd_candidates`: the typed vertex/edge/face decomposition of a
   triangle boundary with outward-rounded per-feature boxes, and
@@ -85,7 +93,9 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   `separation_upper` (triangle inequality) exists exactly when the
   point is certified outside both bodies; `overlap_inradius` is a
   certified common-ball radius exactly when `max(φ_A, φ_B)` is
-  certified negative — a pointwise witness, never a penetration depth;
+  certified negative — a pointwise witness, never by itself a penetration
+  depth. `overlap_witness()` carries the probe and radius in a sealed token;
+  EPA must still revalidate the ball against its concrete support maps;
   `normal` is an uncertified Estimate-class contact axis that is
   absent whenever a gradient is honestly declined. `new_with_inflation`
   widens the sum by both radii, tests outside/inside against each side's own
@@ -240,6 +250,8 @@ the sd found and the advice to project first), `NoOppositeWall`,
 bound), `ConvexInvalidShape` (non-finite/degenerate convex geometry or
 a zero iteration budget), `ConvexInvalidSupport` (non-finite support
 evaluation or bound arithmetic), `FeatureComplexTooLarge`,
+`ConvexOverlapUnproven` (strict positive overlap was absent, touching-only,
+or did not revalidate against the supplied pair),
 `FeatureInvalidInflation`, `FeatureTooManyPairs` (cap refusal, never
 silent truncation), `CodimInvalidThickness`, `CodimInvalidDistance`,
 `DeformationRequiresExactDistance`, `DeformationInvalidMap`,
@@ -252,6 +264,9 @@ Fully deterministic: fixed iteration counts, canonical grid orders,
 no randomness. Identical inputs give identical answers bitwise. Exact-zero
 inflation delegates with the original floating-point inputs unchanged;
 positive composition and endpoint changes use fixed outward rounding.
+Penetration hull faces, horizon edges, and equal-distance ties use canonical
+index order; budgeted runs are deterministic prefixes whose `lo` cannot fall
+and whose `hi` cannot rise.
 
 ## Cancellation behavior
 
@@ -263,6 +278,8 @@ requested cancellation therefore wins over evidence returned by the same call.
 Closest-point and curvature queries likewise poll around every analytic or FD
 sample and once before publishing. All return `Cancelled` teaching errors.
 Other point queries are O(iterations) and non-blocking.
+EPA polls before and after every support evaluation and at a fixed iteration
+stride; no penetration bracket is published after cancellation.
 
 ## Unsafe boundary
 
@@ -288,6 +305,10 @@ bracket contains the true unit-density integral of the chart's region.
 analytic sphere/box distance containment, nonsmooth box-box honesty,
 touching/overlap never claiming separation, bit-identical replay, and
 constructor/budget/cancellation refusals.
+`tests/penetration.rs`, cases gp-001..gp-006 — analytic sphere/box depth
+containment, sealed gap-witness revalidation and cross-pair refusal, touching
+and zero-budget refusal, monotone budget prefixes, bit-identical replay, and
+cancellation, plus malformed support/slack refusal.
 `tests/features.rs`, cases gf-001..gf-005 — feature complexes and CCD
 candidates: canonical construction, BVH-equals-brute-force oracle
 agreement, guaranteed inclusion of the closest pair inside the motion
@@ -340,14 +361,13 @@ convex, implicit-gap, codimensional, CCD, and moments consumers.
   integrals; densities, inertia tensors, and material identity live
   downstream (fs-matdb consumers), never here. Rotation covariance and
   spatially-varying weighting are deferred surfaces —
-  [`GeometricMoments::translated`] covers translation only. The bead
-  The overlap side of any two-body query in this crate is carried
-  STRICTLY as an overlap-inradius witness: `max(φ_A, φ_B)` certified
-  negative proves a common ball of that radius and nothing else
-  (`ImplicitGapOracle::overlap_inradius` is the pointwise carrier),
-  while `ClearanceField`'s positive-part sum remains an authority-free
-  convenience. Neither is, or may be upgraded into, a penetration
-  depth.
+  [`GeometricMoments::translated`] covers translation only.
+- The overlap side of an implicit-gap query is strictly a pointwise common-ball
+  witness: `max(φ_A, φ_B)` certified negative proves that ball and nothing
+  else. It authorizes convex penetration only after the sealed token is
+  revalidated through both concrete support maps' positive contained-ball
+  capability. `ClearanceField`'s positive-part sum remains authority-free and
+  can never authorize penetration.
 - `DeformedChart` transfers sign, zero set, and a Lipschitz theorem —
   never distances, gradients, or support tightness. Pull-back
   bijectivity (no self-interpenetration) and the declared Lipschitz
@@ -361,10 +381,10 @@ convex, implicit-gap, codimensional, CCD, and moments consumers.
   swept/rotating codimensional bodies are deferred surfaces.
 - `ImplicitGapOracle` is pointwise: `separation_upper` bounds the
   distance between the two bodies from above at ONE probe, and
-  `overlap_inradius` witnesses a common ball at ONE probe. Neither
-  aggregates into a global gap field, a penetration depth, or a
-  time-of-impact claim, and the `normal` estimate carries no
-  certificate whatsoever.
+  `overlap_inradius` witnesses a common ball at ONE probe. It does not
+  aggregate into a global gap field or time-of-impact claim; only the sealed
+  pointwise token, revalidated against matching convex maps, can seed the
+  separately bounded EPA route. The `normal` estimate carries no certificate.
 - `ccd_candidates` is a broad phase only: candidates are a
   conservative SUPERSET under the caller's declared motion bounds, and
   no narrow-phase, time-of-impact, or contact claim is made. The
@@ -373,12 +393,16 @@ convex, implicit-gap, codimensional, CCD, and moments consumers.
   axis-aligned in the input frame — rotation-aware swept bounds are a
   deferred surface.
 - `convex_separation` proves separation only (`lo > 0`); an enclosure
-  containing zero claims NOTHING about overlap, and penetration-depth
-  certificates (EPA-style lower bounds) are a deferred rjnd surface.
+  containing zero claims NOTHING about overlap. `convex_penetration_depth`
+  is a separate strictly-admitted route; it does not upgrade a zero-containing
+  separation bracket.
   No convergence rate is claimed: nonsmooth pairs may return wide,
   honest brackets at the iteration cap. Support maps must satisfy the
   declared slack contract; the routine cannot detect a lying
-  `support_slack()`.
+  `support_slack()` or `contained_ball_radius()`. Penetration is minimum pure
+  translation depth for compact convex sets only: no rigid-pose separating
+  motion, nonconvex decomposition, time-of-impact, or response impulse is
+  claimed.
 - Chart-native fast paths (mesh BVH closest-point dispatch instead of
   generic Newton) are perf-lane work; answers here are correct first.
 - The plain query entry points assert that no conversion/motion uncertainty
