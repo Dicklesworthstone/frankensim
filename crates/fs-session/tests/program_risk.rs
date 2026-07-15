@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs_exec::CancelGate;
+use fs_exec::{CancelGate, DrainTracker, RunId};
 use fs_govern::program_risks::{
     AssessmentStatus, ProgramRiskId, ProgramRiskObservation, TriggerComparison, program_risk,
 };
@@ -93,6 +93,40 @@ fn durable_ledger_path(case: &str) -> String {
         ))
         .to_string_lossy()
         .into_owned()
+}
+
+fn solver_checkpoint(
+    ledger: &fs_ledger::Ledger,
+    request: fs_session::PauseRequestId,
+    label: &str,
+) -> fs_ledger::session_registry::SolverCheckpointReceipt {
+    let authority = request.checkpoint_authority();
+    let mut run_bytes = [0_u8; 8];
+    run_bytes.copy_from_slice(&authority.as_bytes()[..8]);
+    let run = RunId(u64::from_le_bytes(run_bytes));
+    let gate = CancelGate::new_clock_free();
+    let tracker = DrainTracker::new(run, &gate);
+    let worker = tracker.register_worker().expect("fixture worker");
+    gate.request();
+    drop(worker);
+    let report = tracker.finalize().expect("fixture run drained");
+    let snapshot = fs_exec::solver::envelope::seal(0x4653_434b_5054, 1, run.0, label.as_bytes());
+    let artifact = ledger
+        .put_artifact(
+            fs_ledger::session_registry::SOLVER_STATE_ARTIFACT_KIND,
+            &snapshot,
+            None,
+        )
+        .expect("fixture solver-state artifact");
+    ledger
+        .attest_solver_checkpoint(fs_ledger::session_registry::SolverCheckpointClaim {
+            session: request.session().0,
+            pause_authority: authority,
+            gate_generation: request.gate_generation(),
+            solver_state_artifact: artifact.hash,
+            drain_report: &report,
+        })
+        .expect("fixture checkpoint receipt")
 }
 
 #[test]
@@ -397,8 +431,9 @@ fn g3_exact_replay_retains_the_original_generation_after_lifecycle_progress() {
         .iter()
         .find_map(|event| event.pause_request_id)
         .expect("pause request authority");
+    let checkpoint = solver_checkpoint(&ledger, request_id, "post-report-checkpoint");
     let acknowledgement = governor
-        .acknowledge_pause(request_id, "post-report-checkpoint")
+        .acknowledge_pause(request_id, &ledger, &checkpoint)
         .expect("acknowledge drained generation");
     governor
         .activate_resume(&acknowledgement)
@@ -503,8 +538,9 @@ fn g3_report_recovery_waits_for_its_pause_resume_generation() {
         .iter()
         .find_map(|event| event.pause_request_id)
         .expect("pause request authority");
+    let checkpoint = solver_checkpoint(&ledger, request_id, "program-risk-generation-checkpoint");
     let acknowledgement = governor
-        .acknowledge_pause(request_id, "program-risk-generation-checkpoint")
+        .acknowledge_pause(request_id, &ledger, &checkpoint)
         .expect("acknowledge generation zero");
     let activation = governor
         .activate_resume(&acknowledgement)
@@ -549,12 +585,7 @@ fn g3_report_recovery_waits_for_its_pause_resume_generation() {
     );
     let recovered_resume_gate = Arc::new(CancelGate::new());
     let recovered_acknowledgement = governor
-        .recover_pause_acknowledgement(
-            &ledger,
-            request_id,
-            "program-risk-generation-checkpoint",
-            recovered_resume_gate,
-        )
+        .recover_pause_acknowledgement(&ledger, request_id, &checkpoint, recovered_resume_gate)
         .expect("recover pause acknowledgement");
     assert_eq!(
         governor

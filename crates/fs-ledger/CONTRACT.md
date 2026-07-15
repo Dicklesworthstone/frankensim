@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v9). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v10). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -11,7 +11,9 @@
 The Design Ledger (plan §11.2, Bet 10): FrankenSQLite-backed system of record
 for content-addressed artifacts, event-sourced ops with the frozen Five
 Explicits, lineage edges, metric time series, the autotuner cache, and the
-fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
+fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std`, `fsqlite`,
+and the lower-layer Franken crates declared in `Cargo.toml`, including
+`fs-exec` for opaque drain/finalize reports and snapshot-envelope validation.
 
 ## Public types and semantics
 
@@ -166,6 +168,18 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   source claim before publishing v8. V8 also splits the two OR-based immutable
   reinsert guards into one point lookup per unique key, avoiding dependence on
   multi-index-OR planning at exact read-cap fixture scale.
+- Solver checkpoint receipts (`session_registry`, schema v10):
+  `attest_solver_checkpoint` accepts an existing artifact only when its exact
+  kind is `solver-state`, its declared size is at most 64 MiB, its complete
+  bytes pass generic fs-exec snapshot-envelope length/checksum validation, and
+  its provenance equals an opaque executor-minted `DrainFinalizeReport` run.
+  The immutable private-field `SolverCheckpointReceipt` binds physical ledger,
+  session, run, exact pause authority, gate generation, artifact hash, drain
+  report hash, and registered/drained counts. One pause authority owns one
+  receipt; exact retry after response loss returns it, while changed fields
+  conflict atomically. Fixed-width transport decoding earns only a candidate:
+  `verify_solver_checkpoint_receipt` must revalidate identity, physical-ledger
+  membership, immutable row equality, artifact integrity, and run provenance.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -187,8 +201,8 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   compared; deterministic ops must then
   reproduce output hashes exactly; fast hash divergences are reported without
   failing; row/branch/session/time envelopes are excluded),
-  `gc_unreferenced_artifacts` (edge-less artifacts only; referenced
-  artifacts are immortal).
+  `gc_unreferenced_artifacts` (artifacts with neither a lineage edge nor a
+  solver-checkpoint receipt; either root makes an artifact immortal).
 
 Schema divergences from plan Appendix D, all deliberate: `JSON` columns are
 STRICT-legal `TEXT` with `json_valid()` CHECKs (Appendix D as written is not
@@ -208,6 +222,10 @@ batch/event hash domains in `session_registry` are therefore the first
 supported writer format. NULL submission ordinals in immutable v6-shaped rows
 are read only as defensive compatibility: Pending remains indeterminate and a
 terminal consumer must recover its authenticated ordinal from the receipt.
+Schema v9 adds immutable sole-producer and exact-operation-edge-set seals.
+Schema v10 adds the immutable `session_checkpoint_receipts` table, one unique
+pause-authority index, artifact foreign key, and update/delete/reinsert guards;
+migration infers no receipts from historic free-form acknowledgement payloads.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -393,6 +411,12 @@ refusal, or verifier panic).
     hash-mismatched state is corruption; raw terminal-row presence never proves
     completion. Recovered Pending work is explicitly indeterminate and receives
     no terminalization permit.
+12. A solver checkpoint receipt is valid only as the conjunction of its
+    domain-separated fixed-field identity, one immutable row in the checked
+    physical ledger, a present `solver-state` artifact whose complete bounded
+    bytes re-hash correctly, a valid generic snapshot envelope, matching run
+    provenance, and equal nonzero registered/drained worker counts. Row or
+    artifact presence alone never proves pause completion.
 
 ## Error model
 
@@ -423,6 +447,11 @@ missing, malformed, or differs from the handle's cached open-time authority.
 `InstanceIdentityUnavailable` refuses to mint a new identity when the safe
 std-only OS entropy source is unavailable; it never falls back to process ids,
 timestamps, addresses, or counters.
+Checkpoint attestation and verification report malformed artifacts, foreign or
+missing receipts, run disagreement, drain-count disagreement, response-loss
+conflicts, and transport identity mismatch as fail-closed `Invalid`,
+`ArtifactReadLimit`, `Corrupt`, or underlying storage errors; none is silently
+treated as a negative lookup or completion.
 Never panics across the crate boundary. Signed database metadata that
 represents a length or count is converted with an explicit non-negative check;
 physical corruption cannot reinterpret `-1` as `u64::MAX`.
@@ -507,6 +536,9 @@ match its hash.
 Canonical bulk fixtures exercise the exact and limit+1 read boundaries for the
 8,192-claim recovery probe, 4,096-submission pause fence, and 1,024-witness
 terminal lookup without weakening the production constants under test.
+Nested registry tests also cover checkpoint response-loss idempotency,
+fixed-width transport forgery, foreign-ledger refusal, conflicting artifact
+replay, wrong artifact kind, and snapshot/run mismatch.
 `tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
 positive/negative zero, infinite dispersion, infinite interval endpoints, a
 maximum-length identity, and validated/derived rows; it independently rehashes
@@ -681,6 +713,11 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
 - `LedgerInstanceId` is a collision-resistant uniqueness token, not a secret,
   signature, or authentication credential. Byte-for-byte database copies
   intentionally retain one identity because they are copies of one lineage.
+- A checkpoint receipt proves that the referenced artifact and executor report
+  are mutually bound and durably present. It does not independently prove that
+  every solver thread was registered with the executor `DrainTracker`, that the
+  snapshot contains sufficient application-specific resume state, or that its
+  numerical contents are scientifically correct.
 - Safe std-only identity generation is implemented through `/dev/urandom` on
   Unix. Fresh identity creation on non-Unix targets is explicitly refused;
   existing v4+ ledgers remain readable when their persisted identity and

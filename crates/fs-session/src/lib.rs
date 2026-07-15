@@ -380,6 +380,16 @@ pub enum SessionError {
         /// Completed request ordinal.
         requested_ordinal: i64,
     },
+    /// A solver checkpoint receipt was forged, stale, cross-session, bound to
+    /// another pause, or not independently verified in the supplied ledger.
+    PauseCheckpointMismatch {
+        /// Session named by the pending pause request.
+        id: u64,
+        /// Deterministic request ordinal that remained incomplete.
+        requested_ordinal: i64,
+        /// Stable machine-actionable refusal class.
+        reason: &'static str,
+    },
     /// Pressure arrived before a fresh resume gate was explicitly activated.
     ResumeNotActivated {
         /// Session awaiting activation.
@@ -656,6 +666,14 @@ impl fmt::Display for SessionError {
             } => write!(
                 f,
                 "session {id} pause request at ordinal {requested_ordinal} was already acknowledged with different checkpoint evidence"
+            ),
+            SessionError::PauseCheckpointMismatch {
+                id,
+                requested_ordinal,
+                reason,
+            } => write!(
+                f,
+                "session {id} pause request at ordinal {requested_ordinal} refused checkpoint receipt ({reason}); the request remains pending"
             ),
             SessionError::ResumeNotActivated { id, generation } => write!(
                 f,

@@ -27,6 +27,12 @@ fs-blake3, fs-substrate, fs-obs.
   where reading a platform time source can trap: it keeps only a private
   sentinel request marker, while timestamp accessors and `RunReport` expose no
   latency sample. Timestamps feed reports only, never results.
+- `DrainTracker<'gate>` / `DrainWorker` / `DrainFinalizeReport` — an explicit
+  RAII attestation boundary for one caller-ledgered `RunId`. Every admitted old
+  worker holds a guard; `finalize()` refuses before cancellation, with zero
+  workers, or while any guard remains live. Success closes worker admission and
+  mints one private-field, domain-separated report binding run identity plus
+  exact registered/drained counts; exact replay returns the same report.
 - `TileKernel` (`type Out: Reduce; tiles() -> TilePlan; run(tile, &Cx) ->
   ControlFlow<Cancelled, Out>`) and `TilePlan { tiles, kernel }` with the
   FNV-stable `kernel_id()`.
@@ -271,7 +277,11 @@ fs-blake3, fs-substrate, fs-obs.
     the `pairwise_fold` split-buffer peak (`2n-1` output elements for `n>0`)
     and one concurrent victim-order partition in addition to final tables;
     it releases on every return/unwind. This invariant applies only to the
-    tracked envelope named above, not arbitrary kernel-owned heap.
+   tracked envelope named above, not arbitrary kernel-owned heap.
+14. A drain/finalize report exists only after its gate was requested and every
+    worker registered with that tracker released its guard. Finalization is
+    exact-replay idempotent and permanently closes later worker admission, so
+    an old live worker cannot coexist with a successful report.
 
 ## Tile-pool placement identity (v2)
 
@@ -325,6 +335,9 @@ decoder's exact cursor and remaining-byte count.
 `to_bytes`/`from_bytes` are the unattributed convenience over the same
 envelope, and `fork` round-trips enveloped bytes. Pause → seal →
 unseal → resume remains bit-exact (conformance-tested).
+`envelope::inspect` independently validates magic, envelope version, exact
+payload extent, and checksum before exposing private-field type/schema/run
+metadata; ledger consumers use it without interpreting solver-specific bytes.
 
 ## Stream identity is declared, never scheduled (bead wf9.7.1)
 
@@ -427,7 +440,8 @@ complete `pairwise_fold` syntax tree against an independently stated
 G5 reduction pins remain unchanged.
 tests/constellation_smoke.rs pins the
 asupersync Budget vocabulary. In-module unit suites cover ordinary and
-clock-free gate stamping, keys,
+clock-free gate stamping, keys, drain-report old-worker refusal and closed
+late admission,
 Reduce laws, partitioning, victim orders, self-cancellation, and pool
 survival after panics, exact finite-budget propagation, simultaneous typed
 allocation refusals, and mixed panic/refusal precedence. GEMM tuner unit drills cover hostile embedded cache
@@ -512,9 +526,11 @@ seed nonmovement, and fail-closed retained-version admission.
 - Race kill-propagation from a parent gate polls at a 50 µs stride
   (measurement-class latency, ledgered); sub-poll-interval propagation
   needs the perf harness like every other latency claim.
-- Ledger SPILL of solver checkpoints (revolve-style schedules, artifact
-  rows) is fs-ad/fs-ledger territory; this crate owns the snapshot bytes
-  and their bit-exactness only.
+- Ledger storage and pause/session binding of solver checkpoints are
+  fs-ledger/fs-session territory. This crate owns snapshot-envelope validity,
+  bit-exact state codecs, and proof that all workers registered with one
+  `DrainTracker` released their guards. It does not discover unregistered OS
+  threads or prove that an orchestrator enrolled every participant in a run.
 - NO "calibrated is faster" assertion in CI: debug-profile timing is
   noise; the improvement is DOCUMENTED via the ledgered calibration
   report, and the perf harness owns throughput verdicts (same doctrine as

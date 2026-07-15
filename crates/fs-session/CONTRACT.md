@@ -131,8 +131,13 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   `open_session_gated` and requests it so the solver checkpoints at its next
   tile boundary (P7). Pause gates are generational: level 3 mints a
   private-field `PauseRequestId` bound to this governor, session, old gate
-  generation, and request ordinal. `acknowledge_pause(request_id, claim)`
-  consumes only that exact generation; while it remains the session's latest
+  generation, and request ordinal; `checkpoint_authority()` exposes only its
+  domain-separated ledger binding. `acknowledge_pause(request_id, ledger,
+  receipt)` consumes only a `SolverCheckpointReceipt` whose session, pause
+  authority, and gate generation match, then makes the ledger independently
+  re-earn the receipt row, physical instance, solver-state artifact, generic
+  snapshot envelope, run provenance, and executor drain report. While it
+  remains the session's latest
   completed generation, identical response replay returns the same event,
   content receipt, restart-stable semantic gate binding, and process-local
   `Arc<CancelGate>`, while conflicting evidence fails closed. If an external
@@ -147,6 +152,10 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   conflicts, while out-of-ladder input remains `InvalidPressureLevel`; an
   unused action from an old generation is stale. Completed actions are bounded
   rather than silently evicted.
+  A successful acknowledgement is itself an authority-bearing ledger use: it
+  binds an as-yet-unbound ledger scope to the receipt's physical ledger, and a
+  previously bound scope or durable governor refuses a receipt from another
+  ledger before changing gate state.
   `PauseAcknowledgement` has private fields and activation compares its full
   event, request, generation, stable binding, content receipt, and exact live
   `Arc` identity with retained state, so a caller-altered acknowledgement
@@ -161,12 +170,13 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   3 reserves the mandatory future
   completion row, and all other event admission counts outstanding
   reservations so the completion cannot be starved at the cap. The request
-  also reserves worst-case retained completion evidence and one global event
+  also reserves worst-case fixed receipt evidence and one global event
   ordinal before it requests the gate. Other event admission must preserve all
-  outstanding completion reservations. Pause completion accepts at most 1 MiB
-  of checkpoint-claim input and retains it under the bounded
-  preview/full-length/full-digest evidence model, releasing unused reserved
-  capacity atomically with completion.
+  outstanding completion reservations. Pause completion retains the 64-byte
+  hexadecimal receipt identity under the bounded evidence model and attributes
+  the exact artifact, run, and drain-report hashes, releasing unused reserved
+  capacity atomically with completion. Caller-authored strings and booleans
+  cannot complete a pause.
   `events_page` is the only event reader and returns at most 1,024 rows under
   the permit's exact scope. It captures only shallow `Arc` references while
   holding the governor mutex; cloning evidence-bearing public rows happens
@@ -326,6 +336,8 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   replay requires the current completed generation and exact process-local
   gate `Arc`, while a prior activation remains replayable after the next L3
   request asks that still-current gate to drain.
+  Pause recovery takes the same typed receipt and re-verifies it against the
+  reopened physical ledger before comparing terminal payload/receipt bytes.
 - `write_program_risk_session_end_report(ledger, open_receipt, logical_time,
   observations)` evaluates fs-govern's distinct PR-001–PR-012 expansion-program
   register and automatically surfaces every non-green row in one owned
@@ -498,8 +510,11 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
    never-activated resume gate is recoverable by same-generation replay without
    another ledger event, and the replaced acknowledgement cannot activate.
    Activation replay is idempotent while its gate generation remains current,
-   including after the next pause requests that gate. `SolverState` snapshots round-trip
-   losslessly across repeated pause-resume cycles.
+   including after the next pause requests that gate. Completion additionally
+   requires a ledger-verified solver-state artifact whose run matches a
+   nonempty executor report minted only after all registered old-worker guards
+   drained. `SolverState` snapshots round-trip losslessly across repeated
+   pause-resume cycles.
 4. **Estimates state their coverage**: unmodeled ops are listed, their
    wall is excluded, nothing is silently assumed.
 5. **Meters are exact and replay-safe under storm**: concurrent distinct
@@ -546,7 +561,7 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 11. **All retained collections are bounded**: session, scope-session,
     operator-authority, submission-key, meter-report, pressure-action,
     degradation-event plus reserved
-    completion row/ordinal, checkpoint-input, evidence-preview,
+    completion row/ordinal, fixed checkpoint-receipt evidence,
     per-scope/per-governor retained payload, pagination, flush row/byte, and
     ordinal limits are checked
     before their corresponding state transition. Limit refusal never runs
@@ -665,7 +680,8 @@ pending submission must meter and terminalize before acknowledgement can rotate
 its gate generation, new work is refused throughout draining/ready phases, and
 exact terminal replay remains available during both;
 ss-011 covers pending/ready pressure refusal, cross-governor request authority,
-bounded checkpoint evidence, identical response replay, same-generation
+old-worker finalization refusal, malformed receipt transport, cross-session and
+foreign-ledger refusal, stored-receipt response-loss replay, same-generation
 replacement of an externally requested never-activated gate, stale-
 acknowledgement refusal, conflicting evidence refusal, explicit idempotent
 activation, and repeated generations; ss-012
@@ -734,12 +750,13 @@ armed and runs when an x86 host picks it up.
 - **Degradation steps are orchestration events**: actual arena spilling and
   adaptive coarsening are fs-alloc/solver behaviors triggered by these events,
   not implemented here. Their v5 phase is therefore `declared`, never
-  `applied`. Pause requests, generational gates, exact request
-  authority, replay, and activation are wired, but the checkpoint claim passed
-  to `acknowledge_pause` is still operator-asserted. fs-session does not yet
-  verify a ledger-minted solver-state artifact or an executor drain receipt, so
-  `Complete` means "the owning orchestrator acknowledged this request," not an
-  independently attested request-drain-finalize proof.
+  `applied`. Pause completion now requires independently verified ledger and
+  executor receipts. Its precise no-claim boundary is enrollment: the opaque
+  drain report proves every worker registered with that `DrainTracker` released
+  its guard, but fs-session cannot discover an orchestrator-owned thread that
+  was never registered. Nor does generic envelope validation prove that a
+  solver-specific payload is semantically sufficient or scientifically
+  correct; those claims remain with the solver contract and Gauntlet evidence.
 - **Capability issuance is not authenticated yet**: `CapabilityToken` and the
   fs-ir projection are caller-constructible declarations. Registration makes a
   declaration immutable inside one governor, but does not prove an external

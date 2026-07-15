@@ -48,7 +48,11 @@ pub mod solver;
 mod tune;
 
 pub use admit::{AdmittedStorage, Concat, LeaseAdmittedOut};
-pub use cx::{Budget, CancelGate, Cancelled, Cx, ExecMode, RunId, StreamKey, TileFailure};
+pub use cx::{
+    Budget, CancelGate, Cancelled, Cx, DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN,
+    DRAIN_FINALIZE_REPORT_IDENTITY_VERSION, DrainFinalizeError, DrainFinalizeReport, DrainTracker,
+    DrainWorker, ExecMode, RunId, StreamKey, TileFailure,
+};
 pub use kernel::{KernelRunner, Reduce, TileKernel, TilePlan};
 pub use kill::{CandidateId, KillRegistry, UnregisteredKill};
 pub use latency::{LaneError, LatencyLane};

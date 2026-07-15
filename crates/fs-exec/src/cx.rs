@@ -200,6 +200,235 @@ impl CancelGate {
     }
 }
 
+/// Semantic version of an executor-minted drain/finalize report.
+pub const DRAIN_FINALIZE_REPORT_IDENTITY_VERSION: u32 = 1;
+/// Domain separating drain/finalize reports from every other executor hash.
+pub const DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-exec.drain-finalize-report.v1";
+
+/// A completed request -> drain -> finalize witness for one logical run.
+///
+/// Fields are private and the only constructor is [`DrainTracker::finalize`],
+/// which refuses until cancellation was requested and every registered worker
+/// guard was dropped. Higher layers may therefore persist this value as an
+/// executor-originated capability rather than accepting caller-authored
+/// booleans such as `drained=true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainFinalizeReport {
+    run: RunId,
+    registered_workers: u64,
+    drained_workers: u64,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl DrainFinalizeReport {
+    /// Logical run whose workers drained.
+    #[must_use]
+    pub const fn run(self) -> RunId {
+        self.run
+    }
+
+    /// Total worker guards admitted before finalization.
+    #[must_use]
+    pub const fn registered_workers(self) -> u64 {
+        self.registered_workers
+    }
+
+    /// Worker guards released before finalization.
+    #[must_use]
+    pub const fn drained_workers(self) -> u64 {
+        self.drained_workers
+    }
+
+    /// Domain-separated identity of the semantic report fields.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DrainState {
+    registered_workers: u64,
+    active_workers: u64,
+    drained_workers: u64,
+    report: Option<DrainFinalizeReport>,
+}
+
+/// Executor-owned accounting boundary for one cancellable solver run.
+///
+/// Each live worker holds a [`DrainWorker`] guard. `finalize` is idempotent
+/// after success, but admission closes permanently at that point so an old
+/// worker can never appear after the report was minted.
+#[derive(Debug)]
+pub struct DrainTracker<'a> {
+    run: RunId,
+    gate: &'a CancelGate,
+    state: Mutex<DrainState>,
+}
+
+impl<'a> DrainTracker<'a> {
+    /// Start tracking one caller-ledgered logical run under its cancellation
+    /// gate. This does not register a worker by itself.
+    #[must_use]
+    pub const fn new(run: RunId, gate: &'a CancelGate) -> Self {
+        Self {
+            run,
+            gate,
+            state: Mutex::new(DrainState {
+                registered_workers: 0,
+                active_workers: 0,
+                drained_workers: 0,
+                report: None,
+            }),
+        }
+    }
+
+    /// Register one live worker. Dropping the returned guard is the worker's
+    /// drain acknowledgement.
+    ///
+    /// # Errors
+    /// Registration after finalization or an unrepresentable worker count is
+    /// refused before counters change.
+    pub fn register_worker(&self) -> Result<DrainWorker<'_, 'a>, DrainFinalizeError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.report.is_some() {
+            return Err(DrainFinalizeError::RegistrationClosed);
+        }
+        let registered_workers = state
+            .registered_workers
+            .checked_add(1)
+            .ok_or(DrainFinalizeError::WorkerCountOverflow)?;
+        let active_workers = state
+            .active_workers
+            .checked_add(1)
+            .ok_or(DrainFinalizeError::WorkerCountOverflow)?;
+        state.registered_workers = registered_workers;
+        state.active_workers = active_workers;
+        Ok(DrainWorker {
+            tracker: self,
+            released: false,
+        })
+    }
+
+    /// Mint the immutable report only after the gate was requested and every
+    /// registered worker guard drained. Exact replay returns the same report.
+    ///
+    /// # Errors
+    /// An unrequested gate, zero registered workers, or any live worker fails
+    /// closed without finalizing the tracker.
+    pub fn finalize(&self) -> Result<DrainFinalizeReport, DrainFinalizeError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(report) = state.report {
+            return Ok(report);
+        }
+        if !self.gate.is_requested() {
+            return Err(DrainFinalizeError::CancellationNotRequested);
+        }
+        if state.registered_workers == 0 {
+            return Err(DrainFinalizeError::NoRegisteredWorkers);
+        }
+        if state.active_workers != 0 || state.drained_workers != state.registered_workers {
+            return Err(DrainFinalizeError::WorkersStillRunning {
+                active: state.active_workers,
+            });
+        }
+        let mut preimage = Vec::with_capacity(28);
+        preimage.extend_from_slice(&DRAIN_FINALIZE_REPORT_IDENTITY_VERSION.to_le_bytes());
+        preimage.extend_from_slice(&self.run.0.to_le_bytes());
+        preimage.extend_from_slice(&state.registered_workers.to_le_bytes());
+        preimage.extend_from_slice(&state.drained_workers.to_le_bytes());
+        let report = DrainFinalizeReport {
+            run: self.run,
+            registered_workers: state.registered_workers,
+            drained_workers: state.drained_workers,
+            content_hash: fs_blake3::hash_domain(DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN, &preimage),
+        };
+        state.report = Some(report);
+        Ok(report)
+    }
+}
+
+/// RAII proof that one worker still belongs to a tracked old run.
+#[derive(Debug)]
+pub struct DrainWorker<'tracker, 'gate> {
+    tracker: &'tracker DrainTracker<'gate>,
+    released: bool,
+}
+
+impl Drop for DrainWorker<'_, '_> {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let mut state = self
+            .tracker
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active_workers != 0 {
+            state.active_workers -= 1;
+            state.drained_workers += 1;
+        }
+        self.released = true;
+    }
+}
+
+/// Structured refusal from the drain/finalize attestation boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainFinalizeError {
+    /// Finalization was attempted before cancellation was requested.
+    CancellationNotRequested,
+    /// A zero-worker tracker carries no evidence of a drained executor run.
+    NoRegisteredWorkers,
+    /// At least one admitted worker guard remains live.
+    WorkersStillRunning {
+        /// Exact live guard count at refusal.
+        active: u64,
+    },
+    /// Finalization already closed worker admission.
+    RegistrationClosed,
+    /// Worker accounting cannot be represented in `u64`.
+    WorkerCountOverflow,
+}
+
+impl core::fmt::Display for DrainFinalizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CancellationNotRequested => {
+                write!(f, "cannot finalize before cancellation is requested")
+            }
+            Self::NoRegisteredWorkers => {
+                write!(
+                    f,
+                    "cannot attest a drained run with zero registered workers"
+                )
+            }
+            Self::WorkersStillRunning { active } => write!(
+                f,
+                "cannot finalize while {active} old-run worker guard(s) remain live"
+            ),
+            Self::RegistrationClosed => {
+                write!(
+                    f,
+                    "the drained run is already finalized; worker admission is closed"
+                )
+            }
+            Self::WorkerCountOverflow => {
+                write!(f, "executor drain worker count overflowed u64")
+            }
+        }
+    }
+}
+
+impl core::error::Error for DrainFinalizeError {}
+
 /// Marker returned by kernels that observed cancellation at a tile boundary
 /// (plan Appendix B: `run(...) -> ControlFlow<Cancelled, Out>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,6 +686,34 @@ mod tests {
         gate.request();
         assert_eq!(gate.now_ns(), 0);
         assert_eq!(gate.requested_at_ns(), None);
+    }
+
+    #[test]
+    fn drain_report_refuses_old_workers_and_closes_late_admission() {
+        let gate = CancelGate::new_clock_free();
+        let tracker = DrainTracker::new(RunId(0x51), &gate);
+        let first = tracker.register_worker().expect("first worker");
+        let second = tracker.register_worker().expect("second worker");
+        assert_eq!(
+            tracker.finalize(),
+            Err(DrainFinalizeError::CancellationNotRequested)
+        );
+        gate.request();
+        drop(first);
+        assert_eq!(
+            tracker.finalize(),
+            Err(DrainFinalizeError::WorkersStillRunning { active: 1 })
+        );
+        drop(second);
+        let report = tracker.finalize().expect("all old workers drained");
+        assert_eq!(report.run(), RunId(0x51));
+        assert_eq!(report.registered_workers(), 2);
+        assert_eq!(report.drained_workers(), 2);
+        assert_eq!(tracker.finalize(), Ok(report), "finalize replay is exact");
+        assert!(matches!(
+            tracker.register_worker(),
+            Err(DrainFinalizeError::RegistrationClosed)
+        ));
     }
 
     #[test]

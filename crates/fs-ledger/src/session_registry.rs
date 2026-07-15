@@ -69,6 +69,199 @@ const SESSION_EVENTS_HASH_DOMAIN: &[u8] = b"org.frankensim.fs-ledger.session-ter
 const PRECLAIM_REQUIRED_SUBMISSION_KIND: &str = "submission";
 const PAUSE_ACKNOWLEDGEMENT_KIND: &str = "pause-acknowledgement";
 
+/// Semantic version of a ledger-minted solver-checkpoint receipt.
+pub const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Exact artifact kind required for attested solver-state snapshots.
+pub const SOLVER_STATE_ARTIFACT_KIND: &str = "solver-state";
+/// Maximum solver-state artifact bytes independently materialized at mint and
+/// verification time.
+pub const MAX_SOLVER_CHECKPOINT_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN: &[u8] =
+    b"org.frankensim.fs-ledger.solver-checkpoint-receipt.v1\0";
+const SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES: usize =
+    4 + 16 + 8 + 8 + 32 + 8 + 32 + 32 + 8 + 8 + 32;
+
+/// Inputs to one immutable solver-checkpoint receipt.
+///
+/// The drain report is executor-minted with private fields. The ledger derives
+/// the run from it, validates the referenced snapshot envelope independently,
+/// and never accepts caller-authored `drained=true` evidence.
+#[derive(Debug, Clone, Copy)]
+pub struct SolverCheckpointClaim<'a> {
+    /// Session whose old execution generation drained.
+    pub session: u64,
+    /// Domain-separated authority of the exact pending pause request.
+    pub pause_authority: ContentHash,
+    /// Cancellation-gate generation that was drained.
+    pub gate_generation: u64,
+    /// Existing content-addressed `solver-state` artifact.
+    pub solver_state_artifact: ContentHash,
+    /// Executor-originated report minted after all registered workers joined.
+    pub drain_report: &'a fs_exec::DrainFinalizeReport,
+}
+
+/// Immutable private-field receipt minted by one physical ledger.
+///
+/// Transport decoding reconstructs only an untrusted typed candidate. A
+/// consumer MUST call [`Ledger::verify_solver_checkpoint_receipt`] before
+/// treating it as completion evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolverCheckpointReceipt {
+    ledger_instance_id: LedgerInstanceId,
+    session: u64,
+    run: fs_exec::RunId,
+    pause_authority: ContentHash,
+    gate_generation: u64,
+    solver_state_artifact: ContentHash,
+    drain_report_hash: ContentHash,
+    registered_workers: u64,
+    drained_workers: u64,
+    content_hash: ContentHash,
+}
+
+impl SolverCheckpointReceipt {
+    /// Physical ledger that minted and stores this receipt.
+    #[must_use]
+    pub const fn ledger_instance_id(self) -> LedgerInstanceId {
+        self.ledger_instance_id
+    }
+
+    /// Session bound into the receipt.
+    #[must_use]
+    pub const fn session(self) -> u64 {
+        self.session
+    }
+
+    /// Logical executor run recovered from the validated snapshot/report pair.
+    #[must_use]
+    pub const fn run(self) -> fs_exec::RunId {
+        self.run
+    }
+
+    /// Exact pending pause authority.
+    #[must_use]
+    pub const fn pause_authority(self) -> ContentHash {
+        self.pause_authority
+    }
+
+    /// Drained cancellation-gate generation.
+    #[must_use]
+    pub const fn gate_generation(self) -> u64 {
+        self.gate_generation
+    }
+
+    /// Content hash of the validated solver-state artifact.
+    #[must_use]
+    pub const fn solver_state_artifact(self) -> ContentHash {
+        self.solver_state_artifact
+    }
+
+    /// Executor drain/finalize report identity.
+    #[must_use]
+    pub const fn drain_report_hash(self) -> ContentHash {
+        self.drain_report_hash
+    }
+
+    /// Workers admitted into the executor drain boundary.
+    #[must_use]
+    pub const fn registered_workers(self) -> u64 {
+        self.registered_workers
+    }
+
+    /// Workers joined before finalization.
+    #[must_use]
+    pub const fn drained_workers(self) -> u64 {
+        self.drained_workers
+    }
+
+    /// Domain-separated identity of every semantic receipt field.
+    #[must_use]
+    pub const fn content_hash(self) -> ContentHash {
+        self.content_hash
+    }
+
+    /// Fixed-width transport for response-loss recovery and process handoff.
+    #[must_use]
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES);
+        bytes.extend_from_slice(&SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.ledger_instance_id.as_bytes());
+        bytes.extend_from_slice(&self.session.to_le_bytes());
+        bytes.extend_from_slice(&self.run.0.to_le_bytes());
+        bytes.extend_from_slice(self.pause_authority.as_bytes());
+        bytes.extend_from_slice(&self.gate_generation.to_le_bytes());
+        bytes.extend_from_slice(self.solver_state_artifact.as_bytes());
+        bytes.extend_from_slice(self.drain_report_hash.as_bytes());
+        bytes.extend_from_slice(&self.registered_workers.to_le_bytes());
+        bytes.extend_from_slice(&self.drained_workers.to_le_bytes());
+        bytes.extend_from_slice(self.content_hash.as_bytes());
+        bytes
+    }
+
+    /// Decode an untrusted fixed-width transport candidate.
+    ///
+    /// This checks self-consistency only. Ledger membership and artifact
+    /// existence are re-earned by [`Ledger::verify_solver_checkpoint_receipt`].
+    ///
+    /// # Errors
+    /// Wrong length/version, malformed drain counts, or identity mismatch.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, LedgerError> {
+        if bytes.len() != SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES {
+            return Err(invalid(
+                "solver_checkpoint_receipt.transport",
+                format!(
+                    "expected {SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES} bytes, got {}",
+                    bytes.len()
+                ),
+            ));
+        }
+        let u32_at = |offset: usize| {
+            u32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("transport length"),
+            )
+        };
+        let u64_at = |offset: usize| {
+            u64::from_le_bytes(
+                bytes[offset..offset + 8]
+                    .try_into()
+                    .expect("transport length"),
+            )
+        };
+        let hash_at = |offset: usize| {
+            ContentHash(
+                bytes[offset..offset + 32]
+                    .try_into()
+                    .expect("transport length"),
+            )
+        };
+        let version = u32_at(0);
+        if version != SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION {
+            return Err(invalid(
+                "solver_checkpoint_receipt.version",
+                format!("found v{version}, require v{SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION}"),
+            ));
+        }
+        let receipt = Self {
+            ledger_instance_id: LedgerInstanceId(
+                bytes[4..20].try_into().expect("transport length"),
+            ),
+            session: u64_at(20),
+            run: fs_exec::RunId(u64_at(28)),
+            pause_authority: hash_at(36),
+            gate_generation: u64_at(68),
+            solver_state_artifact: hash_at(76),
+            drain_report_hash: hash_at(108),
+            registered_workers: u64_at(140),
+            drained_workers: u64_at(148),
+            content_hash: hash_at(156),
+        };
+        validate_checkpoint_receipt(receipt)?;
+        Ok(receipt)
+    }
+}
+
 /// Canonical immutable mutation claim offered before caller work begins.
 ///
 /// The caller supplies the opaque request authority, but fs-ledger binds it to
@@ -301,6 +494,51 @@ fn invalid(field: &str, problem: impl Into<String>) -> LedgerError {
         field: field.to_string(),
         problem: problem.into(),
     }
+}
+
+fn solver_checkpoint_receipt_hash(receipt: SolverCheckpointReceipt) -> ContentHash {
+    let mut hasher = Blake3::new();
+    hasher.update(SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN);
+    hasher.update(&SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION.to_le_bytes());
+    hasher.update(&receipt.ledger_instance_id.as_bytes());
+    hasher.update(&receipt.session.to_le_bytes());
+    hasher.update(&receipt.run.0.to_le_bytes());
+    hasher.update(receipt.pause_authority.as_bytes());
+    hasher.update(&receipt.gate_generation.to_le_bytes());
+    hasher.update(receipt.solver_state_artifact.as_bytes());
+    hasher.update(receipt.drain_report_hash.as_bytes());
+    hasher.update(&receipt.registered_workers.to_le_bytes());
+    hasher.update(&receipt.drained_workers.to_le_bytes());
+    hasher.finalize()
+}
+
+fn validate_checkpoint_receipt(receipt: SolverCheckpointReceipt) -> Result<(), LedgerError> {
+    if receipt.registered_workers == 0 {
+        return Err(invalid(
+            "solver_checkpoint_receipt.registered_workers",
+            "a zero-worker report cannot attest an executor drain",
+        ));
+    }
+    if receipt.drained_workers != receipt.registered_workers {
+        return Err(invalid(
+            "solver_checkpoint_receipt.drained_workers",
+            format!(
+                "{} drained workers differs from {} registered workers",
+                receipt.drained_workers, receipt.registered_workers
+            ),
+        ));
+    }
+    let computed = solver_checkpoint_receipt_hash(receipt);
+    if computed != receipt.content_hash {
+        return Err(invalid(
+            "solver_checkpoint_receipt.content_hash",
+            format!(
+                "declared {} differs from recomputed {computed}",
+                receipt.content_hash
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn stored_corrupt(authority: ContentHash, detail: impl Into<String>) -> LedgerError {
@@ -883,6 +1121,353 @@ impl StoredSessionFlushBatch {
 }
 
 impl Ledger {
+    fn validate_solver_checkpoint_artifact(
+        &self,
+        artifact: ContentHash,
+        run: fs_exec::RunId,
+    ) -> Result<(), LedgerError> {
+        let info = self.artifact_info(&artifact)?.ok_or_else(|| {
+            invalid(
+                "solver_checkpoint_receipt.solver_state_artifact",
+                format!("artifact {artifact} does not exist"),
+            )
+        })?;
+        if info.kind != SOLVER_STATE_ARTIFACT_KIND {
+            return Err(invalid(
+                "solver_checkpoint_receipt.solver_state_artifact",
+                format!(
+                    "artifact {artifact} has kind {:?}, require {SOLVER_STATE_ARTIFACT_KIND:?}",
+                    info.kind
+                ),
+            ));
+        }
+        let bytes = self
+            .get_artifact_bounded(&artifact, MAX_SOLVER_CHECKPOINT_ARTIFACT_BYTES)?
+            .ok_or_else(|| {
+                invalid(
+                    "solver_checkpoint_receipt.solver_state_artifact",
+                    format!("artifact {artifact} disappeared during validation"),
+                )
+            })?;
+        let envelope = fs_exec::solver::envelope::inspect(&bytes).map_err(|error| {
+            invalid(
+                "solver_checkpoint_receipt.solver_state_artifact",
+                format!("artifact {artifact} is not a valid solver-state envelope: {error}"),
+            )
+        })?;
+        if envelope.provenance() != run.0 {
+            return Err(invalid(
+                "solver_checkpoint_receipt.run",
+                format!(
+                    "snapshot provenance {} differs from drained executor run {}",
+                    envelope.provenance(),
+                    run.0
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn solver_checkpoint_receipt_at_instance(
+        &self,
+        pause_authority: ContentHash,
+        current_ledger: LedgerInstanceId,
+    ) -> Result<Option<SolverCheckpointReceipt>, LedgerError> {
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT receipt_hash, ledger_instance_id, session, run, pause_authority, \
+                        gate_generation, solver_state_artifact, drain_report_hash, \
+                        registered_workers, drained_workers \
+                 FROM session_checkpoint_receipts \
+                 WHERE pause_authority = ?1 LIMIT 2",
+                &[blob_param(pause_authority.as_bytes())],
+            )
+            .map_err(|error| sql_err("solver checkpoint receipt read", &error))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != 1 {
+            return Err(stored_corrupt(
+                pause_authority,
+                "solver checkpoint pause authority names multiple receipts",
+            ));
+        }
+        let row = &rows[0];
+        let receipt = SolverCheckpointReceipt {
+            content_hash: ContentHash(row_blob(
+                row,
+                0,
+                pause_authority,
+                "solver_checkpoint.receipt_hash",
+            )?),
+            ledger_instance_id: LedgerInstanceId(row_blob(
+                row,
+                1,
+                pause_authority,
+                "solver_checkpoint.ledger_instance_id",
+            )?),
+            session: u64::from_be_bytes(row_blob(
+                row,
+                2,
+                pause_authority,
+                "solver_checkpoint.session",
+            )?),
+            run: fs_exec::RunId(u64::from_be_bytes(row_blob(
+                row,
+                3,
+                pause_authority,
+                "solver_checkpoint.run",
+            )?)),
+            pause_authority: ContentHash(row_blob(
+                row,
+                4,
+                pause_authority,
+                "solver_checkpoint.pause_authority",
+            )?),
+            gate_generation: u64::from_be_bytes(row_blob(
+                row,
+                5,
+                pause_authority,
+                "solver_checkpoint.gate_generation",
+            )?),
+            solver_state_artifact: ContentHash(row_blob(
+                row,
+                6,
+                pause_authority,
+                "solver_checkpoint.solver_state_artifact",
+            )?),
+            drain_report_hash: ContentHash(row_blob(
+                row,
+                7,
+                pause_authority,
+                "solver_checkpoint.drain_report_hash",
+            )?),
+            registered_workers: u64::from_be_bytes(row_blob(
+                row,
+                8,
+                pause_authority,
+                "solver_checkpoint.registered_workers",
+            )?),
+            drained_workers: u64::from_be_bytes(row_blob(
+                row,
+                9,
+                pause_authority,
+                "solver_checkpoint.drained_workers",
+            )?),
+        };
+        if receipt.ledger_instance_id != current_ledger {
+            return Err(stored_corrupt(
+                pause_authority,
+                format!(
+                    "checkpoint receipt belongs to ledger {}, not current ledger {current_ledger}",
+                    receipt.ledger_instance_id
+                ),
+            ));
+        }
+        if receipt.pause_authority != pause_authority {
+            return Err(stored_corrupt(
+                pause_authority,
+                "checkpoint receipt row disagrees with its indexed pause authority",
+            ));
+        }
+        validate_checkpoint_receipt(receipt).map_err(|error| {
+            stored_corrupt(
+                pause_authority,
+                format!("solver checkpoint receipt identity is corrupt: {error}"),
+            )
+        })?;
+        Ok(Some(receipt))
+    }
+
+    fn insert_solver_checkpoint_receipt(
+        &self,
+        receipt: SolverCheckpointReceipt,
+    ) -> Result<(), LedgerError> {
+        self.conn
+            .prepare(
+                "INSERT INTO session_checkpoint_receipts( \
+                    receipt_hash, ledger_instance_id, session, run, pause_authority, \
+                    gate_generation, solver_state_artifact, drain_report_hash, \
+                    registered_workers, drained_workers, created_at \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )
+            .map_err(|error| sql_err("solver checkpoint receipt insert prepare", &error))?
+            .execute_with_params(&[
+                blob_param(receipt.content_hash.as_bytes()),
+                blob_param(&receipt.ledger_instance_id.as_bytes()),
+                blob_param(&receipt.session.to_be_bytes()),
+                blob_param(&receipt.run.0.to_be_bytes()),
+                blob_param(receipt.pause_authority.as_bytes()),
+                blob_param(&receipt.gate_generation.to_be_bytes()),
+                blob_param(receipt.solver_state_artifact.as_bytes()),
+                blob_param(receipt.drain_report_hash.as_bytes()),
+                blob_param(&receipt.registered_workers.to_be_bytes()),
+                blob_param(&receipt.drained_workers.to_be_bytes()),
+                SqliteValue::Integer(now_wall_ns()),
+            ])
+            .map_err(|error| sql_err("solver checkpoint receipt insert", &error))?;
+        Ok(())
+    }
+
+    /// Mint or exactly replay one immutable solver-checkpoint receipt.
+    ///
+    /// The referenced artifact must already exist with kind `solver-state`,
+    /// its complete bounded bytes must form a checksum-valid fs-exec snapshot,
+    /// and its provenance must equal the opaque drain report's run. The pause
+    /// authority is unique: a retry after response loss returns the same
+    /// receipt, while any changed field conflicts atomically.
+    ///
+    /// # Errors
+    /// Open transactions, missing/oversized/corrupt artifacts, run mismatch,
+    /// malformed drain evidence, authority conflicts, and ledger failures.
+    pub fn attest_solver_checkpoint(
+        &self,
+        claim: SolverCheckpointClaim<'_>,
+    ) -> Result<SolverCheckpointReceipt, LedgerError> {
+        if self.in_transaction() {
+            return Err(invalid(
+                "solver_checkpoint_receipt.transaction",
+                "checkpoint attestation must own its transaction; commit or roll back first",
+            ));
+        }
+        let current_ledger = self.checked_instance_id()?;
+        let report = *claim.drain_report;
+        if report.registered_workers() == 0
+            || report.drained_workers() != report.registered_workers()
+        {
+            return Err(invalid(
+                "solver_checkpoint_receipt.drain_report",
+                "executor report does not prove a non-empty fully drained worker set",
+            ));
+        }
+        let mut report_preimage = Vec::with_capacity(28);
+        report_preimage
+            .extend_from_slice(&fs_exec::DRAIN_FINALIZE_REPORT_IDENTITY_VERSION.to_le_bytes());
+        report_preimage.extend_from_slice(&report.run().0.to_le_bytes());
+        report_preimage.extend_from_slice(&report.registered_workers().to_le_bytes());
+        report_preimage.extend_from_slice(&report.drained_workers().to_le_bytes());
+        let computed_report_hash = fs_blake3::hash_domain(
+            fs_exec::DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN,
+            &report_preimage,
+        );
+        if computed_report_hash != report.content_hash() {
+            return Err(invalid(
+                "solver_checkpoint_receipt.drain_report",
+                "executor report identity does not match its private fields",
+            ));
+        }
+        self.validate_solver_checkpoint_artifact(claim.solver_state_artifact, report.run())?;
+        let mut receipt = SolverCheckpointReceipt {
+            ledger_instance_id: current_ledger,
+            session: claim.session,
+            run: report.run(),
+            pause_authority: claim.pause_authority,
+            gate_generation: claim.gate_generation,
+            solver_state_artifact: claim.solver_state_artifact,
+            drain_report_hash: report.content_hash(),
+            registered_workers: report.registered_workers(),
+            drained_workers: report.drained_workers(),
+            content_hash: ContentHash([0; 32]),
+        };
+        receipt.content_hash = solver_checkpoint_receipt_hash(receipt);
+        validate_checkpoint_receipt(receipt)?;
+
+        self.begin()?;
+        let write = (|| match self
+            .solver_checkpoint_receipt_at_instance(claim.pause_authority, current_ledger)?
+        {
+            Some(stored) if stored == receipt => Ok(stored),
+            Some(_) => Err(invalid(
+                "solver_checkpoint_receipt.pause_authority",
+                format!(
+                    "pause authority {} already stores a different checkpoint receipt",
+                    claim.pause_authority
+                ),
+            )),
+            None => {
+                self.insert_solver_checkpoint_receipt(receipt)?;
+                Ok(receipt)
+            }
+        })();
+        match write {
+            Ok(receipt) => {
+                if let Err(error) = self.commit() {
+                    let _ = self.rollback();
+                    return Err(error);
+                }
+                Ok(receipt)
+            }
+            Err(error) => {
+                let _ = self.rollback();
+                Err(error)
+            }
+        }
+    }
+
+    /// Recover one typed checkpoint receipt by its exact pause authority.
+    /// Absence is `Ok(None)`; a present row is fully reverified before return.
+    ///
+    /// # Errors
+    /// Malformed, foreign-ledger, hash-mismatched, or orphaned receipt state
+    /// fails closed.
+    pub fn solver_checkpoint_receipt(
+        &self,
+        pause_authority: ContentHash,
+    ) -> Result<Option<SolverCheckpointReceipt>, LedgerError> {
+        let current_ledger = self.checked_instance_id()?;
+        self.note_read_query();
+        let Some(receipt) =
+            self.solver_checkpoint_receipt_at_instance(pause_authority, current_ledger)?
+        else {
+            return Ok(None);
+        };
+        self.validate_solver_checkpoint_artifact(receipt.solver_state_artifact, receipt.run)?;
+        Ok(Some(receipt))
+    }
+
+    /// Independently re-earn ledger membership, immutable row identity, and
+    /// solver-state artifact/run binding for a transport receipt candidate.
+    ///
+    /// # Errors
+    /// Self-inconsistent transport, foreign/missing/conflicting ledger rows,
+    /// or a missing/corrupt/mismatched artifact is refused.
+    pub fn verify_solver_checkpoint_receipt(
+        &self,
+        receipt: &SolverCheckpointReceipt,
+    ) -> Result<(), LedgerError> {
+        validate_checkpoint_receipt(*receipt)?;
+        let current_ledger = self.checked_instance_id()?;
+        if receipt.ledger_instance_id != current_ledger {
+            return Err(invalid(
+                "solver_checkpoint_receipt.ledger_instance_id",
+                format!(
+                    "receipt belongs to ledger {}, not current ledger {current_ledger}",
+                    receipt.ledger_instance_id
+                ),
+            ));
+        }
+        self.note_read_query();
+        let stored = self
+            .solver_checkpoint_receipt_at_instance(receipt.pause_authority, current_ledger)?
+            .ok_or_else(|| {
+                invalid(
+                    "solver_checkpoint_receipt.content_hash",
+                    format!(
+                        "receipt {} is not stored by this ledger",
+                        receipt.content_hash
+                    ),
+                )
+            })?;
+        if stored != *receipt {
+            return Err(invalid(
+                "solver_checkpoint_receipt.content_hash",
+                "stored checkpoint receipt differs from the supplied candidate",
+            ));
+        }
+        self.validate_solver_checkpoint_artifact(receipt.solver_state_artifact, receipt.run)
+    }
+
     /// Fetch and hash-verify one immutable mutation claim.
     ///
     /// Absence is Ok(None). A claim may still be Pending; use
@@ -3092,6 +3677,115 @@ mod tests {
 
     fn authority(seed: u64) -> ContentHash {
         hash_bytes(&seed.to_le_bytes())
+    }
+
+    fn drained_report(run: fs_exec::RunId) -> fs_exec::DrainFinalizeReport {
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let tracker = fs_exec::DrainTracker::new(run, &gate);
+        let worker = tracker.register_worker().expect("fixture worker");
+        gate.request();
+        drop(worker);
+        tracker.finalize().expect("fixture run drained")
+    }
+
+    #[test]
+    fn solver_checkpoint_receipt_is_idempotent_transport_checked_and_ledger_bound() {
+        let ledger = Ledger::open(":memory:").expect("checkpoint ledger");
+        let run = fs_exec::RunId(0xA771);
+        let report = drained_report(run);
+        let snapshot =
+            fs_exec::solver::envelope::seal(0x4653_434b_5054, 1, run.0, b"bounded-solver-state");
+        let artifact = ledger
+            .put_artifact(SOLVER_STATE_ARTIFACT_KIND, &snapshot, None)
+            .expect("solver-state artifact");
+        let pause_authority = authority(0x51);
+        let claim = SolverCheckpointClaim {
+            session: 71,
+            pause_authority,
+            gate_generation: 4,
+            solver_state_artifact: artifact.hash,
+            drain_report: &report,
+        };
+        let first = ledger
+            .attest_solver_checkpoint(claim)
+            .expect("first attestation");
+        let after_response_loss = ledger
+            .attest_solver_checkpoint(claim)
+            .expect("exact retry after response loss");
+        assert_eq!(after_response_loss, first);
+        assert_eq!(
+            ledger
+                .solver_checkpoint_receipt(pause_authority)
+                .expect("receipt lookup"),
+            Some(first)
+        );
+
+        let transport = first.to_bytes();
+        let candidate = SolverCheckpointReceipt::from_bytes(&transport).expect("typed transport");
+        ledger
+            .verify_solver_checkpoint_receipt(&candidate)
+            .expect("stored transport candidate verifies");
+        let mut forged = transport;
+        forged[20] ^= 1;
+        assert!(SolverCheckpointReceipt::from_bytes(&forged).is_err());
+
+        let foreign = Ledger::open(":memory:").expect("foreign ledger");
+        assert!(foreign.verify_solver_checkpoint_receipt(&first).is_err());
+
+        let changed_snapshot =
+            fs_exec::solver::envelope::seal(0x4653_434b_5054, 1, run.0, b"changed-solver-state");
+        let changed_artifact = ledger
+            .put_artifact(SOLVER_STATE_ARTIFACT_KIND, &changed_snapshot, None)
+            .expect("changed solver-state artifact");
+        let conflicting = SolverCheckpointClaim {
+            solver_state_artifact: changed_artifact.hash,
+            ..claim
+        };
+        assert!(ledger.attest_solver_checkpoint(conflicting).is_err());
+        assert_eq!(
+            ledger
+                .solver_checkpoint_receipt(pause_authority)
+                .expect("original receipt survives conflict"),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn solver_checkpoint_attestation_refuses_wrong_kind_and_run() {
+        let ledger = Ledger::open(":memory:").expect("checkpoint refusal ledger");
+        let run = fs_exec::RunId(0xA772);
+        let report = drained_report(run);
+        let wrong_run = fs_exec::solver::envelope::seal(7, 1, run.0 + 1, b"state");
+        let wrong_run_artifact = ledger
+            .put_artifact(SOLVER_STATE_ARTIFACT_KIND, &wrong_run, None)
+            .expect("wrong-run artifact");
+        assert!(
+            ledger
+                .attest_solver_checkpoint(SolverCheckpointClaim {
+                    session: 72,
+                    pause_authority: authority(0x52),
+                    gate_generation: 0,
+                    solver_state_artifact: wrong_run_artifact.hash,
+                    drain_report: &report,
+                })
+                .is_err()
+        );
+
+        let valid_envelope = fs_exec::solver::envelope::seal(7, 1, run.0, b"state");
+        let wrong_kind = ledger
+            .put_artifact("generic-artifact", &valid_envelope, None)
+            .expect("wrong-kind artifact");
+        assert!(
+            ledger
+                .attest_solver_checkpoint(SolverCheckpointClaim {
+                    session: 72,
+                    pause_authority: authority(0x53),
+                    gate_generation: 0,
+                    solver_state_artifact: wrong_kind.hash,
+                    drain_report: &report,
+                })
+                .is_err()
+        );
     }
 
     fn fixture_claim<'a>(

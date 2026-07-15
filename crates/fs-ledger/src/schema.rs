@@ -25,9 +25,12 @@
 //! two covering lineage indexes used by capped verifier reads and immutable
 //! per-artifact output seals for consumers that require exactly one producer,
 //! plus immutable operation-edge-set seals for exact-lineage consumers.
+//! Schema v10 adds immutable solver-checkpoint receipts that bind one pause
+//! authority to an existing solver-state artifact and executor-originated
+//! drain/finalize report.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -36,7 +39,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -780,7 +783,60 @@ pub const V9: &[&str] = &[
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 through v9 additions); the
+/// v10: one immutable, idempotent solver-checkpoint receipt per pause
+/// authority. Every scalar uses a fixed-width BLOB so the full `u64` domain is
+/// represented exactly; the artifact foreign key makes persisted solver state
+/// a prerequisite rather than a caller-authored hash claim.
+pub const V10: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS session_checkpoint_receipts(
+        receipt_hash BLOB NOT NULL PRIMARY KEY CHECK(length(receipt_hash) = 32),
+        ledger_instance_id BLOB NOT NULL CHECK(length(ledger_instance_id) = 16),
+        session BLOB NOT NULL CHECK(length(session) = 8),
+        run BLOB NOT NULL CHECK(length(run) = 8),
+        pause_authority BLOB NOT NULL UNIQUE CHECK(length(pause_authority) = 32),
+        gate_generation BLOB NOT NULL CHECK(length(gate_generation) = 8),
+        solver_state_artifact BLOB NOT NULL CHECK(length(solver_state_artifact) = 32)
+            REFERENCES artifacts(hash),
+        drain_report_hash BLOB NOT NULL CHECK(length(drain_report_hash) = 32),
+        registered_workers BLOB NOT NULL CHECK(length(registered_workers) = 8),
+        drained_workers BLOB NOT NULL CHECK(length(drained_workers) = 8),
+        created_at INTEGER NOT NULL,
+        CHECK(registered_workers = drained_workers),
+        CHECK(registered_workers != X'0000000000000000')
+    ) STRICT",
+    "CREATE INDEX IF NOT EXISTS idx_session_checkpoint_artifact
+     ON session_checkpoint_receipts(solver_state_artifact)",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_checkpoint_receipts_immutable_update
+     BEFORE UPDATE ON session_checkpoint_receipts
+     BEGIN
+       SELECT RAISE(ABORT, 'session checkpoint receipt is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_checkpoint_receipts_immutable_delete
+     BEFORE DELETE ON session_checkpoint_receipts
+     BEGIN
+       SELECT RAISE(ABORT, 'session checkpoint receipt is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_checkpoint_receipts_immutable_receipt_reinsert
+     BEFORE INSERT ON session_checkpoint_receipts
+     WHEN EXISTS(
+         SELECT 1 FROM session_checkpoint_receipts
+         WHERE receipt_hash = NEW.receipt_hash
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'session checkpoint receipt is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_checkpoint_receipts_immutable_pause_reinsert
+     BEFORE INSERT ON session_checkpoint_receipts
+     WHEN EXISTS(
+         SELECT 1 FROM session_checkpoint_receipts
+         WHERE pause_authority = NEW.pause_authority
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'session checkpoint pause authority is immutable');
+     END",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 through v10 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -809,4 +865,5 @@ pub const ALL_TABLES: &[&str] = &[
     "session_claim_discovery",
     "artifact_output_seals",
     "op_artifact_edge_seals",
+    "session_checkpoint_receipts",
 ];

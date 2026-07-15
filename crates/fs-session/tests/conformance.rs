@@ -6,17 +6,16 @@
 //! fires in its declared order under synthetic memory pressure with
 //! pause-serialize-resume equality; errors surface as ranked guidance.
 
-use fs_exec::CancelGate;
 use fs_exec::solver::{SolverState, codec};
+use fs_exec::{CancelGate, DrainTracker, RunId};
 use fs_plan::{CostModel, CostObservation, SealedCostModel};
 use fs_session::{
     CalibrationReport, CapabilityToken, Charge, DegradationEvent, DegradationStep,
     DurableGovernorNonce, Enforcement, Estimate, Governor as SessionGovernor, Guidance,
-    MAX_CAPABILITY_OP_BYTES, MAX_CAPABILITY_OPS, MAX_CHECKPOINT_CLAIM_BYTES, MAX_EVENT_PAGE_ROWS,
-    MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES,
-    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_LEDGER_SCOPE_BYTES, MAX_RETAINED_EVIDENCE_BYTES,
-    MAX_SESSIONS_PER_GOVERNOR, MAX_SESSIONS_PER_SCOPE, ScopeFlushPermit, SessionError, SessionId,
-    StepPhase, SubmitOutcome, estimate,
+    MAX_CAPABILITY_OP_BYTES, MAX_CAPABILITY_OPS, MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES,
+    MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES, MAX_IDEMPOTENCY_KEYS_PER_SESSION,
+    MAX_LEDGER_SCOPE_BYTES, MAX_SESSIONS_PER_GOVERNOR, MAX_SESSIONS_PER_SCOPE, ScopeFlushPermit,
+    SessionError, SessionId, StepPhase, SubmitOutcome, estimate,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -146,6 +145,40 @@ fn durable_ledger_path(case: &str) -> String {
         ))
         .to_string_lossy()
         .into_owned()
+}
+
+fn solver_checkpoint(
+    ledger: &fs_ledger::Ledger,
+    request: fs_session::PauseRequestId,
+    label: &str,
+) -> fs_ledger::session_registry::SolverCheckpointReceipt {
+    let authority = request.checkpoint_authority();
+    let mut run_bytes = [0_u8; 8];
+    run_bytes.copy_from_slice(&authority.as_bytes()[..8]);
+    let run = RunId(u64::from_le_bytes(run_bytes));
+    let gate = CancelGate::new_clock_free();
+    let tracker = DrainTracker::new(run, &gate);
+    let worker = tracker.register_worker().expect("fixture worker");
+    gate.request();
+    drop(worker);
+    let report = tracker.finalize().expect("fixture run drained");
+    let snapshot = fs_exec::solver::envelope::seal(0x4653_434b_5054, 1, run.0, label.as_bytes());
+    let artifact = ledger
+        .put_artifact(
+            fs_ledger::session_registry::SOLVER_STATE_ARTIFACT_KIND,
+            &snapshot,
+            None,
+        )
+        .expect("fixture solver-state artifact");
+    ledger
+        .attest_solver_checkpoint(fs_ledger::session_registry::SolverCheckpointClaim {
+            session: request.session().0,
+            pause_authority: authority,
+            gate_generation: request.gate_generation(),
+            solver_state_artifact: artifact.hash,
+            drain_report: &report,
+        })
+        .expect("fixture checkpoint receipt")
 }
 
 fn meter_snapshot_tuple(snapshot: fs_session::MeterSnapshot) -> (f64, u64, f64, u32, u32) {
@@ -1141,8 +1174,10 @@ fn ss_003n_pressure_action_replays_across_pause_lifecycle_and_refuses_stale_ids(
         .last()
         .and_then(|event| event.pause_request_id)
         .expect("pause request");
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+    let checkpoint = solver_checkpoint(&ledger, request_id, "typed-pressure-checkpoint");
     let acknowledgement = governor
-        .acknowledge_pause(request_id, "typed-pressure-checkpoint")
+        .acknowledge_pause(request_id, &ledger, &checkpoint)
         .expect("pause completion");
     assert_eq!(
         governor
@@ -1529,12 +1564,14 @@ fn ss_003p_pause_acknowledgement_waits_for_pending_submission_meter_commit() {
         .iter()
         .find_map(|event| event.pause_request_id)
         .expect("pause request authority");
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+    let checkpoint = solver_checkpoint(&ledger, pause_request, "settled-checkpoint");
     assert!(matches!(
         governor.submit_once(refused_while_draining, || panic!("draining work ran")),
         Err(SessionError::PauseAlreadyPending { id: 39, .. })
     ));
     assert!(matches!(
-        governor.acknowledge_pause(pause_request, "premature-checkpoint"),
+        governor.acknowledge_pause(pause_request, &ledger, &checkpoint),
         Err(SessionError::PauseDrainPending {
             id: 39,
             pending_submissions: 1,
@@ -1552,7 +1589,7 @@ fn ss_003p_pause_acknowledgement_waits_for_pending_submission_meter_commit() {
     };
     assert_eq!(meter_receipt.after().core_s, 7.0);
     let acknowledgement = governor
-        .acknowledge_pause(pause_request, "settled-checkpoint")
+        .acknowledge_pause(pause_request, &ledger, &checkpoint)
         .expect("settled generation can rotate");
     assert!(matches!(
         governor
@@ -2221,8 +2258,9 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
 fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     // Bead gp3.13 acceptance battery: gates are OWNED (bound at open),
     // wrong-session pauses unrepresentable, out-of-ladder levels fail,
-    // and a pause is never complete without a generation-bound checkpoint claim.
+    // and a pause is never complete without a generation-bound ledger receipt.
     let gov = Governor::new();
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
     let gate_a = Arc::new(CancelGate::new());
     let gate_b = Arc::new(CancelGate::new());
     let permit_a = gov
@@ -2286,15 +2324,6 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     assert_eq!(request_id.gate_generation(), 0);
     assert_eq!(request_id.requested_ordinal(), pause.ordinal);
     assert!(gov.pause_pending(SessionId(41)).expect("known session"));
-    let oversized_checkpoint = "x".repeat(MAX_CHECKPOINT_CLAIM_BYTES + 1);
-    assert!(matches!(
-        gov.acknowledge_pause(request_id, &oversized_checkpoint),
-        Err(SessionError::LimitExceeded {
-            resource: "checkpoint_claim_bytes",
-            ..
-        })
-    ));
-    assert!(gov.pause_pending(SessionId(41)).expect("known session"));
 
     let before_repeat = gov
         .events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
@@ -2322,14 +2351,63 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         "repeated level-3 refusal must not mutate the scoped event stream"
     );
 
-    // (e) A blank claim cannot complete the pause (and the pending
-    // request survives the refusal).
+    // (e) A live old worker prevents the executor from minting drain proof.
+    let authority = request_id.checkpoint_authority();
+    let mut run_bytes = [0_u8; 8];
+    run_bytes.copy_from_slice(&authority.as_bytes()[..8]);
+    let run = RunId(u64::from_le_bytes(run_bytes));
+    let drain_gate = CancelGate::new_clock_free();
+    let tracker = DrainTracker::new(run, &drain_gate);
+    let old_worker = tracker.register_worker().expect("old worker admitted");
+    drain_gate.request();
     assert!(matches!(
-        gov.acknowledge_pause(request_id, "  "),
-        Err(SessionError::Submission { .. })
+        tracker.finalize(),
+        Err(fs_exec::DrainFinalizeError::WorkersStillRunning { active: 1 })
     ));
     assert!(gov.pause_pending(SessionId(41)).expect("known session"));
-    // (f) Cross-governor request authority is refused.
+    drop(old_worker);
+    let report = tracker.finalize().expect("old worker drained");
+    let snapshot =
+        fs_exec::solver::envelope::seal(0x4653_434b_5054, 1, run.0, b"solver-state-0xf00d");
+    let artifact = ledger
+        .put_artifact(
+            fs_ledger::session_registry::SOLVER_STATE_ARTIFACT_KIND,
+            &snapshot,
+            None,
+        )
+        .expect("solver-state artifact");
+    let checkpoint_claim = fs_ledger::session_registry::SolverCheckpointClaim {
+        session: request_id.session().0,
+        pause_authority: authority,
+        gate_generation: request_id.gate_generation(),
+        solver_state_artifact: artifact.hash,
+        drain_report: &report,
+    };
+    let checkpoint = ledger
+        .attest_solver_checkpoint(checkpoint_claim)
+        .expect("checkpoint receipt");
+    assert_eq!(
+        ledger
+            .attest_solver_checkpoint(checkpoint_claim)
+            .expect("response-loss retry"),
+        checkpoint,
+        "retry after losing the mint response must recover one receipt"
+    );
+    let recovered_checkpoint = ledger
+        .solver_checkpoint_receipt(authority)
+        .expect("checkpoint lookup")
+        .expect("stored checkpoint");
+    assert_eq!(recovered_checkpoint, checkpoint);
+
+    // Malformed transport cannot forge a typed receipt.
+    let mut forged_transport = checkpoint.to_bytes();
+    forged_transport[20] ^= 1;
+    assert!(
+        fs_ledger::session_registry::SolverCheckpointReceipt::from_bytes(&forged_transport)
+            .is_err()
+    );
+
+    // (f) Cross-session, foreign-ledger, and cross-governor authorities fail closed.
     let foreign = Governor::new();
     foreign
         .open_session_gated(token(42, 1e9, 1e9), Arc::new(CancelGate::new()))
@@ -2340,18 +2418,40 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         .last()
         .and_then(|event| event.pause_request_id)
         .expect("foreign request authority");
+    let cross_session_ledger = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
+    let cross_session_checkpoint =
+        solver_checkpoint(&cross_session_ledger, foreign_request, "cross-session");
     assert!(matches!(
-        gov.acknowledge_pause(foreign_request, "ckpt-b-1"),
+        gov.acknowledge_pause(request_id, &cross_session_ledger, &cross_session_checkpoint,),
+        Err(SessionError::PauseCheckpointMismatch {
+            id: 41,
+            reason: "cross-session",
+            ..
+        })
+    ));
+    assert!(matches!(
+        gov.acknowledge_pause(
+            foreign_request,
+            &cross_session_ledger,
+            &cross_session_checkpoint,
+        ),
         Err(SessionError::PauseRequestMismatch { id: 42, .. })
     ));
-    // (g) The checkpoint claim is the ONLY route to Complete; the
+    let foreign_ledger = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
+    let foreign_checkpoint = solver_checkpoint(&foreign_ledger, request_id, "foreign-ledger");
+    assert!(matches!(
+        gov.acknowledge_pause(request_id, &ledger, &foreign_checkpoint),
+        Err(SessionError::PauseCheckpointMismatch {
+            id: 41,
+            reason: "unverified-ledger-receipt",
+            ..
+        })
+    ));
+
+    // (g) The verified receipt is the ONLY route to Complete; the
     // completion event cites the request it acknowledges.
-    let checkpoint_claim = format!(
-        "solver-state-0xf00d:{}",
-        "é".repeat(MAX_RETAINED_EVIDENCE_BYTES)
-    );
     let acknowledged = gov
-        .acknowledge_pause(request_id, &checkpoint_claim)
+        .acknowledge_pause(request_id, &ledger, &recovered_checkpoint)
         .expect("pending pause");
     let done = acknowledged.event();
     assert_eq!(done.phase, StepPhase::Complete);
@@ -2362,14 +2462,20 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         .checkpoint
         .as_ref()
         .expect("complete event carries structured checkpoint evidence");
-    assert!(checkpoint.preview().starts_with("solver-state-0xf00d"));
-    assert_eq!(checkpoint.preview().len(), MAX_RETAINED_EVIDENCE_BYTES);
-    assert_eq!(checkpoint.byte_len(), checkpoint_claim.len());
+    assert_eq!(
+        checkpoint.preview(),
+        recovered_checkpoint.content_hash().to_hex()
+    );
+    assert_eq!(checkpoint.byte_len(), 64);
     assert!(
         done.attribution
-            .contains(&checkpoint.byte_len().to_string())
+            .contains(&recovered_checkpoint.content_hash().to_string())
     );
-    assert!(done.attribution.contains(&checkpoint.digest().to_string()));
+    assert!(done.attribution.contains(&artifact.hash.to_string()));
+    assert!(
+        done.attribution
+            .contains(&report.content_hash().to_string())
+    );
     assert!(
         done.attribution
             .contains(&format!("ordinal {}", pause.ordinal)),
@@ -2378,7 +2484,7 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     assert!(!gov.pause_pending(SessionId(41)).expect("known session"));
     // Lost-response replay is idempotent and recovers the exact same gate.
     let replayed = gov
-        .acknowledge_pause(request_id, &checkpoint_claim)
+        .acknowledge_pause(request_id, &ledger, &recovered_checkpoint)
         .expect("identical acknowledgement replay");
     assert_eq!(replayed.event(), acknowledged.event());
     assert_eq!(
@@ -2389,10 +2495,10 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         &replayed.resume_gate(),
         &acknowledged.resume_gate()
     ));
-    // Conflicting evidence cannot replace the completed generation.
+    // Foreign-ledger evidence cannot replace the completed generation.
     assert!(matches!(
-        gov.acknowledge_pause(request_id, "different-checkpoint"),
-        Err(SessionError::PauseAcknowledgementConflict { id: 41, .. })
+        gov.acknowledge_pause(request_id, &ledger, &foreign_checkpoint),
+        Err(SessionError::PauseCheckpointMismatch { id: 41, .. })
     ));
 
     // No pressure transition can request the fresh gate before resumed workers
@@ -2419,7 +2525,7 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         })
     );
     let recovered = gov
-        .acknowledge_pause(request_id, &checkpoint_claim)
+        .acknowledge_pause(request_id, &ledger, &recovered_checkpoint)
         .expect("identical replay replaces a never-activated requested gate");
     assert_eq!(recovered.event(), acknowledged.event());
     assert_eq!(recovered.resume_generation(), 1);
@@ -2434,7 +2540,7 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         "the acknowledgement carrying the replaced Arc must stay stale"
     );
     let recovered_replay = gov
-        .acknowledge_pause(request_id, &checkpoint_claim)
+        .acknowledge_pause(request_id, &ledger, &recovered_checkpoint)
         .expect("replacement acknowledgement replay");
     assert!(Arc::ptr_eq(
         &recovered.resume_gate(),
@@ -2472,14 +2578,23 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     gov.activate_resume(&recovered)
         .expect("activation replay remains idempotent after the next pause request");
     assert!(gov.pause_pending(SessionId(41)).expect("known session"));
+    assert!(matches!(
+        gov.acknowledge_pause(second_request, &ledger, &recovered_checkpoint),
+        Err(SessionError::PauseCheckpointMismatch {
+            id: 41,
+            reason: "stale-generation",
+            ..
+        })
+    ));
+    let second_checkpoint = solver_checkpoint(&ledger, second_request, "second-generation");
     let second_ack = gov
-        .acknowledge_pause(second_request, "solver-state-second-generation")
+        .acknowledge_pause(second_request, &ledger, &second_checkpoint)
         .expect("second pending pause");
     assert_eq!(second_ack.event().gate_generation, Some(1));
     assert_eq!(second_ack.resume_generation(), 2);
     assert!(!second_ack.resume_gate().is_requested());
     assert!(matches!(
-        gov.acknowledge_pause(request_id, &checkpoint_claim),
+        gov.acknowledge_pause(request_id, &ledger, &recovered_checkpoint),
         Err(SessionError::PauseRequestMismatch { id: 41, .. })
     ));
     // (h) The ledgered stream never contains an unacknowledged Complete:
@@ -2497,7 +2612,7 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     verdict(
         "ss-011",
         "pressure binds to owned gates: bad levels refused, ungated level-3 atomic refusal, \
-         target-only request, complete only via a bounded checkpoint claim",
+         target-only request, complete only via a drained ledger checkpoint receipt",
     );
 }
 
@@ -2980,8 +3095,9 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
     let companion_l1 = governor
         .apply_memory_pressure(companion_action_id, 1)
         .expect("interleaved companion action");
+    let checkpoint = solver_checkpoint(&ledger, pause_request, "durable-checkpoint");
     let acknowledgement = governor
-        .acknowledge_pause(pause_request, "durable-checkpoint")
+        .acknowledge_pause(pause_request, &ledger, &checkpoint)
         .expect("pause acknowledgement");
     let activation = governor
         .activate_resume(&acknowledgement)
@@ -3012,8 +3128,10 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .iter()
         .find_map(|event| event.pause_request_id)
         .expect("second L3 request authority");
+    let second_checkpoint =
+        solver_checkpoint(&ledger, second_pause_request, "durable-checkpoint-second");
     let second_acknowledgement = governor
-        .acknowledge_pause(second_pause_request, "durable-checkpoint-second")
+        .acknowledge_pause(second_pause_request, &ledger, &second_checkpoint)
         .expect("second pause acknowledgement");
     let flushed = governor
         .flush_scope_to_ledger(&permit, &ledger)
@@ -3081,7 +3199,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         governor.recover_pause_acknowledgement(
             &ledger,
             pause_request,
-            "durable-checkpoint",
+            &checkpoint,
             Arc::clone(&recovered_resume_gate),
         ),
         Err(SessionError::TerminalCorrupt { .. })
@@ -3096,7 +3214,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .recover_pause_acknowledgement(
             &ledger,
             pause_request,
-            "durable-checkpoint",
+            &checkpoint,
             Arc::clone(&recovered_resume_gate),
         )
         .expect("recover pause acknowledgement");
@@ -3155,7 +3273,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
             .recover_pause_acknowledgement(
                 &ledger,
                 pause_request,
-                "durable-checkpoint",
+                &checkpoint,
                 Arc::clone(&recovered_resume_gate),
             )
             .expect("exact acknowledgement replay")
@@ -3174,7 +3292,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
             .recover_pause_acknowledgement(
                 &ledger,
                 second_pause_request,
-                "durable-checkpoint-second",
+                &second_checkpoint,
                 Arc::clone(&recovered_second_gate),
             )
             .expect("recover second acknowledgement")
@@ -3185,7 +3303,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         governor.recover_pause_acknowledgement(
             &ledger,
             pause_request,
-            "durable-checkpoint",
+            &checkpoint,
             Arc::clone(&recovered_resume_gate),
         ),
         Err(SessionError::PauseAcknowledgementConflict { .. })
@@ -3194,19 +3312,26 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         governor.recover_pause_acknowledgement(
             &ledger,
             pause_request,
-            "durable-checkpoint",
+            &checkpoint,
             Arc::new(CancelGate::new()),
         ),
         Err(SessionError::PauseAcknowledgementConflict { .. })
     ));
+    let foreign_checkpoint_ledger =
+        fs_ledger::Ledger::open(":memory:").expect("foreign checkpoint ledger");
+    let altered_checkpoint = solver_checkpoint(
+        &foreign_checkpoint_ledger,
+        pause_request,
+        "altered-checkpoint",
+    );
     assert!(matches!(
         governor.recover_pause_acknowledgement(
             &ledger,
             pause_request,
-            "altered-checkpoint",
+            &altered_checkpoint,
             Arc::clone(&recovered_resume_gate),
         ),
-        Err(SessionError::PauseAcknowledgementConflict { .. })
+        Err(SessionError::PauseCheckpointMismatch { .. })
     ));
     let foreign = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
     assert!(matches!(
@@ -3261,7 +3386,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .recover_pause_acknowledgement(
             &ledger,
             pause_request,
-            "durable-checkpoint",
+            &checkpoint,
             Arc::clone(&historical_gate_one),
         )
         .expect("historical first acknowledgement");
@@ -3276,7 +3401,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .recover_pause_acknowledgement(
             &ledger,
             second_pause_request,
-            "durable-checkpoint-second",
+            &second_checkpoint,
             historical_gate_two,
         )
         .expect("historical second acknowledgement");

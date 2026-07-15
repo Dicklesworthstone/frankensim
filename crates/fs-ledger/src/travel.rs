@@ -928,9 +928,10 @@ impl Ledger {
 
     // -- garbage collection ---------------------------------------------------
 
-    /// Artifacts with no lineage edge on ANY branch are unreachable from
-    /// every `explain()` and safe to reclaim; referenced artifacts are
-    /// immortal (Decalogue P9). Dry runs only report.
+    /// Artifacts with neither a lineage edge on ANY branch nor an immutable
+    /// solver-checkpoint receipt are unreachable from every supported root and
+    /// safe to reclaim. Referenced artifacts are immortal (Decalogue P9). Dry
+    /// runs only report.
     ///
     /// # Errors
     /// Engine errors; on failure during deletion the transaction rolls back.
@@ -938,8 +939,12 @@ impl Ledger {
         let rows = self
             .conn
             .query(
-                "SELECT a.hash FROM artifacts a LEFT JOIN edges e ON a.hash = e.artifact \
-                 WHERE e.artifact IS NULL ORDER BY a.hash",
+                "SELECT a.hash FROM artifacts a \
+                 LEFT JOIN edges e ON a.hash = e.artifact \
+                 LEFT JOIN session_checkpoint_receipts c \
+                    ON a.hash = c.solver_state_artifact \
+                 WHERE e.artifact IS NULL AND c.solver_state_artifact IS NULL \
+                 ORDER BY a.hash",
             )
             .map_err(|e| sql_err("gc scan", &e))?;
         let mut candidates = Vec::with_capacity(rows.len());
@@ -1464,6 +1469,29 @@ mod tests {
         let l = mem();
         let kept = unit(&l, MAIN_BRANCH, ExecMode::Deterministic, 1, 10);
         let loose = l.put_artifact("scratch", b"never linked", None).unwrap();
+        let run = fs_exec::RunId(0x6c);
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let tracker = fs_exec::DrainTracker::new(run, &gate);
+        let worker = tracker.register_worker().expect("checkpoint worker");
+        gate.request();
+        drop(worker);
+        let report = tracker.finalize().expect("checkpoint worker drained");
+        let snapshot = fs_exec::solver::envelope::seal(7, 1, run.0, b"rooted checkpoint");
+        let checkpoint = l
+            .put_artifact(
+                crate::session_registry::SOLVER_STATE_ARTIFACT_KIND,
+                &snapshot,
+                None,
+            )
+            .expect("checkpoint artifact");
+        l.attest_solver_checkpoint(crate::session_registry::SolverCheckpointClaim {
+            session: 1,
+            pause_authority: hash_bytes(b"gc-checkpoint-authority"),
+            gate_generation: 0,
+            solver_state_artifact: checkpoint.hash,
+            drain_report: &report,
+        })
+        .expect("checkpoint receipt");
         let dry = l.gc_unreferenced_artifacts(true).unwrap();
         assert_eq!(dry.candidates, vec![loose.hash.to_hex()]);
         assert_eq!(dry.deleted, 0);
@@ -1477,6 +1505,10 @@ mod tests {
         assert!(
             l.artifact_info(&kept).unwrap().is_some(),
             "referenced artifacts are immortal"
+        );
+        assert!(
+            l.artifact_info(&checkpoint.hash).unwrap().is_some(),
+            "checkpoint receipts root solver-state artifacts"
         );
         assert!(l.lint().unwrap().is_clean());
     }

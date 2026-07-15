@@ -2343,7 +2343,7 @@ impl Governor {
         &self,
         ledger: &fs_ledger::Ledger,
         request_id: PauseRequestId,
-        checkpoint_claim: &str,
+        checkpoint: &fs_ledger::session_registry::SolverCheckpointReceipt,
         resume_gate: Arc<CancelGate>,
     ) -> Result<PauseAcknowledgement, SessionError> {
         if request_id.governor_id != self.id {
@@ -2352,19 +2352,24 @@ impl Governor {
                 requested_ordinal: request_id.requested_ordinal,
             });
         }
-        if checkpoint_claim.len() > MAX_CHECKPOINT_CLAIM_BYTES {
-            return Err(SessionError::LimitExceeded {
-                resource: "checkpoint_claim_bytes",
-                limit: MAX_CHECKPOINT_CLAIM_BYTES,
-                observed_at_least: checkpoint_claim.len(),
-            });
-        }
-        if checkpoint_claim.trim().is_empty() {
-            return Err(SessionError::Submission {
-                what: "pause recovery requires a non-empty checkpoint claim".to_string(),
-            });
-        }
         let authority = pause_ack_authority(request_id);
+        let checkpoint_refusal = |reason| SessionError::PauseCheckpointMismatch {
+            id: request_id.session.0,
+            requested_ordinal: request_id.requested_ordinal,
+            reason,
+        };
+        if checkpoint.session() != request_id.session.0 {
+            return Err(checkpoint_refusal("cross-session"));
+        }
+        if checkpoint.gate_generation() != request_id.gate_generation {
+            return Err(checkpoint_refusal("stale-generation"));
+        }
+        if checkpoint.pause_authority() != authority {
+            return Err(checkpoint_refusal("foreign-pause-request"));
+        }
+        ledger
+            .verify_solver_checkpoint_receipt(checkpoint)
+            .map_err(|_| checkpoint_refusal("unverified-ledger-receipt"))?;
         let ledger_instance_id = self.recovery_ledger(ledger)?;
         let terminal = ledger
             .session_terminal(&authority)
@@ -2373,7 +2378,7 @@ impl Governor {
                 kind: KIND_PAUSE_ACK,
                 authority,
             })?;
-        let evidence = RetainedEvidence::capture(checkpoint_claim);
+        let evidence = RetainedEvidence::capture(&checkpoint.content_hash().to_hex());
         let payload = encode_pause_ack_payload(&evidence);
         if decode_pause_ack_payload(&terminal.claim.payload, request_id)? != evidence {
             return Err(SessionError::PauseAcknowledgementConflict {

@@ -297,6 +297,99 @@ pub mod envelope {
 
     impl core::error::Error for EnvelopeError {}
 
+    /// Type-independent metadata from a fully validated solver snapshot.
+    ///
+    /// This is the ledger bridge: it proves envelope version, exact payload
+    /// length, and checksum before exposing the run provenance, without
+    /// pretending the ledger knows the concrete solver state's type codec.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SnapshotEnvelopeInfo {
+        type_id: u64,
+        schema_version: u32,
+        provenance: u64,
+        payload_len: u64,
+    }
+
+    impl SnapshotEnvelopeInfo {
+        /// Stable solver-state type identity carried by the envelope.
+        #[must_use]
+        pub const fn type_id(self) -> u64 {
+            self.type_id
+        }
+
+        /// Concrete state codec version carried by the envelope.
+        #[must_use]
+        pub const fn schema_version(self) -> u32 {
+            self.schema_version
+        }
+
+        /// Caller-ledgered logical run identity.
+        #[must_use]
+        pub const fn provenance(self) -> u64 {
+            self.provenance
+        }
+
+        /// Exact validated payload byte length.
+        #[must_use]
+        pub const fn payload_len(self) -> u64 {
+            self.payload_len
+        }
+    }
+
+    /// Validate an envelope without decoding its solver-specific payload.
+    ///
+    /// # Errors
+    /// Bad magic, an unsupported envelope version, truncation/append, or a
+    /// checksum mismatch is refused before metadata is returned.
+    pub fn inspect(bytes: &[u8]) -> Result<SnapshotEnvelopeInfo, EnvelopeError> {
+        if bytes.len() < HEADER_LEN {
+            if bytes.len() >= 8 && bytes[..8] != MAGIC {
+                return Err(EnvelopeError::BadMagic);
+            }
+            return Err(EnvelopeError::Truncated {
+                needed: HEADER_LEN,
+                have: bytes.len(),
+            });
+        }
+        if bytes[..8] != MAGIC {
+            return Err(EnvelopeError::BadMagic);
+        }
+        let u32_at = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("header length"))
+        };
+        let u64_at = |offset: usize| {
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("header length"))
+        };
+        let envelope_version = u32_at(8);
+        if envelope_version != ENVELOPE_VERSION {
+            return Err(EnvelopeError::UnknownEnvelopeVersion {
+                found: envelope_version,
+            });
+        }
+        let payload_len = u64_at(32);
+        let payload = &bytes[HEADER_LEN..];
+        if payload_len != payload.len() as u64 {
+            return Err(EnvelopeError::LengthMismatch {
+                declared: payload_len,
+                actual: payload.len() as u64,
+            });
+        }
+        let declared_hash = u64_at(40);
+        let computed = fs_obs::fnv1a64(payload);
+        if computed != declared_hash {
+            return Err(EnvelopeError::ChecksumMismatch {
+                declared: declared_hash,
+                computed,
+            });
+        }
+        Ok(SnapshotEnvelopeInfo {
+            type_id: u64_at(12),
+            schema_version: u32_at(20),
+            provenance: u64_at(24),
+            payload_len,
+        })
+    }
+
     /// Seal a payload: canonical header + payload bytes.
     #[must_use]
     pub fn seal(type_id: u64, schema_version: u32, provenance: u64, payload: &[u8]) -> Vec<u8> {
@@ -578,6 +671,14 @@ mod tests {
             iter: 42,
         };
         let sealed = state.seal(0xABCD);
+        let inspected = envelope::inspect(&sealed).expect("generic envelope inspection");
+        assert_eq!(inspected.type_id(), JacobiState::TYPE_ID);
+        assert_eq!(inspected.schema_version(), JacobiState::SCHEMA_VERSION);
+        assert_eq!(inspected.provenance(), 0xABCD);
+        assert_eq!(
+            inspected.payload_len(),
+            u64::try_from(sealed.len() - envelope::HEADER_LEN).expect("bounded fixture")
+        );
         // The happy path round-trips bit-exactly WITH provenance.
         let (back, prov) = JacobiState::unseal(&sealed).expect("valid seal");
         assert_eq!(back, state);
