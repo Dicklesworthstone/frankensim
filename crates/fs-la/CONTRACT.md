@@ -372,6 +372,13 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   square = 85–87% of measured peak — the ≥75% roofline gate PASSES
   (`tests/perf_lane.rs`, best-of-3, 2mnk flop model). n = 128: 38.4
   (0.74 — blocking overheads at small n, reported not gated).
+  EXPLORATORY / NON-CITABLE (bead ss0n): this lane normalizes against
+  an in-process probe with no historical baseline, sealed
+  `ProductionRun`, or ledger Fresh receipt; its rows carry
+  `"citable":false` and a pre/post denominator-drift check (>10%
+  drift fails the lane). Citable GEMM performance evidence is the
+  sealed fs-roofline production family; migrating this lane there is
+  tracked follow-up work.
 - The capsule (`fs_simd::ops().mk8x4_f64`, NEON `vfmaq_laneq`) is
   BITWISE-identical to the scalar twin per element (same k-ascending
   fused order), so the GEMM golden 0x1d7a_a3c6_b631_7ef0 is

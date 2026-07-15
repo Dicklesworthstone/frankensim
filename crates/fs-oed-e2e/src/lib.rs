@@ -2279,9 +2279,12 @@ mod tests {
         let unsorted = fixture_estimates();
         let refusal = super::CanonicalDesignMenu::from_canonical(unsorted)
             .expect_err("declaration order is not canonical");
+        // Declaration order is alpha, beta, gamma, delta, epsilon: the
+        // first descending pair is (gamma, delta), and `position` names
+        // the offending LATER element — delta at index 3.
         assert!(matches!(
             refusal,
-            super::OedError::CanonicalOrderViolated { position: 2 }
+            super::OedError::CanonicalOrderViolated { position: 3 }
         ));
         let mut duplicated = canonical_sorted(fixture_estimates());
         let duplicate_name = duplicated[0].name.clone();
@@ -2368,7 +2371,26 @@ mod tests {
             }
         }
         // The menu is observably unchanged after every view: identity
-        // order and values are exactly the admitted ones.
-        assert_eq!(menu.estimates(), canonical.as_slice());
+        // order and values are exactly the admitted ones. The fixture
+        // deliberately carries a NaN mean (delta), so slice PartialEq is
+        // unusable (NaN != NaN); the bitwise intent needs exact bit
+        // patterns per field.
+        assert_eq!(menu.estimates().len(), canonical.len());
+        for (kept, admitted) in menu.estimates().iter().zip(&canonical) {
+            assert_eq!(kept.name, admitted.name);
+            assert_eq!(kept.mean.to_bits(), admitted.mean.to_bits());
+            assert_eq!(
+                kept.uncertainty.numerical.to_bits(),
+                admitted.uncertainty.numerical.to_bits()
+            );
+            assert_eq!(
+                kept.uncertainty.statistical.to_bits(),
+                admitted.uncertainty.statistical.to_bits()
+            );
+            assert_eq!(
+                kept.uncertainty.model.to_bits(),
+                admitted.uncertainty.model.to_bits()
+            );
+        }
     }
 }

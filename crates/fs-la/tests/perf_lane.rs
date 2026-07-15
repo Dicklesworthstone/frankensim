@@ -4,6 +4,16 @@
 //! explicitly in release:
 //! `cargo test -p fs-la --release --test perf_lane -- --ignored --nocapture`
 //!
+//! EXPLORATORY / NON-CITABLE (bead ss0n acceptance): this lane
+//! normalizes against a probe taken in the SAME process with no
+//! historical baseline, no sealed `ProductionRun`, and no ledger Fresh
+//! receipt — the self-normalization the governed roofline protocol
+//! exists to prevent. Its rows are diagnostics; they are not citable
+//! performance evidence and every gate row says so machine-readably
+//! (`"citable":false`). A pre/post denominator-drift check bounds the
+//! worst of the hazard until the lane migrates to the sealed
+//! single-thread GEMM production family (tracked follow-up).
+//!
 //! The microkernel is the fs-simd capsule (NEON on aarch64), bitwise-
 //! identical to the scalar twin — the golden 0x1d7a_a3c6_b631_7ef0 is
 //! tier-invariant, verified by the gemm test suite, not here.
@@ -51,13 +61,35 @@ fn gemm_attainment() {
             large_best = large_best.max(att);
         }
     }
+    // DENOMINATOR-DRIFT REGRESSION (bead ss0n acceptance): re-probe
+    // after the timed ladder. A pre-only denominator can silently
+    // flatter attainment when the machine quiets down mid-run; the
+    // governed protocol solves this with sealed pre/post axes, and this
+    // exploratory lane approximates it — drift beyond 10% fails the
+    // lane rather than reporting a self-normalized number.
+    let post_axes = MachineAxes::probe();
+    let drift = (post_axes.peak_single_gflops - axes.peak_single_gflops).abs()
+        / axes.peak_single_gflops.max(1e-9);
+    println!(
+        "{{\"metric\":\"gemm-denominator-drift\",\"pre_gflops\":{:.1},\
+         \"post_gflops\":{:.1},\"drift\":{drift:.4},\"citable\":false}}",
+        axes.peak_single_gflops, post_axes.peak_single_gflops
+    );
+    assert!(
+        drift <= 0.10,
+        "denominator drifted {drift:.3} between pre and post probes; the \
+         attainment number is self-normalized noise — rerun on a quiet \
+         machine or migrate to the sealed production GEMM family"
+    );
     // THE GATE: >= 75% of measured single-thread peak at large square
     // sizes on THIS machine (blocking constants MR=8 NR=4 KC=256
     // MC=128 NC=512). The second-ISA (x86-64/AVX) row is ARMED
-    // PENDING hardware, per the recorded fleet census.
+    // PENDING hardware, per the recorded fleet census. EXPLORATORY:
+    // this row is not citable performance evidence (see module doc).
     println!(
         "{{\"metric\":\"gemm-gate\",\"attainment\":{large_best:.3},\"floor\":0.75,\
-         \"machine\":\"{}-{}\"}}",
+         \"machine\":\"{}-{}\",\"citable\":false,\"lane\":\"exploratory\",\
+         \"denominator\":\"in-process-probe-drift-checked\"}}",
         std::env::consts::OS,
         std::env::consts::ARCH
     );

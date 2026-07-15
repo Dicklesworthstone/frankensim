@@ -5832,10 +5832,11 @@ mod tests {
         let axes = synthetic_axes();
         let (baseline, identity) = live_trusted_baseline(&axes);
         let baseline_policy = attested_policy(&baseline, &identity, test_day());
-        let registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
-            elements: 64,
-            value: 0,
-        })];
+        // fs-plan's strict production-v3 loader validates against the
+        // SEALED four-kernel registry (axpy/dot/sum/gemm); a synthetic
+        // single-kernel run is not a citable production shape.
+        let registry =
+            kernels::production_registry(64, &axes).expect("sealed production registry fixture");
         let run = production::ProductionProbe::from_observed(axes.clone())
             .run_with_test_receipt(
                 production::ProductionRunConfig {
@@ -5901,10 +5902,11 @@ mod tests {
         let axes = synthetic_axes();
         let (baseline, identity) = live_trusted_baseline(&axes);
         let baseline_policy = attested_policy(&baseline, &identity, test_day());
-        let registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
-            elements: 64,
-            value: 0,
-        })];
+        // Same sealed four-kernel shape as the exact-cap fixture: the
+        // strict loader must reach the dependency-receipt read limit,
+        // not refuse earlier on a non-production kernel count.
+        let registry =
+            kernels::production_registry(64, &axes).expect("sealed production registry fixture");
         let run = production::ProductionProbe::from_observed(axes.clone())
             .run_with_test_receipt(
                 production::ProductionRunConfig {
