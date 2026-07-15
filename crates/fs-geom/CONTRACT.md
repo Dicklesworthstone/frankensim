@@ -5,7 +5,7 @@ The Region/Chart abstraction (plan §7.1): abstract regions presented
 through charts; agreement between presentations as a checkable, localized
 proposition; certified conversion receipts (fs-evidence) as the Error
 Ledger's geometry feed; no privileged representation, ever. Layer: L2.
-Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs.
+Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs, fs-sparse.
 
 ## Public types and semantics
 - `Point3`/`Vec3`/`Aabb` — minimal geometry-local types (fs-la owns real
@@ -147,10 +147,17 @@ Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs.
   each edge and before evidence persistence. Optional sheaf rerouting retains a
   structured `RoutePlanError` instead of silently dropping malformed authority.
 
-- `sheaf` module (bead wqd.13, Bet 11 [F/M]): cellular-sheaf sampled
+- `sheaf` module (bead wqd.13, Bet 11 [F/M]): a constant-scalar,
+  graph-gauge base for cellular-sheaf sampled
   interface-agreement evidence, with continuum watertightness retained as the
-  ambitious successor theorem. Fallible `SheafComplex::from_charts` discovers
-  interfaces by support overlap + shared zero-band sampling. Geometry-derived
+  ambitious successor theorem. General function-valued stalks and admitted
+  trace/conversion restriction maps remain the target architecture rather than
+  a property of this scalar base. Fallible `SheafComplex::from_charts` discovers
+  interfaces by support overlap + shared zero-band sampling and returns an
+  immutable `AdmittedSheafComplex`. Raw public `SheafComplex` parts remain
+  available for fixtures and incidence diagnostics but can emit only
+  `Unknown`/`NoClaim`; callers cannot construct or mutate admitted evidence.
+  Geometry-derived
   seeds make the retained two-chart swapped-pair mismatch bound bitwise stable,
   but full evidence/provenance binds patch labels and the finite-iteration
   multi-patch gauge diagnostic is not yet permutation-invariant. Plus
@@ -158,20 +165,37 @@ Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs.
   rejection-sample sets are independent; a clique and the retained minimum
   pairwise count do not prove a common triple zero-band point or aligned
   restriction samples and carry no Čech/topology authority. The fallible
-  `SheafSkeleton::of` first validates the public complex and then omits those
-  candidate triples from topology-sensitive repair until verified common
-  intersections land. The edge-level `delta0_edges`/`delta1` maps
+  `SheafSkeleton::of` structurally validates caller-supplied public adjacency
+  for diagnostic algebra and then omits those candidate triples; it does not
+  authenticate builder origin or confer topology authority. Verified common
+  intersections and an admitted extractor remain successor work. The edge-level
+  `delta0_edges`/`delta1` maps
   assemble as fs-sparse matrices with entries in {−1, 0, +1}; their
   `δ¹·δ⁰ = 0` identity holds BITWISE (small-integer f64). The public `delta0`
   sample-row restriction incidence is deliberately a different cochain space.
-  Triple discovery indexes pairwise edges once, probes the smaller deterministic
+  All three raw-complex incidence entry points and `section_solve` return
+  `Result`, validate ordering/indices before sparse pushes, and enforce the same
+  static patch/interface/sample/triple ceilings before sparse construction.
+  `section_solve` fallibly reserves its graph workspaces and returns typed
+  indeterminate-sample or numerical-overflow refusals rather than successful
+  non-finite diagnostics. The current `fs-sparse::Coo` staging/assembly API
+  still allocates internally through infallible vectors after these caps; a
+  fully fallible sparse-builder successor remains required before
+  `ResourceExhausted` can cover the entire incidence path. Triple
+  discovery builds fallibly reserved vector adjacency and probes the smaller deterministic
   adjacency set explicitly, counts every membership probe (not only emitted
   triangles), polls cancellation at bounded strides and before publication, and
-  enforces `SHEAF_MAX_TRIPLE_CANDIDATES` with a structured work refusal.
+  enforces `SHEAF_MAX_TRIPLE_CANDIDATES` with a structured work refusal. The
+  builder also preflights chart count, O(P²) pair candidates, worst-case chart
+  evaluations, and retained interface samples before evaluating a chart;
+  bounded support/domain/interface/sample/triple allocations return named
+  resource refusals. Cancellation reports pair context plus an explicit typed
+  progress unit (charts, pairs, draws, edges, probes, or retained triples).
   Every producer sample is checked immediately after evaluation; a non-finite
   signed distance is a pair-, chart-, and point-attributed build refusal rather
   than an implicit rejection-sampling miss. The legacy-named
-  `watertightness(tol)` returns `Evidence<SheafVerdict>`: PASS requires a valid
+  `AdmittedSheafComplex::watertightness(tol)` returns
+  `Evidence<SheafVerdict>`: PASS requires a valid
   retained sampling scope and a uniquely ordered public complex with at least
   one nonempty interface and
   every sample's |mismatch| enclosure INSIDE `[0, tol]` via fs-ivl's
@@ -183,6 +207,11 @@ Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs.
   sampled agreement does not establish between-sample coverage, continuum
   watertightness, cocycle membership, or non-exactness and therefore emits no
   H¹ or topological-obstruction claim.
+  `AdmittedSheafComplex::mismatch_bounds()` exposes only immutable,
+  context-free numeric enclosures. Tolerance predicates take the tolerance at
+  use time, so a loose-tolerance boolean cannot be detached and reused as a
+  strict-tolerance result; the bounds still are not a replay-complete source
+  receipt.
   Unresolved unbounded overlaps refuse with pair attribution;
   `from_charts_clipped` admits an explicit finite local scope and preflights
   that clip even for empty/disjoint inputs. `SheafComplex::sampling_clip`
@@ -195,17 +224,22 @@ Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs.
   retain source chart identities, and its live `ProvenanceHash` is a 64-bit FNV
   fingerprint. It is neither collision-resistant content identity nor a
   replay-complete source-model receipt; migration to the shared strong identity
-  substrate is tracked by `frankensim-sj31i.52`. `section_solve` computes
-  per-patch gauge offsets
+  substrate is tracked by the geometry-specific
+  `frankensim-sj31i.52.4`. `section_solve` computes
+  per-patch gauge offsets, pinning the smallest patch in every connected
+  component (including isolates),
   over the adjacency Laplacian and reports the fractional reduction in
   uncentered sample-level midpoint-mismatch mean-square energy from that graph gauge. This
   diagnostic is not an
   exact/coexact/harmonic classifier; the feature-gated `sheaf_repair` module
-  owns those claims. The legacy `ray_parity_falsifier` name is not an
-  independent topology falsifier: with both sampled endpoints strictly outside,
+  owns those claims. `validate_outside_ray_samples` is not an independent
+  topology falsifier: with both endpoints proven outside each chart by an
+  excluding support or rigorous positive distance enclosure,
   a boolean sign sequence necessarily has an even number of toggles. It is only
-  a fallible, work-capped input/sampling diagnostic: empty inputs, zero steps, non-finite
-  endpoints or chart values, endpoints not strictly outside, and
+  a fallible, work-capped input/sampling diagnostic whose report retains work
+  and transition counts: empty inputs, zero steps, non-finite
+  endpoints or chart values, endpoints not nominally outside, endpoints whose
+  outside status is unproven, and
   unrepresentable interpolation are structured refusals. Segment points use
   convex interpolation rather than a potentially overflowing endpoint
   subtraction, and producer-side cancellation is checked after every chart
@@ -339,10 +373,11 @@ structured `AgreementUnknownReason` for non-evaluable checks, and
 returns `ExecuteError` with a stable missing-runner/runner/oracle-record class;
 oracle evidence refusals use `CostOracleError`. Fallible sampling and conversion
 entry points return structured refusals, and `Aabb::new` is total and normalizes.
-Legacy public incidence, Hodge/repair, and merge diagnostic APIs still assert
-shape/index preconditions and can panic on malformed caller-built skeletons;
-their total, budgeted `Result` replacements are required before promotion and
-are tracked in the fresh-eyes successor epic.
+Feature-gated public Hodge/repair and merge diagnostic APIs still assert some
+shape/index preconditions on caller-built skeletons; their total, budgeted
+`Result` replacements remain required before promotion. The base
+`SheafComplex` incidence and section APIs are now structured refusals for
+malformed/oversized raw parts.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -350,12 +385,15 @@ renderings; no clocks, no addresses. Float behavior inherits
 fs-math-class scalar arithmetic.
 
 ## Cancellation behavior
-Every query path takes `&Cx`. `check_agreement` polls per sample point;
-conversion grids, sheaf interface draws, and semantic-diff field draws poll
-`Cx` directly at deterministic bounded strides and return typed cancellation
-diagnostics without publishing partial authoritative output. Chart-local polls
-remain an additional inner-kernel obligation. Long geometry is interruptible
-like any kernel (P7); fixtures are O(1) per query.
+Chart evaluation and production sampling paths take `&Cx`.
+`check_agreement` polls per sample point; conversion grids, sheaf interface
+draws, triple discovery, the ray-sequence validator, and semantic-diff field
+draws poll `Cx` directly at deterministic bounded strides and return typed
+cancellation diagnostics without publishing partial authoritative output.
+Incidence assembly, mismatch assessment/section solve, Hodge/repair, and merge
+diagnostics do not yet accept `Cx`; base-complex work is statically bounded and
+fallibly allocated, but these APIs are not P7-complete. Chart-local polls remain
+an additional inner-kernel obligation.
 
 ## Unsafe boundary
 None. `unsafe_code` denied workspace-wide.
@@ -385,6 +423,12 @@ directed additive/relative exact-bound composition, sealed plan/oracle/spec
 identity, read/write failure, retrospective error maxima, conditional
 refusals, winner policy, cancellation, identity routes, and registry/path/label
 limit+1 refusals.
+`tests/sheaf.rs` additionally locks admitted-vs-raw authority, tolerance-at-use
+mismatch predicates, malformed/oversized raw-algebra refusal, bitwise δδ,
+component-rooted graph-gauge fitting, exact dense-overlap preflight with zero
+chart evaluations, endpoint outside-enclosure proof, finite/non-finite producer
+behavior, and cancellation progress units. Allocation-fault injection and
+small-limit exhaustive cap testing remain explicit successor coverage.
 
 ## No-claim boundaries
 - NO watertightness/manifoldness/self-intersection certificates here —
@@ -499,7 +543,7 @@ limit+1 refusals.
 
 - `Trivial` proves only exact branch/base equality and carries no post-state
   residual receipt. `MergeResidualReceipt` checks nominal `f64` edge values;
-  it is not the interval seam certificate, and the legacy ray-parity routine
+  it is not the interval seam certificate, and the outside-ray sample validator
   is itself only a bounded sampling/input diagnostic rather than an independent
   falsifier.
 - A `CandidateRemainderConflict` is an operational auto-merge refusal from a

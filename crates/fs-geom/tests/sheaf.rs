@@ -13,9 +13,10 @@ use fs_evidence::NumericalKind;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::{BoxChart, SphereChart};
 use fs_geom::{
-    Aabb, Chart, Interface, InterfaceSample, Point3, RAY_PARITY_MAX_EVALUATIONS, RayEndpoint,
-    RayParityError, SamplingDomainError, SheafBuildError, SheafComplex, SheafVerdict, TripleCell,
-    Vec3, ray_parity_falsifier,
+    Aabb, Chart, Interface, InterfaceSample, OUTSIDE_RAY_MAX_EVALUATIONS, OutsideRaySampleError,
+    OutsideRaySampleReport, Point3, RayEndpoint, SamplingDomainError, SheafAlgebraError,
+    SheafBuildError, SheafBuildProgressUnit, SheafComplex, SheafVerdict, TripleCell, Vec3,
+    validate_outside_ray_samples,
 };
 use fs_ivl::Interval;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -211,6 +212,67 @@ impl Chart for EstimatedSphere {
     }
 }
 
+struct AlternatingAuthoritySphere {
+    inner: SphereChart,
+    evaluations: AtomicUsize,
+}
+
+impl Chart for AlternatingAuthoritySphere {
+    fn eval(&self, x: Point3, cx: &Cx<'_>) -> fs_geom::ChartSample {
+        let mut sample = self.inner.eval(x, cx);
+        if self.evaluations.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
+            sample.error = fs_evidence::NumericalCertificate::no_claim();
+        }
+        sample
+    }
+
+    fn support(&self) -> Aabb {
+        self.inner.support()
+    }
+
+    fn name(&self) -> &'static str {
+        "test/alternating-authority-sphere"
+    }
+}
+
+#[test]
+fn sh_000d_one_proven_sample_leak_survives_same_interface_indeterminacy() {
+    with_cx(|cx| {
+        let exact = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let mixed = AlternatingAuthoritySphere {
+            inner: SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.01,
+            },
+            evaluations: AtomicUsize::new(0),
+        };
+        let charts: Vec<&dyn Chart> = vec![&exact, &mixed];
+        let complex = SheafComplex::from_charts(&charts, cx).expect("bounded mixed interface");
+        assert!(complex.interfaces[0].samples.len() > 1);
+        let evidence = complex.watertightness(1e-3);
+        match evidence.value {
+            SheafVerdict::Fail {
+                interface_violations,
+                gauge_fit_share,
+            } => {
+                assert_eq!(interface_violations.len(), 1);
+                assert!(interface_violations[0].1 > 1e-3);
+                assert_eq!(
+                    gauge_fit_share, None,
+                    "an unrelated indeterminate sample disables the aggregate gauge fit"
+                );
+            }
+            other => {
+                panic!("one rigorous above-tolerance sample proves a localized leak: {other:?}")
+            }
+        }
+        assert_eq!(evidence.numerical.kind, NumericalKind::NoClaim);
+    });
+}
+
 #[test]
 fn sh_000d_estimates_cannot_certify_or_falsify_watertightness() {
     with_cx(|cx| {
@@ -229,8 +291,8 @@ fn sh_000d_estimates_cannot_certify_or_falsify_watertightness() {
             "indeterminate chart authority must not become an enclosure receipt"
         );
         match &evidence.value {
-            SheafVerdict::Unknown { straddling } => assert!(
-                straddling.iter().any(|(_, _, hi)| hi.is_infinite()),
+            SheafVerdict::Unknown { reported_bounds } => assert!(
+                reported_bounds.iter().any(|(_, _, hi)| hi.is_infinite()),
                 "the unknown interface must retain its unbounded mismatch report"
             ),
             _ => unreachable!(),
@@ -368,7 +430,8 @@ fn sh_000c_interface_sampler_polls_cancellation_directly() {
                 Err(SheafBuildError::Cancelled {
                     stage: "interface-sampling",
                     patches: Some((0, 1)),
-                    completed_draws: 0,
+                    completed_work: 0,
+                    unit: SheafBuildProgressUnit::InterfaceDraws,
                 })
             ),
             "the sheaf sampler itself must observe cancellation from a non-polling chart: \
@@ -387,6 +450,11 @@ fn sh_001_verdicts_and_localization() {
         assert_eq!(complex.interfaces.len(), 1, "one shared interface");
         assert!(!complex.interfaces[0].samples.is_empty());
         let ev = complex.watertightness(1e-9);
+        let bounds = complex.mismatch_bounds().expect("bounded mismatch output");
+        assert!(!bounds.is_empty());
+        assert!(bounds.iter().all(|bound| bound.determinate()));
+        assert!(bounds.iter().all(|bound| bound.all_within(1e-9)));
+        assert!(bounds.iter().all(|bound| !bound.proven_leak(1e-9)));
         match &ev.value {
             SheafVerdict::Pass {
                 worst_mismatch,
@@ -402,6 +470,14 @@ fn sh_001_verdicts_and_localization() {
             NumericalKind::Enclosure,
             "interval-verified"
         );
+        let raw_view: &SheafComplex = &complex;
+        let downgraded = raw_view.watertightness(1e-9);
+        assert!(matches!(downgraded.value, SheafVerdict::Unknown { .. }));
+        assert_eq!(downgraded.numerical.kind, NumericalKind::NoClaim);
+        assert_ne!(
+            ev.provenance, downgraded.provenance,
+            "admitted assessment and an explicit raw-view downgrade must bind distinct origins"
+        );
         // Leaky: radius off by 1e-2 — FAIL, localized to the (0,1) seam,
         // with the mismatch magnitude ~ delta. This two-vertex, one-edge
         // adjacency graph is a tree, so its first graph cohomology is zero:
@@ -410,6 +486,17 @@ fn sh_001_verdicts_and_localization() {
         let charts2: Vec<&dyn Chart> = vec![&a2, &b2];
         let complex2 = SheafComplex::from_charts(&charts2, cx).expect("bounded sheaf domain");
         let ev2 = complex2.watertightness(1e-4);
+        let leaky_bounds = complex2
+            .mismatch_bounds()
+            .expect("bounded leaky mismatch output");
+        assert!(
+            leaky_bounds.iter().any(|bound| bound.proven_leak(1e-4)),
+            "strict tolerance derives a leak from the retained numeric enclosure"
+        );
+        assert!(
+            leaky_bounds.iter().all(|bound| bound.all_within(1.0)),
+            "the same context-free bounds can be re-evaluated under a loose tolerance without a detached stale boolean"
+        );
         match &ev2.value {
             SheafVerdict::Fail {
                 interface_violations,
@@ -473,16 +560,16 @@ fn sh_001b_overflowing_section_diagnostic_is_explicitly_unavailable() {
         ],
         triples: Vec::new(),
     };
+    assert_eq!(
+        complex.section_solve(),
+        Err(SheafAlgebraError::NumericalOverflow {
+            stage: "section-mean-square",
+        }),
+        "an unrepresentable diagnostic must refuse rather than return non-finite success"
+    );
     let evidence = complex.watertightness(1.0);
-    match evidence.value {
-        SheafVerdict::Fail {
-            gauge_fit_share, ..
-        } => assert_eq!(
-            gauge_fit_share, None,
-            "overflow in a diagnostic least-squares split must not publish NaN or a made-up share"
-        ),
-        other => panic!("finite rigorous mismatches above tolerance must still falsify: {other:?}"),
-    }
+    assert!(matches!(evidence.value, SheafVerdict::Unknown { .. }));
+    assert_eq!(evidence.numerical.kind, NumericalKind::NoClaim);
 }
 
 #[test]
@@ -518,7 +605,7 @@ fn sh_001c_three_patch_pure_gauge_mismatch_is_fully_explained() {
     };
 
     let potentials = [0.0, 1.0, 3.0];
-    let d0 = complex.delta0_edges();
+    let d0 = complex.delta0_edges().expect("valid edge incidence");
     let mismatch: Vec<f64> = (0..d0.nrows())
         .map(|row| {
             let (columns, values) = d0.row(row);
@@ -530,7 +617,7 @@ fn sh_001c_three_patch_pure_gauge_mismatch_is_fully_explained() {
         })
         .collect();
     assert_eq!(mismatch, vec![1.0, 3.0, 2.0]);
-    let d1 = complex.delta1();
+    let d1 = complex.delta1().expect("valid triple incidence");
     let (columns, values) = d1.row(0);
     let loop_sum: f64 = columns
         .iter()
@@ -543,25 +630,15 @@ fn sh_001c_three_patch_pure_gauge_mismatch_is_fully_explained() {
         "the retained pure-gauge cochain must be closed bitwise"
     );
 
-    let (_, raw, residual) = complex.section_solve();
+    let (_, raw, residual) = complex.section_solve().expect("valid diagnostic complex");
     assert!(raw > 0.0);
     assert!(
         residual <= raw * 1e-24,
         "pure gauge mismatch must have no edge-mean fit residual: raw={raw}, residual={residual}"
     );
-    match complex.watertightness(1e-6).value {
-        SheafVerdict::Fail {
-            interface_violations,
-            gauge_fit_share: Some(share),
-        } => {
-            assert_eq!(interface_violations.len(), 3);
-            assert!(
-                share >= 1.0 - 1e-12,
-                "pure gauge edge means must be fully explained: {share}"
-            );
-        }
-        other => panic!("above-tolerance pure gauge seams must be localized: {other:?}"),
-    }
+    let raw_evidence = complex.watertightness(1e-6);
+    assert!(matches!(raw_evidence.value, SheafVerdict::Unknown { .. }));
+    assert_eq!(raw_evidence.numerical.kind, NumericalKind::NoClaim);
 }
 
 #[test]
@@ -584,23 +661,16 @@ fn sh_001c2_gauge_share_measures_sample_energy_not_only_edge_means() {
         }],
         triples: Vec::new(),
     };
-    let (_, raw, residual) = complex.section_solve();
+    let (_, raw, residual) = complex.section_solve().expect("valid diagnostic complex");
     assert!((raw - 9_802.0).abs() <= f64::EPSILON * raw);
     assert!((residual - 9_801.0).abs() <= f64::EPSILON * residual);
-    match complex.watertightness(1.0).value {
-        SheafVerdict::Fail {
-            gauge_fit_share: Some(share),
-            ..
-        } => assert!(
-            share > 0.0 && share < 0.001,
-            "removing the edge mean explains almost none of the sample energy: {share}"
-        ),
-        other => panic!("finite above-tolerance samples must localize a failure: {other:?}"),
-    }
+    let raw_evidence = complex.watertightness(1.0);
+    assert!(matches!(raw_evidence.value, SheafVerdict::Unknown { .. }));
+    assert_eq!(raw_evidence.numerical.kind, NumericalKind::NoClaim);
 }
 
 #[test]
-fn sh_001d_interval_verdict_trichotomy_is_preserved() {
+fn sh_001d_raw_interval_parts_cannot_mint_verdict_authority() {
     let complex_with_mismatch = |mismatch: Interval| SheafComplex {
         sampling_clip: None,
         n_patches: 2,
@@ -615,22 +685,95 @@ fn sh_001d_interval_verdict_trichotomy_is_preserved() {
     };
 
     let pass = complex_with_mismatch(Interval::new(0.25, 0.75)).watertightness(1.0);
-    assert!(matches!(pass.value, SheafVerdict::Pass { .. }));
-    assert_eq!(pass.numerical.kind, NumericalKind::Enclosure);
+    assert!(matches!(pass.value, SheafVerdict::Unknown { .. }));
+    assert_eq!(pass.numerical.kind, NumericalKind::NoClaim);
 
     let fail = complex_with_mismatch(Interval::new(1.25, 1.5)).watertightness(1.0);
-    assert!(matches!(
-        fail.value,
-        SheafVerdict::Fail {
-            interface_violations,
-            ..
-        } if interface_violations.len() == 1 && interface_violations[0].0 == (0, 1)
-    ));
-    assert_eq!(fail.numerical.kind, NumericalKind::Enclosure);
+    assert!(matches!(fail.value, SheafVerdict::Unknown { .. }));
+    assert_eq!(fail.numerical.kind, NumericalKind::NoClaim);
 
     let unknown = complex_with_mismatch(Interval::new(0.75, 1.25)).watertightness(1.0);
     assert!(matches!(unknown.value, SheafVerdict::Unknown { .. }));
     assert_eq!(unknown.numerical.kind, NumericalKind::NoClaim);
+}
+
+#[test]
+fn sh_001e_malformed_or_oversized_raw_algebra_refuses_without_panicking() {
+    let malformed = SheafComplex {
+        sampling_clip: None,
+        n_patches: 2,
+        interfaces: vec![Interface {
+            patches: (0, 2),
+            samples: vec![InterfaceSample {
+                point: Point3::new(0.0, 0.0, 0.0),
+                values: [Interval::point(0.0), Interval::point(1.0)],
+            }],
+        }],
+        triples: Vec::new(),
+    };
+    assert_eq!(malformed.delta0(), Err(SheafAlgebraError::InvalidStructure));
+    assert_eq!(
+        malformed.delta0_edges(),
+        Err(SheafAlgebraError::InvalidStructure)
+    );
+    assert_eq!(malformed.delta1(), Err(SheafAlgebraError::InvalidStructure));
+    assert_eq!(
+        malformed.section_solve(),
+        Err(SheafAlgebraError::InvalidStructure)
+    );
+
+    let oversized = SheafComplex {
+        sampling_clip: None,
+        n_patches: usize::MAX,
+        interfaces: Vec::new(),
+        triples: Vec::new(),
+    };
+    assert!(matches!(
+        oversized.section_solve(),
+        Err(SheafAlgebraError::WorkLimit {
+            stage: "patches",
+            ..
+        })
+    ));
+
+    let indeterminate = SheafComplex {
+        sampling_clip: None,
+        n_patches: 2,
+        interfaces: vec![Interface {
+            patches: (0, 1),
+            samples: vec![InterfaceSample {
+                point: Point3::new(0.0, 0.0, 0.0),
+                values: [Interval::point(0.0), Interval::WHOLE],
+            }],
+        }],
+        triples: Vec::new(),
+    };
+    assert_eq!(
+        indeterminate.section_solve(),
+        Err(SheafAlgebraError::IndeterminateSampleValue {
+            interface: 0,
+            sample: 0,
+        })
+    );
+
+    let overflowing = SheafComplex {
+        sampling_clip: None,
+        n_patches: 2,
+        interfaces: vec![Interface {
+            patches: (0, 1),
+            samples: vec![InterfaceSample {
+                point: Point3::new(0.0, 0.0, 0.0),
+                values: [Interval::point(-f64::MAX), Interval::point(f64::MAX)],
+            }],
+        }],
+        triples: Vec::new(),
+    };
+    assert_eq!(
+        overflowing.section_solve(),
+        Err(SheafAlgebraError::NumericalOverflow {
+            stage: "section-edge-mismatch",
+        })
+    );
 }
 
 #[test]
@@ -647,6 +790,10 @@ fn sh_001e_public_structure_cannot_vacuously_pass_or_alias_provenance() {
     let empty = empty_interface.watertightness(1.0);
     assert!(matches!(empty.value, SheafVerdict::Unknown { .. }));
     assert_eq!(empty.numerical.kind, NumericalKind::NoClaim);
+    assert!(
+        empty.qoi.is_infinite(),
+        "an empty sampled interface must not expose a false-clean zero QoI"
+    );
 
     let malformed_scope = SheafComplex {
         sampling_clip: Some(Aabb {
@@ -709,13 +856,7 @@ fn sh_001e_public_structure_cannot_vacuously_pass_or_alias_provenance() {
         triples: Vec::new(),
     };
     let mixed_evidence = mixed.watertightness(1.0);
-    assert!(matches!(
-        mixed_evidence.value,
-        SheafVerdict::Fail {
-            ref interface_violations,
-            gauge_fit_share: None,
-        } if interface_violations == &[((0, 1), 2.0)]
-    ));
+    assert!(matches!(mixed_evidence.value, SheafVerdict::Unknown { .. }));
     assert_eq!(mixed_evidence.numerical.kind, NumericalKind::NoClaim);
 
     let evidence_at = |x: f64| {
@@ -733,7 +874,7 @@ fn sh_001e_public_structure_cannot_vacuously_pass_or_alias_provenance() {
     assert_ne!(
         evidence_at(0.0).provenance,
         evidence_at(1.0).provenance,
-        "sample coordinates are authority-bearing evidence inputs"
+        "sample coordinates remain provenance-bound diagnostic inputs"
     );
 }
 
@@ -762,9 +903,9 @@ fn sh_002_delta_delta_is_zero_bitwise() {
             !complex.triples.is_empty(),
             "fixture must produce a candidate triangle cell; adjust geometry"
         );
-        let d0 = complex.delta0_edges();
-        let d1 = complex.delta1();
-        let sampled_d0 = complex.delta0();
+        let d0 = complex.delta0_edges().expect("valid edge incidence");
+        let d1 = complex.delta1().expect("valid triple incidence");
+        let sampled_d0 = complex.delta0().expect("valid sampled incidence");
         // δ¹ · δ⁰ computed densely (test scale): every entry EXACTLY 0.0.
         let (rows, mid, cols) = (
             complex.triples.len(),
@@ -917,7 +1058,7 @@ fn sh_004_adversarial_seams_and_soundness() {
              false PASS, got {:?}",
             kv.value
         );
-        // Legacy sign-sequence replay: this validates the bounded sampler and
+        // Sign-sequence replay: this validates the bounded sampler and
         // outside-endpoint contract only. Outside/outside boolean toggles are
         // necessarily even, so this is not independent topology evidence.
         let (wa, wb) = watertight_pair();
@@ -927,11 +1068,14 @@ fn sh_004_adversarial_seams_and_soundness() {
             (Point3::new(0.02, -3.0, 0.01), Point3::new(0.02, 3.0, 0.01)),
             (Point3::new(-2.5, -2.5, 0.0), Point3::new(2.5, 2.5, 0.0)),
         ];
-        assert!(
-            ray_parity_falsifier(&watertight, &rays, 4001, cx)
-                .expect("finite outside rays fit the public work cap")
-                .is_none(),
-            "the legacy outside/outside sign scan must remain stable"
+        let ray_report = validate_outside_ray_samples(&watertight, &rays, 4001, cx)
+            .expect("finite outside rays fit the public work cap");
+        assert_eq!(ray_report.rays, rays.len());
+        assert_eq!(ray_report.sample_points, rays.len() * 4002);
+        assert_eq!(ray_report.chart_evaluations, rays.len() * 4002 * 2);
+        assert_eq!(
+            ray_report.toggles, 6,
+            "each sphere-crossing ray must retain two nonzero transitions"
         );
         verdict_line(
             "sh-004",
@@ -943,6 +1087,55 @@ fn sh_004_adversarial_seams_and_soundness() {
 
 struct ConstantRayChart {
     value: f64,
+}
+
+struct CertifiedConstantRayChart {
+    value: f64,
+    error: fs_evidence::NumericalCertificate,
+    support: Aabb,
+}
+
+struct CountingOverlapChart<'a> {
+    evaluations: &'a AtomicUsize,
+}
+
+impl Chart for CountingOverlapChart<'_> {
+    fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        self.evaluations.fetch_add(1, Ordering::SeqCst);
+        fs_geom::ChartSample {
+            signed_distance: 1.0,
+            gradient: None,
+            lipschitz: None,
+            error: fs_evidence::NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/counting-overlap"
+    }
+}
+
+impl Chart for CertifiedConstantRayChart {
+    fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: self.value,
+            gradient: None,
+            lipschitz: None,
+            error: self.error,
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        self.support
+    }
+
+    fn name(&self) -> &'static str {
+        "test/certified-constant-ray"
+    }
 }
 
 impl Chart for ConstantRayChart {
@@ -965,36 +1158,90 @@ impl Chart for ConstantRayChart {
 }
 
 #[test]
-fn sh_004b_ray_parity_refuses_invalid_work_and_uses_stable_interpolation() {
+fn sh_004b_outside_ray_sampling_refuses_invalid_work_and_is_stable() {
     with_cx(|cx| {
         let outside = ConstantRayChart { value: 1.0 };
         let charts: Vec<&dyn Chart> = vec![&outside];
         let ray = [(Point3::new(-2.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0))];
 
         assert_eq!(
-            ray_parity_falsifier(&[], &ray, 2, cx),
-            Err(RayParityError::EmptyCharts)
+            validate_outside_ray_samples(&[], &ray, 2, cx),
+            Err(OutsideRaySampleError::EmptyCharts)
         );
         assert_eq!(
-            ray_parity_falsifier(&charts, &[], 2, cx),
-            Err(RayParityError::EmptyRays)
+            validate_outside_ray_samples(&charts, &[], 2, cx),
+            Err(OutsideRaySampleError::EmptyRays)
         );
         assert_eq!(
-            ray_parity_falsifier(&charts, &ray, 0, cx),
-            Err(RayParityError::InvalidSteps { steps: 0 })
+            validate_outside_ray_samples(&charts, &ray, 0, cx),
+            Err(OutsideRaySampleError::InvalidSteps { steps: 0 })
         );
         assert!(matches!(
-            ray_parity_falsifier(&charts, &ray, RAY_PARITY_MAX_EVALUATIONS, cx),
-            Err(RayParityError::WorkLimitExceeded { .. })
+            validate_outside_ray_samples(&charts, &ray, OUTSIDE_RAY_MAX_EVALUATIONS, cx),
+            Err(OutsideRaySampleError::WorkLimitExceeded { .. })
+        ));
+        let inside = ConstantRayChart { value: -1.0 };
+        let inside_charts: Vec<&dyn Chart> = vec![&inside];
+        assert!(matches!(
+            validate_outside_ray_samples(&inside_charts, &ray, 2, cx),
+            Err(OutsideRaySampleError::EndpointNotOutside {
+                ray: 0,
+                endpoint: RayEndpoint::Start,
+                ..
+            })
+        ));
+        let unproven_ray = [(Point3::new(-0.5, 0.0, 0.0), Point3::new(0.5, 0.0, 0.0))];
+        assert!(matches!(
+            validate_outside_ray_samples(&charts, &unproven_ray, 2, cx),
+            Err(OutsideRaySampleError::EndpointOutsideUnproven {
+                ray: 0,
+                endpoint: RayEndpoint::Start,
+                chart: 0,
+                ..
+            })
+        ));
+        let certified = CertifiedConstantRayChart {
+            value: 1.0,
+            error: fs_evidence::NumericalCertificate::enclosure(0.5, 1.5),
+            support: Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0)),
+        };
+        let support_excluded = CertifiedConstantRayChart {
+            value: 2.0,
+            error: fs_evidence::NumericalCertificate::no_claim(),
+            support: Aabb::new(Point3::new(-0.1, -0.1, -0.1), Point3::new(0.1, 0.1, 0.1)),
+        };
+        let mixed: Vec<&dyn Chart> = vec![&certified, &support_excluded];
+        assert_eq!(
+            validate_outside_ray_samples(&mixed, &unproven_ray, 2, cx),
+            Ok(OutsideRaySampleReport {
+                rays: 1,
+                sample_points: 3,
+                chart_evaluations: 6,
+                toggles: 0,
+            }),
+            "one rigorous positive enclosure plus one support exclusion proves each endpoint"
+        );
+        let malformed = CertifiedConstantRayChart {
+            value: 1.0,
+            error: fs_evidence::NumericalCertificate {
+                kind: NumericalKind::Exact,
+                lo: 0.0,
+                hi: 0.0,
+            },
+            support: certified.support,
+        };
+        assert!(matches!(
+            validate_outside_ray_samples(&[&malformed as &dyn Chart], &unproven_ray, 2, cx,),
+            Err(OutsideRaySampleError::EndpointOutsideUnproven { .. })
         ));
         assert!(matches!(
-            ray_parity_falsifier(
+            validate_outside_ray_samples(
                 &charts,
                 &[(Point3::new(f64::NAN, 0.0, 0.0), ray[0].1)],
                 2,
                 cx,
             ),
-            Err(RayParityError::NonFiniteEndpoint {
+            Err(OutsideRaySampleError::NonFiniteEndpoint {
                 ray: 0,
                 endpoint: RayEndpoint::Start,
                 ..
@@ -1005,13 +1252,21 @@ fn sh_004b_ray_parity_refuses_invalid_work_and_uses_stable_interpolation() {
             Point3::new(-f64::MAX, -f64::MAX, -f64::MAX),
             Point3::new(f64::MAX, f64::MAX, f64::MAX),
         )];
-        assert_eq!(ray_parity_falsifier(&charts, &huge, 2, cx), Ok(None));
+        assert_eq!(
+            validate_outside_ray_samples(&charts, &huge, 2, cx),
+            Ok(OutsideRaySampleReport {
+                rays: 1,
+                sample_points: 3,
+                chart_evaluations: 3,
+                toggles: 0,
+            })
+        );
 
         let invalid = ConstantRayChart { value: f64::NAN };
         let invalid_charts: Vec<&dyn Chart> = vec![&invalid];
         assert!(matches!(
-            ray_parity_falsifier(&invalid_charts, &ray, 2, cx),
-            Err(RayParityError::NonFiniteSample {
+            validate_outside_ray_samples(&invalid_charts, &ray, 2, cx),
+            Err(OutsideRaySampleError::NonFiniteSample {
                 ray: 0,
                 step: 0,
                 chart: 0,
@@ -1022,7 +1277,32 @@ fn sh_004b_ray_parity_refuses_invalid_work_and_uses_stable_interpolation() {
 }
 
 #[test]
-fn sh_004c_ray_parity_observes_cancellation_requested_by_a_chart() {
+fn sh_004d_dense_overlap_is_refused_before_chart_evaluation() {
+    with_cx(|cx| {
+        let evaluations = AtomicUsize::new(0);
+        let chart = CountingOverlapChart {
+            evaluations: &evaluations,
+        };
+        let charts = vec![&chart as &dyn Chart; 100];
+        let refusal = SheafComplex::from_charts(&charts, cx);
+        assert!(matches!(
+            refusal,
+            Err(SheafBuildError::BuildWorkLimit {
+                stage: "interface-sampling-evaluations",
+                requested: 16_781_312,
+                cap: 16_777_216,
+            })
+        ));
+        assert_eq!(
+            evaluations.load(Ordering::SeqCst),
+            0,
+            "pair/evaluation admission must complete before any chart evaluation"
+        );
+    });
+}
+
+#[test]
+fn sh_004c_outside_ray_sampling_observes_chart_cancellation() {
     let gate = CancelGate::new();
     let chart = CancellingInterfaceChart {
         gate: &gate,
@@ -1032,8 +1312,8 @@ fn sh_004c_ray_parity_observes_cancellation_requested_by_a_chart() {
         let charts: Vec<&dyn Chart> = vec![&chart];
         let rays = [(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0))];
         assert_eq!(
-            ray_parity_falsifier(&charts, &rays, 2, cx),
-            Err(RayParityError::Cancelled {
+            validate_outside_ray_samples(&charts, &rays, 2, cx),
+            Err(OutsideRaySampleError::Cancelled {
                 completed_rays: 0,
                 completed_points: 0,
                 completed_chart_evaluations: 1,
@@ -1059,7 +1339,9 @@ fn sh_005_section_solve_reports_graph_gauge_fit_only() {
         };
         let charts: Vec<&dyn Chart> = vec![&a, &b];
         let complex = SheafComplex::from_charts(&charts, cx).expect("bounded sheaf domain");
-        let (offsets, raw, residual) = complex.section_solve();
+        let (offsets, raw, residual) = complex
+            .section_solve()
+            .expect("valid disconnected diagnostic complex");
         assert!(raw > 0.0, "the leak is visible pre-gauge");
         assert!(
             residual < raw * 0.01,

@@ -22,8 +22,10 @@
 //! - no chart type is privileged, ever — the Rep Router (a later bead)
 //!   picks per OPERATION from declared capabilities.
 //!
-//! Cancellation: every query takes `&fs_exec::Cx` — geometry is
-//! interruptible at bounded strides like any other kernel (Decalogue P7).
+//! Cancellation: chart evaluation and sampling/build kernels take
+//! `&fs_exec::Cx` and poll at bounded work units. Some finite algebraic
+//! diagnostics remain synchronous legacy APIs without a `Cx`; their contracts
+//! identify that no-claim boundary rather than implying universal P7 coverage.
 //!
 //! Object safety note: plan Appendix B sketches `Chart { type Param; ... }`.
 //! `Region` must hold heterogeneous charts (`Arc<dyn Chart>`), so the
@@ -53,9 +55,12 @@ pub use region::{
     AgreementUnknownReason, Disagreement, Region, RegionChart,
 };
 pub use sheaf::{
-    Interface, InterfaceBound, InterfaceSample, RAY_PARITY_MAX_EVALUATIONS, RayEndpoint,
-    RayParityError, SHEAF_MAX_TRIPLE_CANDIDATES, SheafBuildError, SheafComplex, SheafVerdict,
-    TripleCell, ray_parity_falsifier,
+    AdmittedSheafComplex, Interface, InterfaceBound, InterfaceSample, OUTSIDE_RAY_MAX_EVALUATIONS,
+    OutsideRaySampleError, OutsideRaySampleReport, RayEndpoint, SHEAF_MAX_CHARTS,
+    SHEAF_MAX_INTERFACE_EVALUATIONS, SHEAF_MAX_PAIR_CANDIDATES,
+    SHEAF_MAX_RETAINED_INTERFACE_SAMPLES, SHEAF_MAX_TRIPLE_CANDIDATES, SheafAlgebraError,
+    SheafBuildError, SheafBuildProgressUnit, SheafComplex, SheafVerdict, TripleCell,
+    validate_outside_ray_samples,
 };
 
 pub use router::{

@@ -68,10 +68,11 @@ impl core::fmt::Display for SheafSkeletonError {
 impl std::error::Error for SheafSkeletonError {}
 
 impl SheafSkeleton {
-    /// Extract the verified portion of a built complex. The base builder's
-    /// `TripleCell`s are pairwise-interface clique completions rather than
-    /// verified common triple overlaps, so they are deliberately omitted from
-    /// topology-sensitive repair authority.
+    /// Structurally validate and extract caller-supplied adjacency for
+    /// diagnostic repair algebra. This accepts a raw public complex and does not
+    /// authenticate chart-sampling origin or confer topology authority. The base
+    /// builder's `TripleCell`s are pairwise-interface clique completions rather
+    /// than verified common triple overlaps, so they are deliberately omitted.
     ///
     /// # Errors
     /// Returns [`SheafSkeletonError::MalformedComplex`] rather than copying
