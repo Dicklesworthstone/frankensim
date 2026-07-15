@@ -76,12 +76,12 @@ impl Decomposition {
         x == 0 || y == 0 || x == self.n() || y == self.n()
     }
 
-    /// Harmonic mean of the four adjacent cell coefficients at an edge
-    /// between nodes (the standard variable-coefficient stencil).
+    /// Harmonic mean of the adjacent cell coefficients flanking an edge
+    /// between nodes (the standard variable-coefficient transmissibility).
     fn edge_coeff(&self, ax: usize, ay: usize, bx: usize, by: usize) -> f64 {
         let n = self.n();
-        let mut acc = 0.0f64;
-        let mut cnt = 0.0f64;
+        let mut coefficients = [0.0f64; 2];
+        let mut count = 0usize;
         // The two cells flanking the edge (clamped at the boundary).
         let cells: [(Option<usize>, Option<usize>); 2] = if ay == by {
             let cx = Some(ax.min(bx));
@@ -95,11 +95,47 @@ impl Decomposition {
                 && cx < n
                 && cy < n
             {
-                acc += self.rho[cy * n + cx];
-                cnt += 1.0;
+                let coefficient = self.rho[cy * n + cx];
+                assert!(
+                    coefficient.is_finite() && coefficient > 0.0,
+                    "cell coefficients must be finite and positive"
+                );
+                coefficients[count] = coefficient;
+                count += 1;
             }
         }
-        if cnt > 0.0 { acc / cnt } else { 1.0 }
+        match count {
+            0 => 1.0,
+            1 => coefficients[0],
+            2 if coefficients[0] == coefficients[1] => coefficients[0],
+            2 => {
+                let lo = coefficients[0].min(coefficients[1]);
+                let hi = coefficients[0].max(coefficients[1]);
+                // Algebraically 2ab/(a+b), but scaled by the larger input so
+                // positive subnormal coefficients do not vanish through
+                // overflowing reciprocals and finite large inputs do not
+                // overflow through the product.
+                lo / (0.5 * (1.0 + lo / hi))
+            }
+            _ => unreachable!("a lattice edge has at most two flanking cells"),
+        }
+    }
+
+    /// Number of closed subdomains containing both endpoints of a lattice
+    /// edge. An edge along an internal interface has multiplicity two; all
+    /// other edges have multiplicity one.
+    fn edge_multiplicity(&self, ax: usize, ay: usize, bx: usize, by: usize) -> usize {
+        debug_assert_eq!(ax.abs_diff(bx) + ay.abs_diff(by), 1);
+        let interface_coordinate = if ay == by { ay } else { ax };
+        if self.m > 0
+            && interface_coordinate > 0
+            && interface_coordinate < self.n()
+            && interface_coordinate % self.m == 0
+        {
+            2
+        } else {
+            1
+        }
     }
 
     /// Apply the global variable-coefficient 5-point operator to a
@@ -253,7 +289,21 @@ pub struct Bddc {
     coarse_l: Vec<Vec<f64>>,
 }
 
-fn local_stiffness(d: &Decomposition, nodes: &[usize]) -> Vec<Vec<f64>> {
+#[derive(Clone, Copy)]
+struct SubdomainBounds {
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+}
+
+impl SubdomainBounds {
+    fn contains(self, x: usize, y: usize) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+}
+
+fn local_stiffness(d: &Decomposition, nodes: &[usize], bounds: SubdomainBounds) -> Vec<Vec<f64>> {
     let np = d.np();
     let pos: BTreeMap<usize, usize> = nodes.iter().copied().zip(0..).collect();
     let mut a = vec![vec![0.0f64; nodes.len()]; nodes.len()];
@@ -265,10 +315,13 @@ fn local_stiffness(d: &Decomposition, nodes: &[usize]) -> Vec<Vec<f64>> {
             (x, y.wrapping_sub(1)),
             (x, y + 1),
         ] {
-            if nx > d.n() || ny > d.n() {
+            if nx > d.n() || ny > d.n() || !bounds.contains(nx, ny) {
                 continue;
             }
-            let w = d.edge_coeff(x, y, nx, ny);
+            let multiplicity = d.edge_multiplicity(x, y, nx, ny);
+            assert!(multiplicity > 0, "local edge must have an owning subdomain");
+            #[allow(clippy::cast_precision_loss)]
+            let w = d.edge_coeff(x, y, nx, ny) / multiplicity as f64;
             a[i][i] += w;
             if !d.on_rim(nx, ny)
                 && let Some(&j) = pos.get(&d.node(nx, ny))
@@ -313,7 +366,8 @@ impl Bddc {
                 }
                 // Local blocks.
                 let all: Vec<usize> = interior.iter().chain(&boundary).copied().collect();
-                let a = local_stiffness(&decomp, &all);
+                let bounds = SubdomainBounds { x0, x1, y0, y1 };
+                let a = local_stiffness(&decomp, &all, bounds);
                 let ni = interior.len();
                 let nb = boundary.len();
                 let mut k_ii = vec![vec![0.0; ni]; ni];
@@ -591,13 +645,35 @@ impl Bddc {
     /// estimate. Returns (iterations, kappa_estimate).
     #[must_use]
     pub fn solve_cg(&self, b_gamma: &[f64], tol: f64, max_iter: usize) -> (usize, f64) {
+        assert_eq!(
+            b_gamma.len(),
+            self.gamma.len(),
+            "RHS length must match the interface dimension"
+        );
+        assert!(
+            b_gamma.iter().all(|value| value.is_finite()),
+            "RHS entries must be finite"
+        );
         let n = b_gamma.len();
+        let b_scale = b_gamma
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f64, f64::max);
+        if b_scale == 0.0 {
+            return (0, 1.0);
+        }
+        // CG is homogeneous in the RHS, and this API returns only iteration
+        // and condition diagnostics. Normalize before forming dot products so
+        // a finite nonzero RHS cannot be mistaken for zero through squaring
+        // underflow (or overflow while computing its norm).
+        let scaled_b: Vec<f64> = b_gamma.iter().map(|value| value / b_scale).collect();
+        let b_norm_sq: f64 = scaled_b.iter().map(|v| v * v).sum();
+        let b_norm = det::sqrt(b_norm_sq);
         let mut x = vec![0.0f64; n];
-        let mut r = b_gamma.to_vec();
+        let mut r = scaled_b;
         let mut z = self.precondition(&r);
         let mut p = z.clone();
         let mut rz: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
-        let b_norm: f64 = det::sqrt(b_gamma.iter().map(|v| v * v).sum());
         let mut alphas: Vec<f64> = Vec::new();
         let mut betas: Vec<f64> = Vec::new();
         let mut iters = 0usize;

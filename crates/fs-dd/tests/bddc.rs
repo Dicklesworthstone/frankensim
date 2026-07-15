@@ -28,6 +28,205 @@ fn rhs(n: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
+/// Partition the non-Dirichlet lattice nodes into the globally eliminated
+/// interior and retained subdomain-interface sets. The ordering matches the
+/// full-lattice row-major order, without consulting `Bddc` internals.
+fn global_node_partition(decomp: &Decomposition) -> (Vec<usize>, Vec<usize>) {
+    let n = decomp.s * decomp.m;
+    let np = n + 1;
+    let mut interior = Vec::new();
+    let mut gamma = Vec::new();
+    for y in 1..n {
+        for x in 1..n {
+            let node = y * np + x;
+            if x % decomp.m == 0 || y % decomp.m == 0 {
+                gamma.push(node);
+            } else {
+                interior.push(node);
+            }
+        }
+    }
+    (interior, gamma)
+}
+
+/// Independent dense solve for the tiny global-oracle fixture. Gaussian
+/// elimination deliberately avoids sharing fs-dd's local Cholesky path.
+fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
+    let n = b.len();
+    assert_eq!(a.len(), n);
+    assert!(a.iter().all(|row| row.len() == n));
+    for col in 0..n {
+        let mut pivot = col;
+        for row in (col + 1)..n {
+            if a[row][col].abs() > a[pivot][col].abs() {
+                pivot = row;
+            }
+        }
+        assert!(a[pivot][col].abs() > 1e-14, "global K_II is nonsingular");
+        a.swap(col, pivot);
+        b.swap(col, pivot);
+        let pivot_row = a[col].clone();
+        let pivot_value = pivot_row[col];
+        let pivot_rhs = b[col];
+        for row in (col + 1)..n {
+            let scale = a[row][col] / pivot_value;
+            a[row][col] = 0.0;
+            for j in (col + 1)..n {
+                a[row][j] -= scale * pivot_row[j];
+            }
+            b[row] -= scale * pivot_rhs;
+        }
+    }
+    let mut x = vec![0.0; n];
+    for row in (0..n).rev() {
+        let tail: f64 = a[row][(row + 1)..]
+            .iter()
+            .zip(&x[(row + 1)..])
+            .map(|(entry, value)| entry * value)
+            .sum();
+        x[row] = (b[row] - tail) / a[row][row];
+    }
+    x
+}
+
+/// Apply the exact global Schur complement
+/// `K_GG - K_GI K_II^-1 K_IG` using only the public whole-system oracle.
+fn global_schur_apply(decomp: &Decomposition, x_gamma: &[f64]) -> Vec<f64> {
+    let (interior, gamma) = global_node_partition(decomp);
+    assert_eq!(x_gamma.len(), gamma.len());
+    let np = decomp.s * decomp.m + 1;
+    let mut harmonic_extension = vec![0.0; np * np];
+    for (&node, &value) in gamma.iter().zip(x_gamma) {
+        harmonic_extension[node] = value;
+    }
+
+    let interface_load = decomp.apply_global(&harmonic_extension);
+    let mut k_ii = vec![vec![0.0; interior.len()]; interior.len()];
+    for (col, &node) in interior.iter().enumerate() {
+        let mut basis = vec![0.0; np * np];
+        basis[node] = 1.0;
+        let image = decomp.apply_global(&basis);
+        for (row, &row_node) in interior.iter().enumerate() {
+            k_ii[row][col] = image[row_node];
+        }
+    }
+    let interior_rhs: Vec<f64> = interior.iter().map(|&node| interface_load[node]).collect();
+    let correction = solve_dense(k_ii, interior_rhs);
+    for (&node, &value) in interior.iter().zip(&correction) {
+        harmonic_extension[node] = -value;
+    }
+    let condensed = decomp.apply_global(&harmonic_extension);
+    gamma.iter().map(|&node| condensed[node]).collect()
+}
+
+#[test]
+fn dd_000_global_schur_matches_substructured_operator() {
+    for (fixture, decomp) in [
+        ("uniform", Decomposition::uniform(2, 2)),
+        ("jump", Decomposition::checkerboard(2, 2, 64.0)),
+    ] {
+        let bddc = Bddc::new(decomp.clone(), false);
+        let (_, gamma) = global_node_partition(&decomp);
+        assert_eq!(bddc.gamma_len(), gamma.len());
+
+        let mut probes = Vec::with_capacity(gamma.len() + 1);
+        for col in 0..gamma.len() {
+            let mut basis = vec![0.0; gamma.len()];
+            basis[col] = 1.0;
+            probes.push(basis);
+        }
+        probes.push(rhs(gamma.len(), 0x5c48_7572));
+        for (probe, x_gamma) in probes.iter().enumerate() {
+            let expected = global_schur_apply(&decomp, x_gamma);
+            let actual = bddc.schur_apply(x_gamma);
+            for (row, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+                let error = (got - want).abs();
+                assert!(
+                    error <= 5e-11 * want.abs().max(1.0),
+                    "{fixture} probe {probe}, row {row}: substructured {got} vs global {want}"
+                );
+            }
+        }
+    }
+    verdict(
+        "dd-000",
+        "substructured Schur action equals independent elimination of the apply_global oracle",
+    );
+}
+
+#[test]
+fn face_transmissibility_is_the_harmonic_mean() {
+    for (orientation, rho) in [
+        ("vertical", vec![1.0, 9.0, 1.0, 9.0]),
+        ("horizontal", vec![1.0, 1.0, 9.0, 9.0]),
+    ] {
+        // In either orientation, two center edges are flanked by rho=1 and
+        // rho=9 cells, so each contributes 2/(1/1 + 1/9) = 1.8. The other
+        // two edges contribute 1 and 9: total center diagonal 13.6.
+        let decomp = Decomposition { s: 1, m: 2, rho };
+        let mut x = vec![0.0; 9];
+        x[4] = 1.0;
+        let image = decomp.apply_global(&x);
+        assert!(
+            (image[4] - 13.6).abs() <= 1e-12,
+            "{orientation} harmonic face transmissibility gives center diagonal 13.6, got {}",
+            image[4]
+        );
+    }
+
+    let tiny = f64::from_bits(1);
+    let decomp = Decomposition {
+        s: 1,
+        m: 2,
+        rho: vec![tiny, 2.0 * tiny, 2.0 * tiny, tiny],
+    };
+    let mut x = vec![0.0; 9];
+    x[4] = 1.0;
+    let image = decomp.apply_global(&x);
+    assert!(
+        image[4].is_finite() && image[4] > 0.0,
+        "positive subnormal coefficients retain positive transmissibility"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cell coefficients must be finite and positive")]
+fn invalid_cell_coefficient_cannot_disappear_during_harmonic_mean() {
+    let decomp = Decomposition {
+        s: 1,
+        m: 2,
+        rho: vec![f64::NAN, 1.0, 1.0, 1.0],
+    };
+    decomp.apply_global(&vec![0.0; 9]);
+}
+
+#[test]
+fn zero_and_empty_rhs_solves_are_total() {
+    let nonempty = Bddc::new(Decomposition::uniform(2, 2), false);
+    let zero = vec![0.0; nonempty.gamma_len()];
+    assert_eq!(nonempty.solve_cg(&zero, 1e-8, 20), (0, 1.0));
+
+    let mut tiny = vec![0.0; nonempty.gamma_len()];
+    tiny[0] = 1e-300;
+    let (iterations, kappa) = nonempty.solve_cg(&tiny, 1e-8, 20);
+    assert!(
+        iterations > 0,
+        "a nonzero tiny RHS is not classified as zero"
+    );
+    assert!(kappa.is_finite(), "tiny-RHS diagnostics stay finite");
+
+    let empty = Bddc::new(Decomposition::uniform(1, 2), false);
+    assert_eq!(empty.gamma_len(), 0);
+    assert_eq!(empty.solve_cg(&[], 1e-8, 20), (0, 1.0));
+}
+
+#[test]
+#[should_panic(expected = "RHS length must match the interface dimension")]
+fn rhs_dimension_mismatch_is_rejected_before_zero_shortcut() {
+    let nonempty = Bddc::new(Decomposition::uniform(2, 2), false);
+    nonempty.solve_cg(&[], 1e-8, 20);
+}
+
 #[test]
 fn dd_001_g0_preconditioner_properties() {
     let bddc = Bddc::new(Decomposition::uniform(2, 4), true);
@@ -225,7 +424,11 @@ fn dd_005_sheaf_cross_check_and_ccd_locality() {
     );
     // Regression: ccd_locality(0) used to panic (div_ceil(0) + `ccds - 1`
     // usize underflow). Zero islands is degenerate — it must return 0.0, total.
-    assert_eq!(big.ccd_locality(0), 0.0, "zero islands is total, not a panic");
+    assert_eq!(
+        big.ccd_locality(0),
+        0.0,
+        "zero islands is total, not a panic"
+    );
     verdict(
         "dd-005",
         "the sheaf skeleton matches the enrichment (4 edges, 1 harmonic cycle mode \
