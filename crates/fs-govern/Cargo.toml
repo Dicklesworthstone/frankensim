@@ -14,6 +14,9 @@ layer = "UTIL"
 fs-blake3 = { path = "../fs-blake3" }
 
 [dev-dependencies]
+fs-checker = { path = "../fs-checker" }
+fs-ledger = { path = "../fs-ledger" }
+fs-package = { path = "../fs-package" }
 
 [lints]
 workspace = true

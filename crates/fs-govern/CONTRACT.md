@@ -251,6 +251,13 @@ missing/duplicate/non-finite/unit/domain/sample handling; integer/fraction
 domain checks; input-order-independent assessment JSON; and deterministic
 numeric-threshold register serialization.
 
+`tests/lanes_e2e.rs` (bead rjoq.6 slice 2): the cross-crate no-mock
+composition — fs-govern admission persisted into a FrankenSQLite-backed
+fs-ledger (events + content-addressed preregistration/refutation/
+decision-log artifacts), fs-package claims re-checked solver-free by
+fs-checker incl. a mismatched-root refusal, fresh-ledger byte-for-byte
+replay, and an idempotent full-retry pass.
+
 `tests/lanes.rs` (bead rjoq.6, cases lane-001..lane-009): G0 identity and
 state-machine laws (canonical collapse, per-field mutation sensitivity,
 lane-bound mechanism/comparison/successor authority, same-lane refusal with
@@ -287,9 +294,17 @@ identity guard has a test that fails if the guard is removed.
   preregistration artifact are content references whose durable
   finalization, issuer authority, and scientific adequacy are established
   by fs-ledger/fs-package/fs-checker integration and deployment policy.
-  The cross-crate no-mock E2E (two independent theorem lanes plus one
-  in-lane comparison through fs-govern, ledger, package, checker, and
-  replay) is the bead's remaining slice and is NOT claimed by this module.
+  The cross-crate no-mock E2E lives in `tests/lanes_e2e.rs` (dev-deps
+  only): two independent theorem lanes plus one preregistered in-lane
+  comparison drive fs-govern admission with every decision row persisted
+  as a real fs-ledger event, the preregistration and refutation
+  artifacts content-addressed in the ledger (the finalization receipt
+  seals a hash that actually exists there), the outcome packaged as
+  fs-package claims and re-checked solver-free by fs-checker (with a
+  mismatched-root refusal probe), and the whole request sequence
+  replayed byte-for-byte on a fresh portfolio ledger plus an idempotent
+  full-retry pass. Storage-fault injection at every persistence
+  boundary remains the bead's outstanding G4 lane.
 - Independence classes are DECLARED. Canonicalization defeats cosmetic
   splits and the class backstop defeats partition gaming among honestly
   labeled lanes, but the crate cannot algorithmically prove that two
