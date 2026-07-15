@@ -10,6 +10,7 @@ use crate::scenario::{ValidationError, Violation, sort_validation_index};
 use crate::signal::TimeSignal;
 use fs_ga::{Motor, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
+use std::fmt;
 
 /// A frame identity (0 is the world frame).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,6 +64,15 @@ pub struct Frame {
     pub parent: FrameId,
     /// Motion relative to the parent.
     pub motion: FrameMotion,
+}
+
+#[derive(Clone, Copy)]
+struct FrameDiagnosticContext<'a>(&'a str);
+
+impl fmt::Display for FrameDiagnosticContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "frame {:?}", self.0)
+    }
 }
 
 /// The scenario's frame tree (the world frame is implicit).
@@ -435,7 +445,7 @@ impl FrameTree {
 
         for (i, f) in self.frames.iter().enumerate() {
             checkpoint("frame validation")?;
-            let ctx = format!("frame {:?}", f.name);
+            let ctx = FrameDiagnosticContext(f.name.as_str());
             if f.id == WORLD {
                 out.push(Violation {
                     code: "frame-id-zero",
@@ -556,7 +566,7 @@ impl FrameTree {
     }
 }
 
-fn check_axis(axis: &[f64; 3], ctx: &str, out: &mut Vec<Violation>) {
+fn check_axis<C: fmt::Display + ?Sized>(axis: &[f64; 3], ctx: &C, out: &mut Vec<Violation>) {
     let squared_norm = axis_squared_norm(axis);
     if !axis_is_unit(axis) {
         out.push(Violation {
@@ -569,7 +579,7 @@ fn check_axis(axis: &[f64; 3], ctx: &str, out: &mut Vec<Violation>) {
     }
 }
 
-fn check_center(center: Vec3, ctx: &str, out: &mut Vec<Violation>) {
+fn check_center<C: fmt::Display + ?Sized>(center: Vec3, ctx: &C, out: &mut Vec<Violation>) {
     if !vec3_is_finite(center) {
         out.push(Violation {
             code: "frame-center-nonfinite",
@@ -579,7 +589,12 @@ fn check_center(center: Vec3, ctx: &str, out: &mut Vec<Violation>) {
     }
 }
 
-fn dims_violation(ctx: &str, quantity: &str, expected: Dims, got: Dims) -> Violation {
+fn dims_violation<C: fmt::Display + ?Sized>(
+    ctx: &C,
+    quantity: &str,
+    expected: Dims,
+    got: Dims,
+) -> Violation {
     Violation {
         code: "frame-dims",
         what: format!(
@@ -592,7 +607,10 @@ fn dims_violation(ctx: &str, quantity: &str, expected: Dims, got: Dims) -> Viola
 
 #[cfg(test)]
 mod validation_internal_tests {
-    use super::{Frame, FrameId, FrameMotion, FrameTree, WORLD, reserve_frame_validation};
+    use super::{
+        Frame, FrameDiagnosticContext, FrameId, FrameMotion, FrameTree, WORLD,
+        reserve_frame_validation,
+    };
     use crate::scenario::ValidationError;
     use fs_ga::{Quat, Vec3};
 
@@ -606,6 +624,20 @@ mod validation_internal_tests {
                 translation: Vec3::new(0.0, 0.0, 0.0),
             },
         }
+    }
+
+    #[test]
+    fn diagnostic_context_is_borrowed_and_output_stable() {
+        let name = String::from("fixture");
+        let context = FrameDiagnosticContext(name.as_str());
+        assert_eq!(format!("{context}"), "frame \"fixture\"");
+
+        let tree = FrameTree {
+            frames: vec![fixed_frame(1, WORLD)],
+        };
+        let mut findings = Vec::new();
+        tree.check(&mut findings);
+        assert!(findings.is_empty());
     }
 
     #[test]

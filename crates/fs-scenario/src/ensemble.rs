@@ -11,6 +11,7 @@ use crate::scenario::Violation;
 use fs_math::det;
 use fs_qty::{Dims, QtyAny};
 use fs_rand::StreamKey;
+use std::fmt;
 
 const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 /// fs-rand kernel ids for ensemble draws (stable across runs — part of
@@ -170,6 +171,15 @@ pub struct StochasticEnsemble {
     pub dt: QtyAny,
     /// The model.
     pub model: SpectrumModel,
+}
+
+#[derive(Clone, Copy)]
+struct EnsembleDiagnosticContext<'a>(&'a str);
+
+impl fmt::Display for EnsembleDiagnosticContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "ensemble {:?}", self.0)
+    }
 }
 
 /// One realized member: a sampled time series (spectral models) or a
@@ -432,7 +442,7 @@ impl StochasticEnsemble {
 
     /// Structural validation.
     pub fn check(&self, out: &mut Vec<Violation>) {
-        let ctx = format!("ensemble {:?}", self.name);
+        let ctx = EnsembleDiagnosticContext(self.name.as_str());
         if self.name.is_empty() {
             out.push(Violation {
                 code: "ensemble-name-empty",
@@ -624,7 +634,13 @@ impl StochasticEnsemble {
     }
 }
 
-fn expect_dims(ctx: &str, name: &str, q: &QtyAny, expected: Dims, out: &mut Vec<Violation>) {
+fn expect_dims<C: fmt::Display + ?Sized>(
+    ctx: &C,
+    name: &str,
+    q: &QtyAny,
+    expected: Dims,
+    out: &mut Vec<Violation>,
+) {
     if q.dims != expected {
         out.push(Violation {
             code: "ensemble-dims",
@@ -634,5 +650,34 @@ fn expect_dims(ctx: &str, name: &str, q: &QtyAny, expected: Dims, out: &mut Vec<
             ),
             fix: format!("express {name} in coherent SI units"),
         });
+    }
+}
+
+#[cfg(test)]
+mod validation_internal_tests {
+    use super::{EnsembleDiagnosticContext, SpectrumModel, StochasticEnsemble, TIME_DIMS};
+    use fs_qty::{Dims, QtyAny};
+
+    #[test]
+    fn diagnostic_context_is_borrowed_and_output_stable() {
+        let name = String::from("gust");
+        let context = EnsembleDiagnosticContext(name.as_str());
+        assert_eq!(format!("{context}"), "ensemble \"gust\"");
+
+        let ensemble = StochasticEnsemble {
+            name,
+            seed: 1,
+            members: 1,
+            duration: QtyAny::new(2.0, TIME_DIMS),
+            dt: QtyAny::new(1.0, TIME_DIMS),
+            model: SpectrumModel::Dryden {
+                sigma: QtyAny::new(1.0, Dims([1, 0, -1, 0, 0, 0])),
+                length_scale: QtyAny::new(1.0, Dims([1, 0, 0, 0, 0, 0])),
+                mean_speed: QtyAny::new(1.0, Dims([1, 0, -1, 0, 0, 0])),
+            },
+        };
+        let mut findings = Vec::new();
+        ensemble.check(&mut findings);
+        assert!(findings.is_empty());
     }
 }
