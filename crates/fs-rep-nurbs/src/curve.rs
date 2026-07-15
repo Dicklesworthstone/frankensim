@@ -22,6 +22,7 @@ const CURVE_BEZIER_SCAN_WORK_PER_KNOT: u128 = 4;
 const CURVE_BEZIER_BLEND_WORK_PER_CONTROL: u128 = 32;
 const CURVE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const CURVE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const CURVE_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_REMOVAL_MAX_DERIVED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_BEZIER_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
@@ -104,6 +105,44 @@ fn curve_storage_bytes<S: Scalar>(
         .ok_or_else(|| NurbsError::Domain {
             what: "Bezier curve-storage accounting overflows u128".to_string(),
         })
+}
+
+fn preflight_curve_copy<S: Scalar>(
+    knot_count: usize,
+    control_count: usize,
+) -> Result<(), NurbsError> {
+    let work_units = (control_count as u128)
+        .checked_mul(4)
+        .and_then(|work| work.checked_add(knot_count as u128))
+        .and_then(|work| work.checked_add(2))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve-copy work accounting overflows u128".to_string(),
+        })?;
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve copy requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    let retained_bytes = (knot_count as u128)
+        .checked_mul(core::mem::size_of::<S>() as u128)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (control_count as u128).checked_mul(core::mem::size_of::<[S; 4]>() as u128)?,
+            )
+        })
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve-copy retained-byte accounting overflows u128".to_string(),
+        })?;
+    if retained_bytes > CURVE_COPY_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve copy retains {retained_bytes} output bytes above defensive ceiling {CURVE_COPY_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn refinement_work_upper_bound(
@@ -645,6 +684,19 @@ pub struct AdmittedNurbsCurve<'a, S: Scalar, const DIM: usize> {
     inner: &'a NurbsCurve<S, DIM>,
 }
 
+/// Transactional terminal state of a cancellation-aware fallible curve copy.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum CurveCloneRun<S: Scalar, const DIM: usize> {
+    /// The complete sealed copy of the exact source representation.
+    Complete {
+        /// Copied curve generation.
+        curve: NurbsCurve<S, DIM>,
+    },
+    /// Cancellation was observed; all partial copy storage was dropped.
+    Cancelled,
+}
+
 /// Transactional terminal state of cancellation-aware curve admission.
 #[must_use]
 #[derive(Debug, Clone, Copy)]
@@ -953,22 +1005,44 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// Fallibly copy this sealed curve without revalidating unchanged data.
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    /// [`NurbsError::Domain`] when checked copy work/retained bytes or a
+    /// destination allocation is refused.
     pub fn try_clone(&self) -> Result<Self, NurbsError> {
-        let knots = self.knots.try_clone()?;
-        let mut cpw = Vec::new();
-        cpw.try_reserve_exact(self.cpw.len())
-            .map_err(|_| NurbsError::Domain {
-                what: "curve copy control-net allocation was refused".to_string(),
-            })?;
-        cpw.extend_from_slice(&self.cpw);
-        Ok(NurbsCurve { knots, cpw })
+        let mut never_cancel = || false;
+        match self.try_clone_with_poll(&mut never_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(curve),
+            CurveWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling curve copy observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Fallibly copy this sealed curve with bounded cancellation polling.
+    ///
+    /// Count-derived work and a 64 MiB retained-output envelope precede
+    /// cancellation. One gate then covers both fallible allocations, ordered
+    /// knot and control copies at fixed logical-work strides, and final
+    /// publication. The borrowed source is excluded from the output envelope.
+    /// Individual allocator calls, scalar/array copies, and destructors are
+    /// not preemptible. This primitive does not consume the `Cx` budget or own
+    /// request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous copy's work, retained-memory, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn try_clone_with_cx(&self, cx: &Cx<'_>) -> Result<CurveCloneRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self.try_clone_with_poll(&mut should_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(CurveCloneRun::Complete { curve }),
+            CurveWorkRun::Cancelled => Ok(CurveCloneRun::Cancelled),
+        }
     }
 
     fn try_clone_with_poll(
         &self,
         should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<CurveWorkRun<Self>, NurbsError> {
+        preflight_curve_copy::<S>(self.knots.knots.len(), self.cpw.len())?;
         if should_cancel() {
             return Ok(CurveWorkRun::Cancelled);
         }
@@ -3039,6 +3113,103 @@ mod tests {
                 }
             );
         });
+    }
+
+    #[test]
+    fn curve_copy_with_cx_is_transactional_and_exact() {
+        let curve = line_curve();
+        with_curve_cx(true, |cx| {
+            assert_eq!(
+                curve.try_clone_with_cx(cx).expect("admitted copy request"),
+                CurveCloneRun::Cancelled
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                curve.try_clone_with_cx(cx).expect("active curve copy"),
+                CurveCloneRun::Complete {
+                    curve: curve.try_clone().expect("legacy curve copy"),
+                }
+            );
+        });
+
+        let exact = NurbsCurve::<Rat, 1>::new(
+            KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+                .expect("exact line knots"),
+            &[[Rat::int(0)], [Rat::int(1)]],
+            &[Rat::int(1), Rat::int(1)],
+        )
+        .expect("exact line");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                exact.try_clone_with_cx(cx).expect("active exact copy"),
+                CurveCloneRun::Complete {
+                    curve: exact.try_clone().expect("legacy exact copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn curve_copy_cancels_inside_each_linear_copy_and_at_publication() {
+        let curve = long_linear_curve();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = curve
+                .try_clone_with_poll(&mut should_cancel)
+                .expect("bounded curve copy");
+            (matches!(outcome, CurveWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(2), run(2));
+        assert_eq!(run(2), (true, 2));
+        assert_eq!(run(5), run(5));
+        assert_eq!(run(5), (true, 5));
+
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            curve
+                .try_clone_with_poll(&mut never_cancel)
+                .expect("healthy curve copy"),
+            CurveWorkRun::Complete(_)
+        ));
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(matches!(
+            curve
+                .try_clone_with_poll(&mut cancel_at_publication)
+                .expect("publication cancellation"),
+            CurveWorkRun::Cancelled
+        ));
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn curve_copy_preflight_refuses_work_before_retained_bytes() {
+        let oversized = usize::MAX;
+        let work_error = preflight_curve_copy::<f64>(oversized, oversized)
+            .expect_err("work must refuse before retained-byte arithmetic");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
+
+        let memory_error =
+            preflight_curve_copy::<f64>(0, 2_100_000).expect_err("copy output must exceed 64 MiB");
+        assert!(matches!(
+            memory_error,
+            NurbsError::Domain { ref what } if what.contains("retains")
+        ));
     }
 
     #[test]

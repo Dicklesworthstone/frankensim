@@ -54,9 +54,12 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   derivatives through the knot's continuity order and refuses requests that
   would silently mean a one-sided jet;
   checked Cartesian or homogeneous construction seals the knot/control
-  representation. `AdmittedNurbsCurve` binds a validated immutable snapshot
-  and evaluation consumes its admitted knot view without a second structural
-  scan. Owning `admit_with_cx` returns `CurveAdmissionRun` and gates the
+  representation. Owning `try_clone_with_cx` returns transactional
+  `CurveCloneRun` state and publishes only a complete sealed copy after a
+  checked work and 64 MiB retained-output gate. `AdmittedNurbsCurve` binds a
+  validated immutable snapshot and evaluation consumes its admitted knot view
+  without a second structural scan. Owning `admit_with_cx` returns
+  `CurveAdmissionRun` and gates the
   lifetime-bound authority after knot and control validation. Its admitted-only
   `eval_with_cx` returns transactional
   `CurveEvaluationRun` state and never publishes a partial Cartesian point.
@@ -248,6 +251,15 @@ basis construction, polls homogeneous accumulation every 64 logical scalar
 updates, and gates final Cartesian publication. `CurveEvaluationRun::Cancelled`
 contains no partial point; owning curve admission and caller-owned affine
 budget/drain/finalize semantics remain outside this primitive claim.
+`NurbsCurve::try_clone_with_cx` preserves count-derived copy-work and 64 MiB
+retained-output refusal precedence, then carries one fixed-stride gate through
+fallible knot allocation/copy, fallible control allocation/copy, and final
+publication. `CurveCloneRun::Cancelled` exposes no partial copy and drops all
+partial output storage. The borrowed source is excluded from the output
+envelope; allocator calls, scalar/array copies, and destructors are
+non-preemptible, and the primitive adds no source revalidation, wall-time,
+exact caller-budget, drain/finalize, resumability, or geometric-certificate
+claim.
 `AdmittedNurbsCurve::derivatives_with_cx` preserves request, ordinary-continuity,
 checked work, and retained-memory refusal precedence, then polls before every
 allocation and through derivative-net copies and differences, reduced knot and

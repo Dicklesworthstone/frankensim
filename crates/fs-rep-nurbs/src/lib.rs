@@ -29,8 +29,8 @@ pub use closest::{
     ClosestPointRun, DistanceBracketEstimate, closest_point_curve, closest_point_surface,
 };
 pub use curve::{
-    AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveDerivativesRun, CurveEvaluationRun,
-    CurveInsertionRun, CurveRemovalRun, CurveSpanBoxesRun, NurbsCurve,
+    AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveCloneRun, CurveDerivativesRun,
+    CurveEvaluationRun, CurveInsertionRun, CurveRemovalRun, CurveSpanBoxesRun, NurbsCurve,
 };
 pub use rat::Rat;
 pub use surface::{
