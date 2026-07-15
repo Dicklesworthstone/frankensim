@@ -2104,8 +2104,13 @@ mod validation_internal_tests {
         )
         .expect("fallible contact index allocation");
 
+        let mut initialized = 0usize;
         let mut groups = 0usize;
         let result = scenario.contact_pair_conflicts(&index, &mut |phase| {
+            if phase == "contact conflict initialization" {
+                initialized += 1;
+                return Ok(());
+            }
             assert_eq!(phase, "contact conflict groups");
             groups += 1;
             if groups == 2 {
@@ -2118,6 +2123,7 @@ mod validation_internal_tests {
                 Ok(())
             }
         });
+        assert_eq!(initialized, scenario.contacts.len());
         assert_eq!(groups, 2);
         assert!(matches!(
             result,
