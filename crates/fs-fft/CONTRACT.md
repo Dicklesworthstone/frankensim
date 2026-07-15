@@ -127,6 +127,12 @@ oracle, c2r round-trip + full-IFFT oracle, DCT-II/III vs naive definitions +
 round-trip + same-build bit replay, N-D (2D/3D) vs independent naive N-D DFT +
 round-trip + separability + N-D Parseval + 2D convolution theorem +
 determinism, determinism + golden hash, and structured rejection of bad sizes.
+The declared G3 adopter `forward-signal-scale-equivariance`
+(`tests/metamorphic.rs`, seed `0x2ACE_0002`, 384 cases) applies non-identity
+power-of-two rescalings to exactly eight generated complex samples and checks
+every output component from `Fft::forward` at `1e-13` absolute-relative
+tolerance. The fixed oracle, theorem, round-trip, and golden pins above remain
+authoritative and independent.
 The frontier dispatch battery also rejects non-power-of-two lookalikes. The
 performance lane binds its two-pass traffic count to evidence version
 `27d3-6s-fused2`. Its historical-axis input is report-only unless the baseline

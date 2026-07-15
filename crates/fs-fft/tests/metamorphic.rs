@@ -37,10 +37,10 @@ fn minimum_complex_margin(
 fn g3_forward_fft_is_equivariant_under_signal_rescaling() {
     const N: usize = 8;
     let plan = Fft::new(N);
-    let operator = |input: &Vec<f64>| {
+    let operator = |input: &Vec<(f64, f64)>| {
         let mut data = vec![C64::default(); N];
-        for (slot, &value) in data.iter_mut().zip(input) {
-            slot.re = value;
+        for (slot, &(re, im)) in data.iter_mut().zip(input) {
+            *slot = C64::new(re, im);
         }
         let mut scratch = vec![C64::default(); N];
         plan.forward(&mut data, &mut scratch);
@@ -49,11 +49,18 @@ fn g3_forward_fft_is_equivariant_under_signal_rescaling() {
     let relation = unit_rescaling(
         "forward-signal-scale-equivariance",
         Tolerance::AbsoluteRelative {
-            max_abs: 5.0e-11,
-            max_relative: 5.0e-11,
+            max_abs: 1.0e-13,
+            max_relative: 1.0e-13,
         },
-        |input: &Vec<f64>, &scale: &f64| input.iter().map(|value| value * scale).collect(),
-        |base: &Vec<C64>, transformed: &Vec<C64>, &scale: &f64, tolerance| {
+        |input: &Vec<(f64, f64)>, &exponent: &i64| {
+            let scale = 2.0f64.powi(exponent as i32);
+            input
+                .iter()
+                .map(|&(re, im)| (re * scale, im * scale))
+                .collect()
+        },
+        |base: &Vec<C64>, transformed: &Vec<C64>, &exponent: &i64, tolerance| {
+            let scale = 2.0f64.powi(exponent as i32);
             let expected: Vec<C64> = base
                 .iter()
                 .map(|value| C64::new(value.re * scale, value.im * scale))
@@ -67,9 +74,19 @@ fn g3_forward_fft_is_equivariant_under_signal_rescaling() {
         0x2ACE_0002,
         384,
         |stream| {
+            let exponent = match stream.int_in(0, 5) {
+                0 => -3,
+                1 => -2,
+                2 => -1,
+                3 => 1,
+                4 => 2,
+                _ => 3,
+            };
             RelationCase::new(
-                stream.vec_of(N, |stream| stream.f64_in(-32.0, 32.0)),
-                stream.f64_in(-4.0, 4.0),
+                (0..N)
+                    .map(|_| (stream.f64_in(-32.0, 32.0), stream.f64_in(-32.0, 32.0)))
+                    .collect(),
+                exponent,
             )
         },
         &operator,
