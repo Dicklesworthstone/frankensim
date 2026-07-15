@@ -48,6 +48,29 @@ lower their motions into tubes through [`LowerToMotorTube`].
   charts that claim `TraceStepClaim::ExactDistance` (global
   1-Lipschitz theorem for exact signed distance); all other base
   claims refuse with a typed error.
+- `SweptChart<C>` — the sign-correct swept-union implicit
+  `ψ(x) = inf_t φ(M(t)⁻¹x)`. `evaluate` uses a deterministic complete
+  binary cover of the time domain. Every active cell supplies a rigorous
+  lower bound through `SpacetimeChart::eval_over`; every evaluated feasible
+  time supplies a rigorous upper bound. Its `SweepReceipt` therefore encloses
+  the global infimum even when the accuracy decision is `Unknown`. The
+  implicit has the union's inside/outside sign but is **not generally a signed
+  distance**, so the `Chart` façade publishes no numerical-distance,
+  gradient, Lipschitz, topology, or ray-step claim.
+- `EnvelopeChart<C, O>` — a `SweptChart` plus a chart-bound
+  `EnvelopeOracle<C>`. The oracle must rigorously enclose `F` and `dF/dt`,
+  certify characteristic-root existence (interval Newton, root count, or
+  validated implicit-manifold continuation), certify rank margin, trimming,
+  and visibility. A zero-containing interval alone never admits a branch.
+  Interior regular branches, parameter endpoints, rank singularities,
+  trimming, occlusion, and `Unknown` are distinct outcomes. The trace receipt
+  carries the containing swept-field band; it is not an exact envelope SDF.
+- `WankelApexPoint` and `WankelSealCircle` keep three constructions distinct:
+  the ideal apex-point epitrochoid, a declared finite seal's center/contact
+  loci, and the actual bore. The first two are derived directly from
+  `base · T(e cos α, e sin α) · R(α/3 + β₀)`; the actual bore exists only as
+  a visibility/trim-validated envelope of the seal-circle family. Rotor-flank
+  conjugacy is a separate problem.
 - Analytic constructors: `screw_tube` (constant-twist screw about an
   axis line through a center, with translation along the axis) and
   `wankel_tube` (Wankel rotor **pose**: eccentric-center orbit at crank
@@ -87,17 +110,32 @@ have positive dot product — BEFORE any consumer takes a logarithm.
   action is affine in `x`, so corner enclosures hull the box image).
 - The versor-defect bound is an upper bound over the whole segment
   domain, not a sample statistic.
+- At every point, the minimum lower endpoint over the current swept time-cell
+  cover is a lower bound on the true infimum. The smallest upper endpoint at
+  any evaluated feasible time is an upper bound. Splitting replaces one
+  parent by two closed children whose union is the parent; no sample is used
+  to establish completeness.
+- Swept and envelope work selection uses total f64 ordering and fixed endpoint
+  tie breaks. It is independent of worker count and scheduler order.
+- An envelope branch is admitted as regular only after root existence,
+  positive rank margin, in-trim status, and visibility are all `Proven` over
+  its retained time enclosure. Endpoint surfaces are classified separately
+  and never smuggled through the interior `dF/dt = 0` condition.
 
 ## Error model
 
 All fallible operations return `Result<_, MotionError>`:
-`NonFiniteInput`, `EmptyTimeDomain`, `InvalidOrder`,
+`NonFiniteInput`, `EmptyTimeDomain`, `InvalidSegments`, `MixedModelShape`,
 `Taylor(TaylorModelError)` (propagated fs-ivl refusals),
 `DegenerateWeight` (homogeneous weight enclosure contains zero),
 `DoubleCoverAmbiguous`, `ChartTransition` (adjacent segments fail the
 overlap or sign test), `OutOfDomain`, `UnsupportedBaseClaim`
 (`eval_over` on a base chart without `ExactDistance`),
-`UnboundedSupport` (snapshot support transport of an infinite box), and
+`UnboundedSupport` (a swept construction cannot certify a finite support),
+`InvalidConfiguration` (non-finite/negative tolerance),
+`InconsistentEnclosure` (independent lower and feasible-upper evidence
+contradicts), `InvalidGeometry` / `PointActionFailed` (declared machine
+geometry or its finite PGA action refuses), and
 `Cancelled` (cooperative cancellation observed). Panics are reserved
 for programmer errors (violated internal invariants).
 
@@ -123,8 +161,8 @@ None. `#![forbid(unsafe_code)]`.
 
 ## Feature flags
 
-None. Everything here is `[S]`-ambition machinery; swept envelopes,
-clearance volumes, and validated events are separate beads/crates.
+None. Everything here is `[S]`-ambition machinery. Clearance volumes and
+validated events remain separate beads/crates.
 
 ## Conformance tests
 
@@ -150,6 +188,27 @@ clearance volumes, and validated events are separate beads/crates.
 - `mt_009` snapshot chart agreement with pulled-back base evaluation
   and support transport containment.
 
+`tests/swept_envelope.rs`:
+
+- `po_5` checks the deterministic exhaustive-subdivision accounting and
+  falsifies every returned band against the independently derived translation
+  capsule distance. The complete interval partition is the proof; closed-form
+  point comparisons are only falsifiers.
+- budget exhaustion returns `Unknown` with a still-sound interval, while the
+  `Chart` façade retains `NoClaim` distance/ray semantics.
+- exact parameter endpoints are classified separately from interior
+  `dF/dt = 0` branches, and zero-containing field/derivative intervals with no
+  root-existence proof remain `Unknown`.
+- a derived rolling-rack family
+  `F = x cos u + y sin u - r_b u` independently yields the rotated involute
+  from `F = F_u = 0`; its validated fixture exercises regular branch
+  admission and detailed rejection counters.
+- rank-degenerate and invisible characteristic fixtures return `Unknown` or a
+  typed rejection rather than a regular envelope branch.
+- the derived Wankel apex formula is falsified against the independently
+  composed pointwise motor and certified tube action. Finite seal center and
+  contact loci remain distinct and no test equates either with the bore.
+
 ## No-claim boundaries
 
 - **Rigid paths only.** No deformable sweeps, no scaling, no shear.
@@ -168,10 +227,23 @@ clearance volumes, and validated events are separate beads/crates.
   near-rigid pull-back is a homeomorphism of the zero set).
 - `eval_over` supports only `ExactDistance` base charts in this
   version; Lipschitz-implicit transport refuses rather than guessing.
-- The Wankel constructor produces the rotor **pose** path; the
-  epitrochoid apex locus and swept/envelope geometry belong to the
-  envelope bead (`fs-motion` swept-volume follow-up) and are not
-  claimed here.
+- A `SweptChart` interval certifies the infimum of the transported base
+  implicit and hence the swept-union sign. It makes no distance-accuracy claim
+  and registers no Rep Router conversion edge in v1. Future swept-to-mesh or
+  swept-to-voxel edges must preserve the enclosure class and account for their
+  own discretization error.
+- `EnvelopeOracle` is the trusted certifier boundary for characteristic-root
+  existence, derivatives, rank, trim, and visibility. Opaque charts are never
+  finite-differenced and promoted. `Unknown` rank/visibility/existence remains
+  `Unknown`; mutually contradictory oracle fields also demote to `Unknown`.
+  No global watertightness, uniqueness, self-intersection freedom, or exact
+  boundary-distance claim follows from a trace receipt.
+- The Wankel apex expression is an ideal point locus. `WankelSealCircle`
+  exposes a declared center and a contact point for a supplied unit normal;
+  supplying that normal does not prove envelope visibility. The actual bore
+  remains an `EnvelopeChart` problem, and the rotor flank remains a separate
+  conjugate-envelope design problem. The rotor is not claimed to be an exact
+  constant-width triangle, and no rolling-seal assumption is made.
 - No claim of tightness: enclosures are sound, not minimal; segment
   count and Taylor order are the caller's accuracy budget.
 - Double-cover canonicalization is bit-deterministic for identical

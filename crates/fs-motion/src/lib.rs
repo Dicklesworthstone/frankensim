@@ -6,23 +6,32 @@
 //! motor components with rigorously measured versor-defect bounds),
 //! [`MotorPath`] (the point-evaluation view), [`SpacetimeChart`]
 //! (moving geometry with frozen-time snapshots and certified
-//! time-span field enclosures), analytic screw and Wankel-pose
-//! constructors, and the [`LowerToMotorTube`] builder contract that
-//! lets higher layers lower their motions here without upward
-//! dependencies.
+//! time-span field enclosures), [`SweptChart`] (certified implicit
+//! infimum bounds), fail-closed [`EnvelopeChart`] characteristic
+//! classification, analytic screw and Wankel-pose constructors, and
+//! the [`LowerToMotorTube`] builder contract that lets higher layers
+//! lower their motions here without upward dependencies.
 //!
 //! See `CONTRACT.md` for invariants, determinism class, and no-claim
-//! boundaries. Bead: `frankensim-ext-motion-motor-tube-c70j`.
+//! boundaries. Beads: `frankensim-ext-motion-motor-tube-c70j` and
+//! `frankensim-ext-motion-swept-envelope-c58q`.
 
 #![forbid(unsafe_code)]
 
 pub mod algebra;
 pub mod analytic;
 pub mod spacetime;
+pub mod swept;
 pub mod tube;
 
 pub use analytic::{ScrewParams, WankelParams, screw_tube, wankel_tube};
 pub use spacetime::{FieldEnclosure, MotionSnapshot, SpacetimeChart};
+pub use swept::{
+    EnvelopeBranch, EnvelopeBranchClass, EnvelopeChart, EnvelopeConfig, EnvelopeDecision,
+    EnvelopeEvidence, EnvelopeOracle, EnvelopeTraceReceipt, EnvelopeTraceStats, ProofState,
+    SweepDecision, SweepReceipt, SweptChart, SweptConfig, WankelApexPoint, WankelSealCircle,
+    classify_envelope_branch, envelope,
+};
 pub use tube::{
     BoxActionEnclosure, CertifiedMotorTube, EnclosureClass, LowerToMotorTube, MotorPath,
     MotorTubeSegment, PathSample, PointActionEnclosure,
@@ -92,6 +101,27 @@ pub enum MotionError {
     /// The base chart's sample certificate is not a rigorous
     /// enclosure.
     UncertifiedBaseSample,
+    /// A finite support enclosure is required by the requested operation.
+    UnboundedSupport,
+    /// A caller-supplied accuracy or work configuration is invalid.
+    InvalidConfiguration {
+        /// The rejected condition.
+        what: &'static str,
+    },
+    /// Independently certified lower/upper bounds contradicted one another.
+    InconsistentEnclosure {
+        /// Purported lower bound.
+        lower: f64,
+        /// Purported upper bound.
+        upper: f64,
+    },
+    /// Declared machine geometry violates a construction precondition.
+    InvalidGeometry {
+        /// The rejected condition.
+        what: &'static str,
+    },
+    /// A finite PGA point action unexpectedly produced an ideal point.
+    PointActionFailed,
     /// Cooperative cancellation was observed.
     Cancelled,
 }
@@ -116,10 +146,9 @@ impl std::fmt::Display for MotionError {
                  {expected_order} on the shared domain"
             ),
             MotionError::Taylor(e) => write!(f, "taylor model refusal: {e}"),
-            MotionError::DegenerateWeight { lo, hi } => write!(
-                f,
-                "homogeneous weight enclosure [{lo}, {hi}] contains zero"
-            ),
+            MotionError::DegenerateWeight { lo, hi } => {
+                write!(f, "homogeneous weight enclosure [{lo}, {hi}] contains zero")
+            }
             MotionError::DoubleCoverAmbiguous { at } => write!(
                 f,
                 "double-cover sign is ambiguous at anchor time {at}: every component \
@@ -148,6 +177,22 @@ impl std::fmt::Display for MotionError {
                 f,
                 "base chart sample certificate is not a rigorous enclosure"
             ),
+            MotionError::UnboundedSupport => {
+                write!(f, "operation requires a finite base support enclosure")
+            }
+            MotionError::InvalidConfiguration { what } => {
+                write!(f, "invalid motion configuration: {what}")
+            }
+            MotionError::InconsistentEnclosure { lower, upper } => write!(
+                f,
+                "certified infimum bounds are inconsistent: lower {lower} exceeds upper {upper}"
+            ),
+            MotionError::InvalidGeometry { what } => {
+                write!(f, "invalid machine geometry: {what}")
+            }
+            MotionError::PointActionFailed => {
+                write!(f, "finite motor action produced no finite point")
+            }
             MotionError::Cancelled => write!(f, "cancelled at a tile boundary"),
         }
     }
