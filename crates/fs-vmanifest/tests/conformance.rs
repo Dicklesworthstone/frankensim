@@ -1069,7 +1069,7 @@ fn canonical_set_and_external_hex_presentations_share_identity_and_equality() {
         obligation_digest(&baseline.obligations[0]),
         obligation_digest(&reordered.obligations[0])
     );
-    let predecessor = baseline.freeze().expect("baseline freeze");
+    let predecessor = baseline.clone().freeze().expect("baseline freeze");
     let equivalent = reordered.clone().freeze().expect("reordered-set freeze");
     assert_eq!(predecessor.digest(), equivalent.digest());
     assert_eq!(predecessor, equivalent);
