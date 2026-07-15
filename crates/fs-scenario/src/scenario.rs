@@ -7,15 +7,182 @@
 
 use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 use crate::ensemble::StochasticEnsemble;
-use crate::frame::FrameTree;
+use crate::frame::{FrameMotion, FrameTree};
+use fs_exec::Cx;
 use fs_qty::{Dims, QtyAny};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 const ACCEL_DIMS: Dims = Dims([1, 0, -2, 0, 0, 0]);
 const TEMP_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 /// Net-flux tolerance relative to the gross flux magnitude.
 const FLUX_REL_TOL: f64 = 1e-9;
+
+/// Explicit deterministic limits for whole-scenario semantic validation.
+///
+/// Collection fields cap public `Vec` authority before validation allocates
+/// indexes. `max_signal_scalars` counts table times/values and Chebyshev
+/// coefficients. `max_flux_checkpoints` counts raw set-local checkpoints
+/// before deterministic deduplication. `max_work` covers record visits,
+/// ordered-index comparisons, signal scans, checkpoint sorting, and flux
+/// evaluations in machine-independent logical units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidationBudget {
+    /// Maximum non-world frames.
+    pub max_frames: usize,
+    /// Maximum always-active boundary conditions.
+    pub max_base_bcs: usize,
+    /// Maximum load cases.
+    pub max_cases: usize,
+    /// Maximum boundary conditions across all load cases.
+    pub max_case_bcs: usize,
+    /// Maximum load combinations.
+    pub max_combinations: usize,
+    /// Maximum terms across all combinations.
+    pub max_combination_terms: usize,
+    /// Maximum stochastic ensembles.
+    pub max_ensembles: usize,
+    /// Maximum contact-law rows.
+    pub max_contacts: usize,
+    /// Maximum dynamically sized signal scalars visited by validation.
+    pub max_signal_scalars: usize,
+    /// Maximum raw net-flux validation checkpoints across effective sets.
+    pub max_flux_checkpoints: usize,
+    /// Maximum bytes across exact string identities and references.
+    pub max_identity_bytes: usize,
+    /// Maximum deterministic logical work units.
+    pub max_work: u128,
+}
+
+/// Conservative default for [`Scenario::validate`].
+pub const DEFAULT_VALIDATION_BUDGET: ValidationBudget = ValidationBudget {
+    max_frames: 131_072,
+    max_base_bcs: 65_536,
+    max_cases: 16_384,
+    max_case_bcs: 262_144,
+    max_combinations: 65_536,
+    max_combination_terms: 262_144,
+    max_ensembles: 65_536,
+    max_contacts: 65_536,
+    max_signal_scalars: 1_048_576,
+    max_flux_checkpoints: 1_048_576,
+    max_identity_bytes: 16_777_216,
+    max_work: 134_217_728,
+};
+
+impl Default for ValidationBudget {
+    fn default() -> Self {
+        DEFAULT_VALIDATION_BUDGET
+    }
+}
+
+/// Preflighted semantic-validation shape retained for ledger receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidationPlan {
+    /// Non-world frames.
+    pub frames: usize,
+    /// Always-active boundary conditions.
+    pub base_bcs: usize,
+    /// Load cases.
+    pub cases: usize,
+    /// Boundary conditions across all cases.
+    pub case_bcs: usize,
+    /// Load combinations.
+    pub combinations: usize,
+    /// Terms across all combinations.
+    pub combination_terms: usize,
+    /// Stochastic ensembles.
+    pub ensembles: usize,
+    /// Contact-law rows.
+    pub contacts: usize,
+    /// Dynamically sized signal scalars.
+    pub signal_scalars: usize,
+    /// Raw net-flux checkpoints across effective sets.
+    pub flux_checkpoints: usize,
+    /// Exact identity/reference bytes.
+    pub identity_bytes: usize,
+    /// Deterministic logical work units.
+    pub planned_work: u128,
+}
+
+/// Resource-admission or cancellation refusal from semantic validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationError {
+    /// One declared collection/resource exceeded its explicit cap.
+    LimitExceeded {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Requested units.
+        requested: usize,
+        /// Admitted units.
+        limit: usize,
+    },
+    /// Checked work-plan arithmetic overflowed.
+    WorkPlanOverflow {
+        /// Phase whose arithmetic overflowed.
+        phase: &'static str,
+    },
+    /// The complete deterministic work plan exceeded the caller's budget.
+    WorkExceeded {
+        /// Requested logical units.
+        requested: u128,
+        /// Admitted logical units.
+        limit: u128,
+    },
+    /// Cancellation was observed before any result was published.
+    Cancelled {
+        /// Deterministic checkpoint phase.
+        phase: &'static str,
+        /// Completed logical work units.
+        completed: u128,
+        /// Preflighted logical work units, or zero before preflight.
+        planned: u128,
+    },
+}
+
+impl fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LimitExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "scenario validation {resource} request {requested} exceeds limit {limit}"
+            ),
+            Self::WorkPlanOverflow { phase } => {
+                write!(f, "scenario validation work plan overflowed during {phase}")
+            }
+            Self::WorkExceeded { requested, limit } => write!(
+                f,
+                "scenario validation work request {requested} exceeds limit {limit}"
+            ),
+            Self::Cancelled {
+                phase,
+                completed,
+                planned,
+            } => write!(
+                f,
+                "scenario validation cancelled during {phase} after {completed}/{planned} work units"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ValidationError {}
+
+impl ValidationError {
+    fn into_violation(self) -> Violation {
+        Violation {
+            code: "validation-resource-refused",
+            what: self.to_string(),
+            fix: "reduce the scenario or call validate_with_budget using an explicitly reviewed larger budget"
+                .to_string(),
+        }
+    }
+}
 
 /// One validity finding with its structured fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +327,90 @@ pub enum ContactModel {
     Tied,
 }
 
+fn enforce_limit(
+    resource: &'static str,
+    requested: usize,
+    limit: usize,
+) -> Result<(), ValidationError> {
+    if requested > limit {
+        Err(ValidationError::LimitExceeded {
+            resource,
+            requested,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn checked_count_add(
+    total: &mut usize,
+    amount: usize,
+    phase: &'static str,
+) -> Result<(), ValidationError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or(ValidationError::WorkPlanOverflow { phase })?;
+    Ok(())
+}
+
+fn work_units(value: usize, phase: &'static str) -> Result<u128, ValidationError> {
+    u128::try_from(value).map_err(|_| ValidationError::WorkPlanOverflow { phase })
+}
+
+fn checked_work_add(
+    total: &mut u128,
+    amount: u128,
+    phase: &'static str,
+) -> Result<(), ValidationError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or(ValidationError::WorkPlanOverflow { phase })?;
+    Ok(())
+}
+
+fn checked_work_product(
+    left: usize,
+    right: usize,
+    phase: &'static str,
+) -> Result<u128, ValidationError> {
+    work_units(left, phase)?
+        .checked_mul(work_units(right, phase)?)
+        .ok_or(ValidationError::WorkPlanOverflow { phase })
+}
+
+fn ceil_log2(value: usize) -> u128 {
+    if value <= 1 {
+        0
+    } else {
+        u128::from(usize::BITS - (value - 1).leading_zeros())
+    }
+}
+
+fn bc_dynamic_scalars(bc: &BoundaryCondition) -> Result<usize, ValidationError> {
+    match &bc.value {
+        Some(BcValue::Signal(signal)) => {
+            signal
+                .validation_dynamic_scalars()
+                .ok_or(ValidationError::WorkPlanOverflow {
+                    phase: "signal scalar count",
+                })
+        }
+        Some(BcValue::Profile(profile)) => Ok(profile.cheb.coeffs().len()),
+        Some(BcValue::Uniform(_)) | None => Ok(0),
+    }
+}
+
+fn bc_flux_checkpoints(bc: &BoundaryCondition) -> usize {
+    if bc.kind != BcKind::MassFlowInlet {
+        return 0;
+    }
+    match &bc.value {
+        Some(BcValue::Signal(signal)) => signal.net_flux_validation_time_count(),
+        _ => 0,
+    }
+}
+
 /// The scenario root value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scenario {
@@ -201,9 +452,318 @@ impl Scenario {
         }
     }
 
-    /// Validate the whole scenario; empty result means admissible.
+    /// Preflight the complete deterministic semantic-validation work plan.
+    ///
+    /// Top-level collection caps are checked before their contents are
+    /// traversed. Nested collection, signal-scalar, identity-byte, checkpoint,
+    /// and work totals use checked arithmetic and are compared with the
+    /// caller's explicit limits before validation indexes are allocated.
+    pub fn validation_plan(
+        &self,
+        budget: ValidationBudget,
+    ) -> Result<ValidationPlan, ValidationError> {
+        let frames = self.frames.frames.len();
+        let base_bcs = self.base_bcs.len();
+        let cases = self.cases.len();
+        let combinations = self.combinations.len();
+        let ensembles = self.ensembles.len();
+        let contacts = self.contacts.len();
+        enforce_limit("frames", frames, budget.max_frames)?;
+        enforce_limit("base boundary conditions", base_bcs, budget.max_base_bcs)?;
+        enforce_limit("load cases", cases, budget.max_cases)?;
+        enforce_limit("combinations", combinations, budget.max_combinations)?;
+        enforce_limit("ensembles", ensembles, budget.max_ensembles)?;
+        enforce_limit("contacts", contacts, budget.max_contacts)?;
+
+        let mut case_bcs = 0usize;
+        for case in &self.cases {
+            checked_count_add(
+                &mut case_bcs,
+                case.bcs.len(),
+                "case boundary-condition count",
+            )?;
+        }
+        enforce_limit("case boundary conditions", case_bcs, budget.max_case_bcs)?;
+
+        let mut combination_terms = 0usize;
+        for combination in &self.combinations {
+            checked_count_add(
+                &mut combination_terms,
+                combination.terms.len(),
+                "combination term count",
+            )?;
+        }
+        enforce_limit(
+            "combination terms",
+            combination_terms,
+            budget.max_combination_terms,
+        )?;
+
+        let mut identity_bytes = self.name.len();
+        let mut signal_scalars = 0usize;
+        for frame in &self.frames.frames {
+            checked_count_add(
+                &mut identity_bytes,
+                frame.name.len(),
+                "frame identity bytes",
+            )?;
+            if let FrameMotion::Tilt { angle, .. } = &frame.motion {
+                checked_count_add(
+                    &mut signal_scalars,
+                    angle.validation_dynamic_scalars().ok_or(
+                        ValidationError::WorkPlanOverflow {
+                            phase: "frame signal scalar count",
+                        },
+                    )?,
+                    "frame signal scalar count",
+                )?;
+            }
+        }
+
+        let mut base_flux_checkpoint_contribution = 0usize;
+        for bc in &self.base_bcs {
+            checked_count_add(
+                &mut identity_bytes,
+                bc.region.len(),
+                "base boundary identity bytes",
+            )?;
+            checked_count_add(
+                &mut signal_scalars,
+                bc_dynamic_scalars(bc)?,
+                "base boundary signal scalars",
+            )?;
+            checked_count_add(
+                &mut base_flux_checkpoint_contribution,
+                bc_flux_checkpoints(bc),
+                "base flux checkpoints",
+            )?;
+        }
+        for case in &self.cases {
+            checked_count_add(&mut identity_bytes, case.name.len(), "case identity bytes")?;
+            for bc in &case.bcs {
+                checked_count_add(
+                    &mut identity_bytes,
+                    bc.region.len(),
+                    "case boundary identity bytes",
+                )?;
+                checked_count_add(
+                    &mut signal_scalars,
+                    bc_dynamic_scalars(bc)?,
+                    "case boundary signal scalars",
+                )?;
+            }
+        }
+        for combination in &self.combinations {
+            checked_count_add(
+                &mut identity_bytes,
+                combination.name.len(),
+                "combination identity bytes",
+            )?;
+            for (case, _) in &combination.terms {
+                checked_count_add(
+                    &mut identity_bytes,
+                    case.len(),
+                    "combination reference bytes",
+                )?;
+            }
+        }
+        for ensemble in &self.ensembles {
+            checked_count_add(
+                &mut identity_bytes,
+                ensemble.name.len(),
+                "ensemble identity bytes",
+            )?;
+        }
+        for contact in &self.contacts {
+            checked_count_add(
+                &mut identity_bytes,
+                contact.region_a.len(),
+                "contact identity bytes",
+            )?;
+            checked_count_add(
+                &mut identity_bytes,
+                contact.region_b.len(),
+                "contact identity bytes",
+            )?;
+        }
+        enforce_limit("signal scalars", signal_scalars, budget.max_signal_scalars)?;
+        enforce_limit("identity bytes", identity_bytes, budget.max_identity_bytes)?;
+
+        let mut flux_checkpoints = base_flux_checkpoint_contribution.checked_add(1).ok_or(
+            ValidationError::WorkPlanOverflow {
+                phase: "base flux checkpoint count",
+            },
+        )?;
+        let mut flux_sort_work = work_units(flux_checkpoints, "base flux sort work")?
+            .checked_mul(ceil_log2(flux_checkpoints))
+            .ok_or(ValidationError::WorkPlanOverflow {
+                phase: "base flux sort work",
+            })?;
+        let mut flux_evaluation_work =
+            checked_work_product(flux_checkpoints, base_bcs, "base flux evaluation work")?;
+        for case in &self.cases {
+            let mut case_contribution = 0usize;
+            for bc in &case.bcs {
+                checked_count_add(
+                    &mut case_contribution,
+                    bc_flux_checkpoints(bc),
+                    "case flux checkpoints",
+                )?;
+            }
+            let set_checkpoints = 1usize
+                .checked_add(base_flux_checkpoint_contribution)
+                .and_then(|count| count.checked_add(case_contribution))
+                .ok_or(ValidationError::WorkPlanOverflow {
+                    phase: "effective-set flux checkpoint count",
+                })?;
+            checked_count_add(
+                &mut flux_checkpoints,
+                set_checkpoints,
+                "total flux checkpoints",
+            )?;
+            let sort = work_units(set_checkpoints, "case flux sort work")?
+                .checked_mul(ceil_log2(set_checkpoints))
+                .ok_or(ValidationError::WorkPlanOverflow {
+                    phase: "case flux sort work",
+                })?;
+            checked_work_add(&mut flux_sort_work, sort, "total flux sort work")?;
+            let set_bcs =
+                base_bcs
+                    .checked_add(case.bcs.len())
+                    .ok_or(ValidationError::WorkPlanOverflow {
+                        phase: "effective-set boundary count",
+                    })?;
+            checked_work_add(
+                &mut flux_evaluation_work,
+                checked_work_product(set_checkpoints, set_bcs, "case flux evaluation work")?,
+                "total flux evaluation work",
+            )?;
+        }
+        enforce_limit(
+            "flux checkpoints",
+            flux_checkpoints,
+            budget.max_flux_checkpoints,
+        )?;
+
+        let mut record_visits = 1usize;
+        for count in [
+            frames,
+            base_bcs,
+            cases,
+            case_bcs,
+            combinations,
+            combination_terms,
+            ensembles,
+            contacts,
+        ] {
+            checked_count_add(&mut record_visits, count, "validation record visits")?;
+        }
+        let mut index_items = frames
+            .checked_mul(2)
+            .ok_or(ValidationError::WorkPlanOverflow {
+                phase: "frame index item count",
+            })?;
+        for count in [cases, combinations, ensembles, contacts] {
+            checked_count_add(&mut index_items, count, "validation index item count")?;
+        }
+        let largest_index = [frames, cases, combinations, ensembles, contacts]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(ValidationError::WorkPlanOverflow {
+                phase: "validation index height",
+            })?;
+        let index_height = ceil_log2(largest_index);
+        let index_work = work_units(index_items, "validation index work")?
+            .checked_mul(index_height)
+            .ok_or(ValidationError::WorkPlanOverflow {
+                phase: "validation index work",
+            })?;
+        let identity_work = work_units(identity_bytes, "identity comparison work")?
+            .checked_mul(index_height.max(1))
+            .ok_or(ValidationError::WorkPlanOverflow {
+                phase: "identity comparison work",
+            })?;
+        let mut planned_work = work_units(record_visits, "validation record work")?;
+        for (amount, phase) in [
+            (index_work, "validation index work"),
+            (identity_work, "identity comparison work"),
+            (
+                work_units(signal_scalars, "signal scalar work")?,
+                "signal scalar work",
+            ),
+            (flux_sort_work, "flux sort work"),
+            (flux_evaluation_work, "flux evaluation work"),
+        ] {
+            checked_work_add(&mut planned_work, amount, phase)?;
+        }
+        if planned_work > budget.max_work {
+            return Err(ValidationError::WorkExceeded {
+                requested: planned_work,
+                limit: budget.max_work,
+            });
+        }
+
+        Ok(ValidationPlan {
+            frames,
+            base_bcs,
+            cases,
+            case_bcs,
+            combinations,
+            combination_terms,
+            ensembles,
+            contacts,
+            signal_scalars,
+            flux_checkpoints,
+            identity_bytes,
+            planned_work,
+        })
+    }
+
+    /// Validate under [`DEFAULT_VALIDATION_BUDGET`]; empty means admissible.
+    /// Resource refusal is retained as a structured violation so legacy
+    /// callers cannot mistake an unadmitted scenario for a green one.
     #[must_use]
     pub fn validate(&self) -> Vec<Violation> {
+        match self.validation_plan(ValidationBudget::default()) {
+            Ok(_) => self.validate_admitted(),
+            Err(error) => vec![error.into_violation()],
+        }
+    }
+
+    /// Validate under an explicit semantic budget and cancellation context.
+    ///
+    /// Cancellation is polled before preflight, after the work plan is known,
+    /// and after private validation but before findings are published. Thus a
+    /// request observed at any publication boundary returns a typed refusal,
+    /// never a partial or falsely green finding list.
+    pub fn validate_with_budget(
+        &self,
+        budget: ValidationBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<Violation>, ValidationError> {
+        cx.checkpoint().map_err(|_| ValidationError::Cancelled {
+            phase: "initial",
+            completed: 0,
+            planned: 0,
+        })?;
+        let plan = self.validation_plan(budget)?;
+        cx.checkpoint().map_err(|_| ValidationError::Cancelled {
+            phase: "post-preflight",
+            completed: 0,
+            planned: plan.planned_work,
+        })?;
+        let findings = self.validate_admitted();
+        cx.checkpoint().map_err(|_| ValidationError::Cancelled {
+            phase: "pre-publication",
+            completed: plan.planned_work,
+            planned: plan.planned_work,
+        })?;
+        Ok(findings)
+    }
+
+    fn validate_admitted(&self) -> Vec<Violation> {
         let mut out = Vec::new();
         if self.name.is_empty() {
             out.push(Violation {

@@ -12,8 +12,8 @@ Ambition tags: typed BCs/frames/signals/combos [S]; seeded ensembles
 ## Purpose and layer
 
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-blake3, fs-qty,
-fs-rand, fs-cheb, fs-ga, fs-math. The Design Ledger stores scenarios as canonical
-IR artifacts; that integration lives ABOVE L3 (fs-ledger is L6) and is
+fs-rand, fs-cheb, fs-exec, fs-ga, fs-math. The Design Ledger stores scenarios
+as canonical IR artifacts; that integration lives ABOVE L3 (fs-ledger is L6) and is
 exercised here through a dev-dependency in conformance tests only.
 Consumers: fs-solid, fs-flux, fs-lbm, fs-uq, fs-regime, the milestone
 flagships.
@@ -60,7 +60,12 @@ flagships.
   (Frictionless/Coulomb/Tied), explicit `Environment` (gravity, ambient
   temperature/pressure — REQUIRED constructor argument, never silently
   defaulted). `validate()` returns structured `Violation { code, what,
-  fix }` values. Scenario, frame, case, combination, ensemble, and region
+  fix }` values under `DEFAULT_VALIDATION_BUDGET`; a resource refusal becomes a
+  non-green structured violation. `validation_plan` exposes the checked
+  collection/signal/checkpoint/identity/work shape for later ledger binding,
+  while `validate_with_budget` accepts an explicit `ValidationBudget` and
+  fs-exec `Cx`, returning typed `ValidationError` refusals. Scenario, frame,
+  case, combination, ensemble, and region
   identities are exact UTF-8 strings: non-ASCII is admitted, empty identities
   and duplicates within each identity role are refused, and no normalization
   is implicit. Repeated combination terms are refused rather than silently
@@ -145,14 +150,22 @@ flagships.
     the tri-color parent traversal visits each storage row at most once, and
     case/frame/combination/ensemble/contact reference checks use deterministic
     ordered indexes rather than repeated prefix or whole-collection scans.
+12. **Semantic preflight before validation**: top-level collection caps precede
+    nested traversal; checked plans account for aggregate case BCs, combination
+    terms, dynamic signal scalars, raw flux checkpoints, exact identity bytes,
+    ordered-index comparisons, checkpoint sorting, and flux evaluation work.
+    Exact requested limits admit and one-unit-short limits refuse for every
+    budget field.
 
 ## Error model
 
 `ScenarioError`: `Dimensions { context, expected, got }`, `Frame`,
 `Evaluate`, `Parse { at, what }`. Parse/evaluation errors include deterministic
-budget refusals and allocation-refusal context. Validation produces `Vec<Violation>`
-(code + what + fix) rather than failing fast — agents get the whole
-repair list at once.
+budget refusals and allocation-refusal context. `ValidationError` distinguishes
+named limit refusal, work-plan overflow, total-work refusal, and cancellation
+with phase/completed/planned work. Admitted validation produces
+`Vec<Violation>` (code + what + fix) rather than failing fast — agents get the
+whole repair list at once.
 
 ## Determinism class
 
@@ -164,13 +177,16 @@ bit-identical across runs and platforms. IR text is canonical.
 
 All parsing is bounded by explicit byte/depth/node/atom/list limits. Spectral
 realization is O(samples × harmonics), admitted against explicit sample/work
-budgets before allocation; collection reservations are fallible. Validation is
-not yet a `Cx`-accepting operation and does not yet expose a semantic work/heap
-budget. Its identity/reference phase uses deterministic O(N log N) indexes and
-its frame-cycle traversal is linear after indexing; the net-flux checkpoint
-expansion remains an explicit admission no-claim tracked by
-`frankensim-sj31i.24`. No loop is admitted from an unchecked float-to-size
-conversion.
+budgets before allocation; collection reservations are fallible. Semantic
+validation preflights all public collection families, dynamic signal payload,
+identity bytes, raw flux-checkpoint allocation shape, and deterministic work
+before executing. Its identity/reference phase uses deterministic O(N log N)
+indexes and its frame-cycle traversal is linear after indexing. The explicit
+`Cx` lane polls before preflight, after planning, and after private validation
+before publication; a request observed at those boundaries publishes no
+partial findings. Finer in-phase polling and fallible index/output reservation
+remain active work under `frankensim-sj31i.24`. No loop is admitted from an
+unchecked float-to-size conversion.
 
 ## Unsafe boundary
 
@@ -216,6 +232,10 @@ None.
   duplicate role identities, repeated combination terms, self-contact, and
   duplicate/conflicting unordered contact pairs fail closed with declaration
   provenance.
+- **sc-010** the retained semantic plan replays exactly; frames, base/case BCs,
+  cases, combinations/terms, ensembles, contacts, signal scalars, raw flux
+  checkpoints, identity bytes, and total work each admit at the exact boundary
+  and refuse one unit short; pre-requested cancellation publishes no findings.
 
 ## No-claim boundaries
 
@@ -238,6 +258,7 @@ None.
   admission**: parsing may intentionally return a finite but dimensionally
   invalid `Scenario` so migration/diagnostic tooling can inspect it; call
   `Scenario::validate` before solver admission. Input/node/list limits bound
-  decoder cardinality, while semantic validation work/cancellation admission
-  and an exact decoded-heap budget remain active work under
-  `frankensim-sj31i.24`.
+  decoder cardinality. Semantic validation has its own explicit work plan and
+  must not reuse syntax limits as an admission receipt. Exact decoded-heap
+  accounting plus fallible semantic-index/finding reservation remain active
+  work under `frankensim-sj31i.24`.

@@ -7,8 +7,8 @@
 //! makes that class of mistake a structured, fixable refusal instead.
 //!
 //! Layer: L3 (FLUX support). Runtime deps: `std`, fs-blake3, fs-qty,
-//! fs-rand, fs-cheb, fs-ga, fs-math. The Design Ledger stores scenarios as
-//! canonical-IR artifacts — that integration lives ABOVE this layer
+//! fs-rand, fs-cheb, fs-exec, fs-ga, fs-math. The Design Ledger stores
+//! scenarios as canonical-IR artifacts — that integration lives ABOVE this layer
 //! (exercised here via a dev-dependency in conformance tests).
 
 pub mod bc;
@@ -24,7 +24,8 @@ pub use ensemble::{
 };
 pub use frame::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
 pub use scenario::{
-    Combination, ContactLaw, ContactModel, Environment, LoadCase, Scenario, Violation,
+    Combination, ContactLaw, ContactModel, DEFAULT_VALIDATION_BUDGET, Environment, LoadCase,
+    Scenario, ValidationBudget, ValidationError, ValidationPlan, Violation,
 };
 pub use signal::{ChebProfile, Interp, TimeSignal};
 

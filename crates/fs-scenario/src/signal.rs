@@ -126,6 +126,28 @@ impl TimeSignal {
         }
     }
 
+    /// Dynamically sized scalar payload visited by semantic validation.
+    /// `None` denotes impossible `usize` addition rather than wrapping the
+    /// admission plan.
+    pub(crate) fn validation_dynamic_scalars(&self) -> Option<usize> {
+        match self {
+            Self::Constant(_) | Self::Ramp { .. } => Some(0),
+            Self::Table { times, values, .. } => times.len().checked_add(values.len()),
+            Self::Chebfun(profile) => Some(profile.cheb.coeffs().len()),
+        }
+    }
+
+    /// Raw checkpoint contribution before set-local sort/deduplication.
+    pub(crate) fn net_flux_validation_time_count(&self) -> usize {
+        match self {
+            Self::Constant(_) => 0,
+            Self::Ramp { .. } => 2,
+            Self::Table { times, .. } => times.len(),
+            Self::Chebfun(_) => usize::try_from(SMOOTH_NET_FLUX_VALIDATION_PANELS + 1)
+                .expect("the fixed smooth checkpoint count fits usize"),
+        }
+    }
+
     /// Append the deterministic time checkpoints needed by net-flux
     /// compatibility validation.
     ///

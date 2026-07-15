@@ -6,12 +6,13 @@
 //! coherence holds through non-SI spellings (G3).
 
 use fs_blake3::ContentHash;
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ga::{Motor, Point, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{
     BcKind, BcValue, BoundaryCondition, ChebProfile, Combination, Compat, ContactLaw, ContactModel,
     Environment, Frame, FrameId, FrameMotion, Interp, LoadCase, Physics, RealizationBudget,
-    Scenario, SpectrumModel, StochasticEnsemble, TimeSignal,
+    Scenario, SpectrumModel, StochasticEnsemble, TimeSignal, ValidationBudget, ValidationError,
     ir::{
         FiveToSixRule, IrParseBudget, LEGACY_SCENARIO_IR_VERSION, SCENARIO_IR_VERSION, parse_ir,
         parse_ir_with_budget, write_ir,
@@ -35,6 +36,29 @@ const LEGACY_MINIMAL_IR: &str = concat!(
     "(qty 293.15 0 0 0 1 0) (qty 101325 -1 1 -2 0 0)) ",
     "(frames) (bcs) (cases) (combos) (ensembles) (contacts))"
 );
+
+fn with_validation_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    if cancelled {
+        gate.request();
+    }
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x5C09,
+                kernel_id: 9,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
 
 /// The fixture's ensemble battery (all three model families).
 fn fixture_ensembles() -> Vec<StochasticEnsemble> {
@@ -1927,5 +1951,97 @@ fn sc_009_identity_and_unordered_contact_integrity_fail_closed() {
     verdict(
         "sc-009",
         "nonempty unique exact identities, duplicate combination terms, and unordered contact-pair semantics fail closed with declaration provenance",
+    );
+}
+
+#[test]
+fn sc_010_semantic_validation_plan_hits_every_exact_budget_boundary() {
+    let scenario = rich_scenario();
+    let plan = scenario
+        .validation_plan(ValidationBudget::default())
+        .expect("rich fixture fits the default semantic budget");
+    assert_eq!(
+        plan,
+        scenario
+            .validation_plan(ValidationBudget::default())
+            .expect("work-plan replay"),
+        "semantic work planning must replay exactly"
+    );
+
+    macro_rules! exact_and_one_short {
+        ($field:ident, $requested:expr, $resource:literal) => {{
+            let requested = $requested;
+            assert!(requested > 0, "fixture must exercise {}", $resource);
+            let mut exact = ValidationBudget::default();
+            exact.$field = requested;
+            scenario
+                .validation_plan(exact)
+                .unwrap_or_else(|error| panic!("exact {} boundary refused: {error}", $resource));
+
+            let mut short = exact;
+            short.$field = requested - 1;
+            assert!(matches!(
+                scenario.validation_plan(short),
+                Err(ValidationError::LimitExceeded {
+                    resource: $resource,
+                    requested: observed,
+                    limit,
+                }) if observed == requested && limit == requested - 1
+            ));
+        }};
+    }
+
+    exact_and_one_short!(max_frames, plan.frames, "frames");
+    exact_and_one_short!(max_base_bcs, plan.base_bcs, "base boundary conditions");
+    exact_and_one_short!(max_cases, plan.cases, "load cases");
+    exact_and_one_short!(max_case_bcs, plan.case_bcs, "case boundary conditions");
+    exact_and_one_short!(max_combinations, plan.combinations, "combinations");
+    exact_and_one_short!(
+        max_combination_terms,
+        plan.combination_terms,
+        "combination terms"
+    );
+    exact_and_one_short!(max_ensembles, plan.ensembles, "ensembles");
+    exact_and_one_short!(max_contacts, plan.contacts, "contacts");
+    exact_and_one_short!(max_signal_scalars, plan.signal_scalars, "signal scalars");
+    exact_and_one_short!(
+        max_flux_checkpoints,
+        plan.flux_checkpoints,
+        "flux checkpoints"
+    );
+    exact_and_one_short!(max_identity_bytes, plan.identity_bytes, "identity bytes");
+
+    let mut exact_work = ValidationBudget::default();
+    exact_work.max_work = plan.planned_work;
+    with_validation_cx(false, |cx| {
+        assert_eq!(
+            scenario
+                .validate_with_budget(exact_work, cx)
+                .expect("exact work budget admits"),
+            Vec::new()
+        );
+    });
+    let mut short_work = exact_work;
+    short_work.max_work = plan.planned_work - 1;
+    assert!(matches!(
+        scenario.validation_plan(short_work),
+        Err(ValidationError::WorkExceeded {
+            requested,
+            limit,
+        }) if requested == plan.planned_work && limit == plan.planned_work - 1
+    ));
+    with_validation_cx(true, |cx| {
+        assert!(matches!(
+            scenario.validate_with_budget(ValidationBudget::default(), cx),
+            Err(ValidationError::Cancelled {
+                phase: "initial",
+                completed: 0,
+                planned: 0,
+            })
+        ));
+    });
+    verdict(
+        "sc-010",
+        "every semantic collection/signal/checkpoint/identity/work budget admits at the exact plan and refuses one unit short; pre-requested cancellation publishes no findings",
     );
 }
