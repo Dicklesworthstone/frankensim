@@ -36,6 +36,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   and safe mutation while the view is live is unrepresentable. Owning
   convenience calls remain fallible; basis allocation is fallible and
   triangular degree work shares the defensive legacy ceiling.
+  `KnotVector::try_clone_with_cx` returns transactional `KnotCloneRun` state
+  and publishes only a complete sealed copy after checked work and a 64 MiB
+  retained-output gate. The existing trait `Clone` remains a compatibility
+  surface without those fallible or cancellable claims.
   `KnotVector::admit_with_cx` returns `KnotAdmissionRun` and publishes the
   lifetime-bound admitted authority only after every validation pass and its
   final checkpoint complete.
@@ -253,6 +257,15 @@ constant-time parameter/work-refusal precedence, polls before allocation and
 publication plus every 64 logical span/initialization/triangle/finite-check
 operations, and drops all scratch on `BasisRun::Cancelled`. It deliberately
 does not claim caller-budget consumption or executor drain/finalize authority.
+`KnotVector::try_clone_with_cx` preserves count-derived work and 64 MiB
+retained-output refusal precedence, then polls before and after allocation,
+every 64 ordered scalar copies, and immediately before publication.
+`KnotCloneRun::Cancelled` exposes no partial vector and drops all allocated
+output. The borrowed source is excluded from the retained envelope; allocation,
+individual scalar copies, and destruction are non-preemptible. The primitive
+performs no source revalidation and claims no wall-time bound, exact caller-budget
+consumption, executor drain/finalize, or resumability. Trait `Clone` remains
+available but does not acquire these measured-path claims.
 `AdmittedNurbsCurve::eval_with_cx` carries the same cancellation gate through
 basis construction, polls homogeneous accumulation every 64 logical scalar
 updates, and gates final Cartesian publication. `CurveEvaluationRun::Cancelled`

@@ -16,6 +16,7 @@ pub const BASIS_MAX_WORK_UNITS: u128 = 16_777_216;
 // caller still owns request -> drain -> finalize; these primitives only
 // observe the shared gate.
 const KNOT_CANCELLATION_STRIDE: usize = 64;
+const KNOT_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 
 // Conservative price for finite/order/run/multiplicity/clamping validation of
 // one public knot entry. This intentionally overcounts the simple comparisons:
@@ -129,6 +130,19 @@ pub struct AdmittedKnotVector<'a, S: Scalar> {
     inner: &'a KnotVector<S>,
 }
 
+/// Transactional terminal state of a cancellation-aware fallible knot copy.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum KnotCloneRun<S: Scalar> {
+    /// The complete sealed copy of the exact source representation.
+    Complete {
+        /// Copied knot-vector generation.
+        knots: KnotVector<S>,
+    },
+    /// Cancellation was observed; all partial copy storage was dropped.
+    Cancelled,
+}
+
 /// Transactional terminal state of cancellation-aware structural admission.
 #[must_use]
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +200,34 @@ fn knot_poll_due(
     }
     *operations_since_poll = 0;
     should_cancel()
+}
+
+fn preflight_knot_copy<S: Scalar>(knot_count: usize) -> Result<(), NurbsError> {
+    let work_units = (knot_count as u128)
+        .checked_add(2)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-vector copy work accounting overflows u128".to_string(),
+        })?;
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "knot-vector copy requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    let retained_bytes = (knot_count as u128)
+        .checked_mul(core::mem::size_of::<S>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "knot-vector copy retained-byte accounting overflows u128".to_string(),
+        })?;
+    if retained_bytes > KNOT_COPY_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "knot-vector copy retains {retained_bytes} output bytes above defensive ceiling {KNOT_COPY_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl<S: Scalar> KnotVector<S> {
@@ -556,19 +598,71 @@ impl<S: Scalar> KnotVector<S> {
     /// entries.
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] when the destination allocation is refused.
+    /// [`NurbsError::Domain`] when checked copy work/retained bytes or the
+    /// destination allocation is refused.
     pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        match self.try_clone_with_poll(&mut never_cancel)? {
+            Some(knots) => Ok(knots),
+            None => Err(NurbsError::Domain {
+                what: "non-cancelling knot-vector copy observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Fallibly copy this sealed knot vector with bounded cancellation polling.
+    ///
+    /// Count-derived work and a 64 MiB retained-output envelope precede
+    /// cancellation. One gate covers the fallible allocation, fixed-stride
+    /// ordered entry copy, and final publication without revalidating the
+    /// immutable source. The borrowed source is excluded from the output
+    /// envelope. The allocator call, scalar copies, and destruction are not
+    /// preemptible. This primitive does not consume the `Cx` budget or own
+    /// request -> drain -> finalize semantics. The existing `Clone`
+    /// compatibility path does not acquire these fallible/cancellable claims.
+    ///
+    /// # Errors
+    /// Returns the synchronous copy's work, retained-memory, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn try_clone_with_cx(&self, cx: &Cx<'_>) -> Result<KnotCloneRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self.try_clone_with_poll(&mut should_cancel)? {
+            Some(knots) => Ok(KnotCloneRun::Complete { knots }),
+            None => Ok(KnotCloneRun::Cancelled),
+        }
+    }
+
+    fn try_clone_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Self>, NurbsError> {
+        preflight_knot_copy::<S>(self.knots.len())?;
+        if should_cancel() {
+            return Ok(None);
+        }
         let mut knots = Vec::new();
         knots
             .try_reserve_exact(self.knots.len())
             .map_err(|_| NurbsError::Domain {
                 what: "knot-vector copy allocation was refused".to_string(),
             })?;
-        knots.extend_from_slice(&self.knots);
-        Ok(KnotVector {
+        if should_cancel() {
+            return Ok(None);
+        }
+        let mut operations_since_poll = 0usize;
+        for &knot in &self.knots {
+            knots.push(knot);
+            if knot_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(None);
+            }
+        }
+        if should_cancel() {
+            return Ok(None);
+        }
+        Ok(Some(KnotVector {
             knots,
             degree: self.degree,
-        })
+        }))
     }
 
     /// Validate this exact immutable snapshot once and bind the proof to its
@@ -947,6 +1041,115 @@ mod tests {
         }
         knots.extend([1.0, 1.0]);
         KnotVector::new(knots, 1).expect("validation cancellation fixture")
+    }
+
+    #[test]
+    fn knot_copy_with_cx_is_transactional_and_exact() {
+        let knots = validation_cancellation_fixture();
+        assert_eq!(knots.clone(), knots, "trait Clone compatibility remains");
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                knots.try_clone_with_cx(cx).expect("admitted copy request"),
+                KnotCloneRun::Cancelled
+            );
+        });
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                knots.try_clone_with_cx(cx).expect("active knot copy"),
+                KnotCloneRun::Complete {
+                    knots: knots.try_clone().expect("legacy knot copy"),
+                }
+            );
+        });
+
+        let exact = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 3),
+                Rat::new(2, 3),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            1,
+        )
+        .expect("exact multispan knots");
+        with_basis_cx(false, |cx| {
+            assert_eq!(
+                exact.try_clone_with_cx(cx).expect("active exact copy"),
+                KnotCloneRun::Complete {
+                    knots: exact.try_clone().expect("legacy exact copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn knot_copy_cancels_inside_linear_copy_and_at_publication() {
+        let knots = validation_cancellation_fixture();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = knots
+                .try_clone_with_poll(&mut should_cancel)
+                .expect("bounded knot copy");
+            (outcome.is_none(), polls)
+        };
+        assert_eq!(run(3), run(3));
+        assert_eq!(run(3), (true, 3));
+
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(
+            knots
+                .try_clone_with_poll(&mut never_cancel)
+                .expect("healthy knot copy")
+                .is_some()
+        );
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(
+            knots
+                .try_clone_with_poll(&mut cancel_at_publication)
+                .expect("publication cancellation")
+                .is_none()
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn knot_copy_preflight_refuses_work_before_retained_bytes() {
+        let work_error = preflight_knot_copy::<f64>(BASIS_MAX_WORK_UNITS as usize)
+            .expect_err("work must refuse before retained-byte accounting");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
+
+        let scalar_bytes = core::mem::size_of::<f64>() as u128;
+        let exact_retained_count = (KNOT_COPY_MAX_RETAINED_BYTES / scalar_bytes) as usize;
+        preflight_knot_copy::<f64>(exact_retained_count)
+            .expect("the exact retained-byte ceiling is admitted");
+        let retained_count = exact_retained_count + 1;
+        assert!(
+            retained_count as u128 + 2 <= BASIS_MAX_WORK_UNITS,
+            "retained-byte fixture stays within the work envelope"
+        );
+        let memory_error = preflight_knot_copy::<f64>(retained_count)
+            .expect_err("the next scalar beyond 64 MiB must be refused");
+        assert!(matches!(
+            memory_error,
+            NurbsError::Domain { ref what } if what.contains("retains")
+        ));
     }
 
     #[test]
