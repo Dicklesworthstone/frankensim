@@ -128,11 +128,13 @@ where claimed below.
   Unsupported infinite-dimensional dynamics, zero DAE index, invalid time or
   budget data, missing mode references, malformed simultaneous priorities,
   and self-referential regularization refuse.
-- `validate_zeno_problem_v1(ir, cx)` caps modes/events/reset targets before
-  sorting or graph work, polls cancellation at bounded strides, canonicalizes
-  set order, and mints a domain-separated `ZenoProblemIdV1` plus independent
-  canonical-preimage receipt only on success. Its conservative finite graph
-  analysis records zero/Unknown-dwell cycles and local nonuniqueness. A unique
+- `validate_zeno_problem_v1(ir, cx)` caps modes/events before any nested reset
+  scan, then aggregates bounded reset-target counts with permutation-stable
+  diagnostics before sorting or graph work. It polls cancellation at bounded
+  strides, canonicalizes set order, and mints a domain-separated
+  `ZenoProblemIdV1` plus independent canonical-preimage receipt only on
+  success. Its conservative finite graph analysis records zero/Unknown-dwell
+  cycles and local nonuniqueness. A unique
   continuation category refuses when differential inclusions, grazing or
   unresolved guards, set-valued or unresolved resets, unresolved simultaneous
   ordering make it an overclaim. A zero-time cycle is recorded separately: it
@@ -292,6 +294,9 @@ separation versus zero/Unknown-dwell cycles; simultaneous guards, grazing, and
 set-valued-reset uniqueness refusals; exact regularization lineage; numerical
 warning post-state honesty; unknown-mode, zero-index DAE, out-of-domain window,
 unsupported-version, resource-cap, and pre-cancellation refusals.
+Resource-cap coverage includes top-level mode/event/priority fail-fast behavior
+before nested reset inspection, plus permutation-stable diagnostics for both
+per-relation and aggregate reset-target caps.
 
 ## No-claim boundaries
 

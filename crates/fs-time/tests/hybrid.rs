@@ -735,6 +735,138 @@ fn invalid_references_degrees_windows_versions_and_caps_refuse() {
             limit: MAX_HYBRID_MODES_V1,
         },
     );
+
+    let mut oversized_events = separated_ir();
+    let target = oversized_events.modes[0].mode;
+    let mut oversized_reset = oversized_events.events[0].clone();
+    oversized_reset.reset = ResetSemanticsV1::SetValued {
+        relation: ResetRelationIdV1::from_bytes(bytes(204)),
+        targets: vec![target; MAX_RESET_TARGETS_V1 + 1],
+        states: HybridStateSetIdV1::from_bytes(bytes(205)),
+    };
+    oversized_events.events = vec![oversized_events.events[0].clone(); MAX_HYBRID_EVENTS_V1 + 1];
+    oversized_events.events[0] = oversized_reset;
+    let report = with_cx(false, |cx| {
+        validate_zeno_problem_v1(oversized_events, cx).expect_err("top-level cap refuses")
+    });
+    assert_eq!(
+        report.issues(),
+        &[HybridSemanticIssueV1::TooMany {
+            collection: HybridCollectionV1::Events,
+            found: MAX_HYBRID_EVENTS_V1 + 1,
+            limit: MAX_HYBRID_EVENTS_V1,
+        }]
+    );
+
+    let mut oversized_priority = separated_ir();
+    oversized_priority.simultaneous_policy = SimultaneousEventPolicyV1::TotalPriority {
+        ordered_events: vec![oversized_priority.events[0].event; MAX_HYBRID_EVENTS_V1 + 1],
+        witness: HybridWitnessIdV1::from_bytes(bytes(206)),
+    };
+    let report = with_cx(false, |cx| {
+        validate_zeno_problem_v1(oversized_priority, cx).expect_err("priority cap refuses")
+    });
+    assert_eq!(
+        report.issues(),
+        &[HybridSemanticIssueV1::TooMany {
+            collection: HybridCollectionV1::PriorityEvents,
+            found: MAX_HYBRID_EVENTS_V1 + 1,
+            limit: MAX_HYBRID_EVENTS_V1,
+        }]
+    );
+}
+
+#[test]
+fn reset_target_cap_report_is_permutation_stable() {
+    let mut first = separated_ir();
+    let source = first.modes[0].mode;
+    let target = first.modes[1].mode;
+    let mut smaller = event(
+        230,
+        source,
+        target,
+        InteractionLawV1::None {
+            justification: HybridNoClaimIdV1::from_bytes(bytes(231)),
+        },
+        DwellSemanticsV1::ZeroAllowed,
+    );
+    smaller.reset = ResetSemanticsV1::SetValued {
+        relation: ResetRelationIdV1::from_bytes(bytes(232)),
+        targets: vec![target; MAX_RESET_TARGETS_V1 + 1],
+        states: HybridStateSetIdV1::from_bytes(bytes(233)),
+    };
+    let mut larger = event(
+        240,
+        source,
+        target,
+        InteractionLawV1::None {
+            justification: HybridNoClaimIdV1::from_bytes(bytes(241)),
+        },
+        DwellSemanticsV1::ZeroAllowed,
+    );
+    larger.reset = ResetSemanticsV1::SetValued {
+        relation: ResetRelationIdV1::from_bytes(bytes(242)),
+        targets: vec![target; MAX_RESET_TARGETS_V1 + 2],
+        states: HybridStateSetIdV1::from_bytes(bytes(243)),
+    };
+    first.events = vec![smaller, larger];
+    let mut reversed = first.clone();
+    reversed.events.reverse();
+
+    let first_report = with_cx(false, |cx| {
+        validate_zeno_problem_v1(first, cx).expect_err("reset cap refuses")
+    });
+    let reversed_report = with_cx(false, |cx| {
+        validate_zeno_problem_v1(reversed, cx).expect_err("reset cap refuses")
+    });
+    assert_eq!(first_report, reversed_report);
+    assert_eq!(
+        first_report.issues(),
+        &[HybridSemanticIssueV1::TooMany {
+            collection: HybridCollectionV1::ResetTargets,
+            found: MAX_RESET_TARGETS_V1 + 2,
+            limit: MAX_RESET_TARGETS_V1,
+        }]
+    );
+}
+
+#[test]
+fn total_reset_target_cap_report_is_permutation_stable() {
+    let mut first = separated_ir();
+    let target = first.modes[1].mode;
+    let template = first.events[0].clone();
+    let event_count = MAX_TOTAL_RESET_TARGETS_V1 / MAX_RESET_TARGETS_V1 + 1;
+    first.events = (0..event_count)
+        .map(|index| {
+            let seed = u8::try_from(index + 1).expect("fixture event count fits u8");
+            let mut event = template.clone();
+            event.event = HybridEventIdV1::from_bytes(bytes(seed));
+            event.reset = ResetSemanticsV1::SetValued {
+                relation: ResetRelationIdV1::from_bytes(bytes(180 + seed)),
+                targets: vec![target; MAX_RESET_TARGETS_V1],
+                states: HybridStateSetIdV1::from_bytes(bytes(210 + seed)),
+            };
+            event
+        })
+        .collect();
+    let mut reversed = first.clone();
+    reversed.events.reverse();
+
+    let first_report = with_cx(false, |cx| {
+        validate_zeno_problem_v1(first, cx).expect_err("total reset cap refuses")
+    });
+    let reversed_report = with_cx(false, |cx| {
+        validate_zeno_problem_v1(reversed, cx).expect_err("total reset cap refuses")
+    });
+    assert_eq!(first_report, reversed_report);
+    assert_eq!(
+        first_report.issues(),
+        &[HybridSemanticIssueV1::TooMany {
+            collection: HybridCollectionV1::TotalResetTargets,
+            found: event_count * MAX_RESET_TARGETS_V1,
+            limit: MAX_TOTAL_RESET_TARGETS_V1,
+        }]
+    );
 }
 
 #[test]

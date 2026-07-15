@@ -1023,7 +1023,7 @@ pub enum HybridSemanticIssueV1 {
     Identity(CanonicalError),
 }
 
-/// Complete deterministic refusal report.
+/// Deterministic fail-closed refusal report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HybridSemanticReportV1 {
     issues: Vec<HybridSemanticIssueV1>,
@@ -1175,18 +1175,27 @@ pub fn validate_zeno_problem_v1(
             limit: MAX_HYBRID_EVENTS_V1,
         });
     }
+    if !issues.is_empty() {
+        return Err(HybridSemanticReportV1::new(issues));
+    }
+
+    let mut max_targets = 0_usize;
     let mut total_targets = 0_usize;
-    for event in &ir.events {
+    for (index, event) in ir.events.iter().enumerate() {
+        if index.is_multiple_of(32) {
+            checkpoint(cx)?;
+        }
         if let ResetSemanticsV1::SetValued { targets, .. } = &event.reset {
-            if targets.len() > MAX_RESET_TARGETS_V1 {
-                issues.push(HybridSemanticIssueV1::TooMany {
-                    collection: HybridCollectionV1::ResetTargets,
-                    found: targets.len(),
-                    limit: MAX_RESET_TARGETS_V1,
-                });
-            }
+            max_targets = max_targets.max(targets.len());
             total_targets = total_targets.saturating_add(targets.len());
         }
+    }
+    if max_targets > MAX_RESET_TARGETS_V1 {
+        issues.push(HybridSemanticIssueV1::TooMany {
+            collection: HybridCollectionV1::ResetTargets,
+            found: max_targets,
+            limit: MAX_RESET_TARGETS_V1,
+        });
     }
     if total_targets > MAX_TOTAL_RESET_TARGETS_V1 {
         issues.push(HybridSemanticIssueV1::TooMany {
@@ -1199,6 +1208,7 @@ pub fn validate_zeno_problem_v1(
         return Err(HybridSemanticReportV1::new(issues));
     }
 
+    checkpoint(cx)?;
     canonicalize_problem_zeros(&mut ir);
     if ir.schema_version != ZENO_PROBLEM_SCHEMA_VERSION_V1 {
         issues.push(HybridSemanticIssueV1::UnsupportedSchemaVersion {
