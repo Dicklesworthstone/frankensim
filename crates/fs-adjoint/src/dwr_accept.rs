@@ -45,6 +45,48 @@ pub const DWR_EVIDENCE_IDENTITY_VERSION: u32 = 5;
 const MAX_DWR_REFINED_NODES: usize = MAX_DWR_MESH_NODES * 2 - 1;
 
 const DWR_OUTPUT_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-output-identity-v5";
+
+/// Exhaustive field classifier for the retained DWR output identity
+/// (bead sj31i.63): every field of the owner type is deliberately
+/// classified; adding a field breaks this destructure until the
+/// identity declaration moves with it.
+#[allow(dead_code)]
+fn classify_dwr_output_identity_fields(output: &DwrOutput) {
+    let DwrOutput {
+        j_primal: _,
+        eta: _,
+        indicators: _,
+        evidence_identity: _,
+    } = output;
+}
+
+/// Exhaustive field classifier for the retained bracket identity
+/// (bead sj31i.63).
+#[allow(dead_code)]
+fn classify_dwr_bracket_identity_fields(bracket: &Bracket) {
+    let Bracket {
+        bound: _,
+        source: _,
+        evidence_identity: _,
+    } = bracket;
+}
+
+/// Exhaustive field classifier for the retained accept identity
+/// (bead sj31i.63).
+#[allow(dead_code)]
+fn classify_dwr_accept_identity_fields(outcome: &AcceptOutcome, query: &DwrQuery) {
+    let AcceptOutcome {
+        accepted: _,
+        color: _,
+        refused: _,
+        audit: _,
+        evidence_identity: _,
+    } = outcome;
+    let DwrQuery {
+        qoi: _,
+        tolerance: _,
+    } = query;
+}
 const DWR_BRACKET_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-bracket-identity-v5";
 const DWR_ACCEPT_IDENTITY_SCHEMA: &[u8] = b"fs-adjoint-dwr-accept-identity-v5";
 
@@ -2598,6 +2640,377 @@ mod execution_tests {
                 },
             ] {
                 assert_ne!(baseline, root(&fields, changed_policy));
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one synthetic replica walks every output body field
+    fn output_identity_binds_each_body_field() {
+        with_cx(|cx| {
+            let plan_fields: [u128; 21] = core::array::from_fn(|index| {
+                u128::try_from(index).expect("small retained field index") + 1
+            });
+            #[derive(Clone)]
+            struct Body {
+                problem_version: u32,
+                problem_root: u64,
+                problem_canonical: Vec<u8>,
+                candidate_digest: fs_blake3::ContentHash,
+                w_lo: f64,
+                w_hi: f64,
+                j_primal: f64,
+                eta: f64,
+                indicators: Vec<f64>,
+            }
+            let baseline_body = Body {
+                problem_version: 2,
+                problem_root: 0x00DD_00AA_00CC_00BB,
+                problem_canonical: b"output-canonical-fixture".to_vec(),
+                candidate_digest: fs_blake3::hash_domain("dwr-output-test", b"candidate"),
+                w_lo: 0.25,
+                w_hi: 0.75,
+                j_primal: 0.5,
+                eta: 1.0e-3,
+                indicators: vec![0.1, 0.2, 0.3],
+            };
+            let root = |plan_fields: &[u128; 21], body: &Body| {
+                let mut hasher = fs_blake3::Blake3::new();
+                hash_execution_header(&mut hasher, DWR_OUTPUT_IDENTITY_SCHEMA, plan_fields, cx);
+                hasher.update(&body.problem_version.to_le_bytes());
+                hasher.update(&body.problem_root.to_le_bytes());
+                let len = u64::try_from(body.problem_canonical.len()).expect("bounded fixture");
+                hasher.update(&len.to_le_bytes());
+                hasher.update(&body.problem_canonical);
+                hasher.update(body.candidate_digest.as_bytes());
+                hasher.update(&body.w_lo.to_bits().to_le_bytes());
+                hasher.update(&body.w_hi.to_bits().to_le_bytes());
+                hasher.update(&body.j_primal.to_bits().to_le_bytes());
+                hasher.update(&body.eta.to_bits().to_le_bytes());
+                for indicator in &body.indicators {
+                    hasher.update(&indicator.to_bits().to_le_bytes());
+                }
+                hasher.finalize()
+            };
+            let baseline = root(&plan_fields, &baseline_body);
+            assert_eq!(
+                baseline,
+                root(&plan_fields, &baseline_body.clone()),
+                "replay identity must be bit-stable"
+            );
+            // Cross-domain replay refusal: the same preimage under the
+            // accept schema tag can never collide with the output root.
+            let mut cross = fs_blake3::Blake3::new();
+            hash_execution_header(&mut cross, DWR_ACCEPT_IDENTITY_SCHEMA, &plan_fields, cx);
+            assert_ne!(
+                baseline,
+                cross.finalize(),
+                "schema tags must domain-separate the roots"
+            );
+            let mut changed_plan = plan_fields;
+            changed_plan[0] += 1;
+            assert_ne!(baseline, root(&changed_plan, &baseline_body));
+            let variants: Vec<(&'static str, Body)> = vec![
+                ("problem-identity-version", {
+                    let mut body = baseline_body.clone();
+                    body.problem_version += 1;
+                    body
+                }),
+                ("problem-identity-root", {
+                    let mut body = baseline_body.clone();
+                    body.problem_root += 1;
+                    body
+                }),
+                ("problem-canonical-bytes", {
+                    let mut body = baseline_body.clone();
+                    body.problem_canonical[0] ^= 1;
+                    body
+                }),
+                ("problem-canonical-length", {
+                    let mut body = baseline_body.clone();
+                    body.problem_canonical.push(0);
+                    body
+                }),
+                ("candidate-digest", {
+                    let mut body = baseline_body.clone();
+                    body.candidate_digest =
+                        fs_blake3::hash_domain("dwr-output-test", b"other-candidate");
+                    body
+                }),
+                ("window-lo-bits", {
+                    let mut body = baseline_body.clone();
+                    body.w_lo = 0.250_000_1;
+                    body
+                }),
+                ("window-hi-bits", {
+                    let mut body = baseline_body.clone();
+                    body.w_hi = 0.749_999_9;
+                    body
+                }),
+                ("j-primal-bits", {
+                    let mut body = baseline_body.clone();
+                    body.j_primal = -body.j_primal;
+                    body
+                }),
+                ("eta-bits", {
+                    let mut body = baseline_body.clone();
+                    body.eta = 2.0e-3;
+                    body
+                }),
+                ("indicator-item", {
+                    let mut body = baseline_body.clone();
+                    body.indicators[1] = 0.25;
+                    body
+                }),
+                ("indicator-order", {
+                    let mut body = baseline_body.clone();
+                    body.indicators.swap(0, 2);
+                    body
+                }),
+                ("indicator-count", {
+                    let mut body = baseline_body.clone();
+                    body.indicators.push(0.4);
+                    body
+                }),
+            ];
+            for (field, body) in variants {
+                assert_ne!(
+                    baseline,
+                    root(&plan_fields, &body),
+                    "output body field {field} was omitted from the identity"
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one synthetic replica walks every accept body field
+    fn accept_identity_binds_each_body_field() {
+        with_cx(|cx| {
+            let plan_fields: [u128; 4] = core::array::from_fn(|index| {
+                u128::try_from(index).expect("small retained field index") + 1
+            });
+            #[derive(Clone)]
+            struct Body {
+                qoi: Vec<u8>,
+                tolerance: f64,
+                dwr_abs: f64,
+                bracket_identity: Option<fs_blake3::ContentHash>,
+                accepted: bool,
+                refused: bool,
+                color: Vec<u8>,
+                audit: Vec<u8>,
+            }
+            let baseline_body = Body {
+                qoi: b"accept-qoi-fixture".to_vec(),
+                tolerance: 1.0e-2,
+                dwr_abs: 5.0e-3,
+                bracket_identity: Some(fs_blake3::hash_domain("dwr-accept-test", b"bracket")),
+                accepted: true,
+                refused: false,
+                color: b"color-canonical-fixture".to_vec(),
+                audit: b"audit-fixture".to_vec(),
+            };
+            let root = |body: &Body| {
+                let mut hasher = fs_blake3::Blake3::new();
+                hash_execution_header(&mut hasher, DWR_ACCEPT_IDENTITY_SCHEMA, &plan_fields, cx);
+                hasher.update(&body.qoi);
+                hasher.update(&body.tolerance.to_bits().to_le_bytes());
+                hasher.update(&body.dwr_abs.to_bits().to_le_bytes());
+                match &body.bracket_identity {
+                    Some(identity) => {
+                        hasher.update(&[1]);
+                        hasher.update(identity.as_bytes());
+                    }
+                    None => hasher.update(&[0]),
+                }
+                hasher.update(&[u8::from(body.accepted), u8::from(body.refused)]);
+                let color_len = u64::try_from(body.color.len()).expect("bounded fixture");
+                hasher.update(&color_len.to_le_bytes());
+                hasher.update(&body.color);
+                let audit_len = u64::try_from(body.audit.len()).expect("bounded fixture");
+                hasher.update(&audit_len.to_le_bytes());
+                hasher.update(&body.audit);
+                hasher.finalize()
+            };
+            let baseline = root(&baseline_body);
+            assert_eq!(baseline, root(&baseline_body.clone()));
+            let variants: Vec<(&'static str, Body)> = vec![
+                ("qoi-utf8", {
+                    let mut body = baseline_body.clone();
+                    body.qoi[0] ^= 1;
+                    body
+                }),
+                ("tolerance-bits", {
+                    let mut body = baseline_body.clone();
+                    body.tolerance = 1.1e-2;
+                    body
+                }),
+                ("dwr-abs-bits", {
+                    let mut body = baseline_body.clone();
+                    body.dwr_abs = 6.0e-3;
+                    body
+                }),
+                ("bracket-presence", {
+                    let mut body = baseline_body.clone();
+                    body.bracket_identity = None;
+                    body
+                }),
+                ("bracket-evidence-identity", {
+                    let mut body = baseline_body.clone();
+                    body.bracket_identity =
+                        Some(fs_blake3::hash_domain("dwr-accept-test", b"other-bracket"));
+                    body
+                }),
+                ("accepted-flag", {
+                    let mut body = baseline_body.clone();
+                    body.accepted = false;
+                    body
+                }),
+                ("refused-flag", {
+                    let mut body = baseline_body.clone();
+                    body.refused = true;
+                    body
+                }),
+                ("color-canonical-bytes", {
+                    let mut body = baseline_body.clone();
+                    body.color[0] ^= 1;
+                    body
+                }),
+                ("audit-utf8", {
+                    let mut body = baseline_body.clone();
+                    body.audit[0] ^= 1;
+                    body
+                }),
+            ];
+            for (field, body) in variants {
+                assert_ne!(
+                    baseline,
+                    root(&body),
+                    "accept body field {field} was omitted from the identity"
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one synthetic replica walks every bracket body field
+    fn bracket_identity_binds_each_body_field() {
+        with_cx(|cx| {
+            let plan_fields: [u128; 23] = core::array::from_fn(|index| {
+                u128::try_from(index).expect("small retained field index") + 1
+            });
+            #[derive(Clone)]
+            struct Factor {
+                version: u32,
+                root: u64,
+                canonical: Vec<u8>,
+                candidate_digest: fs_blake3::ContentHash,
+                bound_lo: f64,
+                bound_hi: f64,
+                flux_hash: u64,
+            }
+            #[derive(Clone)]
+            struct Body {
+                primal: Factor,
+                dual: Factor,
+                bound: f64,
+                source: Vec<u8>,
+            }
+            let factor = |tag: &[u8]| Factor {
+                version: 2,
+                root: 0x1111_2222_3333_4444,
+                canonical: [b"bracket-canonical-", tag].concat(),
+                candidate_digest: fs_blake3::hash_domain("dwr-bracket-test", tag),
+                bound_lo: 0.5,
+                bound_hi: 0.75,
+                flux_hash: 0xAAAA_BBBB_CCCC_DDDD,
+            };
+            let baseline_body = Body {
+                primal: factor(b"primal"),
+                dual: factor(b"dual"),
+                bound: 0.375,
+                source: b"energy-product".to_vec(),
+            };
+            let root = |body: &Body| {
+                let mut hasher = fs_blake3::Blake3::new();
+                hash_bracket_execution_header(
+                    &mut hasher,
+                    &plan_fields,
+                    cx,
+                    CURRENT_VERIFIER_POLICY_IDENTITY,
+                );
+                for factor in [&body.primal, &body.dual] {
+                    hasher.update(&factor.version.to_le_bytes());
+                    hasher.update(&factor.root.to_le_bytes());
+                    let len = u64::try_from(factor.canonical.len()).expect("bounded fixture");
+                    hasher.update(&len.to_le_bytes());
+                    hasher.update(&factor.canonical);
+                }
+                hasher.update(body.primal.candidate_digest.as_bytes());
+                hasher.update(body.dual.candidate_digest.as_bytes());
+                for factor in [&body.primal, &body.dual] {
+                    hasher.update(&factor.bound_lo.to_bits().to_le_bytes());
+                    hasher.update(&factor.bound_hi.to_bits().to_le_bytes());
+                    hasher.update(&factor.flux_hash.to_le_bytes());
+                }
+                hasher.update(&body.bound.to_bits().to_le_bytes());
+                let source_len = u64::try_from(body.source.len()).expect("bounded fixture");
+                hasher.update(&source_len.to_le_bytes());
+                hasher.update(&body.source);
+                hasher.finalize()
+            };
+            let baseline = root(&baseline_body);
+            assert_eq!(baseline, root(&baseline_body.clone()));
+            let variants: Vec<(&'static str, Body)> = vec![
+                ("primal-problem-identity", {
+                    let mut body = baseline_body.clone();
+                    body.primal.version += 1;
+                    body
+                }),
+                ("dual-problem-identity", {
+                    let mut body = baseline_body.clone();
+                    body.dual.root += 1;
+                    body
+                }),
+                ("problem-canonical-bytes", {
+                    let mut body = baseline_body.clone();
+                    body.primal.canonical[0] ^= 1;
+                    body
+                }),
+                ("candidate-digests", {
+                    let mut body = baseline_body.clone();
+                    body.dual.candidate_digest =
+                        fs_blake3::hash_domain("dwr-bracket-test", b"other-dual");
+                    body
+                }),
+                ("verifier-report-bounds", {
+                    let mut body = baseline_body.clone();
+                    body.primal.bound_hi = 0.8;
+                    body
+                }),
+                ("verifier-report-flux-hash", {
+                    let mut body = baseline_body.clone();
+                    body.dual.flux_hash ^= 1;
+                    body
+                }),
+                ("product-bound-bits", {
+                    let mut body = baseline_body.clone();
+                    body.bound = 0.5;
+                    body
+                }),
+                ("source-utf8", {
+                    let mut body = baseline_body.clone();
+                    body.source[0] ^= 1;
+                    body
+                }),
+            ];
+            for (field, body) in variants {
+                assert_ne!(
+                    baseline,
+                    root(&body),
+                    "bracket body field {field} was omitted from the identity"
+                );
             }
         });
     }
