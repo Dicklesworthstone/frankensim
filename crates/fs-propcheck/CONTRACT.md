@@ -1,7 +1,8 @@
 # CONTRACT: fs-propcheck
 
-> The Gauntlet G0 property-testing engine (bead frankensim-4nh8): seeded
-> generators + integrated shrinking, adopted by law suites across layers.
+> The Gauntlet G0 property-testing engine (bead frankensim-4nh8) plus the G3
+> metamorphic relation layer (bead frankensim-2uce): seeded generators,
+> integrated shrinking, and structured relation evidence.
 
 ## Purpose and layer
 In-house property-based testing with proptest-class shrinking. Layer: UTIL
@@ -36,6 +37,25 @@ while `fs-bisect` re-exports the same trait for production failure families).
   `FSIM_PROPCHECK_REPLAY_FILE` selects an exact CI artifact path.
   `FSIM_PROPCHECK_REPLAY=<case_seed>` reruns exactly the failing case; malformed
   values fail closed instead of silently falling back to a full run.
+- `metamorphic::RelationCase<Input, Transform>` — one generated base input and
+  transform. Its `Shrink` implementation delegates to the coordinated tuple
+  lattice, so a violation minimizes both components rather than freezing the
+  original transform while shrinking only the input.
+- `metamorphic::MetamorphicOperator` and `MetamorphicRelation` — dependency-free
+  G3 harness traits. A relation owns a stable id, canonical family, transform,
+  output expectation, and declared tolerance semantics. Closure-backed
+  constructors cover rigid motion, coherent unit rescaling, refinement
+  monotonicity, adjoint/finite-difference agreement, and conversion-path
+  independence without making UTIL depend on domain crates.
+- `metamorphic::check_relation(...)` — adapts a declared relation to the same
+  case stream, replay selector, shrink budgets, and artifact writer as `check`.
+  A returned violation's final shrunk failure row records relation id/family,
+  transform, both outputs, tolerance, and finite signed admission margin in
+  `failure_context`.
+- `metamorphic::Tolerance` — exact finite-bit, absolute,
+  absolute-or-relative, and non-increasing scalar semantics. Limits are
+  nonnegative and finite; non-finite observations and overflowed comparisons
+  fail closed. Nonnegative margins pass.
 
 ## Invariants
 1. Same `(suite_seed, case_index)` reproduces the identical generated
@@ -51,6 +71,14 @@ while `fs-bisect` re-exports the same trait for production failure families).
    row + the same append-only replay row on disk + a panic carrying the
    best-known counterexample and replay seed. Artifact I/O failure is named in
    the final panic instead of being silently ignored.
+4. `check_relation` never treats an inapplicable transform or operator panic as
+   a skipped case. Consumer generators must produce admitted cases; panics are
+   caught as failures, and a zero-case request is refused as vacuous. A
+   returned relation violation is reevaluated after shrinking, and only that
+   final input/transform/output/tolerance context is written to the receipt.
+   Shrinking preserves the initial failure class, so a relation violation
+   cannot minimize into an unrelated operator panic. Panic receipts retain the
+   generic panic detail but cannot name outputs that were never produced.
 
 ## Error model
 Test-harness semantics: inverted/non-finite f64 bounds and `vec_of(usize::MAX)`
@@ -77,7 +105,8 @@ None. `unsafe_code` denied.
 None.
 
 ## Conformance tests
-tests/propcheck_battery.rs plus in-crate parser/escaping tests: stream
+`tests/propcheck_battery.rs`, `tests/metamorphic_battery.rs`, plus in-crate
+parser/escaping tests: stream
 determinism; unbiased integer rejection and extreme/adjacent finite f64 bounds;
 explicit caller-boundary refusals; shrink-lattice strict decrease over
 `i64::MIN`, singleton vectors, infinities, and coordinated tuples; passing-seed
@@ -85,7 +114,10 @@ refusal, exact-budget convergence, and evaluation/candidate work ceilings; the
 planted `(a>=100,b>=7)` minimum;
 clean-property coverage; returned-false and caught-panic failure drills with
 replay-file diagnostics; deterministic artifact path/JSONL writing; malformed
-replay parsing and JSON escaping.
+replay parsing and JSON escaping. The G3 battery pins all five canonical
+relation labels, fail-closed scalar tolerance boundaries, one declaration
+reused by two operators, and a planted violation that jointly shrinks to
+`input=100, transform=7` before checking its structured failure context.
 
 ## No-claim boundaries
 No statistical coverage claims for f64 generation (uniform-ish plus deliberate
@@ -101,6 +133,18 @@ cross-process record-locking claim; CI shards should use distinct paths. The
 default process-scoped filename avoids that collision.
 The engine count-checks a caller-defined shrink vector after construction; it
 cannot preempt arbitrary work or allocation inside that trait method.
+The G3 layer is an engine, not evidence that any production operator already
+obeys a canonical relation. Domain adapters for motors, runtime unit systems,
+refinement estimators, adjoint directions, and certified conversion routes must
+land in their owning crates; six-layer adoption remains pending on bead
+frankensim-2uce. A custom relation comparator receives and receipts its declared
+tolerance but remains responsible for applying those semantics honestly;
+`Tolerance::evaluate_scalar` is the checked built-in path. The engine does not
+infer transform applicability, physical units, certificate composition, or an
+independent oracle from closure types.
+Generic transform/operator/comparator panics are caught by the shared runner,
+but this engine-only slice does not yet attach relation-stage context to a panic
+that occurs before both outputs and a margin exist.
 
 ## Golden couplings (bead y4pt)
 No goldens pinned. Any future pinned shrink-trajectory golden must have a

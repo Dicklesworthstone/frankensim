@@ -24,6 +24,9 @@
 //!   (property, case seed, shrink steps, minimized debug form) before
 //!   panicking, per the house verdict-logging style.
 
+/// Gauntlet G3 relation declarations and the metamorphic runner.
+pub mod metamorphic;
+
 /// Deterministic generator stream for test inputs (splitmix64).
 ///
 /// NOT a simulation RNG: no Philox identity, no ledger coupling — a
@@ -456,9 +459,36 @@ pub fn minimize_with_budget<T: Shrink>(
 }
 
 #[derive(Debug)]
+pub(crate) enum StructuredVerdict {
+    Pass,
+    Fail(StructuredFailure),
+}
+
+#[derive(Debug)]
+pub(crate) struct StructuredFailure {
+    kind: &'static str,
+    detail: String,
+    context: Vec<(&'static str, String)>,
+}
+
+impl StructuredFailure {
+    pub(crate) fn new(
+        kind: &'static str,
+        detail: impl Into<String>,
+        context: Vec<(&'static str, String)>,
+    ) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+            context,
+        }
+    }
+}
+
+#[derive(Debug)]
 enum PropertyOutcome {
     Pass,
-    ReturnedFalse,
+    Failed(StructuredFailure),
     Panicked(String),
 }
 
@@ -470,7 +500,7 @@ impl PropertyOutcome {
     fn failure_kind(&self) -> &'static str {
         match self {
             Self::Pass => "non-deterministic",
-            Self::ReturnedFalse => "returned-false",
+            Self::Failed(failure) => failure.kind,
             Self::Panicked(_) => "panic",
         }
     }
@@ -478,8 +508,15 @@ impl PropertyOutcome {
     fn detail(&self) -> &str {
         match self {
             Self::Pass => "the minimized input passed when re-evaluated",
-            Self::ReturnedFalse => "property returned false",
+            Self::Failed(failure) => &failure.detail,
             Self::Panicked(message) => message,
+        }
+    }
+
+    fn context(&self) -> &[(&'static str, String)] {
+        match self {
+            Self::Failed(failure) => &failure.context,
+            Self::Pass | Self::Panicked(_) => &[],
         }
     }
 }
@@ -494,10 +531,10 @@ fn panic_message(payload: &(dyn core::any::Any + Send)) -> String {
     }
 }
 
-fn evaluate_property<T>(input: &T, property: &impl Fn(&T) -> bool) -> PropertyOutcome {
+fn evaluate_property<T>(input: &T, property: &impl Fn(&T) -> StructuredVerdict) -> PropertyOutcome {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| property(input))) {
-        Ok(true) => PropertyOutcome::Pass,
-        Ok(false) => PropertyOutcome::ReturnedFalse,
+        Ok(StructuredVerdict::Pass) => PropertyOutcome::Pass,
+        Ok(StructuredVerdict::Fail(failure)) => PropertyOutcome::Failed(failure),
         Err(payload) => PropertyOutcome::Panicked(panic_message(payload.as_ref())),
     }
 }
@@ -526,6 +563,20 @@ fn json_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+fn json_string_object(fields: &[(&'static str, String)]) -> String {
+    let mut object = String::from("{");
+    for (index, (name, value)) in fields.iter().enumerate() {
+        if index > 0 {
+            object.push(',');
+        }
+        object.push_str(&json_string(name));
+        object.push(':');
+        object.push_str(&json_string(value));
+    }
+    object.push('}');
+    object
 }
 
 fn parse_replay_value(value: &str) -> Result<u64, &'static str> {
@@ -606,15 +657,40 @@ pub fn check<T: Shrink + core::fmt::Debug>(
     generate: impl Fn(&mut Stream) -> T,
     property: impl Fn(&T) -> bool,
 ) {
+    check_structured(property_name, suite_seed, cases, generate, |input| {
+        if property(input) {
+            StructuredVerdict::Pass
+        } else {
+            StructuredVerdict::Fail(StructuredFailure::new(
+                "returned-false",
+                "property returned false",
+                Vec::new(),
+            ))
+        }
+    });
+}
+
+pub(crate) fn check_structured<T: Shrink + core::fmt::Debug>(
+    property_name: &str,
+    suite_seed: u64,
+    cases: u64,
+    generate: impl Fn(&mut Stream) -> T,
+    property: impl Fn(&T) -> StructuredVerdict,
+) {
     let run_case = |case_index: u64| {
         let mut stream = Stream::for_case(suite_seed, case_index);
         let input = generate(&mut stream);
-        if evaluate_property(&input, &property).passed() {
+        let initial_outcome = evaluate_property(&input, &property);
+        if initial_outcome.passed() {
             return;
         }
+        let initial_failure_kind = initial_outcome.failure_kind();
         let report = minimize(
             input.clone(),
-            |candidate| evaluate_property(candidate, &property).passed(),
+            |candidate| {
+                let outcome = evaluate_property(candidate, &property);
+                outcome.passed() || outcome.failure_kind() != initial_failure_kind
+            },
             10_000,
         )
         .unwrap_or_else(|error| match error {
@@ -639,6 +715,7 @@ pub fn check<T: Shrink + core::fmt::Debug>(
         let property_json = json_string(property_name);
         let minimized_json = json_string(&minimized);
         let detail_json = json_string(final_outcome.detail());
+        let context_json = json_string_object(final_outcome.context());
         let replay_path_json = json_string(&replay_path.to_string_lossy());
         let failure_row = format!(
             "{{\"suite\":\"fs-propcheck\",\"property\":{property_json},\
@@ -646,7 +723,8 @@ pub fn check<T: Shrink + core::fmt::Debug>(
              \"case_seed\":{case_index},\"shrink_steps\":{},\"shrink_tried\":{},\
              \"converged\":{},\"counterexample_status\":\"{counterexample_status}\",\
              \"failure_kind\":\"{}\",\"failure_detail\":{detail_json},\
-             \"minimized\":{minimized_json},\"replay_file\":{replay_path_json}}}",
+             \"failure_context\":{context_json},\"minimized\":{minimized_json},\
+             \"replay_file\":{replay_path_json}}}",
             report.steps,
             report.tried,
             report.converged,
@@ -693,13 +771,20 @@ pub fn check<T: Shrink + core::fmt::Debug>(
 
 #[cfg(test)]
 mod tests {
-    use super::{json_string, parse_replay_value, replay_artifact_path_from, write_replay_row};
+    use super::{
+        StructuredFailure, StructuredVerdict, check_structured, json_string, json_string_object,
+        parse_replay_value, replay_artifact_path_from, write_replay_row,
+    };
 
     #[test]
     fn json_string_escapes_controls_quotes_and_backslashes() {
         assert_eq!(
             json_string("quote=\" slash=\\ newline=\n nul=\0 snowman=☃"),
             "\"quote=\\\" slash=\\\\ newline=\\n nul=\\u0000 snowman=☃\""
+        );
+        assert_eq!(
+            json_string_object(&[("relation", "rigid\nmove".to_string())]),
+            "{\"relation\":\"rigid\\nmove\"}"
         );
     }
 
@@ -710,6 +795,44 @@ mod tests {
         assert!(parse_replay_value(" 42").is_err());
         assert!(parse_replay_value("+42").is_err());
         assert!(parse_replay_value("18446744073709551616").is_err());
+    }
+
+    #[test]
+    fn structured_shrinking_preserves_the_initial_failure_kind() {
+        let result = std::panic::catch_unwind(|| {
+            check_structured(
+                "failure-kind-stability",
+                7,
+                1,
+                |_| 9_i64,
+                |value| {
+                    if *value >= 3 {
+                        StructuredVerdict::Fail(StructuredFailure::new(
+                            "primary-kind",
+                            "primary failure",
+                            Vec::new(),
+                        ))
+                    } else if *value == 0 {
+                        StructuredVerdict::Fail(StructuredFailure::new(
+                            "incidental-kind",
+                            "incidental failure",
+                            Vec::new(),
+                        ))
+                    } else {
+                        StructuredVerdict::Pass
+                    }
+                },
+            );
+        });
+        let payload = result.expect_err("the primary failure remains");
+        let message = payload
+            .downcast_ref::<String>()
+            .expect("string panic from runner");
+        assert!(message.contains("primary-kind"), "{message}");
+        assert!(
+            message.contains("local-minimum counterexample: 3"),
+            "{message}"
+        );
     }
 
     #[test]
