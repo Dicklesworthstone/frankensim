@@ -1004,7 +1004,7 @@ fn check_powi(root: &Path) -> Vec<Violation> {
 /// by ≥1 ULP across ISAs/libm versions); crates claiming only same-ISA
 /// determinism are exempt and are NOT listed here. Grow this list as crates
 /// are audited — adding a name turns the doctrine on for it.
-const LIBM_DOCTRINE_CRATES: &[&str] = &["fs-geocon", "fs-toleralloc"];
+const LIBM_DOCTRINE_CRATES: &[&str] = &["fs-geocon", "fs-toleralloc", "fs-uq"];
 
 /// Method-call transcendentals that platform libm implements without a
 /// correct-rounding guarantee. `sqrt` is deliberately absent (IEEE-754

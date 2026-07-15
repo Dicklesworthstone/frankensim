@@ -277,6 +277,15 @@ the documented canonicalized exception. Ledger receipt bytes use fixed tagged
 binary encodings; duplicate receipt inputs canonicalize through `BTreeSet`,
 and receipt producer operations run in `ExecMode::Deterministic`.
 
+Numeric scope: SAME-ISA (determinism-tier policy, bead frankensim-lyms).
+Cost-model fitting and the moonshot allocator call platform libm
+(`ln`/`exp`/`powf`), which is not correctly rounded and may drift last-ULP
+across ISAs or libm versions. Identity/receipt BYTES above are exact and
+ISA-independent; fitted cost predictions and allocations are bitwise
+reproducible only on one ISA/libm build. Promote by routing through
+`fs_math::det` and registering in `check-libm` if cross-ISA cost replay is
+ever claimed.
+
 ## Cancellation behavior
 
 Library-owned work is bounded pure computation or bounded ledger reads. Cost-model

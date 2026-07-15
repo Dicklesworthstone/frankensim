@@ -83,7 +83,13 @@ non-finite losses; they do not panic.
 
 Bit-deterministic per seed; golden FNV-64 over KL spectra/fields and
 PCE coefficients: `0x0ed2_4974_dc37_bbc6`, recorded on Apple M4 Pro,
-verified on Threadripper (x86_64).
+verified on Threadripper (x86_64). CROSS-ISA by construction: every
+transcendental routes through `fs_math::det` (bead frankensim-lyms;
+the golden's KL/PCE flow was already libm-free, and the adaptive-MLMC
+rate fit and seismic paths now route det:: too, so no path depends on
+platform libm). Registered in the `check-libm` doctrine lint. log2 is
+computed as `det::ln(x) / LN_2` (det has no log2); `sqrt`/`powi(±3)`
+stay primitive (IEEE correct rounding / pinned lowering).
 
 ## Cancellation behavior
 

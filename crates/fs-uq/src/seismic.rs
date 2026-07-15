@@ -60,7 +60,7 @@ impl KanaiTajimi {
                 let t = i as f64 * dt;
                 lines
                     .iter()
-                    .map(|&(amp, w, ph)| amp * (w * t + ph).cos())
+                    .map(|&(amp, w, ph)| amp * fs_math::det::cos(w * t + ph))
                     .sum()
             })
             .collect()
@@ -100,7 +100,7 @@ pub fn cqc(peaks: &[f64], freqs: &[f64], damps: &[f64]) -> f64 {
         for j in 0..n {
             let (zi, zj) = (damps[i], damps[j]);
             let r = freqs[j] / freqs[i];
-            let num = 8.0 * (zi * zj).sqrt() * (zi + r * zj) * r.powf(1.5);
+            let num = 8.0 * (zi * zj).sqrt() * (zi + r * zj) * fs_math::det::pow(r, 1.5);
             let den = (1.0 - r * r).powi(2)
                 + 4.0 * zi * zj * r * (1.0 + r * r)
                 + 4.0 * (zi * zi + zj * zj) * r * r;

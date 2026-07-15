@@ -96,13 +96,18 @@ fn fitted_rates(statistics: &[RunningStats]) -> (f64, f64) {
             1.0
         }
     };
+    // Determinism doctrine (bead frankensim-lyms): log2 via det::ln so the
+    // rate fit is bit-stable cross-ISA (det has no log2; ln(x)/ln(2) is
+    // composed from correctly-rounded ops and one exact constant divide).
     let log_means: Vec<f64> = corr
         .iter()
-        .map(|stats| stats.mean.abs().max(1e-300).log2())
+        .map(|stats| fs_math::det::ln(stats.mean.abs().max(1e-300)) / core::f64::consts::LN_2)
         .collect();
     let log_variances: Vec<f64> = corr
         .iter()
-        .map(|stats| stats.sample_variance().max(1e-300).log2())
+        .map(|stats| {
+            fs_math::det::ln(stats.sample_variance().max(1e-300)) / core::f64::consts::LN_2
+        })
         .collect();
     (
         fit_slope(&log_means).max(0.1),
@@ -192,7 +197,8 @@ pub fn adaptive_mlmc(
 
     loop {
         let (alpha, _) = fitted_rates(&statistics);
-        let bias = statistics.last().expect("levels").mean.abs() / (2f64.powf(alpha) - 1.0);
+        let bias =
+            statistics.last().expect("levels").mean.abs() / (fs_math::det::pow(2.0, alpha) - 1.0);
         if bias > variance_radius && statistics.len() <= max_level {
             let next = statistics.len();
             add_level(next, &mut statistics, &mut costs, &mut sampler);
@@ -230,7 +236,8 @@ pub fn adaptive_mlmc(
         // loop when capacity remains so the final bias evidence describes the
         // same samples used by the returned estimate.
         let (alpha, beta) = fitted_rates(&statistics);
-        let bias = statistics.last().expect("levels").mean.abs() / (2f64.powf(alpha) - 1.0);
+        let bias =
+            statistics.last().expect("levels").mean.abs() / (fs_math::det::pow(2.0, alpha) - 1.0);
         if bias > variance_radius && statistics.len() <= max_level {
             let next = statistics.len();
             add_level(next, &mut statistics, &mut costs, &mut sampler);

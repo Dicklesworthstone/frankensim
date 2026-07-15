@@ -150,9 +150,15 @@ image.
 
 ## Determinism class
 
-Fully deterministic: the sampling is low-discrepancy, keyed by sample index.
-The transfer renderer uses a distinct per-pixel Philox domain, so pixel/tile
-execution order does not alter its samples.
+SAME-ISA bit-deterministic: the sampling is low-discrepancy, keyed by sample
+index. The transfer renderer uses a distinct per-pixel Philox domain, so
+pixel/tile execution order does not alter its samples. The claim is scoped
+to one ISA/libm build (determinism-tier policy, bead frankensim-lyms):
+volume tracking, phase functions, and disk sampling call platform libm
+(`exp`/`ln`/`cos`/`sin`/`powf`/`cbrt`), which is not correctly rounded and
+may differ by last-ULP across ISAs or libm versions. Cross-ISA bitwise
+replay of renders is deliberately NOT claimed; promote by routing through
+`fs_math::det` and registering in `check-libm` if a lane ever needs it.
 
 ## Cancellation behavior
 
