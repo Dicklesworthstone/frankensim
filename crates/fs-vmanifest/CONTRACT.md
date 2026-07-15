@@ -2,8 +2,9 @@
 
 The typed VerificationManifest schema for leapfrog G1 claim/evidence freezes,
 with authored draft constructors for I01, I02, I03, I04, I05, I06, I08, I10,
-I12, and I15.
-Sibling G1-freeze beads reuse this schema and add their own instance modules.
+I11, I12, and I15, and the RL reality-loop portfolio aggregate.
+Sibling G1-freeze beads reuse this schema and add their own instance modules;
+CP/EM/RL/PD portfolio aggregates freeze the cross-instance seams.
 
 ## Purpose and layer
 
@@ -236,6 +237,29 @@ component encodings retain their v1 subdomains.
   synthetic standard-shaped packs; no licensed standard text is embedded;
   real editions enter only through the waived external slot pinned via
   fs-vvreg.
+- `rl_draft()` — the RL reality-loop PORTFOLIO aggregate (the first
+  CP/EM/RL/PD aggregate): 12 claims split 7 baseline `[S]`, 2 `[F]`, and 3
+  `[M]`; 12 fixture, corpus, theorem, and protocol cards with 5 stage-local
+  held-outs (3 Core, 3 Max ranges with the mutant block spanning
+  135168..=143359); 5 execution leaves; and 1 governed-physical-loop-pack
+  waiver. RL freezes the SEAMS of the lot-to-experiment-to-deployment loop
+  composed from the I05/I06/I10/I11 instance authorities, never their
+  internals: one identity spine (stage boundaries bind exact content
+  addresses; names/paths/timestamps carry no authority); end-to-end
+  blind-partition custody with side channels in scope; exactly-once
+  uncertainty ownership whose twin-level decomposition recomposes exactly;
+  a frozen calibration/measurement graph with cone-exact quarantine;
+  bitwise whole-loop replay from the EvidenceRetentionReceipt chain;
+  declared-graph selective reproof (a consumed instance-manifest successor
+  version invalidates every receipt bound to the predecessor digest); and
+  weakest-wins deployment gating with a closed typed-refusal taxonomy.
+  Frontier lanes target the anytime-valid adaptive OED loop and
+  target-exact HIL/timing composition (a measured sample maximum never
+  promotes to a WCET bound anywhere in the chain). Moonshot lanes target a
+  machine-checked end-to-end composition theorem and physical-campaign
+  receipt parity, while a hidden-mutant lane attacks forged cross-stage
+  certificates. Version-1 prose grants no composition, parity, or
+  deployment authority.
 
 ## Invariants
 
@@ -384,6 +408,20 @@ successor ratchets; G3 hypothesis/oracle/tolerance/holdout/partition/policy
 mutations; G4 chunked assembly equivalence; G5 order invariance; and
 targeted/global amendment invalidation.
 
+`tests/rl.rs`: exact RL 7/2/3 portfolio lattice, single maximal refutation
+lane, 12-fixture/5-held-out corpus, one governed-physical-loop waiver, and
+once-only five-leaf claim map; all nine unit classes, campaign-policy
+participation, lifecycle/events/replay/DSR bindings and sealed canonical
+obligations; seam semantics (content-address identity spine, side-channel
+custody scope, exactly-once ownership with exact recomposition, closed
+typed-refusal gate taxonomy, weakest-wins wording, target-exact timing with
+the no-WCET-promotion rule, instance-digest amendment propagation);
+disjoint single-consumer Core/Max ranges with loop seeds isolated from
+instance-manifest domains; composition-theorem and physical-protocol
+successor ratchets; G3 hypothesis/oracle/tolerance/holdout/partition/policy
+mutations; G4 chunked assembly equivalence; G5 order invariance; and
+targeted/global amendment invalidation.
+
 `tests/i03.rs`: exact I03 8/2/6 claim lattice and once-only 4-Core/
 4-Max leaf mapping; exact nine unit-case classes; content-bound campaign
 policy, FailureBundle, and independent-adjudication obligations; exact
@@ -527,6 +565,16 @@ holdout/policy mutations; and targeted versus global amendment invalidation.
   preflight and completeness root. All I10 fixtures are synthetic
   coupon-shaped data; real instrumented-lab campaigns enter only through the
   waived governed pack.
+- RL portfolio authority is seam bookkeeping, never stage truth: identity
+  continuity, custody, ownership conservation, replay, reproof, and gating
+  do not accredit laboratories, suppliers, devices, targets, or models
+  outside the declared ContextOfUse, and a green deployment gate is not
+  physical validity or safety authority. The end-to-end composition theorem
+  and physical receipt parity are version-1 prose targets behind pre-proof
+  and waiver-discharge successors; a composed guarantee is conditional on
+  every stage premise and validates none of them. All RL fixtures are
+  synthetic loop worlds; real physical campaigns enter only through the
+  waived governed pack under the rl-physical-protocol-card.
 - The adjacent-version `EvidenceKindChanged` guard prevents an immediate
   claim/leaf kind swap. `FrozenManifest` carries no lineage-wide tombstone set;
   a ledger spanning nonadjacent versions must key authority by typed kind plus
