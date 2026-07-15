@@ -563,6 +563,7 @@ dependencies = [
  "fs-ad",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-feec",
  "fs-geom",
  "fs-ivl",
@@ -601,6 +602,8 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
+ "fs-ivl",
 ]
 
 [[package]]
@@ -891,6 +894,7 @@ dependencies = [
  "fs-assimilate",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-toleralloc",
  "fs-voi",
 ]
