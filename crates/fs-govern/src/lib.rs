@@ -24,15 +24,24 @@
 //! ([`proposals`]). The distinct expansion-program namespace PR-001--PR-012,
 //! with quantitative triggers and fail-closed session observations, lives in
 //! [`program_risks`]; it does not replace this crate root's R1--R10 register.
+//! The one-bet discipline itself is EXECUTABLE in [`lanes`]: an atomic,
+//! idempotent, replayable admission ledger enforcing one active unproven
+//! mechanism per independently falsifiable proof lane (bead rjoq.6).
 
 pub mod crates;
 pub mod doctrine;
+pub mod lanes;
 pub mod program_risks;
 pub mod proposals;
 
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
 pub use fs_blake3::ContentHash;
+pub use lanes::{
+    AdmissionDecision, DecisionKind, FinalizationReceipt, HeadToHeadCharter, IdempotencyKey,
+    LANE_POLICY_VERSION, LaneCharter, LaneError, MechanismId, PortfolioLedger, PortfolioPolicy,
+    ProofLaneId, ResourceEnvelope, TerminalKind,
+};
 pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
 
 /// The ten addendum risks (Part V).

@@ -2,16 +2,61 @@
 
 The addendum's governance as machine-readable data: the design principles
 (P1–P8), the governance rules, the nineteen proposals (with kill metrics +
-owning beads), the original Part V runtime risks (R1–R10), and the distinct
+owning beads), the original Part V runtime risks (R1–R10), the distinct
 expansion-program risks (PR-001–PR-012) — each with a CI-gateable completeness
-surface.
+surface — plus the EXECUTABLE one-bet-per-lane admission state machine
+(`lanes` module, bead rjoq.6).
 
 ## Purpose and layer
 
 Layer UTIL. Pure data + audit, with `fs-blake3` as its only dependency for
 canonical content identities. Encodes the doctrine, proposals, original ten
-runtime risks, and twelve expansion-program risks, and audits that nothing
-survives unmeasured (design principle P8 / Governance Rule 2).
+runtime risks, and twelve expansion-program risks, audits that nothing
+survives unmeasured (design principle P8 / Governance Rule 2), and enforces
+the one-active-unproven-mechanism-per-independently-falsifiable-proof-lane
+rule as an atomic, replayable admission ledger.
+
+## Proof-lane admission (`lanes` module, bead rjoq.6)
+
+- `LaneCharter::new(statement, admissible_domain, assumptions,
+  target_authority, baseline, falsifier_family, independence_class)`
+  canonicalizes (whitespace collapse; assumptions sorted + deduped; every
+  field non-empty and bounded) and `lane_id()` mints the authenticated
+  `ProofLaneId` (tagged, length-prefixed fields under BLAKE3 domain
+  `frankensim.fs-govern.proof-lane.v1`). There is NO public id constructor
+  from a raw hash — an id always corresponds to a validated charter
+  (anti-spoofing), and cosmetic re-spellings collapse to one lane (the
+  split-gaming canonicalization). `mechanism_id(name, version)` mints the
+  lane-bound `MechanismId`.
+- `PortfolioLedger::new(PortfolioPolicy { global, max_active_mechanisms })`
+  is the admission state machine (`LANE_POLICY_VERSION = 1`). Semantics:
+  multiple active unproven mechanisms across independently falsifiable
+  lanes; a second active mechanism in the SAME lane refuses atomically;
+  lanes DECLARING the same independence class share one bet (backstop —
+  a comparison on another lane cannot evade it); the four-axis global
+  envelope (work / memory / reviewer slots / falsification capacity) and
+  the mechanism cap bind across all lanes.
+- `HeadToHeadCharter::new(lane, candidates, shared, preregistration)` is
+  the ONLY carve-out: a preregistered comparison (declared BEFORE any
+  admission in the lane, 2..=8 distinct candidates, non-zero
+  preregistration artifact) admits exactly its declared candidates under
+  its own bounded shared envelope.
+- `FinalizationReceipt::new(mechanism, kind, superseded_by, ledger_artifact)`
+  (kinds: refuted / tombstoned / withdrawn / superseded-with-successor) is
+  the ONLY release path: `finalize` releases the slot and its reservation
+  EXACTLY ONCE against an identity-consistent receipt; Unknown or stalled
+  work never releases (there is deliberately no timeout path); terminal is
+  permanent (no re-admission).
+- Every request carries an `IdempotencyKey`: a byte-identical retry
+  replays the recorded decision without double-charging or re-recording; a
+  different request under a used key refuses with the original sequence
+  named. Every method validates completely BEFORE mutating, so refusals
+  leave the ledger observably unchanged (no partial admission);
+  `&mut self` exclusivity is the concurrency contract.
+- The decision log (`decisions()`, bounded `decisions_json(limit)` with an
+  explicit skipped count) records lane/mechanism ids, policy version,
+  idempotency key, request digest, verdict, and a ranked remedy per
+  refusal (`LaneError::remedy`), and is deterministic under replay.
 
 ## Crate registry (`crates` module)
 
@@ -176,6 +221,18 @@ missing/duplicate/non-finite/unit/domain/sample handling; integer/fraction
 domain checks; input-order-independent assessment JSON; and deterministic
 numeric-threshold register serialization.
 
+`tests/lanes.rs` (bead rjoq.6, cases lane-001..lane-008): G0 identity and
+state-machine laws (canonical collapse, per-field mutation sensitivity,
+same-lane refusal with unchanged state, terminal exactly-once release,
+receipt validation incl. zero evidence and self-supersession); G3
+split/merge adversaries (independence-class backstop, comparison-evasion
+refusal, undeclared-candidate refusal); G4 crash/retry idempotency
+(replay without double-charge, key-conflict refusal, refusal replay); G0
+global mechanism-cap and per-axis envelope boundaries incl. the bounded
+comparison budget; G5 whole-ledger and JSON decision-log replay with an
+explicit truncation count. Each same-lane, global-cap, terminal-release,
+and identity guard has a test that fails if the guard is removed.
+
 ## No-claim boundaries
 
 - This crate encodes the risk register as governance DATA; it does not itself
@@ -192,3 +249,19 @@ numeric-threshold register serialization.
   a contingency, or prove that the named Bead owner has reviewed the result.
 - Bead-id owners are string references; this crate does not read the beads
   database (that coupling is deliberately avoided).
+- The lane ledger is the admission STATE MACHINE, not durable storage: the
+  `FinalizationReceipt`'s `ledger_artifact` and the comparison's
+  preregistration artifact are content references whose durable
+  finalization, issuer authority, and scientific adequacy are established
+  by fs-ledger/fs-package/fs-checker integration and deployment policy.
+  The cross-crate no-mock E2E (two independent theorem lanes plus one
+  in-lane comparison through fs-govern, ledger, package, checker, and
+  replay) is the bead's remaining slice and is NOT claimed by this module.
+- Independence classes are DECLARED. Canonicalization defeats cosmetic
+  splits and the class backstop defeats partition gaming among honestly
+  labeled lanes, but the crate cannot algorithmically prove that two
+  falsifier families are genuinely independent — adversarial mislabeling
+  is a governance-review matter, bounded in damage by the global caps.
+- `&mut self` atomicity covers in-process interleavings and retries; a
+  multi-process admission service needs an external serialization or the
+  ledger-backed successor.
