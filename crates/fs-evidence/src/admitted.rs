@@ -24,9 +24,10 @@
 //! ledger must authenticate.
 //!
 //! Defense in depth: even a verifier that accepts everything cannot mint an
-//! [`AdmittedColor`] from a malformed payload, a non-positive rank, or a
-//! stale-algebra receipt — those refusals fire HERE, before the capability
-//! is consulted.
+//! [`AdmittedColor`] from a malformed payload, a non-positive rank, a
+//! stale-algebra receipt, or an accepting decision whose policy identity does
+//! not match the receipt — those refusals fire HERE around the capability
+//! boundary.
 
 use fs_blake3::ContentHash;
 
@@ -175,6 +176,14 @@ pub enum AdmissionRejection {
         /// The deciding policy identity.
         policy: ContentHash,
     },
+    /// An accepting verifier named a policy other than the policy bound into
+    /// the receipt. Acceptance cannot silently rewrite or detach lineage.
+    PolicyMismatch {
+        /// Policy identity committed by the receipt.
+        receipt: ContentHash,
+        /// Policy identity returned by the accepting decision.
+        decision: ContentHash,
+    },
 }
 
 impl core::fmt::Display for AdmissionRejection {
@@ -194,6 +203,10 @@ impl core::fmt::Display for AdmissionRejection {
             Self::Refused { policy } => {
                 write!(f, "admission refused by policy {policy}")
             }
+            Self::PolicyMismatch { receipt, decision } => write!(
+                f,
+                "admission refused: receipt policy {receipt} differs from accepting decision policy {decision}"
+            ),
         }
     }
 }
@@ -241,6 +254,12 @@ impl AdmittedColor {
                 policy: decision.policy(),
             });
         }
+        if decision.policy() != receipt.policy_fingerprint {
+            return Err(AdmissionRejection::PolicyMismatch {
+                receipt: receipt.policy_fingerprint,
+                decision: decision.policy(),
+            });
+        }
         Ok(AdmittedColor { color, receipt })
     }
 
@@ -283,6 +302,13 @@ mod tests {
         }
     }
 
+    struct ReceiptPolicyVerifier;
+    impl AdmissionVerifier for ReceiptPolicyVerifier {
+        fn verify(&self, _c: &Color, receipt: &AdmissionReceipt) -> AdmissionDecision {
+            AdmissionDecision::accept(receipt.policy_fingerprint())
+        }
+    }
+
     #[test]
     fn deny_all_default_refuses_a_well_formed_candidate() {
         let error = AdmittedColor::from_receipt(
@@ -308,10 +334,7 @@ mod tests {
             &LyingVerifier,
         )
         .expect_err("inverted interval must refuse");
-        assert!(matches!(
-            malformed,
-            AdmissionRejection::MalformedPayload(_)
-        ));
+        assert!(matches!(malformed, AdmissionRejection::MalformedPayload(_)));
 
         // Non-positive rank.
         let estimated = AdmittedColor::from_receipt(
@@ -351,7 +374,7 @@ mod tests {
         let admitted = AdmittedColor::from_receipt(
             Color::Verified { lo: -2.0, hi: 3.0 },
             receipt(COLOR_ALGEBRA_VERSION),
-            &LyingVerifier,
+            &ReceiptPolicyVerifier,
         )
         .expect("accepting verifier mints");
         assert_eq!(admitted.rank(), ColorRank::Verified);
@@ -362,6 +385,24 @@ mod tests {
         assert_eq!(
             admitted.receipt().node_hash(),
             fs_blake3::hash_bytes(b"test-node")
+        );
+    }
+
+    #[test]
+    fn accepting_decision_must_match_the_receipt_policy() {
+        let receipt = receipt(COLOR_ALGEBRA_VERSION);
+        let error = AdmittedColor::from_receipt(
+            Color::Verified { lo: -2.0, hi: 3.0 },
+            receipt,
+            &LyingVerifier,
+        )
+        .expect_err("an accepting decision cannot substitute another policy identity");
+        assert_eq!(
+            error,
+            AdmissionRejection::PolicyMismatch {
+                receipt: receipt.policy_fingerprint(),
+                decision: fs_blake3::hash_bytes(b"lying-policy"),
+            }
         );
     }
 }

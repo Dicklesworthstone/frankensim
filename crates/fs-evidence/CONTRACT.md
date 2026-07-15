@@ -94,20 +94,32 @@ on fs-obs only.
   `Verified` numerical interval.
   Write-time enforcement lives HELM-side in fs-ledger over these types.
 
-- `falsify` module (bead qmao.4): FALSIFIER PAIRING — `FalsifierRegistry`
-  (a certificate class CANNOT register without ≥1 independent falsifier;
-  `standard()` ships the six proposal pairings: watertightness→ray-parity,
-  conservation→independent-quadrature flux audit, adjoint→FD spot checks,
-  surrogate→held-out points, symmetry-block→occasional full solves,
-  validated-color→held-out anchors), `ship_gate` (the no-falsifier-no-ship
-  Gauntlet gate), `FalsifierHistory` (per-class-per-regime pass/hit/compute
-  rows; `doubt` = 1 − pass rate with COLD-START = max doubt and a
-  never-zero floor), `record_hit` → mandatory `(Tombstone, EstimatorBug)`
-  canonical-JSON pair, `allocate_budget` (consequence × doubt ×
-  rent-share, normalized; consequence floors for dependent-free claims;
-  zero claims spend zero), and `rent_review` (zero-yield classes at
-  meaningful volume decay toward a floor — every falsifier pays rent, but
-  the pairing rule itself is not killable).
+- `falsify` module (bead qmao.4): bounded declaration catalog and diagnostic
+  telemetry — `FalsifierRegistry` refuses a class with zero declarations and
+  `standard()` provides seven intended checker families, separating retained
+  sampled-interface replay from the much stronger continuum-watertightness
+  proposal (certified oriented intersections, winding/degree, and
+  coverage-complete subdivision). `catalog_gate` reports missing declarations
+  only; it is explicitly not executable or release authority.
+  `FalsifierHistory` ingests bounded, source-referencing `FalsifierAttempt`
+  values carrying an idempotency ID, class/regime/falsifier, caller-asserted
+  claim-revision and retained-artifact references, seed, positive compute
+  charge, and typed outcome. It
+  rejects undeclared class/falsifier pairs, treats byte-identical retries as
+  no-op replays, and rejects conflicting attempt-ID reuse. `doubt` is the
+  empirical discrepancy rate widened by a per-row time-uniform union-bound
+  Hoeffding heuristic, with cold-start maximum and a never-zero floor.
+  Discrepancy attempts emit opaque escaped, fixed-order
+  `fs-evidence/falsifier-candidate` schema-version-1
+  tombstone/estimator-bug *candidate* projections, correlated by attempt and
+  exact seed/compute bit strings; ingestion neither authenticates the caller's
+  references nor adjudicates or persists the candidates.
+  `allocate_budget` validates
+  and max-rescales consequence × doubt × class-review-share weights before
+  normalization. `rent_review` is a preliminary class-level diagnostic over
+  fixed ordered `RENT_VOLUME`-attempt windows whose zero-discrepancy windows
+  decay toward a nonzero floor. Window closure is independent of review-call
+  cadence; subthreshold reviews do not erase observations.
 
 ## Invariants
 1. Conservativeness (G0, evd-001): composed enclosures contain every
@@ -190,19 +202,23 @@ on fs-obs only.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
-`OutOfDomain`, `FitError` — all `core::error::Error` with actionable
+`OutOfDomain`, `FitError`, `FalsifyError` — all `core::error::Error` with actionable
 Display text. Constructors are total (enclosure bounds normalize by
 swapping); no panics cross the boundary.
 
 ## Determinism class
-Deterministic: every function is a pure computation over its inputs; all
-renderings use sorted (BTreeMap) order; no clocks, no addresses, no
-randomness. Bit-stable across runs and platforms up to fs-math-class
-scalar-arithmetic divergence.
+Deterministic: pure values and mutable diagnostic state machines produce the
+same results for the same ordered call sequence; renderings use sorted
+(`BTreeMap`) order; there are no clocks, addresses, or hidden randomness.
+Bit-stable across runs and platforms up to fs-math-class scalar-arithmetic
+divergence.
 
 ## Cancellation behavior
-No compute loops (bounded small algebra per call); nothing to poll. The
-crate is used INSIDE cancellable kernels; it adds no blocking.
+Core certificate/color algebra is bounded small synchronous work. Falsifier
+allocation and history review iterate caller data without a `Cx`; allocation
+length and distinct history rows are defensively capped, but these diagnostic
+APIs are not P7 hot-kernel or cancellation-authoritative paths. Callers must not
+place large reviews inside latency-bounded tile loops.
 
 ## Unsafe boundary
 None. `unsafe_code` denied workspace-wide.
@@ -236,13 +252,19 @@ orders, overlapping and disjoint validated regimes, and structural validation
 of every input and output. It locks the no-laundering rank law while preserving
 the fixed cases above as regression pins.
 
-- Falsifier registration is total: empty falsifier lists refuse at the
-  source; the ship gate names every unpaired class.
-- Budget allocation is monotone in consequence AND doubt, with honest
-  boundaries (cold-start max, perfect-record floor, dependent-free floor,
-  empty-job zero) — property-tested.
-- Every falsifier hit produces BOTH a tombstone and an estimator bug
-  report; neither is optional.
+- Falsifier registration is total: malformed, duplicate, and empty declaration
+  sets refuse; the catalog lint names each distinct undeclared class once in
+  canonical sorted order without making a release claim.
+- Fixed and adversarial falsifier cases check that budget allocation is
+  monotone in consequence AND doubt, with honest
+  boundaries (cold-start max, asymptotic doubt floor, dependent-free floor,
+  empty-job zero), finite max-rescaled extreme weights, and validation even
+  when the requested total budget is zero.
+- Every accepted discrepancy attempt produces BOTH correlated pending candidate
+  payloads; neither candidate is an active tombstone or an adjudicated
+  estimator bug. Exact retries are idempotent, conflicting ID reuse refuses,
+  malformed/undeclared attempts leave telemetry unchanged, and two clean rent
+  windows decay identically under batched versus incremental review calls.
 
 ## Admitted scientific color (bead 6pf9, stage S1)
 
@@ -254,6 +276,10 @@ the fixed cases above as regression pins.
   (`validate_color_payload`), non-positive ranks (Estimated), and
   stale-algebra receipts (`color_algebra_version !=
   COLOR_ALGEBRA_VERSION`) refuse even under an accept-everything verifier.
+- An accepting `AdmissionDecision` must name exactly the policy fingerprint
+  committed by the receipt. A mismatch returns structured `PolicyMismatch`
+  rather than silently detaching the admitted value from its lineage; retained
+  tests cover both a matching authority and an accepting policy substitution.
 - `AdmissionReceipt` is plain data (node provenance hash, row schema
   version, algebra version, policy fingerprint). Authority lives in the
   `AdmissionVerifier` capability; the default `NoAdmissionVerifier` is
@@ -320,12 +346,38 @@ the fixed cases above as regression pins.
 
 - The registry stores falsifier IDENTITIES and stated methods; executing
   a falsifier (running rays, FD probes, full solves) is each consumer
-  kernel's code — this module is the schema, gate, and allocator.
+  kernel's code. A public method string cannot prove executable binding or
+  checker independence, and `catalog_gate` cannot authorize release.
+- Catalog class/spec identifiers are bounded ASCII slugs; human prose belongs
+  in the separately bounded method/detail fields. Class count, declarations per
+  class, per-class and total declaration bytes, lint request/output size,
+  allocation length, history rows/key bytes, attempt count, and retained
+  attempt bytes all have explicit ceilings. These are defensive synchronous
+  caps, not a substitute for a budgeted `Cx` API.
+- Exact-instance authority requires a typed retained receipt bound to the claim,
+  specification, policy, implementation/TCB, seed, stopping rule, budget,
+  outcome, and artifacts, admitted by fs-package/fs-checker. That successor
+  architecture is not implemented by this telemetry module.
 - `consequence` is supplied by the caller (ledger-DAG dependent-weight
   traversal is HELM-side); the allocator's contract is what it does with
   the number, floors included.
-- Tombstone/bug payloads are canonical JSON for the ledger; the tombstone
-  REGISTRY (Proposal E) and falsifier-log mining (Proposal 9) consume
-  them downstream.
-- Rent decay is per-class and floor-bounded; per-regime decay and
-  quarterly cadence enforcement are governance-bead policy (xpck.6).
+- Candidate payloads are opaque escaped
+  `fs-evidence/falsifier-candidate` schema-version-1 fixed-order JSON
+  projections, with the full-width seed and compute charge represented as exact
+  hexadecimal bit strings; they are not authenticated content addresses.
+  History mutation is not transactional with an external
+  sink; downstream adjudication and atomic persistence are mandatory before a
+  candidate can invalidate a claim or count as an estimator defect.
+- Stable attempt IDs prevent identical retry/replay from double-counting and
+  conflicting reuse fails closed. They remain caller assertions rather than
+  authenticated ledger identities, so history still cannot be trusted against
+  fabricated or selectively omitted attempts. `doubt` assumes
+  an admitted stationary Bernoulli process and controls time multiplicity only
+  within one row, not the family of class/regime rows; here it is planning
+  telemetry only. Candidate discrepancy reports conservatively raise this
+  telemetry but cannot activate authority.
+- Rent decay is per-class rather than per-falsifier. Fixed-volume windows are
+  invariant to review-call cadence, but are not authenticated calendar/policy
+  windows and have no restoration policy. Per-falsifier
+  receipts, independence threat graphs, cadence enforcement, and restoration
+  policy remain successor work (xpck.6).

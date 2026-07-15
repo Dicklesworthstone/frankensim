@@ -56,8 +56,9 @@ pub use discrepancy::{
     DiscrepancyBand, DiscrepancyModel, FidelityPair, FitError, ModelBracket, OutOfDomain,
 };
 pub use falsify::{
-    ClaimContext, EstimatorBug, FalsifierHistory, FalsifierHit, FalsifierRegistry, FalsifierSpec,
-    FalsifyError, Tombstone, allocate_budget,
+    AttemptRecord, ClaimContext, EstimatorBugCandidate, FalsifierAttempt, FalsifierHistory,
+    FalsifierOutcome, FalsifierRegistry, FalsifierSpec, FalsifyError, TombstoneCandidate,
+    allocate_budget,
 };
 
 /// Crate version, re-exported for provenance stamping.
