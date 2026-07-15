@@ -20,7 +20,7 @@ fn with_cx<R>(cancelled: bool, mode: ExecMode, budget: Budget, f: impl FnOnce(&C
             &gate,
             arena,
             StreamKey {
-                seed: 0xA5B0_117,
+                seed: 0x0A5B_0117,
                 kernel_id: 1,
                 tile: 0,
                 iteration: 0,
@@ -89,7 +89,8 @@ fn noisy_measurements_carry_a_positive_residual() {
         })
         .collect();
     let reg = with_default_cx(|cx| register(&fids, cx)).unwrap();
-    // the registration error is carried forward, not discarded.
+    // The global fit RMS diagnostic is retained for advisory screens rather
+    // than being discarded or mislabeled as transform covariance.
     assert!(reg.residual_rms() > 0.0 && reg.residual_rms() < 0.1);
 }
 
@@ -116,21 +117,56 @@ fn registration_is_ill_posed_without_enough_non_collinear_fiducials() {
 }
 
 #[test]
-fn registration_rank_gate_is_scale_invariant_for_small_geometry() {
-    let scale = 1.0e-9;
-    let design = [point(0.0, 0.0), point(scale, 0.0), point(0.0, scale)];
-    let fiducials: Vec<_> = design
-        .iter()
-        .copied()
-        .map(|datum| Fiducial::new(datum, datum))
+fn registration_refuses_unobservable_rotation_instead_of_publishing_atan2_convention() {
+    let collapsed = point(0.1, -0.3);
+    let collapsed_fiducials: Vec<Fiducial> = triangle()
+        .into_iter()
+        .map(|design| Fiducial::new(design, collapsed))
         .collect();
+    assert_eq!(
+        with_default_cx(|cx| register(&collapsed_fiducials, cx)),
+        Err(RegError::UnobservableRotation),
+        "a decimal centroid can leave tiny rounded cross terms, but a collapsed scan has no rotation"
+    );
 
-    let registration = with_default_cx(|cx| register(&fiducials, cx))
-        .expect("small non-collinear triangle is rank two");
-    assert_eq!(registration.rotation_rad().to_bits(), 0.0f64.to_bits());
-    assert_eq!(registration.tx().to_bits(), 0.0f64.to_bits());
-    assert_eq!(registration.ty().to_bits(), 0.0f64.to_bits());
-    assert!(registration.residual_rms() <= f64::MIN_POSITIVE);
+    // Reflection of this isotropic design has nonzero measured scatter, but
+    // its rotation-only Procrustes objective is exactly flat:
+    // s_dot = s_cross = 0. This exercises the objective-amplitude gate rather
+    // than the collapsed-point guard.
+    let design = [
+        point(1.0, 0.0),
+        point(0.0, 1.0),
+        point(-1.0, 0.0),
+        point(0.0, -1.0),
+    ];
+    let reflected: Vec<Fiducial> = design
+        .into_iter()
+        .map(|p| Fiducial::new(p, point(p.x(), -p.y())))
+        .collect();
+    assert_eq!(
+        with_default_cx(|cx| register(&reflected, cx)),
+        Err(RegError::RotationCertificationUnresolved),
+        "spread data with an interval-unresolved objective must not be mislabeled collapsed"
+    );
+}
+
+#[test]
+fn registration_rank_gate_is_scale_invariant_for_small_geometry() {
+    for scale in [1.0e-300, 1.0e-200, 1.0e-82, 1.0e-9, 1.0, 1.0e82, 1.0e300] {
+        let design = [point(0.0, 0.0), point(scale, 0.0), point(0.0, scale)];
+        let fiducials: Vec<_> = design
+            .iter()
+            .copied()
+            .map(|datum| Fiducial::new(datum, datum))
+            .collect();
+
+        let registration = with_default_cx(|cx| register(&fiducials, cx))
+            .unwrap_or_else(|error| panic!("scale {scale:e} must remain rank two: {error}"));
+        assert_eq!(registration.rotation_rad().to_bits(), 0.0f64.to_bits());
+        assert_eq!(registration.tx().to_bits(), 0.0f64.to_bits());
+        assert_eq!(registration.ty().to_bits(), 0.0f64.to_bits());
+        assert!(registration.residual_rms() <= f64::MIN_POSITIVE);
+    }
 }
 
 #[test]
@@ -170,7 +206,7 @@ fn the_as_built_diff_is_an_estimated_candidate_with_a_proposed_regime() {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("asbuilt-diff-v3:"));
+            assert!(estimator.starts_with("asbuilt-diff-v4:"));
             assert_eq!(dispersion.to_bits(), 0.05f64.to_bits());
         }
         other => panic!("expected estimated candidate, got {other:?}"),
@@ -290,7 +326,7 @@ fn g4_pre_cancelled_entry_points_report_exact_zero_progress() {
         Err(RegError::Cancelled {
             phase: "register.initial",
             completed_work: 0,
-            planned_work: 12,
+            planned_work: 18,
         })
     );
 
@@ -355,7 +391,7 @@ fn g5_retained_identity_declares_the_v1_256_point_poll_policy() {
     assert_eq!(AS_BUILT_POLL_POLICY_VERSION, 1);
     assert_eq!(AS_BUILT_POLL_STRIDE_POINTS, 256);
     let diff = fixture_diff(ExecMode::Deterministic, Budget::INFINITE);
-    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v3:"));
+    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v4:"));
 }
 
 #[test]
@@ -391,6 +427,21 @@ fn public_geometry_and_registration_construction_refuse_non_finite_values() {
         overflowing.apply(point(f64::MAX, 0.0)),
         Err(RegError::NonFinite { field: "point.x" })
     ));
+
+    // `MAX + 2^970` is the binary64 round-to-nearest overflow midpoint.
+    // A scaled computation rounds its normalized value back to exactly 1.0;
+    // recovery must therefore use an outward range proof rather than treating
+    // a finite scaled result as proof that the original affine sum was finite.
+    let midpoint_overflow = Registration::new(0.0, 2.0_f64.powi(970), 0.0, 0.0).unwrap();
+    assert!(matches!(
+        midpoint_overflow.apply(point(f64::MAX, 0.0)),
+        Err(RegError::NonFinite { field: "point.x" })
+    ));
+    let negative_midpoint_overflow = Registration::new(0.0, -2.0_f64.powi(970), 0.0, 0.0).unwrap();
+    assert!(matches!(
+        negative_midpoint_overflow.apply(point(-f64::MAX, 0.0)),
+        Err(RegError::NonFinite { field: "point.x" })
+    ));
 }
 
 #[test]
@@ -407,16 +458,65 @@ fn public_numeric_values_canonicalize_signed_zero() {
 }
 
 #[test]
-fn registration_rejects_finite_inputs_whose_intermediates_overflow() {
-    let extreme = [
-        Fiducial::new(point(f64::MAX, 0.0), point(0.0, 0.0)),
-        Fiducial::new(point(f64::MAX, 1.0), point(1.0, 0.0)),
-        Fiducial::new(point(-f64::MAX, 0.0), point(0.0, 1.0)),
+fn registration_is_stable_under_extreme_translation_and_mixed_sign_extent() {
+    let translated = [
+        point(8.0e307, 8.0e307),
+        point(9.0e307, 8.0e307),
+        point(8.0e307, 9.0e307),
     ];
-    assert!(matches!(
-        with_default_cx(|cx| register(&extreme, cx)),
-        Err(RegError::NonFinite { .. })
-    ));
+    let mixed_sign = [
+        point(-f64::MAX, 0.0),
+        point(f64::MAX, 0.0),
+        point(f64::MAX, f64::MAX),
+    ];
+    for (label, design) in [("translated", translated), ("mixed-sign", mixed_sign)] {
+        let fiducials: Vec<_> = design
+            .into_iter()
+            .map(|datum| Fiducial::new(datum, datum))
+            .collect();
+        let registration = with_default_cx(|cx| register(&fiducials, cx))
+            .unwrap_or_else(|error| panic!("{label} identity fit must remain finite: {error}"));
+        assert_eq!(registration.rotation_rad().to_bits(), 0.0f64.to_bits());
+        assert_eq!(registration.tx().to_bits(), 0.0f64.to_bits());
+        assert_eq!(registration.ty().to_bits(), 0.0f64.to_bits());
+        assert_eq!(registration.residual_rms().to_bits(), 0.0f64.to_bits());
+    }
+}
+
+#[test]
+fn extreme_rotation_and_cancelling_translation_remain_representable() {
+    let theta = std::f64::consts::FRAC_PI_4;
+    let transform = registration(theta, -1.0e308, 0.0, 0.0);
+    let mapped = transform
+        .apply(point(1.3e308, -1.3e308))
+        .expect("a finite affine result must not inherit rotation-sum overflow");
+    let expected_x = (2.6 * theta.cos() - 1.0) * 1.0e308;
+    assert!((mapped.x() / 1.0e308 - expected_x / 1.0e308).abs() < 1.0e-15);
+    assert!(mapped.y().abs() / 1.0e308 < 1.0e-15);
+
+    // The centroid has the same hostile rotated component, so this also
+    // exercises cancellation-aware translation recovery. Expected measured
+    // points are formed from dimensionless factors before the common scale is
+    // restored, independently avoiding the overflowing operation order.
+    let factors = [(1.30, -1.30), (1.35, -1.30), (1.30, -1.25)];
+    let fiducials: Vec<_> = factors
+        .into_iter()
+        .map(|(x, y)| {
+            let design = point(x * 1.0e308, y * 1.0e308);
+            let measured = point(
+                (theta.cos() * (x - y) - 1.0) * 1.0e308,
+                (theta.sin() * x + theta.cos() * y) * 1.0e308,
+            );
+            Fiducial::new(design, measured)
+        })
+        .collect();
+    let recovered = with_default_cx(|cx| register(&fiducials, cx))
+        .expect("finite extreme-coordinate rigid fit must remain admissible");
+    assert!((recovered.rotation_rad() - theta).abs() < 1.0e-12);
+    assert!((recovered.tx() / 1.0e308 + 1.0).abs() < 1.0e-12);
+    assert!(recovered.ty().abs() / 1.0e308 < 1.0e-12);
+    assert!(recovered.residual_rms().is_finite());
+    assert!(recovered.residual_rms() / 1.0e308 < 1.0e-12);
 }
 
 #[test]

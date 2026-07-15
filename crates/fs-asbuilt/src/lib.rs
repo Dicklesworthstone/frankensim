@@ -8,14 +8,15 @@
 //! color stops being a static stamp and becomes a living, regime-tagged belief.
 //!
 //! Two facts make this honest:
-//! - REGISTRATION (aligning scan to design) is an OPTIMIZATION WITH ERROR, so
-//!   its error is carried forward, not discarded. [`register`] solves the rigid
+//! - REGISTRATION (aligning scan to design) is an OPTIMIZATION WITH ERROR.
+//!   [`register`] solves the rigid
 //!   2-D fit in closed form (no SVD) and is made WELL-POSED by fiducials/datums
 //!   specified at design time (≥ 3 non-collinear points) — the
-//!   design-for-verification requirement pushed upstream.
-//! - The R8 kill criterion is explicit: if registration uncertainty exceeds the
-//!   geometric deviation being certified, the signal is below the noise floor
-//!   ([`well_posed`]).
+//!   design-for-verification requirement pushed upstream. Its retained RMS is
+//!   only a global fit diagnostic, not transform or spatial uncertainty.
+//! - The R8 screen is explicit: if that residual exceeds the geometric
+//!   deviation under review, the signal is below this advisory noise screen
+//!   ([`well_posed`]); no certification claim follows from passing it.
 //!
 //! The as-built δ ([`as_built_diff`]) is measurement-noise-aware and emits
 //! an **estimated candidate** with a proposed regime. A caller-supplied
@@ -27,9 +28,10 @@
 
 use fs_evidence::color_leaf_identity_reason;
 pub use fs_evidence::{Color, ValidityDomain};
+use fs_ivl::Interval;
 
-const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v3";
-const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v3";
+const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v4";
+const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v4";
 const AS_BUILT_WORK_PLAN_VERSION: u32 = 1;
 /// Identity-bound cancellation policy version for resource-driving point scans.
 pub const AS_BUILT_POLL_POLICY_VERSION: u32 = 1;
@@ -146,6 +148,12 @@ pub enum RegError {
     },
     /// The fiducials are (near-)collinear — the fit is ill-posed.
     CollinearFiducials,
+    /// The design points have rank, but their measured correspondence does not
+    /// contain any measured spread and therefore cannot determine a rotation.
+    UnobservableRotation,
+    /// The measured correspondence has spread, but outward arithmetic cannot
+    /// certify a nonzero rotation objective at binary64 precision.
+    RotationCertificationUnresolved,
     /// Two point sets have mismatched lengths.
     LengthMismatch {
         /// Expected.
@@ -205,6 +213,12 @@ impl core::fmt::Display for RegError {
                 write!(formatter, "need at least {need} fiducials, got {have}")
             }
             Self::CollinearFiducials => formatter.write_str("fiducials are collinear"),
+            Self::UnobservableRotation => {
+                formatter.write_str("fiducial correspondence does not determine a rotation")
+            }
+            Self::RotationCertificationUnresolved => formatter.write_str(
+                "fiducial rotation objective is unresolved by the outward-rounded certificate",
+            ),
             Self::LengthMismatch { expected, found } => {
                 write!(formatter, "expected {expected} scanned points, got {found}")
             }
@@ -254,6 +268,89 @@ const fn canonical_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
 }
 
+fn affine_component_with_scaled_fallback(
+    direct: f64,
+    first_coefficient: f64,
+    first_value: f64,
+    second_coefficient: f64,
+    second_value: f64,
+    translation: f64,
+    field: &'static str,
+) -> Result<f64, RegError> {
+    if direct.is_finite() {
+        return Ok(direct);
+    }
+
+    // Preserve the ordinary evaluation bits whenever it succeeds. If an
+    // intermediate rotation sum overflowed before a finite translation could
+    // cancel it, normalize all three addends by their largest finite source
+    // magnitude so cancellation occurs before rescaling. The outward interval
+    // is essential: scaling alone can round a truly overflowing exact sum back
+    // to `f64::MAX`, so recovery is admitted only when the original real
+    // three-term affine sum is certified to lie inside the finite range.
+    let scale = first_value
+        .abs()
+        .max(second_value.abs())
+        .max(translation.abs());
+    if scale == 0.0 {
+        return Ok(0.0);
+    }
+    let scale_enclosure = Interval::point(scale);
+    let normalized_enclosure = Interval::point(first_coefficient)
+        * (Interval::point(first_value) / scale_enclosure)
+        + Interval::point(second_coefficient) * (Interval::point(second_value) / scale_enclosure)
+        + Interval::point(translation) / scale_enclosure;
+    let affine_enclosure = normalized_enclosure * scale_enclosure;
+    if !(affine_enclosure.lo().is_finite() && affine_enclosure.hi().is_finite()) {
+        return Err(RegError::NonFinite { field });
+    }
+    let normalized = first_coefficient.mul_add(
+        first_value / scale,
+        second_coefficient.mul_add(second_value / scale, translation / scale),
+    );
+    let recovered = normalized * scale;
+    if !recovered.is_finite() || !affine_enclosure.contains(recovered) {
+        return Err(RegError::NonFinite { field });
+    }
+    Ok(recovered)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScaledSumSquares {
+    scale: f64,
+    scaled_square_sum: f64,
+}
+
+impl ScaledSumSquares {
+    fn add(&mut self, value: f64) -> Result<(), RegError> {
+        debug_assert!(value.is_finite() && value >= 0.0);
+        if value == 0.0 {
+            return Ok(());
+        }
+        if self.scale < value {
+            let ratio = self.scale / value;
+            self.scaled_square_sum = 1.0 + self.scaled_square_sum * ratio * ratio;
+            self.scale = value;
+        } else {
+            let ratio = value / self.scale;
+            self.scaled_square_sum += ratio * ratio;
+        }
+        require_finite(
+            "registration scaled residual sum of squares",
+            self.scaled_square_sum,
+        )
+    }
+
+    fn root_mean_square(self, count: f64) -> Result<f64, RegError> {
+        if self.scale == 0.0 {
+            return Ok(0.0);
+        }
+        let residual = self.scale * (self.scaled_square_sum / count).sqrt();
+        require_finite("registration residual RMS", residual)?;
+        Ok(residual)
+    }
+}
+
 /// A rigid registration (rotation + translation) mapping design → measured,
 /// with the residual it carries forward.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -264,7 +361,7 @@ pub struct Registration {
     tx: f64,
     /// Translation y.
     ty: f64,
-    /// Root-mean-square residual of the fit (the registration uncertainty).
+    /// Root-mean-square residual of the fit (a global fit diagnostic only).
     residual_rms: f64,
 }
 
@@ -316,9 +413,15 @@ impl Registration {
     /// Refuses arithmetic overflow to a non-finite mapped point.
     pub fn apply(&self, point: Point2) -> Result<Point2, RegError> {
         let (s, c) = self.rotation_rad.sin_cos();
+        let direct_x = c * point.x - s * point.y + self.tx;
+        let direct_y = s * point.x + c * point.y + self.ty;
         Point2::new(
-            c * point.x - s * point.y + self.tx,
-            s * point.x + c * point.y + self.ty,
+            affine_component_with_scaled_fallback(
+                direct_x, c, point.x, -s, point.y, self.tx, "point.x",
+            )?,
+            affine_component_with_scaled_fallback(
+                direct_y, s, point.x, c, point.y, self.ty, "point.y",
+            )?,
         )
     }
 }
@@ -351,7 +454,7 @@ impl RegistrationWorkPlan {
                 operation: "register",
             })?;
         let total = points_per_scan
-            .checked_mul(4)
+            .checked_mul(6)
             .ok_or(RegError::WorkPlanOverflow {
                 operation: "register",
             })?;
@@ -474,9 +577,12 @@ fn scan_checkpoint(
 /// Procrustes rotation). Requires ≥ 3 non-collinear fiducials.
 ///
 /// # Errors
-/// [`RegError::TooFewFiducials`], [`RegError::CollinearFiducials`], or a
-/// structured [`RegError::Cancelled`] with exact point-visit progress. The
-/// complete work plan is computed before the initial cancellation checkpoint.
+/// [`RegError::TooFewFiducials`], [`RegError::CollinearFiducials`],
+/// [`RegError::UnobservableRotation`],
+/// [`RegError::RotationCertificationUnresolved`], oversized or non-finite
+/// inputs/intermediates, work-plan overflow, or a structured
+/// [`RegError::Cancelled`] with exact point-visit progress. The complete work
+/// plan is computed before the initial cancellation checkpoint.
 pub fn register(fiducials: &[Fiducial], cx: &fs_exec::Cx<'_>) -> Result<Registration, RegError> {
     let mut poll = |_: &'static str, _: u128, _: u128| cx.checkpoint();
     register_with_poll(fiducials, &mut poll)
@@ -497,25 +603,35 @@ fn register_with_poll(
     })?);
     operation_checkpoint(REGISTER_DESIGN_CENTROID_PHASE, progress, poll)?;
     let cp = centroid(
-        fiducials.iter().map(|f| f.design),
+        fiducials,
+        |fiducial| fiducial.design,
         REGISTER_DESIGN_CENTROID_PHASE,
         &mut progress,
         poll,
     )?;
-    debug_assert_eq!(progress.completed, plan.points_per_scan);
+    debug_assert_eq!(progress.completed, plan.points_per_scan * 2);
     operation_checkpoint(REGISTER_MEASURED_CENTROID_PHASE, progress, poll)?;
     let cq = centroid(
-        fiducials.iter().map(|f| f.measured),
+        fiducials,
+        |fiducial| fiducial.measured,
         REGISTER_MEASURED_CENTROID_PHASE,
         &mut progress,
         poll,
     )?;
-    debug_assert_eq!(progress.completed, plan.points_per_scan * 2);
+    debug_assert_eq!(progress.completed, plan.points_per_scan * 4);
+    if cp.scale <= 0.0 {
+        return Err(RegError::CollinearFiducials);
+    }
+    if cq.scale <= 0.0 {
+        return Err(RegError::UnobservableRotation);
+    }
 
     // scatter of the centered DESIGN points — collinear iff it is rank-deficient.
     let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
     // cross-covariance terms for the optimal rotation.
     let (mut s_dot, mut s_cross) = (0.0, 0.0);
+    let mut s_dot_enclosure = Interval::point(0.0);
+    let mut s_cross_enclosure = Interval::point(0.0);
     operation_checkpoint(REGISTER_SCATTER_PHASE, progress, poll)?;
     for (index, f) in fiducials.iter().enumerate() {
         scan_checkpoint(
@@ -525,16 +641,38 @@ fn register_with_poll(
             progress,
             poll,
         )?;
-        let (dpx, dpy) = (f.design.x - cp.x, f.design.y - cp.y);
-        let (dqx, dqy) = (f.measured.x - cq.x, f.measured.y - cq.y);
+        // Positive common scales cancel from the rank determinant and the
+        // Procrustes rotation objective. Normalize before products so finite
+        // tiny or huge geometries do not underflow/overflow fourth-order rank
+        // expressions or second-order cross sums.
+        let dpx = normalized_offset(f.design.x, cp.anchor.x, cp.scale, "design x")?
+            - cp.normalized_mean.x;
+        let dpy = normalized_offset(f.design.y, cp.anchor.y, cp.scale, "design y")?
+            - cp.normalized_mean.y;
+        let dqx = normalized_offset(f.measured.x, cq.anchor.x, cq.scale, "measured x")?
+            - cq.normalized_mean.x;
+        let dqy = normalized_offset(f.measured.y, cq.anchor.y, cq.scale, "measured y")?
+            - cq.normalized_mean.y;
+        let dpx_enclosure =
+            normalized_offset_enclosure(f.design.x, cp.anchor.x, cp.scale) - cp.normalized_x;
+        let dpy_enclosure =
+            normalized_offset_enclosure(f.design.y, cp.anchor.y, cp.scale) - cp.normalized_y;
+        let dqx_enclosure =
+            normalized_offset_enclosure(f.measured.x, cq.anchor.x, cq.scale) - cq.normalized_x;
+        let dqy_enclosure =
+            normalized_offset_enclosure(f.measured.y, cq.anchor.y, cq.scale) - cq.normalized_y;
         sxx += dpx * dpx;
         syy += dpy * dpy;
         sxy += dpx * dpy;
         s_dot += dpx * dqx + dpy * dqy;
         s_cross += dpx * dqy - dpy * dqx;
+        s_dot_enclosure =
+            s_dot_enclosure + dpx_enclosure * dqx_enclosure + dpy_enclosure * dqy_enclosure;
+        s_cross_enclosure =
+            s_cross_enclosure + dpx_enclosure * dqy_enclosure - dpy_enclosure * dqx_enclosure;
         progress.complete_point()?;
     }
-    debug_assert_eq!(progress.completed, plan.points_per_scan * 3);
+    debug_assert_eq!(progress.completed, plan.points_per_scan * 5);
     for (field, value) in [
         ("registration design scatter xx", sxx),
         ("registration design scatter yy", syy),
@@ -554,13 +692,47 @@ fn register_with_poll(
         return Err(RegError::CollinearFiducials);
     }
 
+    // atan2(0, 0) returns zero, but that is a library convention rather than
+    // an inferred rotation. The measured-extent gate above catches a fully
+    // collapsed scan. The interval sums then require at least one exact
+    // cross-covariance component to be separated from zero; if both can be
+    // zero, the orientation objective is unproved and admission fails closed
+    // without an arbitrary epsilon.
+    let finite_observability_enclosures = [s_dot_enclosure, s_cross_enclosure]
+        .into_iter()
+        .all(|enclosure| enclosure.lo().is_finite() && enclosure.hi().is_finite());
+    if !finite_observability_enclosures
+        || (s_dot_enclosure.contains_zero() && s_cross_enclosure.contains_zero())
+    {
+        return Err(RegError::RotationCertificationUnresolved);
+    }
+
     let rotation_rad = s_cross.atan2(s_dot);
     let (s, c) = rotation_rad.sin_cos();
-    let tx = cq.x - (c * cp.x - s * cp.y);
-    let ty = cq.y - (s * cp.x + c * cp.y);
+    let direct_tx = cq.point.x - (c * cp.point.x - s * cp.point.y);
+    let direct_ty = cq.point.y - (s * cp.point.x + c * cp.point.y);
+    let tx = affine_component_with_scaled_fallback(
+        direct_tx,
+        -c,
+        cp.point.x,
+        s,
+        cp.point.y,
+        cq.point.x,
+        "registration.tx",
+    )?;
+    let ty = affine_component_with_scaled_fallback(
+        direct_ty,
+        -s,
+        cp.point.x,
+        -c,
+        cp.point.y,
+        cq.point.y,
+        "registration.ty",
+    )?;
     let reg = Registration::new(rotation_rad, tx, ty, 0.0)?;
-    // residual RMS = the carried-forward registration uncertainty.
-    let mut ss = 0.0;
+    // Residual RMS is retained as a global fit diagnostic. It is not transform
+    // covariance or a pointwise spatial uncertainty bound.
+    let mut residuals = ScaledSumSquares::default();
     operation_checkpoint(REGISTER_RESIDUAL_PHASE, progress, poll)?;
     for (index, fiducial) in fiducials.iter().enumerate() {
         scan_checkpoint(
@@ -571,33 +743,156 @@ fn register_with_poll(
             poll,
         )?;
         let distance = reg.apply(fiducial.design)?.dist(fiducial.measured)?;
-        ss += distance * distance;
-        require_finite("registration residual sum of squares", ss)?;
+        residuals.add(distance)?;
         progress.complete_point()?;
     }
     debug_assert_eq!(progress.completed, plan.total);
     operation_checkpoint(REGISTER_PUBLISH_PHASE, progress, poll)?;
-    Registration::new(rotation_rad, tx, ty, (ss / nf).sqrt())
+    Registration::new(rotation_rad, tx, ty, residuals.root_mean_square(nf)?)
+}
+
+#[derive(Clone, Copy)]
+struct CertifiedCentroid {
+    point: Point2,
+    anchor: Point2,
+    normalized_mean: Point2,
+    normalized_x: Interval,
+    normalized_y: Interval,
+    scale: f64,
+}
+
+fn stable_running_mean(current: f64, value: f64, count: u32) -> f64 {
+    if count == 1 {
+        return value;
+    }
+    let divisor = f64::from(count);
+    let difference = value - current;
+    if difference.is_finite() {
+        current + difference / divisor
+    } else {
+        // A finite subtraction can overflow only for opposite-sign extreme
+        // operands. This convex form keeps both products finite and their sum
+        // cannot overflow because the terms have opposite signs.
+        let next_weight = 1.0 / divisor;
+        current.mul_add(1.0 - next_weight, value * next_weight)
+    }
+}
+
+fn normalized_offset(
+    value: f64,
+    anchor: f64,
+    scale: f64,
+    field: &'static str,
+) -> Result<f64, RegError> {
+    let direct = (value - anchor) / scale;
+    let normalized = if direct.is_finite() {
+        direct
+    } else {
+        // The midpoint anchor normally makes the direct difference finite.
+        // Retain a fail-safe scaled subtraction for the extreme opposite-sign
+        // endpoint where the raw subtraction rounds to infinity.
+        value / scale - anchor / scale
+    };
+    require_finite(field, normalized)?;
+    Ok(normalized)
+}
+
+fn normalized_offset_enclosure(value: f64, anchor: f64, scale: f64) -> Interval {
+    let scale = Interval::point(scale);
+    let direct = (Interval::point(value) - Interval::point(anchor)) / scale;
+    if direct.lo().is_finite() && direct.hi().is_finite() {
+        direct
+    } else {
+        Interval::point(value) / scale - Interval::point(anchor) / scale
+    }
 }
 
 fn centroid(
-    points: impl Iterator<Item = Point2>,
+    fiducials: &[Fiducial],
+    select: impl Fn(&Fiducial) -> Point2 + Copy,
     phase: &'static str,
     progress: &mut WorkProgress,
     poll: &mut impl FnMut(&'static str, u128, u128) -> Result<(), fs_exec::Cancelled>,
-) -> Result<Point2, RegError> {
-    let mut n = 0.0;
-    let (mut sx, mut sy) = (0.0, 0.0);
-    for (index, point) in points.enumerate() {
+) -> Result<CertifiedCentroid, RegError> {
+    let mut count = 0_u32;
+    let (mut mean_x, mut mean_y) = (0.0, 0.0);
+    let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (index, fiducial) in fiducials.iter().enumerate() {
         scan_checkpoint(index, AS_BUILT_POLL_STRIDE_POINTS, phase, *progress, poll)?;
-        sx += point.x;
-        sy += point.y;
-        n += 1.0;
-        require_finite("point centroid x sum", sx)?;
-        require_finite("point centroid y sum", sy)?;
+        let point = select(fiducial);
+        count = count.checked_add(1).ok_or(RegError::WorkPlanOverflow {
+            operation: "register",
+        })?;
+        mean_x = stable_running_mean(mean_x, point.x, count);
+        mean_y = stable_running_mean(mean_y, point.y, count);
+        min_x = min_x.min(point.x);
+        max_x = max_x.max(point.x);
+        min_y = min_y.min(point.y);
+        max_y = max_y.max(point.y);
+        require_finite("point centroid x", mean_x)?;
+        require_finite("point centroid y", mean_y)?;
         progress.complete_point()?;
     }
-    Point2::new(sx / n, sy / n)
+    let anchor = Point2::new(f64::midpoint(min_x, max_x), f64::midpoint(min_y, max_y))?;
+    let scale = (max_x - anchor.x)
+        .abs()
+        .max((min_x - anchor.x).abs())
+        .max((max_y - anchor.y).abs())
+        .max((min_y - anchor.y).abs());
+    require_finite("point-set normalization scale", scale)?;
+    operation_checkpoint(phase, *progress, poll)?;
+
+    let mut normalized_sum_x = 0.0;
+    let mut normalized_sum_y = 0.0;
+    let mut normalized_sum_x_enclosure = Interval::point(0.0);
+    let mut normalized_sum_y_enclosure = Interval::point(0.0);
+    for (index, fiducial) in fiducials.iter().enumerate() {
+        scan_checkpoint(index, AS_BUILT_POLL_STRIDE_POINTS, phase, *progress, poll)?;
+        let point = select(fiducial);
+        if scale > 0.0 {
+            let normalized_x = normalized_offset(point.x, anchor.x, scale, "normalized point x")?;
+            let normalized_y = normalized_offset(point.y, anchor.y, scale, "normalized point y")?;
+            normalized_sum_x += normalized_x;
+            normalized_sum_y += normalized_y;
+            normalized_sum_x_enclosure =
+                normalized_sum_x_enclosure + normalized_offset_enclosure(point.x, anchor.x, scale);
+            normalized_sum_y_enclosure =
+                normalized_sum_y_enclosure + normalized_offset_enclosure(point.y, anchor.y, scale);
+            require_finite("normalized centroid x sum", normalized_sum_x)?;
+            require_finite("normalized centroid y sum", normalized_sum_y)?;
+        }
+        progress.complete_point()?;
+    }
+    let divisor = f64::from(count);
+    let normalized_mean = if scale > 0.0 {
+        Point2::new(normalized_sum_x / divisor, normalized_sum_y / divisor)?
+    } else {
+        Point2::new(0.0, 0.0)?
+    };
+    let interval_divisor = Interval::point(divisor);
+    let reconstruct = |anchor: f64, normalized: f64, fallback: f64, lo: f64, hi: f64| {
+        let anchored = scale.mul_add(normalized, anchor);
+        if anchored.is_finite() {
+            anchored.clamp(lo, hi)
+        } else {
+            // The stable online mean is an independently finite convex estimate
+            // for the rare case where rounded reconstruction crosses MAX.
+            fallback
+        }
+    };
+    let point = Point2::new(
+        reconstruct(anchor.x, normalized_mean.x, mean_x, min_x, max_x),
+        reconstruct(anchor.y, normalized_mean.y, mean_y, min_y, max_y),
+    )?;
+    Ok(CertifiedCentroid {
+        point,
+        anchor,
+        normalized_mean,
+        normalized_x: normalized_sum_x_enclosure / interval_divisor,
+        normalized_y: normalized_sum_y_enclosure / interval_divisor,
+        scale,
+    })
 }
 
 /// The R8 residual-proxy screen: the global registration fit residual is below
@@ -1005,7 +1300,7 @@ fn estimator_identity(
     }
     let preimage_hash = hasher.finalize();
     Ok(format!(
-        "asbuilt-diff-v3:{}",
+        "asbuilt-diff-v4:{}",
         fs_blake3::hash_domain(AS_BUILT_ESTIMATOR_DOMAIN, preimage_hash.as_bytes())
     ))
 }
@@ -1013,6 +1308,15 @@ fn estimator_identity(
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
+
+    #[test]
+    fn g0_scaled_residual_rms_avoids_intermediate_square_overflow() {
+        let mut residuals = ScaledSumSquares::default();
+        residuals.add(f64::MAX).unwrap();
+        residuals.add(f64::MAX).unwrap();
+        let rms = residuals.root_mean_square(2.0).unwrap();
+        assert_eq!(rms.to_bits(), f64::MAX.to_bits());
+    }
 
     fn points(count: usize) -> Vec<Point2> {
         (0..count)
@@ -1059,9 +1363,9 @@ mod cancellation_tests {
         assert_eq!(
             boundary_error,
             RegError::Cancelled {
-                phase: REGISTER_MEASURED_CENTROID_PHASE,
+                phase: REGISTER_DESIGN_CENTROID_PHASE,
                 completed_work: 256,
-                planned_work: 1_024,
+                planned_work: 1_536,
             }
         );
 
@@ -1079,7 +1383,78 @@ mod cancellation_tests {
             RegError::Cancelled {
                 phase: REGISTER_DESIGN_CENTROID_PHASE,
                 completed_work: 256,
-                planned_work: 1_028,
+                planned_work: 1_542,
+            }
+        );
+
+        let second_pass_error = register_with_poll(&plus_one, &mut |phase, completed, _| {
+            let second_pass_stride =
+                u128::try_from(plus_one.len() + AS_BUILT_POLL_STRIDE_POINTS).unwrap();
+            if phase == REGISTER_DESIGN_CENTROID_PHASE && completed == second_pass_stride {
+                Err(fs_exec::Cancelled)
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("the anchored-normalized pass must poll at its own stride boundary");
+        assert_eq!(
+            second_pass_error,
+            RegError::Cancelled {
+                phase: REGISTER_DESIGN_CENTROID_PHASE,
+                completed_work: 513,
+                planned_work: 1_542,
+            }
+        );
+    }
+
+    #[test]
+    fn g4_hostile_maximum_shapes_preflight_before_initial_cancellation() {
+        let point = Point2::new(0.0, 0.0).expect("finite hostile-maximum point");
+        let maximum_fiducials = vec![Fiducial::new(point, point); MAX_AS_BUILT_POINTS];
+        let registration_error = register_with_poll(
+            &maximum_fiducials,
+            &mut |phase, completed_work, planned_work| {
+                assert_eq!(phase, REGISTER_INITIAL_PHASE);
+                assert_eq!(completed_work, 0);
+                assert_eq!(planned_work, 6_000_000);
+                Err(fs_exec::Cancelled)
+            },
+        )
+        .expect_err("maximum registration must remain cancellable before scalar work");
+        assert_eq!(
+            registration_error,
+            RegError::Cancelled {
+                phase: REGISTER_INITIAL_PHASE,
+                completed_work: 0,
+                planned_work: 6_000_000,
+            }
+        );
+
+        let maximum_points = vec![point; MAX_AS_BUILT_POINTS];
+        let registration = Registration::new(0.0, 0.0, 0.0, 0.0).unwrap();
+        let diff_error = as_built_diff_with_poll(
+            &registration,
+            &maximum_points,
+            &maximum_points,
+            1.0,
+            0.1,
+            "hostile-maximum-cancel-fixture",
+            execution(),
+            CURRENT_POLL_POLICY,
+            &mut |phase, completed_work, planned_work| {
+                assert_eq!(phase, DIFF_INITIAL_PHASE);
+                assert_eq!(completed_work, 0);
+                assert_eq!(planned_work, 3_000_000);
+                Err(fs_exec::Cancelled)
+            },
+        )
+        .expect_err("maximum diff must remain cancellable before allocation or scalar work");
+        assert_eq!(
+            diff_error,
+            RegError::Cancelled {
+                phase: DIFF_INITIAL_PHASE,
+                completed_work: 0,
+                planned_work: 3_000_000,
             }
         );
     }
@@ -1113,8 +1488,8 @@ mod cancellation_tests {
             registration_final_error,
             RegError::Cancelled {
                 phase: REGISTER_PUBLISH_PHASE,
-                completed_work: 12,
-                planned_work: 12,
+                completed_work: 18,
+                planned_work: 18,
             }
         );
 
@@ -1215,7 +1590,13 @@ mod cancellation_tests {
         assert_ne!(identity(&baseline), identity(&next_stride));
         assert_eq!(baseline.deviations, next_version.deviations);
         assert_eq!(baseline.deviations, next_stride.deviations);
-        assert_eq!(baseline.max_deviation, next_version.max_deviation);
-        assert_eq!(baseline.max_deviation, next_stride.max_deviation);
+        assert_eq!(
+            baseline.max_deviation.to_bits(),
+            next_version.max_deviation.to_bits()
+        );
+        assert_eq!(
+            baseline.max_deviation.to_bits(),
+            next_stride.max_deviation.to_bits()
+        );
     }
 }

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "As-built ingestion: reality as another chart (addendum Proposal 11). Registers finite scan data to the design by a closed-form rigid fit, carries registration error forward, applies the R8 signal-vs-noise gate, and emits an estimated as-built candidate pending authenticated calibration authority."
+description = "As-built ingestion: reality as another chart (addendum Proposal 11). Registers finite scan data to the design by a closed-form rigid fit, retains global fit RMS for advisory screens without calling it transform uncertainty, applies the R8 signal-vs-noise gate, and emits an estimated as-built candidate pending authenticated calibration authority."
 
 [package.metadata.frankensim]
 layer = "L2"
@@ -14,6 +14,7 @@ layer = "L2"
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
+fs-ivl = { path = "../fs-ivl" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
