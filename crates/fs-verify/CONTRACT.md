@@ -72,6 +72,22 @@ quadrature.
   exact antiderivative coefficients. The bound `‖σ − u_h′‖` is then
   interval-evaluated. Accept ⟺ `bound.hi ≤ tolerance`; an accept
   carries `Color::Verified`; a reject carries no color.
+- `VerifierWorkPlan::for_inputs` is the constant-time public shape preflight.
+  For mesh nodes `n`, cells `c=n-1`, and canonical coefficient counts `u`, `f`,
+  and `a`, it charges validation `3+2n+c+3u+3f+2a`, tightness `c`,
+  equilibrated construction `c`, flux hashing `3+f+a`, finalization `1`, and
+  their checked `u128` sum. Public accessors and `identity_fields()` expose
+  those six counts in stable phase order. Plan version is
+  `VERIFIER_WORK_PLAN_VERSION = 1`.
+- `estimator::verify_with_checkpoint` is the generic cancellation/composition
+  seam. Its callback receives immutable invocation-global `VerifierProgress`
+  at every phase entry, each nonzero global multiple of 256 logical work units,
+  a structured-refusal flush, and the final publication gate. Poll schedule
+  version is `VERIFIER_POLL_POLICY_VERSION = 1` and stride is
+  `VERIFIER_POLL_STRIDE_WORK_UNITS = 256`. A callback error is returned
+  unchanged, wins over a pending scientific refusal, and prevents report
+  publication. Shape refusal happens before the driver exists and invokes no
+  callback. `verify` is the bitwise-equivalent infallible no-op wrapper.
 - Public admission precedes indexing or arithmetic. Meshes contain
   `2..=1_000_000` finite, strictly increasing nodes with bit-canonical
   `+0.0` and `1.0` endpoints. Candidates have exactly the mesh length,
@@ -254,6 +270,10 @@ quadrature.
     while an outright winner preserves every earlier rejection in
     drift telemetry (econ-009). Drift/zoo key counts, counters, rolling
     savings windows, and policy inputs fail closed at fixed bounds.
+20. G4 verifier traces lock exact phase entries, invocation-global 256-unit
+    boundaries, structured-refusal flushes, callback-error precedence, and the
+    distinct final publication callback. Sparse-callback execution is bitwise
+    equivalent to the legacy convenience wrapper.
 
 ## Error model
 
@@ -264,6 +284,11 @@ never an accept. A well-formed finite bound above tolerance is a
 distinct, ordinary REJECT. Non-authority numerical APIs return
 `Fem1dError`; finite Newton nonconvergence remains explicit in the
 low-level report and is promoted to an error by every savings caller.
+`verify_with_checkpoint` adds a separate execution-control result layer:
+callback errors are returned unchanged and no report is published. Shape and
+scientific failures remain fail-closed `VerifierReport` refusals when no
+callback error intervenes; work-plan overflow or an executed/preflighted-count
+mismatch is a structured verifier refusal.
 
 ## Determinism class
 
@@ -275,9 +300,13 @@ deterministic-reduction contract when the tile-kernel form lands
 
 ## Cancellation behavior
 
-v0 calls are synchronous and bounded by mesh, iteration, and work
-caps, but they do not yet poll cancellation inside their loops. The
-tiled/parallel form inherits fs-exec's checkpoint discipline.
+The equilibrated verifier is synchronous and bounded by mesh, coefficient, and
+checked work caps. `verify_with_checkpoint` exposes bounded logical progress to
+a caller-provided callback without depending directly on `fs-exec`; a parent
+may map callback invocations to `Cx::checkpoint`, another cancellation token,
+or retained trace collection. Callback failure prevents publication. Other
+legacy fem1d/zoo/economics loops do not thereby gain `Cx` cancellation; their
+existing synchronous resource caps remain their boundary.
 
 ## Unsafe boundary
 
@@ -302,6 +331,9 @@ root `0x959a77719f308c27` at 281 bytes and problem root
 `0x7148ea04d6605664` at 490 bytes, and refuses stale/future receipts. JSON-line verdicts,
 seeded LCG randomness, fs-obs events for the effectivity table and
 ledger rows. Any reimplementation must pass the suite unchanged.
+The G4 additions specifically cover exact work-plan formulas, sparse callback
+traces, legacy equivalence, invocation-global boundaries, refusal progress,
+callback errors, and publication distinct from a boundary at the same count.
 
 ## No-claim boundaries
 
@@ -338,3 +370,12 @@ ledger rows. Any reimplementation must pass the suite unchanged.
 - The asupersync speculative RACE (proposer vs target, loser drained
   request→drain→finalize at a tile boundary, zero leaks) is the
   concurrent form — v0 speculates sequentially before the solve.
+- Logical work and the 256-unit callback stride are stable accounting
+  semantics, not instruction, wall-clock, memory, deadline, drain-latency,
+  pause/resume, or 200-microsecond responsiveness claims. The verifier report
+  itself does not bind work-plan/poll-policy versions or stride; downstream
+  evidence that claims this execution policy must bind the plan fields and all
+  three public policy constants explicitly.
+- The generic callback seam is not itself `Cx` integration and does not prove
+  request→drain→finalize behavior, leak freedom, or cross-ISA/thread-count bit
+  stability for a surrounding async or future parallel scope.

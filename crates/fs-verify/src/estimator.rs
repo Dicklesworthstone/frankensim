@@ -79,12 +79,12 @@ pub struct VerifierProgress {
 /// by one such micro-tile but never overstates completed work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VerifierWorkPlan {
-    validation_work_units: u128,
-    tightness_work_units: u128,
-    equilibrated_work_units: u128,
-    hash_work_units: u128,
-    finalization_work_units: u128,
-    planned_work_units: u128,
+    validation: u128,
+    tightness: u128,
+    equilibrated: u128,
+    hash: u128,
+    finalization: u128,
+    total: u128,
 }
 
 impl VerifierWorkPlan {
@@ -159,61 +159,61 @@ impl VerifierWorkPlan {
             .and_then(|work| work.checked_add(finalization_work_units))
             .ok_or(VerifierRefusal::WorkPlanOverflow)?;
         Ok(Self {
-            validation_work_units,
-            tightness_work_units,
-            equilibrated_work_units,
-            hash_work_units,
-            finalization_work_units,
-            planned_work_units,
+            validation: validation_work_units,
+            tightness: tightness_work_units,
+            equilibrated: equilibrated_work_units,
+            hash: hash_work_units,
+            finalization: finalization_work_units,
+            total: planned_work_units,
         })
     }
 
     /// Validation work in the plan.
     #[must_use]
     pub const fn validation_work_units(self) -> u128 {
-        self.validation_work_units
+        self.validation
     }
 
     /// Tightness-optimizer work in the plan.
     #[must_use]
     pub const fn tightness_work_units(self) -> u128 {
-        self.tightness_work_units
+        self.tightness
     }
 
     /// Equilibrated-bound work in the plan.
     #[must_use]
     pub const fn equilibrated_work_units(self) -> u128 {
-        self.equilibrated_work_units
+        self.equilibrated
     }
 
     /// Flux-identity work in the plan.
     #[must_use]
     pub const fn hash_work_units(self) -> u128 {
-        self.hash_work_units
+        self.hash
     }
 
     /// Final report/publication work in the plan.
     #[must_use]
     pub const fn finalization_work_units(self) -> u128 {
-        self.finalization_work_units
+        self.finalization
     }
 
     /// Total work in the plan.
     #[must_use]
     pub const fn planned_work_units(self) -> u128 {
-        self.planned_work_units
+        self.total
     }
 
     /// Stable phase counts used by downstream evidence identities.
     #[must_use]
     pub const fn identity_fields(self) -> [u128; 6] {
         [
-            self.validation_work_units,
-            self.tightness_work_units,
-            self.equilibrated_work_units,
-            self.hash_work_units,
-            self.finalization_work_units,
-            self.planned_work_units,
+            self.validation,
+            self.tightness,
+            self.equilibrated,
+            self.hash,
+            self.finalization,
+            self.total,
         ]
     }
 }
@@ -481,7 +481,7 @@ impl<F> VerifierDriver<F> {
             kind,
             phase: self.phase,
             completed_work_units: self.completed_work_units,
-            planned_work_units: self.plan.planned_work_units,
+            planned_work_units: self.plan.total,
         })
     }
 
@@ -501,7 +501,7 @@ impl<F> VerifierDriver<F> {
         self.completed_work_units = self
             .completed_work_units
             .checked_add(1)
-            .filter(|completed| *completed <= self.plan.planned_work_units)
+            .filter(|completed| *completed <= self.plan.total)
             .ok_or(VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
         if self
             .completed_work_units
@@ -914,15 +914,15 @@ where
     driver.enter(VerifierPhase::Validation)?;
     let (canonical_f, canonical_big_f) =
         validate_inputs_with_checkpoint(problem, candidate, tolerance, driver)?;
-    driver.require_completed(driver.plan.validation_work_units)?;
+    driver.require_completed(driver.plan.validation)?;
 
     driver.enter(VerifierPhase::Tightness)?;
     // Any finite c is sound. This rounded optimizer affects tightness only.
     let c_star = tightness_constant_with_checkpoint(problem, candidate, &canonical_big_f, driver)?;
     let after_tightness = driver
         .plan
-        .validation_work_units
-        .checked_add(driver.plan.tightness_work_units)
+        .validation
+        .checked_add(driver.plan.tightness)
         .ok_or(VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
     driver.require_completed(after_tightness)?;
 
@@ -930,14 +930,14 @@ where
     let bound =
         equilibrated_bound_with_checkpoint(problem, candidate, &canonical_f, c_star, driver)?;
     let after_equilibrated = after_tightness
-        .checked_add(driver.plan.equilibrated_work_units)
+        .checked_add(driver.plan.equilibrated)
         .ok_or(VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
     driver.require_completed(after_equilibrated)?;
 
     driver.enter(VerifierPhase::Hash)?;
     let flux_hash = flux_hash_with_checkpoint(c_star, &canonical_f, &canonical_big_f, driver)?;
     let after_hash = after_equilibrated
-        .checked_add(driver.plan.hash_work_units)
+        .checked_add(driver.plan.hash)
         .ok_or(VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
     driver.require_completed(after_hash)?;
 
@@ -961,7 +961,7 @@ where
         refusal: None,
     };
     driver.complete_one()?;
-    driver.require_completed(driver.plan.planned_work_units)?;
+    driver.require_completed(driver.plan.total)?;
     driver.publication()?;
     Ok(report)
 }

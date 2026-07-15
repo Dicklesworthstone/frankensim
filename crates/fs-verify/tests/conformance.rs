@@ -407,7 +407,7 @@ fn g4_verifier_work_boundaries_are_invocation_global_and_deterministic() {
 #[test]
 fn g4_verifier_publication_is_distinct_when_final_work_hits_a_boundary() {
     #[allow(clippy::cast_precision_loss)]
-    let mesh: Vec<f64> = (0..149).map(|index| index as f64 / 148.0).collect();
+    let mesh: Vec<f64> = (0..149).map(|index| f64::from(index) / 148.0).collect();
     let p = problem(
         "checkpoint-publication-boundary",
         poly(vec![0.0, 1.0, -1.0]),
