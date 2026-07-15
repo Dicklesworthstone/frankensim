@@ -8,9 +8,11 @@
 //! (deterministic LCG starts). Feasible ⟺ the elastic optimum's total
 //! violation is ~0. The unsat core starts from the elastic support
 //! (violated constraints at the optimum) and is refined by the
-//! DELETION FILTER, so the result is MINIMAL: dropping ANY member
-//! restores feasibility — a property the conformance battery checks
-//! against brute-force enumeration.
+//! DELETION FILTER. The support is verified jointly infeasible before
+//! filtering; otherwise the seed expands to the full, already-proven
+//! infeasible set. The result is MINIMAL: dropping ANY member restores
+//! feasibility — a property the conformance battery checks against
+//! brute-force enumeration.
 
 use crate::{ConError, ConstraintSpec, scalar_at};
 use fs_exec::Cx;
@@ -287,6 +289,19 @@ fn feasible_fraction(
     Ok(f64::from(hits) / f64::from(samples))
 }
 
+fn elastic_solve_subset(
+    problem: &Problem,
+    specs: &[ConstraintSpec],
+    domain: &DomainBox,
+    members: &[usize],
+    cx: &Cx<'_>,
+) -> Result<ElasticReport, ConError> {
+    let skip: Vec<usize> = (0..specs.len())
+        .filter(|index| !members.contains(index))
+        .collect();
+    elastic_solve(problem, specs, domain, &skip, cx)
+}
+
 /// Diagnose a constraint set over a domain: feasibility, MINIMAL unsat
 /// core (deletion-filtered), and ranked repairs with feasibility
 /// estimates.
@@ -309,7 +324,11 @@ pub fn diagnose_infeasibility(
             elastic,
         });
     }
-    // Candidate core: the elastic support (violated at the optimum).
+    // Candidate core: the elastic support (violated at the optimum). A
+    // support identifies the sum-optimum's active trade-off, but need not be
+    // jointly infeasible by itself. Verify it before deletion filtering and
+    // deterministically expand to the full, already-proven infeasible set when
+    // the support is feasible.
     let mut core: Vec<usize> = elastic
         .violations
         .iter()
@@ -317,22 +336,30 @@ pub fn diagnose_infeasibility(
         .filter(|&(_, &v)| v > FEAS_TOL)
         .map(|(i, _)| i)
         .collect();
-    // Deletion filter for MINIMALITY: a member stays only if the rest
-    // of the core remains infeasible WITH that member removed (against
-    // the full non-core context, which is feasible by construction of
-    // the support — we test against all constraints minus the member).
+    let support = elastic_solve_subset(problem, specs, domain, &core, cx)?;
+    if support.total_violation <= FEAS_TOL {
+        core = (0..specs.len()).collect();
+    }
+
+    // Deletion filter for MINIMALITY. The current core is jointly infeasible
+    // on entry. A removal is installed only when the resulting subset is also
+    // jointly infeasible, so that invariant is preserved at every step.
     let mut k = 0;
     while k < core.len() {
-        let member = core[k];
-        let mut skip: Vec<usize> = (0..specs.len()).filter(|i| !core.contains(i)).collect();
-        skip.push(member);
-        let without = elastic_solve(problem, specs, domain, &skip, cx)?;
+        let mut without_members = core.clone();
+        without_members.remove(k);
+        let without = elastic_solve_subset(problem, specs, domain, &without_members, cx)?;
         if without.total_violation <= FEAS_TOL {
             k += 1; // necessary: dropping it restores feasibility
         } else {
-            core.remove(k); // redundant: still infeasible without it
+            core = without_members; // redundant: still infeasible without it
         }
     }
+    let verified_core = elastic_solve_subset(problem, specs, domain, &core, cx)?;
+    assert!(
+        verified_core.total_violation > FEAS_TOL,
+        "deletion filtering must not publish a jointly feasible unsat core"
+    );
     // Repairs: relax each core member by graded slacks, or drop it if
     // soft; estimate feasibility by Monte-Carlo volume; rank.
     let mut repairs = Vec::new();

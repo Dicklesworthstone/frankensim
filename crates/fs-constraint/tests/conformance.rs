@@ -490,6 +490,72 @@ fn fscon_005_unsat_cores() {
     });
 }
 
+/// Regression for frankensim-js9b: the constraints violated at the elastic
+/// sum-optimum can be jointly feasible. The diagnosis must expand that seed
+/// before deletion filtering rather than mislabeling the feasible support as
+/// an unsat core.
+#[test]
+fn feasible_elastic_support_is_expanded_before_deletion_filtering() {
+    with_cx(|cx| {
+        // A: x >= 1, B: y >= 1, C: x + y <= 1. A and B are jointly
+        // feasible at (1, 1). Scaling C by two makes the elastic sum attain
+        // its minimum at (0.5, 0.5), where A and B are violated while C is
+        // satisfied, so the raw support is the feasible set {A, B}.
+        let host = linear_host(&[(-1.0, 0.0, -1.0), (0.0, -1.0, -1.0), (2.0, 2.0, 2.0)]);
+        let specs: Vec<ConstraintSpec> = ["floor-x", "floor-y", "sum-cap"]
+            .iter()
+            .zip(&host.nodes)
+            .map(|(name, &node)| hard(name, node))
+            .collect();
+        let domain = DomainBox {
+            ranges: vec![(0.0, 1.0), (0.0, 1.0)],
+        };
+        let first = diagnose_infeasibility(&host.problem, &specs, &domain, cx).expect("first");
+        let support: Vec<usize> = first
+            .elastic
+            .violations
+            .iter()
+            .enumerate()
+            .filter(|&(_, &violation)| violation > 1e-6)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            support,
+            vec![0, 1],
+            "the fixture must exercise the feasible elastic-support path"
+        );
+        assert!(
+            grid_feasible(&host.problem, &specs, &support, &domain),
+            "the deliberately feasible elastic support is the regression precondition"
+        );
+        let replay = diagnose_infeasibility(&host.problem, &specs, &domain, cx).expect("replay");
+        let jointly_infeasible = !grid_feasible(&host.problem, &specs, &first.core, &domain);
+        let deletions_feasible = first.core.iter().copied().all(|drop| {
+            let rest: Vec<usize> = first
+                .core
+                .iter()
+                .copied()
+                .filter(|&index| index != drop)
+                .collect();
+            grid_feasible(&host.problem, &specs, &rest, &domain)
+        });
+        let deterministic = first.core == replay.core;
+
+        verdict(
+            "fscon-005-feasible-support",
+            !first.feasible
+                && first.core == vec![0, 1, 2]
+                && jointly_infeasible
+                && deletions_feasible
+                && deterministic,
+            &format!(
+                "the feasible elastic support {{floor-x, floor-y}} expands to the deterministic minimal jointly-infeasible core {:?}; every deletion is feasible",
+                first.core
+            ),
+        );
+    });
+}
+
 /// fscon-006 — the worked repair example: ranked repairs whose
 /// feasibility estimates are CALIBRATED against enumeration, and the
 /// full diagnosis payload ships through fs-obs.
