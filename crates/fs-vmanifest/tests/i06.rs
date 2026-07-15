@@ -499,7 +499,7 @@ fn i06_maximal_causal_completeness_and_decision_ratchets_mint_no_prose_authority
         causal
             .hypotheses
             .iter()
-            .any(|h| h.contains("Graph discovery output"))
+            .any(|h| h.contains("graph discovery output"))
     );
     assert!(causal.no_claim.contains("does not validate that graph"));
 

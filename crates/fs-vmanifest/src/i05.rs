@@ -608,9 +608,10 @@ LEAF_REQUIREMENT=every obligation references this policy fixture, declares all n
             source: FixtureSource::AuthoredSpec {
                 spec: "I05_FIXTURE_V1 CORE HOLDOUT multi-clock HIL campaigns: independent host/DAQ/bus/device \
                        oscillators with offset, affine drift, piecewise thermal drift, tick wrap/reset, timestamp \
-                       before/after transport, jitter, delay, drop, duplicate, reorder and burst catch-up. Logic- \
-                       analyzer edges provide external intervals. Includes adversarial trace whose pointwise-best \
-                       alignment passes but whole-interval directed refinement fails. Indices 69632..=73727.",
+                       before/after transport, jitter, delay, drop, duplicate, reorder and burst catch-up. \
+                       Logic-analyzer edges provide external intervals. Includes adversarial trace whose \
+                       pointwise-best alignment passes but whole-interval directed refinement fails. Indices \
+                       69632..=73727; one I05.G3 consumer.",
             },
             partition: Partition::HeldOut,
         },
@@ -659,8 +660,9 @@ LEAF_REQUIREMENT=every obligation references this policy fixture, declares all n
                 spec: "I05_EXHAUSTIVENESS_CARD_V1 TARGET. Intended successor covers exact binary x finite initial \
                        architectural/microarchitectural/input state x bounded interrupt/DMA schedules, applies the \
                        executable transition/cycle-cost relation, and returns maximum cost plus argmax trace. REQUIRED \
-                       MACHINE ARTIFACTS before search: complete grammar and canonical encoding, validity/initial/ \
-                       transition/cost predicates, unsupported-opcode closure, total enumeration or sound symbolic \
+                       MACHINE ARTIFACTS before search: complete grammar and canonical encoding, \
+                       validity/initial/transition/cost predicates, unsupported-opcode closure, total enumeration \
+                       or sound symbolic \
                        coverage and exclusion order, symmetry quotient with proof obligations, rank/unrank/sharding, \
                        independent decoder, source digests, preflight and Merkle completeness root. This prose card \
                        grants no exhaustive or silicon-WCET authority.",
@@ -808,7 +810,7 @@ fn i05_obligations() -> Vec<ObligationRow> {
                 CAMPAIGN_POLICY_FIXTURE,
                 "i05-synthetic-target-profiles",
                 "i05-timing-task-graphs",
-                "i05-compositional-timing-max-holdout",
+                "i05-timing-adversaries-core-holdout",
             ],
             g3_relations: &[
                 "cycle-to-second rescaling follows only the frozen clock interval and preserves kind",
@@ -956,7 +958,7 @@ fn i05_obligations() -> Vec<ObligationRow> {
                 CAMPAIGN_POLICY_FIXTURE,
                 "i05-synthetic-target-profiles",
                 "i05-timing-task-graphs",
-                "i05-timing-adversaries-core-holdout",
+                "i05-compositional-timing-max-holdout",
             ],
             g3_relations: &[
                 "independent schedule enumeration falsifies but never manufactures an upper bound",
@@ -1029,8 +1031,8 @@ fn i05_obligations() -> Vec<ObligationRow> {
                           terminal state",
             g5_matrix: "proof/search shards {1,2,7,31} x workers {1,2,7} x frontier orders {lex,reverse,permuted} x \
                         deterministic mode on identical toolchain/target-semantics fingerprint; AST bytes, premise/axiom \
-                        closure, kernel result, explored/valid/excluded counts, roots, exact maximum/argmax, mutant verdicts, \
-                        terminal states and receipts match bitwise",
+                        closure, kernel result, explored/valid/excluded counts, completeness roots, exact \
+                        maximum/argmax, mutant verdicts, terminal states and receipts match bitwise",
             entry_point: "scripts/e2e/leapfrog/i05_maximal_certifiers.sh",
             tier: CampaignTier::Max,
             dsr_lane: "dsr quality --tool frankensim (i05-maximal-certifiers isolated lane)",

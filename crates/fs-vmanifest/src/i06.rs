@@ -111,8 +111,9 @@ fn i06_claims() -> Vec<ClaimSpec> {
                         strain/shear rate, humidity, surface/process/history state and validity domain",
             hypotheses: &[
                 "property registry distinguishes electrical/thermal conductivity, intrinsic permeability/gas \
-                 permeability/permeance/diffusivity, magnetic moment/magnetization/permeability/coercivity, dynamic/ \
-                 kinematic/non-Newtonian viscosity, latent heat per mass/volume, density, ductility and hardness scale",
+                 permeability/permeance/diffusivity, magnetic moment/magnetization/permeability/coercivity, \
+                 dynamic/kinematic/non-Newtonian viscosity, latent heat per mass/volume, density, ductility and \
+                 hardness scale",
                 "surface observations distinguish roughness/contamination and advancing/receding/static contact angle; \
                  anisotropic tensors retain frame, symmetry and component covariance",
                 "missing, below/above-detection, interval-censored, qualitative and ordinal values are not coerced to \
@@ -506,8 +507,8 @@ LEAF_REQUIREMENT=every obligation references this policy fixture,all nine unit c
                        magnetization, permeability, remanence and coercivity; elastic/plastic/creep/fatigue/fracture \
                        parameters; tensile elongation/ductility; Rockwell/Vickers/Brinell hardness as distinct \
                        method-qualified scales; dynamic/kinematic and shear-rate-dependent viscosity; intrinsic porous \
-                       permeability, gas permeability, permeance, diffusivity; vapor pressure; latent heat per mass/ \
-                       volume; surface energy and advancing/receding/static contact angle. Tensor/frame, temperature, \
+                       permeability, gas permeability, permeance, diffusivity; vapor pressure; latent heat per \
+                       mass/volume; surface energy and advancing/receding/static contact angle. Tensor/frame, temperature, \
                        pressure, frequency, rate, humidity, roughness, contamination, process/history domains explicit. \
                        Exact-rational affine/multiplicative conversions plus forbidden cross-kind conversion corpus.",
             },

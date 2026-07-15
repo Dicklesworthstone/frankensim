@@ -2257,7 +2257,7 @@ fn i03_holdouts_are_stage_separated_and_statistical_holdout_is_not_publicly_rege
                 "the governed statistical holdout must not be publicly regenerable"
             );
             for required in [
-                "candidate/model/toolchain",
+                "Candidate/model/toolchain",
                 "{i03-stat-custodian-a,i03-stat-custodian-b,i03-stat-custodian-c}",
                 "all-three-fixed phase receipt",
                 "Ed25519 uses RFC8032 PureEdDSA",
