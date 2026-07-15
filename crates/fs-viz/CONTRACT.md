@@ -16,6 +16,14 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
   (number of negative Hessian eigenvalues) of a critical point.
 - `Grid2::from_fn(nx, ny, lo, hi, f)` — a scalar field on a regular grid; `at`,
   `point`, `isocontour_crossings(iso)` (linearly-interpolated edge crossings).
+- `Grid3::from_fn(dimensions, lower, upper, node_limit, field)` and
+  `Grid3::from_values(...)` — owned finite scalar samples with x-fastest
+  addressing, strict world bounds, and an explicit node budget.
+- `Grid3::isosurface(iso, triangle_limit) -> Result<IsoMesh3, IsoSurfaceError>`
+  — deterministic six-tetrahedra-per-cell extraction with canonical global
+  edge/node vertex sharing, outward winding from `< iso` toward `>= iso`, and
+  an explicit all-or-error triangle budget. `IsoMesh3::into_parts` yields the
+  renderer-ready indexed arrays; `surface_area` measures the PL surface.
 
 ## Invariants
 
@@ -26,16 +34,25 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
   degenerate.
 - `isocontour_crossings` of a circle SDF all lie on the circle (to grid
   resolution); a level set outside the field's range yields no crossings.
+- A planar `Grid3` level set has exact area and increasing-field winding.
+  Sphere area error decreases under refinement, and gyroid extraction is
+  indexed, centrally symmetric, and exactly replay-deterministic.
 - All primitives are deterministic.
 
 ## Error model
 
-Total functions; `Grid2::from_fn` panics only on a degenerate grid (`< 2` points
-per axis).
+`Grid2::from_fn` panics only on a degenerate grid (`< 2` points per axis).
+`Grid3` construction is fallible and refuses degenerate/overflowing dimensions,
+invalid or non-finite bounds/samples, length mismatch, node-budget excess, and
+allocation refusal. Isosurface extraction refuses non-finite levels, a zero or
+exceeded triangle budget, `u32` index exhaustion, and non-finite geometry. It
+never returns a silently truncated mesh.
 
 ## Determinism class
 
 Fully deterministic: RK4, classification, and contouring are pure functions.
+Grid3 sampling is z/y/x with x-fastest storage; isosurface traversal is
+z/y/x/cube-tetrahedron order and uses an ordered edge cache.
 
 ## Cancellation behavior
 
@@ -52,21 +69,28 @@ None.
 
 ## Conformance tests
 
-`tests/viz.rs` (6 cases): a rotation field streams along a circle; a saddle
+`tests/viz.rs`: a rotation field streams along a circle; a saddle
 field conserves the hyperbola invariant; Hessian classification recovers the
 Morse type; a circle-SDF isocontour lies on the circle (+ empty out-of-range);
-grid sampling/addressing; determinism.
+2-D grid sampling/addressing; determinism; exact oriented plane extraction;
+sphere-area refinement; gyroid symmetry/indexing/replay; and fail-before-work
+Grid3 budget/non-finite admission.
 
 ## No-claim boundaries
 
 - v0 is the ANALYTICALLY-VERIFIABLE core: RK4 streamlines, Morse critical-point
-  classification, and the isocontour edge-crossing pass. The fuller deliverable
-  — DUAL contouring with sharp-feature (QEF) vertex placement into a mesh,
-  DIRECT VOLUME RENDERING with preintegrated transfer functions, LINE-INTEGRAL
-  CONVOLUTION, tensor/stress-ellipsoid glyphs, and full MORSE–SMALE complexes /
-  Reeb graphs with persistence thresholding — is staged.
-- The contouring shares its edge-crossing pass with the SDF→mesh converter
-  (one contouring implementation); the 3-D dual-contouring surface + Hermite
-  normals are downstream.
+  classification, 2-D edge crossings, and regular-grid marching tetrahedra.
+  DUAL contouring with sharp-feature QEF placement, DIRECT VOLUME RENDERING
+  with preintegrated transfer functions, LINE-INTEGRAL CONVOLUTION,
+  tensor/stress-ellipsoid glyphs, and full MORSE–SMALE complexes / Reeb graphs
+  with persistence thresholding are staged.
+- `IsoMesh3` is the piecewise-linear isosurface of trilinearly sampled node
+  data under a fixed tetrahedralization. It does not claim topology recovery
+  below grid resolution, sharp-feature preservation, Hermite normals,
+  watertightness when the surface intersects the domain boundary, or an error
+  certificate against an unsampled continuum field.
+- The API does not read ledgers or depend on L6. A higher-layer orchestrator
+  must validate/version a scalar-field artifact, call this L5 primitive, and
+  bind source/output content hashes into lineage.
 - Adaptive/embedded-pair integration (fs-time steppers) and Qty-labeled
   perceptually-uniform colormaps are staged with the rendering integration.

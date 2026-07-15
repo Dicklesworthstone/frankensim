@@ -14,8 +14,14 @@
 //! - [`Grid2::isocontour_crossings`] — the isocontour edge crossings of a scalar
 //!   grid (the one contouring implementation), which on a circle SDF all lie on
 //!   the circle.
+//! - [`Grid3::isosurface`] — bounded deterministic marching tetrahedra from an
+//!   owned x-fastest scalar grid to a renderer-ready indexed triangle mesh.
 //!
 //! Deterministic; no dependencies.
+
+mod isosurface;
+
+pub use isosurface::{Grid3, Grid3Error, IsoMesh3, IsoSurfaceError, Vec3};
 
 /// A 2-D point / vector.
 pub type Vec2 = [f64; 2];
