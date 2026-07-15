@@ -19,6 +19,10 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
   randomized NLA summaries.
 - `deep`, `geom`, `pde`, `dynamics`, `certified`, and `campaigns`
   modules re-export broader browser demos over upper-stack crates.
+- `geom::marching_cubes` retains its historical Three.js triangle/normal wire
+  layout but samples the selected analytic demo field into `fs-viz::Grid3` and
+  delegates all polygonization, indexing, budget, and winding semantics to the
+  shared native marching-tetrahedra implementation.
 - The `#[wasm_bindgen]` JavaScript boundary is compiled only for
   `wasm32`; native builds exercise the same pure Rust functions.
 
@@ -48,6 +52,9 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    then outward-divides verified endpoints by the physical yield stress. The
    four claim fields are appended to the layout block immediately before the
    existing sizing offset, so all earlier layout fields retain their positions.
+7. The browser isosurface is a serialization adapter, not a second polygonizer:
+   each indexed `fs-viz` triangle is expanded to three positions plus three
+   analytic gradient normals in the documented 18-value block.
 
 ## Error model
 
@@ -55,6 +62,9 @@ No structured error type in v0. Browser-facing functions use bounded
 fallback outputs for invalid or failed kernel calls. Native helper
 functions may still use ordinary Rust assertions from their upstream
 crates when called outside the clamped public surface.
+`marching_cubes` maps non-finite input, sampling/allocation refusal, or a
+surface exceeding 60,000 triangles to the one-value `[0]` sentinel; it never
+serializes a silently truncated/open prefix.
 
 ## Determinism class
 
@@ -91,6 +101,8 @@ transcription test compares both serialized claim ranks/flags/outward endpoints
 and reconstructs the load-path replay golden from its two wire words for exact
 comparison against the native campaign; it is not browser execution or
 cross-target bit-identity evidence.
+The geometry module additionally checks the shared isosurface's triangle-count
+wire length, finite unit normals, exact replay, and non-finite sentinel.
 Current verification is native cargo test/clippy of the nested workspace plus
 any wasm32 build lane provided by DSR or site automation. The wasm32 browser
 surface itself remains a build/smoke lane rather than a browser-E2E test suite.

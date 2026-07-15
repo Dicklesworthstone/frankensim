@@ -17,6 +17,7 @@
 //! Every input is clamped and the triangle budget is capped: nothing traps.
 
 use fs_math::det;
+use fs_viz::Grid3;
 
 /* ----------------------------------------------------------------------- */
 /*  Scalar fields (signed: negative inside, gradient points outward)        */
@@ -76,99 +77,6 @@ fn field_normal(kind: u32, g: [f64; 3]) -> [f64; 3] {
     }
 }
 
-/// Linear crossing point on the segment `pa→pb` where `φ` reaches `lev`.
-fn interp_edge(pa: [f64; 3], pb: [f64; 3], va: f64, vb: f64, lev: f64) -> [f64; 3] {
-    let denom = vb - va;
-    let mut t = if denom.abs() > 1e-12 {
-        (lev - va) / denom
-    } else {
-        0.5
-    };
-    t = t.clamp(0.0, 1.0);
-    [
-        pa[0] + t * (pb[0] - pa[0]),
-        pa[1] + t * (pb[1] - pa[1]),
-        pa[2] + t * (pb[2] - pa[2]),
-    ]
-}
-
-/// Push one triangle (three positions) plus its three gradient normals into
-/// `out`, in the layout `v0(3) v1(3) v2(3) n0(3) n1(3) n2(3)`.
-fn emit_tri(out: &mut Vec<f64>, kind: u32, a: [f64; 3], b: [f64; 3], c: [f64; 3]) {
-    for p in [a, b, c] {
-        out.push(p[0]);
-        out.push(p[1]);
-        out.push(p[2]);
-    }
-    for p in [a, b, c] {
-        let nrm = field_normal(kind, p);
-        out.push(nrm[0]);
-        out.push(nrm[1]);
-        out.push(nrm[2]);
-    }
-}
-
-/// Polygonize one tetrahedron generically from its four corner signs relative
-/// to `lev`. Returns the number of triangles emitted (0, 1, or 2).
-fn polygonise_tet(
-    p: &[[f64; 3]; 4],
-    val: &[f64; 4],
-    lev: f64,
-    kind: u32,
-    out: &mut Vec<f64>,
-) -> usize {
-    let mut inside = [0usize; 4];
-    let mut n_in = 0usize;
-    let mut outside = [0usize; 4];
-    let mut n_out = 0usize;
-    for (i, &v) in val.iter().enumerate() {
-        if v < lev {
-            inside[n_in] = i;
-            n_in += 1;
-        } else {
-            outside[n_out] = i;
-            n_out += 1;
-        }
-    }
-    let cross = |a: usize, b: usize| interp_edge(p[a], p[b], val[a], val[b], lev);
-    match n_in {
-        1 => {
-            let a = inside[0];
-            emit_tri(
-                out,
-                kind,
-                cross(a, outside[0]),
-                cross(a, outside[1]),
-                cross(a, outside[2]),
-            );
-            1
-        }
-        3 => {
-            let b = outside[0];
-            emit_tri(
-                out,
-                kind,
-                cross(b, inside[0]),
-                cross(b, inside[1]),
-                cross(b, inside[2]),
-            );
-            1
-        }
-        2 => {
-            let (a, b) = (inside[0], inside[1]);
-            let (c, d) = (outside[0], outside[1]);
-            let e_ac = cross(a, c);
-            let e_ad = cross(a, d);
-            let e_bd = cross(b, d);
-            let e_bc = cross(b, c);
-            emit_tri(out, kind, e_ac, e_ad, e_bd);
-            emit_tri(out, kind, e_ac, e_bd, e_bc);
-            2
-        }
-        _ => 0, // all in or all out — no surface
-    }
-}
-
 /// Marching-tetrahedra isosurface of a real `res³` scalar field.
 ///
 /// `kind`: 0 = Gyroid TPMS `sin x cos y + …`, 1 = metaballs (four centres),
@@ -181,77 +89,46 @@ fn polygonise_tet(
 ///   n2(3)` — three vertex positions (in the `[-1,1]³` cube) followed by three
 ///   per-vertex gradient normals. Total length `1 + 18*triCount`.
 ///
-/// `res` clamped to `[8,48]`; extraction stops once `triCount` reaches ~60000
-/// (report the actual count via `[0]` / the return length).
+/// `res` is clamped to `[8,48]` and the complete surface is limited to 60,000
+/// triangles. Invalid/non-finite input, allocation refusal, or a surface over
+/// that budget returns the bounded failure sentinel `[0]`; no partial surface
+/// is serialized.
 pub fn marching_cubes(res_in: usize, kind_in: u32, iso_in: f64) -> Vec<f64> {
     let res = res_in.clamp(8, 48);
     let iso = iso_in.clamp(-1.0, 1.0);
     let kind = if kind_in > 2 { 0 } else { kind_in };
     let tri_cap = 60000usize;
-
-    let coord = |i: usize| -1.0 + 2.0 * i as f64 / (res as f64 - 1.0);
-    let vidx = |i: usize, j: usize, k: usize| (k * res + j) * res + i;
-    let mut vals = vec![0.0f64; res * res * res];
-    for k in 0..res {
-        let z = coord(k);
-        for j in 0..res {
-            let y = coord(j);
-            for i in 0..res {
-                vals[vidx(i, j, k)] = field_phi(kind, coord(i), y, z);
-            }
+    let node_limit = res * res * res;
+    let Ok(grid) = Grid3::from_fn([res; 3], [-1.0; 3], [1.0; 3], node_limit, |point| {
+        field_phi(kind, point[0], point[1], point[2])
+    }) else {
+        return vec![0.0];
+    };
+    let Ok(mesh) = grid.isosurface(iso, tri_cap) else {
+        return vec![0.0];
+    };
+    let Some(output_len) = mesh
+        .triangles()
+        .len()
+        .checked_mul(18)
+        .and_then(|payload| payload.checked_add(1))
+    else {
+        return vec![0.0];
+    };
+    let mut out = Vec::new();
+    if out.try_reserve_exact(output_len).is_err() {
+        return vec![0.0];
+    }
+    out.push(mesh.triangles().len() as f64);
+    for triangle in mesh.triangles() {
+        let points = (*triangle).map(|index| mesh.vertices()[index as usize]);
+        for point in points {
+            out.extend_from_slice(&point);
+        }
+        for point in points {
+            out.extend_from_slice(&field_normal(kind, point));
         }
     }
-
-    // Corner index = i + 2j + 4k (matching the tet decomposition below).
-    const CORNER: [[usize; 3]; 8] = [
-        [0, 0, 0],
-        [1, 0, 0],
-        [0, 1, 0],
-        [1, 1, 0],
-        [0, 0, 1],
-        [1, 0, 1],
-        [0, 1, 1],
-        [1, 1, 1],
-    ];
-    // Six tetrahedra sharing the cube's 0–7 main diagonal.
-    const TETS: [[usize; 4]; 6] = [
-        [0, 7, 1, 3],
-        [0, 7, 3, 2],
-        [0, 7, 2, 6],
-        [0, 7, 6, 4],
-        [0, 7, 4, 5],
-        [0, 7, 5, 1],
-    ];
-
-    let mut out: Vec<f64> = Vec::new();
-    out.push(0.0); // triCount placeholder
-    let mut tri_count = 0usize;
-
-    let cells = res.saturating_sub(1);
-    'outer: for k in 0..cells {
-        for j in 0..cells {
-            for i in 0..cells {
-                let mut cpos = [[0.0f64; 3]; 8];
-                let mut cval = [0.0f64; 8];
-                for c in 0..8 {
-                    let ci = i + CORNER[c][0];
-                    let cj = j + CORNER[c][1];
-                    let ck = k + CORNER[c][2];
-                    cpos[c] = [coord(ci), coord(cj), coord(ck)];
-                    cval[c] = vals[vidx(ci, cj, ck)];
-                }
-                for tet in TETS.iter() {
-                    let pp = [cpos[tet[0]], cpos[tet[1]], cpos[tet[2]], cpos[tet[3]]];
-                    let vv = [cval[tet[0]], cval[tet[1]], cval[tet[2]], cval[tet[3]]];
-                    tri_count += polygonise_tet(&pp, &vv, iso, kind, &mut out);
-                    if tri_count >= tri_cap {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
-    out[0] = tri_count as f64;
     out
 }
 
@@ -341,4 +218,35 @@ pub fn sdf_volume(res_in: usize, kind_in: u32, t_in: f64) -> Vec<f64> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::marching_cubes;
+
+    #[test]
+    fn shared_isosurface_serializes_the_browser_triangle_layout() {
+        let output = marching_cubes(16, 2, 0.0);
+        let triangle_count = output[0] as usize;
+        assert!(triangle_count > 0);
+        assert_eq!(output.len(), 1 + 18 * triangle_count);
+        assert!(output.iter().all(|value| value.is_finite()));
+        for triangle in output[1..].chunks_exact(18) {
+            for normal in triangle[9..].chunks_exact(3) {
+                let length = normal[0]
+                    .mul_add(
+                        normal[0],
+                        normal[1].mul_add(normal[1], normal[2] * normal[2]),
+                    )
+                    .sqrt();
+                assert!((length - 1.0).abs() < 1e-12);
+            }
+        }
+        assert_eq!(output, marching_cubes(16, 2, 0.0));
+    }
+
+    #[test]
+    fn shared_isosurface_maps_nonfinite_input_to_the_bounded_sentinel() {
+        assert_eq!(marching_cubes(16, 0, f64::NAN), vec![0.0]);
+    }
 }
