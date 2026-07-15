@@ -8,7 +8,12 @@ use fs_conform::{
     Composition, ConformanceSuite, Converter, ManufacturedCase, Tier, certify, check_adjoint,
     check_functoriality, check_identity, check_tolerance_honesty,
 };
-use fs_propcheck::{Shrink, check};
+use fs_propcheck::{
+    Shrink, check,
+    metamorphic::{
+        RelationCase, RelationObservation, Tolerance, check_relation, conversion_path_independence,
+    },
+};
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -326,5 +331,94 @@ fn g0_generated_identity_holds_exactly() {
             let identity = integer_mtx("generated-identity", [1, 0, 0, 1]);
             check_identity(&identity, &[vec![x as f64, y as f64]], 0.0)
         },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G3 metamorphic adoption (bead frankensim-2uce): the route transform selects
+// two real Converter::apply paths for the same manufactured map. The fixed and
+// generated G0 functoriality pins above remain independent regressions.
+// ---------------------------------------------------------------------------
+
+fn nonvacuous_functor_case(stream: &mut fs_propcheck::Stream) -> FunctorCase {
+    let mut values = std::array::from_fn(|_| stream.int_in(-8, 8));
+    if values[..4].iter().all(|value| *value == 0) {
+        values[0] = 1;
+    }
+    if values[4..8].iter().all(|value| *value == 0) {
+        values[4] = 1;
+    }
+    if values[8..].iter().all(|value| *value == 0) {
+        values[8] = 1;
+    }
+    FunctorCase(values)
+}
+
+fn apply_conversion_path(case: &FunctorCase, composed: bool) -> Vec<f64> {
+    let [f00, f01, f10, f11, g00, g01, g10, g11, p0, p1] = case.0;
+    let f = integer_mtx("g3-f", [f00, f01, f10, f11]);
+    let g = integer_mtx("g3-g", [g00, g01, g10, g11]);
+    let probe = [p0 as f64, p1 as f64];
+    if composed {
+        f.apply(&g.apply(&probe))
+    } else {
+        let direct = integer_mtx(
+            "g3-f-after-g",
+            [
+                f00 * g00 + f01 * g10,
+                f00 * g01 + f01 * g11,
+                f10 * g00 + f11 * g10,
+                f10 * g01 + f11 * g11,
+            ],
+        );
+        direct.apply(&probe)
+    }
+}
+
+fn exact_path_observation(
+    direct: &[f64],
+    composed: &[f64],
+    tolerance: Tolerance,
+) -> RelationObservation {
+    if direct.is_empty() || direct.len() != composed.len() {
+        return RelationObservation::new(
+            -1.0,
+            "direct and composed conversion paths must return the same nonempty dimension",
+        );
+    }
+    let margin = direct
+        .iter()
+        .zip(composed)
+        .map(|(reference, candidate)| {
+            let reference = if *reference == 0.0 { 0.0 } else { *reference };
+            let candidate = if *candidate == 0.0 { 0.0 } else { *candidate };
+            tolerance.evaluate_scalar(reference, candidate).margin()
+        })
+        .fold(0.0_f64, f64::min);
+    RelationObservation::new(
+        margin,
+        "direct and composed Converter::apply paths agree componentwise",
+    )
+}
+
+#[test]
+fn g3_generated_conversion_paths_agree_exactly() {
+    let relation = conversion_path_independence(
+        "restriction-map-direct-vs-composed",
+        Tolerance::Exact,
+        |input: &(FunctorCase, i64), route: &i64| (input.0.clone(), *route),
+        |direct: &Vec<f64>, composed: &Vec<f64>, _route: &i64, tolerance| {
+            exact_path_observation(direct, composed, tolerance)
+        },
+    );
+    let operator = |input: &(FunctorCase, i64)| apply_conversion_path(&input.0, input.1 != 0);
+
+    check_relation(
+        "fs-conform/converter-apply",
+        0xC0F0_4A48_0003,
+        512,
+        |stream| RelationCase::new((nonvacuous_functor_case(stream), 0_i64), 1_i64),
+        &operator,
+        &relation,
     );
 }
