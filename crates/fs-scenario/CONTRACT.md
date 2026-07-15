@@ -60,7 +60,13 @@ flagships.
   (Frictionless/Coulomb/Tied), explicit `Environment` (gravity, ambient
   temperature/pressure — REQUIRED constructor argument, never silently
   defaulted). `validate()` returns structured `Violation { code, what,
-  fix }` values.
+  fix }` values. Scenario, frame, case, combination, ensemble, and region
+  identities are exact UTF-8 strings: non-ASCII is admitted, empty identities
+  and duplicates within each identity role are refused, and no normalization
+  is implicit. Repeated combination terms are refused rather than silently
+  summed. Contact pairs are unordered; a repeated equal model is a duplicate
+  and a repeated different model is a conflict, both with declaration-row
+  provenance.
 - `ir::write_ir`/`ir::parse_ir` — canonical byte-stable, explicitly versioned
   s-expression encoding. v2 writes six-base `[m, kg, s, K, A, mol]` vectors;
   explicit v1 and historical unversioned five-vector forms decode by appending
@@ -131,6 +137,14 @@ flagships.
    APIs directly on a malformed public struct cannot bypass scenario-level validation. IR parsing
    independently enforces wire/resource/numeric-constructor safety, but is not
    semantic scenario admission; callers still invoke `Scenario::validate`.
+10. **Identity integrity**: every scenario/frame/case/combination/ensemble/
+    region identity is nonempty; names are unique within their role;
+    combination terms do not repeat a case; and an unordered contact pair has
+    exactly one declared model. Diagnostics retain first and repeated rows.
+11. **Indexed structural validation**: frame identity indexes are built once;
+    the tri-color parent traversal visits each storage row at most once, and
+    case/frame/combination/ensemble/contact reference checks use deterministic
+    ordered indexes rather than repeated prefix or whole-collection scans.
 
 ## Error model
 
@@ -151,8 +165,11 @@ bit-identical across runs and platforms. IR text is canonical.
 All parsing is bounded by explicit byte/depth/node/atom/list limits. Spectral
 realization is O(samples × harmonics), admitted against explicit sample/work
 budgets before allocation; collection reservations are fallible. Validation is
-linear in the scenario representation apart from the separately documented
-identity/reference scans. No loop is admitted from an unchecked float-to-size
+not yet a `Cx`-accepting operation and does not yet expose a semantic work/heap
+budget. Its identity/reference phase uses deterministic O(N log N) indexes and
+its frame-cycle traversal is linear after indexing; the net-flux checkpoint
+expansion remains an explicit admission no-claim tracked by
+`frankensim-sj31i.24`. No loop is admitted from an unchecked float-to-size
 conversion.
 
 ## Unsafe boundary
@@ -195,6 +212,10 @@ None.
   sample/work budgets are checked at exact boundary and boundary+1, and valid
   Carreau draws remain finite, in-band, and physically ordered. A one-sample
   spectral grid is rejected before it can masquerade as a stochastic trace.
+- **sc-009** exact non-ASCII identities remain admissible, while empty and
+  duplicate role identities, repeated combination terms, self-contact, and
+  duplicate/conflicting unordered contact pairs fail closed with declaration
+  provenance.
 
 ## No-claim boundaries
 
@@ -217,4 +238,6 @@ None.
   admission**: parsing may intentionally return a finite but dimensionally
   invalid `Scenario` so migration/diagnostic tooling can inspect it; call
   `Scenario::validate` before solver admission. Input/node/list limits bound
-  decoder cardinality, while an exact decoded-heap budget remains future work.
+  decoder cardinality, while semantic validation work/cancellation admission
+  and an exact decoded-heap budget remain active work under
+  `frankensim-sj31i.24`.

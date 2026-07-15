@@ -696,6 +696,11 @@ fn sc_001b_non_ascii_names_round_trip() {
         compatibility: None,
         frame: 0,
     });
+    assert_eq!(
+        s.validate(),
+        Vec::new(),
+        "non-ASCII exact identities are admissible when nonempty and unique"
+    );
     let text = write_ir(&s);
     let back = parse_ir(&text).expect("non-ASCII IR parses");
     assert_eq!(
@@ -1784,5 +1789,143 @@ fn sc_008a_realization_budgets_and_carreau_domains_fail_closed() {
     verdict(
         "sc-008a",
         "sample/work exact boundaries, ratio overflow, direct model validation, and physical Carreau domains fail closed",
+    );
+}
+
+#[test]
+fn sc_009_identity_and_unordered_contact_integrity_fail_closed() {
+    let fixed = || FrameMotion::Fixed {
+        orientation: Quat::identity(),
+        translation: Vec3::new(0.0, 0.0, 0.0),
+    };
+    let mut scenario = Scenario::new("", 17, Environment::earth_lab());
+    scenario.frames.add(Frame {
+        id: FrameId(1),
+        name: String::new(),
+        parent: FrameId(0),
+        motion: fixed(),
+    });
+    scenario.frames.add(Frame {
+        id: FrameId(2),
+        name: "fixture-frame".to_string(),
+        parent: FrameId(0),
+        motion: fixed(),
+    });
+    scenario.frames.add(Frame {
+        id: FrameId(3),
+        name: "fixture-frame".to_string(),
+        parent: FrameId(0),
+        motion: fixed(),
+    });
+    scenario.base_bcs.push(BoundaryCondition {
+        region: String::new(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::WallNoSlip,
+        value: None,
+        compatibility: None,
+        frame: 0,
+    });
+    scenario.cases.extend([
+        LoadCase {
+            name: String::new(),
+            bcs: Vec::new(),
+        },
+        LoadCase {
+            name: "load".to_string(),
+            bcs: Vec::new(),
+        },
+        LoadCase {
+            name: "load".to_string(),
+            bcs: Vec::new(),
+        },
+    ]);
+    scenario.combinations.extend([
+        Combination {
+            name: String::new(),
+            terms: vec![
+                ("load".to_string(), 1.0),
+                ("load".to_string(), 2.0),
+                (String::new(), 1.0),
+            ],
+        },
+        Combination {
+            name: "combo".to_string(),
+            terms: Vec::new(),
+        },
+        Combination {
+            name: "combo".to_string(),
+            terms: Vec::new(),
+        },
+    ]);
+    let mut ensembles = fixture_ensembles();
+    ensembles[0].name.clear();
+    ensembles[1].name = "ensemble".to_string();
+    ensembles[2].name = "ensemble".to_string();
+    scenario.ensembles = ensembles;
+    scenario.contacts.extend([
+        ContactLaw {
+            region_a: "a".to_string(),
+            region_b: "b".to_string(),
+            model: ContactModel::Frictionless,
+        },
+        ContactLaw {
+            region_a: "b".to_string(),
+            region_b: "a".to_string(),
+            model: ContactModel::Tied,
+        },
+        ContactLaw {
+            region_a: "a".to_string(),
+            region_b: "b".to_string(),
+            model: ContactModel::Frictionless,
+        },
+        ContactLaw {
+            region_a: String::new(),
+            region_b: "c".to_string(),
+            model: ContactModel::Frictionless,
+        },
+        ContactLaw {
+            region_a: "self".to_string(),
+            region_b: "self".to_string(),
+            model: ContactModel::Tied,
+        },
+    ]);
+
+    let violations = scenario.validate();
+    for code in [
+        "scenario-name-empty",
+        "frame-name-empty",
+        "frame-name-duplicate",
+        "bc-region-empty",
+        "case-name-empty",
+        "case-name-duplicate",
+        "combo-name-empty",
+        "combo-name-duplicate",
+        "combo-case-empty",
+        "combo-term-duplicate",
+        "ensemble-name-empty",
+        "ensemble-name-duplicate",
+        "contact-region-empty",
+        "contact-self-pair",
+        "contact-pair-conflict",
+        "contact-pair-duplicate",
+    ] {
+        assert!(
+            violations.iter().any(|violation| violation.code == code),
+            "missing {code}: {violations:#?}"
+        );
+    }
+    let repeated_term = violations
+        .iter()
+        .find(|violation| violation.code == "combo-term-duplicate")
+        .expect("repeated term diagnosis");
+    assert!(repeated_term.what.contains("terms 0 and 1"));
+    let conflicting_pair = violations
+        .iter()
+        .find(|violation| violation.code == "contact-pair-conflict")
+        .expect("unordered conflict diagnosis");
+    assert!(conflicting_pair.what.contains("row 0") && conflicting_pair.what.contains("row 1"));
+    verdict(
+        "sc-009",
+        "nonempty unique exact identities, duplicate combination terms, and unordered contact-pair semantics fail closed with declaration provenance",
     );
 }

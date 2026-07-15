@@ -141,6 +141,13 @@ impl BoundaryCondition {
             "bc on {:?} ({:?}/{:?})",
             self.region, self.physics, self.kind
         );
+        if self.region.is_empty() {
+            out.push(Violation {
+                code: "bc-region-empty",
+                what: format!("{ctx}: region identity is empty"),
+                fix: "bind the condition to a nonempty exact UTF-8 region name".to_string(),
+            });
+        }
         if let Some(value) = &self.value {
             match value {
                 BcValue::Uniform(quantity) => {

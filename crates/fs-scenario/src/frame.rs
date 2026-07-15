@@ -10,6 +10,7 @@ use crate::scenario::Violation;
 use crate::signal::TimeSignal;
 use fs_ga::{Motor, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
+use std::collections::BTreeMap;
 
 /// A frame identity (0 is the world frame).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -290,9 +291,61 @@ impl FrameTree {
         Ok(pose)
     }
 
-    /// Structural validation: unique nonzero ids, unique names, resolvable
-    /// acyclic parents, unit axes, angle-schedule dimensions.
+    fn validation_cycle_flags(&self, first_by_id: &BTreeMap<u32, usize>) -> Vec<bool> {
+        // Each frame has at most one parent, so a tri-color walk visits every
+        // storage row at most once. Nodes leading into a cycle are marked too:
+        // their parent chain also never reaches WORLD.
+        let mut state = vec![0u8; self.frames.len()];
+        let mut reaches_cycle = vec![false; self.frames.len()];
+        let mut path = Vec::new();
+        for start in 0..self.frames.len() {
+            if state[start] != 0 {
+                continue;
+            }
+            path.clear();
+            let mut current = Some(start);
+            let cyclic = loop {
+                let Some(index) = current else {
+                    break false;
+                };
+                match state[index] {
+                    0 => {
+                        state[index] = 1;
+                        path.push(index);
+                        let frame = &self.frames[index];
+                        current = if frame.id == WORLD || frame.parent == WORLD {
+                            None
+                        } else {
+                            first_by_id.get(&frame.parent.0).copied()
+                        };
+                    }
+                    1 => break true,
+                    2 => break reaches_cycle[index],
+                    _ => unreachable!("frame validation color is internal"),
+                }
+            };
+            for index in path.drain(..).rev() {
+                reaches_cycle[index] = cyclic;
+                state[index] = 2;
+            }
+        }
+        reaches_cycle
+    }
+
+    /// Structural validation: nonempty unique names, unique nonzero ids,
+    /// resolvable acyclic parents, unit axes, and angle-schedule dimensions.
+    ///
+    /// Identity lookup is indexed once and cycle detection is a tri-color
+    /// parent walk, avoiding the former repeated linear scans per chain.
     pub fn check(&self, out: &mut Vec<Violation>) {
+        let mut first_by_id = BTreeMap::new();
+        let mut first_by_name = BTreeMap::new();
+        for (index, frame) in self.frames.iter().enumerate() {
+            first_by_id.entry(frame.id.0).or_insert(index);
+            first_by_name.entry(frame.name.as_str()).or_insert(index);
+        }
+        let reaches_cycle = self.validation_cycle_flags(&first_by_id);
+
         for (i, f) in self.frames.iter().enumerate() {
             let ctx = format!("frame {:?}", f.name);
             if f.id == WORLD {
@@ -302,21 +355,34 @@ impl FrameTree {
                     fix: "renumber the frame with a nonzero id".to_string(),
                 });
             }
-            if self.frames[..i].iter().any(|g| g.id == f.id) {
+            if f.name.is_empty() {
+                out.push(Violation {
+                    code: "frame-name-empty",
+                    what: format!("frame storage row {i} has an empty name"),
+                    fix: "give every frame a nonempty exact UTF-8 name".to_string(),
+                });
+            }
+            if first_by_id[&f.id.0] != i {
                 out.push(Violation {
                     code: "frame-id-duplicate",
-                    what: format!("{ctx}: id {} is already taken", f.id.0),
+                    what: format!(
+                        "{ctx}: id {} first appears at frame row {} and repeats at row {i}",
+                        f.id.0, first_by_id[&f.id.0]
+                    ),
                     fix: "give every frame a unique id".to_string(),
                 });
             }
-            if self.frames[..i].iter().any(|g| g.name == f.name) {
+            if first_by_name[f.name.as_str()] != i {
                 out.push(Violation {
                     code: "frame-name-duplicate",
-                    what: format!("{ctx}: name is already taken"),
+                    what: format!(
+                        "{ctx}: name first appears at frame row {} and repeats at row {i}",
+                        first_by_name[f.name.as_str()]
+                    ),
                     fix: "give every frame a unique name".to_string(),
                 });
             }
-            if f.parent != WORLD && self.find(f.parent).is_none() {
+            if f.parent != WORLD && !first_by_id.contains_key(&f.parent.0) {
                 out.push(Violation {
                     code: "frame-parent-missing",
                     what: format!("{ctx}: parent id {} does not exist", f.parent.0),
@@ -374,37 +440,12 @@ impl FrameTree {
                     }
                 }
             }
-            // Cycle detection: walk the parent chain STRUCTURALLY — no pose
-            // evaluation. Using `world_pose(...).is_err()` conflated a genuine
-            // cycle with a `local_pose` failure (a bad motion dimension or an
-            // unevaluable angle signal, e.g. an empty table), so a well-formed
-            // acyclic frame with an independently-reported signal defect got a
-            // spurious `frame-chain-cyclic` that misdirected the repair. A
-            // dangling parent is reported separately (`frame-parent-missing`)
-            // and is not a cycle here.
-            if self.find(f.parent).is_some() {
-                let mut current = f.id;
-                let mut hops = 0usize;
-                let cyclic = loop {
-                    if current == WORLD {
-                        break false;
-                    }
-                    match self.find(current) {
-                        None => break false, // chain left the graph — not a cycle
-                        Some(frame) => current = frame.parent,
-                    }
-                    hops += 1;
-                    if hops > self.frames.len() {
-                        break true;
-                    }
-                };
-                if cyclic {
-                    out.push(Violation {
-                        code: "frame-chain-cyclic",
-                        what: format!("{ctx}: parent chain never reaches the world frame"),
-                        fix: "break the cycle so every chain terminates at frame 0".to_string(),
-                    });
-                }
+            if reaches_cycle[i] {
+                out.push(Violation {
+                    code: "frame-chain-cyclic",
+                    what: format!("{ctx}: parent chain never reaches the world frame"),
+                    fix: "break the cycle so every chain terminates at frame 0".to_string(),
+                });
             }
         }
     }

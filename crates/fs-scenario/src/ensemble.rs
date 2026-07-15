@@ -433,6 +433,13 @@ impl StochasticEnsemble {
     /// Structural validation.
     pub fn check(&self, out: &mut Vec<Violation>) {
         let ctx = format!("ensemble {:?}", self.name);
+        if self.name.is_empty() {
+            out.push(Violation {
+                code: "ensemble-name-empty",
+                what: "ensemble identity is empty".to_string(),
+                fix: "give every ensemble a nonempty exact UTF-8 name".to_string(),
+            });
+        }
         if self.members == 0 {
             out.push(Violation {
                 code: "ensemble-empty",
