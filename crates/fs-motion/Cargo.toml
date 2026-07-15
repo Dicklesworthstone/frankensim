@@ -1,0 +1,25 @@
+[package]
+name = "fs-motion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Certified rigid motion: motor tubes with Taylor-model component enclosures, spacetime charts binding motion to geometry, and analytic screw/Wankel constructors."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
+fs-geom = { path = "../fs-geom" }
+fs-ivl = { path = "../fs-ivl" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true

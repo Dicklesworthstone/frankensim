@@ -808,6 +808,7 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-ivl",
 ]
 
 [[package]]
@@ -835,6 +836,7 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-ivl",
 ]
 
 [[package]]
@@ -1381,6 +1383,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-motion"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-evidence",
+ "fs-exec",
+ "fs-ga",
+ "fs-geom",
+ "fs-ivl",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-neuroshape-e2e"
 version = "0.0.1"
 dependencies = [
@@ -1587,6 +1602,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-geom",
