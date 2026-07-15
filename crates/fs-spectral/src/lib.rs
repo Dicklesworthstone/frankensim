@@ -32,6 +32,7 @@
 use fs_evidence::{Color, ColorRank};
 
 pub mod admission;
+pub mod service;
 pub mod truth;
 
 /// A structured spectral failure.

@@ -13,9 +13,14 @@ layer = "L1"
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-la = { path = "../fs-la" }
 fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-math = { path = "../fs-math" }
+fs-sparse = { path = "../fs-sparse" }
 
 [lints]
 workspace = true

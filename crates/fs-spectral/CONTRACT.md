@@ -19,7 +19,11 @@ Production dependencies are limited to:
 
 - `fs-blake3` for domain-separated canonical identities and the
   presented -> verified -> admitted authority typestate;
-- `fs-evidence` for the existing gap-health confidence color lattice; and
+- `fs-evidence` for the existing gap-health confidence color lattice;
+- `fs-exec` for the cancellation contexts the eigensolver service's
+  bounded ticks poll;
+- `fs-la` for the deterministic Lanczos/LOBPCG backends the service
+  wraps; and
 - `fs-qty` for compile-time Floquet quantities and runtime-dimensioned
   normalization boundaries.
 
@@ -247,6 +251,51 @@ structural zeros. This prevents a mathematically admissible eigensolver from
 silently interpreting a legacy zero-padded or zero-omitted sequence under the
 wrong gap convention.
 
+## Eigensolver service API and semantics (bead bfid)
+
+The `service` module is the generic resumable symmetric-eigensolver
+lane (ownership rule: generic operator spectra live at L1; domain
+crates adapt their operators DOWNWARD to `service::SymmetricOp` — an
+fs-solver `LinearOp` adapter is an L3 shim, deliberately not defined
+here).
+
+- `EigenService` wraps fs-la Lanczos/LOBPCG behind bounded,
+  cancellable, resumable ticks: plain-data state, `clone()` IS the
+  checkpoint, split runs replay bitwise-identically to straight runs;
+  `tick(op, cx)` gates the operator dimension, polls `cx.checkpoint()`
+  between backend steps, caps `steps_per_tick` at
+  `MAX_STEPS_PER_TICK`, and ROLLS BACK the in-flight tick on
+  cancellation or non-finite operator output so accepted state is
+  never corrupted.
+- `CertifiedEigenvalue` carries the Ritz value, TRUE operator
+  residual, and the Weyl containment interval
+  `[value − residual, value + residual]`: an EXISTENCE certificate
+  (some eigenvalue lies inside), never distinctness. `gap_report`
+  clusters by interval overlap (lower-bound sort, both-endpoint hull
+  merge) and reports "multiplicity at the achieved resolution" plus a
+  certified leading-gap lower bound that is 0 when hulls touch.
+- Warm starts (`EigenService::warm`) seed from previous Ritz vectors
+  for parameter continuation; wrong-size, non-finite, zero,
+  rank-deficient, or overflow-sized seeds refuse typed.
+- Typed refusals throughout: `InvalidQuery`, `DimensionMismatch`,
+  `NonFiniteOperator` (with rollback), `InvalidSeed`,
+  `SubspaceExhausted` (sticky Lanczos invariant-subspace breakdown —
+  never a zero-vector re-entry), `Unconverged` (budget; resumable),
+  `Cancelled` (rolled back; resumable).
+- The pre-existing dense monitor path (`symmetric_eigenvalues`,
+  `spectral_gap`, `GapHealthMonitor`, `propagate`, `route`) is the
+  interpretation layer ABOVE this backend and is unchanged.
+
+Service no-claims: symmetry of the operator is the caller's declared
+obligation (a nonsymmetric operator voids every claim);
+per-pair intervals do not certify eigenvalue distinctness or exact
+multiplicity; the LOBPCG lane is PROVISIONAL pending central proof of
+the rank-truncation path (the Lanczos lane is the service claim);
+warm-start speedup is logged perf evidence, never an absolute claim;
+no admitted-authority coupling — service outputs are numerical
+results, not admission-API propositions, and gain authority only
+through the admission lane's own receipts.
+
 ## Result-truth API and semantics
 
 `SpectralTruthDraftV1` is validated only against the complete
@@ -439,6 +488,17 @@ None. This is solid-spine admission/truth infrastructure, not a moonshot kernel.
   accounting, projective-prefix placement, algebraic/geometric capacity,
   explicit undefined-separation no-claim, impossible cluster states, and
   deterministic malformed-input reports.
+
+The eigensolver-service battery is `tests/service.rs` (sv-001..010,
+printed measurements): dense-reference accuracy falsification for both
+backends and ends; degenerate-spectrum clustering at resolution;
+bitwise split-run equality; warm-start continuation speedup (logged);
+typed refusals incl. rank-deficient warm blocks and dimension
+mismatch; Weyl-interval containment falsification; hostile-size
+overflow refusals; identity-operator sticky subspace exhaustion;
+bridging-interval cluster regression with non-finite filtering; and
+the sparse seam via an fs-sparse CSR `SymmetricOp` against the
+analytic tridiagonal-Laplacian spectrum.
 
 ## No-claim boundaries
 
