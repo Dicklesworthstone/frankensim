@@ -580,6 +580,27 @@ pub enum OptError {
         /// Storage length supplied by the caller.
         got: u64,
     },
+    /// A retraction point, step, or computed output contains NaN/Inf.
+    RetractionNonFinite {
+        /// Which retraction payload is malformed.
+        input: &'static str,
+        /// Component within that payload.
+        component: u32,
+        /// The offending value's exact IEEE-754 bit pattern.
+        bits: u64,
+    },
+    /// A finite, correctly sized retraction input is outside the
+    /// manifold domain or produces a singular candidate.
+    RetractionDomain {
+        /// Manifold family.
+        manifold: &'static str,
+        /// Domain rule that failed.
+        what: &'static str,
+        /// Optional column or column-pair attribution.
+        location: Option<(u32, u32)>,
+        /// Exact bits of the diagnostic norm/dot measurement.
+        measurement_bits: u64,
+    },
     /// A per-item or aggregate admission cap was exceeded.
     CapExceeded {
         /// Which cap.
@@ -732,6 +753,36 @@ impl core::fmt::Display for OptError {
                 "{input} has length {got}, but this manifold requires length {expected}; \
                  retraction refuses malformed storage"
             ),
+            OptError::RetractionNonFinite {
+                input,
+                component,
+                bits,
+            } => write!(
+                f,
+                "{input} has non-finite component {component}: {} (bits {bits:016X}); \
+                 retraction refuses non-finite storage",
+                f64::from_bits(*bits)
+            ),
+            OptError::RetractionDomain {
+                manifold,
+                what,
+                location,
+                measurement_bits,
+            } => {
+                let measurement = f64::from_bits(*measurement_bits);
+                match location {
+                    Some((column, against)) => write!(
+                        f,
+                        "{manifold} retraction domain failure at columns {column}/{against}: \
+                         {what} (measurement {measurement}, bits {measurement_bits:016X})"
+                    ),
+                    None => write!(
+                        f,
+                        "{manifold} retraction domain failure: {what} \
+                         (measurement {measurement}, bits {measurement_bits:016X})"
+                    ),
+                }
+            }
             OptError::CapExceeded { what, count, cap } => write!(
                 f,
                 "admission cap exceeded: {what} = {count} > {cap}; split the problem \

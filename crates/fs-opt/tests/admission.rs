@@ -1016,3 +1016,160 @@ fn adm_017_non_finite_runtime_results_refuse() {
         ));
     });
 }
+
+/// adm-018 — retractions refuse non-finite storage, off-manifold bases,
+/// and singular candidates instead of normalizing them into fabricated
+/// points. Descent applies the same membership gate before f0.
+#[test]
+#[allow(clippy::too_many_lines)] // one explicit refusal matrix across all manifold families
+fn adm_018_retraction_domain_is_fail_closed() {
+    let sphere = Manifold::Sphere { ambient: 3 };
+    assert!(matches!(
+        sphere.retract(&[0.0, 0.0, 0.0], &[0.0; 3]),
+        Err(OptError::RetractionDomain {
+            manifold: "Sphere",
+            ..
+        })
+    ));
+    assert!(matches!(
+        sphere.retract(&[1.0, 0.0, 0.0], &[-1.0, 0.0, 0.0]),
+        Err(OptError::RetractionDomain {
+            manifold: "Sphere",
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        Manifold::So3.retract(&[0.0; 4], &[0.0; 3]),
+        Err(OptError::RetractionDomain {
+            manifold: "SO(3)",
+            ..
+        })
+    ));
+    assert!(matches!(
+        Manifold::So3.retract(&[1.0, 0.0, 0.0, 0.0], &[f64::MAX; 3]),
+        Err(OptError::RetractionDomain {
+            manifold: "SO(3)",
+            ..
+        })
+    ));
+
+    let stiefel = Manifold::Stiefel { n: 3, p: 2 };
+    let orthonormal = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let duplicate_columns = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    assert!(matches!(
+        stiefel.retract(&duplicate_columns, &[0.0; 6]),
+        Err(OptError::RetractionDomain {
+            manifold: "Stiefel",
+            ..
+        })
+    ));
+    assert!(matches!(
+        stiefel.retract(&orthonormal, &[0.0, 0.0, 0.0, 1.0, -1.0, 0.0]),
+        Err(OptError::RetractionDomain {
+            manifold: "Stiefel",
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        Manifold::Rn { dim: 2 }.retract(&[0.0, f64::INFINITY], &[0.0; 2]),
+        Err(OptError::RetractionNonFinite {
+            input: "retraction point",
+            component: 1,
+            ..
+        })
+    ));
+    assert!(matches!(
+        Manifold::Rn { dim: 1 }.retract(&[f64::MAX], &[f64::MAX]),
+        Err(OptError::RetractionNonFinite {
+            input: "retraction output",
+            component: 0,
+            ..
+        })
+    ));
+
+    let sphere_out = sphere
+        .retract(&[1.0, 0.0, 0.0], &[0.0, 0.25, 0.0])
+        .expect("regular sphere candidate");
+    let sphere_norm_sq = sphere_out.iter().map(|value| value * value).sum::<f64>();
+    assert!((sphere_norm_sq - 1.0).abs() <= 1e-10);
+    let so3_out = Manifold::So3
+        .retract(&[1.0, 0.0, 0.0, 0.0], &[0.25, 0.0, 0.0])
+        .expect("regular SO(3) candidate");
+    let so3_norm_sq = so3_out.iter().map(|value| value * value).sum::<f64>();
+    assert!((so3_norm_sq - 1.0).abs() <= 1e-10);
+    let stiefel_out = stiefel
+        .retract(&orthonormal, &[0.0; 6])
+        .expect("regular Stiefel candidate");
+    assert!(
+        stiefel_out
+            .iter()
+            .zip(orthonormal)
+            .all(|(got, expected)| (*got - expected).abs() <= 1e-12)
+    );
+
+    let gate = fs_exec::CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 0x18,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            asupersync::types::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        let calls = std::cell::Cell::new(0u32);
+        let guarded = |_: &[f64]| {
+            calls.set(calls.get() + 1);
+            0.0
+        };
+        assert!(matches!(
+            fs_opt::descend_fn(
+                sphere,
+                &guarded,
+                &[2.0, 0.0, 0.0],
+                fs_opt::DescentOptions {
+                    steps: 0,
+                    ..fs_opt::DescentOptions::default()
+                },
+                0,
+                &cx,
+            ),
+            Err(OptError::RetractionDomain { .. })
+        ));
+        assert_eq!(calls.get(), 0, "invalid base must refuse before f0");
+
+        let mut builder = ProblemBuilder::new();
+        let variable = builder
+            .var("x", Manifold::Rn { dim: 1 }, Dims::NONE)
+            .expect("variable");
+        let point = builder.var_ref(variable).expect("point");
+        let objective = builder.norm_sq(point).expect("objective node");
+        builder
+            .objective(objective, Sense::Minimize, 1.0)
+            .expect("objective");
+        let problem = builder.finish();
+        assert!(matches!(
+            fs_opt::descend_ir(
+                &problem,
+                &[1.0],
+                fs_opt::DescentOptions {
+                    steps: 1,
+                    lr: f64::MAX,
+                    fd_h: 1e-6,
+                },
+                &cx,
+            ),
+            Err(OptError::RetractionNonFinite {
+                input: "retraction step",
+                ..
+            })
+        ));
+    });
+}

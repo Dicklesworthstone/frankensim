@@ -84,10 +84,14 @@ structure; FLUX/UQ execute it.
   consumes. The public retraction boundary validates the manifold and
   requires exact point and parameter storage before any indexing or
   zip-based arithmetic; malformed slices refuse with a typed input and
-  expected/actual lengths. `descend_fn`/`descend_ir` are the TOY
-  consumers proving iterates stay ON their manifolds. Both descent
-  entry points are LEAF-GATED before the first objective evaluation or
-  any descent arithmetic (bead j3vb5 / review High #6):
+  expected/actual lengths. Point, step, candidate, and output components
+  must remain finite. Sphere/SO(3) bases must have unit squared norm and
+  Stiefel bases must have an identity Gram matrix within `1e-10`; candidate
+  squared norms at or below `1e-24` refuse as singular instead of being
+  clamped and normalized into fabricated points. `descend_fn`/`descend_ir`
+  are the TOY consumers proving iterates stay ON their manifolds. Both
+  descent entry points are LEAF-GATED before the first objective
+  evaluation or any descent arithmetic (bead j3vb5 / review High #6):
   the manifold validates through the admission policy, the start
   point must match `point_dim` with FINITE components (offending bit
   pattern retained in the refusal), and `DescentOptions` must carry

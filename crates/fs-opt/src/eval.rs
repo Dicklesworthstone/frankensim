@@ -9,6 +9,13 @@ use crate::admission::AdmissionCaps;
 use crate::ir::{Expr, Manifold, NodeId, OptError, Problem};
 use fs_exec::Cx;
 
+/// Squared-norm/dot tolerance for deciding whether a finite stored
+/// point is already on its declared manifold.
+const MANIFOLD_MEMBERSHIP_TOL: f64 = 1e-10;
+/// Candidates below this squared norm are numerically rank-deficient;
+/// normalizing them would fabricate a direction.
+const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
+
 /// An evaluated node value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -255,16 +262,113 @@ impl Manifold {
         }
     }
 
+    fn label(&self) -> &'static str {
+        match self {
+            Manifold::Rn { .. } => "Rn",
+            Manifold::Sphere { .. } => "Sphere",
+            Manifold::So3 => "SO(3)",
+            Manifold::Stiefel { .. } => "Stiefel",
+        }
+    }
+
+    fn domain_error(
+        &self,
+        what: &'static str,
+        location: Option<(u32, u32)>,
+        measurement: f64,
+    ) -> OptError {
+        OptError::RetractionDomain {
+            manifold: self.label(),
+            what,
+            location,
+            measurement_bits: measurement.to_bits(),
+        }
+    }
+
+    fn validate_retraction_finite(input: &'static str, values: &[f64]) -> Result<(), OptError> {
+        for (component, value) in values.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(OptError::RetractionNonFinite {
+                    input,
+                    component: component as u32,
+                    bits: value.to_bits(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_point_domain(&self, x: &[f64]) -> Result<(), OptError> {
+        match *self {
+            Manifold::Rn { .. } => Ok(()),
+            Manifold::Sphere { .. } | Manifold::So3 => {
+                let norm_sq = x.iter().map(|value| value * value).sum::<f64>();
+                if !norm_sq.is_finite() {
+                    return Err(self.domain_error(
+                        "point norm squared must be finite",
+                        None,
+                        norm_sq,
+                    ));
+                }
+                if (norm_sq - 1.0).abs() > MANIFOLD_MEMBERSHIP_TOL {
+                    return Err(self.domain_error(
+                        "point must have unit norm before retraction",
+                        None,
+                        norm_sq,
+                    ));
+                }
+                Ok(())
+            }
+            Manifold::Stiefel { n, p } => {
+                let (n, p) = (n as usize, p as usize);
+                for column in 0..p {
+                    for against in 0..=column {
+                        let dot = (0..n)
+                            .map(|row| x[column * n + row] * x[against * n + row])
+                            .sum::<f64>();
+                        let location = Some((column as u32, against as u32));
+                        if !dot.is_finite() {
+                            return Err(self.domain_error(
+                                "point Gram entry must be finite",
+                                location,
+                                dot,
+                            ));
+                        }
+                        let expected = if column == against { 1.0 } else { 0.0 };
+                        if (dot - expected).abs() > MANIFOLD_MEMBERSHIP_TOL {
+                            return Err(self.domain_error(
+                                "point columns must be orthonormal",
+                                location,
+                                dot,
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn validate_retraction_output(&self, output: Vec<f64>) -> Result<Vec<f64>, OptError> {
+        Self::validate_retraction_finite("retraction output", &output)?;
+        self.validate_point_domain(&output)?;
+        Ok(output)
+    }
+
     /// Retract: move from `x` along parameter vector `t`, landing ON
     /// the manifold. Rn: translation. Sphere: normalize(x+t). SO(3):
     /// right-multiply by `exp(ω/2)` (unit quaternion). Stiefel:
     /// Gram-Schmidt of `X+T` (QR retraction). Raw point and parameter
-    /// storage must exactly match this manifold; malformed slices are
-    /// refused before any indexing or zip-based arithmetic.
+    /// storage must exactly match this manifold and contain finite
+    /// components. The base point must already belong to the manifold;
+    /// zero-norm and rank-deficient candidates are refused rather than
+    /// normalized into fabricated points.
     ///
     /// # Errors
-    /// [`OptError::ManifoldInvalid`] or [`OptError::RetractionLen`].
+    /// [`OptError::ManifoldInvalid`], [`OptError::RetractionLen`],
+    /// [`OptError::RetractionNonFinite`], or [`OptError::RetractionDomain`].
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one auditable branch per manifold and refusal phase
     pub fn retract(&self, x: &[f64], t: &[f64]) -> Result<Vec<f64>, OptError> {
         self.validate(&AdmissionCaps::default())?;
         let point_dim = self.point_dim().ok_or_else(|| OptError::ManifoldInvalid {
@@ -277,6 +381,8 @@ impl Manifold {
                 got: x.len() as u64,
             });
         }
+        Self::validate_retraction_finite("retraction point", x)?;
+        self.validate_point_domain(x)?;
         let param_dim = self.param_dim().ok_or_else(|| OptError::ManifoldInvalid {
             what: format!("{self:?} has no representable retraction parameter dimension"),
         })?;
@@ -287,16 +393,37 @@ impl Manifold {
                 got: t.len() as u64,
             });
         }
+        Self::validate_retraction_finite("retraction step", t)?;
         match *self {
-            Manifold::Rn { .. } => Ok(x.iter().zip(t).map(|(a, b)| a + b).collect()),
+            Manifold::Rn { .. } => {
+                let output = x.iter().zip(t).map(|(a, b)| a + b).collect();
+                self.validate_retraction_output(output)
+            }
             Manifold::Sphere { .. } => {
                 let y: Vec<f64> = x.iter().zip(t).map(|(a, b)| a + b).collect();
-                let n = y.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
-                Ok(y.iter().map(|v| v / n).collect())
+                Self::validate_retraction_finite("retraction candidate", &y)?;
+                let norm_sq = y.iter().map(|value| value * value).sum::<f64>();
+                if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
+                    return Err(self.domain_error(
+                        "candidate norm squared must be finite and nonsingular",
+                        None,
+                        norm_sq,
+                    ));
+                }
+                let norm = norm_sq.sqrt();
+                self.validate_retraction_output(y.iter().map(|value| value / norm).collect())
             }
             Manifold::So3 => {
                 let half = [t[0] * 0.5, t[1] * 0.5, t[2] * 0.5];
-                let ang = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+                let angle_sq = half[0] * half[0] + half[1] * half[1] + half[2] * half[2];
+                if !angle_sq.is_finite() {
+                    return Err(self.domain_error(
+                        "step half-angle norm squared must be finite",
+                        None,
+                        angle_sq,
+                    ));
+                }
+                let ang = angle_sq.sqrt();
                 let (s, c) = if ang > 1e-12 {
                     (ang.sin() / ang, ang.cos())
                 } else {
@@ -310,41 +437,62 @@ impl Manifold {
                     q[0] * dq[2] - q[1] * dq[3] + q[2] * dq[0] + q[3] * dq[1],
                     q[0] * dq[3] + q[1] * dq[2] - q[2] * dq[1] + q[3] * dq[0],
                 ];
-                let n = out.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
-                for v in &mut out {
-                    *v /= n;
+                Self::validate_retraction_finite("retraction candidate", &out)?;
+                let norm_sq = out.iter().map(|value| value * value).sum::<f64>();
+                if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
+                    return Err(self.domain_error(
+                        "candidate norm squared must be finite and nonsingular",
+                        None,
+                        norm_sq,
+                    ));
                 }
-                Ok(out.to_vec())
+                let norm = norm_sq.sqrt();
+                for v in &mut out {
+                    *v /= norm;
+                }
+                self.validate_retraction_output(out.to_vec())
             }
             Manifold::Stiefel { n, p } => {
                 let (n, p) = (n as usize, p as usize);
-                let mut cols: Vec<Vec<f64>> = (0..p)
-                    .map(|j| {
-                        (0..n)
-                            .map(|i| x[j * n + i] + t[j * n + i])
-                            .collect::<Vec<f64>>()
-                    })
-                    .collect();
+                let mut cols = Vec::with_capacity(p);
+                for column in 0..p {
+                    let candidate = (0..n)
+                        .map(|row| x[column * n + row] + t[column * n + row])
+                        .collect::<Vec<f64>>();
+                    Self::validate_retraction_finite("retraction candidate", &candidate)?;
+                    cols.push(candidate);
+                }
                 // Deterministic Gram-Schmidt (QR retraction).
                 for j in 0..p {
                     for k in 0..j {
                         let d: f64 = (0..n).map(|i| cols[j][i] * cols[k][i]).sum();
+                        if !d.is_finite() {
+                            return Err(self.domain_error(
+                                "candidate Gram projection must be finite",
+                                Some((j as u32, k as u32)),
+                                d,
+                            ));
+                        }
                         let prior = cols[k].clone();
                         for (cj, ck) in cols[j].iter_mut().zip(&prior) {
                             *cj -= d * ck;
                         }
+                        Self::validate_retraction_finite("retraction candidate", &cols[j])?;
                     }
-                    let nn = cols[j]
-                        .iter()
-                        .map(|v| v * v)
-                        .sum::<f64>()
-                        .sqrt()
-                        .max(1e-300);
+                    let norm_sq = cols[j].iter().map(|value| value * value).sum::<f64>();
+                    if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
+                        return Err(self.domain_error(
+                            "candidate column is rank-deficient",
+                            Some((j as u32, j as u32)),
+                            norm_sq,
+                        ));
+                    }
+                    let norm = norm_sq.sqrt();
                     for v in &mut cols[j] {
-                        *v /= nn;
+                        *v /= norm;
                     }
                 }
-                Ok(cols.concat())
+                self.validate_retraction_output(cols.concat())
             }
         }
     }
@@ -456,6 +604,7 @@ fn descend_fn_checked(
             });
         }
     }
+    manifold.validate_point_domain(x0)?;
     if !(opts.fd_h.is_finite() && opts.fd_h > 0.0) {
         return Err(OptError::BadParam {
             what: "descent finite-difference step fd_h (finite, > 0)",
