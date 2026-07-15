@@ -401,7 +401,6 @@ impl From<AssimError> for DiffRealError {
 /// # Errors
 /// Propagates structured cancellation or scientific refusal from the as-built
 /// and assimilation stage. No partial battery report is published.
-#[must_use]
 pub fn run_battery(cx: &Cx<'_>) -> Result<DiffRealReport, DiffRealError> {
     Ok(DiffRealReport {
         stages: vec![
@@ -505,7 +504,6 @@ pub fn stage_differentiation() -> StageLog {
 /// # Errors
 /// Propagates the structured lower-layer refusal, including cancellation, and
 /// publishes no partial stage log.
-#[must_use]
 pub fn stage_as_built_loop(cx: &Cx<'_>) -> Result<StageLog, DiffRealError> {
     let mut events = Vec::new();
     let mut assertions_passed = true;

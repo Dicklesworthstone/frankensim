@@ -427,11 +427,7 @@ mod affine_certificate_tests {
 
     #[test]
     fn colleague_recurrence_refuses_absorbed_nonzero_term() {
-        let polynomial = Cheb1::from_coeffs(
-            -1.0,
-            1.0,
-            vec![0.0, 2.0f64.powi(-100), 0.0, 1.0],
-        );
+        let polynomial = Cheb1::from_coeffs(-1.0, 1.0, vec![0.0, 2.0f64.powi(-100), 0.0, 1.0]);
         let result = std::panic::catch_unwind(|| {
             colleague_roots(
                 &polynomial,
