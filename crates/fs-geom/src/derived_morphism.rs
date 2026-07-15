@@ -5,9 +5,12 @@
 //! inclusion declarations; checks structural evidence restriction/corestriction;
 //! and composes ordered typed primitive paths with content-addressed lineage. A
 //! separate token seals declared spans from two admitted legs without folding
-//! correspondences into directed-map composition. This module deliberately
-//! cannot mint a non-identity equivalence: a witness digest is data, not a proof
-//! of an inverse, quasi-isomorphism, refinement theorem, or physical crosswalk.
+//! correspondences into directed-map composition. A second standalone token
+//! binds a fixed-resolution quasi-isomorphism *candidate* to an exact refinement
+//! path and exact local presentations, without granting theorem authority. This
+//! module deliberately cannot mint a non-identity equivalence: a witness digest
+//! is data, not a proof of an inverse, quasi-isomorphism, refinement theorem, or
+//! physical crosswalk.
 
 use core::fmt;
 
@@ -20,15 +23,19 @@ use fs_exec::Cx;
 
 use crate::derived::{
     AdmittedDerivedGeometryV1, CoefficientSystemV1, ConfigurationChartIdV1, ConfigurationChartV1,
-    DerivedComplexIdV1, DerivedFrameIdV1, DerivedGeometryIdV1, DerivedModelVersionIdV1,
-    DerivedNoClaimIdV1, DerivedResolutionIdV1, DerivedSubjectIdV1, DerivedUnitSystemIdV1,
-    DerivedWitnessIdV1, FiniteDerivedComplexV1, GeometricCategoryV1,
+    DerivedCheckerIdV1, DerivedComplexIdV1, DerivedComplexRoleV1, DerivedFrameIdV1,
+    DerivedGeometryIdV1, DerivedLocalModelIdV1, DerivedLocalModelV1, DerivedModelVersionIdV1,
+    DerivedNoClaimIdV1, DerivedResolutionIdV1, DerivedSubjectIdV1, DerivedTheoremIdV1,
+    DerivedUnitSystemIdV1, DerivedWitnessIdV1, FiniteDerivedComplexV1, GeometricCategoryV1,
+    PresentationScopeV1,
 };
 
 /// Current schema for structural RD.1b morphism receipts.
 pub const DERIVED_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone declared span-correspondence receipts.
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
+pub const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Maximum primitive nonidentity factors retained in one flattened composition.
 pub const DERIVED_MORPHISM_MAX_FACTORS_V1: usize = 1024;
 const DERIVED_MORPHISM_CANCELLATION_STRIDE_V1: usize = 64;
@@ -78,6 +85,40 @@ impl CanonicalSchema for DerivedSpanCorrespondenceIdentitySchemaV1 {
 
 /// Typed identity of one admitted standalone span `source <- apex -> target`.
 pub type DerivedSpanCorrespondenceIdV1 = EvidenceNodeId<DerivedSpanCorrespondenceIdentitySchemaV1>;
+
+/// Domain-separated semantic identity for one structurally admitted
+/// fixed-resolution quasi-isomorphism candidate.
+pub enum DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str =
+        "org.frankensim.fs-geom.fixed-resolution-quasi-isomorphism-candidate.v1";
+    const NAME: &'static str = "fixed-resolution-quasi-isomorphism-candidate";
+    const VERSION: u32 = DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact refinement path, exact endpoint local models, complexes, resolutions, and roles, retained fixed-resolution scope witnesses, nominal external check metadata, and no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("refinement-path", WireType::Bytes),
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::required("source-local-model", WireType::Bytes),
+        FieldSpec::required("target-local-model", WireType::Bytes),
+        FieldSpec::required("complex-role", WireType::Bytes),
+        FieldSpec::required("source-complex", WireType::Bytes),
+        FieldSpec::required("target-complex", WireType::Bytes),
+        FieldSpec::required("source-resolution", WireType::Bytes),
+        FieldSpec::required("target-resolution", WireType::Bytes),
+        FieldSpec::required("source-scope-witness", WireType::Bytes),
+        FieldSpec::required("target-scope-witness", WireType::Bytes),
+        FieldSpec::required("nominal-theorem", WireType::Bytes),
+        FieldSpec::required("nominal-checker", WireType::Bytes),
+        FieldSpec::required("nominal-check-receipt", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one fixed-resolution quasi-isomorphism candidate.
+pub type DerivedFixedResolutionQuasiIsomorphismCandidateIdV1 =
+    EvidenceNodeId<DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1>;
 
 /// Nominal artifact implementing one declared chart map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -482,6 +523,46 @@ pub struct DerivedSpanCorrespondenceIrV1 {
     pub no_claim: DerivedNoClaimIdV1,
 }
 
+/// Versioned declaration of one fixed-resolution quasi-isomorphism candidate.
+///
+/// The exact supplied refinement path is the only directed map. The theorem,
+/// checker, and check-receipt IDs are nominal metadata retained for RD.1c; RD.1b
+/// neither dereferences them nor promotes the candidate to an equivalence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedFixedResolutionQuasiIsomorphismCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact admitted source geometry.
+    pub source_geometry: DerivedGeometryIdV1,
+    /// Exact admitted target geometry.
+    pub target_geometry: DerivedGeometryIdV1,
+    /// Exact source local presentation.
+    pub source_local_model: DerivedLocalModelIdV1,
+    /// Exact target local presentation.
+    pub target_local_model: DerivedLocalModelIdV1,
+    /// Tangent, cotangent, or deformation-obstruction complex under comparison.
+    pub complex_role: DerivedComplexRoleV1,
+    /// Exact complex selected by the source local model for `complex_role`.
+    pub source_complex: DerivedComplexIdV1,
+    /// Exact complex selected by the target local model for `complex_role`.
+    pub target_complex: DerivedComplexIdV1,
+    /// Exact source finite resolution.
+    pub source_resolution: DerivedResolutionIdV1,
+    /// Exact target finite resolution.
+    pub target_resolution: DerivedResolutionIdV1,
+    /// Exact sealed homogeneous refinement path used as the directed candidate.
+    pub refinement_path: DerivedMorphismIdV1,
+    /// Nominal theorem-card identity for the claimed cohomology isomorphism.
+    pub nominal_theorem: DerivedTheoremIdV1,
+    /// Nominal independent-checker identity; not executed by RD.1b.
+    pub nominal_checker: DerivedCheckerIdV1,
+    /// Nominal external check receipt; not authenticated by RD.1b.
+    pub nominal_check_receipt: DerivedWitnessIdV1,
+    /// Explicit artifact denying quasi-isomorphism, presentation-equivalence,
+    /// and physical-equivalence authority to this structural token.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
 /// Structured refusal from RD.1b structural morphism admission/composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedMorphismErrorV1 {
@@ -631,6 +712,92 @@ impl fmt::Display for DerivedSpanCorrespondenceErrorV1 {
 
 impl core::error::Error for DerivedSpanCorrespondenceErrorV1 {}
 
+/// Structured refusal from fixed-resolution quasi-isomorphism candidate admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A raw endpoint does not name the supplied admitted geometry.
+    EndpointMismatch {
+        /// Stable source/target geometry field.
+        field: &'static str,
+    },
+    /// A required opaque identity used the all-zero sentinel.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// The raw refinement-path ID does not name the supplied sealed path.
+    PathIdentityMismatch,
+    /// The supplied sealed path is not a homogeneous complex-refinement path.
+    PathClassMismatch {
+        /// Actual sealed path family.
+        found: AdmittedDerivedMorphismClassV1,
+    },
+    /// A retained refinement primitive contradicts the sealed path or candidate scope.
+    PathShapeMismatch {
+        /// Stable failed path relation.
+        field: &'static str,
+        /// Zero-based primitive index, or zero for an empty path.
+        index: usize,
+    },
+    /// A selected local-model ID is not owned by its exact endpoint geometry.
+    MissingLocalModel {
+        /// Stable source/target local-model field.
+        field: &'static str,
+    },
+    /// A selected complex ID is not owned by its exact endpoint geometry.
+    MissingCandidateComplex {
+        /// Stable source/target complex field.
+        field: &'static str,
+    },
+    /// A selected local model does not bind the complex under the declared role.
+    ComplexRoleMismatch {
+        /// Stable failed source/target role relation.
+        field: &'static str,
+    },
+    /// A selected local model and complex disagree on their exact chart.
+    LocalPresentationMismatch {
+        /// Stable failed source/target presentation relation.
+        field: &'static str,
+    },
+    /// A complex, local-model scope, and raw resolution selector disagree.
+    ResolutionScopeMismatch {
+        /// Stable failed source/target resolution relation.
+        field: &'static str,
+    },
+    /// A local model is not explicitly scoped to one fixed finite resolution.
+    PresentationScopeMismatch {
+        /// Stable source/target presentation field.
+        field: &'static str,
+    },
+    /// The endpoint local presentations do not name one exact locality.
+    LocalityMismatch,
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "fixed-resolution quasi-isomorphism candidate refused: {self:?}"
+        )
+    }
+}
+
+impl core::error::Error for DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1 {}
+
 /// Sealed, content-addressed structural morphism.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AdmittedDerivedMorphismV1 {
@@ -776,6 +943,144 @@ impl AdmittedDerivedSpanCorrespondenceV1 {
     /// Canonical receipt and construction limits.
     #[must_use]
     pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedSpanCorrespondenceIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed structural declaration of one fixed-resolution quasi-isomorphism candidate.
+///
+/// This token binds exact local presentations and nominal external-check metadata
+/// to an already sealed refinement path. It deliberately exposes no equivalence,
+/// inverse, homotopy, composition, evidence-transport, or authority capability.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
+    refinement_path: DerivedMorphismIdV1,
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_local_model: DerivedLocalModelIdV1,
+    target_local_model: DerivedLocalModelIdV1,
+    complex_role: DerivedComplexRoleV1,
+    source_complex: DerivedComplexIdV1,
+    target_complex: DerivedComplexIdV1,
+    source_resolution: DerivedResolutionIdV1,
+    target_resolution: DerivedResolutionIdV1,
+    source_scope_witness: DerivedWitnessIdV1,
+    target_scope_witness: DerivedWitnessIdV1,
+    nominal_theorem: DerivedTheoremIdV1,
+    nominal_checker: DerivedCheckerIdV1,
+    nominal_check_receipt: DerivedWitnessIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedFixedResolutionQuasiIsomorphismCandidateIdV1>,
+}
+
+impl AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
+    /// Exact sealed refinement path used as the directed candidate.
+    #[must_use]
+    pub const fn refinement_path(&self) -> DerivedMorphismIdV1 {
+        self.refinement_path
+    }
+
+    /// Exact source geometry.
+    #[must_use]
+    pub const fn source_geometry(&self) -> DerivedGeometryIdV1 {
+        self.source_geometry
+    }
+
+    /// Exact target geometry.
+    #[must_use]
+    pub const fn target_geometry(&self) -> DerivedGeometryIdV1 {
+        self.target_geometry
+    }
+
+    /// Exact source local presentation.
+    #[must_use]
+    pub const fn source_local_model(&self) -> DerivedLocalModelIdV1 {
+        self.source_local_model
+    }
+
+    /// Exact target local presentation.
+    #[must_use]
+    pub const fn target_local_model(&self) -> DerivedLocalModelIdV1 {
+        self.target_local_model
+    }
+
+    /// Complex role under comparison.
+    #[must_use]
+    pub const fn complex_role(&self) -> DerivedComplexRoleV1 {
+        self.complex_role
+    }
+
+    /// Exact source complex.
+    #[must_use]
+    pub const fn source_complex(&self) -> DerivedComplexIdV1 {
+        self.source_complex
+    }
+
+    /// Exact target complex.
+    #[must_use]
+    pub const fn target_complex(&self) -> DerivedComplexIdV1 {
+        self.target_complex
+    }
+
+    /// Exact source finite resolution.
+    #[must_use]
+    pub const fn source_resolution(&self) -> DerivedResolutionIdV1 {
+        self.source_resolution
+    }
+
+    /// Exact target finite resolution.
+    #[must_use]
+    pub const fn target_resolution(&self) -> DerivedResolutionIdV1 {
+        self.target_resolution
+    }
+
+    /// Fixed-resolution scope witness retained by the source local model.
+    #[must_use]
+    pub const fn source_scope_witness(&self) -> DerivedWitnessIdV1 {
+        self.source_scope_witness
+    }
+
+    /// Fixed-resolution scope witness retained by the target local model.
+    #[must_use]
+    pub const fn target_scope_witness(&self) -> DerivedWitnessIdV1 {
+        self.target_scope_witness
+    }
+
+    /// Nominal theorem card; not authenticated by this token.
+    #[must_use]
+    pub const fn nominal_theorem(&self) -> DerivedTheoremIdV1 {
+        self.nominal_theorem
+    }
+
+    /// Nominal checker; not executed by this token.
+    #[must_use]
+    pub const fn nominal_checker(&self) -> DerivedCheckerIdV1 {
+        self.nominal_checker
+    }
+
+    /// Nominal external check receipt; not authenticated by this token.
+    #[must_use]
+    pub const fn nominal_check_receipt(&self) -> DerivedWitnessIdV1 {
+        self.nominal_check_receipt
+    }
+
+    /// Explicit artifact denying authority to this structural candidate.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedFixedResolutionQuasiIsomorphismCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedFixedResolutionQuasiIsomorphismCandidateIdV1> {
         self.receipt
     }
 }
@@ -2223,6 +2528,580 @@ pub fn admit_derived_span_correspondence_v1(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FixedResolutionQuasiIsomorphismCandidateBindingV1 {
+    refinement_path: DerivedMorphismIdV1,
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_local_model: DerivedLocalModelIdV1,
+    target_local_model: DerivedLocalModelIdV1,
+    complex_role: DerivedComplexRoleV1,
+    source_complex: DerivedComplexIdV1,
+    target_complex: DerivedComplexIdV1,
+    source_resolution: DerivedResolutionIdV1,
+    target_resolution: DerivedResolutionIdV1,
+    source_scope_witness: DerivedWitnessIdV1,
+    target_scope_witness: DerivedWitnessIdV1,
+    nominal_theorem: DerivedTheoremIdV1,
+    nominal_checker: DerivedCheckerIdV1,
+    nominal_check_receipt: DerivedWitnessIdV1,
+    no_authority: DerivedNoClaimIdV1,
+}
+
+const fn complex_role_tag(role: DerivedComplexRoleV1) -> [u8; 1] {
+    match role {
+        DerivedComplexRoleV1::Tangent => [0],
+        DerivedComplexRoleV1::Cotangent => [1],
+        DerivedComplexRoleV1::DeformationObstruction => [2],
+    }
+}
+
+const fn local_model_complex_for_role(
+    model: &DerivedLocalModelV1,
+    role: DerivedComplexRoleV1,
+) -> DerivedComplexIdV1 {
+    match role {
+        DerivedComplexRoleV1::Tangent => model.tangent_complex,
+        DerivedComplexRoleV1::Cotangent => model.cotangent_complex,
+        DerivedComplexRoleV1::DeformationObstruction => model.deformation_complex,
+    }
+}
+
+fn fixed_resolution_scope_witness(
+    model: &DerivedLocalModelV1,
+    expected_resolution: DerivedResolutionIdV1,
+    presentation_field: &'static str,
+    resolution_field: &'static str,
+    witness_field: &'static str,
+) -> Result<DerivedWitnessIdV1, DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1> {
+    match model.presentation {
+        PresentationScopeV1::FixedResolution {
+            resolution,
+            witness,
+        } => {
+            if resolution != expected_resolution {
+                return Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::ResolutionScopeMismatch {
+                        field: resolution_field,
+                    },
+                );
+            }
+            if is_zero(witness.as_bytes()) {
+                return Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingIdentity {
+                        field: witness_field,
+                    },
+                );
+            }
+            Ok(witness)
+        }
+        PresentationScopeV1::Literal { .. } | PresentationScopeV1::ExternallyChecked { .. } => Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PresentationScopeMismatch {
+                field: presentation_field,
+            },
+        ),
+    }
+}
+
+fn validate_fixed_resolution_candidate_path(
+    ir: &DerivedFixedResolutionQuasiIsomorphismCandidateIrV1,
+    refinement_path: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<(), DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1> {
+    if refinement_path.class() != AdmittedDerivedMorphismClassV1::DeclaredComplexRefinementPath {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathClassMismatch {
+                found: refinement_path.class(),
+            },
+        );
+    }
+    let primitives = refinement_path.primitive_path();
+    if primitives.is_empty() {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathShapeMismatch {
+                field: "empty-refinement-path",
+                index: 0,
+            },
+        );
+    }
+
+    let mut previous_target = None;
+    for (index, primitive) in primitives.iter().enumerate() {
+        if index.is_multiple_of(DERIVED_MORPHISM_CANCELLATION_STRIDE_V1) && cx.checkpoint().is_err()
+        {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
+                    stage: "candidate-path-scan",
+                },
+            );
+        }
+        let AdmittedDerivedPrimitiveV1::DeclaredComplexRefinement(refinement) = primitive else {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathShapeMismatch {
+                    field: "non-refinement-primitive",
+                    index,
+                },
+            );
+        };
+        if let Some((geometry, complex, resolution)) = previous_target
+            && (
+                refinement.source_geometry,
+                refinement.source_complex,
+                refinement.source_resolution,
+            ) != (geometry, complex, resolution)
+        {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathShapeMismatch {
+                    field: "refinement-seam",
+                    index,
+                },
+            );
+        }
+        if index == 0
+            && (
+                refinement.source_geometry,
+                refinement.source_complex,
+                refinement.source_resolution,
+            ) != (ir.source_geometry, ir.source_complex, ir.source_resolution)
+        {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathShapeMismatch {
+                    field: "source-selector",
+                    index,
+                },
+            );
+        }
+        if index + 1 == primitives.len()
+            && (
+                refinement.target_geometry,
+                refinement.target_complex,
+                refinement.target_resolution,
+            ) != (ir.target_geometry, ir.target_complex, ir.target_resolution)
+        {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathShapeMismatch {
+                    field: "target-selector",
+                    index,
+                },
+            );
+        }
+        previous_target = Some((
+            refinement.target_geometry,
+            refinement.target_complex,
+            refinement.target_resolution,
+        ));
+    }
+    Ok(())
+}
+
+fn fixed_resolution_quasi_isomorphism_candidate_receipt(
+    binding: &FixedResolutionQuasiIsomorphismCandidateBindingV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedFixedResolutionQuasiIsomorphismCandidateIdV1>,
+    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
+                stage: "candidate-identity-entry",
+            },
+        );
+    }
+    let role = complex_role_tag(binding.complex_role);
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
+                stage: "candidate-identity",
+            }
+        }
+        other => DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedFixedResolutionQuasiIsomorphismCandidateIdV1, _>::new(
+        DERIVED_MORPHISM_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "refinement-path"),
+        binding.refinement_path.as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "source-geometry"),
+            binding.source_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "target-geometry"),
+            binding.target_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "source-local-model"),
+            binding.source_local_model.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(4, "target-local-model"),
+            binding.target_local_model.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(5, "complex-role"), &role))
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(6, "source-complex"),
+            binding.source_complex.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(7, "target-complex"),
+            binding.target_complex.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(8, "source-resolution"),
+            binding.source_resolution.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(9, "target-resolution"),
+            binding.target_resolution.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(10, "source-scope-witness"),
+            binding.source_scope_witness.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(11, "target-scope-witness"),
+            binding.target_scope_witness.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(12, "nominal-theorem"),
+            binding.nominal_theorem.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(13, "nominal-checker"),
+            binding.nominal_checker.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(14, "nominal-check-receipt"),
+            binding.nominal_check_receipt.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(15, "no-authority"),
+            binding.no_authority.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+#[allow(clippy::too_many_lines)] // One fail-closed structural candidate admission.
+fn fixed_resolution_quasi_isomorphism_candidate_binding(
+    ir: &DerivedFixedResolutionQuasiIsomorphismCandidateIrV1,
+    source: &AdmittedDerivedGeometryV1,
+    target: &AdmittedDerivedGeometryV1,
+    refinement_path: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<
+    FixedResolutionQuasiIsomorphismCandidateBindingV1,
+    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1,
+> {
+    if ir.source_geometry != source.id() {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::EndpointMismatch {
+                field: "source-geometry",
+            },
+        );
+    }
+    if ir.target_geometry != target.id() {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::EndpointMismatch {
+                field: "target-geometry",
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.source_local_model.as_bytes(), "source-local-model"),
+        (ir.target_local_model.as_bytes(), "target-local-model"),
+        (ir.source_complex.as_bytes(), "source-complex"),
+        (ir.target_complex.as_bytes(), "target-complex"),
+        (ir.source_resolution.as_bytes(), "source-resolution"),
+        (ir.target_resolution.as_bytes(), "target-resolution"),
+        (ir.refinement_path.as_bytes(), "refinement-path"),
+        (ir.nominal_theorem.as_bytes(), "nominal-theorem"),
+        (ir.nominal_checker.as_bytes(), "nominal-checker"),
+        (ir.nominal_check_receipt.as_bytes(), "nominal-check-receipt"),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingIdentity { field },
+            );
+        }
+    }
+    if ir.refinement_path != refinement_path.id() {
+        return Err(DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathIdentityMismatch);
+    }
+    for (matches, field) in [
+        (
+            refinement_path.source() == ir.source_geometry,
+            "refinement-path-source",
+        ),
+        (
+            refinement_path.target() == ir.target_geometry,
+            "refinement-path-target",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::EndpointMismatch { field },
+            );
+        }
+    }
+    validate_fixed_resolution_candidate_path(ir, refinement_path, cx)?;
+
+    let source_model = source
+        .ir()
+        .local_models
+        .iter()
+        .find(|model| model.id == ir.source_local_model)
+        .ok_or(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingLocalModel {
+                field: "source-local-model",
+            },
+        )?;
+    let target_model = target
+        .ir()
+        .local_models
+        .iter()
+        .find(|model| model.id == ir.target_local_model)
+        .ok_or(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingLocalModel {
+                field: "target-local-model",
+            },
+        )?;
+    let source_complex = source
+        .ir()
+        .complexes
+        .iter()
+        .find(|complex| complex.id == ir.source_complex)
+        .ok_or(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingCandidateComplex {
+                field: "source-complex",
+            },
+        )?;
+    let target_complex = target
+        .ir()
+        .complexes
+        .iter()
+        .find(|complex| complex.id == ir.target_complex)
+        .ok_or(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingCandidateComplex {
+                field: "target-complex",
+            },
+        )?;
+
+    for (matches, field) in [
+        (
+            source_complex.role == ir.complex_role,
+            "source-complex-role",
+        ),
+        (
+            target_complex.role == ir.complex_role,
+            "target-complex-role",
+        ),
+        (
+            local_model_complex_for_role(source_model, ir.complex_role) == ir.source_complex,
+            "source-local-model-complex",
+        ),
+        (
+            local_model_complex_for_role(target_model, ir.complex_role) == ir.target_complex,
+            "target-local-model-complex",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::ComplexRoleMismatch {
+                    field,
+                },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            source_model.chart == source_complex.chart,
+            "source-model-complex-chart",
+        ),
+        (
+            target_model.chart == target_complex.chart,
+            "target-model-complex-chart",
+        ),
+        (
+            source_model.chart == target_model.chart,
+            "endpoint-local-model-chart",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::LocalPresentationMismatch {
+                    field,
+                },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            source_complex.resolution.id == ir.source_resolution,
+            "source-complex-resolution",
+        ),
+        (
+            target_complex.resolution.id == ir.target_resolution,
+            "target-complex-resolution",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::ResolutionScopeMismatch {
+                    field,
+                },
+            );
+        }
+    }
+    if source_model.locality != target_model.locality {
+        return Err(DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::LocalityMismatch);
+    }
+    let source_scope_witness = fixed_resolution_scope_witness(
+        source_model,
+        ir.source_resolution,
+        "source-presentation",
+        "source-presentation-resolution",
+        "source-scope-witness",
+    )?;
+    let target_scope_witness = fixed_resolution_scope_witness(
+        target_model,
+        ir.target_resolution,
+        "target-presentation",
+        "target-presentation-resolution",
+        "target-scope-witness",
+    )?;
+
+    Ok(FixedResolutionQuasiIsomorphismCandidateBindingV1 {
+        refinement_path: ir.refinement_path,
+        source_geometry: ir.source_geometry,
+        target_geometry: ir.target_geometry,
+        source_local_model: ir.source_local_model,
+        target_local_model: ir.target_local_model,
+        complex_role: ir.complex_role,
+        source_complex: ir.source_complex,
+        target_complex: ir.target_complex,
+        source_resolution: ir.source_resolution,
+        target_resolution: ir.target_resolution,
+        source_scope_witness,
+        target_scope_witness,
+        nominal_theorem: ir.nominal_theorem,
+        nominal_checker: ir.nominal_checker,
+        nominal_check_receipt: ir.nominal_check_receipt,
+        no_authority: ir.no_authority,
+    })
+}
+
+/// Admit a structural fixed-resolution quasi-isomorphism candidate.
+///
+/// The supplied path must be an exact sealed homogeneous refinement path. Each
+/// endpoint selector must resolve to a local model that owns the selected role
+/// complex and explicitly declares its own matching `FixedResolution` scope.
+/// The endpoint localities must be identical. The resulting token retains the
+/// exact scope witnesses and nominal theorem/checker/receipt IDs, but does not
+/// authenticate them or prove a chain map, commutation, cohomology isomorphism,
+/// inverse, homotopy, presentation equivalence, refinement invariance, evidence
+/// preservation, or physical equivalence. RD.1c owns independent promotion.
+///
+/// # Errors
+/// Returns a typed refusal for schema, endpoint/path, local-model/complex/role,
+/// fixed-resolution/locality, nominal-identity, cancellation, or canonical-
+/// identity defects.
+#[must_use = "a raw quasi-isomorphism candidate has no theorem authority"]
+pub fn admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+    ir: &DerivedFixedResolutionQuasiIsomorphismCandidateIrV1,
+    source: &AdmittedDerivedGeometryV1,
+    target: &AdmittedDerivedGeometryV1,
+    refinement_path: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
+                stage: "candidate-admission-entry",
+            },
+        );
+    }
+    if ir.schema_version != DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    let binding = fixed_resolution_quasi_isomorphism_candidate_binding(
+        ir,
+        source,
+        target,
+        refinement_path,
+        cx,
+    )?;
+    let receipt = fixed_resolution_quasi_isomorphism_candidate_receipt(&binding, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
+                stage: "candidate-publication",
+            },
+        );
+    }
+    Ok(AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
+        refinement_path: binding.refinement_path,
+        source_geometry: binding.source_geometry,
+        target_geometry: binding.target_geometry,
+        source_local_model: binding.source_local_model,
+        target_local_model: binding.target_local_model,
+        complex_role: binding.complex_role,
+        source_complex: binding.source_complex,
+        target_complex: binding.target_complex,
+        source_resolution: binding.source_resolution,
+        target_resolution: binding.target_resolution,
+        source_scope_witness: binding.source_scope_witness,
+        target_scope_witness: binding.target_scope_witness,
+        nominal_theorem: binding.nominal_theorem,
+        nominal_checker: binding.nominal_checker,
+        nominal_check_receipt: binding.nominal_check_receipt,
+        no_authority: binding.no_authority,
+        receipt,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2230,9 +3109,12 @@ mod tests {
     use fs_exec::{CancelGate, ExecMode, StreamKey};
 
     use crate::derived::{
-        CompactnessV1, ComplexDifferentialV1, ConfigurationChartClassV1, DerivedComplexRoleV1,
-        DerivedLinearMapIdV1, DerivedQuantityKindIdV1, FiniteComputabilityV1, FiniteResolutionV1,
-        GradedSpaceV1, LocalityScopeV1, RegularityClassV1, UnitBindingV1,
+        CompactnessV1, ComplexDifferentialV1, ConfigurationChartClassV1, DerivedAdmissionBudgetV1,
+        DerivedComplexRoleV1, DerivedGeometryIrV1, DerivedLinearMapIdV1, DerivedLocalModelClassV1,
+        DerivedProofStateV1, DerivedQuantityKindIdV1, FiniteComputabilityV1, FiniteResolutionV1,
+        GradedSpaceV1, LocalityScopeV1, RegularityClassV1, StratificationClassV1,
+        StratificationIdV1, StratificationV1, StratumIdV1, StratumSpecV1, UnitBindingV1,
+        admit_derived_geometry_v1,
     };
 
     fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -2665,6 +3547,180 @@ mod tests {
             cx,
         )
         .expect("valid identity morphism")
+    }
+
+    fn fixed_resolution_geometry_ir(
+        tangent_complex_seed: u8,
+        tangent_resolution_seed: u8,
+        local_model_seed: u8,
+        tangent_rank: u32,
+    ) -> DerivedGeometryIrV1 {
+        let chart = chart(4, 2, 2, 8, 1.0);
+        let chart_id = chart.id;
+        let tangent = complex(
+            tangent_complex_seed,
+            tangent_resolution_seed,
+            chart_id,
+            DerivedComplexRoleV1::Tangent,
+            &[(0, tangent_rank, 120), (1, 1, 121)],
+            0,
+        );
+        let cotangent = complex(
+            tangent_complex_seed.wrapping_add(1),
+            tangent_resolution_seed.wrapping_add(1),
+            chart_id,
+            DerivedComplexRoleV1::Cotangent,
+            &[(0, 1, 122), (1, 1, 123)],
+            0,
+        );
+        let deformation = complex(
+            tangent_complex_seed.wrapping_add(2),
+            tangent_resolution_seed.wrapping_add(2),
+            chart_id,
+            DerivedComplexRoleV1::DeformationObstruction,
+            &[(0, 1, 124), (1, 1, 125)],
+            0,
+        );
+        let local_model = DerivedLocalModelIdV1::from_bytes([local_model_seed; 32]);
+        let stratum = StratumIdV1::from_bytes([local_model_seed.wrapping_add(1); 32]);
+        let locality = LocalityScopeV1::GermAt {
+            chart: chart_id,
+            point: DerivedWitnessIdV1::from_bytes([5; 32]),
+        };
+        DerivedGeometryIrV1 {
+            schema_version: crate::derived::DERIVED_GEOMETRY_SCHEMA_VERSION_V1,
+            subject: DerivedSubjectIdV1::from_bytes([1; 32]),
+            model_version: DerivedModelVersionIdV1::from_bytes([4; 32]),
+            category: GeometricCategoryV1::Semialgebraic,
+            coefficients: CoefficientSystemV1::RationalReal,
+            frame: DerivedFrameIdV1::from_bytes([2; 32]),
+            unit_system: DerivedUnitSystemIdV1::from_bytes([3; 32]),
+            locality,
+            compactness: CompactnessV1::RelativelyCompact {
+                witness: DerivedWitnessIdV1::from_bytes([6; 32]),
+            },
+            charts: vec![chart],
+            equalities: Vec::new(),
+            inequalities: Vec::new(),
+            boundaries: Vec::new(),
+            contacts: Vec::new(),
+            constitutive_data: Vec::new(),
+            complexes: vec![tangent, cotangent, deformation],
+            local_models: vec![DerivedLocalModelV1 {
+                id: local_model,
+                chart: chart_id,
+                class: DerivedLocalModelClassV1::GeneralFiniteDerived,
+                equalities: Vec::new(),
+                active_inequalities: Vec::new(),
+                active_contacts: Vec::new(),
+                constitutive_data: Vec::new(),
+                tangent_complex: complex_id(tangent_complex_seed),
+                cotangent_complex: complex_id(tangent_complex_seed.wrapping_add(1)),
+                deformation_complex: complex_id(tangent_complex_seed.wrapping_add(2)),
+                virtual_dimension: 1,
+                locality,
+                presentation: PresentationScopeV1::FixedResolution {
+                    resolution: resolution_id(tangent_resolution_seed),
+                    witness: DerivedWitnessIdV1::from_bytes(
+                        [tangent_resolution_seed.wrapping_add(32); 32],
+                    ),
+                },
+            }],
+            stratification: StratificationV1 {
+                id: StratificationIdV1::from_bytes([local_model_seed.wrapping_add(2); 32]),
+                class: StratificationClassV1::FiniteIncidence,
+                strata: vec![StratumSpecV1 {
+                    id: stratum,
+                    chart: chart_id,
+                    local_model,
+                    dimension: 1,
+                    active_inequalities: Vec::new(),
+                    active_contacts: Vec::new(),
+                    relative_boundary: None,
+                    regularity: RegularityClassV1::Polynomial,
+                    compactness: CompactnessV1::RelativelyCompact {
+                        witness: DerivedWitnessIdV1::from_bytes(
+                            [local_model_seed.wrapping_add(3); 32],
+                        ),
+                    },
+                }],
+                incidences: Vec::new(),
+                local_links: Vec::new(),
+            },
+            proof_state: DerivedProofStateV1::StructuralNoClaim {
+                no_claim: DerivedNoClaimIdV1::from_bytes([local_model_seed.wrapping_add(4); 32]),
+            },
+        }
+    }
+
+    fn fixed_resolution_candidate_fixture(
+        cx: &Cx<'_>,
+    ) -> (
+        AdmittedDerivedGeometryV1,
+        AdmittedDerivedGeometryV1,
+        AdmittedDerivedMorphismV1,
+        DerivedFixedResolutionQuasiIsomorphismCandidateIrV1,
+    ) {
+        let source = admit_derived_geometry_v1(
+            fixed_resolution_geometry_ir(70, 80, 90, 1),
+            DerivedAdmissionBudgetV1::STANDARD,
+            cx,
+        )
+        .expect("valid source fixed-resolution geometry");
+        let target = admit_derived_geometry_v1(
+            fixed_resolution_geometry_ir(73, 83, 93, 2),
+            DerivedAdmissionBudgetV1::STANDARD,
+            cx,
+        )
+        .expect("valid target fixed-resolution geometry");
+        let path = admit_derived_morphism_v1(
+            DerivedMorphismIrV1 {
+                schema_version: DERIVED_MORPHISM_SCHEMA_VERSION_V1,
+                source: source.id(),
+                target: target.id(),
+                kind: DerivedMorphismKindV1::DeclaredComplexRefinement {
+                    source_complex: complex_id(70),
+                    target_complex: complex_id(73),
+                    source_resolution: resolution_id(80),
+                    target_resolution: resolution_id(83),
+                    prolongation: DerivedComplexRefinementMapIdV1::from_bytes([101; 32]),
+                    commutation: DerivedWitnessIdV1::from_bytes([102; 32]),
+                },
+                evidence: DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                    input_geometry: source.id(),
+                    output_geometry: target.id(),
+                    input_evidence: evidence_id(source.id()),
+                    output_evidence: evidence_id(target.id()),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Estimated,
+                },
+                equivalence: DerivedEquivalenceBoundaryV1::NoClaim {
+                    artifact: DerivedNoClaimIdV1::from_bytes([103; 32]),
+                },
+            },
+            &source,
+            &target,
+            cx,
+        )
+        .expect("valid fixed-resolution refinement path");
+        let ir = DerivedFixedResolutionQuasiIsomorphismCandidateIrV1 {
+            schema_version: DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1,
+            source_geometry: source.id(),
+            target_geometry: target.id(),
+            source_local_model: DerivedLocalModelIdV1::from_bytes([90; 32]),
+            target_local_model: DerivedLocalModelIdV1::from_bytes([93; 32]),
+            complex_role: DerivedComplexRoleV1::Tangent,
+            source_complex: complex_id(70),
+            target_complex: complex_id(73),
+            source_resolution: resolution_id(80),
+            target_resolution: resolution_id(83),
+            refinement_path: path.id(),
+            nominal_theorem: DerivedTheoremIdV1::from_bytes([104; 32]),
+            nominal_checker: DerivedCheckerIdV1::from_bytes([105; 32]),
+            nominal_check_receipt: DerivedWitnessIdV1::from_bytes([106; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([107; 32]),
+        };
+        (source, target, path, ir)
     }
 
     #[test]
@@ -4943,6 +5999,349 @@ mod tests {
             assert!(matches!(
                 compose_derived_morphisms_v1(&identity, &strict, cx),
                 Err(DerivedMorphismErrorV1::Cancelled { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn fixed_resolution_candidate_is_domain_separate_replayable_and_no_authority() {
+        assert_ne!(
+            <DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedMorphismIdentitySchemaV1 as CanonicalSchema>::DOMAIN
+        );
+        assert_ne!(
+            <DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedSpanCorrespondenceIdentitySchemaV1 as CanonicalSchema>::DOMAIN
+        );
+        assert_eq!(
+            <DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS
+                .len(),
+            16
+        );
+
+        with_cx(false, |cx| {
+            let (source, target, path, ir) = fixed_resolution_candidate_fixture(cx);
+            let first = admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                &ir, &source, &target, &path, cx,
+            )
+            .expect("valid structural quasi-isomorphism candidate");
+            let replay = admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                &ir, &source, &target, &path, cx,
+            )
+            .expect("deterministic structural candidate replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.refinement_path(), path.id());
+            assert_eq!(first.source_geometry(), source.id());
+            assert_eq!(first.target_geometry(), target.id());
+            assert_eq!(first.source_local_model(), ir.source_local_model);
+            assert_eq!(first.target_local_model(), ir.target_local_model);
+            assert_eq!(first.complex_role(), DerivedComplexRoleV1::Tangent);
+            assert_eq!(first.source_complex(), complex_id(70));
+            assert_eq!(first.target_complex(), complex_id(73));
+            assert_eq!(first.source_resolution(), resolution_id(80));
+            assert_eq!(first.target_resolution(), resolution_id(83));
+            assert_eq!(
+                first.source_scope_witness(),
+                DerivedWitnessIdV1::from_bytes([112; 32])
+            );
+            assert_eq!(
+                first.target_scope_witness(),
+                DerivedWitnessIdV1::from_bytes([115; 32])
+            );
+            assert_eq!(first.nominal_theorem(), ir.nominal_theorem);
+            assert_eq!(first.nominal_checker(), ir.nominal_checker);
+            assert_eq!(first.nominal_check_receipt(), ir.nominal_check_receipt);
+            assert_eq!(first.no_authority(), ir.no_authority);
+            assert_eq!(
+                path.class(),
+                AdmittedDerivedMorphismClassV1::DeclaredComplexRefinementPath
+            );
+            assert_eq!(path.no_equivalence_claims().len(), 1);
+        });
+    }
+
+    #[test]
+    fn fixed_resolution_candidate_receipt_binds_every_ordered_field() {
+        with_cx(false, |cx| {
+            let (source, target, path, ir) = fixed_resolution_candidate_fixture(cx);
+            let binding = fixed_resolution_quasi_isomorphism_candidate_binding(
+                &ir, &source, &target, &path, cx,
+            )
+            .expect("valid candidate binding");
+            let baseline = fixed_resolution_quasi_isomorphism_candidate_receipt(&binding, cx)
+                .expect("candidate receipt")
+                .id();
+
+            macro_rules! assert_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = binding;
+                    changed.$field = $value;
+                    let changed =
+                        fixed_resolution_quasi_isomorphism_candidate_receipt(&changed, cx)
+                            .expect("mutated candidate receipt")
+                            .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_field_moves_identity!(
+                refinement_path,
+                DerivedMorphismIdV1::parse_slice(&[201; 32]).expect("nonzero path identity")
+            );
+            assert_field_moves_identity!(source_geometry, geometry_id(202));
+            assert_field_moves_identity!(target_geometry, geometry_id(203));
+            assert_field_moves_identity!(
+                source_local_model,
+                DerivedLocalModelIdV1::from_bytes([204; 32])
+            );
+            assert_field_moves_identity!(
+                target_local_model,
+                DerivedLocalModelIdV1::from_bytes([205; 32])
+            );
+            assert_field_moves_identity!(complex_role, DerivedComplexRoleV1::Cotangent);
+            assert_field_moves_identity!(source_complex, complex_id(206));
+            assert_field_moves_identity!(target_complex, complex_id(207));
+            assert_field_moves_identity!(source_resolution, resolution_id(208));
+            assert_field_moves_identity!(target_resolution, resolution_id(209));
+            assert_field_moves_identity!(
+                source_scope_witness,
+                DerivedWitnessIdV1::from_bytes([210; 32])
+            );
+            assert_field_moves_identity!(
+                target_scope_witness,
+                DerivedWitnessIdV1::from_bytes([211; 32])
+            );
+            assert_field_moves_identity!(
+                nominal_theorem,
+                DerivedTheoremIdV1::from_bytes([212; 32])
+            );
+            assert_field_moves_identity!(
+                nominal_checker,
+                DerivedCheckerIdV1::from_bytes([213; 32])
+            );
+            assert_field_moves_identity!(
+                nominal_check_receipt,
+                DerivedWitnessIdV1::from_bytes([214; 32])
+            );
+            assert_field_moves_identity!(no_authority, DerivedNoClaimIdV1::from_bytes([215; 32]));
+        });
+    }
+
+    #[test]
+    fn fixed_resolution_candidate_refuses_path_role_scope_and_opaque_identity_defects() {
+        with_cx(false, |cx| {
+            let (source, target, path, ir) = fixed_resolution_candidate_fixture(cx);
+
+            let mut bad_schema = ir;
+            bad_schema.schema_version = 2;
+            assert!(matches!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &bad_schema,
+                    &source,
+                    &target,
+                    &path,
+                    cx,
+                ),
+                Err(DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::UnsupportedSchemaVersion {
+                    found: 2,
+                    supported: DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1,
+                })
+            ));
+
+            let mut wrong_path = ir;
+            wrong_path.refinement_path =
+                DerivedMorphismIdV1::parse_slice(&[216; 32]).expect("nonzero path identity");
+            assert_eq!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &wrong_path,
+                    &source,
+                    &target,
+                    &path,
+                    cx,
+                ),
+                Err(DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathIdentityMismatch)
+            );
+
+            let strict_path = admit_derived_morphism_v1(
+                DerivedMorphismIrV1 {
+                    schema_version: DERIVED_MORPHISM_SCHEMA_VERSION_V1,
+                    source: source.id(),
+                    target: target.id(),
+                    kind: DerivedMorphismKindV1::Strict {
+                        witness: DerivedWitnessIdV1::from_bytes([220; 32]),
+                    },
+                    evidence: DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                        input_geometry: source.id(),
+                        output_geometry: target.id(),
+                        input_evidence: evidence_id(source.id()),
+                        output_evidence: evidence_id(target.id()),
+                        input_rank: ColorRank::Validated,
+                        output_rank: ColorRank::Estimated,
+                    },
+                    equivalence: DerivedEquivalenceBoundaryV1::NoClaim {
+                        artifact: DerivedNoClaimIdV1::from_bytes([221; 32]),
+                    },
+                },
+                &source,
+                &target,
+                cx,
+            )
+            .expect("valid non-refinement control path");
+            let mut wrong_class = ir;
+            wrong_class.refinement_path = strict_path.id();
+            assert_eq!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &wrong_class,
+                    &source,
+                    &target,
+                    &strict_path,
+                    cx,
+                ),
+                Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathClassMismatch {
+                        found: AdmittedDerivedMorphismClassV1::Strict,
+                    }
+                )
+            );
+
+            let mut wrong_selector = ir;
+            wrong_selector.source_resolution = resolution_id(222);
+            assert_eq!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &wrong_selector,
+                    &source,
+                    &target,
+                    &path,
+                    cx,
+                ),
+                Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PathShapeMismatch {
+                        field: "source-selector",
+                        index: 0,
+                    }
+                )
+            );
+
+            let mut wrong_role = ir;
+            wrong_role.complex_role = DerivedComplexRoleV1::Cotangent;
+            assert!(matches!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &wrong_role,
+                    &source,
+                    &target,
+                    &path,
+                    cx,
+                ),
+                Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::ComplexRoleMismatch {
+                        field: "source-complex-role",
+                    }
+                )
+            ));
+
+            let mut missing_model = ir;
+            missing_model.source_local_model = DerivedLocalModelIdV1::from_bytes([217; 32]);
+            assert_eq!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &missing_model,
+                    &source,
+                    &target,
+                    &path,
+                    cx,
+                ),
+                Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingLocalModel {
+                        field: "source-local-model",
+                    }
+                )
+            );
+
+            for (field, mut malformed) in [
+                ("nominal-theorem", ir),
+                ("nominal-checker", ir),
+                ("nominal-check-receipt", ir),
+                ("no-authority", ir),
+            ] {
+                match field {
+                    "nominal-theorem" => {
+                        malformed.nominal_theorem = DerivedTheoremIdV1::from_bytes([0; 32]);
+                    }
+                    "nominal-checker" => {
+                        malformed.nominal_checker = DerivedCheckerIdV1::from_bytes([0; 32]);
+                    }
+                    "nominal-check-receipt" => {
+                        malformed.nominal_check_receipt = DerivedWitnessIdV1::from_bytes([0; 32]);
+                    }
+                    "no-authority" => {
+                        malformed.no_authority = DerivedNoClaimIdV1::from_bytes([0; 32]);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                        &malformed, &source, &target, &path, cx,
+                    ),
+                    Err(
+                        DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::MissingIdentity {
+                            field,
+                        }
+                    )
+                );
+            }
+
+            let literal_model = DerivedLocalModelV1 {
+                presentation: PresentationScopeV1::Literal {
+                    no_claim: DerivedNoClaimIdV1::from_bytes([218; 32]),
+                },
+                ..source.ir().local_models[0].clone()
+            };
+            assert_eq!(
+                fixed_resolution_scope_witness(
+                    &literal_model,
+                    ir.source_resolution,
+                    "source-presentation",
+                    "source-presentation-resolution",
+                    "source-scope-witness",
+                ),
+                Err(DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PresentationScopeMismatch {
+                    field: "source-presentation",
+                })
+            );
+            let external_model = DerivedLocalModelV1 {
+                presentation: PresentationScopeV1::ExternallyChecked {
+                    witness: DerivedWitnessIdV1::from_bytes([219; 32]),
+                },
+                ..source.ir().local_models[0].clone()
+            };
+            assert_eq!(
+                fixed_resolution_scope_witness(
+                    &external_model,
+                    ir.source_resolution,
+                    "source-presentation",
+                    "source-presentation-resolution",
+                    "source-scope-witness",
+                ),
+                Err(DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::PresentationScopeMismatch {
+                    field: "source-presentation",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn fixed_resolution_candidate_entry_cancellation_fails_closed() {
+        let (source, target, path, ir) = with_cx(false, fixed_resolution_candidate_fixture);
+        with_cx(true, |cx| {
+            assert!(matches!(
+                admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+                    &ir, &source, &target, &path, cx,
+                ),
+                Err(
+                    DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
+                        stage: "candidate-admission-entry",
+                    }
+                )
             ));
         });
     }

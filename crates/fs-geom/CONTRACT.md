@@ -197,6 +197,17 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   transport. V1 does not compose spans: actual composition requires a separately
   admitted pullback apex, projections, commuting square, and pullback authority,
   and associativity is only available under the resulting scoped equivalences.
+  `DerivedFixedResolutionQuasiIsomorphismCandidateIrV1` is another standalone
+  declaration outside the morphism-kind and equivalence algebras. It binds one
+  exact sealed homogeneous refinement path to exact source/target local-model,
+  complex, resolution, and complex-role selectors. Both local models must own
+  the selected role complex, share one exact locality, and explicitly carry a
+  `FixedResolution` presentation scope matching their own selected resolution.
+  Literal and merely `ExternallyChecked` presentation scopes fail closed. The
+  sealed candidate retains both endpoint scope-witness IDs plus nominal theorem,
+  checker, and external check-receipt IDs and an explicit no-authority artifact.
+  These are structured inputs for RD.1c, not a quasi-isomorphism or equivalence
+  capability; candidate composition and inversion are intentionally absent.
   Evidence transport is explicitly contravariant restriction or covariant
   balance corestriction and binds exact input/output geometry identities plus
   nominal caller-declared input/output evidence-artifact identities and ranks.
@@ -217,9 +228,11 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   establish payload preservation or validity-domain inclusion, prove theorem
   truth, or establish physical equivalence. Invertible chart transitions,
   geometric/stratified refinements, authenticated subobject inclusions,
-  quasi-isomorphism witnesses, constructible maps, composable/authenticated
-  correspondences, and L6 Machine-IR crosswalks remain typed RD.1b follow-ups
-  rather than being represented as strict maps.
+  Constructible maps, composable/authenticated correspondences, and L6
+  Machine-IR crosswalks remain typed RD.1b follow-ups rather than being
+  represented as strict maps. Authoritative quasi-isomorphism receipts require
+  RD.1c independent checking of the structural candidate and its retained
+  artifacts.
 
 - `exit_path` module (RD.X1, `[M]`, behind `derived-geometry`) admits a bounded,
   executable statement language for maximal exit/entrance-path approximation
@@ -551,6 +564,13 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    endpoint orientation of both sealed legs, and one nonzero no-authority
    artifact. They do not enter directed-morphism composition or expose a direct
    evidence transport.
+10. Fixed-resolution quasi-isomorphism candidates bind an exact nonempty
+   homogeneous refinement path; exact endpoint geometry, local-model, role,
+   complex, and resolution selectors; each endpoint's exact fixed-resolution
+   scope witness; nominal theorem/checker/check-receipt IDs; and an explicit
+   no-authority artifact. They do not enter morphism composition or the
+   equivalence boundary, and no field can be omitted without changing or
+   refusing the candidate receipt.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -582,6 +602,12 @@ Refusal publishes no admitted morphism.
 Standalone span admission uses `DerivedSpanCorrespondenceErrorV1` for schema,
 zero no-authority identity, raw-leg/sealed-leg mismatch, leg orientation,
 cancellation, and canonical-identity defects. Refusal publishes no span token.
+Fixed-resolution quasi-isomorphism candidate admission uses
+`DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1` for schema, exact
+endpoint/path/selector, local-model ownership, role/complex/chart/locality,
+fixed-resolution scope, nominal identity, cancellation, and canonical-identity
+defects. Refusal publishes no candidate token and cannot affect the supplied
+sealed morphism.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -615,6 +641,12 @@ Standalone span receipts use a separate schema/domain and encode exact
 source/apex/target geometry IDs, left then right admitted-leg IDs, and the
 no-authority artifact. Replaying the same ordered legs is stable; swapping valid
 distinct equal-endpoint legs changes identity.
+Fixed-resolution quasi-isomorphism candidate receipts use another separate
+schema/domain and encode the exact refinement path; ordered endpoint geometry,
+local-model, complex, and resolution IDs; the selected complex role; both
+endpoint scope witnesses; nominal theorem/checker/check-receipt IDs; and the
+no-authority artifact. Exact replay is stable, while moving any retained field
+changes identity without authenticating its payload.
 
 ## Cancellation behavior
 Chart evaluation and production sampling paths take `&Cx`.
@@ -643,6 +675,10 @@ identity construction, and before publication. Cancellation exposes no partial
 admitted morphism.
 Standalone span admission polls at entry, before and inside identity encoding,
 and immediately before publication. Cancellation exposes no partial span token.
+Fixed-resolution quasi-isomorphism candidate admission additionally polls while
+scanning the bounded typed refinement path, before and inside identity encoding,
+and immediately before publication. Cancellation exposes no partial candidate
+token.
 RD.X1 statement admission polls before validation, once for every derived
 theorem-lattice node, before identity construction, and inside the streaming
 encoder. Its falsifier set and truncation lattice have hard versioned caps;
@@ -828,6 +864,25 @@ claim those stronger G4/G5 results.
   reduction, convergence, constraints, strata, physics, or evidence authority
   are preserved. Nonzero prolongation and commutation IDs name nominal artifacts
   only, and `IdentityOnly` is refused.
+- `AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1` proves only that
+  exact endpoint local models select the declared role complexes under matching
+  endpoint-local `FixedResolution` scopes, and that an exact homogeneous
+  refinement path connects those selectors. It does not validate differential
+  payloads or square-zero laws; prolongation existence, linearity, degree/unit/
+  quantity preservation, or commutation; induced cohomology maps or their
+  injectivity/surjectivity; Betti, Euler, or torsion agreement; an inverse,
+  zigzag, or chain homotopy; presentation, generator, constraint, stratum,
+  geometry, evidence, or physical equivalence; refinement naturality or
+  invariance; or error reduction and convergence. Its theorem, checker, check-
+  receipt, scope-witness, prolongation, and commutation IDs remain nominal.
+  RD.1c must independently resolve the exact candidate and path, verify every
+  differential and factor map (including truncation boundaries), establish the
+  induced degreewise cohomology isomorphism under the declared coefficient
+  semantics, and bind checker/version/TCB/budget evidence in a new authority
+  receipt. Stronger presentation equivalence additionally requires semantic
+  generator/constraint correspondence plus inverse or zigzag and homotopy
+  evidence; extension to later resolutions requires a separate naturality or
+  coherent-zigzag theorem.
 - `DeclaredInclusion` is a typed whole-object inclusion declaration, not a
   containment certificate. It proves no actual subset or validity-domain
   inclusion; map execution or payload truth; injectivity, monicity, embedding,
