@@ -168,7 +168,9 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   preview/full-length/full-digest evidence model, releasing unused reserved
   capacity atomically with completion.
   `events_page` is the only event reader and returns at most 1,024 rows under
-  the permit's exact scope.
+  the permit's exact scope. It captures only shallow `Arc` references while
+  holding the governor mutex; cloning evidence-bearing public rows happens
+  after releasing it.
 - `grant` module (bead aeq7, increment 1): `CapabilityToken` is
   demoted to an untrusted REQUEST; authority is an opaque
   `SessionGrant` minted only by `mint_grant` through an injected
@@ -261,11 +263,14 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   encoded payload. An unchanged repeated call is a no-op; failed persistence
   leaves every selected generation-aware cursor dirty for retry.
   The call refuses an already-open ledger transaction because it cannot know
-  whether the owner will commit or roll back. Preparation reserves one scope
-  under the governor mutex, database I/O runs after releasing that mutex, and
-  cursor commit validates the reservation plus generation/revision snapshot.
-  A concurrent same-scope flush returns `ScopeFlushInFlight`; unrelated hot
-  paths remain live. Each scope owns one commit-ordinal-indexed causal set in
+  whether the owner will commit or roll back. Under the governor mutex,
+  preparation validates the scope, selects at most 1,024 immutable
+  `Arc`-backed sources, and installs one reservation. Evidence cloning plus
+  JSON/binary terminal materialization and database I/O run after releasing
+  that mutex; cursor commit reacquires it and validates the reservation plus
+  generation/revision. A concurrent same-scope flush returns
+  `ScopeFlushInFlight`; unrelated hot paths remain live. Each scope owns one
+  commit-ordinal-indexed causal set in
   which standalone meter rows and successful submission terminal rows are
   interleaved. A successful terminal substitutes for its private meter row, so
   no later report whose `before` snapshot contains that charge can precede the
@@ -669,6 +674,10 @@ tests cover exact flush row/byte limits, event/ordinal/retained-byte caps,
 concurrent acknowledgement replay, altered-acknowledgement refusal, multiple
 simultaneous reservations,
 pagination, and same-scope in-flight reservation refusal.
+`maximum_page_and_flush_materialize_without_holding_the_governor_lock`
+barrier-pauses a 1,024-row evidence page and a 1,024-terminal flush after
+snapshot capture, then proves an unrelated scope can complete both charge and
+submit before either materializer is released.
 The durable registry regressions use real on-disk ledger reopen: a fresh
 Pending claim executes no closure and rolls back every local reservation;
 successful and failed submission terminals recover their original receipt;
@@ -758,6 +767,12 @@ armed and runs when an x86 host picks it up.
   failure receipt becomes restart-replayable only when
   `flush_scope_to_ledger` commits the typed terminal and owned event. A crash
   in between is safely Pending/indeterminate, not a claimed recovered result.
+- **Flush snapshots shorten but do not eliminate governor serialization**:
+  `Arc` snapshots remove evidence cloning and terminal encoding from the
+  governor-wide critical section; scope validation, bounded source selection,
+  reservation, and cursor commit still serialize briefly on that mutex. The
+  barrier regression proves lock independence, not a hardware-specific
+  wall-clock latency SLO.
 - **Each exact ledger scope flushes to one owning sink**: per-scope in-memory
   cursors prevent duplicate appends, while a later different sink for that
   scope is refused by opaque `LedgerInstanceId` before writes rather than

@@ -1131,7 +1131,7 @@ fn cached_pause_acknowledgement(
             .ok_or(SessionError::UngatedSession {
                 id: request_id.session.0,
             })?;
-    if event != &expected.event
+    if event.as_ref() != &expected.event
         || !completed.is_some_and(|completed| {
             completed.request_id == request_id
                 && completed.resume_generation == replay.resume_generation
@@ -1616,7 +1616,7 @@ impl Governor {
                     return Ok(SubmitOutcome::Failed {
                         admission_ordinal: *admission_ordinal,
                         receipt: *receipt,
-                        evidence: evidence.clone(),
+                        evidence: evidence.as_ref().clone(),
                     });
                 }
                 Some(IdemState::Pending { .. }) => return Ok(SubmitOutcome::InFlight),
@@ -1726,7 +1726,7 @@ impl Governor {
                 let state = IdemState::Failed {
                     admission_ordinal: *admission_ordinal,
                     receipt: *receipt,
-                    evidence: evidence.clone(),
+                    evidence: Arc::new(evidence.clone()),
                     durable_permit: None,
                 };
                 let (event, _) = buffered_submission_failure(&ledger_scope, request_id, &state)?;
@@ -1791,7 +1791,7 @@ impl Governor {
                 return Ok(SubmitOutcome::Failed {
                     admission_ordinal: *admission_ordinal,
                     receipt: *receipt,
-                    evidence: evidence.clone(),
+                    evidence: evidence.as_ref().clone(),
                 });
             }
             Some(IdemState::Pending { .. }) => return Ok(SubmitOutcome::InFlight),
@@ -2035,7 +2035,9 @@ impl Governor {
                     action_id,
                     level,
                     events: scope.events[replay.event_start..replay.event_start + replay.event_len]
-                        .to_vec(),
+                        .iter()
+                        .map(|event| event.as_ref().clone())
+                        .collect(),
                     content_hash: replay.content_hash,
                 });
             }
@@ -2119,7 +2121,9 @@ impl Governor {
                 action_id,
                 level,
                 events: scope.events[replay.event_start..replay.event_start + replay.event_len]
-                    .to_vec(),
+                    .iter()
+                    .map(|event| event.as_ref().clone())
+                    .collect(),
                 content_hash: replay.content_hash,
             });
         }
@@ -2296,7 +2300,7 @@ impl Governor {
             .get_mut(&ledger_scope)
             .expect("recovered scope")
             .events
-            .extend(receipt.events.iter().cloned());
+            .extend(receipt.events.iter().cloned().map(Arc::new));
         inner.next_ordinal = receipt
             .events
             .last()
@@ -2599,7 +2603,7 @@ impl Governor {
                 .get_mut(&ledger_scope)
                 .expect("recovered scope");
             scope.reserved_pause_completions -= 1;
-            scope.events.push(acknowledgement.event.clone());
+            scope.events.push(Arc::new(acknowledgement.event.clone()));
             scope.sink.get_or_insert(ledger_instance_id);
         }
         release_retained_bytes(

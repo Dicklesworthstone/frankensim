@@ -2535,7 +2535,7 @@ impl SessionMeters {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum IdemState {
     Pending {
         admission_ordinal: u64,
@@ -2554,7 +2554,7 @@ enum IdemState {
     Failed {
         admission_ordinal: u64,
         receipt: SubmissionReceipt,
-        evidence: RetainedEvidence,
+        evidence: Arc<RetainedEvidence>,
         durable_permit: Option<fs_ledger::session_registry::SessionClaimPermit>,
     },
 }
@@ -2597,10 +2597,10 @@ enum DirtyControlMutation {
 struct OpenReplay {
     token_digest: fs_blake3::ContentHash,
     gate: Option<Arc<CancelGate>>,
-    receipt: SessionOpenReceipt,
+    receipt: Arc<SessionOpenReceipt>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct PressureReplay {
     level: u8,
     event_start: usize,
@@ -3424,6 +3424,61 @@ struct PreparedFlush {
     control_marks: Vec<(i64, DirtyControlMutation, fs_blake3::ContentHash, usize)>,
 }
 
+struct FlushSnapshot {
+    reservation_id: u64,
+    generation: i64,
+    revision: u64,
+    next_flush_lane: u8,
+    sources: Vec<FlushSource>,
+}
+
+#[allow(clippy::large_enum_variant)] // Boxing would add up to 1,024 allocations under the hot-path lock.
+enum FlushSource {
+    Open {
+        open_id: SessionOpenId,
+        receipt: Arc<SessionOpenReceipt>,
+        token: Arc<CapabilityToken>,
+    },
+    Meter {
+        indexed_ordinal: u64,
+        report_id: MeterReportId,
+        receipt: MeterReceipt,
+    },
+    Submission {
+        indexed_ordinal: u64,
+        request_id: SubmissionRequestId,
+        state: IdemState,
+        failed_lane: bool,
+    },
+    Pressure {
+        indexed_ordinal: i64,
+        action_id: PressureActionId,
+        replay: PressureReplay,
+        events: Vec<Arc<DegradationEvent>>,
+    },
+    PauseAcknowledgement {
+        indexed_ordinal: i64,
+        request_id: PauseRequestId,
+        replay: PauseAcknowledgementReplay,
+        event: Arc<DegradationEvent>,
+        action_hash: fs_blake3::ContentHash,
+        gate: Arc<CancelGate>,
+        session_open: fs_blake3::ContentHash,
+    },
+    ResumeActivation {
+        indexed_ordinal: i64,
+        activation_id: ResumeActivationId,
+        receipt: ResumeActivationReceipt,
+    },
+}
+
+enum FlushMark {
+    Open(SessionOpenId, fs_blake3::ContentHash),
+    Meter(MeterReportId, fs_blake3::ContentHash),
+    Submission(SubmissionRequestId, (u64, SubmissionReceipt, u64)),
+    Control(i64, DirtyControlMutation, fs_blake3::ContentHash, usize),
+}
+
 struct BufferedTerminal {
     authority: fs_blake3::ContentHash,
     session_open: fs_blake3::ContentHash,
@@ -3505,6 +3560,307 @@ fn push_bounded_terminal(
     Ok(true)
 }
 
+impl FlushSnapshot {
+    #[allow(clippy::too_many_lines)] // One explicit off-lock materialization grammar for every terminal kind.
+    fn materialize(self, ledger_scope: &str) -> Result<PreparedFlush, SessionError> {
+        let mut terminals = Vec::with_capacity(self.sources.len().min(64));
+        let mut event_rows = 0usize;
+        let mut encoded_bytes = 0usize;
+        let mut open_marks = Vec::new();
+        let mut meter_report_marks = Vec::new();
+        let mut idempotency_marks = Vec::new();
+        let mut control_marks = Vec::new();
+
+        for source in self.sources {
+            let (terminal, mark) = match source {
+                FlushSource::Open {
+                    open_id,
+                    receipt,
+                    token,
+                } => {
+                    if capability_token_identity(&token) != receipt.token_digest {
+                        return Err(SessionError::Persistence {
+                            what: format!(
+                                "session {} token no longer matches its immutable open receipt",
+                                open_id.session.0
+                            ),
+                        });
+                    }
+                    let row = buffered_open_receipt(ledger_scope, open_id, &receipt, &token);
+                    (
+                        BufferedTerminal {
+                            authority: open_id.content_hash,
+                            session_open: receipt.content_hash,
+                            kind: recovery::KIND_OPEN,
+                            session: open_id.session,
+                            generation: 0,
+                            causal_ordinal: None,
+                            payload: recovery::encode_open_payload(&token, receipt.gate_identity),
+                            receipt: recovery::encode_open_receipt(&receipt),
+                            events: vec![row],
+                            permit: None,
+                        },
+                        FlushMark::Open(open_id, receipt.content_hash),
+                    )
+                }
+                FlushSource::Meter {
+                    indexed_ordinal,
+                    report_id,
+                    receipt,
+                } => {
+                    if receipt.commit_ordinal != indexed_ordinal {
+                        return Err(SessionError::Persistence {
+                            what: format!(
+                                "meter report {} causal index ordinal {indexed_ordinal} disagrees with receipt ordinal {}",
+                                report_id.content_hash, receipt.commit_ordinal
+                            ),
+                        });
+                    }
+                    let row = buffered_meter_receipt(ledger_scope, report_id, &receipt)?;
+                    let content_hash = receipt.content_hash;
+                    (
+                        BufferedTerminal {
+                            authority: report_id.content_hash,
+                            session_open: report_id.session_open,
+                            kind: recovery::KIND_METER,
+                            session: report_id.session,
+                            generation: report_id.generation,
+                            causal_ordinal: Some(receipt.commit_ordinal),
+                            payload: recovery::encode_meter_payload(receipt.delta),
+                            receipt: recovery::encode_meter_terminal_receipt(&receipt),
+                            events: vec![row],
+                            permit: None,
+                        },
+                        FlushMark::Meter(report_id, content_hash),
+                    )
+                }
+                FlushSource::Submission {
+                    indexed_ordinal,
+                    request_id,
+                    state,
+                    failed_lane,
+                } => {
+                    let (row, generation) = if failed_lane {
+                        buffered_submission_failure(ledger_scope, request_id, &state)?
+                    } else {
+                        buffered_submission_success(ledger_scope, request_id, &state)?
+                    };
+                    if generation.2 != indexed_ordinal {
+                        return Err(SessionError::Persistence {
+                            what: format!(
+                                "submission {} index ordinal {indexed_ordinal} disagrees with terminal ordinal {}",
+                                request_id.content_hash, generation.2
+                            ),
+                        });
+                    }
+                    (
+                        BufferedTerminal {
+                            authority: request_id.content_hash,
+                            session_open: request_id.session_open,
+                            kind: recovery::KIND_SUBMISSION,
+                            session: request_id.session,
+                            generation: request_id.generation,
+                            causal_ordinal: Some(generation.0),
+                            payload: recovery::encode_submission_payload(request_id),
+                            receipt: recovery::encode_submission_terminal_receipt(&state)?,
+                            events: vec![row],
+                            permit: durable_submission_permit(&state),
+                        },
+                        FlushMark::Submission(request_id, generation),
+                    )
+                }
+                FlushSource::Pressure {
+                    indexed_ordinal,
+                    action_id,
+                    replay,
+                    events,
+                } => {
+                    if events.first().map(|event| event.ordinal) != Some(indexed_ordinal) {
+                        return Err(SessionError::Persistence {
+                            what: format!(
+                                "pressure action {} control ordinal disagrees with its first event",
+                                action_id.content_hash
+                            ),
+                        });
+                    }
+                    let owned_events: Vec<_> =
+                        events.iter().map(|event| event.as_ref().clone()).collect();
+                    let receipt = PressureReceipt {
+                        action_id,
+                        level: replay.level,
+                        events: owned_events,
+                        content_hash: replay.content_hash,
+                    };
+                    let rows = events
+                        .iter()
+                        .map(|event| {
+                            buffered_degradation_event(ledger_scope, event, replay.content_hash)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let owned_event_count = events.len();
+                    (
+                        BufferedTerminal {
+                            authority: action_id.content_hash,
+                            session_open: action_id.session_open,
+                            kind: recovery::KIND_PRESSURE,
+                            session: action_id.session,
+                            generation: action_id.generation,
+                            causal_ordinal: Some(u64::try_from(indexed_ordinal).map_err(|_| {
+                                SessionError::Persistence {
+                                    what: format!(
+                                        "control terminal has negative causal ordinal {indexed_ordinal}"
+                                    ),
+                                }
+                            })?),
+                            payload: recovery::encode_pressure_payload(replay.level),
+                            receipt: recovery::encode_pressure_terminal_receipt(&receipt),
+                            events: rows,
+                            permit: None,
+                        },
+                        FlushMark::Control(
+                            indexed_ordinal,
+                            DirtyControlMutation::Pressure(action_id),
+                            replay.content_hash,
+                            owned_event_count,
+                        ),
+                    )
+                }
+                FlushSource::PauseAcknowledgement {
+                    indexed_ordinal,
+                    request_id,
+                    replay,
+                    event,
+                    action_hash,
+                    gate,
+                    session_open,
+                } => {
+                    if event.ordinal != indexed_ordinal {
+                        return Err(SessionError::Persistence {
+                            what: "pause acknowledgement control ordinal disagrees with its completion event"
+                                .to_string(),
+                        });
+                    }
+                    let acknowledgement = PauseAcknowledgement {
+                        request_id,
+                        event: event.as_ref().clone(),
+                        resume_gate: gate,
+                        resume_generation: replay.resume_generation,
+                        gate_binding: replay.gate_binding,
+                        content_hash: replay.content_hash,
+                    };
+                    let evidence =
+                        event
+                            .checkpoint
+                            .as_ref()
+                            .ok_or_else(|| SessionError::Persistence {
+                                what: "pause acknowledgement lacks checkpoint evidence".to_string(),
+                            })?;
+                    let row = buffered_degradation_event(ledger_scope, &event, action_hash)?;
+                    (
+                        BufferedTerminal {
+                            authority: recovery::pause_ack_authority(request_id),
+                            session_open,
+                            kind: recovery::KIND_PAUSE_ACK,
+                            session: request_id.session,
+                            generation: replay.resume_generation,
+                            causal_ordinal: Some(u64::try_from(indexed_ordinal).map_err(|_| {
+                                SessionError::Persistence {
+                                    what: format!(
+                                        "control terminal has negative causal ordinal {indexed_ordinal}"
+                                    ),
+                                }
+                            })?),
+                            payload: recovery::encode_pause_ack_payload(evidence),
+                            receipt: recovery::encode_pause_ack_terminal_receipt(
+                                &acknowledgement,
+                            ),
+                            events: vec![row],
+                            permit: None,
+                        },
+                        FlushMark::Control(
+                            indexed_ordinal,
+                            DirtyControlMutation::PauseAcknowledgement(request_id),
+                            replay.content_hash,
+                            1,
+                        ),
+                    )
+                }
+                FlushSource::ResumeActivation {
+                    indexed_ordinal,
+                    activation_id,
+                    receipt,
+                } => (
+                    BufferedTerminal {
+                        authority: activation_id.content_hash,
+                        session_open: activation_id.session_open,
+                        kind: recovery::KIND_RESUME_ACTIVATION,
+                        session: activation_id.session,
+                        generation: activation_id.resume_generation,
+                        causal_ordinal: Some(u64::try_from(indexed_ordinal).map_err(|_| {
+                            SessionError::Persistence {
+                                what: format!(
+                                    "control terminal has negative causal ordinal {indexed_ordinal}"
+                                ),
+                            }
+                        })?),
+                        payload: recovery::encode_activation_payload_parts(
+                            receipt.acknowledgement_hash,
+                            activation_id.resume_generation,
+                            receipt.gate_binding,
+                        ),
+                        receipt: recovery::encode_activation_terminal_receipt(receipt),
+                        events: Vec::new(),
+                        permit: None,
+                    },
+                    FlushMark::Control(
+                        indexed_ordinal,
+                        DirtyControlMutation::ResumeActivation(activation_id),
+                        receipt.content_hash,
+                        0,
+                    ),
+                ),
+            };
+
+            if !push_bounded_terminal(
+                &mut terminals,
+                &mut event_rows,
+                &mut encoded_bytes,
+                ledger_scope,
+                terminal,
+            )? {
+                break;
+            }
+            match mark {
+                FlushMark::Open(open_id, content_hash) => {
+                    open_marks.push((open_id, content_hash));
+                }
+                FlushMark::Meter(report_id, content_hash) => {
+                    meter_report_marks.push((report_id, content_hash));
+                }
+                FlushMark::Submission(request_id, generation) => {
+                    idempotency_marks.push((request_id, generation));
+                }
+                FlushMark::Control(ordinal, mutation, content_hash, owned_events) => {
+                    control_marks.push((ordinal, mutation, content_hash, owned_events));
+                }
+            }
+        }
+
+        Ok(PreparedFlush {
+            reservation_id: self.reservation_id,
+            generation: self.generation,
+            revision: self.revision,
+            next_flush_lane: self.next_flush_lane,
+            terminals,
+            encoded_bytes,
+            open_marks,
+            meter_report_marks,
+            idempotency_marks,
+            control_marks,
+        })
+    }
+}
+
 #[cfg(test)]
 fn push_bounded_event(
     buffered: &mut Vec<BufferedLedgerEvent>,
@@ -3541,7 +3897,10 @@ struct ScopeState {
     dirty_causal: BTreeSet<(u64, DirtyCausalMutation)>,
     dirty_submission_failures: BTreeSet<(u64, SubmissionRequestId)>,
     dirty_control: BTreeSet<(i64, DirtyControlMutation)>,
-    events: Vec<DegradationEvent>,
+    // Immutable evidence-bearing rows make page/flush snapshots shallow while
+    // the governor lock is held. Public cloning and JSON materialization occur
+    // only after that lock is released.
+    events: Vec<Arc<DegradationEvent>>,
     flushed_events: usize,
     sink: Option<fs_ledger::LedgerInstanceId>,
     flush_generation: i64,
@@ -3555,18 +3914,13 @@ struct ScopeState {
 fn has_dirty_submission_predecessor(
     scope: &ScopeState,
     pause_request: PauseRequestId,
-    selected_terminals: &[BufferedTerminal],
+    selected_submissions: &BTreeSet<SubmissionRequestId>,
 ) -> bool {
     let is_draining_generation = |request_id: SubmissionRequestId| {
         request_id.session == pause_request.session
             && request_id.generation == pause_request.gate_generation
     };
-    let is_selected = |request_id: SubmissionRequestId| {
-        selected_terminals.iter().any(|terminal| {
-            terminal.kind == recovery::KIND_SUBMISSION
-                && terminal.authority == request_id.content_hash
-        })
-    };
+    let is_selected = |request_id: SubmissionRequestId| selected_submissions.contains(&request_id);
     scope.dirty_causal.iter().any(|(_, mutation)| {
         matches!(
             mutation,
@@ -3598,7 +3952,7 @@ struct CompletedPause {
     acknowledgement_hash: fs_blake3::ContentHash,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct PauseAcknowledgementReplay {
     completion_event_index: usize,
     resume_generation: u64,
@@ -3616,7 +3970,7 @@ enum GatePhase {
 struct Inner {
     open_requests: BTreeMap<SessionOpenId, OpenReplay>,
     session_open_ids: BTreeMap<u64, SessionOpenId>,
-    tokens: BTreeMap<u64, CapabilityToken>,
+    tokens: BTreeMap<u64, Arc<CapabilityToken>>,
     /// Session-OWNED cancellation gates, bound at open (gp3.13): the
     /// only route to a pause request, so a foreign gate is
     /// unrepresentable at the pressure API.
@@ -3733,6 +4087,8 @@ pub struct Governor {
     id: fs_blake3::ContentHash,
     durable_sink: Option<fs_ledger::LedgerInstanceId>,
     inner: Mutex<Inner>,
+    #[cfg(test)]
+    materialization_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 /// Process-local exclusion for one program-risk singleton publication.
@@ -3770,6 +4126,8 @@ impl Governor {
             id: ephemeral_governor_id(),
             durable_sink: None,
             inner: Mutex::new(Inner::default()),
+            #[cfg(test)]
+            materialization_barrier: Mutex::new(None),
         }
     }
 
@@ -3811,8 +4169,33 @@ impl Governor {
             id,
             durable_sink: Some(sink),
             inner: Mutex::new(inner),
+            #[cfg(test)]
+            materialization_barrier: Mutex::new(None),
         })
     }
+
+    #[cfg(test)]
+    fn set_materialization_barrier(&self, barrier: Option<Arc<std::sync::Barrier>>) {
+        *self
+            .materialization_barrier
+            .lock()
+            .expect("materialization barrier lock") = barrier;
+    }
+
+    #[cfg(test)]
+    fn wait_at_materialization_barrier_for_test(&self) {
+        let barrier = self
+            .materialization_barrier
+            .lock()
+            .expect("materialization barrier lock")
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn wait_at_materialization_barrier_for_test(&self) {}
 
     fn ensure_durable_recovery_complete(&self, inner: &Inner) -> Result<(), SessionError> {
         if self.durable_sink.is_none() {
@@ -3905,7 +4288,7 @@ impl Governor {
                 (None, Some(_)) | (Some(_), None) => false,
             };
             if replay.token_digest == token_digest && same_gate {
-                return Ok(replay.receipt.clone());
+                return Ok(replay.receipt.as_ref().clone());
             }
             return Err(SessionError::MutationConflict {
                 kind: "session-open",
@@ -3978,6 +4361,8 @@ impl Governor {
                 &ledger_scope,
             ),
         };
+        let token = Arc::new(token);
+        let retained_receipt = Arc::new(receipt.clone());
         g.meters.insert(session, SessionMeters::default());
         g.meter_report_ids.insert(session, BTreeSet::new());
         g.reserved_meter_reports.insert(session, 0);
@@ -4000,7 +4385,7 @@ impl Governor {
             OpenReplay {
                 token_digest,
                 gate,
-                receipt: receipt.clone(),
+                receipt: retained_receipt,
             },
         );
         commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
@@ -4061,7 +4446,7 @@ impl Governor {
             .expect("governor lock")
             .tokens
             .get(&session.0)
-            .cloned()
+            .map(|token| token.as_ref().clone())
             .ok_or(SessionError::UnknownSession { id: session.0 })
     }
 
@@ -4114,7 +4499,7 @@ impl Governor {
                         open_id.session.0
                     ),
                 })?;
-        if *known_open != open_id || replay.receipt != *receipt {
+        if *known_open != open_id || replay.receipt.as_ref() != receipt {
             return Err(SessionError::MutationAuthorityMismatch {
                 kind: recovery::KIND_PROGRAM_RISK_REPORT,
                 id: open_id.content_hash,
@@ -4233,7 +4618,7 @@ impl Governor {
         &self,
         g: &Inner,
         report_id: MeterReportId,
-    ) -> Result<CapabilityToken, SessionError> {
+    ) -> Result<Arc<CapabilityToken>, SessionError> {
         let token =
             g.tokens
                 .get(&report_id.session.0)
@@ -4732,7 +5117,7 @@ impl Governor {
                 request_id.generation < current_generation,
             )
         };
-        self.recover_open(ledger, open_id, token, gate)?;
+        self.recover_open(ledger, open_id, token.as_ref().clone(), gate)?;
         let claim_exists = ledger
             .session_mutation_claim(&request_id.content_hash)
             .map_err(|error| SessionError::Persistence {
@@ -4795,7 +5180,7 @@ impl Governor {
                     return Ok(SubmitOutcome::Failed {
                         admission_ordinal: *admission_ordinal,
                         receipt: *receipt,
-                        evidence: evidence.clone(),
+                        evidence: evidence.as_ref().clone(),
                     });
                 }
                 Some(IdemState::Pending { .. }) => return Ok(SubmitOutcome::InFlight),
@@ -5120,7 +5505,7 @@ impl Governor {
                         IdemState::Failed {
                             admission_ordinal,
                             receipt,
-                            evidence: evidence.clone(),
+                            evidence: Arc::new(evidence.clone()),
                             durable_permit,
                         },
                     );
@@ -5309,7 +5694,9 @@ impl Governor {
                 .ok_or_else(|| SessionError::Persistence {
                     what: "pressure replay event range is no longer retained".to_string(),
                 })?
-                .to_vec();
+                .iter()
+                .map(|event| event.as_ref().clone())
+                .collect();
             return Ok(PressureReceipt {
                 action_id,
                 level,
@@ -5530,7 +5917,7 @@ impl Governor {
                 .scopes
                 .get_mut(&ledger_scope)
                 .expect("registered session scope");
-            scope.events.extend(fired.iter().cloned());
+            scope.events.extend(fired.iter().cloned().map(Arc::new));
             scope
                 .dirty_control
                 .insert((first_ordinal, DirtyControlMutation::Pressure(action_id)));
@@ -5845,7 +6232,7 @@ impl Governor {
                 .get_mut(&ledger_scope)
                 .expect("registered session scope");
             scope.reserved_pause_completions -= 1;
-            scope.events.push(event.clone());
+            scope.events.push(Arc::new(event.clone()));
             scope.dirty_control.insert((
                 ordinal,
                 DirtyControlMutation::PauseAcknowledgement(request_id),
@@ -5929,7 +6316,7 @@ impl Governor {
             });
         }
         if completed.request_id != request_id
-            || stored_event != &acknowledgement.event
+            || stored_event.as_ref() != &acknowledgement.event
             || completed.resume_generation != acknowledgement.resume_generation
             || completed.gate_binding != acknowledgement.gate_binding
             || completed.acknowledgement_hash != acknowledgement.content_hash
@@ -6040,22 +6427,30 @@ impl Governor {
                 observed_at_least: limit,
             });
         }
-        let g = self.inner.lock().expect("governor lock");
-        let events = &g
-            .scopes
-            .get(&permit.ledger_scope)
-            .ok_or_else(|| SessionError::UnknownLedgerScope {
-                scope: permit.ledger_scope.clone(),
-            })?
-            .events;
-        let start = offset.min(events.len());
-        let end = start.saturating_add(limit).min(events.len());
-        Ok(events[start..end].to_vec())
+        let snapshot = {
+            let g = self.inner.lock().expect("governor lock");
+            let events = &g
+                .scopes
+                .get(&permit.ledger_scope)
+                .ok_or_else(|| SessionError::UnknownLedgerScope {
+                    scope: permit.ledger_scope.clone(),
+                })?
+                .events;
+            let start = offset.min(events.len());
+            let end = start.saturating_add(limit).min(events.len());
+            events[start..end].to_vec()
+        };
+        self.wait_at_materialization_barrier_for_test();
+        Ok(snapshot
+            .into_iter()
+            .map(|event| event.as_ref().clone())
+            .collect())
     }
 
     /// Persist at most one bounded chunk for the permit's exact scope.
-    /// Preparation and cursor commit hold the governor mutex; atomic database
-    /// I/O does not. Call again while [`FlushReport::remaining_dirty`] is true.
+    /// Bounded source selection and cursor commit hold the governor mutex;
+    /// evidence cloning, terminal encoding, and atomic database I/O do not.
+    /// Call again while [`FlushReport::remaining_dirty`] is true.
     ///
     /// # Errors
     /// Foreign permits, concurrent same-scope flushes, sink mismatches,
@@ -6098,7 +6493,7 @@ impl Governor {
                 attempted_sink: sink_identity,
             });
         }
-        let prepared = {
+        let snapshot = {
             let mut g = self.inner.lock().expect("governor lock");
             let scope =
                 g.scopes
@@ -6142,20 +6537,15 @@ impl Governor {
                 0
             };
             let next_flush_lane = (start_flush_lane + 1) % 4;
-            let mut terminals = Vec::with_capacity(MAX_FLUSH_ROWS.min(64));
-            let mut event_rows = 0usize;
-            let mut encoded_bytes = 0usize;
-            let mut open_marks = Vec::new();
-            let mut meter_report_marks = Vec::new();
-            let mut idempotency_marks = Vec::new();
-            let mut control_marks = Vec::new();
+            let mut sources = Vec::with_capacity(MAX_FLUSH_ROWS.min(64));
+            let mut selected_submissions = BTreeSet::new();
 
             // Rotate the first lane after every successful non-empty chunk.
             // This bounds preparation by dirty rows rather than retained state
             // and prevents continuously dirty report streams from starving
             // open, terminal, or degradation receipts.
             'lanes: for lane_offset in 0..4 {
-                let remaining_rows = MAX_FLUSH_ROWS - terminals.len();
+                let remaining_rows = MAX_FLUSH_ROWS - sources.len();
                 if remaining_rows == 0 {
                     break;
                 }
@@ -6181,8 +6571,8 @@ impl Governor {
                                     ),
                                 }
                             })?;
-                            let receipt = &replay.receipt;
-                            let token = g.tokens.get(&open_id.session.0).ok_or_else(|| {
+                            let receipt = Arc::clone(&replay.receipt);
+                            let token = g.tokens.get(&open_id.session.0).cloned().ok_or_else(|| {
                                 SessionError::Persistence {
                                     what: format!(
                                         "scope dirty-open index references missing token for session {}",
@@ -6190,40 +6580,11 @@ impl Governor {
                                     ),
                                 }
                             })?;
-                            if capability_token_identity(token) != receipt.token_digest {
-                                return Err(SessionError::Persistence {
-                                    what: format!(
-                                        "session {} token no longer matches its immutable open receipt",
-                                        open_id.session.0
-                                    ),
-                                });
-                            }
-                            let row = buffered_open_receipt(&ledger_scope, open_id, receipt, token);
-                            let terminal = BufferedTerminal {
-                                authority: open_id.content_hash,
-                                session_open: receipt.content_hash,
-                                kind: recovery::KIND_OPEN,
-                                session: open_id.session,
-                                generation: 0,
-                                causal_ordinal: None,
-                                payload: recovery::encode_open_payload(
-                                    token,
-                                    receipt.gate_identity,
-                                ),
-                                receipt: recovery::encode_open_receipt(receipt),
-                                events: vec![row],
-                                permit: None,
-                            };
-                            if !push_bounded_terminal(
-                                &mut terminals,
-                                &mut event_rows,
-                                &mut encoded_bytes,
-                                &ledger_scope,
-                                terminal,
-                            )? {
-                                break 'lanes;
-                            }
-                            open_marks.push((open_id, receipt.content_hash));
+                            sources.push(FlushSource::Open {
+                                open_id,
+                                receipt,
+                                token,
+                            });
                         }
                         if has_more {
                             break 'lanes;
@@ -6253,38 +6614,11 @@ impl Governor {
                                                 ),
                                             }
                                         })?;
-                                    if receipt.commit_ordinal != indexed_ordinal {
-                                        return Err(SessionError::Persistence {
-                                            what: format!(
-                                                "meter report {} causal index ordinal {indexed_ordinal} disagrees with receipt ordinal {}",
-                                                report_id.content_hash, receipt.commit_ordinal
-                                            ),
-                                        });
-                                    }
-                                    let row =
-                                        buffered_meter_receipt(&ledger_scope, report_id, receipt)?;
-                                    let terminal = BufferedTerminal {
-                                        authority: report_id.content_hash,
-                                        session_open: report_id.session_open,
-                                        kind: recovery::KIND_METER,
-                                        session: report_id.session,
-                                        generation: report_id.generation,
-                                        causal_ordinal: Some(receipt.commit_ordinal),
-                                        payload: recovery::encode_meter_payload(receipt.delta),
-                                        receipt: recovery::encode_meter_terminal_receipt(receipt),
-                                        events: vec![row],
-                                        permit: None,
-                                    };
-                                    if !push_bounded_terminal(
-                                        &mut terminals,
-                                        &mut event_rows,
-                                        &mut encoded_bytes,
-                                        &ledger_scope,
-                                        terminal,
-                                    )? {
-                                        break 'lanes;
-                                    }
-                                    meter_report_marks.push((report_id, receipt.content_hash));
+                                    sources.push(FlushSource::Meter {
+                                        indexed_ordinal,
+                                        report_id,
+                                        receipt: receipt.clone(),
+                                    });
                                 }
                                 DirtyCausalMutation::Submission(request_id) => {
                                     let state =
@@ -6296,43 +6630,13 @@ impl Governor {
                                                 ),
                                             }
                                         })?;
-                                    let (row, generation) = buffered_submission_success(
-                                        &ledger_scope,
+                                    sources.push(FlushSource::Submission {
+                                        indexed_ordinal,
                                         request_id,
-                                        state,
-                                    )?;
-                                    if generation.2 != indexed_ordinal {
-                                        return Err(SessionError::Persistence {
-                                            what: format!(
-                                                "submission {} causal index ordinal {indexed_ordinal} disagrees with terminal ordinal {}",
-                                                request_id.content_hash, generation.2
-                                            ),
-                                        });
-                                    }
-                                    let terminal = BufferedTerminal {
-                                        authority: request_id.content_hash,
-                                        session_open: request_id.session_open,
-                                        kind: recovery::KIND_SUBMISSION,
-                                        session: request_id.session,
-                                        generation: request_id.generation,
-                                        causal_ordinal: Some(generation.0),
-                                        payload: recovery::encode_submission_payload(request_id),
-                                        receipt: recovery::encode_submission_terminal_receipt(
-                                            state,
-                                        )?,
-                                        events: vec![row],
-                                        permit: durable_submission_permit(state),
-                                    };
-                                    if !push_bounded_terminal(
-                                        &mut terminals,
-                                        &mut event_rows,
-                                        &mut encoded_bytes,
-                                        &ledger_scope,
-                                        terminal,
-                                    )? {
-                                        break 'lanes;
-                                    }
-                                    idempotency_marks.push((request_id, generation));
+                                        state: state.clone(),
+                                        failed_lane: false,
+                                    });
+                                    selected_submissions.insert(request_id);
                                 }
                             }
                         }
@@ -6361,38 +6665,13 @@ impl Governor {
                                     ),
                                 }
                             })?;
-                            let (event, generation) =
-                                buffered_submission_failure(&ledger_scope, request_id, state)?;
-                            if generation.2 != indexed_ordinal {
-                                return Err(SessionError::Persistence {
-                                    what: format!(
-                                        "failed submission {} index ordinal {indexed_ordinal} disagrees with terminal ordinal {}",
-                                        request_id.content_hash, generation.2
-                                    ),
-                                });
-                            }
-                            let terminal = BufferedTerminal {
-                                authority: request_id.content_hash,
-                                session_open: request_id.session_open,
-                                kind: recovery::KIND_SUBMISSION,
-                                session: request_id.session,
-                                generation: request_id.generation,
-                                causal_ordinal: Some(generation.0),
-                                payload: recovery::encode_submission_payload(request_id),
-                                receipt: recovery::encode_submission_terminal_receipt(state)?,
-                                events: vec![event],
-                                permit: durable_submission_permit(state),
-                            };
-                            if !push_bounded_terminal(
-                                &mut terminals,
-                                &mut event_rows,
-                                &mut encoded_bytes,
-                                &ledger_scope,
-                                terminal,
-                            )? {
-                                break 'lanes;
-                            }
-                            idempotency_marks.push((request_id, generation));
+                            sources.push(FlushSource::Submission {
+                                indexed_ordinal,
+                                request_id,
+                                state: state.clone(),
+                                failed_lane: true,
+                            });
+                            selected_submissions.insert(request_id);
                         }
                         if has_more {
                             break 'lanes;
@@ -6416,7 +6695,11 @@ impl Governor {
                             {
                                 let scope =
                                     g.scopes.get(&ledger_scope).expect("scope checked above");
-                                if has_dirty_submission_predecessor(scope, request_id, &terminals) {
+                                if has_dirty_submission_predecessor(
+                                    scope,
+                                    request_id,
+                                    &selected_submissions,
+                                ) {
                                     // The ledger rejects a pause acknowledgement while any
                                     // omitted draining-generation submission remains Pending.
                                     // A predecessor already selected into this atomic batch is
@@ -6426,15 +6709,7 @@ impl Governor {
                                     break;
                                 }
                             }
-                            let causal_ordinal =
-                                u64::try_from(indexed_ordinal).map_err(|_| {
-                                    SessionError::Persistence {
-                                        what: format!(
-                                            "control terminal has negative causal ordinal {indexed_ordinal}"
-                                        ),
-                                    }
-                                })?;
-                            let (terminal, content_hash, owned_events) = match mutation {
+                            let source = match mutation {
                                 DirtyControlMutation::Pressure(action_id) => {
                                     let replay = g.pressure_actions.get(&action_id).ok_or_else(|| {
                                         SessionError::Persistence {
@@ -6459,52 +6734,12 @@ impl Governor {
                                             ),
                                         })?
                                         .to_vec();
-                                    if events.first().map(|event| event.ordinal)
-                                        != Some(indexed_ordinal)
-                                    {
-                                        return Err(SessionError::Persistence {
-                                            what: format!(
-                                                "pressure action {} control ordinal disagrees with its first event",
-                                                action_id.content_hash
-                                            ),
-                                        });
-                                    }
-                                    let receipt = PressureReceipt {
+                                    FlushSource::Pressure {
+                                        indexed_ordinal,
                                         action_id,
-                                        level: replay.level,
-                                        events: events.clone(),
-                                        content_hash: replay.content_hash,
-                                    };
-                                    let rows = events
-                                        .iter()
-                                        .map(|event| {
-                                            buffered_degradation_event(
-                                                &ledger_scope,
-                                                event,
-                                                replay.content_hash,
-                                            )
-                                        })
-                                        .collect::<Result<Vec<_>, _>>()?;
-                                    (
-                                        BufferedTerminal {
-                                            authority: action_id.content_hash,
-                                            session_open: action_id.session_open,
-                                            kind: recovery::KIND_PRESSURE,
-                                            session: action_id.session,
-                                            generation: action_id.generation,
-                                            causal_ordinal: Some(causal_ordinal),
-                                            payload: recovery::encode_pressure_payload(
-                                                replay.level,
-                                            ),
-                                            receipt: recovery::encode_pressure_terminal_receipt(
-                                                &receipt,
-                                            ),
-                                            events: rows,
-                                            permit: None,
-                                        },
-                                        replay.content_hash,
-                                        events.len(),
-                                    )
+                                        replay: *replay,
+                                        events,
+                                    }
                                 }
                                 DirtyControlMutation::PauseAcknowledgement(request_id) => {
                                     let replay = g
@@ -6527,12 +6762,6 @@ impl Governor {
                                             what: "pause acknowledgement lost its completion event"
                                                 .to_string(),
                                         })?;
-                                    if event.ordinal != indexed_ordinal {
-                                        return Err(SessionError::Persistence {
-                                            what: "pause acknowledgement control ordinal disagrees with its completion event"
-                                                .to_string(),
-                                        });
-                                    }
                                     let action_id = event.pressure_action_id.ok_or_else(|| {
                                         SessionError::Persistence {
                                             what: "pause completion lost its pressure action"
@@ -6552,46 +6781,18 @@ impl Governor {
                                             id: request_id.session.0,
                                         },
                                     )?;
-                                    let acknowledgement = PauseAcknowledgement {
+                                    FlushSource::PauseAcknowledgement {
+                                        indexed_ordinal,
                                         request_id,
-                                        event: event.clone(),
-                                        resume_gate: gate,
-                                        resume_generation: replay.resume_generation,
-                                        gate_binding: replay.gate_binding,
-                                        content_hash: replay.content_hash,
-                                    };
-                                    let evidence = event.checkpoint.as_ref().ok_or_else(|| {
-                                        SessionError::Persistence {
-                                            what: "pause acknowledgement lacks checkpoint evidence"
-                                                .to_string(),
-                                        }
-                                    })?;
-                                    let row = buffered_degradation_event(
-                                        &ledger_scope,
-                                        &event,
+                                        replay: *replay,
+                                        event,
                                         action_hash,
-                                    )?;
-                                    (
-                                        BufferedTerminal {
-                                            authority: recovery::pause_ack_authority(request_id),
-                                            session_open: Self::current_open_identity(
-                                                &g,
-                                                request_id.session,
-                                            )?,
-                                            kind: recovery::KIND_PAUSE_ACK,
-                                            session: request_id.session,
-                                            generation: replay.resume_generation,
-                                            causal_ordinal: Some(causal_ordinal),
-                                            payload: recovery::encode_pause_ack_payload(evidence),
-                                            receipt: recovery::encode_pause_ack_terminal_receipt(
-                                                &acknowledgement,
-                                            ),
-                                            events: vec![row],
-                                            permit: None,
-                                        },
-                                        replay.content_hash,
-                                        1,
-                                    )
+                                        gate,
+                                        session_open: Self::current_open_identity(
+                                            &g,
+                                            request_id.session,
+                                        )?,
+                                    }
                                 }
                                 DirtyControlMutation::ResumeActivation(activation_id) => {
                                     let receipt = *g
@@ -6603,45 +6804,14 @@ impl Governor {
                                                 activation_id.content_hash
                                             ),
                                         })?;
-                                    (
-                                        BufferedTerminal {
-                                            authority: activation_id.content_hash,
-                                            session_open: activation_id.session_open,
-                                            kind: recovery::KIND_RESUME_ACTIVATION,
-                                            session: activation_id.session,
-                                            generation: activation_id.resume_generation,
-                                            causal_ordinal: Some(causal_ordinal),
-                                            payload: recovery::encode_activation_payload_parts(
-                                                receipt.acknowledgement_hash,
-                                                activation_id.resume_generation,
-                                                receipt.gate_binding,
-                                            ),
-                                            receipt: recovery::encode_activation_terminal_receipt(
-                                                receipt,
-                                            ),
-                                            events: Vec::new(),
-                                            permit: None,
-                                        },
-                                        receipt.content_hash,
-                                        0,
-                                    )
+                                    FlushSource::ResumeActivation {
+                                        indexed_ordinal,
+                                        activation_id,
+                                        receipt,
+                                    }
                                 }
                             };
-                            if !push_bounded_terminal(
-                                &mut terminals,
-                                &mut event_rows,
-                                &mut encoded_bytes,
-                                &ledger_scope,
-                                terminal,
-                            )? {
-                                break 'lanes;
-                            }
-                            control_marks.push((
-                                indexed_ordinal,
-                                mutation,
-                                content_hash,
-                                owned_events,
-                            ));
+                            sources.push(source);
                         }
                         if has_more && !deferred_pause {
                             break 'lanes;
@@ -6651,7 +6821,7 @@ impl Governor {
                 }
             }
 
-            if terminals.is_empty() {
+            if sources.is_empty() {
                 return Ok(FlushReport {
                     appended_rows: 0,
                     committed_terminals: 0,
@@ -6672,17 +6842,29 @@ impl Governor {
                 .get_mut(&ledger_scope)
                 .expect("scope checked above")
                 .in_flight = Some(reservation_id);
-            PreparedFlush {
+            FlushSnapshot {
                 reservation_id,
                 generation,
                 revision,
                 next_flush_lane,
-                terminals,
-                encoded_bytes,
-                open_marks,
-                meter_report_marks,
-                idempotency_marks,
-                control_marks,
+                sources,
+            }
+        };
+
+        self.wait_at_materialization_barrier_for_test();
+        let snapshot_reservation_id = snapshot.reservation_id;
+        let prepared = match snapshot.materialize(&ledger_scope) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let mut g = self.inner.lock().expect("governor lock");
+                let scope = g
+                    .scopes
+                    .get_mut(&ledger_scope)
+                    .expect("reserved scope remains registered");
+                if scope.in_flight == Some(snapshot_reservation_id) {
+                    scope.in_flight = None;
+                }
+                return Err(error);
             }
         };
 
@@ -8303,7 +8485,7 @@ mod tests {
                 .scopes
                 .get_mut("bounded")
                 .expect("fixture scope")
-                .events = vec![fixture; MAX_DEGRADATION_EVENTS_PER_SCOPE - 1];
+                .events = vec![Arc::new(fixture); MAX_DEGRADATION_EVENTS_PER_SCOPE - 1];
         }
         governor
             .apply_memory_pressure(SessionId(1), 1)
@@ -8404,7 +8586,7 @@ mod tests {
                 .scopes
                 .get_mut("pause-capacity")
                 .expect("fixture scope")
-                .events = vec![fixture; MAX_DEGRADATION_EVENTS_PER_SCOPE - 4];
+                .events = vec![Arc::new(fixture); MAX_DEGRADATION_EVENTS_PER_SCOPE - 4];
         }
         let requested = governor
             .apply_memory_pressure(SessionId(9), 3)
@@ -8614,6 +8796,127 @@ mod tests {
             })
         );
         assert_eq!(ledger.table_count("events").unwrap(), 0);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One barrier protocol proves both bounded materialization surfaces.
+    fn maximum_page_and_flush_materialize_without_holding_the_governor_lock() {
+        let page_governor = Arc::new(Governor::new());
+        let page_permit = page_governor
+            .open_session(test_token(1, "materialize-page"))
+            .expect("page fixture session");
+        page_governor
+            .open_session(test_token(2, "materialize-page-hot"))
+            .expect("unrelated page hot-path session");
+        let evidence = RetainedEvidence::capture(&"e".repeat(MAX_RETAINED_EVIDENCE_BYTES));
+        let event = Arc::new(DegradationEvent {
+            session: SessionId(1),
+            step: DegradationStep::PauseSerializeResume,
+            pressure_level: 3,
+            phase: StepPhase::Complete,
+            attribution: "maximum evidence-bearing page fixture".to_string(),
+            ordinal: 1,
+            requested_ordinal: Some(1),
+            checkpoint: Some(evidence),
+            gate_generation: Some(1),
+            pause_request_id: None,
+            pressure_action_id: None,
+        });
+        page_governor
+            .inner
+            .lock()
+            .expect("governor lock")
+            .scopes
+            .get_mut("materialize-page")
+            .expect("page scope")
+            .events = vec![event; MAX_EVENT_PAGE_ROWS];
+
+        let page_barrier = Arc::new(std::sync::Barrier::new(2));
+        page_governor.set_materialization_barrier(Some(Arc::clone(&page_barrier)));
+        let page_worker = {
+            let governor = Arc::clone(&page_governor);
+            std::thread::spawn(move || {
+                governor
+                    .events_page(&page_permit, 0, MAX_EVENT_PAGE_ROWS)
+                    .expect("maximum page materializes")
+            })
+        };
+        page_barrier.wait();
+        let (page_hot_tx, page_hot_rx) = std::sync::mpsc::channel();
+        let page_hot_worker = {
+            let governor = Arc::clone(&page_governor);
+            std::thread::spawn(move || {
+                governor
+                    .charge(SessionId(2), Charge::default())
+                    .expect("unrelated charge while page materialization is paused");
+                governor
+                    .submit_once(SessionId(2), "page-hot-submit", Charge::default)
+                    .expect("unrelated submission while page materialization is paused");
+                page_hot_tx.send(()).expect("page hot-path witness");
+            })
+        };
+        let page_hot = page_hot_rx.recv_timeout(std::time::Duration::from_secs(1));
+        page_barrier.wait();
+        page_governor.set_materialization_barrier(None);
+        let page = page_worker.join().expect("page materialization worker");
+        page_hot_worker.join().expect("page hot-path worker");
+        assert!(
+            page_hot.is_ok(),
+            "unrelated scope charge/submit must finish while maximum page cloning is barrier-paused"
+        );
+        assert_eq!(page.len(), MAX_EVENT_PAGE_ROWS);
+
+        let flush_governor = Arc::new(Governor::new());
+        let mut flush_permit = None;
+        for session in 0..MAX_SESSIONS_PER_SCOPE {
+            let permit = flush_governor
+                .open_session(test_token(
+                    u64::try_from(session).expect("fixture id fits"),
+                    "materialize-flush",
+                ))
+                .expect("maximum flush source row");
+            flush_permit.get_or_insert(permit);
+        }
+        flush_governor
+            .open_session(test_token(10_000, "materialize-flush-hot"))
+            .expect("unrelated flush hot-path session");
+        let flush_barrier = Arc::new(std::sync::Barrier::new(2));
+        flush_governor.set_materialization_barrier(Some(Arc::clone(&flush_barrier)));
+        let flush_worker = {
+            let governor = Arc::clone(&flush_governor);
+            let permit = flush_permit.expect("flush permit");
+            std::thread::spawn(move || {
+                let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+                governor
+                    .flush_scope_to_ledger(&permit, &ledger)
+                    .expect("maximum flush materializes")
+            })
+        };
+        flush_barrier.wait();
+        let (flush_hot_tx, flush_hot_rx) = std::sync::mpsc::channel();
+        let flush_hot_worker = {
+            let governor = Arc::clone(&flush_governor);
+            std::thread::spawn(move || {
+                governor
+                    .charge(SessionId(10_000), Charge::default())
+                    .expect("unrelated charge while flush materialization is paused");
+                governor
+                    .submit_once(SessionId(10_000), "flush-hot-submit", Charge::default)
+                    .expect("unrelated submission while flush materialization is paused");
+                flush_hot_tx.send(()).expect("flush hot-path witness");
+            })
+        };
+        let flush_hot = flush_hot_rx.recv_timeout(std::time::Duration::from_secs(1));
+        flush_barrier.wait();
+        flush_governor.set_materialization_barrier(None);
+        let report = flush_worker.join().expect("flush materialization worker");
+        flush_hot_worker.join().expect("flush hot-path worker");
+        assert!(
+            flush_hot.is_ok(),
+            "unrelated scope charge/submit must finish while maximum flush encoding is barrier-paused"
+        );
+        assert_eq!(report.appended_rows, MAX_FLUSH_ROWS);
+        assert_eq!(report.committed_terminals, MAX_FLUSH_ROWS);
     }
 
     #[test]
