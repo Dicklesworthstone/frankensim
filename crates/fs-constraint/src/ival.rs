@@ -7,7 +7,7 @@
 //! with fs-ivl — CONTRACT no-claim); the conformance battery separates
 //! the conservativeness law from that caveat with an fp-slack check.
 
-use fs_opt::{Expr, NodeId, Problem};
+use fs_opt::{AdmissionCaps, Expr, NodeId, Problem};
 
 /// A closed interval.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,6 +121,16 @@ pub enum IvalError {
         /// The refused node id.
         node: u32,
     },
+    /// A sealed graph was built under a looser policy than this
+    /// evaluator's default depth/work envelope.
+    CapExceeded {
+        /// Which aggregate boundary was crossed.
+        what: &'static str,
+        /// Observed value.
+        count: u64,
+        /// Admitted limit.
+        cap: u64,
+    },
     /// Negative `powi` exponents are deferred.
     NegativePow,
     /// Binding count does not cover the variable's components.
@@ -146,6 +156,12 @@ impl core::fmt::Display for IvalError {
                 "node id {node} is outside the problem's expression arena; interval \
                  evaluation refuses forged or stale node references"
             ),
+            IvalError::CapExceeded { what, count, cap } => {
+                write!(
+                    f,
+                    "{what} = {count} exceeds the interval-evaluation cap of {cap}"
+                )
+            }
             IvalError::NegativePow => write!(f, "negative integer powers are deferred"),
             IvalError::BadBindings => {
                 write!(f, "the box bindings do not cover the variable components")
@@ -172,9 +188,29 @@ pub fn interval_eval(
     node: NodeId,
     boxes: &[(f64, f64)],
 ) -> Result<Iv, IvalError> {
+    let caps = AdmissionCaps::default();
+    let depth = problem
+        .node_depth(node)
+        .map_err(|_| IvalError::UnknownNode { node: node.0 })?;
+    if depth > caps.max_graph_depth {
+        return Err(IvalError::CapExceeded {
+            what: "graph depth",
+            count: u64::from(depth),
+            cap: u64::from(caps.max_graph_depth),
+        });
+    }
+    let work = problem.total_admission_work();
+    if work > caps.max_total_work {
+        return Err(IvalError::CapExceeded {
+            what: "total admission work",
+            count: work,
+            cap: caps.max_total_work,
+        });
+    }
     // One slot per admitted node makes work proportional to the DAG,
     // not to the exponentially larger unfolded expression tree.
-    let mut memo = vec![None; problem.exprs().len()];
+    // Arena order means this root can reach only its own prefix.
+    let mut memo = vec![None; node.0 as usize + 1];
     match ival_at(problem, node, boxes, &mut memo)? {
         IvVal::S(iv) => Ok(iv),
         IvVal::V(_) => Err(IvalError::BadBindings),

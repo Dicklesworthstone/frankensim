@@ -31,7 +31,11 @@ what the constraints MEAN.
 - `interval_eval` (the in-house prover): rigorous inclusion over
   fs-opt graphs per node; refuses (teaching reasons) on division
   through zero, domain violations, negative powers, PDE/stochastic
-  nodes. `prove_interval` turns a provable domain into a `Proven`
+  nodes. Before memo allocation it checks the sealed root depth and
+  aggregate admission-work receipt against fs-opt's default cap
+  schedule, so a graph built under looser caps cannot drive unbounded
+  recursion; the exact max-depth boundary is a G4 fixture.
+  `prove_interval` turns a provable domain into a `Proven`
   status + `ProofArtifact::IntervalBound`. Robust kinds are proven
   conservatively over their uncertainty boxes the same way, carrying
   ENCLOSURE certificates.
@@ -78,7 +82,8 @@ what the constraints MEAN.
 `ConError` teaching errors: `NotScalar`, `Eval` (fs-opt errors carried
 through), `NotProvable{why}` (an honest gap with escalation advice,
 not a failure), `BadParam`, `Parse{line, what}`. The interval engine's
-`IvalError` names each refusal reason.
+`IvalError` names each refusal reason, including the aggregate cap name,
+observed count, and enforced limit.
 
 ## Determinism class
 
@@ -104,8 +109,9 @@ None.
 
 `tests/conformance.rs`, cases fscon-001..fscon-006 — JSON-line
 verdicts, seeded LCG randomness, fs-obs events for ledger rows and
-the full diagnosis payload. Any reimplementation must pass the suite
-unchanged.
+the full diagnosis payload, plus G4 shared-DAG/work and exact/max+1
+depth-boundary fixtures for interval evaluation. Any reimplementation
+must pass the suite unchanged.
 
 ## No-claim boundaries
 

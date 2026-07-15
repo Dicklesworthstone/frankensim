@@ -9,21 +9,22 @@
 //! shape/dimension/class from the expression list, re-checks every
 //! leaf policy and cap, proves reference validity and acyclicity from
 //! the arena ordering, and only then mints the problem's
-//! [`ProblemSemanticId`]. Violations come back as a COMPLETE report in
-//! deterministic order (section by section, ascending index), never a
-//! first-error-only refusal.
+//! [`ProblemSemanticId`]. Admitted-size leaf violations come back as a
+//! complete deterministic report (section by section, ascending index);
+//! aggregate work/byte/depth boundaries fail at their first crossing so
+//! a refused expression prefix cannot buy traversal of later graph nodes.
 
 use crate::ir::Class;
 use crate::ir::{
-    BilevelRef, Expr, Manifold, NodeId, OptError, Problem, ProblemTag, Shape, Variable, children,
-    own_class,
+    BilevelRef, Expr, Manifold, NodeId, OptError, Problem, ProblemTag, Shape, VarId, Variable,
+    children, own_class,
 };
 use crate::serial::{LegacyProblemHash, ProblemSemanticId};
 use fs_qty::Dims;
 
 /// Version of the admission schema: bump when a rule, cap default, or
 /// the semantic-id preimage changes meaning.
-pub const ADMISSION_SCHEMA_VERSION: u32 = 2;
+pub const ADMISSION_SCHEMA_VERSION: u32 = 3;
 
 /// Versioned per-item and aggregate admission caps. Construct via
 /// [`AdmissionCaps::default`] and override individual fields; the
@@ -55,8 +56,13 @@ pub struct AdmissionCaps {
     /// Maximum expression depth. This bounds recursive consumers even
     /// when the graph is a valid, acyclic chain.
     pub max_graph_depth: u32,
+    /// Maximum deterministic validation work units. One unit is charged
+    /// for each retained top-level item and each expression child edge,
+    /// so admission and evaluation cannot be forced to traverse an
+    /// otherwise count-valid but over-budget graph.
+    pub max_total_work: u64,
     /// Conservative aggregate byte budget for retained names, expression
-    /// strings, intern keys, and their canonical wire spellings.
+    /// strings, fingerprint metadata, and their canonical wire spellings.
     pub max_total_retained_bytes: u64,
     /// Maximum exact input artifact size accepted by the wire parser.
     pub max_wire_bytes: u64,
@@ -64,7 +70,7 @@ pub struct AdmissionCaps {
 
 impl AdmissionCaps {
     /// Compatibility spelling for callers pinned to the original cap
-    /// constant. Validation itself is governed by schema v2.
+    /// constant. Validation itself is governed by schema v3.
     pub const V1: AdmissionCaps = AdmissionCaps {
         max_vars: 4096,
         max_nodes: 1 << 20,
@@ -77,13 +83,16 @@ impl AdmissionCaps {
         max_point_dim: 1 << 24,
         max_total_point_storage: 1 << 32,
         max_graph_depth: 256,
+        max_total_work: 1 << 24,
         // Keeps the conservative canonical-body charge comfortably
         // inside the 64 MiB exact-wire parser envelope.
         max_total_retained_bytes: 1 << 25,
         max_wire_bytes: 1 << 26,
     };
 
-    /// The v2 cap schedule.
+    /// The v2 compatibility cap schedule. The work field was added in
+    /// schema v3 and is populated with the v3 default for source
+    /// compatibility; semantic admission receipts still report v3.
     pub const V2: AdmissionCaps = AdmissionCaps {
         max_vars: 4096,
         max_nodes: 1 << 20,
@@ -96,8 +105,28 @@ impl AdmissionCaps {
         max_point_dim: 1 << 24,
         max_total_point_storage: 1 << 32,
         max_graph_depth: 256,
+        max_total_work: 1 << 24,
         // Keeps the conservative canonical-body charge comfortably
         // inside the 64 MiB exact-wire parser envelope.
+        max_total_retained_bytes: 1 << 25,
+        max_wire_bytes: 1 << 26,
+    };
+
+    /// The v3 cap schedule: first-contact retained/wire/depth/work
+    /// enforcement across builder, parser, admission, and evaluators.
+    pub const V3: AdmissionCaps = AdmissionCaps {
+        max_vars: 4096,
+        max_nodes: 1 << 20,
+        max_objectives: 1024,
+        max_constraints: 1 << 16,
+        max_tags: 1024,
+        max_name_bytes: 4096,
+        max_string_bytes: 4096,
+        max_fidelity_levels: 1024,
+        max_point_dim: 1 << 24,
+        max_total_point_storage: 1 << 32,
+        max_graph_depth: 256,
+        max_total_work: 1 << 24,
         max_total_retained_bytes: 1 << 25,
         max_wire_bytes: 1 << 26,
     };
@@ -105,7 +134,7 @@ impl AdmissionCaps {
 
 impl Default for AdmissionCaps {
     fn default() -> Self {
-        AdmissionCaps::V2
+        AdmissionCaps::V3
     }
 }
 
@@ -252,6 +281,8 @@ pub struct ProblemAdmission {
     objective_count: u32,
     constraint_count: u32,
     total_point_storage: u64,
+    graph_depth: u32,
+    total_work: u64,
     total_retained_bytes: u64,
     quarantined_legacy_identities: Vec<LegacyProblemHash>,
 }
@@ -298,6 +329,18 @@ impl ProblemAdmission {
     #[must_use]
     pub fn total_point_storage(&self) -> u64 {
         self.total_point_storage
+    }
+
+    /// Maximum root-to-leaf expression depth re-derived by admission.
+    #[must_use]
+    pub fn graph_depth(&self) -> u32 {
+        self.graph_depth
+    }
+
+    /// Deterministic validation work charged for the admitted problem.
+    #[must_use]
+    pub fn total_work(&self) -> u64 {
+        self.total_work
     }
 
     /// Conservative retained/canonical byte accounting for the admitted
@@ -415,29 +458,72 @@ fn escaped_wire_bytes(s: &str) -> u64 {
     })
 }
 
+const NAME_RETAINED_FIXED_BYTES: u64 = 64;
+const EXPR_RETAINED_FIXED_BYTES: u64 = 192;
+
 /// Conservative retained/wire byte charge for a diagnostic name. The
 /// fixed allowance covers its directive, ids, separators, and container
 /// metadata; raw and escaped bytes cover both the owned value and its
 /// canonical spelling.
 pub(crate) fn name_retained_bytes(s: &str) -> u64 {
-    64u64
+    NAME_RETAINED_FIXED_BYTES
         .saturating_add(s.len() as u64)
         .saturating_add(escaped_wire_bytes(s))
 }
 
 /// Conservative retained/wire byte charge for one expression, including
-/// the owned expression, its intern key, and canonical directive.
+/// the owned expression, fixed-size fingerprint metadata, and canonical
+/// directive.
 pub(crate) fn expr_retained_bytes(e: &Expr) -> u64 {
-    let string = match e {
+    string_expr_retained_bytes(expr_external_string(e))
+}
+
+fn expr_external_string(e: &Expr) -> &str {
+    match e {
         Expr::PdeResidual { study, .. } => study.as_str(),
         Expr::Expectation { uq_config, .. }
         | Expr::Cvar { uq_config, .. }
         | Expr::Quantile { uq_config, .. } => uq_config.as_str(),
         _ => "",
-    };
-    192u64
+    }
+}
+
+/// Conservative retained/canonical charge for an expression carrying
+/// one borrowed external identifier. This lets the builder enforce the
+/// aggregate limit before cloning the identifier into an owned [`Expr`].
+pub(crate) fn string_expr_retained_bytes(string: &str) -> u64 {
+    EXPR_RETAINED_FIXED_BYTES
         .saturating_add(string.len() as u64)
         .saturating_add(escaped_wire_bytes(string))
+}
+
+/// Accumulate one owned/raw string plus its escaped canonical spelling,
+/// stopping as soon as the aggregate retained-byte cap is crossed. The
+/// raw-length lower bound is O(1); canonical bytes are then charged one
+/// input byte at a time, so an over-cap string never buys a full scan.
+fn checked_retained_string_total(
+    current: u64,
+    fixed: u64,
+    string: &str,
+    caps: &AdmissionCaps,
+) -> Result<u64, (u64, u64)> {
+    let mut total = current
+        .saturating_add(fixed)
+        .saturating_add(string.len() as u64);
+    if total > caps.max_total_retained_bytes {
+        return Err((total, caps.max_total_retained_bytes));
+    }
+    for byte in string.as_bytes() {
+        total = total.saturating_add(if byte.is_ascii_graphic() && *byte != b'%' {
+            1
+        } else {
+            3
+        });
+        if total > caps.max_total_retained_bytes {
+            return Err((total, caps.max_total_retained_bytes));
+        }
+    }
+    Ok(total)
 }
 
 pub(crate) fn checked_retained_total(
@@ -451,6 +537,31 @@ pub(crate) fn checked_retained_total(
             what: "total retained/canonical bytes",
             count: total,
             cap: caps.max_total_retained_bytes,
+        });
+    }
+    Ok(total)
+}
+
+/// Work charged by one expression: one node visit plus one visit for
+/// every child edge. [`crate::ir::children`] is fixed-size and does not
+/// allocate while computing the charge.
+pub(crate) fn expr_work(e: &Expr) -> u64 {
+    1u64.saturating_add(children(e).count() as u64)
+}
+
+/// Add deterministic validation work and fail before a retaining
+/// mutation when the aggregate cap would be crossed.
+pub(crate) fn checked_work_total(
+    current: u64,
+    addition: u64,
+    caps: &AdmissionCaps,
+) -> Result<u64, OptError> {
+    let total = current.saturating_add(addition);
+    if total > caps.max_total_work {
+        return Err(OptError::CapExceeded {
+            what: "total admission work",
+            count: total,
+            cap: caps.max_total_work,
         });
     }
     Ok(total)
@@ -555,7 +666,90 @@ fn dims_sub_checked(a: Dims, b: Dims, op: &'static str) -> Result<Dims, OptError
     Ok(Dims(out))
 }
 
-type NodeInfo = (Shape, Dims, Class);
+pub(crate) type NodeInfo = (Shape, Dims, Class);
+
+fn scalar_info(
+    op: &'static str,
+    node: NodeId,
+    lookup: &dyn Fn(NodeId) -> Option<NodeInfo>,
+) -> Result<NodeInfo, OptError> {
+    let info = lookup(node).ok_or(OptError::UnknownNode { id: node.0 })?;
+    match info.0 {
+        Shape::Scalar => Ok(info),
+        vector @ Shape::Vector(_) => Err(OptError::ShapeMismatch {
+            op,
+            left: vector,
+            right: Shape::Scalar,
+        }),
+    }
+}
+
+/// Shared borrowed leaf rule for PDE nodes. The builder calls this
+/// before cloning `study`; whole-problem admission calls the same rule
+/// on the retained expression.
+pub(crate) fn derive_pde_leaf(
+    study: &str,
+    over: VarId,
+    dims: Dims,
+    vars: &[Variable],
+    caps: &AdmissionCaps,
+) -> Result<NodeInfo, OptError> {
+    validate_string("PDE study", study, caps)?;
+    if over.0 as usize >= vars.len() {
+        return Err(OptError::UnknownVar { id: over.0 });
+    }
+    Ok((Shape::Scalar, dims, Class::Smooth))
+}
+
+/// Shared borrowed leaf rule for expectation nodes.
+pub(crate) fn derive_expectation_leaf(
+    of: NodeId,
+    uq_config: &str,
+    lookup: &dyn Fn(NodeId) -> Option<NodeInfo>,
+    caps: &AdmissionCaps,
+) -> Result<NodeInfo, OptError> {
+    validate_string("UQ config", uq_config, caps)?;
+    let (_, dims, class) = scalar_info("expectation", of, lookup)?;
+    Ok((Shape::Scalar, dims, class))
+}
+
+/// Shared borrowed leaf rule for CVaR nodes.
+pub(crate) fn derive_cvar_leaf(
+    of: NodeId,
+    alpha: f64,
+    uq_config: &str,
+    lookup: &dyn Fn(NodeId) -> Option<NodeInfo>,
+    caps: &AdmissionCaps,
+) -> Result<NodeInfo, OptError> {
+    validate_string("UQ config", uq_config, caps)?;
+    if !(alpha.is_finite() && alpha > 0.0 && alpha < 1.0) {
+        return Err(OptError::BadParam {
+            what: "cvar alpha",
+            value: alpha,
+        });
+    }
+    let (_, dims, _) = scalar_info("cvar", of, lookup)?;
+    Ok((Shape::Scalar, dims, Class::C0))
+}
+
+/// Shared borrowed leaf rule for quantile nodes.
+pub(crate) fn derive_quantile_leaf(
+    of: NodeId,
+    q: f64,
+    uq_config: &str,
+    lookup: &dyn Fn(NodeId) -> Option<NodeInfo>,
+    caps: &AdmissionCaps,
+) -> Result<NodeInfo, OptError> {
+    validate_string("UQ config", uq_config, caps)?;
+    if !(q.is_finite() && q > 0.0 && q < 1.0) {
+        return Err(OptError::BadParam {
+            what: "quantile q",
+            value: q,
+        });
+    }
+    let (_, dims, _) = scalar_info("quantile", of, lookup)?;
+    Ok((Shape::Scalar, dims, Class::C0))
+}
 
 /// THE expression rule: derive (shape, dims, class) for a candidate
 /// expression against already-admitted context, refusing with the same
@@ -775,15 +969,11 @@ pub(crate) fn derive_expr(
         Expr::PdeResidual {
             study, over, dims, ..
         } => {
-            if (over.0 as usize) >= vars.len() {
-                return Err(OptError::UnknownVar { id: over.0 });
-            }
-            validate_string("pde study identifier", study, caps)?;
-            (Shape::Scalar, *dims)
+            let info = derive_pde_leaf(study, *over, *dims, vars, caps)?;
+            (info.0, info.1)
         }
         Expr::Expectation { of, uq_config } => {
-            validate_string("uq config identifier", uq_config, caps)?;
-            let info = scalar("expectation", get(*of)?)?;
+            let info = derive_expectation_leaf(*of, uq_config, lookup, caps)?;
             (Shape::Scalar, info.1)
         }
         Expr::Cvar {
@@ -791,31 +981,16 @@ pub(crate) fn derive_expr(
             alpha,
             uq_config,
         } => {
-            validate_string("uq config identifier", uq_config, caps)?;
-            if !(alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0) {
-                return Err(OptError::BadParam {
-                    what: "cvar alpha",
-                    value: *alpha,
-                });
-            }
-            let info = scalar("cvar", get(*of)?)?;
+            let info = derive_cvar_leaf(*of, *alpha, uq_config, lookup, caps)?;
             (Shape::Scalar, info.1)
         }
         Expr::Quantile { of, q, uq_config } => {
-            validate_string("uq config identifier", uq_config, caps)?;
-            if !(q.is_finite() && *q > 0.0 && *q < 1.0) {
-                return Err(OptError::BadParam {
-                    what: "quantile q",
-                    value: *q,
-                });
-            }
-            let info = scalar("quantile", get(*of)?)?;
+            let info = derive_quantile_leaf(*of, *q, uq_config, lookup, caps)?;
             (Shape::Scalar, info.1)
         }
     };
     let class = children(e)
-        .iter()
-        .filter_map(|c| lookup(*c).map(|i| i.2))
+        .filter_map(|child| lookup(child).map(|info| info.2))
         .chain([own_class(e)])
         .min()
         .unwrap_or(Class::Smooth);
@@ -823,9 +998,11 @@ pub(crate) fn derive_expr(
 }
 
 /// Re-validate the problem and mint its semantic identity. Aggregate
-/// count/alignment/byte caps are preflighted first and refuse before
-/// proportional allocation. Inside that bounded envelope, every section
-/// runs in deterministic order and returns all discovered violations.
+/// count/alignment caps are preflighted first and refuse before
+/// proportional allocation. Work, retained-byte, and depth limits then
+/// stop at their first aggregate crossing. Inside that bounded envelope,
+/// every remaining section runs in deterministic order and returns all
+/// discovered violations.
 ///
 /// # Errors
 /// A complete [`AdmissionReport`].
@@ -866,6 +1043,7 @@ pub(crate) fn admit_with_caps(
         ("shape cache length", problem.shapes.len() as u64),
         ("dimension cache length", problem.dims.len() as u64),
         ("class cache length", problem.classes.len() as u64),
+        ("depth cache length", problem.depths.len() as u64),
     ] {
         if len != n_nodes {
             violations.push(AdmissionViolation::Aggregate {
@@ -882,25 +1060,109 @@ pub(crate) fn admit_with_caps(
         });
     }
 
-    let total_retained_bytes = problem
-        .vars
-        .iter()
-        .map(|var| name_retained_bytes(&var.name))
-        .chain(problem.exprs.iter().map(expr_retained_bytes))
-        .chain(
-            problem
-                .constraints
-                .iter()
-                .map(|constraint| name_retained_bytes(&constraint.name)),
-        )
-        .fold(0u64, u64::saturating_add);
-    if total_retained_bytes > caps.max_total_retained_bytes {
+    // Fixed-size section work is O(1), and retained top-level names can
+    // be charged without walking the expression arena. Refuse either
+    // aggregate before allocating proportional graph tables.
+    let mut total_work = (problem.vars.len() as u64)
+        .saturating_add(problem.objectives.len() as u64)
+        .saturating_add(problem.constraints.len() as u64)
+        .saturating_add(problem.tags.len() as u64);
+    if total_work > caps.max_total_work {
         return Err(AdmissionReport {
             schema_version: ADMISSION_SCHEMA_VERSION,
             violations: vec![AdmissionViolation::Aggregate {
-                what: "total retained/canonical bytes",
-                count: total_retained_bytes,
-                cap: caps.max_total_retained_bytes,
+                what: "total admission work",
+                count: total_work,
+                cap: caps.max_total_work,
+            }],
+        });
+    }
+    let charge_retained =
+        |current: u64, fixed: u64, string: &str| -> Result<u64, AdmissionReport> {
+            checked_retained_string_total(current, fixed, string, caps).map_err(|(count, cap)| {
+                AdmissionReport {
+                    schema_version: ADMISSION_SCHEMA_VERSION,
+                    violations: vec![AdmissionViolation::Aggregate {
+                        what: "total retained/canonical bytes",
+                        count,
+                        cap,
+                    }],
+                }
+            })
+        };
+    let mut total_retained_bytes = 0u64;
+    for variable in &problem.vars {
+        total_retained_bytes = charge_retained(
+            total_retained_bytes,
+            NAME_RETAINED_FIXED_BYTES,
+            &variable.name,
+        )?;
+    }
+    for constraint in &problem.constraints {
+        total_retained_bytes = charge_retained(
+            total_retained_bytes,
+            NAME_RETAINED_FIXED_BYTES,
+            &constraint.name,
+        )?;
+    }
+
+    // Expression work, retained bytes, and depth share ONE prefix pass.
+    // Once any aggregate crosses its limit, no later expression is
+    // visited. Depth is a hard safety boundary rather than a best-effort
+    // diagnostic, so max+1 also exits before shape/class allocation.
+    let mut derived_depths = Vec::new();
+    let mut graph_depth = 0u32;
+    for (i, expression) in problem.exprs.iter().enumerate() {
+        total_work = total_work.saturating_add(expr_work(expression));
+        if total_work > caps.max_total_work {
+            return Err(AdmissionReport {
+                schema_version: ADMISSION_SCHEMA_VERSION,
+                violations: vec![AdmissionViolation::Aggregate {
+                    what: "total admission work",
+                    count: total_work,
+                    cap: caps.max_total_work,
+                }],
+            });
+        }
+        total_retained_bytes = charge_retained(
+            total_retained_bytes,
+            EXPR_RETAINED_FIXED_BYTES,
+            expr_external_string(expression),
+        )?;
+        let lookup = |node: NodeId| derived_depths.get(node.0 as usize).copied();
+        match derive_depth(expression, &lookup, caps) {
+            Ok(depth) => {
+                graph_depth = graph_depth.max(depth);
+                derived_depths.push(depth);
+            }
+            Err(
+                error @ OptError::CapExceeded {
+                    what: "graph depth",
+                    ..
+                },
+            ) => {
+                return Err(AdmissionReport {
+                    schema_version: ADMISSION_SCHEMA_VERSION,
+                    violations: vec![AdmissionViolation::Node {
+                        index: i as u32,
+                        error,
+                    }],
+                });
+            }
+            Err(_) => {
+                // The complete node scan below reports malformed child
+                // order/ids. A fallback keeps this preflight bounded.
+                derived_depths.push(1);
+            }
+        }
+    }
+    if total_work != problem.total_work {
+        return Err(AdmissionReport {
+            schema_version: ADMISSION_SCHEMA_VERSION,
+            violations: vec![AdmissionViolation::Aggregate {
+                what: "admission work cache",
+                count: problem.total_work,
+                cap: total_work,
             }],
         });
     }
@@ -953,10 +1215,10 @@ pub(crate) fn admit_with_caps(
     // when a node fails, its cached triple is used to continue the
     // scan so every downstream violation is still reported.
     let mut derived: Vec<NodeInfo> = Vec::with_capacity(problem.exprs.len());
-    let mut derived_depths: Vec<u32> = Vec::with_capacity(problem.exprs.len());
     let aligned = problem.shapes.len() == problem.exprs.len()
         && problem.dims.len() == problem.exprs.len()
-        && problem.classes.len() == problem.exprs.len();
+        && problem.classes.len() == problem.exprs.len()
+        && problem.depths.len() == problem.exprs.len();
     for (i, e) in problem.exprs.iter().enumerate() {
         let index = i as u32;
         let mut order_ok = true;
@@ -977,12 +1239,6 @@ pub(crate) fn admit_with_caps(
         let re_derived = if order_ok {
             let lookup = |n: NodeId| derived.get(n.0 as usize).copied();
             derive_expr(e, &lookup, &problem.vars, caps)
-        } else {
-            Err(OptError::UnknownNode { id: index })
-        };
-        let re_derived_depth = if order_ok {
-            let lookup = |n: NodeId| derived_depths.get(n.0 as usize).copied();
-            derive_depth(e, &lookup, caps)
         } else {
             Err(OptError::UnknownNode { id: index })
         };
@@ -1017,14 +1273,11 @@ pub(crate) fn admit_with_caps(
                 derived.push(cached.unwrap_or((Shape::Scalar, Dims::NONE, Class::Smooth)));
             }
         }
-        match re_derived_depth {
-            Ok(depth) => derived_depths.push(depth),
-            Err(error) => {
-                if order_ok {
-                    violations.push(AdmissionViolation::Node { index, error });
-                }
-                derived_depths.push(1);
-            }
+        if aligned && problem.depths[i] != derived_depths[i] {
+            violations.push(AdmissionViolation::CacheMismatch {
+                node: index,
+                what: "depth",
+            });
         }
     }
 
@@ -1103,6 +1356,8 @@ pub(crate) fn admit_with_caps(
         objective_count: problem.objectives.len() as u32,
         constraint_count: problem.constraints.len() as u32,
         total_point_storage,
+        graph_depth,
+        total_work,
         total_retained_bytes,
         quarantined_legacy_identities: quarantined,
     })

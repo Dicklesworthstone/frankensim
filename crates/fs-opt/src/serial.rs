@@ -210,28 +210,42 @@ fn unesc(s: &str) -> Result<String, &'static str> {
 /// buffer is retained.
 fn unesc_limited(s: &str, max_bytes: u64) -> Result<String, &'static str> {
     let src = s.as_bytes();
-    let capacity = src
-        .len()
-        .min(usize::try_from(max_bytes).unwrap_or(usize::MAX));
-    let mut bytes = Vec::with_capacity(capacity);
+    // First pass validates escape structure and counts decoded bytes.
+    // A cap+1 token therefore refuses before allocating its output
+    // buffer instead of allocating up to the cap and only then failing.
+    let mut decoded_len = 0usize;
     let mut i = 0;
     while i < src.len() {
-        if bytes.len() as u64 >= max_bytes {
+        if u64::try_from(decoded_len).unwrap_or(u64::MAX) >= max_bytes {
             return Err("percent-decoded token exceeds its admission byte cap");
         }
         if src[i] == b'%' {
             if i + 3 > src.len() {
                 return Err("truncated percent escape");
             }
-            let (Some(hi), Some(lo)) = (hex_nibble(src[i + 1]), hex_nibble(src[i + 2])) else {
+            if hex_nibble(src[i + 1]).is_none() || hex_nibble(src[i + 2]).is_none() {
                 return Err("percent escape must contain exactly two hexadecimal digits");
-            };
-            bytes.push((hi << 4) | lo);
+            }
+            decoded_len += 1;
             i += 3;
             continue;
         }
-        bytes.push(src[i]);
+        decoded_len += 1;
         i += 1;
+    }
+
+    let mut bytes = Vec::with_capacity(decoded_len);
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'%' {
+            let hi = hex_nibble(src[i + 1]).expect("first pass validated the escape");
+            let lo = hex_nibble(src[i + 2]).expect("first pass validated the escape");
+            bytes.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            bytes.push(src[i]);
+            i += 1;
+        }
     }
     String::from_utf8(bytes).map_err(|_| "percent-decoded token is not valid UTF-8")
 }
@@ -453,14 +467,8 @@ fn parse_manifold(s: &str) -> Option<Manifold> {
     None
 }
 
-/// Canonical single-token form of one expression (the hash-consing key
-/// AND the serialized body). Expression tokens are identical under the
-/// v2 and v3 grammars (both are six-base).
-#[must_use]
-pub(crate) fn expr_key(e: &Expr) -> String {
-    expr_key_for_wire(e, WireVersion::V3, TokenEncoding::PercentBytes)
-}
-
+/// Canonical single-token form of one expression. Expression tokens are
+/// identical under the v2 and v3 grammars (both are six-base).
 fn expr_key_for_wire(e: &Expr, version: WireVersion, encoding: TokenEncoding) -> String {
     match e {
         Expr::Var(v) => format!("var {}", v.0),
@@ -784,7 +792,14 @@ pub fn parse(text: &str) -> Result<Problem, OptError> {
 /// refusals are wrapped at the directive that triggered them.
 #[allow(clippy::too_many_lines)] // one grammar rule per block
 pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
-    let caps = AdmissionCaps::default();
+    parse_with_version_and_caps(text, &AdmissionCaps::default())
+}
+
+#[allow(clippy::too_many_lines)] // one grammar rule per block
+fn parse_with_version_and_caps(
+    text: &str,
+    caps: &AdmissionCaps,
+) -> Result<ParsedProblem, OptError> {
     let wire_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
     if wire_bytes > caps.max_wire_bytes {
         return Err(perr(
@@ -795,24 +810,32 @@ pub fn parse_with_version(text: &str) -> Result<ParsedProblem, OptError> {
             ),
         ));
     }
-    let max_lines = u64::from(caps.max_vars)
+    let structural_max_lines = u64::from(caps.max_vars)
         .saturating_add(u64::from(caps.max_nodes))
         .saturating_add(u64::from(caps.max_objectives))
         .saturating_add(u64::from(caps.max_constraints))
         .saturating_add(u64::from(caps.max_tags))
         .saturating_add(4);
-    let logical_lines = text.strip_suffix('\n').unwrap_or(text).split('\n').count() as u64;
-    if logical_lines > max_lines {
-        return Err(perr(
-            1,
-            format!(
-                "wire artifact has {logical_lines} lines, exceeding the bounded directive envelope of {max_lines}"
-            ),
-        ));
+    // Every retained directive costs at least one admission-work unit;
+    // header/budget/hash account for the three non-retained lines. This
+    // pre-size gate runs before the line-reference vector is allocated.
+    let work_max_lines = caps.max_total_work.saturating_add(3);
+    let max_lines = structural_max_lines.min(work_max_lines);
+    let mut logical_lines = 0u64;
+    for _ in text.strip_suffix('\n').unwrap_or(text).split('\n') {
+        logical_lines = logical_lines.saturating_add(1);
+        if logical_lines > max_lines {
+            return Err(perr(
+                1,
+                format!(
+                    "wire artifact crossed the bounded directive envelope of {max_lines} at line {logical_lines}"
+                ),
+            ));
+        }
     }
     let max_name_bytes = caps.max_name_bytes;
     let max_string_bytes = caps.max_string_bytes;
-    let mut b = ProblemBuilder::with_caps(caps);
+    let mut b = ProblemBuilder::with_caps(caps.clone());
     let mut expected_hash: Option<u64> = None;
     // A version header is mandatory. Defaulting a headerless artifact to v1
     // would invent provenance for bytes no historical writer emitted.
@@ -1255,9 +1278,11 @@ fn parse_expr(
 mod tests {
     use super::{
         ContentHash, FiveToSixRule, ProblemSemanticId, TokenEncoding, WireVersion,
-        canonical_v2_migration_target, esc, fnv1a, parse, parse_with_version, problem_hash,
-        serialize, serialize_for_wire, unesc,
+        canonical_v2_migration_target, esc, fnv1a, parse, parse_with_version,
+        parse_with_version_and_caps, problem_hash, serialize, serialize_for_wire, unesc,
+        unesc_limited,
     };
+    use crate::AdmissionCaps;
     use crate::ir::{BilevelRef, NodeId, OptError, ProblemBuilder, ProblemTag, Sense};
     use fs_qty::Dims;
 
@@ -1669,6 +1694,35 @@ mod tests {
         assert!(
             parse_with_version(&format!("{body}{} trailing\n", hash_line.trim_end())).is_err(),
             "hash trailing fields must fail"
+        );
+    }
+
+    #[test]
+    fn parser_aggregate_caps_preflight_before_proportional_buffers() {
+        let mut builder = ProblemBuilder::new();
+        let scalar = builder.konst(1.0, Dims::NONE).expect("constant");
+        builder
+            .objective(scalar, Sense::Minimize, 1.0)
+            .expect("objective");
+        let canonical = serialize(&builder.finish());
+
+        let mut wire_caps = AdmissionCaps::default();
+        wire_caps.max_wire_bytes = u64::try_from(canonical.len()).expect("wire length") - 1;
+        assert!(matches!(
+            parse_with_version_and_caps(&canonical, &wire_caps),
+            Err(OptError::Parse { line: 1, what }) if what.contains("wire artifact")
+        ));
+
+        let mut work_caps = AdmissionCaps::default();
+        work_caps.max_total_work = 1;
+        assert!(matches!(
+            parse_with_version_and_caps(&canonical, &work_caps),
+            Err(OptError::Parse { line: 1, what }) if what.contains("directive envelope")
+        ));
+
+        assert_eq!(
+            unesc_limited("abcde", 4),
+            Err("percent-decoded token exceeds its admission byte cap")
         );
     }
 }

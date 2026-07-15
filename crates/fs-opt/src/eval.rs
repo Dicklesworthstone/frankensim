@@ -39,10 +39,27 @@ impl Value {
 /// # Errors
 /// [`OptError::Unevaluable`] / [`OptError::UnknownVar`] /
 /// [`OptError::UnknownNode`] / [`OptError::BindingCount`] /
-/// [`OptError::BindingLen`].
+/// [`OptError::BindingLen`] / [`OptError::CapExceeded`].
 pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Value, OptError> {
     if node.0 as usize >= problem.exprs.len() {
         return Err(OptError::UnknownNode { id: node.0 });
+    }
+    let caps = AdmissionCaps::default();
+    let depth = problem.node_depth(node)?;
+    if depth > caps.max_graph_depth {
+        return Err(OptError::CapExceeded {
+            what: "graph depth",
+            count: u64::from(depth),
+            cap: u64::from(caps.max_graph_depth),
+        });
+    }
+    let work = problem.total_admission_work();
+    if work > caps.max_total_work {
+        return Err(OptError::CapExceeded {
+            what: "total admission work",
+            count: work,
+            cap: caps.max_total_work,
+        });
     }
     if bindings.len() > problem.vars.len() {
         return Err(OptError::BindingCount {
@@ -63,8 +80,18 @@ pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Va
             });
         }
     }
-    let mut memo: Vec<Option<Value>> = vec![None; problem.exprs.len()];
-    eval_at(problem, node, bindings, &mut memo)
+    // Arena order guarantees every dependency has a lower id, so a
+    // prefix is sufficient; unrelated later nodes cannot force memo
+    // allocation for this evaluation.
+    let mut memo: Vec<Option<Value>> = vec![None; node.0 as usize + 1];
+    eval_at(
+        problem,
+        node,
+        bindings,
+        &mut memo,
+        caps.max_graph_depth,
+        caps.max_graph_depth,
+    )
 }
 
 #[allow(clippy::too_many_lines)] // one arm per node kind: the evaluator IS the semantics
@@ -73,11 +100,22 @@ fn eval_at(
     node: NodeId,
     bindings: &[Vec<f64>],
     memo: &mut Vec<Option<Value>>,
+    remaining_depth: u32,
+    depth_cap: u32,
 ) -> Result<Value, OptError> {
+    if remaining_depth == 0 {
+        return Err(OptError::CapExceeded {
+            what: "graph depth",
+            count: u64::from(depth_cap).saturating_add(1),
+            cap: u64::from(depth_cap),
+        });
+    }
     if let Some(v) = &memo[node.0 as usize] {
         return Ok(v.clone());
     }
-    let ev = |n: NodeId, memo: &mut Vec<Option<Value>>| eval_at(problem, n, bindings, memo);
+    let ev = |n: NodeId, memo: &mut Vec<Option<Value>>| {
+        eval_at(problem, n, bindings, memo, remaining_depth - 1, depth_cap)
+    };
     let scalar = |v: Value| -> f64 {
         match v {
             Value::S(x) => x,

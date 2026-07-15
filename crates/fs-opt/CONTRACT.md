@@ -17,7 +17,8 @@ structure; FLUX/UQ execute it.
   read-only accessors (`vars()`, `exprs()`, `objectives()`,
   `constraints()`, `tags()`, `budget()`) plus CHECKED id-indexed
   accessors (`expr`, `variable`, `shape`, `node_dims`, `class`,
-  `reachable`) that refuse unknown ids instead of panicking. Every
+  `node_depth`, `reachable`) plus the sealed graph's
+  `total_admission_work`; unknown ids refuse instead of panicking. Every
   builder constructor validates through the SAME versioned leaf rules
   the admission validator uses (`derive_expr` + leaf policies):
   shapes (`Scalar`/`Vector(n)`), fs-qty DIMENSIONS (add/compare need
@@ -33,11 +34,14 @@ structure; FLUX/UQ execute it.
   bilevel references), scalar-only objective/constraint roots, and
   versioned per-item/aggregate caps (`AdmissionCaps`,
   `ProblemBuilder::with_caps`), including graph depth, conservative
-  retained/canonical bytes, exact input-wire bytes, and target-`usize`
-  packed point storage. External strings are length-checked before
-  cloning; expression validation and depth derivation precede intern-key
-  allocation. Rejection leaves intern tables, ids, byte/storage totals,
-  budget, and ordering unchanged.
+  retained/canonical bytes, exact input-wire bytes, deterministic
+  admission work (one item visit plus expression child edges), and
+  target-`usize` packed point storage. External strings are checked
+  against per-field and aggregate byte/work/depth limits while borrowed;
+  PDE/UQ ownership and insertion of the fixed-size, collision-checked
+  fingerprint happen only after every cap passes. Cap+1 rejection leaves
+  vector capacities, owned-string capacity, intern tables, ids,
+  byte/work/storage totals, budget, and ordering unchanged.
 - `Problem::admit` / `admit_with_caps` → `ProblemAdmission`: the
   single versioned re-validation chokepoint (schema
   `ADMISSION_SCHEMA_VERSION`). Re-derives every node's
@@ -45,9 +49,11 @@ structure; FLUX/UQ execute it.
   proves reference validity and acyclicity from arena ordering,
   re-checks every leaf policy and cap. Cheap aggregate count/alignment
   failures return their complete deterministic preflight section before
-  proportional graph work; within that count envelope, retained-byte
-  preflight runs before derived graph allocation. The remaining sections
-  then scan deterministically — or mint
+  proportional graph work. Within that count envelope, validation work
+  and retained bytes accumulate only until their first cap crossing, and
+  depth is re-derived with a max+1 early exit before shape/class table
+  allocation. The remaining admitted-size sections then scan
+  deterministically — or mint
   the `ProblemSemanticId` and lists quarantined legacy identities on
   success. Builder output always admits (same rules, pinned by test).
 - Identity is DOMAIN-SEPARATED with no implicit conversion:
@@ -127,12 +133,19 @@ structure; FLUX/UQ execute it.
   Semantic bilevel references have no v2 spelling, so that migration
   writer refuses with `WireIncompatible` rather than emitting a
   self-invalid downconversion. Parsing preflights exact artifact bytes
-  and directive counts, decodes tokens within per-field caps, REBUILDS
-  through the validating builder, and verifies the integrity hash —
+  and the minimum of structural/work directive envelopes before allocating
+  its line table. Token decoding is two-pass: malformed percent escapes
+  and any decoded cap+1 token refuse before its output buffer exists;
+  decoded UTF-8 validity is checked when that bounded buffer becomes a
+  `String`. The parser then REBUILDS through the validating builder and
+  verifies the integrity hash —
   tampered, oversized, or ill-typed files refuse as `Parse` with line
   numbers.
-- `eval`: memoized evaluation of algebraic subgraphs; PDE/stochastic
-  nodes refuse with `Unevaluable` NAMING their executor.
+- `eval`: memoized evaluation of algebraic subgraphs; the sealed root
+  depth and aggregate-work receipts are checked against the default
+  admission schedule before memo allocation, and recursion carries a
+  remaining-depth guard. PDE/stochastic nodes refuse with `Unevaluable`
+  NAMING their executor.
 - `GoodhartGuard` (addendum Proposal D): treats an optimizer `Endpoint`
   (`design`, `objective`, `label`; `from_descent` bridges `DescentReport`)
   as an adversarial example. A FIXED four-step escalation ladder
@@ -200,8 +213,9 @@ name + exact bit pattern), `CapExceeded` (cap name + count + limit),
 (line + what), `Cancelled`, `BudgetExhausted` (spent count receipt).
 Whole-problem re-validation refuses with a deterministically ordered
 `AdmissionReport`: the cheap count/alignment preflight gathers all of
-its findings before early refusal, retained bytes are checked next, and
-admitted-size section scans are index ordered.
+its findings before early refusal; work, retained bytes, and graph depth
+then fail at the first aggregate crossing, and admitted-size section
+scans are index ordered.
 
 ## Determinism class
 
@@ -240,7 +254,7 @@ seeded LCG randomness, fs-obs Custom event carrying the fixture
 problem hash and routing refusal. Any reimplementation must pass the
 suite unchanged.
 
-`tests/admission.rs`, cases adm-001..adm-015 (bead sj31i.48) — G0
+`tests/admission.rs` (beads sj31i.48 / xf8v7) — G0/G4/G5
 leaf-policy tables (manifold boundaries incl. checked `Stiefel`
 overflow, non-finite payloads with bit retention, weight policy incl.
 `-0.0`, tag domains, checked dimension combining), builder-rollback
@@ -248,8 +262,12 @@ identity, builder/admission agreement, mutation-sensitive semantic
 identity, deterministic bounded admission reports under explicit caps,
 domain-separated identity round trips, v3 bilevel + legacy
 quarantine, checked id accessors, binding validation, saturated component
-diagnostics, scalar-only Min/Max, and fail-closed graph-depth / aggregate
-retained-byte builder rollback.
+diagnostics, scalar-only Min/Max, fail-closed graph-depth / aggregate
+retained-byte builder rollback, exact aggregate-work receipts, measured
+cap+1 storage atomicity, and the max-depth builder/parser/admission/eval
+boundary. Unit fixtures additionally pin string-bearing and bitwise-float
+fingerprint identity plus exact fallback inside a simulated hash-collision
+bucket.
 
 `tests/guard.rs` (Proposal D, 15 cases): no-steps→provisional-not-honored;
 all-pass→cleared→honored; a veto→failed with a finding; an unregistered
@@ -263,6 +281,14 @@ provisional).
 
 ## No-claim boundaries
 
+- `max_total_work` is a deterministic structural admission envelope
+  (retained items plus expression edges), not a wall-clock or cycle-count
+  performance model. Per-field byte caps separately bound string hashing
+  and decoding work.
+- The cap+1 allocation fixture snapshots all builder vector capacities,
+  intern entries, owned-string capacity, and accounting totals. It does
+  not claim that Rust's process-global allocator performs no temporary
+  bookkeeping inside error formatting.
 - Gradients here are FD-through-retraction toys; exact adjoints and
   reverse-mode graph gradients are the gradient-stack bead (the
   parked draft's `graph.rs` already prototypes reverse-mode — harvest

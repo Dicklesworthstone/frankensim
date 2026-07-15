@@ -665,6 +665,105 @@ fn adm_015_depth_and_retained_bytes_fail_closed() {
     );
 }
 
+/// G4 admission envelope — aggregate work is charged incrementally and
+/// cap+1 refuses before retaining a new item. The admitted receipt
+/// re-derives the exact same charge.
+#[test]
+fn aggregate_work_cap_is_incremental_and_receipted() {
+    let mut caps = AdmissionCaps::default();
+    caps.max_total_work = 2;
+    let mut builder = ProblemBuilder::with_caps(caps.clone());
+    let variable = builder
+        .var("x", Manifold::Rn { dim: 1 }, Dims::NONE)
+        .expect("work unit 1");
+    builder.var_ref(variable).expect("work unit 2");
+    assert!(matches!(
+        builder.tag(ProblemTag::MultiFidelity { levels: 1 }),
+        Err(OptError::CapExceeded {
+            what: "total admission work",
+            count: 3,
+            cap: 2,
+        })
+    ));
+    let problem = builder.finish();
+    assert!(problem.tags().is_empty(), "cap+1 tag was not retained");
+    assert_eq!(problem.total_admission_work(), 2);
+    assert_eq!(
+        problem
+            .admit_with_caps(&caps)
+            .expect("bounded prefix re-admits")
+            .total_work(),
+        2
+    );
+}
+
+/// G4/G5 depth boundary — a chain exactly at the default depth cap
+/// builds, parses, admits, and evaluates deterministically. The next
+/// node refuses in the builder; a problem deliberately built under a
+/// looser cap is rejected by default admission, parsing, and evaluation
+/// before recursive work begins.
+#[test]
+fn graph_depth_boundary_is_closed_everywhere() {
+    fn chain(caps: AdmissionCaps, depth: u32) -> (fs_opt::Problem, NodeId) {
+        let mut builder = ProblemBuilder::with_caps(caps);
+        let mut root = builder.konst(1.0, Dims::NONE).expect("depth 1");
+        for _ in 1..depth {
+            root = builder.neg(root).expect("next admitted depth");
+        }
+        builder
+            .objective(root, Sense::Minimize, 1.0)
+            .expect("scalar objective");
+        (builder.finish(), root)
+    }
+
+    let default_caps = AdmissionCaps::default();
+    let limit = default_caps.max_graph_depth;
+    let (at_limit, root) = chain(default_caps.clone(), limit);
+    let receipt = at_limit.admit().expect("exact depth cap admits");
+    assert_eq!(receipt.graph_depth(), limit);
+    let value = eval(&at_limit, root, &[])
+        .expect("depth-gated evaluator accepts the boundary")
+        .scalar()
+        .expect("scalar chain");
+    let expected = if limit % 2 == 0 { -1.0 } else { 1.0 };
+    assert_eq!(value.to_bits(), expected.to_bits());
+    parse(&serialize(&at_limit)).expect("wire parser accepts the exact boundary");
+
+    let mut builder = ProblemBuilder::with_caps(default_caps.clone());
+    let mut capped = builder.konst(1.0, Dims::NONE).expect("depth 1");
+    for _ in 1..limit {
+        capped = builder.neg(capped).expect("within depth cap");
+    }
+    assert!(matches!(
+        builder.neg(capped),
+        Err(OptError::CapExceeded {
+            what: "graph depth",
+            count,
+            cap,
+        }) if count == u64::from(limit) + 1 && cap == u64::from(limit)
+    ));
+
+    let mut relaxed = default_caps;
+    relaxed.max_graph_depth = limit + 1;
+    let (over_limit, over_root) = chain(relaxed, limit + 1);
+    assert!(
+        over_limit.admit().is_err(),
+        "default admission refuses max+1"
+    );
+    assert!(matches!(
+        eval(&over_limit, over_root, &[]),
+        Err(OptError::CapExceeded {
+            what: "graph depth",
+            count,
+            cap,
+        }) if count == u64::from(limit) + 1 && cap == u64::from(limit)
+    ));
+    assert!(matches!(
+        parse(&serialize(&over_limit)),
+        Err(OptError::Parse { what, .. }) if what.contains("graph depth")
+    ));
+}
+
 /// adm-013 (bead j3vb5, review High #6) — descent leaf gating: a
 /// non-finite start component or degenerate step policy refuses TYPED
 /// through the public API before any descent arithmetic, for both the

@@ -13,7 +13,7 @@ use fs_constraint::{
     prove_interval, serialize_specs,
 };
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_opt::{Manifold, NodeId, Problem, ProblemBuilder};
+use fs_opt::{AdmissionCaps, Manifold, NodeId, Problem, ProblemBuilder};
 use fs_qty::Dims;
 
 fn verdict(case: &str, pass: bool, detail: &str) {
@@ -809,4 +809,43 @@ fn interval_eval_bounds_shared_dag_and_powi_work() {
     let expected = 2.0f64.powi(40) + 1.0;
     assert_eq!(enclosure.lo.to_bits(), expected.to_bits());
     assert_eq!(enclosure.hi.to_bits(), expected.to_bits());
+}
+
+/// G4 depth boundary: interval recursion is tied to fs-opt's admission
+/// schedule. The exact cap evaluates without overflowing the stack; a
+/// graph built under a deliberately looser policy refuses before
+/// recursive interval work begins.
+#[test]
+fn interval_eval_respects_the_admitted_depth_boundary() {
+    fn chain(caps: AdmissionCaps, depth: u32) -> (Problem, NodeId) {
+        let mut builder = ProblemBuilder::with_caps(caps);
+        let mut root = builder.konst(1.0, Dims::NONE).expect("depth 1");
+        for _ in 1..depth {
+            root = builder.neg(root).expect("next depth");
+        }
+        builder
+            .objective(root, fs_opt::Sense::Minimize, 1.0)
+            .expect("objective");
+        (builder.finish(), root)
+    }
+
+    let defaults = AdmissionCaps::default();
+    let limit = defaults.max_graph_depth;
+    let (at_limit, root) = chain(defaults.clone(), limit);
+    let interval = interval_eval(&at_limit, root, &[]).expect("exact depth cap evaluates");
+    let expected: f64 = if limit % 2 == 0 { -1.0 } else { 1.0 };
+    assert_eq!(interval.lo.to_bits(), expected.to_bits());
+    assert_eq!(interval.hi.to_bits(), expected.to_bits());
+
+    let mut relaxed = defaults;
+    relaxed.max_graph_depth = limit + 1;
+    let (over_limit, over_root) = chain(relaxed, limit + 1);
+    assert!(matches!(
+        interval_eval(&over_limit, over_root, &[]),
+        Err(fs_constraint::IvalError::CapExceeded {
+            what: "graph depth",
+            count,
+            cap,
+        }) if count == u64::from(limit) + 1 && cap == u64::from(limit)
+    ));
 }
