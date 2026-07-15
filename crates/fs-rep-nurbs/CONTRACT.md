@@ -68,7 +68,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
 - `NurbsSurface<S>` — sealed tensor-product representation with checked
   Cartesian/homogeneous construction. `AdmittedNurbsSurface` reuses one source
   validation through tensor evaluation, first partials, and per-span control
-  boxes; directional knot insertion remains an owning transformation.
+  boxes. Its admitted-only `eval_with_cx` returns transactional
+  `SurfaceEvaluationRun` state and never publishes a partial Cartesian point;
+  directional knot insertion remains an owning transformation.
 - `TrimLoop`/`TrimmedPatch` — trim curves in EXACT RATIONAL form
   (closure and continuity validated by rational equality, including exact
   left/right-limit agreement at any full knot break). Loop, curve, and
@@ -213,6 +215,14 @@ partial owned generations and returns `CurveBezierRun::Cancelled`. Individual
 allocator calls and scalar operations are not preemptible; the API claims a
 logical-operation bound, not a wall-time bound, and does not claim owning curve
 admission, `Cx` budget consumption, or executor drain/finalize authority.
+`AdmittedNurbsSurface::eval_with_cx` evaluates the U basis and then the V basis
+under one cancellation gate, preserving the synchronous U-major/V-minor tensor
+arithmetic order. It polls the pair product and homogeneous lane updates after
+at most 64 logical operations and gates final Cartesian publication.
+`SurfaceEvaluationRun::Cancelled` carries no partial accumulator or point and
+drops any allocated basis workspaces. Owning surface admission, aggregate
+affine-budget consumption, and executor drain/finalize remain caller responsibilities;
+allocator calls and individual scalar operations are not wall-time preemptible.
 The owning `admit_with_cx` path applies the same fixed stride across finite,
 ordering, multiplicity, and clamping validation and gates admitted authority at
 publication; `KnotVector::new` construction remains outside that cancellation

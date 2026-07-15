@@ -4,12 +4,26 @@
 //! boxes (the convex-hull property in both directions).
 
 use crate::NurbsError;
-use crate::basis::{BASIS_MAX_WORK_UNITS, KnotVector, Scalar};
+use crate::basis::{BASIS_MAX_WORK_UNITS, BasisRun, KnotVector, Scalar};
 use crate::curve::NurbsCurve;
+use fs_exec::Cx;
 
 const SURFACE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
 const SURFACE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const SURFACE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const SURFACE_CANCELLATION_STRIDE: usize = 64;
+
+fn surface_poll_due(
+    operations_since_poll: &mut usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> bool {
+    *operations_since_poll += 1;
+    if *operations_since_poll < SURFACE_CANCELLATION_STRIDE {
+        return false;
+    }
+    *operations_since_poll = 0;
+    should_cancel()
+}
 
 /// One (u-span × v-span) control box: (min, max, (u0, u1), (v0, v1)).
 pub type SurfaceSpanBox<S> = ([S; 3], [S; 3], (S, S), (S, S));
@@ -232,6 +246,19 @@ pub struct NurbsSurface<S: Scalar> {
 #[derive(Debug, Clone, Copy)]
 pub struct AdmittedNurbsSurface<'a, S: Scalar> {
     inner: &'a NurbsSurface<S>,
+}
+
+/// Transactional terminal state of cancellation-aware Cartesian evaluation.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SurfaceEvaluationRun<S: Scalar> {
+    /// The complete finite Cartesian point.
+    Complete {
+        /// Evaluated point on the admitted surface.
+        point: [S; 3],
+    },
+    /// Cancellation was observed; no partial point was published.
+    Cancelled,
 }
 
 impl<S: Scalar> NurbsSurface<S> {
@@ -661,6 +688,106 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         Ok(point)
     }
 
+    /// Evaluate a Cartesian point with bounded cancellation polling.
+    ///
+    /// This admitted-only entry point carries one `Cx` through both basis
+    /// rows, tensor contraction, rational projection, and final publication.
+    /// The caller remains responsible for owning surface admission, `Cx`
+    /// budget consumption, and request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous evaluator's parameter, work, allocation,
+    /// weight, and finite-arithmetic refusals when they win before an observed
+    /// cancellation.
+    pub fn eval_with_cx(
+        &self,
+        u: S,
+        v: S,
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
+        let (span_u, basis_u) = match self.knots_u().basis_with_cx(u, cx)? {
+            BasisRun::Complete { span, values } => (span, values),
+            BasisRun::Cancelled => return Ok(SurfaceEvaluationRun::Cancelled),
+        };
+        let (span_v, basis_v) = match self.knots_v().basis_with_cx(v, cx)? {
+            BasisRun::Complete { span, values } => (span, values),
+            BasisRun::Cancelled => return Ok(SurfaceEvaluationRun::Cancelled),
+        };
+        self.eval_from_basis_with_poll(span_u, &basis_u, span_v, &basis_v, || {
+            cx.checkpoint().is_err()
+        })
+    }
+
+    fn eval_from_basis_with_poll(
+        &self,
+        span_u: usize,
+        basis_u: &[S],
+        span_v: usize,
+        basis_v: &[S],
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
+        if should_cancel() {
+            return Ok(SurfaceEvaluationRun::Cancelled);
+        }
+        let degree_u = self.knots_u().degree();
+        let degree_v = self.knots_v().degree();
+        let mut operations_since_poll = 0usize;
+        let mut homogeneous = [S::zero(); 4];
+        for (row_offset, &weight_u) in basis_u.iter().enumerate() {
+            for (column_offset, &weight_v) in basis_v.iter().enumerate() {
+                let control = &self.inner.cpw[span_u - degree_u + row_offset]
+                    [span_v - degree_v + column_offset];
+                let tensor_weight = weight_u * weight_v;
+                if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(SurfaceEvaluationRun::Cancelled);
+                }
+                for (accumulator, &component) in homogeneous.iter_mut().zip(control) {
+                    *accumulator = *accumulator + tensor_weight * component;
+                    if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                        return Ok(SurfaceEvaluationRun::Cancelled);
+                    }
+                }
+            }
+        }
+        for (index, &component) in homogeneous.iter().enumerate() {
+            if !component.is_finite() {
+                return Err(NurbsError::Domain {
+                    what: "homogeneous surface evaluation left the finite numeric domain"
+                        .to_string(),
+                });
+            }
+            if index == 3 && !component.is_admissible_weight() {
+                return Err(NurbsError::Domain {
+                    what: "surface evaluation produced an inadmissible rational denominator"
+                        .to_string(),
+                });
+            }
+            if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(SurfaceEvaluationRun::Cancelled);
+            }
+        }
+
+        let point = [
+            homogeneous[0] / homogeneous[3],
+            homogeneous[1] / homogeneous[3],
+            homogeneous[2] / homogeneous[3],
+        ];
+        for &component in &point {
+            if !component.is_finite() {
+                return Err(NurbsError::Domain {
+                    what: "Cartesian surface evaluation left the finite numeric domain".to_string(),
+                });
+            }
+            if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(SurfaceEvaluationRun::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(SurfaceEvaluationRun::Cancelled);
+        }
+        Ok(SurfaceEvaluationRun::Complete { point })
+    }
+
     /// Per-span Cartesian control boxes without a second structural scan.
     ///
     /// # Errors
@@ -838,6 +965,178 @@ impl AdmittedNurbsSurface<'_, f64> {
 mod tests {
     use super::*;
     use crate::Rat;
+    use asupersync::types::Budget;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    fn with_surface_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        if cancelled {
+            gate.request();
+        }
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x5A2F_AC00,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+
+    fn bilinear_surface() -> NurbsSurface<f64> {
+        let knots_u = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("u knots");
+        let knots_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("v knots");
+        let points = vec![
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+        ];
+        let weights = vec![vec![1.0; 2]; 2];
+        NurbsSurface::new(knots_u, knots_v, &points, &weights).expect("bilinear plane")
+    }
+
+    fn high_degree_surface() -> NurbsSurface<f64> {
+        let degree_u = 16usize;
+        let mut knots_u = vec![0.0; degree_u + 1];
+        knots_u.extend(vec![1.0; degree_u + 1]);
+        let knots_v = vec![0.0, 0.0, 1.0, 1.0];
+        let points: Vec<Vec<[f64; 3]>> = (0..=degree_u)
+            .map(|row| {
+                let x = row as f64 / degree_u as f64;
+                vec![[x, 0.0, 0.0], [x, 1.0, 0.0]]
+            })
+            .collect();
+        let weights = vec![vec![1.0; 2]; degree_u + 1];
+        NurbsSurface::new(
+            KnotVector::new(knots_u, degree_u).expect("high-degree u knots"),
+            KnotVector::new(knots_v, 1).expect("linear v knots"),
+            &points,
+            &weights,
+        )
+        .expect("high-degree plane")
+    }
+
+    #[test]
+    fn admitted_surface_evaluation_with_cx_is_transactional_and_exact() {
+        let surface = bilinear_surface();
+        let admitted = surface.admit().expect("admitted plane");
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                admitted
+                    .eval_with_cx(0.25, 0.75, cx)
+                    .expect("valid request"),
+                SurfaceEvaluationRun::Cancelled
+            ));
+            assert!(matches!(
+                admitted.eval_with_cx(-1.0, 2.0, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .eval_with_cx(0.25, 0.75, cx)
+                    .expect("active context"),
+                SurfaceEvaluationRun::Complete {
+                    point: admitted.eval(0.25, 0.75).expect("legacy evaluation"),
+                }
+            );
+        });
+
+        let zero = Rat::int(0);
+        let one = Rat::int(1);
+        let knots_u = KnotVector::new(vec![zero, zero, one, one], 1).expect("exact u knots");
+        let knots_v = KnotVector::new(vec![zero, zero, one, one], 1).expect("exact v knots");
+        let points = vec![
+            vec![[zero, zero, zero], [zero, one, zero]],
+            vec![[one, zero, zero], [one, one, zero]],
+        ];
+        let weights = vec![vec![one; 2]; 2];
+        let exact_surface =
+            NurbsSurface::new(knots_u, knots_v, &points, &weights).expect("exact bilinear plane");
+        let admitted_exact = exact_surface.admit().expect("admitted exact plane");
+        let quarter = Rat::new(1, 4);
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                admitted_exact
+                    .eval_with_cx(quarter, quarter, cx)
+                    .expect("exact active context"),
+                SurfaceEvaluationRun::Complete {
+                    point: admitted_exact
+                        .eval(quarter, quarter)
+                        .expect("exact legacy evaluation"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn surface_evaluation_replays_inside_tensor_work_and_at_publication() {
+        let surface = high_degree_surface();
+        let admitted = surface.admit().expect("admitted high-degree plane");
+        let (span_u, basis_u) = admitted.knots_u().basis(0.5).expect("u basis");
+        let (span_v, basis_v) = admitted.knots_v().basis(0.5).expect("v basis");
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = admitted
+                .eval_from_basis_with_poll(span_u, &basis_u, span_v, &basis_v, || {
+                    polls += 1;
+                    polls == 2
+                })
+                .expect("finite tensor contraction");
+            (outcome, polls)
+        };
+        assert_eq!(run(), run());
+        assert_eq!(run(), (SurfaceEvaluationRun::Cancelled, 2));
+
+        let bilinear = bilinear_surface();
+        let admitted_bilinear = bilinear.admit().expect("admitted bilinear plane");
+        let (bilinear_span_u, bilinear_basis_u) =
+            admitted_bilinear.knots_u().basis(0.5).expect("u basis");
+        let (bilinear_span_v, bilinear_basis_v) =
+            admitted_bilinear.knots_v().basis(0.5).expect("v basis");
+        let mut total_polls = 0usize;
+        assert!(matches!(
+            admitted_bilinear
+                .eval_from_basis_with_poll(
+                    bilinear_span_u,
+                    &bilinear_basis_u,
+                    bilinear_span_v,
+                    &bilinear_basis_v,
+                    || {
+                        total_polls += 1;
+                        false
+                    },
+                )
+                .expect("healthy bilinear evaluation"),
+            SurfaceEvaluationRun::Complete { .. }
+        ));
+        assert_eq!(total_polls, 2);
+        let mut replay_polls = 0usize;
+        assert_eq!(
+            admitted_bilinear
+                .eval_from_basis_with_poll(
+                    bilinear_span_u,
+                    &bilinear_basis_u,
+                    bilinear_span_v,
+                    &bilinear_basis_v,
+                    || {
+                        replay_polls += 1;
+                        replay_polls == 2
+                    },
+                )
+                .expect("publication cancellation"),
+            SurfaceEvaluationRun::Cancelled
+        );
+        assert_eq!(replay_polls, 2);
+    }
 
     #[test]
     fn span_box_preflight_prices_nested_scans_and_retained_output() {

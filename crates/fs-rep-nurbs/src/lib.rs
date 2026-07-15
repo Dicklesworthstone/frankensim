@@ -28,7 +28,7 @@ pub use boolean::{BooleanOp, BooleanPolicy, BooleanRefusal, boolean};
 pub use closest::{DistanceBracketEstimate, closest_point_curve, closest_point_surface};
 pub use curve::{AdmittedNurbsCurve, CurveBezierRun, CurveEvaluationRun, NurbsCurve};
 pub use rat::Rat;
-pub use surface::{AdmittedNurbsSurface, NurbsSurface};
+pub use surface::{AdmittedNurbsSurface, NurbsSurface, SurfaceEvaluationRun};
 pub use trim::{AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimmedPatch};
 
 use core::fmt;
