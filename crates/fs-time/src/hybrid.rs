@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use fs_blake3::identity::{
     CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, Field, FieldSpec,
-    IdentityReceipt, ProblemSemanticId, WireType,
+    IdentityReceipt, ProblemSemanticId, StrongIdentity, WireType,
 };
 use fs_exec::Cx;
 
