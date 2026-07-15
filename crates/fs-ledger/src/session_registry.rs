@@ -81,13 +81,14 @@ const PAUSE_ACKNOWLEDGEMENT_KIND: &str = "pause-acknowledgement";
 
 /// Semantic version of a ledger-minted solver-checkpoint receipt.
 pub const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Domain of the canonical solver-checkpoint receipt preimage.
+pub const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-ledger.solver-checkpoint-receipt.v1";
 /// Exact artifact kind required for attested solver-state snapshots.
 pub const SOLVER_STATE_ARTIFACT_KIND: &str = "solver-state";
 /// Maximum solver-state artifact bytes independently materialized at mint and
 /// verification time.
 pub const MAX_SOLVER_CHECKPOINT_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
-const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN: &[u8] =
-    b"org.frankensim.fs-ledger.solver-checkpoint-receipt.v1\0";
 const SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES: usize =
     4 + 16 + 8 + 8 + 32 + 8 + 32 + 32 + 8 + 8 + 32;
 
@@ -128,6 +129,66 @@ pub struct SolverCheckpointReceipt {
     drained_workers: u64,
     content_hash: ContentHash,
 }
+
+#[allow(dead_code)]
+fn classify_solver_checkpoint_receipt_identity_fields(source: &SolverCheckpointReceipt) {
+    let SolverCheckpointReceipt {
+        ledger_instance_id,
+        session,
+        run,
+        pause_authority,
+        gate_generation,
+        solver_state_artifact,
+        drain_report_hash,
+        registered_workers,
+        drained_workers,
+        content_hash,
+    } = source;
+    let _ = (
+        ledger_instance_id,
+        session,
+        run,
+        pause_authority,
+        gate_generation,
+        solver_state_artifact,
+        drain_report_hash,
+        registered_workers,
+        drained_workers,
+        content_hash,
+    );
+}
+
+/// Owner-local solver-checkpoint receipt declaration consumed by
+/// `xtask check-identities`.
+#[allow(dead_code)]
+pub const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-ledger:solver-checkpoint-receipt",
+    "version_const=SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-ledger.solver-checkpoint-receipt.v1",
+    "domain_const=SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN",
+    "encoder=solver_checkpoint_receipt_hash",
+    "encoder_helpers=solver_checkpoint_receipt_hash_with_schema",
+    "schema_constants=SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION,SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES,SOLVER_STATE_ARTIFACT_KIND,MAX_SOLVER_CHECKPOINT_ARTIFACT_BYTES,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_VERSION,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN",
+    "schema_functions=Ledger::validate_solver_checkpoint_artifact,Ledger::solver_checkpoint_receipt_at_instance,Ledger::insert_solver_checkpoint_receipt,Ledger::attest_solver_checkpoint,Ledger::solver_checkpoint_receipt,Ledger::verify_solver_checkpoint_receipt,SolverCheckpointReceipt::to_bytes,SolverCheckpointReceipt::from_bytes,crates/fs-exec/src/cx.rs#DrainTracker::finalize",
+    "schema_dependencies=fs-ledger:artifact-content,fs-ledger:physical-instance",
+    "digest=blake3-256-domain-separated",
+    "encoding=typed-binary",
+    "sources=SolverCheckpointReceipt",
+    "source_fields=SolverCheckpointReceipt.ledger_instance_id:semantic,SolverCheckpointReceipt.session:semantic,SolverCheckpointReceipt.run:semantic,SolverCheckpointReceipt.pause_authority:semantic,SolverCheckpointReceipt.gate_generation:semantic,SolverCheckpointReceipt.solver_state_artifact:semantic,SolverCheckpointReceipt.drain_report_hash:semantic,SolverCheckpointReceipt.registered_workers:semantic,SolverCheckpointReceipt.drained_workers:semantic,SolverCheckpointReceipt.content_hash:derived:recomputed-from-semantic-fields",
+    "source_bindings=SolverCheckpointReceipt.ledger_instance_id>ledger-instance-id,SolverCheckpointReceipt.session>session,SolverCheckpointReceipt.run>run,SolverCheckpointReceipt.pause_authority>pause-authority,SolverCheckpointReceipt.gate_generation>gate-generation,SolverCheckpointReceipt.solver_state_artifact>solver-state-artifact,SolverCheckpointReceipt.drain_report_hash>drain-report-hash,SolverCheckpointReceipt.registered_workers>registered-workers,SolverCheckpointReceipt.drained_workers>drained-workers",
+    "external_semantic_fields=identity-domain,identity-version,canonical-field-order",
+    "semantic_fields=identity-domain,identity-version,canonical-field-order,ledger-instance-id,session,run,pause-authority,gate-generation,solver-state-artifact,drain-report-hash,registered-workers,drained-workers",
+    "excluded_fields=none",
+    "consumers=Ledger::attest_solver_checkpoint,Ledger::solver_checkpoint_receipt,Ledger::verify_solver_checkpoint_receipt,SolverCheckpointReceipt::from_bytes",
+    "mutations=identity-domain:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,identity-version:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,ledger-instance-id:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,session:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,run:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,pause-authority:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,gate-generation:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,solver-state-artifact:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,drain-report-hash:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,registered-workers:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently,drained-workers:crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_solver_checkpoint_receipt_identity_fields",
+    "transport_guard=validate_checkpoint_receipt",
+    "version_guard=crates/fs-ledger/src/session_registry.rs#solver_checkpoint_receipt_identity_version_and_transport_fail_closed",
+    "coupling_surface=fs-ledger:solver-checkpoint-receipt",
+];
 
 impl SolverCheckpointReceipt {
     /// Physical ledger that minted and stores this receipt.
@@ -588,10 +649,15 @@ fn invalid(field: &str, problem: impl Into<String>) -> LedgerError {
     }
 }
 
-fn solver_checkpoint_receipt_hash(receipt: SolverCheckpointReceipt) -> ContentHash {
+fn solver_checkpoint_receipt_hash_with_schema(
+    receipt: SolverCheckpointReceipt,
+    identity_domain: &str,
+    identity_version: u32,
+) -> ContentHash {
     let mut hasher = Blake3::new();
-    hasher.update(SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN);
-    hasher.update(&SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION.to_le_bytes());
+    hasher.update(identity_domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&identity_version.to_le_bytes());
     hasher.update(&receipt.ledger_instance_id.as_bytes());
     hasher.update(&receipt.session.to_le_bytes());
     hasher.update(&receipt.run.0.to_le_bytes());
@@ -602,6 +668,14 @@ fn solver_checkpoint_receipt_hash(receipt: SolverCheckpointReceipt) -> ContentHa
     hasher.update(&receipt.registered_workers.to_le_bytes());
     hasher.update(&receipt.drained_workers.to_le_bytes());
     hasher.finalize()
+}
+
+fn solver_checkpoint_receipt_hash(receipt: SolverCheckpointReceipt) -> ContentHash {
+    solver_checkpoint_receipt_hash_with_schema(
+        receipt,
+        SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,
+        SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION,
+    )
 }
 
 fn validate_checkpoint_receipt(receipt: SolverCheckpointReceipt) -> Result<(), LedgerError> {
@@ -4276,6 +4350,116 @@ mod tests {
         gate.request();
         drop(worker);
         tracker.finalize().expect("fixture run drained")
+    }
+
+    fn checkpoint_identity_fixture() -> SolverCheckpointReceipt {
+        let mut receipt = SolverCheckpointReceipt {
+            ledger_instance_id: LedgerInstanceId([0x11; 16]),
+            session: 0x22,
+            run: fs_exec::RunId(0x33),
+            pause_authority: ContentHash([0x44; 32]),
+            gate_generation: 0x55,
+            solver_state_artifact: ContentHash([0x66; 32]),
+            drain_report_hash: ContentHash([0x77; 32]),
+            registered_workers: 3,
+            drained_workers: 3,
+            content_hash: ContentHash([0; 32]),
+        };
+        receipt.content_hash = solver_checkpoint_receipt_hash(receipt);
+        receipt
+    }
+
+    #[test]
+    fn solver_checkpoint_receipt_identity_fields_move_independently() {
+        let base = checkpoint_identity_fixture();
+        let base_hash = base.content_hash;
+        let moved_hash = |receipt| solver_checkpoint_receipt_hash(receipt);
+
+        assert_ne!(
+            base_hash,
+            solver_checkpoint_receipt_hash_with_schema(
+                base,
+                "org.frankensim.fs-ledger.solver-checkpoint-receipt.w1",
+                SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION,
+            ),
+            "identity domain must move the receipt identity"
+        );
+        assert_ne!(
+            base_hash,
+            solver_checkpoint_receipt_hash_with_schema(
+                base,
+                SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,
+                SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION + 1,
+            ),
+            "identity version must move the receipt identity"
+        );
+
+        let mut reordered = Blake3::new();
+        reordered.update(SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN.as_bytes());
+        reordered.update(&[0]);
+        reordered.update(&SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION.to_le_bytes());
+        reordered.update(&base.ledger_instance_id.as_bytes());
+        reordered.update(&base.run.0.to_le_bytes());
+        reordered.update(&base.session.to_le_bytes());
+        reordered.update(base.pause_authority.as_bytes());
+        reordered.update(&base.gate_generation.to_le_bytes());
+        reordered.update(base.solver_state_artifact.as_bytes());
+        reordered.update(base.drain_report_hash.as_bytes());
+        reordered.update(&base.registered_workers.to_le_bytes());
+        reordered.update(&base.drained_workers.to_le_bytes());
+        assert_ne!(
+            base_hash,
+            reordered.finalize(),
+            "canonical field order must move the receipt identity"
+        );
+
+        let mut moved = base;
+        moved.ledger_instance_id = LedgerInstanceId([0x12; 16]);
+        assert_ne!(base_hash, moved_hash(moved), "ledger instance id");
+        moved = base;
+        moved.session += 1;
+        assert_ne!(base_hash, moved_hash(moved), "session");
+        moved = base;
+        moved.run = fs_exec::RunId(moved.run.0 + 1);
+        assert_ne!(base_hash, moved_hash(moved), "run");
+        moved = base;
+        moved.pause_authority = ContentHash([0x45; 32]);
+        assert_ne!(base_hash, moved_hash(moved), "pause authority");
+        moved = base;
+        moved.gate_generation += 1;
+        assert_ne!(base_hash, moved_hash(moved), "gate generation");
+        moved = base;
+        moved.solver_state_artifact = ContentHash([0x67; 32]);
+        assert_ne!(base_hash, moved_hash(moved), "solver-state artifact");
+        moved = base;
+        moved.drain_report_hash = ContentHash([0x78; 32]);
+        assert_ne!(base_hash, moved_hash(moved), "drain report hash");
+        moved = base;
+        moved.registered_workers += 1;
+        assert_ne!(base_hash, moved_hash(moved), "registered workers");
+        moved = base;
+        moved.drained_workers += 1;
+        assert_ne!(base_hash, moved_hash(moved), "drained workers");
+    }
+
+    #[test]
+    fn solver_checkpoint_receipt_identity_version_and_transport_fail_closed() {
+        assert_eq!(SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION, 1);
+        assert_eq!(
+            SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,
+            "org.frankensim.fs-ledger.solver-checkpoint-receipt.v1"
+        );
+        let receipt = checkpoint_identity_fixture();
+        let bytes = receipt.to_bytes();
+        assert_eq!(
+            SolverCheckpointReceipt::from_bytes(&bytes).expect("current transport"),
+            receipt
+        );
+
+        let mut future = bytes;
+        future[..4]
+            .copy_from_slice(&(SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION + 1).to_le_bytes());
+        assert!(SolverCheckpointReceipt::from_bytes(&future).is_err());
     }
 
     #[test]
