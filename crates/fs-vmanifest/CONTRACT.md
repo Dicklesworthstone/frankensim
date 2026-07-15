@@ -1,8 +1,8 @@
 # CONTRACT: fs-vmanifest
 
 The typed VerificationManifest schema for leapfrog G1 claim/evidence freezes,
-with authored draft constructors for I01, I02, I03, I04, I05, I06, I08, I12,
-and I15.
+with authored draft constructors for I01, I02, I03, I04, I05, I06, I08, I10,
+I12, and I15.
 Sibling G1-freeze beads reuse this schema and add their own instance modules.
 
 ## Purpose and layer
@@ -202,6 +202,29 @@ component encodings retain their v1 subdomains.
 - `i08_draft()` — the I08 (evidence-budget co-design planner) instance:
   8 claims (5/2/1 with a robust multi-horizon optimality falsifier), 9
   fixture pins (2 held-out), 6 obligation rows, 1 waiver.
+- `i10_draft()` — the I10 constitutive identifiability and optimal coupon
+  design gate: 11 claims split 6 baseline `[S]`, 2 `[F]`, and 3 `[M]`; 14
+  fixture, counterexample, theorem, and finite-grammar cards with 6
+  stage-local held-outs (3 Core, 3 Max); 6 execution leaves; and 1
+  instrumented-lab-campaign-pack waiver. The baseline freezes non-confusable
+  law/experiment/nuisance/discrepancy schema identity; adjoint sensitivities
+  published only inside independent outward-rounded finite-difference
+  enclosures; three-valued gauge-witnessed structural identifiability (a
+  full-rank numeric FIM alone never mints Identifiable; kinematic/isotropic
+  hardening under monotone proportional loading, Prony relabeling, and
+  modulus-thickness products are seeded confoundings); profile-likelihood/
+  sloppiness practical identifiability with preregistered coverage and
+  eigen-direction ownership; conservative three-valued manufacturable
+  coupon/environment/sensor admission where feasibility precedes any
+  information criterion; and blind held-out design gain scored only on
+  declared identifiable combinations. Frontier lanes target discrepancy-aware
+  robust design (regret vs a scenario-exhaustive oracle) and anytime-valid
+  adaptive law discrimination. Moonshot lanes target a machine-checked
+  identifiable-combination quotient completeness theorem and certified
+  zero-gap global design optimality over a frozen finite grammar, while a
+  hidden-mutant lane attacks false identifiability and design certificates.
+  Version-1 prose grants no theorem, completeness, discrimination, or
+  design-optimality authority.
 - `i12_draft()` — the I12 hybrid mode-automaton compiler instance: 10
   claims (6/2/2, including the Solid grazing false-certificate
   refutation tripwire), 7 fixture pins (3 held-out), 6 obligation rows,
@@ -347,6 +370,20 @@ hypothesis/oracle/tolerance/holdout/partition/policy mutations; G4 chunked
 assembly equivalence; G5 order invariance; and targeted/global amendment
 invalidation.
 
+`tests/i10.rs`: exact I10 6/2/3 lattice, single maximal refutation lane,
+14-fixture/6-held-out corpus, one instrumented-lab waiver, and once-only
+six-leaf claim map; all nine unit classes, campaign-policy participation,
+structured lifecycle/events/replay/DSR bindings and sealed canonical
+obligations; gauge-confounding semantics (numeric-FIM no-mint, seeded
+hardening/Prony/product confoundings, invariance-witness replay,
+sloppiness-versus-structural wording separation); enclosure-checked adjoint,
+feasibility-precedes-optimality, identifiable-combination-only gain, and
+Undecided-never-equivalence no-claim boundaries; disjoint single-consumer
+Core/Max ranges; quotient-theorem and finite-grammar design-optimality
+successor ratchets; G3 hypothesis/oracle/tolerance/holdout/partition/policy
+mutations; G4 chunked assembly equivalence; G5 order invariance; and
+targeted/global amendment invalidation.
+
 `tests/i03.rs`: exact I03 8/2/6 claim lattice and once-only 4-Core/
 4-Max leaf mapping; exact nine unit-case classes; content-bound campaign
 policy, FailureBundle, and independent-adjudication obligations; exact
@@ -478,6 +515,18 @@ holdout/policy mutations; and targeted versus global amendment invalidation.
   rank/unrank/sharding, independent decoding, preflight and completeness root.
   Global optimality requires coincident checker-verified lower and feasible
   upper bounds; a positive gap remains honest non-optimal/Unknown authority.
+- I10 structural verdicts hold for exact model structure and noise-free
+  observables and never certify practical recoverability under noise or
+  discrepancy; synthetic profile coverage and held-out gain are not real-
+  laboratory authority, `Feasible` is not fabrication approval, `Undecided`
+  never proves rival-law equivalence, and the quotient theorem and zero-gap
+  design optimality are version-1 prose targets: pre-proof successors must
+  freeze law/observable/group ASTs, premises, translation, axiom closure,
+  nonvacuity and kernel replay; pre-candidate successors must freeze the
+  finite design grammar, bounds, rank/unrank/sharding, independent decoding,
+  preflight and completeness root. All I10 fixtures are synthetic
+  coupon-shaped data; real instrumented-lab campaigns enter only through the
+  waived governed pack.
 - The adjacent-version `EvidenceKindChanged` guard prevents an immediate
   claim/leaf kind swap. `FrozenManifest` carries no lineage-wide tombstone set;
   a ledger spanning nonadjacent versions must key authority by typed kind plus

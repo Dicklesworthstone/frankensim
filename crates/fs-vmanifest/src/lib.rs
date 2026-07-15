@@ -43,6 +43,7 @@ mod i05;
 mod i06;
 mod i08;
 mod i09;
+mod i10;
 mod i12;
 mod i15;
 
@@ -54,6 +55,7 @@ pub use i05::i05_draft;
 pub use i06::i06_draft;
 pub use i08::i08_draft;
 pub use i09::i09_draft;
+pub use i10::i10_draft;
 pub use i12::i12_draft;
 pub use i15::i15_draft;
 
