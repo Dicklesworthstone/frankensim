@@ -24,9 +24,14 @@
 //!   remains a quarantined correlation/corruption tripwire only;
 //!   parsing REBUILDS through the validating builder, so tampered
 //!   files cannot smuggle ill-typed graphs.
+//! - quantified reach-avoid and viability games retain exact quantifier
+//!   order, information timing, causal strategy class, model/set context,
+//!   horizon, stopping, proof polarity, composition, and no-claim scope in a
+//!   separate versioned admission identity ([game]).
 
 mod admission;
 mod eval;
+pub mod game;
 mod guard;
 mod ir;
 mod serial;

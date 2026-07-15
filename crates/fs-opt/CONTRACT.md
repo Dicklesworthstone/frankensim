@@ -162,6 +162,24 @@ structure; FLUX/UQ execute it.
   `±δ` coordinate probes and vetoes a found-better point (not a true optimum)
   or a sharp crack (optimum not in a smooth basin), failing closed on
   non-finite values.
+- The game module (RE.Q1) is the versioned object language for quantified
+  reach-avoid and viability games. Initial, target, unsafe, control,
+  disturbance, parameter, hybrid-mode, and hybrid-event domains have
+  non-interchangeable identity types and retain exact model-version,
+  state-space, frame, unit, and time-unit context. The ordered quantifier
+  prefix prints each exists/forall clause and full typed domain identity.
+  Information patterns state hidden, initial, current, history, delayed, or
+  forbidden-future observations. Strategy descriptions distinguish open-loop,
+  state-feedback, nonanticipative, hybrid-mode, set-valued, and unresolved
+  policies and bind their exact temporal dependencies. Finite/infinite
+  horizons, stopping rules, deterministic, differential-game, finite-hybrid,
+  and admitted-DAE model classes, proof polarity, composition, and analysis
+  budgets are identity-bearing semantics. Admission canonicalizes unordered
+  grants, dependencies, strategies, and parallel/product components while
+  retaining quantifier and sequential order. Its claim availability is only
+  later-checker eligibility: unsupported infinite horizons, unresolved Zeno
+  behavior, regularized hybrid models, unresolved or set-valued strategies,
+  and Unknown polarity remain explicitly Unknown.
 
 ## Invariants
 
@@ -203,6 +221,15 @@ structure; FLUX/UQ execute it.
    scales by `s`, both objective receipts scale by `s²`, and evaluation,
    step, and budget receipts remain exact (`tests/metamorphic.rs`).
 
+8. RE.Q1 admission never rewrites quantifier order. In particular, a universal
+   disturbance followed by an existential open-loop control refuses as a
+   trajectory-clairvoyant lowering, while an explicitly nonanticipative policy
+   may use only observations and delays granted by its information pattern.
+   Future access always refuses. Hidden, delayed, mode, event, model-version,
+   frame, unit, and typed-domain mismatches fail closed before publication.
+   Equivalent ordering of semantic sets replays to one receipt, but swapped
+   quantifiers or strategy classes produce distinct identities.
+
 ## Error model
 
 `OptError` teaching errors throughout: unknown ids, shape/dimension
@@ -222,6 +249,11 @@ its findings before early refusal; work, retained bytes, and graph depth
 then fail at the first aggregate crossing, and admitted-size section
 scans are index ordered.
 
+Game admission adds deterministic typed refusals for hard pre-work caps,
+decoded schema drift, set/model context, quantifier domains, anticipative or
+unavailable observations, strategy causality, horizon/stopping conflicts,
+composition, cancellation, and canonical identity.
+
 ## Determinism class
 
 Fully deterministic: `BTreeMap` interning, index-ordered ids, bitwise
@@ -231,12 +263,21 @@ Identical build sequences give identical problems, semantic ids,
 hashes, and bytes; identical rejections give identical reports
 (opt-002/003 and adm-004/005/006 are the trip-wires).
 
+RE.Q1 game identities are bit-deterministic: semantic sets are canonically
+ordered, quantifier and sequential-composition order remain significant,
+floating signed zero is normalized, and model, units, information, strategy,
+polarity, horizon, stopping, composition, and budget are domain separated.
+
 ## Cancellation behavior
 
 `descend_fn`/`descend_ir` poll `cx.checkpoint()` every step and
 return `OptError::Cancelled` between steps. Budget exhaustion is a
 RECEIPT (`budget_stopped` in the report), not an error — the iterate
 remains valid and `evals` never exceeds the positive cap (P4).
+
+Game admission polls before proportional scans, during bounded information and
+strategy traversal, and at identity publication. Cancellation returns a typed
+Cancelled issue and no receipt.
 
 ## Unsafe boundary
 
@@ -258,6 +299,13 @@ Off by default; nothing else is gated.
 seeded LCG randomness, fs-obs Custom event carrying the fixture
 problem hash and routing refusal. Any reimplementation must pass the
 suite unchanged.
+
+The RE.Q1 game battery covers canonical schema replay and semantic-set
+permutation, quantifier-order and open-loop/feedback identity separation,
+clairvoyance refusal, hidden and delayed disturbance information,
+finite/infinite horizons, hybrid mode information, unresolved/excluded Zeno
+scope, unit/model/domain mismatch, future access, DAE/stopping failures,
+parallel-composition canonicalization, schema/cap mutation, and cancellation.
 
 `tests/admission.rs` (beads sj31i.48 / xf8v7) — G0/G4/G5
 leaf-policy tables (manifold boundaries incl. checked `Stiefel`
@@ -315,6 +363,11 @@ discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
   executed; FLUX studies and UQ runners bind to them in their beads.
 - Constraint semantics (kinds, repair, feasibility restoration) are
   fs-constraint's; this crate carries kind + name only.
+- RE.Q1 admits game meaning but computes no winning, reachable, or viable set.
+  Eligible means only that a later theorem module may attempt the requested
+  polarity. Infinite-horizon results and hybrid games without retained Zeno
+  exclusion remain Unknown. Regularization is distinct model lineage, and
+  inner, outer, exact, and Unknown sets are never silently interchanged.
 - FrankenScript `ascent.optimize` lowering binds to this IR when the
   HELM surface lands.
 - Bilevel tags reference inner problems by TYPED identity; admission
