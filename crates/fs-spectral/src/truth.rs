@@ -1551,7 +1551,7 @@ fn validate_truth_witness(
                 found: witness.proposition(),
             });
         }
-        Ok(expected) if witness.audit().canonical_preimage() != expected.canonical_preimage() => {
+        Ok(expected) if !witness.matches_receipt(expected) => {
             issues.push(SpectralTruthErrorV1::WitnessObservationMismatch {
                 proposition: expected.id(),
             });

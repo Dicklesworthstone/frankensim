@@ -7,8 +7,9 @@
 )]
 
 use fs_blake3::identity::{
-    AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ContentId, ExternalAnchorRef,
-    IdentityReceipt, NoClaimState, TrustState,
+    AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ByteObservation, CanonicalSchema,
+    ContentId, ExternalAnchorRef, IdentityReceipt, NoClaimState, ObservedIdentity,
+    PromotionRefusal, TrustState,
 };
 use fs_qty::{Angle, Dims, QtyAny, Time};
 use fs_spectral::admission::*;
@@ -86,8 +87,8 @@ struct ExactAuthority {
     proposition: SpectralPropositionId,
     preimage: ContentId,
     anchor: ExternalAnchorRef,
-    verifier: SpectralAuthorityVerifierIdV1,
-    policy: SpectralAuthorityPolicyIdV1,
+    verifier: IdentityReceipt<SpectralAuthorityVerifierIdV1>,
+    policy: IdentityReceipt<SpectralAuthorityPolicyIdV1>,
 }
 
 impl
@@ -104,8 +105,8 @@ impl
         if receipt.id() == self.proposition
             && receipt.canonical_preimage() == self.preimage
             && presented.anchor() == self.anchor
-            && presented.verifier() == self.verifier
-            && presented.key_policy() == self.policy
+            && presented.verifier() == self.verifier.id()
+            && presented.key_policy() == self.policy.id()
         {
             Ok(())
         } else {
@@ -128,8 +129,8 @@ impl
         if receipt.id() == self.proposition
             && receipt.canonical_preimage() == self.preimage
             && verified.anchor() == self.anchor
-            && verified.verifier() == self.verifier
-            && verified.key_policy() == self.policy
+            && verified.verifier() == self.verifier.id()
+            && verified.key_policy() == self.policy.id()
         {
             Ok(())
         } else {
@@ -143,12 +144,8 @@ fn exact_authority(receipt: IdentityReceipt<SpectralPropositionId>, seed: u8) ->
         proposition: receipt.id(),
         preimage: receipt.canonical_preimage(),
         anchor: ExternalAnchorRef::presented(ContentId::of_bytes(&[b's', b'p', b'e', b'c', seed])),
-        verifier: spectral_verifier_receipt(b"fs-spectral-test-exact-verifier-v1")
-            .unwrap()
-            .id(),
-        policy: spectral_authority_policy_receipt(b"fs-spectral-test-admission-policy-v1")
-            .unwrap()
-            .id(),
+        verifier: spectral_verifier_receipt(b"fs-spectral-test-exact-verifier-v1").unwrap(),
+        policy: spectral_authority_policy_receipt(b"fs-spectral-test-admission-policy-v1").unwrap(),
     }
 }
 
@@ -159,22 +156,71 @@ fn present(
     AuthorityRef::present(
         receipt,
         authority.anchor,
-        authority.verifier,
-        authority.policy,
+        authority.verifier.id(),
+        authority.policy.id(),
     )
+}
+
+fn policy_relative_and_promotion(
+    receipt: IdentityReceipt<SpectralPropositionId>,
+    authority: ExactAuthority,
+) -> (AdmittedSpectralAuthorityV1, SpectralPromotionWitnessV1) {
+    let admitted = present(receipt, authority)
+        .verify(&authority)
+        .unwrap()
+        .admit(&authority)
+        .unwrap();
+    let root = spectral_promotion_trust_root(authority.verifier, authority.policy).unwrap();
+    let promotion = root
+        .admit_for_promotion(
+            &admitted,
+            ObservedIdentity::from_receipt(authority.verifier).bytes(),
+            ObservedIdentity::from_receipt(authority.policy).bytes(),
+        )
+        .unwrap();
+    (admitted, promotion)
 }
 
 fn admit_receipt(
     receipt: IdentityReceipt<SpectralPropositionId>,
     seed: u8,
 ) -> AdmittedSpectralWitnessV1 {
-    let authority = exact_authority(receipt, seed);
-    let admitted = present(receipt, authority)
-        .verify(&authority)
-        .unwrap()
-        .admit(&authority)
-        .unwrap();
-    AdmittedSpectralWitnessV1::from_authority(admitted)
+    let (admitted, promotion) =
+        policy_relative_and_promotion(receipt, exact_authority(receipt, seed));
+    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion).unwrap()
+}
+
+/// An untrusted caller-controlled verifier/admitter pair that accepts every
+/// presented binding. It can reach only policy-relative admission unless a
+/// separately configured promotion root also accepts the binding.
+struct PermitAll;
+
+impl
+    AuthorityVerifier<
+        SpectralPropositionId,
+        SpectralVerifierIdentitySchemaV1,
+        SpectralAuthorityPolicySchemaV1,
+    > for PermitAll
+{
+    type Error = core::convert::Infallible;
+
+    fn verify(&self, _presented: &PresentedSpectralAuthorityV1) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl
+    AuthorityAdmitter<
+        SpectralPropositionId,
+        SpectralVerifierIdentitySchemaV1,
+        SpectralAuthorityPolicySchemaV1,
+    > for PermitAll
+{
+    type Error = core::convert::Infallible;
+
+    fn admit(&self, _verified: &VerifiedSpectralAuthorityV1) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -475,7 +521,7 @@ fn authority_typestate_checks_subject_preimage_anchor_verifier_and_policy() {
         Err(AuthorityError::Mismatch)
     );
     let wrong_verifier = ExactAuthority {
-        verifier: spectral_verifier_receipt(b"wrong-verifier").unwrap().id(),
+        verifier: spectral_verifier_receipt(b"wrong-verifier").unwrap(),
         ..authority
     };
     assert_eq!(
@@ -483,9 +529,7 @@ fn authority_typestate_checks_subject_preimage_anchor_verifier_and_policy() {
         Err(AuthorityError::Mismatch)
     );
     let wrong_policy = ExactAuthority {
-        policy: spectral_authority_policy_receipt(b"wrong-policy")
-            .unwrap()
-            .id(),
+        policy: spectral_authority_policy_receipt(b"wrong-policy").unwrap(),
         ..authority
     };
     assert_eq!(
@@ -501,6 +545,207 @@ fn authority_typestate_checks_subject_preimage_anchor_verifier_and_policy() {
     assert_eq!(
         witness.audit().no_claim(),
         NoClaimState::ScientificCorrectnessNotProven
+    );
+    let promotion = witness.promotion_audit();
+    assert_eq!(
+        promotion.verifier_domain,
+        SpectralVerifierIdentitySchemaV1::DOMAIN
+    );
+    assert_eq!(
+        promotion.key_policy_domain,
+        SpectralAuthorityPolicySchemaV1::DOMAIN
+    );
+    assert_eq!(
+        promotion.verifier_observation,
+        ObservedIdentity::from_receipt(authority.verifier).bytes()
+    );
+    assert_eq!(
+        promotion.key_policy_observation,
+        ObservedIdentity::from_receipt(authority.policy).bytes()
+    );
+    assert_eq!(promotion.context, SPECTRAL_PROMOTION_CONTEXT_V1);
+}
+
+#[test]
+fn configured_root_refuses_permit_all_bindings_outside_its_configuration() {
+    let axes = standard_axes(41, 4);
+    let receipt = regularity_proposition_receipt(
+        axes.subject,
+        axes.scalar,
+        axes.class,
+        axes.scaling,
+        axes.domain,
+        axes.codomain,
+        RegularityClassV1::FiniteDimensional,
+        WitnessDispositionV1::Witnessed,
+    )
+    .unwrap();
+    let trusted_verifier =
+        spectral_verifier_receipt(b"fs-spectral-test-exact-verifier-v1").unwrap();
+    let trusted_policy =
+        spectral_authority_policy_receipt(b"fs-spectral-test-admission-policy-v1").unwrap();
+    let rogue_verifier = spectral_verifier_receipt(b"foreign-permit-all-verifier").unwrap();
+    let rogue_policy = spectral_authority_policy_receipt(b"foreign-permit-all-policy").unwrap();
+    let anchor = ExternalAnchorRef::presented(ContentId::of_bytes(b"foreign-permit-all"));
+    let root = spectral_promotion_trust_root(trusted_verifier, trusted_policy).unwrap();
+
+    let rogue = AuthorityRef::present(receipt, anchor, rogue_verifier.id(), rogue_policy.id())
+        .verify(&PermitAll)
+        .unwrap()
+        .admit(&PermitAll)
+        .unwrap();
+    assert_eq!(
+        root.admit_for_promotion(
+            &rogue,
+            ObservedIdentity::from_receipt(rogue_verifier).bytes(),
+            ObservedIdentity::from_receipt(rogue_policy).bytes(),
+        )
+        .unwrap_err(),
+        PromotionRefusal::ForeignVerifier
+    );
+
+    let trusted_verifier_rogue_policy =
+        AuthorityRef::present(receipt, anchor, trusted_verifier.id(), rogue_policy.id())
+            .verify(&PermitAll)
+            .unwrap()
+            .admit(&PermitAll)
+            .unwrap();
+    assert_eq!(
+        root.admit_for_promotion(
+            &trusted_verifier_rogue_policy,
+            ObservedIdentity::from_receipt(trusted_verifier).bytes(),
+            ObservedIdentity::from_receipt(rogue_policy).bytes(),
+        )
+        .unwrap_err(),
+        PromotionRefusal::ForeignKeyPolicy
+    );
+
+    let trusted_ids =
+        AuthorityRef::present(receipt, anchor, trusted_verifier.id(), trusted_policy.id())
+            .verify(&PermitAll)
+            .unwrap()
+            .admit(&PermitAll)
+            .unwrap();
+    let forged = ByteObservation::new(ContentId::of_bytes(b"different-canonical-bytes"), 999);
+    let verifier_refusal = root
+        .admit_for_promotion(
+            &trusted_ids,
+            forged,
+            ObservedIdentity::from_receipt(trusted_policy).bytes(),
+        )
+        .unwrap_err();
+    let PromotionRefusal::VerifierObservationMismatch {
+        configured,
+        presented,
+    } = verifier_refusal
+    else {
+        panic!("expected verifier observation mismatch, got {verifier_refusal:?}");
+    };
+    assert_eq!(
+        configured,
+        ObservedIdentity::from_receipt(trusted_verifier).bytes()
+    );
+    assert_eq!(presented, forged);
+
+    let policy_refusal = root
+        .admit_for_promotion(
+            &trusted_ids,
+            ObservedIdentity::from_receipt(trusted_verifier).bytes(),
+            forged,
+        )
+        .unwrap_err();
+    let PromotionRefusal::KeyPolicyObservationMismatch {
+        configured,
+        presented,
+    } = policy_refusal
+    else {
+        panic!("expected key-policy observation mismatch, got {policy_refusal:?}");
+    };
+    assert_eq!(
+        configured,
+        ObservedIdentity::from_receipt(trusted_policy).bytes()
+    );
+    assert_eq!(presented, forged);
+}
+
+#[test]
+fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
+    let axes = standard_axes(42, 4);
+    let receipt = regularity_proposition_receipt(
+        axes.subject,
+        axes.scalar,
+        axes.class,
+        axes.scaling,
+        axes.domain,
+        axes.codomain,
+        RegularityClassV1::FiniteDimensional,
+        WitnessDispositionV1::Witnessed,
+    )
+    .unwrap();
+    let authority = exact_authority(receipt, 42);
+    let (admitted, promotion) = policy_relative_and_promotion(receipt, authority);
+    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion).unwrap();
+
+    let other_receipt = regularity_proposition_receipt(
+        axes.subject,
+        axes.scalar,
+        axes.class,
+        axes.scaling,
+        axes.domain,
+        axes.codomain,
+        RegularityClassV1::RegularPencil,
+        WitnessDispositionV1::Witnessed,
+    )
+    .unwrap();
+    let (_, other_subject) =
+        policy_relative_and_promotion(other_receipt, exact_authority(other_receipt, 42));
+    assert_eq!(
+        AdmittedSpectralWitnessV1::from_authority(&admitted, other_subject),
+        Err(SpectralPromotionBindingErrorV1::Subject)
+    );
+
+    let (_, other_anchor) = policy_relative_and_promotion(receipt, exact_authority(receipt, 43));
+    assert_eq!(
+        AdmittedSpectralWitnessV1::from_authority(&admitted, other_anchor),
+        Err(SpectralPromotionBindingErrorV1::Anchor)
+    );
+
+    let foreign_verifier = ExactAuthority {
+        verifier: spectral_verifier_receipt(b"other-exact-verifier").unwrap(),
+        ..authority
+    };
+    let (_, other_verifier) = policy_relative_and_promotion(receipt, foreign_verifier);
+    assert_eq!(
+        AdmittedSpectralWitnessV1::from_authority(&admitted, other_verifier),
+        Err(SpectralPromotionBindingErrorV1::Verifier)
+    );
+
+    let foreign_policy = ExactAuthority {
+        policy: spectral_authority_policy_receipt(b"other-exact-policy").unwrap(),
+        ..authority
+    };
+    let (_, other_policy) = policy_relative_and_promotion(receipt, foreign_policy);
+    assert_eq!(
+        AdmittedSpectralWitnessV1::from_authority(&admitted, other_policy),
+        Err(SpectralPromotionBindingErrorV1::KeyPolicy)
+    );
+
+    let wrong_context_root = SpectralPromotionTrustRootV1::configure(
+        ObservedIdentity::from_receipt(authority.verifier),
+        ObservedIdentity::from_receipt(authority.policy),
+        "org.frankensim.fs-spectral.wrong-promotion-context",
+    )
+    .unwrap();
+    let wrong_context = wrong_context_root
+        .admit_for_promotion(
+            &admitted,
+            ObservedIdentity::from_receipt(authority.verifier).bytes(),
+            ObservedIdentity::from_receipt(authority.policy).bytes(),
+        )
+        .unwrap();
+    assert_eq!(
+        AdmittedSpectralWitnessV1::from_authority(&admitted, wrong_context),
+        Err(SpectralPromotionBindingErrorV1::Context)
     );
 }
 
@@ -1944,6 +2189,112 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     ))
     .unwrap();
     assert_ne!(first.problem_id(), reanchored.problem_id());
+
+    let descriptor_receipt = regularity_proposition_receipt(
+        axes.subject,
+        axes.scalar,
+        axes.class,
+        axes.scaling,
+        axes.domain,
+        axes.codomain,
+        RegularityClassV1::RegularDescriptor,
+        WitnessDispositionV1::Witnessed,
+    )
+    .unwrap();
+    let authority = exact_authority(descriptor_receipt, 23);
+    let admitted = present(descriptor_receipt, authority)
+        .verify(&authority)
+        .unwrap()
+        .admit(&authority)
+        .unwrap();
+    let changed_observation =
+        ByteObservation::new(ContentId::of_bytes(b"independent-verifier-observation"), 37);
+    let observation_root = SpectralPromotionTrustRootV1::configure(
+        ObservedIdentity::presented(authority.verifier.id(), changed_observation),
+        ObservedIdentity::from_receipt(authority.policy),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+    )
+    .unwrap();
+    let reobserved_promotion = observation_root
+        .admit_for_promotion(
+            &admitted,
+            changed_observation,
+            ObservedIdentity::from_receipt(authority.policy).bytes(),
+        )
+        .unwrap();
+    let reobserved_descriptor = RegularityClaimV1::new(
+        RegularityClassV1::RegularDescriptor,
+        WitnessDispositionV1::Witnessed,
+        AdmittedSpectralWitnessV1::from_authority(&admitted, reobserved_promotion).unwrap(),
+    );
+    let reobserved = validate_problem(default_spec(
+        axes,
+        vec![gyroscopic, palindromic],
+        vec![reobserved_descriptor, polynomial],
+        SpectralOrderingV1::SetValued,
+        scope,
+    ))
+    .unwrap();
+    assert_ne!(first.problem_id(), reobserved.problem_id());
+
+    let changed_length = ByteObservation::new(changed_observation.content_id(), 38);
+    let length_root = SpectralPromotionTrustRootV1::configure(
+        ObservedIdentity::presented(authority.verifier.id(), changed_length),
+        ObservedIdentity::from_receipt(authority.policy),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+    )
+    .unwrap();
+    let length_promotion = length_root
+        .admit_for_promotion(
+            &admitted,
+            changed_length,
+            ObservedIdentity::from_receipt(authority.policy).bytes(),
+        )
+        .unwrap();
+    let changed_length_descriptor = RegularityClaimV1::new(
+        RegularityClassV1::RegularDescriptor,
+        WitnessDispositionV1::Witnessed,
+        AdmittedSpectralWitnessV1::from_authority(&admitted, length_promotion).unwrap(),
+    );
+    let changed_length_problem = validate_problem(default_spec(
+        axes,
+        vec![gyroscopic, palindromic],
+        vec![changed_length_descriptor, polynomial],
+        SpectralOrderingV1::SetValued,
+        scope,
+    ))
+    .unwrap();
+    assert_ne!(reobserved.problem_id(), changed_length_problem.problem_id());
+
+    let changed_policy_observation =
+        ByteObservation::new(ContentId::of_bytes(b"independent-policy-observation"), 29);
+    let policy_root = SpectralPromotionTrustRootV1::configure(
+        ObservedIdentity::from_receipt(authority.verifier),
+        ObservedIdentity::presented(authority.policy.id(), changed_policy_observation),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+    )
+    .unwrap();
+    let policy_promotion = policy_root
+        .admit_for_promotion(
+            &admitted,
+            ObservedIdentity::from_receipt(authority.verifier).bytes(),
+            changed_policy_observation,
+        )
+        .unwrap();
+    let changed_policy_descriptor = RegularityClaimV1::new(
+        RegularityClassV1::RegularDescriptor,
+        WitnessDispositionV1::Witnessed,
+        AdmittedSpectralWitnessV1::from_authority(&admitted, policy_promotion).unwrap(),
+    );
+    let changed_policy_problem = validate_problem(default_spec(
+        axes,
+        vec![gyroscopic, palindromic],
+        vec![changed_policy_descriptor, polynomial],
+        SpectralOrderingV1::SetValued,
+        scope,
+    ))
+    .unwrap();
+    assert_ne!(first.problem_id(), changed_policy_problem.problem_id());
 }
 
 #[test]

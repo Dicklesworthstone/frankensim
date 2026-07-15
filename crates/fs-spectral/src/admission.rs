@@ -16,9 +16,10 @@ use core::fmt;
 
 use fs_blake3::hash_domain;
 use fs_blake3::identity::{
-    Admitted, AuthorityRef, CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema,
-    Field, FieldSpec, IdentityAuditRecord, IdentityReceipt, KeyPolicyId, NeverCancel, Presented,
-    ProblemSemanticId, StrongIdentity, Verified, VerifierId, WireType,
+    AuthorityRef, CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, Field,
+    FieldSpec, IdentityAuditRecord, IdentityReceipt, KeyPolicyId, NeverCancel, ObservedIdentity,
+    PolicyRelativeAdmitted, Presented, ProblemSemanticId, PromotionAuditRecord, PromotionRefusal,
+    PromotionTrustRoot, PromotionWitness, StrongIdentity, Verified, VerifierId, WireType,
 };
 use fs_qty::{Angle, Dims, QtyAny, Time};
 
@@ -38,6 +39,8 @@ const IDENTITY_LIMITS: CanonicalLimits = CanonicalLimits::new(1 << 18, 1 << 16, 
 // encodable without broadening unrelated identity inputs.
 const PROPOSITION_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(1 << 18, 1 << 18, 16, 4096, 4096);
+const SPECTRAL_PROMOTION_WITNESS_ENCODING_DOMAIN_V1: &[u8] =
+    b"org.frankensim.fs-spectral.promotion-witness-encoding.v1";
 
 macro_rules! opaque_digest_id {
     ($(#[$meta:meta])* $name:ident) => {
@@ -194,6 +197,19 @@ impl CanonicalSchema for SpectralAuthorityPolicySchemaV1 {
 pub type SpectralAuthorityVerifierIdV1 = VerifierId<SpectralVerifierIdentitySchemaV1>;
 /// Typed identity of the policy admitting a spectral verifier decision.
 pub type SpectralAuthorityPolicyIdV1 = KeyPolicyId<SpectralAuthorityPolicySchemaV1>;
+/// Configured trust root required to promote policy-relative spectral
+/// admission into a favorable witness.
+pub type SpectralPromotionTrustRootV1 =
+    PromotionTrustRoot<SpectralVerifierIdentitySchemaV1, SpectralAuthorityPolicySchemaV1>;
+/// Opaque promotion decision minted by a [`SpectralPromotionTrustRootV1`].
+pub type SpectralPromotionWitnessV1 = PromotionWitness<
+    SpectralPropositionId,
+    SpectralVerifierIdentitySchemaV1,
+    SpectralAuthorityPolicySchemaV1,
+>;
+/// Stable context bound into every spectral promotion decision created via
+/// [`spectral_promotion_trust_root`].
+pub const SPECTRAL_PROMOTION_CONTEXT_V1: &str = "org.frankensim.fs-spectral.promotion.v1";
 /// Untrusted presented spectral authority.
 pub type PresentedSpectralAuthorityV1 = AuthorityRef<
     SpectralPropositionId,
@@ -209,35 +225,132 @@ pub type VerifiedSpectralAuthorityV1 = AuthorityRef<
     Verified,
 >;
 /// Verifier-accepted and separately policy-admitted spectral authority.
-pub type AdmittedSpectralAuthorityV1 = AuthorityRef<
+///
+/// This state is explicitly policy-relative. It is not sufficient to mint a
+/// favorable spectral witness and must first pass a configured
+/// [`SpectralPromotionTrustRootV1`].
+pub type PolicyRelativeSpectralAuthorityV1 = AuthorityRef<
     SpectralPropositionId,
     SpectralVerifierIdentitySchemaV1,
     SpectralAuthorityPolicySchemaV1,
-    Admitted,
+    PolicyRelativeAdmitted,
 >;
+/// Compatibility name for policy-relative spectral admission. Despite the
+/// historical name, this type is not promotion authority.
+pub type AdmittedSpectralAuthorityV1 = PolicyRelativeSpectralAuthorityV1;
 
-/// Copyable audit token produced by consuming an admitted authority reference.
+/// Configure a spectral promotion root from independently retained canonical
+/// verifier and policy receipts.
 ///
-/// Its fields are private and [`IdentityAuditRecord`] itself has no public raw
-/// constructor, so callers cannot manufacture an admitted trust state by
-/// choosing an enum value. Admission remains policy-relative and does not by
-/// itself prove scientific correctness; the verifier and policy identities
-/// stay attached for replay.
+/// The caller remains responsible for choosing meaningful verifier and policy
+/// configurations. The root binds both typed identities and their exact
+/// canonical-byte observations; digest-only configuration is not accepted.
+/// This v1 root is configuration-relative and does not authenticate an owner
+/// or root instance.
+///
+/// # Errors
+///
+/// Returns [`PromotionRefusal`] if the fixed spectral promotion context is
+/// invalid.
+pub const fn spectral_promotion_trust_root(
+    verifier: IdentityReceipt<SpectralAuthorityVerifierIdV1>,
+    policy: IdentityReceipt<SpectralAuthorityPolicyIdV1>,
+) -> Result<SpectralPromotionTrustRootV1, PromotionRefusal> {
+    SpectralPromotionTrustRootV1::configure(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+    )
+}
+
+/// Exact binding mismatch between a policy-relative authority and an opaque
+/// spectral promotion decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpectralPromotionBindingErrorV1 {
+    /// The subject receipt, preimage, or bounded receipt metadata differs.
+    Subject,
+    /// The external anchor differs.
+    Anchor,
+    /// The typed verifier identity differs.
+    Verifier,
+    /// The typed key-policy identity differs.
+    KeyPolicy,
+    /// The promotion witness was minted for another configured context.
+    Context,
+}
+
+impl fmt::Display for SpectralPromotionBindingErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Subject => f.write_str("spectral promotion subject receipt differs"),
+            Self::Anchor => f.write_str("spectral promotion anchor differs"),
+            Self::Verifier => f.write_str("spectral promotion verifier differs"),
+            Self::KeyPolicy => f.write_str("spectral promotion key policy differs"),
+            Self::Context => f.write_str("spectral promotion context differs"),
+        }
+    }
+}
+
+impl core::error::Error for SpectralPromotionBindingErrorV1 {}
+
+/// Copyable favorable token produced only from a configured spectral
+/// promotion witness.
+///
+/// Generic verifier/admitter capabilities yield only
+/// [`PolicyRelativeSpectralAuthorityV1`]. They cannot be converted directly
+/// into this type; a separately configured [`SpectralPromotionTrustRootV1`]
+/// must first mint an opaque [`SpectralPromotionWitnessV1`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmittedSpectralWitnessV1 {
     proposition: SpectralPropositionId,
     audit: IdentityAuditRecord,
+    promotion: PromotionAuditRecord,
 }
 
 impl AdmittedSpectralWitnessV1 {
-    /// Consume an admitted authority reference and retain its exact bounded
-    /// audit record.
-    #[must_use]
-    pub fn from_authority(authority: AdmittedSpectralAuthorityV1) -> Self {
-        Self {
+    /// Inspect a policy-relative authority together with the opaque,
+    /// root-relative promotion decision for that exact binding.
+    ///
+    /// Policy-relative admission alone is deliberately insufficient:
+    ///
+    /// ```compile_fail,E0061
+    /// use fs_spectral::admission::{
+    ///     AdmittedSpectralAuthorityV1, AdmittedSpectralWitnessV1,
+    /// };
+    /// fn foreign_policy_cannot_promote(admitted: AdmittedSpectralAuthorityV1) {
+    ///     let _ = AdmittedSpectralWitnessV1::from_authority(&admitted);
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpectralPromotionBindingErrorV1`] unless the authority and
+    /// promotion decision bind the exact same subject receipt, anchor,
+    /// verifier, key policy, and fixed spectral promotion context.
+    pub fn from_authority(
+        authority: &AdmittedSpectralAuthorityV1,
+        promotion: SpectralPromotionWitnessV1,
+    ) -> Result<Self, SpectralPromotionBindingErrorV1> {
+        if authority.receipt() != promotion.subject() {
+            return Err(SpectralPromotionBindingErrorV1::Subject);
+        }
+        if authority.anchor() != promotion.anchor() {
+            return Err(SpectralPromotionBindingErrorV1::Anchor);
+        }
+        if authority.verifier() != promotion.verifier().id() {
+            return Err(SpectralPromotionBindingErrorV1::Verifier);
+        }
+        if authority.key_policy() != promotion.key_policy().id() {
+            return Err(SpectralPromotionBindingErrorV1::KeyPolicy);
+        }
+        if promotion.context() != SPECTRAL_PROMOTION_CONTEXT_V1 {
+            return Err(SpectralPromotionBindingErrorV1::Context);
+        }
+        Ok(Self {
             proposition: authority.receipt().id(),
             audit: authority.audit_record(),
-        }
+            promotion: promotion.audit(),
+        })
     }
 
     /// Exact proposition identity checked by the admitted verifier/policy.
@@ -246,18 +359,28 @@ impl AdmittedSpectralWitnessV1 {
         self.proposition
     }
 
-    /// Bounded verifier, policy, anchor, and no-claim audit record.
+    /// Bounded subject, anchor, verifier/policy identity, trust-state, and
+    /// no-claim audit record retained from policy-relative admission.
     #[must_use]
     pub const fn audit(&self) -> IdentityAuditRecord {
         self.audit
     }
 
-    /// Whether this token is bound to both the typed digest and independently
-    /// retained canonical-preimage root of the expected proposition receipt.
+    /// Bounded verifier/policy namespace, canonical-byte observations, and
+    /// configured promotion context.
+    #[must_use]
+    pub const fn promotion_audit(&self) -> PromotionAuditRecord {
+        self.promotion
+    }
+
+    /// Whether this token is bound to the typed digest, independently retained
+    /// canonical-preimage root, and exact canonical byte length of the expected
+    /// proposition receipt.
     #[must_use]
     pub fn matches_receipt(&self, expected: IdentityReceipt<SpectralPropositionId>) -> bool {
         self.proposition == expected.id()
             && self.audit.canonical_preimage() == expected.canonical_preimage()
+            && self.audit.canonical_bytes() == expected.canonical_bytes()
     }
 }
 
@@ -2648,9 +2771,17 @@ fn push_gauge_context(out: &mut Vec<u8>, context: GaugeContextV1) {
 
 fn witness_bytes(witness: &AdmittedSpectralWitnessV1) -> Vec<u8> {
     let audit = witness.audit;
-    let mut out = Vec::with_capacity(32 * 5 + 8);
+    let promotion = witness.promotion;
+    let mut out = Vec::with_capacity(32 * 8 + 64);
+    push_u64(
+        &mut out,
+        u64::try_from(SPECTRAL_PROMOTION_WITNESS_ENCODING_DOMAIN_V1.len())
+            .expect("static witness encoding domain length fits u64"),
+    );
+    out.extend_from_slice(SPECTRAL_PROMOTION_WITNESS_ENCODING_DOMAIN_V1);
     out.extend_from_slice(witness.proposition.as_bytes());
     out.extend_from_slice(audit.canonical_preimage().as_bytes());
+    push_u64(&mut out, audit.canonical_bytes());
     match audit.anchor() {
         Some(anchor) => {
             out.push(1);
@@ -2672,6 +2803,27 @@ fn witness_bytes(witness: &AdmittedSpectralWitnessV1) -> Vec<u8> {
         }
         None => out.push(0),
     }
+    push_u64(
+        &mut out,
+        u64::try_from(promotion.verifier_domain.len())
+            .expect("static verifier domain length fits u64"),
+    );
+    out.extend_from_slice(promotion.verifier_domain.as_bytes());
+    out.extend_from_slice(promotion.verifier_observation.content_id().as_bytes());
+    push_u64(&mut out, promotion.verifier_observation.length());
+    push_u64(
+        &mut out,
+        u64::try_from(promotion.key_policy_domain.len())
+            .expect("static key-policy domain length fits u64"),
+    );
+    out.extend_from_slice(promotion.key_policy_domain.as_bytes());
+    out.extend_from_slice(promotion.key_policy_observation.content_id().as_bytes());
+    push_u64(&mut out, promotion.key_policy_observation.length());
+    push_u64(
+        &mut out,
+        u64::try_from(promotion.context.len()).expect("static promotion context length fits u64"),
+    );
+    out.extend_from_slice(promotion.context.as_bytes());
     out
 }
 
@@ -3188,7 +3340,7 @@ fn validate_witness_receipt(
             expected: expected.id(),
             found: witness.proposition,
         });
-    } else if witness.audit.canonical_preimage() != expected.canonical_preimage() {
+    } else if !witness.matches_receipt(expected) {
         issues.push(SpectralAdmissionIssueV1::WitnessObservationMismatch {
             proposition: expected.id(),
         });

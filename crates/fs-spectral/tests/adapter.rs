@@ -4,7 +4,7 @@
 
 use fs_blake3::identity::{
     AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ContentId, ExternalAnchorRef,
-    IdentityReceipt,
+    IdentityReceipt, ObservedIdentity,
 };
 use fs_qty::{Dims, Time};
 use fs_spectral::adapter::*;
@@ -518,8 +518,8 @@ struct ExactAuthority {
     proposition: SpectralPropositionId,
     preimage: ContentId,
     anchor: ExternalAnchorRef,
-    verifier: SpectralAuthorityVerifierIdV1,
-    policy: SpectralAuthorityPolicyIdV1,
+    verifier: IdentityReceipt<SpectralAuthorityVerifierIdV1>,
+    policy: IdentityReceipt<SpectralAuthorityPolicyIdV1>,
 }
 
 impl
@@ -536,8 +536,8 @@ impl
         if receipt.id() == self.proposition
             && receipt.canonical_preimage() == self.preimage
             && presented.anchor() == self.anchor
-            && presented.verifier() == self.verifier
-            && presented.key_policy() == self.policy
+            && presented.verifier() == self.verifier.id()
+            && presented.key_policy() == self.policy.id()
         {
             Ok(())
         } else {
@@ -560,8 +560,8 @@ impl
         if receipt.id() == self.proposition
             && receipt.canonical_preimage() == self.preimage
             && verified.anchor() == self.anchor
-            && verified.verifier() == self.verifier
-            && verified.key_policy() == self.policy
+            && verified.verifier() == self.verifier.id()
+            && verified.key_policy() == self.policy.id()
         {
             Ok(())
         } else {
@@ -575,25 +575,29 @@ fn admitted_witness(receipt: IdentityReceipt<SpectralPropositionId>) -> Admitted
         proposition: receipt.id(),
         preimage: receipt.canonical_preimage(),
         anchor: ExternalAnchorRef::presented(ContentId::of_bytes(b"adapter-structure-test")),
-        verifier: spectral_verifier_receipt(b"adapter-exact-verifier")
-            .unwrap()
-            .id(),
-        policy: spectral_authority_policy_receipt(b"adapter-test-policy")
-            .unwrap()
-            .id(),
+        verifier: spectral_verifier_receipt(b"adapter-exact-verifier").unwrap(),
+        policy: spectral_authority_policy_receipt(b"adapter-test-policy").unwrap(),
     };
     let presented = AuthorityRef::present(
         receipt,
         authority.anchor,
-        authority.verifier,
-        authority.policy,
+        authority.verifier.id(),
+        authority.policy.id(),
     );
     let admitted = presented
         .verify(&authority)
         .unwrap()
         .admit(&authority)
         .unwrap();
-    AdmittedSpectralWitnessV1::from_authority(admitted)
+    let root = spectral_promotion_trust_root(authority.verifier, authority.policy).unwrap();
+    let promotion = root
+        .admit_for_promotion(
+            &admitted,
+            ObservedIdentity::from_receipt(authority.verifier).bytes(),
+            ObservedIdentity::from_receipt(authority.policy).bytes(),
+        )
+        .unwrap();
+    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion).unwrap()
 }
 
 fn structured_problem(seed: u8) -> ValidatedSpectralProblemV1 {

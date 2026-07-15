@@ -220,21 +220,43 @@ and the fixed no-theorem authority boundary.
 
 ### Authority boundary
 
-A favorable proposition cannot be created by selecting an enum value.
-Evidence producers must:
+A generic verifier/admitter success is policy-relative and cannot directly
+create a favorable proposition. Evidence producers must:
 
 1. build the family-specific canonical proposition receipt;
 2. present that receipt with an external anchor, verifier identity, and policy
    identity;
 3. pass an injected `AuthorityVerifier`;
 4. separately pass an injected `AuthorityAdmitter`; and
-5. consume the admitted authority to obtain
-   `AdmittedSpectralWitnessV1`.
+5. configure a separate `SpectralPromotionTrustRootV1` from independently
+   retained full verifier and policy receipts;
+6. have that root re-adjudicate both typed identities and their canonical-byte
+   observations to mint an opaque `SpectralPromotionWitnessV1`; and
+7. pair that opaque decision with the exact same policy-relative authority to
+   obtain `AdmittedSpectralWitnessV1`.
+
+The final pairing refuses any difference in the complete subject receipt,
+anchor, verifier identity, key-policy identity, or fixed spectral promotion
+context. A one-argument conversion from generic `Admitted` no longer exists.
+The retained promotion audit is bounded to verifier/policy namespaces,
+canonical-byte roots and lengths, and the fixed context. Its versioned witness
+encoding binds those fields in addition to the pre-existing subject, anchor,
+verifier, and policy identities.
 
 Every consuming validator recomputes the expected typed proposition ID and its
-independent canonical-preimage root. Both must match. The audit record retains
-anchor, verifier, policy, trust state, and the explicit
-`ScientificCorrectnessNotProven` boundary. Policy admission is not a theorem.
+independent canonical-preimage root and byte length. All must match. The audit
+record retains anchor, verifier, policy, trust state, and the explicit
+`ScientificCorrectnessNotProven` boundary. Policy admission and root matching
+are not a theorem.
+
+No-claim boundary: fs-blake3 v1 currently makes the promotion witness fields
+opaque but allows public, copyable trust-root configuration. Therefore this
+consumer hardening prevents direct and mismatched escalation, but it does not
+authenticate root-instance ownership: code that can reproduce the exact root
+configuration can reproduce its decision. Do not interpret a promotion token
+as cryptographic caller identity or scientific correctness; a branded or
+authenticated domain-owner capability is still required for that stronger
+claim.
 
 Structure and regularity receipts bind subject, scalar field, representation,
 descriptor role, origin, the complete scaling context (identity, dimensions,
