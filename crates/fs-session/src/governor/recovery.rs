@@ -1151,7 +1151,7 @@ fn cached_pause_acknowledgement(
     }
     Ok(Some(PauseAcknowledgement {
         request_id,
-        event: event.clone(),
+        event: event.as_ref().clone(),
         resume_gate: current_gate,
         resume_generation: replay.resume_generation,
         gate_binding: replay.gate_binding,

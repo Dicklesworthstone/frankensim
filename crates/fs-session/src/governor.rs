@@ -5354,7 +5354,7 @@ impl Governor {
                 .expect("open session has submission key index")
                 .insert(request_id.key_hash, request_id);
             commit_retained_bytes(&mut g, &token.ledger_scope, retained_bytes);
-            (admission_ordinal, token.ledger_scope)
+            (admission_ordinal, token.ledger_scope.clone())
         };
 
         if let Some((ledger, ledger_instance_id, canonical_program)) = durable {
@@ -6114,7 +6114,7 @@ impl Governor {
             }
             return Ok(PauseAcknowledgement {
                 request_id,
-                event,
+                event: event.as_ref().clone(),
                 resume_gate,
                 resume_generation: completed.resume_generation,
                 gate_binding: completed.gate_binding,
