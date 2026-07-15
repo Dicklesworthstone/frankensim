@@ -1,13 +1,20 @@
 //! In-house OpenEXR writer + reader (plan §10.5), spec-conformant subset:
 //! single-part scanline files, NONE compression, HALF/FLOAT channels,
 //! multi-channel AOVs (beauty/albedo/normal/depth) with the spec's
-//! alphabetical channel ordering. The reader covers our writer's subset
-//! (round-trips + ledger artifacts) with structured rejections beyond it.
+//! alphabetical channel ordering, and opaque custom header attributes. The
+//! reader covers our writer's subset (round-trips + ledger artifacts) with
+//! structured rejections beyond it.
 //!
 //! Determinism: byte-exact encodes (pure integer/bit code).
 
 use crate::ImgError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Canonical custom EXR attribute name for the rendered source artifact hash.
+///
+/// `fs-img` treats the value as opaque bytes.  The L6 composition layer owns
+/// hash syntax and ledger lookup; this L5 crate only preserves the bytes.
+pub const SOURCE_ARTIFACT_HASH_ATTRIBUTE: &str = "frankensim.sourceArtifactHash";
 
 /// Channel sample type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +50,20 @@ pub struct Channel {
     pub ty: PixelType,
     /// Row-major samples (width × height).
     pub data: Vec<f32>,
+}
+
+/// One opaque custom OpenEXR header attribute.
+///
+/// Attribute names and type names are UTF-8 strings admitted by the writer;
+/// values are preserved byte-for-byte and may contain NUL or non-UTF-8 data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExrAttribute {
+    /// Attribute name, unique within the custom attribute set.
+    pub name: String,
+    /// OpenEXR attribute type name, such as `string`.
+    pub ty: String,
+    /// Raw attribute payload bytes.
+    pub value: Vec<u8>,
 }
 
 /// f32 → f16 bits with round-to-nearest-even (subnormals + specials).
@@ -117,13 +138,32 @@ fn push_attr(out: &mut Vec<u8>, name: &str, ty: &str, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
-/// Encode channels as a single-part scanline EXR (NONE compression).
-/// Channels are stored in the spec's alphabetical order regardless of the
-/// argument order.
+/// Encode channels as a single-part scanline EXR (NONE compression), without
+/// custom attributes. Channels are stored in the spec's alphabetical order
+/// regardless of the argument order.
 ///
 /// # Errors
 /// [`ImgError`] on shape/name defects.
 pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8>, ImgError> {
+    write_exr_with_attributes(width, height, channels, &[])
+}
+
+/// Encode channels and opaque custom header attributes as a single-part
+/// scanline EXR (NONE compression).
+///
+/// Channels and custom attributes are each stored in alphabetical name order.
+/// Passing an empty attribute slice is byte-identical to [`write_exr`].
+/// Built-in EXR attribute names are reserved so custom values cannot shadow
+/// the structural header.
+///
+/// # Errors
+/// [`ImgError`] on shape, name, duplicate, reserved-name, or size defects.
+pub fn write_exr_with_attributes(
+    width: u32,
+    height: u32,
+    channels: &[Channel],
+    attributes: &[ExrAttribute],
+) -> Result<Vec<u8>, ImgError> {
     if width == 0 || height == 0 || channels.is_empty() {
         return Err(ImgError::Shape {
             expected: 1,
@@ -154,6 +194,31 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
         if sorted.insert(&c.name, c).is_some() {
             return Err(ImgError::Malformed {
                 what: format!("duplicate channel {:?}", c.name),
+            });
+        }
+    }
+    let mut sorted_attributes: BTreeMap<&str, &ExrAttribute> = BTreeMap::new();
+    for attribute in attributes {
+        validate_attribute_name("attribute", &attribute.name)?;
+        validate_attribute_name("attribute type", &attribute.ty)?;
+        if is_builtin_attribute(&attribute.name) {
+            return Err(ImgError::Malformed {
+                what: format!("custom attribute {:?} shadows a built-in", attribute.name),
+            });
+        }
+        if u32::try_from(attribute.value.len()).is_err() {
+            return Err(ImgError::Shape {
+                expected: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+                got: attribute.value.len(),
+                context: "EXR attribute payload bytes (maximum)",
+            });
+        }
+        if sorted_attributes
+            .insert(&attribute.name, attribute)
+            .is_some()
+        {
+            return Err(ImgError::Malformed {
+                what: format!("duplicate custom attribute {:?}", attribute.name),
             });
         }
     }
@@ -191,6 +256,9 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
         "float",
         &1.0f32.to_le_bytes(),
     );
+    for attribute in sorted_attributes.values() {
+        push_attr(&mut out, &attribute.name, &attribute.ty, &attribute.value);
+    }
     out.push(0); // end of header
 
     // Scanline offset table placeholder.
@@ -226,6 +294,29 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
     Ok(out)
 }
 
+fn validate_attribute_name(context: &str, name: &str) -> Result<(), ImgError> {
+    if name.is_empty() || name.contains('\0') || name.len() > 31 {
+        return Err(ImgError::Malformed {
+            what: format!("{context} name {name:?} must contain 1..=31 UTF-8 bytes and no NUL"),
+        });
+    }
+    Ok(())
+}
+
+fn is_builtin_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        "channels"
+            | "compression"
+            | "dataWindow"
+            | "displayWindow"
+            | "lineOrder"
+            | "pixelAspectRatio"
+            | "screenWindowCenter"
+            | "screenWindowWidth"
+    )
+}
+
 /// A decoded EXR (our writer's subset): alphabetical channels, f32 data
 /// (HALF widened losslessly).
 #[derive(Debug, Clone, PartialEq)]
@@ -236,10 +327,15 @@ pub struct DecodedExr {
     pub height: u32,
     /// Channels in file (alphabetical) order.
     pub channels: Vec<Channel>,
+    /// Opaque custom header attributes in file order.
+    pub attributes: Vec<ExrAttribute>,
 }
 
 fn take(bytes: &[u8], pos: usize, n: usize) -> Result<&[u8], ImgError> {
-    bytes.get(pos..pos + n).ok_or_else(|| ImgError::Malformed {
+    let end = pos.checked_add(n).ok_or_else(|| ImgError::Malformed {
+        what: format!("byte range overflow at byte {pos}"),
+    })?;
+    bytes.get(pos..end).ok_or_else(|| ImgError::Malformed {
         what: format!("truncated at byte {pos}"),
     })
 }
@@ -254,7 +350,11 @@ fn read_cstr(bytes: &[u8], pos: &mut usize) -> Result<String, ImgError> {
             what: "unterminated string".to_string(),
         });
     }
-    let s = String::from_utf8_lossy(&bytes[start..*pos]).into_owned();
+    let s = std::str::from_utf8(&bytes[start..*pos])
+        .map_err(|_| ImgError::Malformed {
+            what: format!("non-UTF-8 header string at byte {start}"),
+        })?
+        .to_owned();
     *pos += 1;
     Ok(s)
 }
@@ -293,8 +393,8 @@ fn parse_chlist(value: &[u8]) -> Result<Vec<(String, PixelType)>, ImgError> {
     Ok(specs)
 }
 
-/// Parsed header: (channel specs, width, height).
-type HeaderInfo = (Vec<(String, PixelType)>, u32, u32);
+/// Parsed header: (channel specs, width, height, custom attributes).
+type HeaderInfo = (Vec<(String, PixelType)>, u32, u32, Vec<ExrAttribute>);
 
 /// Parse the header attributes; returns [`HeaderInfo`] and leaves `pos`
 /// just past the header terminator.
@@ -302,13 +402,20 @@ fn parse_header(bytes: &[u8], pos: &mut usize) -> Result<HeaderInfo, ImgError> {
     let mut specs: Vec<(String, PixelType)> = Vec::new();
     let mut window = (0u32, 0u32);
     let mut compression_seen = false;
+    let mut attributes = Vec::new();
+    let mut seen_names = BTreeSet::new();
     loop {
         if bytes.get(*pos) == Some(&0) {
             *pos += 1;
             break; // end of header
         }
         let name = read_cstr(bytes, pos)?;
-        let _ty = read_cstr(bytes, pos)?;
+        if !seen_names.insert(name.clone()) {
+            return Err(ImgError::Malformed {
+                what: format!("duplicate header attribute {name:?}"),
+            });
+        }
+        let ty = read_cstr(bytes, pos)?;
         let size = u32::from_le_bytes(take(bytes, *pos, 4)?.try_into().expect("4 bytes")) as usize;
         *pos += 4;
         let value = take(bytes, *pos, size)?.to_vec();
@@ -317,10 +424,18 @@ fn parse_header(bytes: &[u8], pos: &mut usize) -> Result<HeaderInfo, ImgError> {
             "channels" => specs = parse_chlist(&value)?,
             "compression" => {
                 compression_seen = true;
-                if value != [0] {
-                    return Err(ImgError::Unsupported {
-                        what: format!("compression {} (NONE only)", value[0]),
-                    });
+                match value.as_slice() {
+                    [0] => {}
+                    [] => {
+                        return Err(ImgError::Malformed {
+                            what: "empty compression attribute".to_string(),
+                        });
+                    }
+                    [code, ..] => {
+                        return Err(ImgError::Unsupported {
+                            what: format!("compression {code} (NONE only)"),
+                        });
+                    }
                 }
             }
             "dataWindow" => {
@@ -338,7 +453,9 @@ fn parse_header(bytes: &[u8], pos: &mut usize) -> Result<HeaderInfo, ImgError> {
                 }
                 window = ((x2 + 1).cast_unsigned(), (y2 + 1).cast_unsigned());
             }
-            _ => {}
+            "displayWindow" | "lineOrder" | "pixelAspectRatio" | "screenWindowCenter"
+            | "screenWindowWidth" => {}
+            _ => attributes.push(ExrAttribute { name, ty, value }),
         }
     }
     if !compression_seen || specs.is_empty() || window.0 == 0 || window.1 == 0 {
@@ -346,11 +463,11 @@ fn parse_header(bytes: &[u8], pos: &mut usize) -> Result<HeaderInfo, ImgError> {
             what: "missing required header attributes".to_string(),
         });
     }
-    Ok((specs, window.0, window.1))
+    Ok((specs, window.0, window.1, attributes))
 }
 
-/// Decode an EXR produced by [`write_exr`]. Structured rejection outside
-/// that subset.
+/// Decode an EXR produced by [`write_exr`] or
+/// [`write_exr_with_attributes`]. Structured rejection outside that subset.
 ///
 /// # Errors
 /// [`ImgError::Malformed`] / [`ImgError::Unsupported`].
@@ -367,7 +484,7 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
         });
     }
     let mut pos = 8usize;
-    let (specs, width, height) = parse_header(bytes, &mut pos)?;
+    let (specs, width, height, attributes) = parse_header(bytes, &mut pos)?;
     // Skip the offset table; read blocks sequentially (our writer's order).
     pos += 8 * height as usize;
     let n = width as usize * height as usize;
@@ -414,6 +531,7 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
         width,
         height,
         channels,
+        attributes,
     })
 }
 
@@ -473,6 +591,74 @@ mod tests {
             let orig = channels.iter().find(|o| o.name == c.name).expect("name");
             assert_eq!(c.data, orig.data, "channel {} drifted", c.name);
         }
+        assert!(decoded.attributes.is_empty());
+    }
+
+    #[test]
+    fn exr_custom_attributes_round_trip_and_empty_path_stays_exact() {
+        let channel = Channel {
+            name: "R".to_string(),
+            ty: PixelType::Float,
+            data: vec![0.25, 0.5],
+        };
+        let empty_legacy = write_exr(2, 1, std::slice::from_ref(&channel)).unwrap();
+        let empty_explicit =
+            write_exr_with_attributes(2, 1, std::slice::from_ref(&channel), &[]).unwrap();
+        assert_eq!(empty_legacy, empty_explicit);
+
+        let attributes = vec![
+            ExrAttribute {
+                name: SOURCE_ARTIFACT_HASH_ATTRIBUTE.to_string(),
+                ty: "string".to_string(),
+                value: b"blake3:0123456789abcdef".to_vec(),
+            },
+            ExrAttribute {
+                name: "frankensim.binaryReceipt".to_string(),
+                ty: "opaque".to_string(),
+                value: vec![0, 0xFF, 0, 7],
+            },
+            ExrAttribute {
+                name: "frankensim.emptyReceipt".to_string(),
+                ty: "opaque".to_string(),
+                value: Vec::new(),
+            },
+        ];
+        let encoded =
+            write_exr_with_attributes(2, 1, std::slice::from_ref(&channel), &attributes).unwrap();
+        assert_eq!(
+            encoded,
+            write_exr_with_attributes(2, 1, std::slice::from_ref(&channel), &attributes).unwrap()
+        );
+        let decoded = read_exr(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .attributes
+                .iter()
+                .map(|attribute| attribute.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "frankensim.binaryReceipt",
+                "frankensim.emptyReceipt",
+                SOURCE_ARTIFACT_HASH_ATTRIBUTE,
+            ]
+        );
+        assert_eq!(decoded.attributes[0].value.as_slice(), &[0, 0xFF, 0, 7]);
+        assert!(decoded.attributes[1].value.is_empty());
+        assert_eq!(
+            decoded.attributes[2].value.as_slice(),
+            b"blake3:0123456789abcdef"
+        );
+        assert_eq!(
+            encoded,
+            write_exr_with_attributes(
+                decoded.width,
+                decoded.height,
+                &decoded.channels,
+                &decoded.attributes,
+            )
+            .unwrap(),
+            "our metadata-bearing subset re-encodes byte exactly"
+        );
     }
 
     #[test]
@@ -498,5 +684,24 @@ mod tests {
         ));
         // Duplicate channel names refuse at write time.
         assert!(write_exr(2, 2, &[ch.clone(), ch]).is_err());
+
+        let reserved = ExrAttribute {
+            name: "channels".to_string(),
+            ty: "string".to_string(),
+            value: Vec::new(),
+        };
+        assert!(
+            write_exr_with_attributes(
+                2,
+                2,
+                std::slice::from_ref(&Channel {
+                    name: "R".to_string(),
+                    ty: PixelType::Float,
+                    data: vec![0.0; 4],
+                }),
+                std::slice::from_ref(&reserved)
+            )
+            .is_err()
+        );
     }
 }

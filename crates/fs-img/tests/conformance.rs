@@ -5,8 +5,9 @@
 //! while the bias label propagates; fuzzed readers reject structurally.
 
 use fs_img::{
-    Channel, DenoiseParams, LabeledPlane, PixelProvenance, PixelType, PngColor, atrous_denoise,
-    mse, read_exr, read_png, write_exr, write_png8, write_png16,
+    Channel, DenoiseParams, ExrAttribute, LabeledPlane, PixelProvenance, PixelType, PngColor,
+    SOURCE_ARTIFACT_HASH_ATTRIBUTE, atrous_denoise, mse, read_exr, read_png, write_exr,
+    write_exr_with_attributes, write_png8, write_png16,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -49,17 +50,29 @@ fn im_001_encodes_are_bit_exact_and_round_trip() {
             data: (0..n).map(|i| (i % 32) as f32 * 0.062_5).collect(),
         },
     ];
-    let exr_a = write_exr(w, h, &chans).unwrap();
-    let exr_b = write_exr(w, h, &chans).unwrap();
+    let source_hash = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let attributes = [ExrAttribute {
+        name: SOURCE_ARTIFACT_HASH_ATTRIBUTE.to_string(),
+        ty: "string".to_string(),
+        value: source_hash.to_vec(),
+    }];
+    let exr_a = write_exr_with_attributes(w, h, &chans, &attributes).unwrap();
+    let exr_b = write_exr_with_attributes(w, h, &chans, &attributes).unwrap();
     assert_eq!(exr_a, exr_b, "EXR byte determinism");
     let dec = read_exr(&exr_a).unwrap();
     for c in &dec.channels {
         let orig = chans.iter().find(|o| o.name == c.name).unwrap();
         assert_eq!(c.data, orig.data, "AOV {} round-trip", c.name);
     }
+    assert_eq!(dec.attributes.as_slice(), &attributes);
+    assert_eq!(
+        write_exr(w, h, &chans).unwrap(),
+        write_exr_with_attributes(w, h, &chans, &[]).unwrap(),
+        "empty metadata must preserve legacy bytes"
+    );
     verdict(
         "im-001",
-        "PNG8/PNG16/EXR byte-deterministic; AOV round-trips lossless",
+        "PNG8/PNG16/EXR byte-deterministic; AOV and source-hash metadata round-trip lossless",
     );
 }
 

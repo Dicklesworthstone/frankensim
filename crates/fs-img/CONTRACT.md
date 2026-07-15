@@ -23,9 +23,15 @@ readers exist to round-trip **our own** outputs, not the world's files.
 - `Channel { name, ty, data: Vec<f32> }`, `PixelType` (Half/Float),
   `write_exr` — single-part scanline EXR, version 2, NONE compression,
   channels stored in the spec's alphabetical order regardless of argument
-  order. `read_exr` → `DecodedExr`. `f32_to_f16_bits` / `f16_bits_to_f32`
-  — IEEE 754 half conversion with round-to-nearest-even, including
-  subnormals, ±inf, and NaN (payload preserved as a quiet bit).
+  order. `ExrAttribute { name, ty, value }` and
+  `write_exr_with_attributes` add alphabetically ordered opaque custom header
+  attributes; `DecodedExr.attributes` preserves their names, type names, and
+  payload bytes exactly. `SOURCE_ARTIFACT_HASH_ATTRIBUTE` standardizes the
+  L5/L6 composition key without teaching this crate ledger semantics. An empty
+  attribute slice is byte-identical to `write_exr`. `read_exr` → `DecodedExr`.
+  `f32_to_f16_bits` / `f16_bits_to_f32` — IEEE 754 half conversion with
+  round-to-nearest-even, including subnormals, ±inf, and NaN (payload
+  preserved as a quiet bit).
 - `LabeledPlane { width, height, data, provenance }` with mandatory
   `PixelProvenance` tag: `RawEstimate` or `BiasedDenoised { iterations }`.
   `atrous_denoise(noisy, albedo?, params)` — iterated 5×5 B3-spline à-trous
@@ -43,6 +49,8 @@ readers exist to round-trip **our own** outputs, not the world's files.
 2. **Lossless AOV round-trip**: `read_exr(write_exr(x))` returns exactly
    the input samples for FLOAT channels; HALF channels return exactly the
    RNE-converted value (and exactly the input when it is representable).
+   Custom EXR attribute payloads, including NUL and non-UTF-8 bytes, round-trip
+   exactly; built-in names cannot be shadowed.
 3. **The bias label cannot be dropped**: `atrous_denoise` output is always
    `BiasedDenoised`; there is no API to relabel a plane `RawEstimate`.
 4. **Structured rejection**: readers never decode garbage silently — every
@@ -88,7 +96,8 @@ None.
 
 - **im-001** — PNG8/PNG16/EXR encodes are byte-identical across repeated
   calls; PNG round-trips samples exactly; EXR AOV set (FLOAT + on-grid
-  HALF) round-trips losslessly.
+  HALF) and source-artifact-hash metadata round-trip losslessly; empty
+  metadata preserves the legacy EXR bytes exactly.
 - **im-002** — external oracle: macOS `sips` (CoreImage) parses our PNG and
   EXR and reports the correct dimensions. Dev-only; **skips with an explicit
   JSON note** when `sips` is absent (Linux CI).
@@ -107,6 +116,10 @@ known answers, and denoiser partition-of-unity on constant images.
   subset our writers emit (None-filtered stored-block PNG; single-part
   scanline NONE-compression v2 EXR) and return structured `Unsupported`
   errors beyond it. They are for round-trips and Ledger artifacts.
+- **Metadata is opaque at L5.** `fs-img` validates EXR header syntax and
+  preserves custom attribute bytes; it does not validate hash algorithms,
+  artifact existence, lineage, or whether a claimed source hash matches the
+  rendered field. Those checks belong to the L6 composition layer.
 - **No compression-ratio claim.** PNG zlib streams use STORED deflate
   blocks: universally decodable, ~0% compression. EXR is NONE compression.
   Compact storage is out of scope for this bead.

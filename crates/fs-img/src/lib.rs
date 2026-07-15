@@ -13,7 +13,8 @@ pub mod png;
 
 pub use denoise::{DenoiseParams, LabeledPlane, PixelProvenance, atrous_denoise, mse};
 pub use exr::{
-    Channel, DecodedExr, PixelType, f16_bits_to_f32, f32_to_f16_bits, read_exr, write_exr,
+    Channel, DecodedExr, ExrAttribute, PixelType, SOURCE_ARTIFACT_HASH_ATTRIBUTE, f16_bits_to_f32,
+    f32_to_f16_bits, read_exr, write_exr, write_exr_with_attributes,
 };
 pub use png::{DecodedPng, PngColor, read_png, write_png8, write_png16};
 
