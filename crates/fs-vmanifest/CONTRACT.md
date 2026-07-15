@@ -1,8 +1,8 @@
 # CONTRACT: fs-vmanifest
 
 The typed VerificationManifest schema for leapfrog G1 claim/evidence freezes,
-with authored draft constructors for I01, I02, I03, I04, I05, I08, I12, and
-I15.
+with authored draft constructors for I01, I02, I03, I04, I05, I06, I08, I12,
+and I15.
 Sibling G1-freeze beads reuse this schema and add their own instance modules.
 
 ## Purpose and layer
@@ -179,6 +179,26 @@ component encodings retain their v1 subdomains.
   interrupt target support is a separate content-addressed, capability-
   allowlisted, audited runtime capsule and remains an explicit TCB rather than
   being hidden inside code generation.
+- `i06_draft()` — the I06 material-lot passport and substitution-impact
+  gate: 12 claims split 7 baseline `[S]`, 2 `[F]`, and 3 `[M]`; 17 fixture,
+  theorem, and finite-decision cards with 7 stage-local held-outs; 7 execution
+  leaves; and 1 governed-industrial-lot-pack waiver. The baseline freezes
+  non-confusable material/specification/supplier/heat/lot/specimen/process/
+  custody identity; source-preserving, method/condition/domain-qualified
+  property observations; hierarchical lot/spatial/aging posteriors without
+  pseudoreplication; three-valued ContextOfUse substitution; exact selective
+  invalidation relative to a declared dependency graph; anytime-valid supplier
+  drift; and replayable human/agent-parity decision receipts. Property semantics
+  explicitly distinguish conductivity kinds, permeability/permeance/
+  diffusivity, magnetic quantities, viscosity kinds, mass/volume latent heat,
+  hardness scales, tensor frames, censoring, wetting hysteresis, process/history
+  and validity domains. Frontier lanes target calibrated coupled-property
+  posteriors and identifiable causal transport. Moonshot lanes target a
+  machine-checked transitive impact-completeness theorem and exact global robust
+  decision optimality over a frozen finite grammar, while a hidden-mutant lane
+  attacks forged provenance and false certificates. Version-1 prose grants no
+  theorem, graph-completeness, causal, exhaustive, supplier, or decision
+  authority.
 - `i08_draft()` — the I08 (evidence-budget co-design planner) instance:
   8 claims (5/2/1 with a robust multi-horizon optimality falsifier), 9
   fixture pins (2 held-out), 6 obligation rows, 1 waiver.
@@ -314,6 +334,19 @@ ratchets; G3 assumption/oracle/tolerance/holdout/partition/policy mutations;
 G4 chunked assembly equivalence; G5 input-order invariance; and targeted versus
 global amendment invalidation.
 
+`tests/i06.rs`: exact I06 7/2/3 lattice, single maximal refutation lane,
+17-fixture/7-held-out corpus, one governed industrial waiver, and once-only
+seven-leaf claim map; all nine unit classes, campaign-policy participation,
+structured lifecycle/events/replay/DSR bindings and sealed canonical
+obligations; non-confusable property kinds, domains, units, frames, methods,
+censoring and calibration; authenticity-versus-physical-truth, uncertainty-
+ownership, pseudoreplication, three-valued substitution, declared-graph and
+NoAlarm no-claim boundaries; disjoint single-consumer Core/Max ranges; causal/
+impact theorem and finite-decision global-optimality successor ratchets; G3
+hypothesis/oracle/tolerance/holdout/partition/policy mutations; G4 chunked
+assembly equivalence; G5 order invariance; and targeted/global amendment
+invalidation.
+
 `tests/i03.rs`: exact I03 8/2/6 claim lattice and once-only 4-Core/
 4-Max leaf mapping; exact nine unit-case classes; content-bound campaign
 policy, FailureBundle, and independent-adjudication obligations; exact
@@ -427,6 +460,24 @@ holdout/policy mutations; and targeted versus global amendment invalidation.
   symbolic coverage, quotient obligations, independent decoding, preflight and
   completeness root. Even a model-exact maximum becomes silicon WCET only
   after independent model-fidelity qualification on the exact hardware.
+- I06 cryptographic and custody validity authenticates records and transitions,
+  not physical composition, label-to-specimen correspondence, supplier honesty,
+  method execution, calibration, specification conformance, qualification, or
+  legal authority. Synthetic posterior coverage and drift-certifier tests do
+  not establish a real supplier population; `NoAlarm` never proves no drift.
+  ContextOfUse `Compatible` is neither universal interchangeability nor an
+  automatic procurement/manufacturing/safety approval.
+- I06 exact impact closure is initially only relative to the frozen declared
+  graph. Version-1 causal/impact theorem prose and finite decision grammar mint
+  no completeness, causal, exhaustive, or optimality authority. Pre-proof
+  successors must freeze machine graph/SCM/authority/proposition/definition
+  ASTs, complete adapters/open-world boundaries, runtime premises, translation,
+  axiom closure, nonvacuity and kernel replay. Pre-search successors must freeze
+  the complete finite action/scenario/test grammar, feasibility/interval utility,
+  ambiguity/risk semantics, validity/exclusion, enumeration or verified bounds,
+  rank/unrank/sharding, independent decoding, preflight and completeness root.
+  Global optimality requires coincident checker-verified lower and feasible
+  upper bounds; a positive gap remains honest non-optimal/Unknown authority.
 - The adjacent-version `EvidenceKindChanged` guard prevents an immediate
   claim/leaf kind swap. `FrozenManifest` carries no lineage-wide tombstone set;
   a ledger spanning nonadjacent versions must key authority by typed kind plus
