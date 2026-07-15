@@ -75,8 +75,10 @@ without gaining solver, geometry, FFI, or license surface.
   `None` differs from empty bytes, and variants bind both numeric tag and
   payload.
 - Ordered collections preserve caller order. Canonical sets must be strictly
-  byte-lexicographic and duplicate-free. Typed children bind their role,
-  complete schema descriptor identity, and all 32 digest bytes.
+  byte-lexicographic and duplicate-free. Each set item's byte and aggregate
+  field budgets are admitted before potentially long ordering comparisons.
+  Typed children bind their role, complete schema descriptor identity, and all
+  32 digest bytes.
 - Finite `f64` values are encoded by exact IEEE-754 bits. Signed zero remains
   distinct. NaN and infinities refuse before publication.
 - Successful construction publishes both a derive-key typed ID and a plain

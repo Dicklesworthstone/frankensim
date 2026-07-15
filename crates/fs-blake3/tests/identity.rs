@@ -1207,6 +1207,25 @@ impl IntoIterator for PanicChunks {
     }
 }
 
+struct ArmBeforeSecond<'a> {
+    first: Option<&'a [u8]>,
+    second: Option<&'a [u8]>,
+    armed: &'a Cell<bool>,
+}
+
+impl<'a> Iterator for ArmBeforeSecond<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(first) = self.first.take() {
+            return Some(first);
+        }
+        let second = self.second.take()?;
+        self.armed.set(true);
+        Some(second)
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // One hostile-length/count transactional refusal matrix.
 fn hostile_lengths_counts_and_stream_mismatch_refuse_before_publication() {
@@ -1232,6 +1251,31 @@ fn hostile_lengths_counts_and_stream_mismatch_refuse_before_publication() {
             kind: LimitKind::CollectionItems,
             requested: u64::MAX,
             limit: 2
+        })
+    ));
+
+    let armed = Cell::new(false);
+    let oversized_set_item = [b'a'; 65];
+    let set_values = ArmBeforeSecond {
+        first: Some(b"a"),
+        second: Some(&oversized_set_item),
+        armed: &armed,
+    };
+    let oversized_set = CanonicalEncoder::<SemanticId<SetLeaf>, _>::new(tiny, || {
+        assert!(
+            !armed.get(),
+            "oversized set item must refuse before ordering comparison"
+        );
+        false
+    })
+    .unwrap()
+    .canonical_set(Field::new(0, "items"), 2, set_values);
+    assert!(matches!(
+        oversized_set,
+        Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested: 65,
+            limit: 64
         })
     ));
 

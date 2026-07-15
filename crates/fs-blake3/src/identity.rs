@@ -1679,6 +1679,15 @@ where
                     observed,
                 });
             }
+            let value_len = as_u64(value.len())?;
+            self.ensure_field_bytes(value_len)?;
+            let next_field_payload = checked_add(
+                field_payload,
+                checked_add(u64::from(u64::BITS / 8), value_len)?,
+            )?;
+            self.ensure_field_bytes(next_field_payload)?;
+            self.ensure_additional(checked_add(u64::from(u64::BITS / 8), value_len)?)?;
+            // Admit the item before scanning a hostile equal prefix for order.
             if let Some(before) = previous {
                 match self.compare_canonical_slices(before, value)? {
                     core::cmp::Ordering::Equal => {
@@ -1694,15 +1703,8 @@ where
                     core::cmp::Ordering::Less => {}
                 }
             }
-            let value_len = as_u64(value.len())?;
-            self.ensure_field_bytes(value_len)?;
-            field_payload = checked_add(
-                field_payload,
-                checked_add(u64::from(u64::BITS / 8), value_len)?,
-            )?;
-            self.ensure_field_bytes(field_payload)?;
-            self.ensure_additional(checked_add(u64::from(u64::BITS / 8), value_len)?)?;
             self.append_len_bytes(value)?;
+            field_payload = next_field_payload;
             previous = Some(value);
         }
         if observed != declared_count {
