@@ -12,7 +12,7 @@ use asupersync::types::Budget;
 use fs_evidence::NumericalKind;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Chart, Differentiability, Point3};
-use fs_rep_nurbs::sdf::{Orientation, ShellSdf, ShellSdfChart, generate_tile};
+use fs_rep_nurbs::sdf::{ControlAabbRun, Orientation, ShellSdf, ShellSdfChart, generate_tile};
 use fs_rep_nurbs::{KnotVector, NurbsCurve, NurbsSurface, Rat, TrimLoop, TrimmedPatch};
 
 fn verdict(case: &str, detail: &str) {
@@ -23,7 +23,14 @@ fn verdict(case: &str, detail: &str) {
 }
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    with_cx_state(false, f)
+}
+
+fn with_cx_state<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
+    if cancelled {
+        gate.request();
+    }
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
         let cx = Cx::new(
@@ -162,6 +169,33 @@ fn ns_000_query_validation_precedes_surface_work() {
         tolerance_error.to_string().contains("tolerance"),
         "tolerance refusal must have deterministic precedence: {tolerance_error}"
     );
+}
+
+#[test]
+fn ns_000_control_support_is_transactional_and_preflighted() {
+    let shell = ShellSdf::new(vec![sphere()], vec![None], Orientation::Outward).expect("shell");
+    let expected = shell.control_aabb(0.125).expect("synchronous support");
+    with_cx_state(false, |cx| {
+        assert_eq!(
+            shell
+                .control_aabb_with_cx(0.125, cx)
+                .expect("active control-support traversal"),
+            ControlAabbRun::Complete { aabb: expected }
+        );
+    });
+    with_cx_state(true, |cx| {
+        assert_eq!(
+            shell
+                .control_aabb_with_cx(0.125, cx)
+                .expect("pre-cancelled control-support traversal"),
+            ControlAabbRun::Cancelled
+        );
+        assert!(matches!(
+            shell.control_aabb_with_cx(f64::NAN, cx),
+            Err(fs_rep_nurbs::NurbsError::Domain { ref what })
+                if what.contains("padding")
+        ));
+    });
 }
 
 #[test]

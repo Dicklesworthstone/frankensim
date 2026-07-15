@@ -51,6 +51,21 @@ pub struct SdfQuery {
     pub splits: u32,
 }
 
+/// Transactional terminal state of cancellation-aware control-support
+/// traversal.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ControlAabbRun {
+    /// Every homogeneous control was projected and the finite outward support
+    /// box passed its final publication checkpoint.
+    Complete {
+        /// One-ULP-outward, caller-padded control-net support.
+        aabb: Aabb,
+    },
+    /// Cancellation was observed; no partial support box is exposed.
+    Cancelled,
+}
+
 /// A NURBS shell presented as a measured distance-field approximation.
 #[derive(Debug)]
 pub struct ShellSdf {
@@ -62,6 +77,7 @@ pub struct ShellSdf {
     split_work_units_per_round: u128,
     polish_work_units: u128,
     sign_work_units: u128,
+    control_aabb_work_units: u128,
 }
 
 /// Gauss–Newton polish iterations (evaluated-distance improvement only).
@@ -87,12 +103,42 @@ const SDF_QUERY_MAX_WORK_UNITS: u128 = 67_108_864;
 /// parameter lies on a singular surface chart.
 const SIGN_FALLBACK_MAX_CANDIDATES: u128 = 80;
 
+/// Conservative four-lane projection/min/max price for one homogeneous
+/// control in control-support traversal.
+const SDF_CONTROL_AABB_WORK_PER_CONTROL: u128 = 16;
+const SDF_CONTROL_AABB_PHASE_WORK: u128 = 32;
+const SDF_CONTROL_AABB_MAX_WORK_UNITS: u128 = 16_777_216;
+const SDF_CONTROL_AABB_POLL_STRIDE: usize = 64;
+
 fn checked_work_product(values: &[u128], stage: &str) -> Result<u128, NurbsError> {
     values.iter().try_fold(1u128, |acc, value| {
         acc.checked_mul(*value).ok_or_else(|| NurbsError::Domain {
             what: format!("NURBS shell {stage} work accounting overflows u128"),
         })
     })
+}
+
+fn enforce_control_aabb_work(work_units: u128) -> Result<(), NurbsError> {
+    if work_units > SDF_CONTROL_AABB_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "NURBS shell control support requests {work_units} work units above defensive ceiling {SDF_CONTROL_AABB_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn control_aabb_poll_due(
+    controls_since_poll: &mut usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> bool {
+    *controls_since_poll += 1;
+    if *controls_since_poll < SDF_CONTROL_AABB_POLL_STRIDE {
+        return false;
+    }
+    *controls_since_poll = 0;
+    should_cancel()
 }
 
 fn validate_distance_request(q: [f64; 3], tol: f64) -> Result<(), NurbsError> {
@@ -167,6 +213,7 @@ impl ShellSdf {
         let mut split_work_units_per_round = 0u128;
         let mut polish_work_units = 0u128;
         let mut max_evaluation_work = 0u128;
+        let mut control_aabb_work_units = SDF_CONTROL_AABB_PHASE_WORK;
         for surface in &surfaces {
             let work = surface_base_work_units(surface)?;
             if work > CLOSEST_MAX_BASE_WORK_UNITS {
@@ -200,6 +247,21 @@ impl ShellSdf {
                     what: "NURBS shell polish-work accounting overflows u128".to_string(),
                 })?;
             max_evaluation_work = max_evaluation_work.max(evaluation_work);
+            let surface_controls = checked_work_product(
+                &[
+                    surface.cpw.len() as u128,
+                    surface.cpw.first().map_or(0, Vec::len) as u128,
+                ],
+                "control-support shape",
+            )?;
+            control_aabb_work_units = control_aabb_work_units
+                .checked_add(checked_work_product(
+                    &[surface_controls, SDF_CONTROL_AABB_WORK_PER_CONTROL],
+                    "control-support traversal",
+                )?)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "NURBS shell control-support work accounting overflows u128".to_string(),
+                })?;
         }
         let trimmed_surface_count = trims.iter().filter(|trim| trim.is_some()).count() as u128;
         // The winning surface incurs one ordinary gradient/sign evaluation and
@@ -225,6 +287,7 @@ impl ShellSdf {
             split_work_units_per_round,
             polish_work_units,
             sign_work_units,
+            control_aabb_work_units,
         };
         // Do not successfully construct a shell for which even a zero-split
         // query is deterministically inadmissible.
@@ -282,15 +345,57 @@ impl ShellSdf {
     /// Cartesian control point and hence the rational surface.
     ///
     /// # Errors
-    /// Returns [`NurbsError::Domain`] when `pad` is non-finite or negative.
+    /// Returns [`NurbsError::Domain`] when `pad` is non-finite or negative,
+    /// when traversal work exceeds the defensive ceiling, or when outward
+    /// support leaves the finite AABB domain.
     pub fn control_aabb(&self, pad: f64) -> Result<Aabb, NurbsError> {
+        let mut never_cancel = || false;
+        match self.control_aabb_with_poll(pad, &mut never_cancel)? {
+            ControlAabbRun::Complete { aabb } => Ok(aabb),
+            ControlAabbRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling NURBS control-support traversal observed cancellation"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Compute outward control-net support with bounded cancellation polling.
+    ///
+    /// Padding and checked traversal-work refusals retain synchronous
+    /// precedence. Cancellation is then observed before the first control,
+    /// after at most 64 projected controls, and immediately before publication.
+    /// A cancelled traversal exposes no partial box. This primitive does not
+    /// consume the `Cx` budget or own request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous padding, work, or finite-support refusal when it
+    /// wins before an observed cancellation.
+    pub fn control_aabb_with_cx(
+        &self,
+        pad: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ControlAabbRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.control_aabb_with_poll(pad, &mut should_cancel)
+    }
+
+    fn control_aabb_with_poll(
+        &self,
+        pad: f64,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<ControlAabbRun, NurbsError> {
         if !pad.is_finite() || pad < 0.0 {
             return Err(NurbsError::Domain {
                 what: "NURBS SDF support padding must be finite and non-negative".to_string(),
             });
         }
+        enforce_control_aabb_work(self.control_aabb_work_units)?;
+        if should_cancel() {
+            return Ok(ControlAabbRun::Cancelled);
+        }
         let mut min = [f64::INFINITY; 3];
         let mut max = [f64::NEG_INFINITY; 3];
+        let mut controls_since_poll = 0usize;
         for s in &self.surfaces {
             for row in &s.cpw {
                 for h in row {
@@ -298,6 +403,9 @@ impl ShellSdf {
                     for k in 0..3 {
                         min[k] = min[k].min(next_down(c[k]));
                         max[k] = max[k].max(next_up(c[k]));
+                    }
+                    if control_aabb_poll_due(&mut controls_since_poll, should_cancel) {
+                        return Ok(ControlAabbRun::Cancelled);
                     }
                 }
             }
@@ -320,7 +428,10 @@ impl ShellSdf {
                     .to_string(),
             });
         }
-        Ok(support)
+        if should_cancel() {
+            return Ok(ControlAabbRun::Cancelled);
+        }
+        Ok(ControlAabbRun::Complete { aabb: support })
     }
 
     /// Measured unsigned-distance bracket per surface, Gauss–Newton polish,
@@ -814,10 +925,16 @@ impl Chart for ShellSdfChart {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_trimmed_witness, store_f32_with_error};
+    use super::{
+        ControlAabbRun, Orientation, SDF_CONTROL_AABB_MAX_WORK_UNITS, SDF_CONTROL_AABB_PHASE_WORK,
+        SDF_CONTROL_AABB_WORK_PER_CONTROL, ShellSdf, enforce_control_aabb_work,
+        select_trimmed_witness, store_f32_with_error,
+    };
+    use crate::NurbsError;
     use crate::basis::KnotVector;
     use crate::curve::NurbsCurve;
     use crate::rat::Rat;
+    use crate::surface::NurbsSurface;
     use crate::trim::{TrimLoop, TrimmedPatch};
 
     fn unit_square_trim() -> TrimmedPatch {
@@ -847,6 +964,122 @@ mod tests {
         )
         .expect("square curve");
         TrimmedPatch::new(vec![TrimLoop::new(curve).expect("closed square")])
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn long_control_surface() -> NurbsSurface<f64> {
+        let u_controls = 65usize;
+        let mut u_knots = Vec::with_capacity(u_controls + 2);
+        u_knots.extend([0.0, 0.0]);
+        for index in 1..u_controls - 1 {
+            u_knots.push(index as f64 / (u_controls - 1) as f64);
+        }
+        u_knots.extend([1.0, 1.0]);
+        let knots_u = KnotVector::new(u_knots, 1).expect("long support U knots");
+        let knots_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear support V knots");
+        let points: Vec<Vec<[f64; 3]>> = (0..u_controls)
+            .map(|u| {
+                let x = u as f64 / (u_controls - 1) as f64;
+                vec![[x, 0.0, 0.0], [x, 1.0, 0.0]]
+            })
+            .collect();
+        let weights = vec![vec![1.0; 2]; u_controls];
+        NurbsSurface::new(knots_u, knots_v, &points, &weights).expect("long support surface")
+    }
+
+    fn long_control_shell() -> ShellSdf {
+        ShellSdf::new(
+            vec![long_control_surface()],
+            vec![None],
+            Orientation::Unknown,
+        )
+        .expect("long control shell")
+    }
+
+    #[test]
+    fn control_aabb_work_gate_is_boundary_exact_and_precedes_cancellation() {
+        assert!(enforce_control_aabb_work(SDF_CONTROL_AABB_MAX_WORK_UNITS).is_ok());
+        assert!(matches!(
+            enforce_control_aabb_work(SDF_CONTROL_AABB_MAX_WORK_UNITS + 1),
+            Err(NurbsError::Domain { ref what }) if what.contains("work units")
+        ));
+
+        let mut shell = long_control_shell();
+        assert_eq!(
+            shell.control_aabb_work_units,
+            SDF_CONTROL_AABB_PHASE_WORK + 130 * SDF_CONTROL_AABB_WORK_PER_CONTROL
+        );
+        let two_surface_shell = ShellSdf::new(
+            vec![long_control_surface(), long_control_surface()],
+            vec![None, None],
+            Orientation::Unknown,
+        )
+        .expect("two-surface support shell");
+        assert_eq!(
+            two_surface_shell.control_aabb_work_units,
+            SDF_CONTROL_AABB_PHASE_WORK + 260 * SDF_CONTROL_AABB_WORK_PER_CONTROL
+        );
+
+        shell.control_aabb_work_units = SDF_CONTROL_AABB_MAX_WORK_UNITS + 1;
+        let mut polls = 0usize;
+        let error = shell
+            .control_aabb_with_poll(0.0, &mut || {
+                polls += 1;
+                true
+            })
+            .expect_err("work refusal must precede cancellation");
+        assert!(error.to_string().contains("work units"));
+        assert_eq!(polls, 0);
+
+        let padding_error = shell
+            .control_aabb_with_poll(f64::NAN, &mut || {
+                polls += 1;
+                true
+            })
+            .expect_err("padding refusal must precede work and cancellation");
+        assert!(padding_error.to_string().contains("padding"));
+        assert_eq!(polls, 0);
+    }
+
+    #[test]
+    fn control_aabb_finite_support_refusal_precedes_publication_cancellation() {
+        let line = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("extreme support knots");
+        let points = vec![vec![[f64::MAX, 0.0, 0.0]; 2]; 2];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(line.clone(), line, &points, &weights)
+            .expect("finite extreme surface");
+        let shell = ShellSdf::new(vec![surface], vec![None], Orientation::Unknown)
+            .expect("finite extreme shell");
+        let mut polls = 0usize;
+        let error = shell
+            .control_aabb_with_poll(0.0, &mut || {
+                polls += 1;
+                polls == 2
+            })
+            .expect_err("finite-support overflow must beat final cancellation");
+        assert!(error.to_string().contains("finite AABB"));
+        assert_eq!(
+            polls, 1,
+            "the failing support is never offered for publication"
+        );
+    }
+
+    #[test]
+    fn control_aabb_polling_is_bounded_and_gates_publication() {
+        let run = |target: Option<usize>| {
+            let shell = long_control_shell();
+            let mut polls = 0usize;
+            let outcome = shell
+                .control_aabb_with_poll(0.0, &mut || {
+                    polls += 1;
+                    target == Some(polls)
+                })
+                .expect("valid support traversal");
+            (outcome, polls)
+        };
+        assert_eq!(run(Some(2)), (ControlAabbRun::Cancelled, 2));
+        assert_eq!(run(None).1, 4);
+        assert_eq!(run(Some(4)), (ControlAabbRun::Cancelled, 4));
     }
 
     #[test]

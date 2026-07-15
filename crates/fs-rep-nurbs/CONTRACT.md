@@ -185,6 +185,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   evaluation time. `ShellSdf::control_aabb` likewise rejects malformed padding
   and any outward expansion that leaves the finite AABB domain through `Result`
   rather than admitting unbounded support or panicking on public configuration.
+  Its transactional `control_aabb_with_cx` preserves padding and checked
+  control-traversal work refusals ahead of cancellation, polls after at most 64
+  homogeneous controls, and publishes only a complete finite outward box.
   It presents `nurbs-sdf/estimated-signed` under declared local
   orientation or `nurbs-sdf/estimated-unsigned` otherwise; it emits
   `NumericalKind::Estimate`, no Lipschitz authority, and no continuity claim:
@@ -649,7 +652,9 @@ It reuses the same split/frontier model, exports worst-case seed and split heap
 coefficients into its aggregate work gate, and additionally charges
 structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
 which even a zero-split query exceeds the ceiling is not constructible. The SDF
-and legacy refit paths retain static process ceilings with no effective `Cx`.
+control-support primitive has an effective fixed-stride `Cx` checkpoint and
+final publication gate, but end-to-end SDF query/chart/tile and legacy refit
+paths retain static process ceilings with no effective workflow-wide `Cx`.
 Trim classification now has effective primitive checkpoints but still uses its
 static ceiling rather than a caller-owned affine budget. None of these APIs yet
 owns end-to-end request→drain→finalize semantics, so they are not P7
