@@ -99,22 +99,27 @@ fn spine_exit_1_laundering_refused() {
     );
 }
 
-/// EXIT TEST 2 — NO-FALSIFIER-NO-SHIP: a certificate class without a
-/// registered falsifier fails Gauntlet review the way untested code
-/// fails CI.
+/// EXIT TEST 2 — FALSIFIER CATALOG: a certificate class without a declared
+/// falsifier is named by the metadata lint. Exact-instance release admission is
+/// deliberately outside this declaration-only test.
 #[test]
-fn spine_exit_2_no_falsifier_no_ship() {
+fn spine_exit_2_falsifier_catalog_lint() {
     let registry = FalsifierRegistry::standard();
-    // A shipped class the standard registry covers: passes.
-    let clean = registry.ship_gate(&["watertightness"]);
-    assert!(clean.is_empty(), "paired class ships: {clean:?}");
-    // A novel class nobody paired: BLOCKED, named.
-    let blocked = registry.ship_gate(&["watertightness", "novel-magic-certificate"]);
+    // A catalog class with a declaration is clean.
+    let clean = registry
+        .catalog_gate(&["sampled-interface-agreement"])
+        .expect("bounded valid catalog query");
+    assert!(clean.is_empty(), "paired class is cataloged: {clean:?}");
+    // A novel class nobody paired is named, without pretending this is a
+    // complete executable or release gate.
+    let blocked = registry
+        .catalog_gate(&["sampled-interface-agreement", "novel-magic-certificate"])
+        .expect("bounded valid catalog query");
     assert_eq!(blocked.len(), 1, "the unpaired class is named");
     assert!(blocked[0].contains("novel-magic-certificate"));
     verdict(
         "spine-exit-2",
-        "unpaired certificate class blocked by the ship gate; paired classes pass",
+        "catalog lint names an unpaired certificate class; release authority remains external",
     );
 }
 

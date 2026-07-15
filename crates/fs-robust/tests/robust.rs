@@ -301,8 +301,8 @@ use fs_robust::{AdmittedRobustReport, admitted_headline_for, robust_optimum_admi
 /// ledger oracle are exercised in fs-evidence and fs-ledger batteries.
 struct FixtureAuthority;
 impl AdmissionVerifier for FixtureAuthority {
-    fn verify(&self, _c: &Color, _r: &AdmissionReceipt) -> AdmissionDecision {
-        AdmissionDecision::accept(fs_blake3::hash_bytes(b"fixture-authority"))
+    fn verify(&self, _c: &Color, receipt: &AdmissionReceipt) -> AdmissionDecision {
+        AdmissionDecision::accept(receipt.policy_fingerprint())
     }
 }
 
