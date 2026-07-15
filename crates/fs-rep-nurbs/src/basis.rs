@@ -142,6 +142,19 @@ pub enum KnotAdmissionRun<'a, S: Scalar> {
     Cancelled,
 }
 
+/// Transactional terminal state of cancellation-aware knot-span lookup.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnotSpanRun {
+    /// The complete source-span index for the requested parameter.
+    Complete {
+        /// Knot span using Piegl–Tiller A2.1 endpoint semantics.
+        span: usize,
+    },
+    /// Cancellation was observed; no span index was published.
+    Cancelled,
+}
+
 /// Transactional terminal state of one cancellation-aware basis evaluation.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
@@ -229,27 +242,55 @@ impl<S: Scalar> KnotVector<S> {
     }
 
     fn span_after_validation(&self, t: S) -> Result<usize, NurbsError> {
+        match self.span_after_validation_with_poll(t, || false)? {
+            KnotSpanRun::Complete { span } => Ok(span),
+            KnotSpanRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling knot-span lookup observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn span_after_validation_with_poll(
+        &self,
+        t: S,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<KnotSpanRun, NurbsError> {
         let (lo, hi) = self.validated_domain();
         if !t.is_finite() || t < lo || t > hi {
             return Err(NurbsError::Domain {
                 what: format!("parameter {t:?} outside {lo:?}..{hi:?}"),
             });
         }
+        if should_cancel() {
+            return Ok(KnotSpanRun::Cancelled);
+        }
+        let mut operations_since_poll = 0usize;
         let n = self.control_count() - 1;
-        if t == hi {
+        let span = if t == hi {
             // Validation guarantees at least one non-empty span, so this walk
             // cannot underflow.
             let mut s = n;
             while self.knots[s] == self.knots[s + 1] {
                 s -= 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(KnotSpanRun::Cancelled);
+                }
             }
-            return Ok(s);
+            s
+        } else {
+            let mut span = self.degree;
+            while span < n && self.knots[span + 1] <= t {
+                span += 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(KnotSpanRun::Cancelled);
+                }
+            }
+            span
+        };
+        if should_cancel() {
+            return Ok(KnotSpanRun::Cancelled);
         }
-        let mut span = self.degree;
-        while span < n && self.knots[span + 1] <= t {
-            span += 1;
-        }
-        Ok(span)
+        Ok(KnotSpanRun::Complete { span })
     }
 
     /// Validate the sealed fields before any indexing algorithm uses them.
@@ -669,6 +710,25 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
         self.span_after_preflight(t)
     }
 
+    /// Resolve a knot span with bounded cancellation polling.
+    ///
+    /// Parameter and checked span-search work refusals retain their
+    /// synchronous precedence. The fixed-stride gate covers the directional
+    /// search and final span publication. This method does not consume the
+    /// `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous span lookup's parameter or work refusal when it
+    /// wins before an observed cancellation.
+    pub fn span_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<KnotSpanRun, NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.span_search_work(),
+            "admitted knot-span evaluation",
+        )?;
+        self.inner
+            .span_after_validation_with_poll(t, || cx.checkpoint().is_err())
+    }
+
     fn span_after_preflight(&self, t: S) -> Result<usize, NurbsError> {
         self.inner.span_after_validation(t)
     }
@@ -914,6 +974,121 @@ mod tests {
                 "constant-time request validation must precede cancellation"
             );
         });
+    }
+
+    #[test]
+    fn admitted_span_cancellation_is_transactional_and_preserves_request_precedence() {
+        let knots = validation_cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        let legacy_error = admitted
+            .span(f64::NAN)
+            .expect_err("non-finite legacy parameter");
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .span_with_cx(0.5, cx)
+                    .expect("valid request reaches cancellation"),
+                KnotSpanRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .span_with_cx(f64::NAN, cx)
+                    .expect_err("parameter refusal must beat cancellation"),
+                legacy_error
+            );
+        });
+    }
+
+    #[test]
+    fn admitted_span_with_cx_matches_legacy_for_float_and_exact_scalars() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.25, 0.75, 1.0, 1.0, 1.0], 2)
+            .expect("quadratic multispan knots");
+        let admitted = knots.admit().expect("admitted float fixture");
+
+        let exact_knots = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 4),
+                Rat::new(3, 4),
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("exact quadratic multispan knots");
+        let exact_admitted = exact_knots.admit().expect("admitted exact fixture");
+
+        with_basis_cx(false, |cx| {
+            for parameter in [0.6, 1.0] {
+                assert_eq!(
+                    admitted
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable float span"),
+                    KnotSpanRun::Complete {
+                        span: admitted.span(parameter).expect("legacy float span"),
+                    }
+                );
+            }
+            for parameter in [Rat::new(3, 5), Rat::int(1)] {
+                assert_eq!(
+                    exact_admitted
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable exact span"),
+                    KnotSpanRun::Complete {
+                        span: exact_admitted.span(parameter).expect("legacy exact span"),
+                    }
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn admitted_span_cancellation_replays_inside_forward_search() {
+        let knots = validation_cancellation_fixture();
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = knots
+                .span_after_validation_with_poll(0.5, || {
+                    polls += 1;
+                    polls == 2
+                })
+                .expect("valid span request");
+            (outcome, polls)
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first, (KnotSpanRun::Cancelled, 2));
+    }
+
+    #[test]
+    fn admitted_span_final_checkpoint_gates_publication() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let admitted = knots.admit().expect("admitted line knots");
+        let mut total_polls = 0usize;
+        let complete = admitted
+            .inner
+            .span_after_validation_with_poll(0.5, || {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy span lookup");
+        assert_eq!(complete, KnotSpanRun::Complete { span: 1 });
+        assert_eq!(total_polls, 2);
+
+        let mut replay_polls = 0usize;
+        let cancelled = admitted
+            .inner
+            .span_after_validation_with_poll(0.5, || {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("final-checkpoint cancellation");
+        assert_eq!(cancelled, KnotSpanRun::Cancelled);
+        assert_eq!(replay_polls, total_polls);
     }
 
     #[test]

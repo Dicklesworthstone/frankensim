@@ -39,6 +39,8 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   `KnotVector::admit_with_cx` returns `KnotAdmissionRun` and publishes the
   lifetime-bound admitted authority only after every validation pass and its
   final checkpoint complete.
+  `AdmittedKnotVector::span_with_cx` returns transactional `KnotSpanRun` state:
+  the complete scalar span index or cancellation with no published index.
   `AdmittedKnotVector::basis_with_cx` returns transactional `BasisRun` state:
   complete span/values or cancellation with no partial row.
 - `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation in dimensions 0–3;
@@ -210,7 +212,13 @@ limits. Direct `KnotVector` domain/span/basis admission charges live-knot
 validation, worst-case span search, and Cox–de Boor triangular degree work
 before allocating or iterating. Borrowed admitted knot, curve, and surface
 views make repeated source validation unnecessary for basis, evaluation,
-partials, and span boxes. The admitted-only `basis_with_cx` path preserves
+partials, and span boxes. The admitted-only `span_with_cx` path preserves
+checked work-refusal then parameter-refusal precedence, polls the directional
+linear search after at most 64 span steps, and gates final index publication.
+It allocates no payload and does not claim owning admission, wall-time
+preemption, caller-budget consumption, or executor drain/finalize authority;
+individual generic-scalar comparisons remain non-preemptible. The admitted-only
+`basis_with_cx` path preserves
 constant-time parameter/work-refusal precedence, polls before allocation and
 publication plus every 64 logical span/initialization/triangle/finite-check
 operations, and drops all scratch on `BasisRun::Cancelled`. It deliberately
