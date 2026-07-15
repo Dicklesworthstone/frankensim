@@ -18,7 +18,7 @@ stiffness curves vs literature) are recorded successors.
 - `homogenize::Homogenizer::effective` → `EffectiveTensor` (Voigt
   3×3 + density): u = E·x + u_per split, cell stiffness from the
   fs-solid hyper2d tangent at u = 0 (exact linearization), PERIODIC
-  master–slave reduction on the structured mesh's exact opposite-edge
+  representative-node reduction on the structured mesh's exact opposite-edge
   correspondence (corners fold to one pinned node), effective tensor
   by energy averages over the three unit-strain cell problems.
   Microstructure enters as a per-element stiffness contrast

@@ -8,6 +8,7 @@
 //! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections.
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
+//! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
 //! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
@@ -993,6 +994,133 @@ fn check_powi(root: &Path) -> Vec<Violation> {
         }
     }
     violations
+}
+
+// ---------------------------------------------------------------------------
+// Sole-branch terminology policy (bead sj31i.54). The prohibited token is
+// assembled from fragments so this guard and its mutation fixtures do not
+// exempt themselves from the same tracked-source scan they enforce.
+// ---------------------------------------------------------------------------
+
+const TERMINOLOGY_CHECK: &str = "branch-terminology";
+const TERMINOLOGY_ALLOWLIST_VERSION: u32 = 1;
+
+fn legacy_branch_word() -> String {
+    ["mas", "ter"].concat()
+}
+
+fn terminology_policy_line_is_allowlisted(path: &str, line: &str, word: &str) -> bool {
+    if path != "AGENTS.md" {
+        return false;
+    }
+    [
+        format!("## Git Branch: ONLY Use `main`, NEVER `{word}`"),
+        format!("- Never reference `{word}` in code or docs. If you see it, treat it as a bug."),
+        format!("- If the remote also needs a legacy `{word}` ref, synchronize it from `main`"),
+    ]
+    .iter()
+    .any(|allowed| line == allowed)
+}
+
+fn scan_terminology_sources(sources: &BTreeMap<String, String>) -> Vec<Violation> {
+    let word = legacy_branch_word();
+    let needle = word.to_ascii_lowercase();
+    let mut violations = Vec::new();
+    for (path, source) in sources {
+        for (line_index, line) in source.lines().enumerate() {
+            if line.to_ascii_lowercase().contains(&needle)
+                && !terminology_policy_line_is_allowlisted(path, line, &word)
+            {
+                violations.push(Violation {
+                    check: TERMINOLOGY_CHECK,
+                    crate_name: path.clone(),
+                    detail: format!(
+                        "{path}:{}: prohibited legacy branch term {word:?}; use main for the branch, root/study for seeds, or representative/constrained for domain reductions (allowlist v{TERMINOLOGY_ALLOWLIST_VERSION})",
+                        line_index + 1
+                    ),
+                });
+            }
+        }
+    }
+    violations
+}
+
+fn terminology_scans_path(path: &str) -> bool {
+    if path.starts_with(".beads/") {
+        return false;
+    }
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension,
+                "c" | "cc"
+                    | "cpp"
+                    | "h"
+                    | "hpp"
+                    | "js"
+                    | "json"
+                    | "jsonl"
+                    | "lean"
+                    | "md"
+                    | "py"
+                    | "rs"
+                    | "sh"
+                    | "toml"
+                    | "ts"
+                    | "txt"
+                    | "yaml"
+                    | "yml"
+            )
+        })
+}
+
+fn tracked_terminology_sources(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("cannot inventory tracked files: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if !output.stdout.is_empty() && !output.stdout.ends_with(&[0]) {
+        return Err("git ls-files inventory is not NUL-terminated".to_string());
+    }
+
+    let mut sources = BTreeMap::new();
+    for raw_path in output.stdout.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        let path = std::str::from_utf8(raw_path)
+            .map_err(|_| "git ls-files emitted a non-UTF-8 path".to_string())?;
+        if !terminology_scans_path(path) {
+            continue;
+        }
+        let bytes = std::fs::read(root.join(path))
+            .map_err(|error| format!("cannot read tracked source {path:?}: {error}"))?;
+        let source = String::from_utf8(bytes)
+            .map_err(|_| format!("tracked source {path:?} is not valid UTF-8"))?;
+        sources.insert(path.to_string(), source);
+    }
+    Ok(sources)
+}
+
+fn check_terminology(root: &Path) -> Vec<Violation> {
+    match tracked_terminology_sources(root) {
+        Ok(sources) => scan_terminology_sources(&sources),
+        Err(detail) => vec![Violation {
+            check: TERMINOLOGY_CHECK,
+            crate_name: "<repo>".to_string(),
+            detail,
+        }],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2923,6 +3051,7 @@ fn main() -> ExitCode {
         "check-contracts" => (check_contracts(&manifests), vec!["contracts"]),
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
+        "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
         "check-identities" => (
             identities::check_identities(&root),
@@ -2942,6 +3071,7 @@ fn main() -> ExitCode {
             v.extend(check_contracts(&manifests));
             v.extend(check_unsafe(&root));
             v.extend(check_powi(&root));
+            v.extend(check_terminology(&root));
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
             let manifest_report = manifest_fixture::check_manifest_fixture(&root);
@@ -2958,6 +3088,7 @@ fn main() -> ExitCode {
                     "contracts",
                     "unsafe-capsules",
                     "powi-determinism",
+                    TERMINOLOGY_CHECK,
                     "golden-couplings",
                     "semantic-identities",
                     "manifest-fixture",
@@ -2970,7 +3101,7 @@ fn main() -> ExitCode {
         other => {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
-                 check-unsafe|check-powi|check-goldens|check-claims|check-closures|\
+                 check-unsafe|check-powi|check-terminology|check-goldens|check-claims|check-closures|\
                  check-identities|check-manifest-fixture|check-citable-producers|check-all|generate-identities|\
                  lock-constellation|check-constellation"
             );
@@ -3375,6 +3506,79 @@ mod tests {
         assert!(!contains_unsafe_token(
             "let unsafety = 1; let not_unsafe_thing = 2;"
         ));
+    }
+
+    #[test]
+    fn terminology_scanner_has_an_exact_policy_allowlist_and_mutation_coverage() {
+        let word = legacy_branch_word();
+        let title_case = format!("{}{}", word[..1].to_ascii_uppercase(), &word[1..]);
+        let upper_case = word.to_ascii_uppercase();
+        let mut clean = BTreeMap::from([
+            (
+                "AGENTS.md".to_string(),
+                format!(
+                    "## Git Branch: ONLY Use `main`, NEVER `{word}`\n- Never reference `{word}` in code or docs. If you see it, treat it as a bug.\n- If the remote also needs a legacy `{word}` ref, synchronize it from `main`\n"
+                ),
+            ),
+            (
+                "docs/domain.md".to_string(),
+                "The main manifold uses one primary representative and a root seed.\n".to_string(),
+            ),
+        ]);
+        assert!(
+            scan_terminology_sources(&clean).is_empty(),
+            "the exact controlling policy lines and unrelated domain vocabulary are allowed"
+        );
+
+        clean.insert(
+            "crates/a/src/lib.rs".to_string(),
+            format!("let {word} = representative;\n"),
+        );
+        clean.insert("docs/b.md".to_string(), format!("{title_case} seed.\n"));
+        clean.insert("scripts/c.sh".to_string(), format!("role={upper_case}\n"));
+        let violations = scan_terminology_sources(&clean);
+        assert_eq!(violations.len(), 3, "each spelling class must trip once");
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.crate_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["crates/a/src/lib.rs", "docs/b.md", "scripts/c.sh"]
+        );
+        assert!(violations.iter().all(|violation| {
+            violation.detail.contains("allowlist v1") && violation.detail.contains(":1:")
+        }));
+
+        let near_miss = BTreeMap::from([(
+            "AGENTS.md".to_string(),
+            format!("- Never reference `{word}` in generated docs.\n"),
+        )]);
+        assert_eq!(
+            scan_terminology_sources(&near_miss).len(),
+            1,
+            "the AGENTS path does not broadly exempt non-policy occurrences"
+        );
+    }
+
+    #[test]
+    fn terminology_path_scope_excludes_issue_storage_but_includes_source_and_docs() {
+        assert!(!terminology_scans_path(".beads/issues.jsonl"));
+        assert!(terminology_scans_path("AGENTS.md"));
+        assert!(terminology_scans_path("crates/demo/src/lib.rs"));
+        assert!(terminology_scans_path("scripts/ci/check.sh"));
+        assert!(!terminology_scans_path("assets/plot.png"));
+    }
+
+    #[test]
+    fn terminology_check_is_clean_on_the_real_workspace_tree() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask lives below the workspace root");
+        let violations = check_terminology(root);
+        assert!(
+            violations.is_empty(),
+            "tracked source/docs must satisfy the sole-branch vocabulary policy: {violations:?}"
+        );
     }
 
     #[test]

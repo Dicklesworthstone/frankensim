@@ -3,7 +3,7 @@
 //! Displacements split as u = E·x + u_per with u_per PERIODIC; the
 //! cell stiffness comes from the fs-solid hyper2d tangent at u = 0
 //! (exact linearization — no separate linear-elastic assembly to
-//! drift), the periodic constraint is a master–slave reduction on the
+//! drift), the periodic constraint is a representative-node reduction on the
 //! structured mesh's exact opposite-edge node correspondence, and the
 //! effective tensor is the energy average
 //! C_hom[i][j] = (1/|Y|)·(E_i·x + χ_i)ᵀ K (E_j·x + χ_j).
@@ -179,22 +179,23 @@ impl Homogenizer {
                 }
             }
         }
-        // Periodic master–slave: right edge → left edge, top → bottom;
-        // corners all collapse to node 0. Map node → master node.
-        let mut master: Vec<usize> = (0..nn * nn).collect();
+        // Periodic representative reduction: right edge → left edge, top →
+        // bottom; corners all collapse to node 0. Map each node to its
+        // retained representative.
+        let mut representative: Vec<usize> = (0..nn * nn).collect();
         for j in 0..nn {
-            master[j * nn + n] = j * nn; // right → left
+            representative[j * nn + n] = j * nn; // right → left
         }
         for i in 0..nn {
-            master[n * nn + i] = master[i]; // top → bottom (post left-fold)
+            representative[n * nn + i] = representative[i]; // top → bottom (post left-fold)
         }
-        // Reduced dof indexing over master nodes, minus rigid modes:
+        // Reduced dof indexing over representative nodes, minus rigid modes:
         // pin node 0 fully (translations; periodic + energy average is
         // rotation-free for the cell problems).
         let mut red_index = vec![usize::MAX; ndof];
         let mut nred = 0usize;
         for node in 0..nn * nn {
-            if master[node] == node && node != 0 {
+            if representative[node] == node && node != 0 {
                 red_index[2 * node] = nred;
                 red_index[2 * node + 1] = nred + 1;
                 nred += 2;
@@ -203,7 +204,7 @@ impl Homogenizer {
         let red_of = |dof: usize| -> usize {
             let node = dof / 2;
             let comp = dof % 2;
-            let m = master[node];
+            let m = representative[node];
             if m == 0 {
                 usize::MAX
             } else {

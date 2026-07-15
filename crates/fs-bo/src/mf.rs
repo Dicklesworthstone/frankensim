@@ -274,7 +274,7 @@ pub struct MfConfig {
     pub acq_starts: usize,
     /// Acquisition evaluations per restart.
     pub acq_evals: usize,
-    /// Master seed.
+    /// Root seed for all derived study streams.
     pub seed: u64,
 }
 

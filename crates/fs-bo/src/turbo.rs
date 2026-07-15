@@ -35,7 +35,7 @@ pub struct TurboConfig {
     pub succ_tol: usize,
     /// Failures before halving.
     pub fail_tol: usize,
-    /// Master seed.
+    /// Root seed for all derived study streams.
     pub seed: u64,
     /// Local-data cap: the GP trains on at most this many points
     /// nearest the region center (O(n³) inference — unbounded local

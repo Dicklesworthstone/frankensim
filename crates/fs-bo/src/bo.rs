@@ -27,7 +27,7 @@ pub struct BoConfig {
     pub q: usize,
     /// MC samples for q-EI.
     pub mc_samples: usize,
-    /// Master seed.
+    /// Root seed for all derived study streams.
     pub seed: u64,
 }
 

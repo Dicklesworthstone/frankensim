@@ -1685,7 +1685,7 @@ mod tests {
             build_terminal_expansions(&nodes, &constraints).expect("valid midpoint transform");
         let selected = BTreeSet::from([(0, 0), (1, 0)]);
         let error = clamp_terminal_blocks(&node_ids, Some(&expansions), &selected)
-            .expect_err("one unclamped master must refuse");
+            .expect_err("one unclamped representative must refuse");
         assert!(
             matches!(&error, CutFemError::InvalidElasticityInput { what } if what.contains("not all clamped")),
             "unexpected refusal: {error}"

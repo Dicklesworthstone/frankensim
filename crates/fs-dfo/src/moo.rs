@@ -178,7 +178,7 @@ pub struct NsgaParams {
     pub eta_m: f64,
     /// Per-variable mutation probability.
     pub p_mut: f64,
-    /// Master seed.
+    /// Root seed for all derived study streams.
     pub seed: u64,
 }
 
@@ -845,7 +845,7 @@ pub struct MoeadParams {
     pub eta_m: f64,
     /// Per-variable mutation probability.
     pub p_mut: f64,
-    /// Master seed.
+    /// Root seed for all derived study streams.
     pub seed: u64,
 }
 
