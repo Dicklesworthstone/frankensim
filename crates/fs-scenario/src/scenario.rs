@@ -486,6 +486,15 @@ impl Scenario {
         &self,
         budget: ValidationBudget,
     ) -> Result<ValidationPlan, ValidationError> {
+        let mut checkpoint = |_: &'static str| Ok(());
+        self.validation_plan_with_checkpoint(budget, &mut checkpoint)
+    }
+
+    fn validation_plan_with_checkpoint(
+        &self,
+        budget: ValidationBudget,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
+    ) -> Result<ValidationPlan, ValidationError> {
         let frames = self.frames.frames.len();
         let base_bcs = self.base_bcs.len();
         let cases = self.cases.len();
@@ -498,6 +507,7 @@ impl Scenario {
         enforce_limit("combinations", combinations, budget.max_combinations)?;
         enforce_limit("ensembles", ensembles, budget.max_ensembles)?;
         enforce_limit("contacts", contacts, budget.max_contacts)?;
+        checkpoint("preflight collection caps")?;
 
         let mut case_bcs = 0usize;
         for case in &self.cases {
@@ -506,6 +516,7 @@ impl Scenario {
                 case.bcs.len(),
                 "case boundary-condition count",
             )?;
+            checkpoint("preflight case boundary counts")?;
         }
         enforce_limit("case boundary conditions", case_bcs, budget.max_case_bcs)?;
 
@@ -516,6 +527,7 @@ impl Scenario {
                 combination.terms.len(),
                 "combination term count",
             )?;
+            checkpoint("preflight combination term counts")?;
         }
         enforce_limit(
             "combination terms",
@@ -542,6 +554,7 @@ impl Scenario {
                     "frame signal scalar count",
                 )?;
             }
+            checkpoint("preflight frames")?;
         }
 
         let mut base_flux_checkpoint_contribution = 0usize;
@@ -561,6 +574,7 @@ impl Scenario {
                 bc_flux_checkpoints(bc),
                 "base flux checkpoints",
             )?;
+            checkpoint("preflight base boundary conditions")?;
         }
         for case in &self.cases {
             checked_count_add(&mut identity_bytes, case.name.len(), "case identity bytes")?;
@@ -575,7 +589,9 @@ impl Scenario {
                     bc_dynamic_scalars(bc)?,
                     "case boundary signal scalars",
                 )?;
+                checkpoint("preflight case boundary conditions")?;
             }
+            checkpoint("preflight load cases")?;
         }
         for combination in &self.combinations {
             checked_count_add(
@@ -589,7 +605,9 @@ impl Scenario {
                     case.len(),
                     "combination reference bytes",
                 )?;
+                checkpoint("preflight combination terms")?;
             }
+            checkpoint("preflight combinations")?;
         }
         for ensemble in &self.ensembles {
             checked_count_add(
@@ -597,6 +615,7 @@ impl Scenario {
                 ensemble.name.len(),
                 "ensemble identity bytes",
             )?;
+            checkpoint("preflight ensembles")?;
         }
         for contact in &self.contacts {
             checked_count_add(
@@ -609,6 +628,7 @@ impl Scenario {
                 contact.region_b.len(),
                 "contact identity bytes",
             )?;
+            checkpoint("preflight contacts")?;
         }
         enforce_limit("signal scalars", signal_scalars, budget.max_signal_scalars)?;
         enforce_limit("identity bytes", identity_bytes, budget.max_identity_bytes)?;
@@ -633,6 +653,7 @@ impl Scenario {
                     bc_flux_checkpoints(bc),
                     "case flux checkpoints",
                 )?;
+                checkpoint("preflight case flux checkpoints")?;
             }
             let set_checkpoints = 1usize
                 .checked_add(base_flux_checkpoint_contribution)
@@ -662,6 +683,7 @@ impl Scenario {
                 checked_work_product(set_checkpoints, set_bcs, "case flux evaluation work")?,
                 "total flux evaluation work",
             )?;
+            checkpoint("preflight case flux sets")?;
         }
         enforce_limit(
             "flux checkpoints",
@@ -728,7 +750,6 @@ impl Scenario {
                 limit: budget.max_work,
             });
         }
-
         Ok(ValidationPlan {
             frames,
             base_bcs,
@@ -778,7 +799,14 @@ impl Scenario {
             completed: 0,
             planned: 0,
         })?;
-        let plan = self.validation_plan(budget)?;
+        let mut preflight_checkpoint = |phase: &'static str| {
+            cx.checkpoint().map_err(|_| ValidationError::Cancelled {
+                phase,
+                completed: 0,
+                planned: 0,
+            })
+        };
+        let plan = self.validation_plan_with_checkpoint(budget, &mut preflight_checkpoint)?;
         cx.checkpoint().map_err(|_| ValidationError::Cancelled {
             phase: "post-preflight",
             completed: 0,
@@ -1162,7 +1190,8 @@ impl Scenario {
 #[cfg(test)]
 mod validation_internal_tests {
     use super::{
-        Environment, Scenario, ValidationBudget, ValidationError, reserve_validation_times,
+        Environment, LoadCase, Scenario, ValidationBudget, ValidationError,
+        reserve_validation_times,
     };
 
     #[test]
@@ -1206,5 +1235,44 @@ mod validation_internal_tests {
             }) if planned == plan.planned_work
         ));
         assert_eq!(visited, ["scenario identity", "environment"]);
+    }
+
+    #[test]
+    fn injected_preflight_cancellation_refuses_the_plan() {
+        let mut scenario = Scenario::new("preflight-cancel", 1, Environment::earth_lab());
+        scenario.cases.push(LoadCase {
+            name: "load".to_string(),
+            bcs: Vec::new(),
+        });
+        let mut visited = Vec::new();
+        let result =
+            scenario.validation_plan_with_checkpoint(ValidationBudget::default(), &mut |phase| {
+                visited.push(phase);
+                if phase == "preflight case boundary counts" {
+                    Err(ValidationError::Cancelled {
+                        phase,
+                        completed: 0,
+                        planned: 0,
+                    })
+                } else {
+                    Ok(())
+                }
+            });
+
+        assert!(matches!(
+            result,
+            Err(ValidationError::Cancelled {
+                phase: "preflight case boundary counts",
+                completed: 0,
+                planned: 0,
+            })
+        ));
+        assert_eq!(
+            visited,
+            [
+                "preflight collection caps",
+                "preflight case boundary counts"
+            ]
+        );
     }
 }

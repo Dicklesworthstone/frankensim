@@ -185,7 +185,8 @@ without materializing a vector for every effective set; its exact raw
 checkpoint capacity is fallibly reserved before append/sort. Its
 identity/reference phase uses deterministic O(N log N) indexes and its
 frame-cycle traversal is linear after indexing. The explicit `Cx` lane polls
-before preflight, after planning, after fixed phases, at every frame-index row,
+before preflight, at every top-level and nested record visited while constructing
+the semantic plan, after planning, after fixed phases, at every frame-index row,
 frame-cycle traversal/finalization step, and frame validation row, at
 BC/case/combination term/ensemble/contact boundaries, before and after each
 net-flux provider evaluation, at every tabulated signal scalar and Chebyshev
@@ -249,6 +250,8 @@ None.
 - A deterministic injected-checkpoint regression cancels at the environment
   phase and proves the private finding buffer is not returned; the public `Cx`
   path uses the same checkpoint route.
+- A deterministic injected preflight regression cancels while counting nested
+  case boundary conditions and proves no semantic plan is published.
 - A focused frame regression injects cancellation inside the tri-color cycle
   walk and proves frame findings remain private at that boundary.
 - A focused table-signal regression proves the checkpointed scalar traversal
