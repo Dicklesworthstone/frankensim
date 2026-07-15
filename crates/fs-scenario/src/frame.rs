@@ -291,7 +291,11 @@ impl FrameTree {
         Ok(pose)
     }
 
-    fn validation_cycle_flags(&self, first_by_id: &BTreeMap<u32, usize>) -> Vec<bool> {
+    fn validation_cycle_flags<E>(
+        &self,
+        first_by_id: &BTreeMap<u32, usize>,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), E>,
+    ) -> Result<Vec<bool>, E> {
         // Each frame has at most one parent, so a tri-color walk visits every
         // storage row at most once. Nodes leading into a cycle are marked too:
         // their parent chain also never reaches WORLD.
@@ -299,12 +303,14 @@ impl FrameTree {
         let mut reaches_cycle = vec![false; self.frames.len()];
         let mut path = Vec::new();
         for start in 0..self.frames.len() {
+            checkpoint("frame cycle start")?;
             if state[start] != 0 {
                 continue;
             }
             path.clear();
             let mut current = Some(start);
             let cyclic = loop {
+                checkpoint("frame cycle traversal")?;
                 let Some(index) = current else {
                     break false;
                 };
@@ -325,11 +331,12 @@ impl FrameTree {
                 }
             };
             for index in path.drain(..).rev() {
+                checkpoint("frame cycle finalization")?;
                 reaches_cycle[index] = cyclic;
                 state[index] = 2;
             }
         }
-        reaches_cycle
+        Ok(reaches_cycle)
     }
 
     /// Structural validation: nonempty unique names, unique nonzero ids,
@@ -338,15 +345,29 @@ impl FrameTree {
     /// Identity lookup is indexed once and cycle detection is a tri-color
     /// parent walk, avoiding the former repeated linear scans per chain.
     pub fn check(&self, out: &mut Vec<Violation>) {
+        let mut checkpoint = |_: &'static str| Ok::<(), core::convert::Infallible>(());
+        match self.check_with_checkpoint(out, &mut checkpoint) {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    pub(crate) fn check_with_checkpoint<E>(
+        &self,
+        out: &mut Vec<Violation>,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), E>,
+    ) -> Result<(), E> {
         let mut first_by_id = BTreeMap::new();
         let mut first_by_name = BTreeMap::new();
         for (index, frame) in self.frames.iter().enumerate() {
+            checkpoint("frame index")?;
             first_by_id.entry(frame.id.0).or_insert(index);
             first_by_name.entry(frame.name.as_str()).or_insert(index);
         }
-        let reaches_cycle = self.validation_cycle_flags(&first_by_id);
+        let reaches_cycle = self.validation_cycle_flags(&first_by_id, checkpoint)?;
 
         for (i, f) in self.frames.iter().enumerate() {
+            checkpoint("frame validation")?;
             let ctx = format!("frame {:?}", f.name);
             if f.id == WORLD {
                 out.push(Violation {
@@ -447,7 +468,9 @@ impl FrameTree {
                     fix: "break the cycle so every chain terminates at frame 0".to_string(),
                 });
             }
+            checkpoint("frame validation")?;
         }
+        Ok(())
     }
 }
 
@@ -482,5 +505,53 @@ fn dims_violation(ctx: &str, quantity: &str, expected: Dims, got: Dims) -> Viola
             got.0, expected.0
         ),
         fix: format!("express the {quantity} in coherent SI units"),
+    }
+}
+
+#[cfg(test)]
+mod validation_internal_tests {
+    use super::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
+    use fs_ga::{Quat, Vec3};
+
+    fn fixed_frame(id: u32, parent: FrameId) -> Frame {
+        Frame {
+            id: FrameId(id),
+            name: format!("frame-{id}"),
+            parent,
+            motion: FrameMotion::Fixed {
+                orientation: Quat::identity(),
+                translation: Vec3::new(0.0, 0.0, 0.0),
+            },
+        }
+    }
+
+    #[test]
+    fn injected_cancellation_reaches_the_frame_cycle_walk() {
+        let mut tree = FrameTree::new();
+        tree.add(fixed_frame(1, WORLD));
+        tree.add(fixed_frame(2, FrameId(1)));
+        let mut findings = Vec::new();
+        let mut visited = Vec::new();
+
+        let result = tree.check_with_checkpoint(&mut findings, &mut |phase| {
+            visited.push(phase);
+            if phase == "frame cycle traversal" {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(result, Err("cancelled"));
+        assert!(findings.is_empty());
+        assert_eq!(
+            visited,
+            [
+                "frame index",
+                "frame index",
+                "frame cycle start",
+                "frame cycle traversal",
+            ]
+        );
     }
 }

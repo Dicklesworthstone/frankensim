@@ -815,7 +815,7 @@ impl Scenario {
         checkpoint("scenario identity")?;
         self.environment.check(&mut out);
         checkpoint("environment")?;
-        self.frames.check(&mut out);
+        self.frames.check_with_checkpoint(&mut out, checkpoint)?;
         checkpoint("frames")?;
         let frame_ids: BTreeSet<u32> = self.frames.frames.iter().map(|frame| frame.id.0).collect();
         for bc in &self.base_bcs {
