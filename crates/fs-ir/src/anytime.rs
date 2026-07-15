@@ -18,6 +18,7 @@ use crate::planner::{
     validate_finite, validate_positive_finite, validate_rung_cells,
 };
 use fs_evidence::Color;
+use fs_verify::estimator::VerifierReceipt;
 
 /// Maximum entries in one operational budget ladder.
 pub const MAX_BUDGET_RUNGS: usize = 4_096;
@@ -44,9 +45,13 @@ pub struct IntervalStep {
     /// are VERIFIED; the operator always knows what they hold).
     pub color: Color,
     /// Stable family of the verifier that minted `color`.
-    pub verifier_family: &'static str,
+    pub verifier_family: String,
     /// Reconstructed-flux identity bound to the verifier certificate.
     pub flux_hash: u64,
+    /// Immutable receipt emitted by the exact verification run behind this
+    /// interval. This is cloned from the retained planner certificate; the
+    /// anytime layer never reconstructs or re-mints verifier authority.
+    pub verifier_receipt: VerifierReceipt,
     /// The "what would tighten this" hint, priced.
     pub hint: String,
     /// True when the query discharged at this budget.
@@ -365,8 +370,9 @@ where
             spent,
             bound,
             color: certificate.color().clone(),
-            verifier_family: certificate.verifier_family(),
+            verifier_family: certificate.verifier_family().to_string(),
             flux_hash: certificate.flux_hash(),
+            verifier_receipt: certificate.receipt().clone(),
             hint: tighten_hint(bound, self.tolerance, spent, costs, hot_region_of(mesh))?,
             discharged,
         });
@@ -520,4 +526,71 @@ fn hot_region_of(mesh: &[f64]) -> Option<(f64, f64)> {
         }
     }
     (lo < hi).then_some((lo, hi))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnytimeControl, AnytimeDriver};
+    use crate::planner::{CostTable, MemCache, PlanOutcome, ProblemFamily, plan};
+    use fs_verify::fem1d::Poly;
+
+    #[test]
+    fn interval_step_retains_original_verifier_receipt() {
+        let family = ProblemFamily::new(
+            Poly::new(vec![0.0, 0.2, -0.2, 0.0, 1.0, -1.0])
+                .expect("valid receipt-propagation polynomial"),
+            "receipt-propagation",
+        )
+        .expect("valid receipt-propagation family");
+        let tolerance = 0.05;
+        let mut costs = CostTable::new(200.0).expect("valid cold cost");
+        let outcome = plan(
+            &family,
+            1.0,
+            tolerance,
+            2_000.0,
+            &[12, 24, 48, 96],
+            &mut MemCache::default(),
+            &mut costs,
+        )
+        .expect("receipt-propagation plan");
+        let (certificate, mesh, spent) = match &outcome {
+            PlanOutcome::Discharged {
+                certificate,
+                mesh,
+                cost,
+                ..
+            } => (certificate, mesh.as_slice(), *cost),
+            PlanOutcome::RefusedWithBest {
+                best_certificate,
+                best_mesh,
+                cost,
+                ..
+            } => (best_certificate, best_mesh.as_slice(), *cost),
+            PlanOutcome::RefusedWithoutAnswer { reason, .. } => {
+                panic!("the propagation fixture must produce a receipt: {reason}")
+            }
+        };
+
+        let budgets = [spent];
+        let mut driver = AnytimeDriver::new(&budgets, tolerance, |_| AnytimeControl::Continue)
+            .expect("valid receipt-propagation driver");
+        driver
+            .emit(spent, certificate, mesh, &costs)
+            .expect("emit retained verifier receipt");
+        let step = driver
+            .trajectory
+            .first()
+            .expect("one retained interval step");
+
+        assert_eq!(&step.verifier_receipt, certificate.receipt());
+        assert_eq!(
+            step.verifier_receipt.artifact_root(),
+            certificate.receipt().artifact_root()
+        );
+        assert_eq!(
+            step.verifier_receipt.candidate_root(),
+            certificate.receipt().candidate_root()
+        );
+    }
 }

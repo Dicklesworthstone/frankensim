@@ -10,10 +10,12 @@
 //! enclosures FAIL CLOSED as structured refusals: no color, ever.
 
 use crate::fem1d::{
-    Fem1dError, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS, MmsProblem, gauss5,
-    require_converged, true_energy_error, try_zeroed, validate_candidate, validate_problem,
+    Fem1dError, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS, MMS_PROBLEM_IDENTITY_VERSION,
+    MmsProblem, gauss5, require_converged, true_energy_error, try_zeroed, validate_candidate,
+    validate_problem,
 };
 use crate::interval::Iv;
+use fs_blake3::{Blake3, ContentHash, hash_domain};
 use fs_evidence::Color;
 use std::fmt::Write as _;
 
@@ -27,6 +29,64 @@ pub const VERIFIER_WORK_PLAN_VERSION: u32 = 1;
 pub const VERIFIER_POLL_POLICY_VERSION: u32 = 1;
 /// Maximum completed logical work between verifier work-boundary callbacks.
 pub const VERIFIER_POLL_STRIDE_WORK_UNITS: u128 = 256;
+/// Semantic version of the candidate-bound reconstructed-flux identity.
+pub const VERIFIER_FLUX_IDENTITY_VERSION: u32 = 2;
+/// Semantic schema for production verifier receipts.
+pub const VERIFIER_RECEIPT_SCHEMA_VERSION: u32 = 1;
+/// Exact theorem implemented by the production verifier receipt.
+pub const VERIFIER_RECEIPT_THEOREM: &str = "prager-synge/equilibrated-flux/elliptic-1d/v1";
+/// Exact outward-rounded arithmetic policy implemented by the verifier.
+pub const VERIFIER_RECEIPT_ARITHMETIC: &str = "outward-rounded-f64-interval/gauss5-enclosed/v1";
+/// Exact operator named by the verifier receipt.
+pub const VERIFIER_RECEIPT_OPERATOR: &str = "poisson-1d/homogeneous-dirichlet/p1/v1";
+/// Exact quantity certified by this verifier.
+pub const VERIFIER_RECEIPT_QOI: &str = "fem1d-energy-error";
+/// Semantic units of [`VERIFIER_RECEIPT_QOI`].
+pub const VERIFIER_RECEIPT_UNITS: &str = "energy-norm";
+
+const VERIFIER_RECEIPT_HASH_DOMAIN: &str = "fs-verify:verifier-receipt:v1";
+const VERIFIER_RECEIPT_MAGIC: &[u8; 8] = b"FSVRCP01";
+const MAX_VERIFIER_RECEIPT_CANONICAL_BYTES: usize = 16 * 1024;
+const MAX_VERIFIER_RECEIPT_STRING_BYTES: usize = 1024;
+const MAX_VERIFIER_RECEIPT_HYPOTHESES: usize = 16;
+const VERIFIER_RECEIPT_HYPOTHESES: [&str; 4] = [
+    "canonical degree-at-most-five manufactured class",
+    "homogeneous Dirichlet endpoints",
+    "finite strictly increasing mesh over [0,1]",
+    "equilibrated flux has exact derivative minus forcing",
+];
+
+/// Owner-local verifier-receipt identity declaration consumed by
+/// `xtask check-identities`.
+#[allow(dead_code)]
+pub const VERIFIER_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-verify:verifier-receipt",
+    "version_const=VERIFIER_RECEIPT_SCHEMA_VERSION",
+    "version=1",
+    "domain=fs-verify:verifier-receipt:v1",
+    "domain_const=VERIFIER_RECEIPT_HASH_DOMAIN",
+    "encoder=VerifierReceipt::calculated_artifact_root",
+    "encoder_helpers=VerifierReceipt::canonical_bytes_inner,receipt_push,receipt_push_string,receipt_push_hash,receipt_phase_tag,receipt_checkpoint_tag",
+    "schema_constants=VERIFIER_RECEIPT_SCHEMA_VERSION,VERIFIER_RECEIPT_HASH_DOMAIN,VERIFIER_RECEIPT_MAGIC,MAX_VERIFIER_RECEIPT_CANONICAL_BYTES,MAX_VERIFIER_RECEIPT_STRING_BYTES,MAX_VERIFIER_RECEIPT_HYPOTHESES",
+    "schema_functions=VerifierReceipt::from_successful_report,VerifierProducerSourceIdentity::current,current_verifier_feature_set,source_set_root,framed_parts_root,f64_sequence_root,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-verify:fem1d-mms-problem",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=VerifierReceipt,VerifierProducerSourceIdentity",
+    "source_fields=VerifierReceipt.schema_version:semantic,VerifierReceipt.theorem:semantic,VerifierReceipt.producer:semantic,VerifierReceipt.problem_identity_version:semantic,VerifierReceipt.problem_root:semantic,VerifierReceipt.candidate_root:semantic,VerifierReceipt.mesh_root:semantic,VerifierReceipt.operator_root:semantic,VerifierReceipt.coefficient_root:semantic,VerifierReceipt.query_root:semantic,VerifierReceipt.qoi:semantic,VerifierReceipt.units:semantic,VerifierReceipt.flux_hash:semantic,VerifierReceipt.verifier_family:semantic,VerifierReceipt.arithmetic:semantic,VerifierReceipt.hypotheses:semantic,VerifierReceipt.bound_lo_bits:semantic,VerifierReceipt.bound_hi_bits:semantic,VerifierReceipt.tolerance_bits:semantic,VerifierReceipt.accepted:semantic,VerifierReceipt.work_plan:semantic,VerifierReceipt.observed_completed_work:semantic,VerifierReceipt.observed_planned_work:semantic,VerifierReceipt.final_phase:semantic,VerifierReceipt.final_checkpoint:semantic,VerifierReceipt.publication_observed:semantic,VerifierReceipt.artifact_root:derived:recomputed-from-canonical-fields,VerifierProducerSourceIdentity.crate_name:semantic,VerifierProducerSourceIdentity.crate_version:semantic,VerifierProducerSourceIdentity.features:semantic,VerifierProducerSourceIdentity.producer_source_root:semantic,VerifierProducerSourceIdentity.dependency_source_root:semantic,VerifierProducerSourceIdentity.workspace_manifest_root:semantic,VerifierProducerSourceIdentity.workspace_lock_root:semantic,VerifierProducerSourceIdentity.toolchain_root:semantic",
+    "source_bindings=VerifierReceipt.schema_version>schema-version,VerifierReceipt.theorem>theorem,VerifierReceipt.producer>producer-source-identity,VerifierReceipt.problem_identity_version>problem-identity-version,VerifierReceipt.problem_root>problem-root,VerifierReceipt.candidate_root>candidate-root,VerifierReceipt.mesh_root>mesh-root,VerifierReceipt.operator_root>operator-root,VerifierReceipt.coefficient_root>coefficient-root,VerifierReceipt.query_root>query-root,VerifierReceipt.qoi>qoi,VerifierReceipt.units>units,VerifierReceipt.flux_hash>flux-hash,VerifierReceipt.verifier_family>verifier-family,VerifierReceipt.arithmetic>arithmetic,VerifierReceipt.hypotheses>ordered-hypotheses,VerifierReceipt.bound_lo_bits>bound-lo-bits,VerifierReceipt.bound_hi_bits>bound-hi-bits,VerifierReceipt.tolerance_bits>tolerance-bits,VerifierReceipt.accepted>accepted,VerifierReceipt.work_plan>work-plan,VerifierReceipt.observed_completed_work>observed-completed-work,VerifierReceipt.observed_planned_work>observed-planned-work,VerifierReceipt.final_phase>final-phase,VerifierReceipt.final_checkpoint>final-checkpoint,VerifierReceipt.publication_observed>publication-observed,VerifierProducerSourceIdentity.crate_name>producer-crate,VerifierProducerSourceIdentity.crate_version>producer-version,VerifierProducerSourceIdentity.features>producer-features,VerifierProducerSourceIdentity.producer_source_root>producer-source-root,VerifierProducerSourceIdentity.dependency_source_root>dependency-source-root,VerifierProducerSourceIdentity.workspace_manifest_root>workspace-manifest-root,VerifierProducerSourceIdentity.workspace_lock_root>workspace-lock-root,VerifierProducerSourceIdentity.toolchain_root>toolchain-root",
+    "external_semantic_fields=canonical-magic,digest-domain",
+    "semantic_fields=canonical-magic,digest-domain,schema-version,theorem,producer-crate,producer-version,producer-features,producer-source-root,dependency-source-root,workspace-manifest-root,workspace-lock-root,toolchain-root,problem-identity-version,problem-root,candidate-root,mesh-root,operator-root,coefficient-root,query-root,qoi,units,flux-hash,verifier-family,arithmetic,ordered-hypotheses,bound-lo-bits,bound-hi-bits,tolerance-bits,accepted,work-plan,observed-completed-work,observed-planned-work,final-phase,final-checkpoint,publication-observed",
+    "excluded_fields=artifact-root:derived-recomputed-not-canonical-input,statement:derived-display-only,producer-label:derived-display-only,binary-artifact-identity:no-claim",
+    "consumers=VerifierReceipt::artifact_root,VerifierReceipt::from_retained_bytes,admit_verifier_receipt,fs-ir::planner::VerifierCertificate,fs-flywheel-e2e",
+    "mutations=canonical-magic:crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay,digest-domain:crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay,schema-version:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,theorem:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-crate:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-version:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-features:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,producer-source-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,dependency-source-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,workspace-manifest-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,workspace-lock-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,toolchain-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,problem-identity-version:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,problem-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,candidate-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,mesh-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,operator-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,coefficient-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,query-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,qoi:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,units:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,flux-hash:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,verifier-family:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,arithmetic:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,ordered-hypotheses:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,bound-lo-bits:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,bound-hi-bits:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,tolerance-bits:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,accepted:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,work-plan:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,observed-completed-work:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,observed-planned-work:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,final-phase:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,final-checkpoint:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,publication-observed:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay",
+    "nonsemantic_mutations=artifact-root:crates/fs-verify/src/estimator.rs#every_receipt_semantic_field_moves_root_and_fails_exact_replay,statement:crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay,producer-label:crates/fs-verify/src/estimator.rs#producer_identity_reports_the_exact_compiled_feature_set,binary-artifact-identity:crates/fs-verify/src/estimator.rs#producer_identity_reports_the_exact_compiled_feature_set",
+    "field_guard=classify_verifier_receipt_identity_fields",
+    "transport_guard=VerifierReceipt::from_retained_bytes",
+    "version_guard=crates/fs-verify/src/estimator.rs#production_receipt_retention_requires_independent_root_and_replay",
+    "coupling_surface=fs-verify:verifier-receipt",
+];
 
 /// One phase of the bounded equilibrated-flux verification workflow.
 #[non_exhaustive]
@@ -147,8 +207,13 @@ impl VerifierWorkPlan {
             .ok_or(VerifierRefusal::WorkPlanOverflow)?;
         let tightness_work_units = cells;
         let equilibrated_work_units = cells;
-        let hash_work_units = 3_u128
-            .checked_add(forcing_coefficients)
+        let hash_work_units = 7_u128
+            .checked_add(
+                mesh_nodes
+                    .checked_mul(2)
+                    .ok_or(VerifierRefusal::WorkPlanOverflow)?,
+            )
+            .and_then(|work| work.checked_add(forcing_coefficients))
             .and_then(|work| work.checked_add(antiderivative_coefficients))
             .ok_or(VerifierRefusal::WorkPlanOverflow)?;
         let finalization_work_units = 1;
@@ -404,6 +469,1080 @@ impl VerifierReport {
             family, self.flux_hash,
         );
         s
+    }
+}
+
+/// Collision-resistant address of one canonical production verifier receipt.
+///
+/// This is an fs-verify-owned nominal wrapper. A root authenticates bytes, not
+/// scientific authority; callers must still pass the decoded receipt through
+/// [`admit_verifier_receipt`] for an exact independent replay.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VerifierArtifactRoot(ContentHash);
+
+impl VerifierArtifactRoot {
+    /// Construct a presented root from exact retained bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(ContentHash(bytes))
+    }
+
+    /// Raw digest bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+
+    /// Lowercase hexadecimal transport.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        self.0.to_hex()
+    }
+
+    /// Workspace lower-layer digest value.
+    #[must_use]
+    pub const fn content_hash(self) -> ContentHash {
+        self.0
+    }
+}
+
+impl core::fmt::Display for VerifierArtifactRoot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl core::fmt::Debug for VerifierArtifactRoot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "VerifierArtifactRoot({self})")
+    }
+}
+
+/// Source-cone identity declared by the verifier producer.
+///
+/// This deliberately does not claim to be a binary attestation. It binds the
+/// exact in-tree manifests and source bytes for fs-verify plus its production
+/// fs-evidence/fs-obs/fs-blake3 dependency cone, along with workspace, lock,
+/// feature, and toolchain inputs. External artifact attestation remains a
+/// separate authority boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierProducerSourceIdentity {
+    crate_name: String,
+    crate_version: String,
+    features: String,
+    producer_source_root: ContentHash,
+    dependency_source_root: ContentHash,
+    workspace_manifest_root: ContentHash,
+    workspace_lock_root: ContentHash,
+    toolchain_root: ContentHash,
+}
+
+impl VerifierProducerSourceIdentity {
+    fn current() -> Result<Self, VerifierReceiptError> {
+        Ok(Self {
+            crate_name: try_owned("fs-verify")?,
+            crate_version: try_owned(crate::VERSION)?,
+            features: try_owned(current_verifier_feature_set())?,
+            producer_source_root: source_set_root(
+                "fs-verify/producer-source-cone/v1",
+                &[
+                    include_bytes!("../Cargo.toml"),
+                    include_bytes!("lib.rs"),
+                    include_bytes!("economics.rs"),
+                    include_bytes!("estimator.rs"),
+                    include_bytes!("fem1d.rs"),
+                    include_bytes!("interval.rs"),
+                    include_bytes!("zoo.rs"),
+                ],
+            ),
+            dependency_source_root: source_set_root(
+                "fs-verify/production-dependency-source-cone/v1",
+                &[
+                    include_bytes!("../../fs-evidence/Cargo.toml"),
+                    include_bytes!("../../fs-evidence/src/lib.rs"),
+                    include_bytes!("../../fs-evidence/src/admitted.rs"),
+                    include_bytes!("../../fs-evidence/src/cards.rs"),
+                    include_bytes!("../../fs-evidence/src/color.rs"),
+                    include_bytes!("../../fs-evidence/src/discrepancy.rs"),
+                    include_bytes!("../../fs-evidence/src/falsify.rs"),
+                    include_bytes!("../../fs-obs/Cargo.toml"),
+                    include_bytes!("../../fs-obs/src/lib.rs"),
+                    include_bytes!("../../fs-obs/src/ident.rs"),
+                    include_bytes!("../../fs-blake3/Cargo.toml"),
+                    include_bytes!("../../fs-blake3/src/lib.rs"),
+                    include_bytes!("../../fs-blake3/src/identity.rs"),
+                ],
+            ),
+            workspace_manifest_root: hash_domain(
+                "fs-verify:workspace-manifest:v1",
+                include_bytes!("../../../Cargo.toml"),
+            ),
+            workspace_lock_root: hash_domain(
+                "fs-verify:workspace-lock:v1",
+                include_bytes!("../../../Cargo.lock"),
+            ),
+            toolchain_root: hash_domain(
+                "fs-verify:toolchain:v1",
+                include_bytes!("../../../rust-toolchain.toml"),
+            ),
+        })
+    }
+
+    /// Producer crate name.
+    #[must_use]
+    pub fn crate_name(&self) -> &str {
+        &self.crate_name
+    }
+
+    /// Producer crate version.
+    #[must_use]
+    pub fn crate_version(&self) -> &str {
+        &self.crate_version
+    }
+
+    /// Exact enabled production feature set represented by the receipt API.
+    #[must_use]
+    pub fn features(&self) -> &str {
+        &self.features
+    }
+
+    /// Root of the fs-verify manifest and complete source tree.
+    #[must_use]
+    pub const fn producer_source_root(&self) -> ContentHash {
+        self.producer_source_root
+    }
+
+    /// Root of the complete production dependency source cone.
+    #[must_use]
+    pub const fn dependency_source_root(&self) -> ContentHash {
+        self.dependency_source_root
+    }
+
+    /// Root of the workspace manifest governing the producer build.
+    #[must_use]
+    pub const fn workspace_manifest_root(&self) -> ContentHash {
+        self.workspace_manifest_root
+    }
+
+    /// Root of the workspace dependency lock input.
+    #[must_use]
+    pub const fn workspace_lock_root(&self) -> ContentHash {
+        self.workspace_lock_root
+    }
+
+    /// Root of the pinned toolchain input.
+    #[must_use]
+    pub const fn toolchain_root(&self) -> ContentHash {
+        self.toolchain_root
+    }
+
+    /// Honest source-identity label; this is not a binary-attestation label.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("{}-source@{}", self.crate_name, self.crate_version)
+    }
+}
+
+const fn current_verifier_feature_set() -> &'static str {
+    if cfg!(feature = "certified-speculation") {
+        "certified-speculation"
+    } else {
+        "none"
+    }
+}
+
+/// Actual callback progress observed before a verifier attempt stopped.
+///
+/// Cancellation and partial progress are telemetry only. This type cannot be
+/// converted into a verifier receipt or admitted scientific authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifierAttemptTelemetry {
+    work_plan: [u128; 6],
+    last_progress: Option<VerifierProgress>,
+    publication_observed: bool,
+}
+
+impl VerifierAttemptTelemetry {
+    /// Exact preflighted work shape.
+    #[must_use]
+    pub const fn work_plan(&self) -> [u128; 6] {
+        self.work_plan
+    }
+
+    /// Last real verifier callback observed before cancellation.
+    #[must_use]
+    pub const fn last_progress(&self) -> Option<VerifierProgress> {
+        self.last_progress
+    }
+
+    /// Whether the publication callback completed. Cancelled attempts are
+    /// always false and cannot mint receipts.
+    #[must_use]
+    pub const fn publication_observed(&self) -> bool {
+        self.publication_observed
+    }
+}
+
+/// Fail-closed receipt production, transport, or replay error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifierReceiptError {
+    /// The scientific verifier refused the supplied inputs or enclosure.
+    VerifierRefused(VerifierRefusal),
+    /// A real cancellation callback stopped the attempt before publication.
+    Cancelled(VerifierAttemptTelemetry),
+    /// The verifier report and observed callback transcript disagreed.
+    Protocol(&'static str),
+    /// Receipt storage could not be reserved.
+    AllocationFailed,
+    /// Retained bytes exceeded the fixed transport cap.
+    ReceiptTooLarge {
+        /// Supplied byte count.
+        requested: usize,
+        /// Fixed receipt cap.
+        cap: usize,
+    },
+    /// Retained bytes were malformed or non-canonical.
+    MalformedRetained(&'static str),
+    /// The independently supplied BLAKE3 root did not authenticate the bytes.
+    ArtifactRootMismatch,
+    /// The presented receipt differed from a fresh exact verifier replay.
+    ReplayMismatch,
+}
+
+impl core::fmt::Display for VerifierReceiptError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::VerifierRefused(reason) => write!(f, "verifier refused: {}", reason.id()),
+            Self::Cancelled(telemetry) => write!(
+                f,
+                "verifier cancelled before publication after {:?}",
+                telemetry.last_progress
+            ),
+            Self::Protocol(stage) => write!(f, "verifier receipt protocol mismatch: {stage}"),
+            Self::AllocationFailed => f.write_str("verifier receipt allocation failed"),
+            Self::ReceiptTooLarge { requested, cap } => {
+                write!(f, "verifier receipt has {requested} bytes above cap {cap}")
+            }
+            Self::MalformedRetained(stage) => {
+                write!(f, "malformed retained verifier receipt: {stage}")
+            }
+            Self::ArtifactRootMismatch => f.write_str("retained verifier receipt root mismatch"),
+            Self::ReplayMismatch => f.write_str("verifier receipt differs from exact replay"),
+        }
+    }
+}
+
+impl std::error::Error for VerifierReceiptError {}
+
+/// Immutable production proof record emitted only by the real verifier.
+///
+/// Fields are private. Retained bytes decode only into a presented receipt;
+/// positive authority is available exclusively through
+/// [`AdmittedVerifierReceipt`] after exact replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierReceipt {
+    schema_version: u32,
+    theorem: String,
+    producer: VerifierProducerSourceIdentity,
+    problem_identity_version: u32,
+    problem_root: ContentHash,
+    candidate_root: ContentHash,
+    mesh_root: ContentHash,
+    operator_root: ContentHash,
+    coefficient_root: ContentHash,
+    query_root: ContentHash,
+    qoi: String,
+    units: String,
+    flux_hash: u64,
+    verifier_family: String,
+    arithmetic: String,
+    hypotheses: Vec<String>,
+    bound_lo_bits: u64,
+    bound_hi_bits: u64,
+    tolerance_bits: u64,
+    accepted: bool,
+    work_plan: [u128; 6],
+    observed_completed_work: u128,
+    observed_planned_work: u128,
+    final_phase: VerifierPhase,
+    final_checkpoint: VerifierCheckpointKind,
+    publication_observed: bool,
+    artifact_root: VerifierArtifactRoot,
+}
+
+/// Opaque capability proving one exact receipt survived independent replay.
+pub struct AdmittedVerifierReceipt<'a> {
+    receipt: &'a VerifierReceipt,
+}
+
+#[allow(dead_code)]
+fn classify_verifier_receipt_identity_fields(receipt: &VerifierReceipt) {
+    let VerifierReceipt {
+        schema_version,
+        theorem,
+        producer,
+        problem_identity_version,
+        problem_root,
+        candidate_root,
+        mesh_root,
+        operator_root,
+        coefficient_root,
+        query_root,
+        qoi,
+        units,
+        flux_hash,
+        verifier_family,
+        arithmetic,
+        hypotheses,
+        bound_lo_bits,
+        bound_hi_bits,
+        tolerance_bits,
+        accepted,
+        work_plan,
+        observed_completed_work,
+        observed_planned_work,
+        final_phase,
+        final_checkpoint,
+        publication_observed,
+        artifact_root,
+    } = receipt;
+    let VerifierProducerSourceIdentity {
+        crate_name,
+        crate_version,
+        features,
+        producer_source_root,
+        dependency_source_root,
+        workspace_manifest_root,
+        workspace_lock_root,
+        toolchain_root,
+    } = producer;
+    let _ = (
+        schema_version,
+        theorem,
+        crate_name,
+        crate_version,
+        features,
+        producer_source_root,
+        dependency_source_root,
+        workspace_manifest_root,
+        workspace_lock_root,
+        toolchain_root,
+        problem_identity_version,
+        problem_root,
+        candidate_root,
+        mesh_root,
+        operator_root,
+        coefficient_root,
+        query_root,
+        qoi,
+        units,
+        flux_hash,
+        verifier_family,
+        arithmetic,
+        hypotheses,
+        bound_lo_bits,
+        bound_hi_bits,
+        tolerance_bits,
+        accepted,
+        work_plan,
+        observed_completed_work,
+        observed_planned_work,
+        final_phase,
+        final_checkpoint,
+        publication_observed,
+        artifact_root,
+    );
+}
+
+fn try_owned(value: &str) -> Result<String, VerifierReceiptError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| VerifierReceiptError::AllocationFailed)?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+/// Hash an ordered, length-framed byte-part sequence without retaining the
+/// potentially large source/candidate preimage. The frame prefix and exact
+/// domain bytes make this use of plain streaming BLAKE3 unambiguous.
+fn framed_parts_root(domain: &str, parts: &[&[u8]]) -> ContentHash {
+    let mut hasher = Blake3::new();
+    hasher.update(b"fs-verify:length-framed-parts:v1");
+    hasher.update(&(domain.len() as u128).to_le_bytes());
+    hasher.update(domain.as_bytes());
+    hasher.update(&(parts.len() as u128).to_le_bytes());
+    for part in parts {
+        hasher.update(&(part.len() as u128).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize()
+}
+
+fn source_set_root(domain: &str, sources: &[&[u8]]) -> ContentHash {
+    framed_parts_root(domain, sources)
+}
+
+fn f64_sequence_root(domain: &str, values: &[f64]) -> ContentHash {
+    let mut hasher = Blake3::new();
+    hasher.update(b"fs-verify:f64-sequence:v1");
+    hasher.update(&(domain.len() as u128).to_le_bytes());
+    hasher.update(domain.as_bytes());
+    hasher.update(&(values.len() as u128).to_le_bytes());
+    for value in values {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+    hasher.finalize()
+}
+
+fn receipt_phase_tag(phase: VerifierPhase) -> u8 {
+    match phase {
+        VerifierPhase::Validation => 0,
+        VerifierPhase::Tightness => 1,
+        VerifierPhase::Equilibrated => 2,
+        VerifierPhase::Hash => 3,
+        VerifierPhase::Finalization => 4,
+    }
+}
+
+fn receipt_checkpoint_tag(checkpoint: VerifierCheckpointKind) -> u8 {
+    match checkpoint {
+        VerifierCheckpointKind::PhaseEntry => 0,
+        VerifierCheckpointKind::WorkBoundary => 1,
+        VerifierCheckpointKind::RefusalFlush => 2,
+        VerifierCheckpointKind::Publication => 3,
+    }
+}
+
+fn receipt_push(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), VerifierReceiptError> {
+    let requested =
+        bytes
+            .len()
+            .checked_add(value.len())
+            .ok_or(VerifierReceiptError::ReceiptTooLarge {
+                requested: usize::MAX,
+                cap: MAX_VERIFIER_RECEIPT_CANONICAL_BYTES,
+            })?;
+    if requested > MAX_VERIFIER_RECEIPT_CANONICAL_BYTES {
+        return Err(VerifierReceiptError::ReceiptTooLarge {
+            requested,
+            cap: MAX_VERIFIER_RECEIPT_CANONICAL_BYTES,
+        });
+    }
+    bytes
+        .try_reserve_exact(value.len())
+        .map_err(|_| VerifierReceiptError::AllocationFailed)?;
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+
+fn receipt_push_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), VerifierReceiptError> {
+    if value.len() > MAX_VERIFIER_RECEIPT_STRING_BYTES {
+        return Err(VerifierReceiptError::ReceiptTooLarge {
+            requested: value.len(),
+            cap: MAX_VERIFIER_RECEIPT_STRING_BYTES,
+        });
+    }
+    let len = u64::try_from(value.len())
+        .map_err(|_| VerifierReceiptError::MalformedRetained("string length"))?;
+    receipt_push(bytes, &len.to_le_bytes())?;
+    receipt_push(bytes, value.as_bytes())
+}
+
+fn receipt_push_hash(bytes: &mut Vec<u8>, root: ContentHash) -> Result<(), VerifierReceiptError> {
+    receipt_push(bytes, root.as_bytes())
+}
+
+struct ReceiptCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ReceiptCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], VerifierReceiptError> {
+        let end = self
+            .offset
+            .checked_add(count)
+            .ok_or(VerifierReceiptError::MalformedRetained(
+                "field length overflow",
+            ))?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(VerifierReceiptError::MalformedRetained("truncated field"))?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> Result<u8, VerifierReceiptError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn bool(&mut self) -> Result<bool, VerifierReceiptError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(VerifierReceiptError::MalformedRetained("boolean tag")),
+        }
+    }
+
+    fn u32(&mut self) -> Result<u32, VerifierReceiptError> {
+        let bytes: [u8; 4] = self
+            .take(4)?
+            .try_into()
+            .map_err(|_| VerifierReceiptError::MalformedRetained("u32"))?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, VerifierReceiptError> {
+        let bytes: [u8; 8] = self
+            .take(8)?
+            .try_into()
+            .map_err(|_| VerifierReceiptError::MalformedRetained("u64"))?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn u128(&mut self) -> Result<u128, VerifierReceiptError> {
+        let bytes: [u8; 16] = self
+            .take(16)?
+            .try_into()
+            .map_err(|_| VerifierReceiptError::MalformedRetained("u128"))?;
+        Ok(u128::from_le_bytes(bytes))
+    }
+
+    fn hash(&mut self) -> Result<ContentHash, VerifierReceiptError> {
+        let bytes: [u8; 32] = self
+            .take(32)?
+            .try_into()
+            .map_err(|_| VerifierReceiptError::MalformedRetained("content hash"))?;
+        Ok(ContentHash(bytes))
+    }
+
+    fn string(&mut self) -> Result<String, VerifierReceiptError> {
+        let len = usize::try_from(self.u64()?)
+            .map_err(|_| VerifierReceiptError::MalformedRetained("string length"))?;
+        if len > MAX_VERIFIER_RECEIPT_STRING_BYTES {
+            return Err(VerifierReceiptError::MalformedRetained("oversized string"));
+        }
+        let value = core::str::from_utf8(self.take(len)?)
+            .map_err(|_| VerifierReceiptError::MalformedRetained("string utf8"))?;
+        try_owned(value)
+    }
+
+    fn phase(&mut self) -> Result<VerifierPhase, VerifierReceiptError> {
+        match self.u8()? {
+            0 => Ok(VerifierPhase::Validation),
+            1 => Ok(VerifierPhase::Tightness),
+            2 => Ok(VerifierPhase::Equilibrated),
+            3 => Ok(VerifierPhase::Hash),
+            4 => Ok(VerifierPhase::Finalization),
+            _ => Err(VerifierReceiptError::MalformedRetained("phase tag")),
+        }
+    }
+
+    fn checkpoint(&mut self) -> Result<VerifierCheckpointKind, VerifierReceiptError> {
+        match self.u8()? {
+            0 => Ok(VerifierCheckpointKind::PhaseEntry),
+            1 => Ok(VerifierCheckpointKind::WorkBoundary),
+            2 => Ok(VerifierCheckpointKind::RefusalFlush),
+            3 => Ok(VerifierCheckpointKind::Publication),
+            _ => Err(VerifierReceiptError::MalformedRetained("checkpoint tag")),
+        }
+    }
+
+    fn finish(self) -> Result<(), VerifierReceiptError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(VerifierReceiptError::MalformedRetained("trailing bytes"))
+        }
+    }
+}
+
+impl VerifierReceipt {
+    fn canonical_bytes_inner(&self) -> Result<Vec<u8>, VerifierReceiptError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(2_048)
+            .map_err(|_| VerifierReceiptError::AllocationFailed)?;
+        receipt_push(&mut bytes, VERIFIER_RECEIPT_MAGIC)?;
+        receipt_push(&mut bytes, &self.schema_version.to_le_bytes())?;
+        receipt_push_string(&mut bytes, &self.theorem)?;
+        receipt_push_string(&mut bytes, &self.producer.crate_name)?;
+        receipt_push_string(&mut bytes, &self.producer.crate_version)?;
+        receipt_push_string(&mut bytes, &self.producer.features)?;
+        for root in [
+            self.producer.producer_source_root,
+            self.producer.dependency_source_root,
+            self.producer.workspace_manifest_root,
+            self.producer.workspace_lock_root,
+            self.producer.toolchain_root,
+        ] {
+            receipt_push_hash(&mut bytes, root)?;
+        }
+        receipt_push(&mut bytes, &self.problem_identity_version.to_le_bytes())?;
+        for root in [
+            self.problem_root,
+            self.candidate_root,
+            self.mesh_root,
+            self.operator_root,
+            self.coefficient_root,
+            self.query_root,
+        ] {
+            receipt_push_hash(&mut bytes, root)?;
+        }
+        receipt_push_string(&mut bytes, &self.qoi)?;
+        receipt_push_string(&mut bytes, &self.units)?;
+        receipt_push(&mut bytes, &self.flux_hash.to_le_bytes())?;
+        receipt_push_string(&mut bytes, &self.verifier_family)?;
+        receipt_push_string(&mut bytes, &self.arithmetic)?;
+        let hypothesis_count = u32::try_from(self.hypotheses.len())
+            .map_err(|_| VerifierReceiptError::MalformedRetained("hypothesis count"))?;
+        if self.hypotheses.len() > MAX_VERIFIER_RECEIPT_HYPOTHESES {
+            return Err(VerifierReceiptError::MalformedRetained("hypothesis count"));
+        }
+        receipt_push(&mut bytes, &hypothesis_count.to_le_bytes())?;
+        for hypothesis in &self.hypotheses {
+            receipt_push_string(&mut bytes, hypothesis)?;
+        }
+        for bits in [self.bound_lo_bits, self.bound_hi_bits, self.tolerance_bits] {
+            receipt_push(&mut bytes, &bits.to_le_bytes())?;
+        }
+        receipt_push(&mut bytes, &[u8::from(self.accepted)])?;
+        for work in self.work_plan {
+            receipt_push(&mut bytes, &work.to_le_bytes())?;
+        }
+        receipt_push(&mut bytes, &self.observed_completed_work.to_le_bytes())?;
+        receipt_push(&mut bytes, &self.observed_planned_work.to_le_bytes())?;
+        receipt_push(&mut bytes, &[receipt_phase_tag(self.final_phase)])?;
+        receipt_push(&mut bytes, &[receipt_checkpoint_tag(self.final_checkpoint)])?;
+        receipt_push(&mut bytes, &[u8::from(self.publication_observed)])?;
+        Ok(bytes)
+    }
+
+    fn calculated_artifact_root(&self) -> Result<VerifierArtifactRoot, VerifierReceiptError> {
+        Ok(VerifierArtifactRoot(hash_domain(
+            VERIFIER_RECEIPT_HASH_DOMAIN,
+            &self.canonical_bytes_inner()?,
+        )))
+    }
+
+    fn from_successful_report(
+        problem: &MmsProblem,
+        candidate: &[f64],
+        tolerance: f64,
+        plan: VerifierWorkPlan,
+        progress: VerifierProgress,
+        report: &VerifierReport,
+    ) -> Result<Self, VerifierReceiptError> {
+        if report.refusal.is_some() {
+            return Err(VerifierReceiptError::Protocol("refused report"));
+        }
+        if !report.bound.lo.is_finite()
+            || !report.bound.hi.is_finite()
+            || report.bound.lo < 0.0
+            || report.bound.lo > report.bound.hi
+            || report.tolerance.to_bits() != tolerance.to_bits()
+            || report.family != EstimatorFamily::EquilibratedFlux.id()
+            || report.accept != (report.bound.hi <= tolerance)
+        {
+            return Err(VerifierReceiptError::Protocol("report fields"));
+        }
+        match (&report.color, report.accept) {
+            (Some(Color::Verified { lo, hi }), true)
+                if lo.to_bits() == 0.0_f64.to_bits()
+                    && hi.to_bits() == report.bound.hi.to_bits() => {}
+            (None, false) => {}
+            _ => return Err(VerifierReceiptError::Protocol("report color")),
+        }
+        if progress.kind != VerifierCheckpointKind::Publication
+            || progress.phase != VerifierPhase::Finalization
+            || progress.completed_work_units != plan.planned_work_units()
+            || progress.planned_work_units != plan.planned_work_units()
+        {
+            return Err(VerifierReceiptError::Protocol("publication transcript"));
+        }
+
+        let producer = VerifierProducerSourceIdentity::current()?;
+        let problem_root = hash_domain(
+            "fs-verify:mms-problem-strong-root:v1",
+            problem.canonical_bytes(),
+        );
+        let candidate_root = f64_sequence_root("fs-verify:candidate-nodal:v1", candidate);
+        let mesh_root = f64_sequence_root("fs-verify:mesh:v1", problem.mesh());
+        let operator_root = hash_domain(
+            "fs-verify:operator:v1",
+            VERIFIER_RECEIPT_OPERATOR.as_bytes(),
+        );
+        let coefficient_root = hash_domain(
+            "fs-verify:mms-class-strong-root:v1",
+            problem.class().canonical_bytes(),
+        );
+        let tolerance_bytes = tolerance.to_bits().to_le_bytes();
+        let query_root = framed_parts_root(
+            "fs-verify:verification-query:v1",
+            &[
+                problem_root.as_bytes(),
+                candidate_root.as_bytes(),
+                mesh_root.as_bytes(),
+                operator_root.as_bytes(),
+                coefficient_root.as_bytes(),
+                &tolerance_bytes,
+                VERIFIER_RECEIPT_QOI.as_bytes(),
+                VERIFIER_RECEIPT_UNITS.as_bytes(),
+            ],
+        );
+        let mut hypotheses = Vec::new();
+        hypotheses
+            .try_reserve_exact(VERIFIER_RECEIPT_HYPOTHESES.len())
+            .map_err(|_| VerifierReceiptError::AllocationFailed)?;
+        for hypothesis in VERIFIER_RECEIPT_HYPOTHESES {
+            hypotheses.push(try_owned(hypothesis)?);
+        }
+        let mut receipt = Self {
+            schema_version: VERIFIER_RECEIPT_SCHEMA_VERSION,
+            theorem: try_owned(VERIFIER_RECEIPT_THEOREM)?,
+            producer,
+            problem_identity_version: MMS_PROBLEM_IDENTITY_VERSION,
+            problem_root,
+            candidate_root,
+            mesh_root,
+            operator_root,
+            coefficient_root,
+            query_root,
+            qoi: try_owned(VERIFIER_RECEIPT_QOI)?,
+            units: try_owned(VERIFIER_RECEIPT_UNITS)?,
+            flux_hash: report.flux_hash,
+            verifier_family: try_owned(EstimatorFamily::EquilibratedFlux.id())?,
+            arithmetic: try_owned(VERIFIER_RECEIPT_ARITHMETIC)?,
+            hypotheses,
+            // This is the theorem's true-error interval. The interval
+            // evaluator's positive lower enclosure is not a lower bound on
+            // the unknown true error; zero is the only proved lower endpoint.
+            bound_lo_bits: 0.0_f64.to_bits(),
+            bound_hi_bits: report.bound.hi.to_bits(),
+            tolerance_bits: tolerance.to_bits(),
+            accepted: report.accept,
+            work_plan: plan.identity_fields(),
+            observed_completed_work: progress.completed_work_units,
+            observed_planned_work: progress.planned_work_units,
+            final_phase: progress.phase,
+            final_checkpoint: progress.kind,
+            publication_observed: true,
+            artifact_root: VerifierArtifactRoot(ContentHash([0; 32])),
+        };
+        receipt.artifact_root = receipt.calculated_artifact_root()?;
+        Ok(receipt)
+    }
+
+    /// Exact retained byte representation. The derived artifact root is not
+    /// recursively encoded; it authenticates these bytes from outside.
+    ///
+    /// # Errors
+    /// Returns a bounded allocation/size error. Receipt production has already
+    /// exercised this path once, so a later failure grants no authority.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, VerifierReceiptError> {
+        self.canonical_bytes_inner()
+    }
+
+    /// Parse exact retained bytes authenticated by an independently supplied
+    /// collision-resistant root. This yields presented data only; callers must
+    /// use [`admit_verifier_receipt`] before treating it as authority.
+    ///
+    /// # Errors
+    /// Fails before decoding on a root mismatch, and otherwise rejects size,
+    /// schema, UTF-8, enum-tag, boolean, truncation, and trailing-byte defects.
+    pub fn from_retained_bytes(
+        bytes: &[u8],
+        expected_root: VerifierArtifactRoot,
+    ) -> Result<Self, VerifierReceiptError> {
+        if bytes.len() > MAX_VERIFIER_RECEIPT_CANONICAL_BYTES {
+            return Err(VerifierReceiptError::ReceiptTooLarge {
+                requested: bytes.len(),
+                cap: MAX_VERIFIER_RECEIPT_CANONICAL_BYTES,
+            });
+        }
+        let actual_root = VerifierArtifactRoot(hash_domain(VERIFIER_RECEIPT_HASH_DOMAIN, bytes));
+        if actual_root != expected_root {
+            return Err(VerifierReceiptError::ArtifactRootMismatch);
+        }
+        let mut cursor = ReceiptCursor::new(bytes);
+        if cursor.take(VERIFIER_RECEIPT_MAGIC.len())? != VERIFIER_RECEIPT_MAGIC {
+            return Err(VerifierReceiptError::MalformedRetained("magic"));
+        }
+        let schema_version = cursor.u32()?;
+        if schema_version != VERIFIER_RECEIPT_SCHEMA_VERSION {
+            return Err(VerifierReceiptError::MalformedRetained("schema version"));
+        }
+        let theorem = cursor.string()?;
+        let producer = VerifierProducerSourceIdentity {
+            crate_name: cursor.string()?,
+            crate_version: cursor.string()?,
+            features: cursor.string()?,
+            producer_source_root: cursor.hash()?,
+            dependency_source_root: cursor.hash()?,
+            workspace_manifest_root: cursor.hash()?,
+            workspace_lock_root: cursor.hash()?,
+            toolchain_root: cursor.hash()?,
+        };
+        let problem_identity_version = cursor.u32()?;
+        let problem_root = cursor.hash()?;
+        let candidate_root = cursor.hash()?;
+        let mesh_root = cursor.hash()?;
+        let operator_root = cursor.hash()?;
+        let coefficient_root = cursor.hash()?;
+        let query_root = cursor.hash()?;
+        let qoi = cursor.string()?;
+        let units = cursor.string()?;
+        let flux_hash = cursor.u64()?;
+        let verifier_family = cursor.string()?;
+        let arithmetic = cursor.string()?;
+        let hypothesis_count = usize::try_from(cursor.u32()?)
+            .map_err(|_| VerifierReceiptError::MalformedRetained("hypothesis count"))?;
+        if hypothesis_count > MAX_VERIFIER_RECEIPT_HYPOTHESES {
+            return Err(VerifierReceiptError::MalformedRetained("hypothesis count"));
+        }
+        let mut hypotheses = Vec::new();
+        hypotheses
+            .try_reserve_exact(hypothesis_count)
+            .map_err(|_| VerifierReceiptError::AllocationFailed)?;
+        for _ in 0..hypothesis_count {
+            hypotheses.push(cursor.string()?);
+        }
+        let bound_lo_bits = cursor.u64()?;
+        let bound_hi_bits = cursor.u64()?;
+        let tolerance_bits = cursor.u64()?;
+        let accepted = cursor.bool()?;
+        let mut work_plan = [0_u128; 6];
+        for work in &mut work_plan {
+            *work = cursor.u128()?;
+        }
+        let observed_completed_work = cursor.u128()?;
+        let observed_planned_work = cursor.u128()?;
+        let final_phase = cursor.phase()?;
+        let final_checkpoint = cursor.checkpoint()?;
+        let publication_observed = cursor.bool()?;
+        cursor.finish()?;
+        let receipt = Self {
+            schema_version,
+            theorem,
+            producer,
+            problem_identity_version,
+            problem_root,
+            candidate_root,
+            mesh_root,
+            operator_root,
+            coefficient_root,
+            query_root,
+            qoi,
+            units,
+            flux_hash,
+            verifier_family,
+            arithmetic,
+            hypotheses,
+            bound_lo_bits,
+            bound_hi_bits,
+            tolerance_bits,
+            accepted,
+            work_plan,
+            observed_completed_work,
+            observed_planned_work,
+            final_phase,
+            final_checkpoint,
+            publication_observed,
+            artifact_root: expected_root,
+        };
+        if receipt.canonical_bytes_inner()? != bytes {
+            return Err(VerifierReceiptError::MalformedRetained(
+                "non-canonical encoding",
+            ));
+        }
+        Ok(receipt)
+    }
+
+    /// Receipt schema version.
+    #[must_use]
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Exact theorem identifier.
+    #[must_use]
+    pub fn theorem(&self) -> &str {
+        &self.theorem
+    }
+
+    /// Honest producer source-cone identity (not binary attestation).
+    #[must_use]
+    pub const fn producer(&self) -> &VerifierProducerSourceIdentity {
+        &self.producer
+    }
+
+    /// Retained lower-layer problem-identity schema version.
+    #[must_use]
+    pub const fn problem_identity_version(&self) -> u32 {
+        self.problem_identity_version
+    }
+
+    /// Strong root of the exact canonical manufactured problem.
+    #[must_use]
+    pub const fn problem_root(&self) -> ContentHash {
+        self.problem_root
+    }
+
+    /// Strong root of exact candidate values.
+    #[must_use]
+    pub const fn candidate_root(&self) -> ContentHash {
+        self.candidate_root
+    }
+
+    /// Strong root of exact mesh values.
+    #[must_use]
+    pub const fn mesh_root(&self) -> ContentHash {
+        self.mesh_root
+    }
+
+    /// Exact operator identity.
+    #[must_use]
+    pub const fn operator_root(&self) -> ContentHash {
+        self.operator_root
+    }
+
+    /// Strong root of the exact manufactured coefficient class.
+    #[must_use]
+    pub const fn coefficient_root(&self) -> ContentHash {
+        self.coefficient_root
+    }
+
+    /// Exact verification query/QoI/tolerance identity.
+    #[must_use]
+    pub const fn query_root(&self) -> ContentHash {
+        self.query_root
+    }
+
+    /// Certified quantity identifier.
+    #[must_use]
+    pub fn qoi(&self) -> &str {
+        &self.qoi
+    }
+
+    /// Certified quantity units.
+    #[must_use]
+    pub fn units(&self) -> &str {
+        &self.units
+    }
+
+    /// Candidate-bound reconstructed-flux identity.
+    #[must_use]
+    pub const fn flux_hash(&self) -> u64 {
+        self.flux_hash
+    }
+
+    /// Production verifier family.
+    #[must_use]
+    pub fn verifier_family(&self) -> &str {
+        &self.verifier_family
+    }
+
+    /// Arithmetic policy encoded in the receipt.
+    #[must_use]
+    pub fn arithmetic(&self) -> &str {
+        &self.arithmetic
+    }
+
+    /// Exact theorem hypotheses.
+    #[must_use]
+    pub fn hypotheses(&self) -> &[String] {
+        &self.hypotheses
+    }
+
+    /// Proved lower endpoint of the true-error interval.
+    #[must_use]
+    pub fn bound_lo(&self) -> f64 {
+        f64::from_bits(self.bound_lo_bits)
+    }
+
+    /// Proved upper endpoint of the true-error interval.
+    #[must_use]
+    pub fn bound_hi(&self) -> f64 {
+        f64::from_bits(self.bound_hi_bits)
+    }
+
+    /// Exact tested tolerance.
+    #[must_use]
+    pub fn tolerance(&self) -> f64 {
+        f64::from_bits(self.tolerance_bits)
+    }
+
+    /// Whether the proved upper endpoint met the tested tolerance.
+    #[must_use]
+    pub const fn accepted(&self) -> bool {
+        self.accepted
+    }
+
+    /// Verified color only when the tolerance was discharged.
+    #[must_use]
+    pub fn color(&self) -> Option<Color> {
+        self.accepted.then(|| Color::Verified {
+            lo: self.bound_lo(),
+            hi: self.bound_hi(),
+        })
+    }
+
+    /// Exact preflighted logical work shape.
+    #[must_use]
+    pub const fn work_plan(&self) -> [u128; 6] {
+        self.work_plan
+    }
+
+    /// Actual completed work at successful publication.
+    #[must_use]
+    pub const fn observed_completed_work(&self) -> u128 {
+        self.observed_completed_work
+    }
+
+    /// Planned work reported by the successful publication callback.
+    #[must_use]
+    pub const fn observed_planned_work(&self) -> u128 {
+        self.observed_planned_work
+    }
+
+    /// True only for a completed production publication transcript.
+    #[must_use]
+    pub const fn publication_observed(&self) -> bool {
+        self.publication_observed
+    }
+
+    /// Collision-resistant address of the exact retained bytes.
+    #[must_use]
+    pub const fn artifact_root(&self) -> VerifierArtifactRoot {
+        self.artifact_root
+    }
+
+    /// Lower-owned deterministic statement used by evidence packages.
+    #[must_use]
+    pub fn statement(&self) -> String {
+        format!(
+            "{} in {} is certified within [{:.17e}, {:.17e}] by {} at tolerance {:.17e}",
+            self.qoi(),
+            self.units(),
+            self.bound_lo(),
+            self.bound_hi(),
+            self.theorem(),
+            self.tolerance(),
+        )
+    }
+}
+
+impl<'a> AdmittedVerifierReceipt<'a> {
+    /// Exact presented receipt that survived replay.
+    #[must_use]
+    pub const fn receipt(&self) -> &'a VerifierReceipt {
+        self.receipt
     }
 }
 
@@ -865,6 +2004,8 @@ where
 
 fn flux_hash_with_checkpoint<F, E>(
     c_star: f64,
+    mesh: &[f64],
+    candidate: &[f64],
     forcing: &crate::fem1d::Poly,
     antiderivative: &crate::fem1d::Poly,
     driver: &mut VerifierDriver<F>,
@@ -872,8 +2013,25 @@ fn flux_hash_with_checkpoint<F, E>(
 where
     F: FnMut(VerifierProgress) -> Result<(), E>,
 {
-    let mut hash = fnv_extend(0xcbf2_9ce4_8422_2325, &c_star.to_bits().to_le_bytes());
+    let mut hash = fnv_extend(
+        0xcbf2_9ce4_8422_2325,
+        b"fs-verify/equilibrated-flux-reconstruction/v2",
+    );
     driver.complete_one()?;
+    hash = fnv_extend(hash, &VERIFIER_FLUX_IDENTITY_VERSION.to_le_bytes());
+    driver.complete_one()?;
+    hash = fnv_extend(hash, &c_star.to_bits().to_le_bytes());
+    driver.complete_one()?;
+    for values in [mesh, candidate] {
+        let length = u64::try_from(values.len())
+            .map_err(|_| VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
+        hash = fnv_extend(hash, &length.to_le_bytes());
+        driver.complete_one()?;
+        for value in values {
+            hash = fnv_extend(hash, &value.to_bits().to_le_bytes());
+            driver.complete_one()?;
+        }
+    }
     for polynomial in [forcing, antiderivative] {
         let length = u64::try_from(polynomial.coefficients().len())
             .map_err(|_| VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
@@ -935,7 +2093,14 @@ where
     driver.require_completed(after_equilibrated)?;
 
     driver.enter(VerifierPhase::Hash)?;
-    let flux_hash = flux_hash_with_checkpoint(c_star, &canonical_f, &canonical_big_f, driver)?;
+    let flux_hash = flux_hash_with_checkpoint(
+        c_star,
+        problem.mesh(),
+        candidate,
+        &canonical_f,
+        &canonical_big_f,
+        driver,
+    )?;
     let after_hash = after_equilibrated
         .checked_add(driver.plan.hash)
         .ok_or(VerifierRunError::Refusal(VerifierRefusal::WorkPlanMismatch))?;
@@ -1017,6 +2182,102 @@ pub fn verify(problem: &MmsProblem, candidate: &[f64], tolerance: f64) -> Verifi
         Ok(report) => report,
         Err(never) => match never {},
     }
+}
+
+/// Run the real verifier and emit an immutable production receipt only after
+/// its successful publication callback. The cancellation predicate observes
+/// actual verifier checkpoints; returning true stops the callback immediately
+/// and yields telemetry rather than a promotable partial receipt.
+///
+/// # Errors
+/// Returns a structured scientific refusal, real cancellation telemetry, or a
+/// fail-closed receipt construction/protocol error. No receipt exists on any
+/// error path.
+pub fn verify_with_receipt_cancellable<F>(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    tolerance: f64,
+    mut should_cancel: F,
+) -> Result<VerifierReceipt, VerifierReceiptError>
+where
+    F: FnMut(VerifierProgress) -> bool,
+{
+    let plan = VerifierWorkPlan::for_inputs(problem, candidate)
+        .map_err(VerifierReceiptError::VerifierRefused)?;
+    let mut last_progress = None;
+    let mut publication_observed = false;
+    let result = verify_with_checkpoint(problem, candidate, tolerance, |progress| {
+        last_progress = Some(progress);
+        if should_cancel(progress) {
+            Err(())
+        } else {
+            if progress.kind == VerifierCheckpointKind::Publication {
+                publication_observed = true;
+            }
+            Ok(())
+        }
+    });
+    let report = match result {
+        Ok(report) => report,
+        Err(()) => {
+            return Err(VerifierReceiptError::Cancelled(VerifierAttemptTelemetry {
+                work_plan: plan.identity_fields(),
+                last_progress,
+                publication_observed: false,
+            }));
+        }
+    };
+    if let Some(reason) = report.refusal {
+        return Err(VerifierReceiptError::VerifierRefused(reason));
+    }
+    if !publication_observed {
+        return Err(VerifierReceiptError::Protocol(
+            "missing successful publication callback",
+        ));
+    }
+    let progress = last_progress.ok_or(VerifierReceiptError::Protocol(
+        "missing verifier callback transcript",
+    ))?;
+    VerifierReceipt::from_successful_report(problem, candidate, tolerance, plan, progress, &report)
+}
+
+/// Run the real verifier to completion and return its exact production-owned
+/// receipt. This is the receipt-producing counterpart to [`verify`].
+///
+/// # Errors
+/// Returns a structured verifier refusal or fail-closed receipt construction
+/// error. Above-tolerance finite reports still produce an unaccepted receipt;
+/// they cannot produce [`VerifierReceipt::color`].
+pub fn verify_with_receipt(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    tolerance: f64,
+) -> Result<VerifierReceipt, VerifierReceiptError> {
+    verify_with_receipt_cancellable(problem, candidate, tolerance, |_| false)
+}
+
+/// Admit a presented verifier receipt only after authenticating its retained
+/// bytes and independently replaying the exact production verifier over the
+/// supplied problem, candidate, and tolerance.
+///
+/// # Errors
+/// Returns [`VerifierReceiptError::ArtifactRootMismatch`] when the retained
+/// fields do not match the stored root, or a replay/refusal error when current
+/// production output differs from the presented receipt.
+pub fn admit_verifier_receipt<'a>(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    tolerance: f64,
+    receipt: &'a VerifierReceipt,
+) -> Result<AdmittedVerifierReceipt<'a>, VerifierReceiptError> {
+    if receipt.calculated_artifact_root()? != receipt.artifact_root {
+        return Err(VerifierReceiptError::ArtifactRootMismatch);
+    }
+    let replay = verify_with_receipt(problem, candidate, tolerance)?;
+    if replay != *receipt {
+        return Err(VerifierReceiptError::ReplayMismatch);
+    }
+    Ok(AdmittedVerifierReceipt { receipt })
 }
 
 const GAUSS5_REF: [(f64, f64); 5] = [
@@ -1196,7 +2457,297 @@ pub fn effectivity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fem1d::{Poly, solve_p1};
     use fs_math::dd::Dd;
+
+    fn receipt_fixture() -> (MmsProblem, Vec<f64>, f64, VerifierReceipt) {
+        let problem = MmsProblem::new(
+            "verifier-receipt-fixture",
+            Poly::new(vec![0.0, 1.0, -1.0]).expect("admitted polynomial"),
+            vec![0.0, 0.125, 0.375, 0.75, 1.0],
+        )
+        .expect("admitted manufactured problem");
+        let candidate = solve_p1(&problem).expect("finite P1 fixture");
+        let tolerance = 1.0;
+        let receipt = verify_with_receipt(&problem, &candidate, tolerance)
+            .expect("production verifier receipt");
+        assert!(receipt.accepted());
+        (problem, candidate, tolerance, receipt)
+    }
+
+    fn flipped(root: ContentHash) -> ContentHash {
+        let mut bytes = *root.as_bytes();
+        bytes[0] ^= 1;
+        ContentHash(bytes)
+    }
+
+    #[test]
+    fn producer_identity_reports_the_exact_compiled_feature_set() {
+        let (_, _, _, receipt) = receipt_fixture();
+        assert_eq!(
+            receipt.producer().features(),
+            current_verifier_feature_set()
+        );
+        assert_eq!(
+            receipt.producer().features(),
+            if cfg!(feature = "certified-speculation") {
+                "certified-speculation"
+            } else {
+                "none"
+            }
+        );
+    }
+
+    #[test]
+    fn production_receipt_retention_requires_independent_root_and_replay() {
+        let (problem, candidate, tolerance, receipt) = receipt_fixture();
+        let bytes = receipt.canonical_bytes().expect("canonical receipt bytes");
+        let presented = VerifierReceipt::from_retained_bytes(&bytes, receipt.artifact_root())
+            .expect("root-authenticated canonical receipt");
+        assert_eq!(presented, receipt);
+        let admitted = admit_verifier_receipt(&problem, &candidate, tolerance, &presented)
+            .expect("exact independent replay admits the receipt");
+        assert_eq!(admitted.receipt(), &receipt);
+
+        let wrong_root = VerifierArtifactRoot(flipped(receipt.artifact_root().content_hash()));
+        assert_eq!(
+            VerifierReceipt::from_retained_bytes(&bytes, wrong_root),
+            Err(VerifierReceiptError::ArtifactRootMismatch)
+        );
+        let mut corrupted = bytes.clone();
+        corrupted[0] ^= 1;
+        assert_eq!(
+            VerifierReceipt::from_retained_bytes(&corrupted, receipt.artifact_root()),
+            Err(VerifierReceiptError::ArtifactRootMismatch)
+        );
+        let corrupted_root =
+            VerifierArtifactRoot(hash_domain(VERIFIER_RECEIPT_HASH_DOMAIN, &corrupted));
+        assert_eq!(
+            VerifierReceipt::from_retained_bytes(&corrupted, corrupted_root),
+            Err(VerifierReceiptError::MalformedRetained("magic"))
+        );
+
+        let mut future = receipt.clone();
+        future.schema_version += 1;
+        future.artifact_root = future
+            .calculated_artifact_root()
+            .expect("future-version root");
+        let future_bytes = future.canonical_bytes().expect("future-version bytes");
+        assert_eq!(
+            VerifierReceipt::from_retained_bytes(&future_bytes, future.artifact_root()),
+            Err(VerifierReceiptError::MalformedRetained("schema version"))
+        );
+
+        // A foreign receipt can be internally self-consistent and root-valid.
+        // It is still only presented bytes until the independent production
+        // replay rejects its changed scientific semantics.
+        let mut foreign = receipt.clone();
+        foreign.qoi.push_str("-foreign");
+        foreign.artifact_root = foreign
+            .calculated_artifact_root()
+            .expect("foreign root calculation");
+        let foreign_bytes = foreign
+            .canonical_bytes()
+            .expect("foreign canonical receipt bytes");
+        let foreign_presented =
+            VerifierReceipt::from_retained_bytes(&foreign_bytes, foreign.artifact_root())
+                .expect("self-consistent foreign bytes are presentable");
+        assert!(matches!(
+            admit_verifier_receipt(&problem, &candidate, tolerance, &foreign_presented),
+            Err(VerifierReceiptError::ReplayMismatch)
+        ));
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        let trailing_root =
+            VerifierArtifactRoot(hash_domain(VERIFIER_RECEIPT_HASH_DOMAIN, &trailing));
+        assert_eq!(
+            VerifierReceipt::from_retained_bytes(&trailing, trailing_root),
+            Err(VerifierReceiptError::MalformedRetained("trailing bytes"))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn every_receipt_semantic_field_moves_root_and_fails_exact_replay() {
+        let (problem, candidate, tolerance, receipt) = receipt_fixture();
+        let original_root = receipt.artifact_root();
+
+        macro_rules! semantic_mutation {
+            ($field:literal, $mutation:expr) => {{
+                let mut changed = receipt.clone();
+                $mutation(&mut changed);
+                let moved_root = changed
+                    .calculated_artifact_root()
+                    .expect("mutated canonical root");
+                assert_ne!(moved_root, original_root, "{} must move root", $field);
+                changed.artifact_root = moved_root;
+                assert!(
+                    matches!(
+                        admit_verifier_receipt(&problem, &candidate, tolerance, &changed),
+                        Err(VerifierReceiptError::ReplayMismatch)
+                    ),
+                    "{} must fail independent replay",
+                    $field
+                );
+            }};
+        }
+
+        semantic_mutation!("schema version", |r: &mut VerifierReceipt| r
+            .schema_version +=
+            1);
+        semantic_mutation!("theorem", |r: &mut VerifierReceipt| r.theorem.push('x'));
+        semantic_mutation!("producer crate", |r: &mut VerifierReceipt| r
+            .producer
+            .crate_name
+            .push('x'));
+        semantic_mutation!("producer version", |r: &mut VerifierReceipt| r
+            .producer
+            .crate_version
+            .push('x'));
+        semantic_mutation!("producer features", |r: &mut VerifierReceipt| r
+            .producer
+            .features
+            .push('x'));
+        semantic_mutation!("producer source", |r: &mut VerifierReceipt| r
+            .producer
+            .producer_source_root =
+            flipped(r.producer.producer_source_root));
+        semantic_mutation!("dependency source", |r: &mut VerifierReceipt| r
+            .producer
+            .dependency_source_root =
+            flipped(r.producer.dependency_source_root));
+        semantic_mutation!("workspace manifest", |r: &mut VerifierReceipt| r
+            .producer
+            .workspace_manifest_root =
+            flipped(r.producer.workspace_manifest_root));
+        semantic_mutation!("workspace lock", |r: &mut VerifierReceipt| r
+            .producer
+            .workspace_lock_root =
+            flipped(r.producer.workspace_lock_root));
+        semantic_mutation!("toolchain", |r: &mut VerifierReceipt| r
+            .producer
+            .toolchain_root =
+            flipped(r.producer.toolchain_root));
+        semantic_mutation!("problem identity version", |r: &mut VerifierReceipt| r
+            .problem_identity_version +=
+            1);
+        semantic_mutation!("problem root", |r: &mut VerifierReceipt| r.problem_root =
+            flipped(r.problem_root));
+        semantic_mutation!("candidate root", |r: &mut VerifierReceipt| r
+            .candidate_root =
+            flipped(r.candidate_root));
+        semantic_mutation!("mesh root", |r: &mut VerifierReceipt| r.mesh_root =
+            flipped(r.mesh_root));
+        semantic_mutation!("operator root", |r: &mut VerifierReceipt| r.operator_root =
+            flipped(r.operator_root));
+        semantic_mutation!("coefficient root", |r: &mut VerifierReceipt| r
+            .coefficient_root =
+            flipped(r.coefficient_root));
+        semantic_mutation!("query root", |r: &mut VerifierReceipt| r.query_root =
+            flipped(r.query_root));
+        semantic_mutation!("QoI", |r: &mut VerifierReceipt| r.qoi.push('x'));
+        semantic_mutation!("units", |r: &mut VerifierReceipt| r.units.push('x'));
+        semantic_mutation!("flux hash", |r: &mut VerifierReceipt| r.flux_hash ^= 1);
+        semantic_mutation!("verifier family", |r: &mut VerifierReceipt| r
+            .verifier_family
+            .push('x'));
+        semantic_mutation!("arithmetic", |r: &mut VerifierReceipt| r
+            .arithmetic
+            .push('x'));
+        semantic_mutation!("hypotheses", |r: &mut VerifierReceipt| {
+            r.hypotheses.pop();
+        });
+        semantic_mutation!("lower endpoint", |r: &mut VerifierReceipt| r
+            .bound_lo_bits ^=
+            1);
+        semantic_mutation!("upper endpoint", |r: &mut VerifierReceipt| r
+            .bound_hi_bits ^=
+            1);
+        semantic_mutation!("tolerance", |r: &mut VerifierReceipt| r.tolerance_bits ^= 1);
+        semantic_mutation!("acceptance", |r: &mut VerifierReceipt| r.accepted =
+            !r.accepted);
+        for index in 0..6 {
+            semantic_mutation!("work-plan component", |r: &mut VerifierReceipt| r
+                .work_plan[index] +=
+                1);
+        }
+        semantic_mutation!("observed completed work", |r: &mut VerifierReceipt| r
+            .observed_completed_work +=
+            1);
+        semantic_mutation!("observed planned work", |r: &mut VerifierReceipt| r
+            .observed_planned_work +=
+            1);
+        semantic_mutation!("final phase", |r: &mut VerifierReceipt| r.final_phase =
+            VerifierPhase::Hash);
+        semantic_mutation!("final checkpoint", |r: &mut VerifierReceipt| r
+            .final_checkpoint =
+            VerifierCheckpointKind::PhaseEntry);
+        semantic_mutation!("publication", |r: &mut VerifierReceipt| r
+            .publication_observed =
+            false);
+
+        let mut bad_derived_root = receipt.clone();
+        bad_derived_root.artifact_root =
+            VerifierArtifactRoot(flipped(original_root.content_hash()));
+        assert_eq!(
+            bad_derived_root
+                .calculated_artifact_root()
+                .expect("derived root is excluded from canonical bytes"),
+            original_root
+        );
+        assert!(matches!(
+            admit_verifier_receipt(&problem, &candidate, tolerance, &bad_derived_root),
+            Err(VerifierReceiptError::ArtifactRootMismatch)
+        ));
+    }
+
+    #[test]
+    fn cancellation_is_real_checkpoint_telemetry_and_never_a_receipt() {
+        let (problem, candidate, tolerance, receipt) = receipt_fixture();
+        let cancelled =
+            verify_with_receipt_cancellable(&problem, &candidate, tolerance, |progress| {
+                progress.kind == VerifierCheckpointKind::PhaseEntry
+                    && progress.phase == VerifierPhase::Equilibrated
+            });
+        let Err(VerifierReceiptError::Cancelled(telemetry)) = cancelled else {
+            panic!("a real phase-entry cancellation must return telemetry only");
+        };
+        let progress = telemetry
+            .last_progress()
+            .expect("real callback was observed");
+        assert_eq!(progress.kind, VerifierCheckpointKind::PhaseEntry);
+        assert_eq!(progress.phase, VerifierPhase::Equilibrated);
+        assert!(!telemetry.publication_observed());
+        assert_eq!(telemetry.work_plan(), receipt.work_plan());
+
+        // Even cancelling at the fully computed publication gate mints no
+        // receipt: publication authority exists only after the callback wins.
+        let at_publication =
+            verify_with_receipt_cancellable(&problem, &candidate, tolerance, |progress| {
+                progress.kind == VerifierCheckpointKind::Publication
+            });
+        let Err(VerifierReceiptError::Cancelled(telemetry)) = at_publication else {
+            panic!("publication-gate cancellation must return telemetry only");
+        };
+        assert_eq!(
+            telemetry.last_progress().map(|progress| progress.kind),
+            Some(VerifierCheckpointKind::Publication)
+        );
+        assert!(!telemetry.publication_observed());
+    }
+
+    #[test]
+    fn candidate_identity_moves_both_strong_root_and_flux_identity() {
+        let (problem, candidate, tolerance, receipt) = receipt_fixture();
+        let mut changed_candidate = candidate.clone();
+        changed_candidate[1] = f64::from_bits(changed_candidate[1].to_bits() + 1);
+        let changed = verify_with_receipt(&problem, &changed_candidate, tolerance)
+            .expect("changed finite candidate still produces a receipt");
+        assert_ne!(changed.candidate_root(), receipt.candidate_root());
+        assert_ne!(changed.flux_hash(), receipt.flux_hash());
+        assert_ne!(changed.artifact_root(), receipt.artifact_root());
+    }
 
     fn contains_dd(interval: Iv, exact: Dd) -> bool {
         !exact.lt(Dd::from_f64(interval.lo)) && !Dd::from_f64(interval.hi).lt(exact)

@@ -21,7 +21,7 @@ use core::fmt;
 use std::collections::BTreeMap;
 
 use fs_evidence::{Color, NumericalCertificate, color_leaf_identity_reason, verified_from};
-use fs_verify::estimator::verify;
+use fs_verify::estimator::{VerifierReceipt, verify_with_receipt};
 use fs_verify::fem1d::{
     Fem1dError, MAX_FEM1D_MESH_NODES, MmsClass, MmsProblem, Poly, gauss5, solve_p1,
 };
@@ -511,17 +511,15 @@ pub struct OpLog {
 /// verifier family and reconstructed-flux identity checked by the planner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifierCertificate {
-    bound: f64,
+    receipt: VerifierReceipt,
     color: Color,
-    verifier_family: &'static str,
-    flux_hash: u64,
 }
 
 impl VerifierCertificate {
     /// Certified energy-error half width.
     #[must_use]
     pub fn bound(&self) -> f64 {
-        self.bound
+        self.receipt.bound_hi()
     }
 
     /// Evidence color minted through `fs-evidence`'s guarded enclosure door.
@@ -532,14 +530,21 @@ impl VerifierCertificate {
 
     /// Stable verifier-family identity.
     #[must_use]
-    pub fn verifier_family(&self) -> &'static str {
-        self.verifier_family
+    pub fn verifier_family(&self) -> &str {
+        self.receipt.verifier_family()
     }
 
     /// Identity of the verifier's reconstructed flux.
     #[must_use]
     pub fn flux_hash(&self) -> u64 {
-        self.flux_hash
+        self.receipt.flux_hash()
+    }
+
+    /// Immutable lower-layer receipt emitted by the exact verification run
+    /// that minted this certificate.
+    #[must_use]
+    pub fn receipt(&self) -> &VerifierReceipt {
+        &self.receipt
     }
 }
 
@@ -1169,21 +1174,25 @@ fn checked_verify(
     tolerance: f64,
 ) -> Result<CheckedVerification, PlanError> {
     validate_candidate(problem.mesh(), candidate)?;
-    let report = verify(problem, candidate, tolerance);
-    if report.refusal.is_some() {
-        return Err(PlanError::NumericalFailure {
-            stage: "verifier refusal",
-        });
-    }
-    let lo = report.bound.lo;
-    let hi = report.bound.hi;
+    let receipt = verify_with_receipt(problem, candidate, tolerance).map_err(|_| {
+        PlanError::NumericalFailure {
+            stage: "verifier receipt production",
+        }
+    })?;
+    let lo = receipt.bound_lo();
+    let hi = receipt.bound_hi();
     if !lo.is_finite() || !hi.is_finite() || lo < 0.0 || lo > hi {
         return Err(PlanError::NumericalFailure {
             stage: "verifier enclosure",
         });
     }
+    if canonical_f64_bits(receipt.tolerance()) != canonical_f64_bits(tolerance) {
+        return Err(PlanError::NumericalFailure {
+            stage: "verifier tolerance consistency",
+        });
+    }
     let expected_accept = hi <= tolerance;
-    if report.accept != expected_accept {
+    if receipt.accepted() != expected_accept {
         return Err(PlanError::NumericalFailure {
             stage: "verifier acceptance consistency",
         });
@@ -1193,7 +1202,8 @@ fn checked_verify(
             stage: "verifier evidence-color admission",
         }
     })?;
-    match (&report.color, expected_accept) {
+    let receipt_color = receipt.color();
+    match (receipt_color.as_ref(), expected_accept) {
         (
             Some(Color::Verified {
                 lo: color_lo,
@@ -1211,10 +1221,8 @@ fn checked_verify(
     }
     Ok(CheckedVerification {
         certificate: VerifierCertificate {
-            bound: canonicalize_zero(hi),
-            color: report.color.unwrap_or(guarded_color),
-            verifier_family: report.family,
-            flux_hash: report.flux_hash,
+            receipt,
+            color: receipt_color.unwrap_or(guarded_color),
         },
         accept: expected_accept,
     })
@@ -1827,8 +1835,9 @@ pub fn baseline_uniform(
 #[cfg(test)]
 mod tests {
     use super::{
-        PLANNER_CACHE_KEY_DOMAIN, PLANNER_CACHE_KEY_VERSION, PlannerCacheKeyAdmissionError,
-        ProblemFamily, admit_planner_cache_key, cache_key, cache_key_with_prefix, prolong_linear,
+        CostTable, MemCache, PLANNER_CACHE_KEY_DOMAIN, PLANNER_CACHE_KEY_VERSION, PlanOutcome,
+        PlannerCacheKeyAdmissionError, ProblemFamily, admit_planner_cache_key, cache_key,
+        cache_key_with_prefix, plan, prolong_linear,
     };
     use fs_verify::fem1d::Poly;
 
@@ -1858,6 +1867,50 @@ mod tests {
         let coarse_nodal = [0.0, 0.7, -0.2, 0.0];
         let prolonged = prolong_linear(&coarse_mesh, &coarse_nodal, &coarse_mesh).unwrap();
         assert_eq!(prolonged, coarse_nodal);
+    }
+
+    #[test]
+    fn plan_retains_verifier_receipt_through_audit_and_outcome() {
+        let receipt_family = family(vec![0.0, 0.2, -0.2, 0.0, 1.0, -1.0], "receipt-propagation");
+        let mut costs = CostTable::new(200.0).expect("valid cold cost");
+        let outcome = plan(
+            &receipt_family,
+            1.0,
+            0.05,
+            2_000.0,
+            &[12, 24, 48, 96],
+            &mut MemCache::default(),
+            &mut costs,
+        )
+        .expect("receipt-propagation plan");
+        let (certificate, ops) = match &outcome {
+            PlanOutcome::Discharged {
+                certificate, ops, ..
+            } => (certificate, ops),
+            PlanOutcome::RefusedWithBest {
+                best_certificate,
+                ops,
+                ..
+            } => (best_certificate, ops),
+            PlanOutcome::RefusedWithoutAnswer { reason, .. } => {
+                panic!("the propagation fixture must produce a receipt: {reason}")
+            }
+        };
+        let audited = ops
+            .iter()
+            .rev()
+            .find_map(|entry| entry.certificate_after.as_ref())
+            .expect("audit trail retains the verifier receipt");
+
+        assert_eq!(audited.receipt(), certificate.receipt());
+        assert_eq!(
+            audited.receipt().artifact_root(),
+            certificate.receipt().artifact_root()
+        );
+        assert_eq!(
+            audited.receipt().candidate_root(),
+            certificate.receipt().candidate_root()
+        );
     }
 
     #[test]

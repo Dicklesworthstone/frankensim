@@ -1,122 +1,338 @@
 //! EPISTEMIC-ENGINE ACCEPTANCE (bead xpck.8): the TOP-LEVEL runnable
-//! integration gate for the whole addendum — a declarative query becomes a
-//! colored, priced, auditable answer and crosses the solver-free checker's
-//! typed capability boundary. The in-test certificate and signature policies
-//! are deterministic fixtures, not vendor-independent scientific or
-//! cryptographic verification.
+//! integration gate for the whole addendum — a declarative query produces a
+//! colored, priced, auditable package and crosses the solver-free checker's
+//! typed capability boundary. Scientific promotion consumes an immutable
+//! `fs-verify` receipt and independently replays its exact problem/candidate;
+//! only the package-root signature policy remains a deterministic fixture, not
+//! vendor-independent cryptographic authentication. The retained certificate
+//! covers the exact 1-D manufactured proxy; the physical wedge QoI stays an
+//! explicit Estimated no-claim until its own upstream certifier exists.
 //!
 //! The path: admission (typed, teaching refusals) → flywheel discharge
 //! (planner + cache) → anytime colored answer (+ the VoI-priced hint)
-//! → fixture-authenticated evidence package → SOLVER-FREE policy re-check →
+//! → authentic-receipt-backed evidence package → SOLVER-FREE policy re-check →
 //! G5 whole-path replay → the laundering invariant at every hop.
 #![cfg(feature = "flywheel-e2e")]
 
 use fs_evidence::{Color, IntervalOp, compose};
-use fs_ir::planner::{CostTable, MemCache, PlanError, ProblemFamily};
+use fs_ir::planner::{
+    AnswerCache, CachedAnswer, CostTable, MemCache, PlanError, PlanOutcome, ProblemFamily, plan,
+};
 use fs_ir::{admission, sexpr};
 use fs_package::{Claim, EvidencePackage, Provenance};
+use fs_verify::estimator::{
+    AdmittedVerifierReceipt, VERIFIER_RECEIPT_QOI, VERIFIER_RECEIPT_UNITS,
+    VerifierProducerSourceIdentity, VerifierReceipt, admit_verifier_receipt,
+};
+use fs_verify::fem1d::Poly;
 
-const CERTIFICATE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const QOI_ID: &str = VERIFIER_RECEIPT_QOI;
+const QOI_UNITS: &str = VERIFIER_RECEIPT_UNITS;
+const PHYSICAL_QOI_ID: &str = "cht-wedge-perturbation-growth-min";
+const PHYSICAL_QOI_UNITS: &str = "UNRESOLVED:no-authoritative-unit-schema";
+const RECEIPT_POLICY: &str = "fs-flywheel-e2e/authentic-receipt-resolver/v1";
 
-// These fixtures prove exact request binding, policy plumbing, and fail-closed
-// substitution behavior. They do not resolve retained certificate artifacts
-// or establish an independent trust root.
-
-struct ExactCertificate {
-    provenance: Provenance,
-    claim_index: usize,
-    claim_id: String,
-    statement: String,
-    lo: f64,
-    hi: f64,
-    producer: String,
+fn push_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
+    let len = u64::try_from(value.len()).expect("bounded acceptance field length fits u64");
+    bytes.extend_from_slice(&len.to_le_bytes());
+    bytes.extend_from_slice(value);
 }
 
-impl ExactCertificate {
-    fn matches(&self, request: &fs_checker::SourceCertificateRequest<'_>) -> bool {
-        request.package_provenance == &self.provenance
-            && request.claim_index == self.claim_index
-            && request.claim_id == self.claim_id
-            && request.statement == self.statement
-            && request.lo.to_bits() == self.lo.to_bits()
-            && request.hi.to_bits() == self.hi.to_bits()
-            && request.producer == self.producer
-            && request.certificate_hash.to_hex() == CERTIFICATE_HASH
+fn push_text(bytes: &mut Vec<u8>, value: &str) {
+    push_bytes(bytes, value.as_bytes());
+}
+
+fn push_hash(bytes: &mut Vec<u8>, value: fs_checker::ContentHash) {
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn hash_f64_slice(domain: &str, values: &[f64]) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(&mut bytes, domain);
+    bytes.extend_from_slice(
+        &u64::try_from(values.len())
+            .expect("bounded acceptance vector length fits u64")
+            .to_le_bytes(),
+    );
+    for value in values {
+        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+#[derive(Debug, Clone)]
+struct AuthenticReceiptResolver {
+    receipt: VerifierReceipt,
+    family: ProblemFamily,
+    theta: f64,
+    tolerance: f64,
+    planner_budget: f64,
+    planner_spent: f64,
+    rungs: Vec<usize>,
+}
+
+struct ResolvedVerifierReceipt<'a> {
+    admitted: AdmittedVerifierReceipt<'a>,
+}
+
+fn retain_original_receipt(receipt: VerifierReceipt) -> VerifierReceipt {
+    let bytes = receipt
+        .canonical_bytes()
+        .expect("bounded original receipt transport bytes");
+    let presented = VerifierReceipt::from_retained_bytes(&bytes, receipt.artifact_root())
+        .expect("independently rooted original receipt transport");
+    assert_eq!(
+        presented, receipt,
+        "retained transport must preserve the exact original verifier receipt"
+    );
+    presented
+}
+
+impl ResolvedVerifierReceipt<'_> {
+    fn receipt(&self) -> &VerifierReceipt {
+        self.admitted.receipt()
+    }
+
+    fn claim(&self) -> Claim {
+        let receipt = self.receipt();
+        Claim::from_certificate(
+            receipt.qoi(),
+            receipt.statement(),
+            receipt.bound_lo(),
+            receipt.bound_hi(),
+            receipt.producer().label(),
+            receipt.artifact_root().to_hex(),
+        )
     }
 }
 
-struct ExactCertificateVerifier(Vec<ExactCertificate>);
+impl AuthenticReceiptResolver {
+    fn capture(
+        family: &ProblemFamily,
+        theta: f64,
+        tolerance: f64,
+        planner_budget: f64,
+        rungs: &[usize],
+    ) -> Result<Self, PlanError> {
+        let mut cache = MemCache::default();
+        let mut costs = CostTable::new(200.0)?;
+        let outcome = plan(
+            family,
+            theta,
+            tolerance,
+            planner_budget,
+            rungs,
+            &mut cache,
+            &mut costs,
+        )?;
+        let (candidate, mesh, spent, receipt) = outcome_candidate(outcome)
+            .expect("an acceptance receipt budget must produce a bounded candidate");
+        let receipt = retain_original_receipt(receipt);
+        let problem = family.at(theta, mesh)?;
+        admit_verifier_receipt(&problem, &candidate, tolerance, &receipt)
+            .expect("the retained original planner receipt must replay before use");
+        Ok(Self {
+            receipt,
+            family: family.clone(),
+            theta,
+            tolerance,
+            planner_budget,
+            planner_spent: spent,
+            rungs: rungs.to_vec(),
+        })
+    }
 
-impl ExactCertificateVerifier {
+    fn from_original_step(
+        family: &ProblemFamily,
+        theta: f64,
+        tolerance: f64,
+        planner_budget: f64,
+        planner_spent: f64,
+        rungs: &[usize],
+        receipt: VerifierReceipt,
+    ) -> Self {
+        Self {
+            receipt: retain_original_receipt(receipt),
+            family: family.clone(),
+            theta,
+            tolerance,
+            planner_budget,
+            planner_spent,
+            rungs: rungs.to_vec(),
+        }
+    }
+
+    fn resolve(&self) -> Result<ResolvedVerifierReceipt<'_>, &'static str> {
+        let mut cache = MemCache::default();
+        let mut costs = CostTable::new(200.0).map_err(|_| "replay cost table refused")?;
+        let outcome = plan(
+            &self.family,
+            self.theta,
+            self.tolerance,
+            self.planner_budget,
+            &self.rungs,
+            &mut cache,
+            &mut costs,
+        )
+        .map_err(|_| "independent planner replay refused")?;
+        let (candidate, mesh, spent, replay_receipt) =
+            outcome_candidate(outcome).ok_or("independent replay produced no candidate")?;
+        if spent.to_bits() != self.planner_spent.to_bits() {
+            return Err("independent planner consumption differs from the original step");
+        }
+        if replay_receipt != self.receipt {
+            return Err("original planner receipt differs from deterministic planner replay");
+        }
+        let problem = self
+            .family
+            .at(self.theta, mesh)
+            .map_err(|_| "independent problem replay refused")?;
+        let admitted = admit_verifier_receipt(&problem, &candidate, self.tolerance, &self.receipt)
+            .map_err(|_| "original verifier receipt failed exact production replay")?;
+        Ok(ResolvedVerifierReceipt { admitted })
+    }
+}
+
+fn outcome_candidate(outcome: PlanOutcome) -> Option<(Vec<f64>, Vec<f64>, f64, VerifierReceipt)> {
+    match outcome {
+        PlanOutcome::Discharged {
+            nodal,
+            mesh,
+            certificate,
+            cost,
+            ..
+        } => Some((nodal, mesh, cost, certificate.receipt().clone())),
+        PlanOutcome::RefusedWithBest {
+            best_nodal,
+            best_mesh,
+            best_certificate,
+            cost,
+            ..
+        } => Some((
+            best_nodal,
+            best_mesh,
+            cost,
+            best_certificate.receipt().clone(),
+        )),
+        PlanOutcome::RefusedWithoutAnswer { .. } => None,
+    }
+}
+
+enum ReceiptPromotion<'a> {
+    Verified(ResolvedVerifierReceipt<'a>),
+    Gated {
+        color: Color,
+        no_claim: &'static str,
+    },
+}
+
+fn resolve_for_promotion(resolver: Option<&AuthenticReceiptResolver>) -> ReceiptPromotion<'_> {
+    let Some(resolver) = resolver else {
+        return ReceiptPromotion::Gated {
+            color: Color::Estimated {
+                estimator: "missing-authentic-verifier-receipt".to_string(),
+                dispersion: 1.0,
+            },
+            no_claim: "NO-CLAIM: upstream verifier receipt authority is unavailable",
+        };
+    };
+    match resolver.resolve() {
+        Ok(resolved) if resolved.receipt().accepted() => ReceiptPromotion::Verified(resolved),
+        Ok(resolved) => ReceiptPromotion::Gated {
+            color: Color::Estimated {
+                estimator: "verified-bound-above-requested-tolerance".to_string(),
+                dispersion: resolved.receipt().bound_hi(),
+            },
+            no_claim: "NO-CLAIM: authentic bound did not discharge the requested tolerance",
+        },
+        Err(_) => ReceiptPromotion::Gated {
+            color: Color::Estimated {
+                estimator: "authentic-verifier-replay-refused".to_string(),
+                dispersion: 1.0,
+            },
+            no_claim: "NO-CLAIM: retained verifier receipt failed independent replay",
+        },
+    }
+}
+
+fn physical_qoi_no_claim(detail: &str, dispersion: f64) -> Claim {
+    Claim::estimated(
+        PHYSICAL_QOI_ID,
+        format!(
+            "NO-CLAIM for {PHYSICAL_QOI_ID} ({PHYSICAL_QOI_UNITS}): {detail}; the authentic \
+             receipt covers only the named 1-D manufactured proxy"
+        ),
+        "gated:physical-wedge-certifier-unavailable",
+        dispersion,
+    )
+}
+
+struct ReceiptCertificateVerifier<'a> {
+    resolved: ResolvedVerifierReceipt<'a>,
+    provenance: Provenance,
+    claim_index: usize,
+    expected_claim_subject_hash: fs_checker::ContentHash,
+}
+
+impl<'a> ReceiptCertificateVerifier<'a> {
+    fn from_resolver(
+        resolver: &'a AuthenticReceiptResolver,
+        provenance: Provenance,
+        claim_index: usize,
+    ) -> Result<Self, &'static str> {
+        let resolved = resolver.resolve()?;
+        let expected_claim_subject_hash = resolved
+            .claim()
+            .declared_source_certificate_subject_hash_unverified();
+        Ok(Self {
+            resolved,
+            provenance,
+            claim_index,
+            expected_claim_subject_hash,
+        })
+    }
+
     fn policy_fingerprint(&self) -> fs_checker::ContentHash {
-        fn push(bytes: &mut Vec<u8>, value: &[u8]) {
-            let len = u64::try_from(value.len()).expect("fixture field length fits u64");
-            bytes.extend_from_slice(&len.to_le_bytes());
-            bytes.extend_from_slice(value);
-        }
-
-        let mut bytes = b"fs-flywheel-e2e:exact-certificate-policy:v1".to_vec();
-        for certificate in &self.0 {
-            push(&mut bytes, certificate.provenance.code_version.as_bytes());
-            push(
-                &mut bytes,
-                certificate.provenance.constellation_lock.as_bytes(),
-            );
-            let claim_index =
-                u64::try_from(certificate.claim_index).expect("fixture claim index fits u64");
-            bytes.extend_from_slice(&claim_index.to_le_bytes());
-            push(&mut bytes, certificate.claim_id.as_bytes());
-            push(&mut bytes, certificate.statement.as_bytes());
-            bytes.extend_from_slice(&certificate.lo.to_bits().to_le_bytes());
-            bytes.extend_from_slice(&certificate.hi.to_bits().to_le_bytes());
-            push(&mut bytes, certificate.producer.as_bytes());
-            push(&mut bytes, CERTIFICATE_HASH.as_bytes());
-        }
+        let mut bytes = Vec::new();
+        push_text(&mut bytes, RECEIPT_POLICY);
+        push_hash(
+            &mut bytes,
+            self.resolved.receipt().artifact_root().content_hash(),
+        );
+        push_hash(&mut bytes, self.expected_claim_subject_hash);
+        push_text(&mut bytes, &self.provenance.code_version);
+        push_text(&mut bytes, &self.provenance.constellation_lock);
+        bytes.extend_from_slice(
+            &u64::try_from(self.claim_index)
+                .expect("bounded claim index fits u64")
+                .to_le_bytes(),
+        );
         fs_ledger::hash_bytes(&bytes)
     }
 }
 
-impl fs_checker::SourceCertificateVerifier for ExactCertificateVerifier {
+impl fs_checker::SourceCertificateVerifier for ReceiptCertificateVerifier<'_> {
     fn verify(
         &self,
         request: &fs_checker::SourceCertificateRequest<'_>,
     ) -> fs_checker::VerificationDecision {
         let fingerprint = self.policy_fingerprint();
-        if self
-            .0
-            .iter()
-            .any(|certificate| certificate.matches(request))
+        let receipt = self.resolved.receipt();
+        if receipt.accepted()
+            && request.package_provenance == &self.provenance
+            && request.claim_index == self.claim_index
+            && request.claim_subject_hash == self.expected_claim_subject_hash
+            && request.claim_id == receipt.qoi()
+            && request.statement == receipt.statement()
+            && request.lo.to_bits() == receipt.bound_lo().to_bits()
+            && request.hi.to_bits() == receipt.bound_hi().to_bits()
+            && request.producer == receipt.producer().label()
+            && request.certificate_hash == receipt.artifact_root().content_hash()
         {
             fs_checker::VerificationDecision::accept(fingerprint)
         } else {
             fs_checker::VerificationDecision::reject(fingerprint)
         }
     }
-}
-
-fn certificate_claim(
-    provenance: &Provenance,
-    claim_index: usize,
-    claim_id: impl Into<String>,
-    statement: impl Into<String>,
-    lo: f64,
-    hi: f64,
-    producer: impl Into<String>,
-) -> (Claim, ExactCertificate) {
-    let claim_id = claim_id.into();
-    let statement = statement.into();
-    let producer = producer.into();
-    let certificate = ExactCertificate {
-        provenance: provenance.clone(),
-        claim_index,
-        claim_id: claim_id.clone(),
-        statement: statement.clone(),
-        lo,
-        hi,
-        producer: producer.clone(),
-    };
-    let claim = Claim::from_certificate(claim_id, statement, lo, hi, producer, CERTIFICATE_HASH);
-    (claim, certificate)
 }
 
 struct ExactRootSignatureVerifier {
@@ -157,7 +373,6 @@ fn flip(root: fs_package::ContentHash) -> fs_package::ContentHash {
     bytes[0] ^= 0xde;
     fs_package::ContentHash(bytes)
 }
-use fs_verify::fem1d::Poly;
 use std::collections::BTreeMap;
 
 fn verdict(case: &str, detail: &str) {
@@ -342,8 +557,8 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         ProbeKind, UncertaintyNode, rank_purchases,
     };
     // Discharge the query, wrap the answer, and exercise the STANDALONE
-    // checker's certificate-policy, composition, and content-address paths
-    // with zero solver dependency.
+    // checker's receipt-policy, composition, and content-address paths. The
+    // real verifier runs before the checker receives its sealed capability.
     let family = steep_family()?;
     let mut cache = MemCache::default();
     let mut costs = CostTable::new(200.0)?;
@@ -383,29 +598,64 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
     .expect("valid bounded VoI request");
     let hint = fs_plan::voi::hint_for_query(&ranked);
     let hint_text = hint.render_text();
-    // The package: colored claims, fixture-authenticated, Merkle-rooted.
-    let Color::Verified { lo, hi } = last.color else {
+    // The package: authentic proxy receipt, explicit physical-QoI no-claim,
+    // and an Estimated VoI hint, all Merkle-rooted.
+    let Color::Verified { lo, hi } = &last.color else {
         panic!("the wedge trajectory ends verified");
     };
-    let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
-    let (qoi_claim, qoi_certificate) = certificate_claim(
-        &provenance,
-        0,
-        "wedge-qoi-interval",
-        format!("certified half-width {bound:.3e} at tol 6e-3"),
-        lo,
-        hi,
-        "fs-wedge/dwr-certifier",
+    let resolver = AuthenticReceiptResolver::from_original_step(
+        &family,
+        1.0,
+        6e-3,
+        last.budget,
+        last.spent,
+        &RUNGS,
+        last.verifier_receipt.clone(),
     );
+    assert_eq!(
+        resolver.receipt.bound_lo().to_bits(),
+        lo.to_bits(),
+        "the package interval is the authentic verifier interval"
+    );
+    assert_eq!(
+        resolver.receipt.bound_hi().to_bits(),
+        hi.to_bits(),
+        "the package interval is the authentic verifier interval"
+    );
+    assert_eq!(
+        resolver.receipt.flux_hash(),
+        last.flux_hash,
+        "the package retains the planner's authentic flux reconstruction"
+    );
+    assert_eq!(
+        resolver.receipt.verifier_family(),
+        last.verifier_family.as_str(),
+        "the package cannot relabel the verifier family"
+    );
+    assert_eq!(
+        resolver.receipt, last.verifier_receipt,
+        "package construction consumes the original anytime receipt, not a fresh mint"
+    );
+    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(Some(&resolver)) else {
+        panic!("the authentic final receipt must resolve before package construction");
+    };
+    let qoi_claim = resolved.claim();
+    let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
     let pkg = signed_fixture(
-        EvidencePackage::new(provenance)
+        EvidencePackage::new(provenance.clone())
             .with_claim(qoi_claim)
+            .with_claim(physical_qoi_no_claim(
+                "no authentic verifier receipt exists for the physical perturbation-growth QoI",
+                bound.max(f64::MIN_POSITIVE),
+            ))
             .with_claim(Claim::estimated("voi-hint", hint_text, "voi-myopic", 1.0)),
         "acceptance-gate",
     );
-    // SOLVER-FREE FIXTURE RE-CHECK: fs-checker exercises exact certificate,
-    // signature-policy, composition, and root bindings without solver deps.
-    let source_verifier = ExactCertificateVerifier(vec![qoi_certificate]);
+    // SOLVER-FREE PACKAGE RE-CHECK: the checker receives only the sealed token
+    // produced by the independent replay above. Its injected capability can
+    // match the exact request without importing or invoking a solver.
+    let source_verifier = ReceiptCertificateVerifier::from_resolver(&resolver, provenance, 0)
+        .expect("receipt resolves before the solver-free package check");
     let signature_verifier = ExactRootSignatureVerifier {
         domain: "acceptance-gate",
     };
@@ -415,7 +665,7 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         fs_checker::check_with_capabilities(&pkg, None, Some(&signature_verifier), &capabilities);
     assert!(
         check.passed(),
-        "the package passes the solver-free fixture policy"
+        "the package passes the solver-free receipt policy"
     );
     assert!(matches!(
         check.signature(),
@@ -442,76 +692,844 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         .passed(),
         "a tampered root fails the independent checker code path"
     );
+    match resolve_for_promotion(None) {
+        ReceiptPromotion::Gated { color, no_claim } => {
+            assert!(matches!(color, Color::Estimated { .. }));
+            assert!(no_claim.contains("NO-CLAIM") && no_claim.contains("unavailable"));
+        }
+        ReceiptPromotion::Verified(_) => {
+            panic!("missing upstream authority must never mint a verified claim")
+        }
+    }
     let pie = check.render_pie();
     println!(
-        "{{\"metric\":\"package\",\"root\":\"{root}\",\"hint\":{},\
-         \"pie\":\"{}\"}}",
+        "{{\"schema_version\":1,\"suite\":\"fs-flywheel-e2e/acceptance\",\
+         \"case\":\"ac-003\",\"seed\":\"0x5EED0008\",\"units\":\"{QOI_UNITS}\",\
+         \"budget_cells_bits\":\"{:016x}\",\"spent_cells_bits\":\"{:016x}\",\
+         \"cancellation\":\"completed-drained-finalized-published\",\
+         \"artifact_root\":\"{root}\",\"verifier_family\":\"{}\",\
+         \"verifier_receipt\":\"{}\",\"physical_promotion\":\"estimated-no-claim\",\
+         \"hint\":{},\"pie\":\"{}\"}}",
+        resolver.planner_budget.to_bits(),
+        resolver.planner_spent.to_bits(),
+        resolver.receipt.verifier_family(),
+        resolver.receipt.artifact_root(),
         hint.to_json(),
         pie.replace('"', "'").replace('\n', " | ")
     );
     verdict(
         "ac-003",
-        "the colored answer enters a fixture-authenticated Merkle-rooted package carrying \
-         its VoI-priced hint; the standalone checker exercises solver-free capability \
-         binding and catches a tampered root",
+        "an immutable fs-verify receipt is independently replayed before its exact 1-D proxy \
+         result enters the package; verifier family, flux reconstruction, full receipt address, \
+         and VoI hint remain bound, while the physical wedge QoI and missing authority remain \
+         explicit Estimated no-claims",
     );
     Ok(())
 }
 
+fn package_accepts_claim(
+    resolver: &AuthenticReceiptResolver,
+    provenance: &Provenance,
+    claim: Claim,
+) -> bool {
+    let package = signed_fixture(
+        EvidencePackage::new(provenance.clone()).with_claim(claim),
+        "acceptance-gate/ac-003-mutation",
+    );
+    let source_verifier =
+        ReceiptCertificateVerifier::from_resolver(resolver, provenance.clone(), 0)
+            .expect("mutation baseline receipt resolves before package checking");
+    let signature_verifier = ExactRootSignatureVerifier {
+        domain: "acceptance-gate/ac-003-mutation",
+    };
+    let capabilities =
+        fs_checker::VerificationCapabilities::deny_all().with_source_certificates(&source_verifier);
+    fs_checker::check_with_capabilities(&package, None, Some(&signature_verifier), &capabilities)
+        .passed()
+}
+
 #[test]
+fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Result<(), PlanError>
+{
+    let family = steep_family()?;
+    let resolver = AuthenticReceiptResolver::capture(&family, 1.0, 6e-3, 400.0, &RUNGS)?;
+    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(Some(&resolver)) else {
+        panic!("baseline production receipt must promote");
+    };
+    let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
+    assert!(package_accepts_claim(
+        &resolver,
+        &provenance,
+        resolved.claim()
+    ));
+
+    let receipt = &resolver.receipt;
+    let fake_hash = Claim::from_certificate(
+        receipt.qoi(),
+        receipt.statement(),
+        receipt.bound_lo(),
+        receipt.bound_hi(),
+        receipt.producer().label(),
+        "00".repeat(32),
+    );
+    assert!(
+        !package_accepts_claim(&resolver, &provenance, fake_hash),
+        "a fixed/fake certificate address cannot stand in for the production receipt"
+    );
+    let relabeled = Claim::from_certificate(
+        receipt.qoi(),
+        receipt.statement(),
+        receipt.bound_lo(),
+        receipt.bound_hi(),
+        "fs-wedge/dwr-certifier",
+        receipt.artifact_root().to_hex(),
+    );
+    assert!(
+        !package_accepts_claim(&resolver, &provenance, relabeled),
+        "acceptance cannot relabel the production source identity"
+    );
+    let altered_endpoint = Claim::from_certificate(
+        receipt.qoi(),
+        receipt.statement(),
+        receipt.bound_lo(),
+        receipt.bound_hi() + f64::EPSILON,
+        receipt.producer().label(),
+        receipt.artifact_root().to_hex(),
+    );
+    assert!(
+        !package_accepts_claim(&resolver, &provenance, altered_endpoint),
+        "altering an interval endpoint fails exact checker request binding"
+    );
+    let cross_qoi = Claim::from_certificate(
+        format!("{}-foreign", receipt.qoi()),
+        receipt.statement(),
+        receipt.bound_lo(),
+        receipt.bound_hi(),
+        receipt.producer().label(),
+        receipt.artifact_root().to_hex(),
+    );
+    assert!(
+        !package_accepts_claim(&resolver, &provenance, cross_qoi),
+        "the same receipt address cannot authenticate a different QoI subject"
+    );
+
+    let cross_problem = AuthenticReceiptResolver::from_original_step(
+        &family,
+        0.75,
+        resolver.tolerance,
+        resolver.planner_budget,
+        resolver.planner_spent,
+        &resolver.rungs,
+        resolver.receipt.clone(),
+    );
+    assert!(
+        cross_problem.resolve().is_err(),
+        "an authentic receipt cannot replay against a substituted problem parameter"
+    );
+    let cross_tolerance = AuthenticReceiptResolver::from_original_step(
+        &family,
+        resolver.theta,
+        7e-3,
+        resolver.planner_budget,
+        resolver.planner_spent,
+        &resolver.rungs,
+        resolver.receipt.clone(),
+    );
+    assert!(
+        cross_tolerance.resolve().is_err(),
+        "an authentic receipt cannot replay against a substituted tolerance"
+    );
+
+    // Exercise the claim-subject comparison directly: every visible request
+    // field remains exact and only the address-free subject digest changes.
+    let verifier = ReceiptCertificateVerifier::from_resolver(&resolver, provenance.clone(), 0)
+        .expect("baseline production receipt resolves");
+    let claim = resolved.claim();
+    let statement = receipt.statement();
+    let producer = receipt.producer().label();
+    let request = fs_checker::SourceCertificateRequest {
+        package_provenance: &provenance,
+        package_root: fs_checker::ContentHash([7; 32]),
+        claim_index: 0,
+        claim_id: receipt.qoi(),
+        statement: &statement,
+        claim_subject_hash: claim.declared_source_certificate_subject_hash_unverified(),
+        lo: receipt.bound_lo(),
+        hi: receipt.bound_hi(),
+        producer: &producer,
+        certificate_hash: receipt.artifact_root().content_hash(),
+        semantic_witness: None,
+    };
+    assert!(
+        fs_checker::SourceCertificateVerifier::verify(&verifier, &request).accepted(),
+        "the exact lower-owned claim subject is recognized"
+    );
+    let mut changed_subject = *request.claim_subject_hash.as_bytes();
+    changed_subject[0] ^= 1;
+    let substituted = fs_checker::SourceCertificateRequest {
+        claim_subject_hash: fs_checker::ContentHash(changed_subject),
+        ..request
+    };
+    assert!(
+        !fs_checker::SourceCertificateVerifier::verify(&verifier, &substituted).accepted(),
+        "a subject-only substitution must fail closed"
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct RecordingCache {
+    inner: MemCache,
+    committed_mutations: Vec<fs_checker::ContentHash>,
+}
+
+impl AnswerCache for RecordingCache {
+    fn lookup(&self, key: &str, tolerance: f64) -> Option<CachedAnswer> {
+        self.inner.lookup(key, tolerance)
+    }
+
+    fn insert(&mut self, key: &str, answer: CachedAnswer) {
+        let mut bytes = Vec::new();
+        push_text(&mut bytes, "fs-flywheel-e2e/cache-mutation/v1");
+        push_text(&mut bytes, key);
+        bytes.extend_from_slice(&answer.bound().to_bits().to_le_bytes());
+        push_hash(
+            &mut bytes,
+            hash_f64_slice("cache-candidate/v1", answer.nodal()),
+        );
+        push_hash(&mut bytes, hash_f64_slice("cache-mesh/v1", answer.mesh()));
+        self.committed_mutations.push(fs_ledger::hash_bytes(&bytes));
+        self.inner.insert(key, answer);
+    }
+}
+
+impl RecordingCache {
+    fn initial_snapshot_root() -> fs_checker::ContentHash {
+        fs_ledger::hash_bytes(b"fs-flywheel-e2e/cache-snapshot/v1:empty")
+    }
+
+    fn committed_mutations_root(&self) -> fs_checker::ContentHash {
+        let mut bytes = Vec::new();
+        push_text(&mut bytes, "fs-flywheel-e2e/cache-mutation-sequence/v1");
+        bytes.extend_from_slice(
+            &u64::try_from(self.committed_mutations.len())
+                .expect("bounded cache mutation count fits u64")
+                .to_le_bytes(),
+        );
+        for mutation in &self.committed_mutations {
+            push_hash(&mut bytes, *mutation);
+        }
+        fs_ledger::hash_bytes(&bytes)
+    }
+}
+
+fn interval_sequence_root(trajectory: &[fs_ir::anytime::IntervalStep]) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(&mut bytes, "fs-flywheel-e2e/interval-sequence/v1");
+    bytes.extend_from_slice(
+        &u64::try_from(trajectory.len())
+            .expect("bounded interval count fits u64")
+            .to_le_bytes(),
+    );
+    for step in trajectory {
+        bytes.extend_from_slice(&step.budget.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&step.spent.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&step.bound.to_bits().to_le_bytes());
+        let Color::Verified { lo, hi } = &step.color else {
+            panic!("the acceptance trajectory may retain only verified enclosures");
+        };
+        bytes.extend_from_slice(&lo.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&hi.to_bits().to_le_bytes());
+        push_text(&mut bytes, &step.verifier_family);
+        bytes.extend_from_slice(&step.flux_hash.to_le_bytes());
+        let receipt = &step.verifier_receipt;
+        assert_eq!(receipt.bound_hi().to_bits(), step.bound.to_bits());
+        assert_eq!(receipt.verifier_family(), step.verifier_family.as_str());
+        assert_eq!(receipt.flux_hash(), step.flux_hash);
+        for root in [
+            receipt.artifact_root().content_hash(),
+            receipt.problem_root(),
+            receipt.candidate_root(),
+            receipt.mesh_root(),
+            receipt.operator_root(),
+            receipt.coefficient_root(),
+            receipt.query_root(),
+        ] {
+            push_hash(&mut bytes, root);
+        }
+        push_text(&mut bytes, receipt.qoi());
+        push_text(&mut bytes, receipt.units());
+        push_text(&mut bytes, &step.hint);
+        bytes.push(u8::from(step.discharged));
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+
+fn ladder_root(budgets: &[f64], rungs: &[usize]) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(
+        &mut bytes,
+        "fs-flywheel-e2e/ladder-and-escalation-policy/v1",
+    );
+    bytes.extend_from_slice(
+        &u64::try_from(budgets.len())
+            .expect("bounded budget ladder fits u64")
+            .to_le_bytes(),
+    );
+    for budget in budgets {
+        bytes.extend_from_slice(&budget.to_bits().to_le_bytes());
+    }
+    bytes.extend_from_slice(
+        &u64::try_from(rungs.len())
+            .expect("bounded rung ladder fits u64")
+            .to_le_bytes(),
+    );
+    for rung in rungs {
+        bytes.extend_from_slice(
+            &u64::try_from(*rung)
+                .expect("bounded rung size fits u64")
+                .to_le_bytes(),
+        );
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+
+fn escalation_root(trajectory: &[fs_ir::anytime::IntervalStep]) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(&mut bytes, "fs-flywheel-e2e/escalation-decisions/v1");
+    for step in trajectory {
+        push_text(&mut bytes, &step.hint);
+        bytes.push(u8::from(step.discharged));
+        bytes.extend_from_slice(&step.budget.to_bits().to_le_bytes());
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+
+fn admission_ir_root(report: &admission::AdmissionReport) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(&mut bytes, "fs-flywheel-e2e/admission-ir/v1");
+    bytes.extend_from_slice(&report.lowering.ir_version().to_le_bytes());
+    push_text(&mut bytes, report.lowering.raw_canonical());
+    match report.lowering.lowered_canonical() {
+        Some(lowered) => {
+            bytes.push(1);
+            push_text(&mut bytes, lowered);
+        }
+        None => bytes.push(0),
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+
+fn admission_decision_root(
+    report: &admission::AdmissionReport,
+    cx: &admission::AdmissionContext<'_>,
+) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(&mut bytes, "fs-flywheel-e2e/admission-decision/v1");
+    push_hash(&mut bytes, admission_ir_root(report));
+    push_text(&mut bytes, &report.study);
+    bytes.push(u8::from(report.admitted));
+    push_text(&mut bytes, &report.diagnosis());
+    let capability = cx
+        .capability
+        .as_ref()
+        .expect("acceptance admission has an explicit session capability");
+    bytes.extend_from_slice(&capability.cores.to_le_bytes());
+    bytes.extend_from_slice(&capability.mem_bytes.to_le_bytes());
+    bytes.extend_from_slice(&capability.wall_s.to_bits().to_le_bytes());
+    for op in &capability.ops {
+        push_text(&mut bytes, op);
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+
+fn voi_manifest_roots(bound: f64) -> (fs_checker::ContentHash, fs_checker::ContentHash) {
+    use fs_plan::voi::{
+        Cx, DecisionBudget, LiveDecision, MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS, Probe,
+        ProbeKind, UncertaintyNode, rank_purchases,
+    };
+    let margin = |value: &[f64]| value[0] - 5e-3;
+    let decision = LiveDecision {
+        margin: &margin,
+        arity: 1,
+    };
+    let nodes = [UncertaintyNode {
+        name: "qoi-bound".to_string(),
+        lo: 0.0,
+        hi: bound.max(1e-6) * 2.0,
+        nominal: bound,
+    }];
+    let menu = [Probe {
+        name: "climb-final-rung".to_string(),
+        target: "qoi-bound".to_string(),
+        cost: 12.0,
+        shrink: 0.25,
+        kind: ProbeKind::Computational,
+    }];
+    let ranked = rank_purchases(
+        &Cx::for_testing(),
+        &decision,
+        &nodes,
+        &menu,
+        32,
+        DecisionBudget::new(MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS)
+            .expect("valid replay VoI budget"),
+        "fs-flywheel-acceptance-v1",
+        "ac-004-snapshot-v1",
+    )
+    .expect("valid replay VoI request");
+    let mut inputs = Vec::new();
+    push_text(&mut inputs, "fs-flywheel-e2e/voi-inputs/v1");
+    inputs.extend_from_slice(&ranked.source_identity_version().to_le_bytes());
+    push_text(&mut inputs, "margin/v1:value[0]-threshold");
+    inputs.extend_from_slice(&5e-3_f64.to_bits().to_le_bytes());
+    push_hash(&mut inputs, ranked.source_context_id());
+
+    let mut outputs = Vec::new();
+    push_text(&mut outputs, "fs-flywheel-e2e/voi-outputs/v1");
+    outputs.extend_from_slice(&ranked.identity_version().to_le_bytes());
+    push_hash(&mut outputs, ranked.context_id());
+    (
+        fs_ledger::hash_bytes(&inputs),
+        fs_ledger::hash_bytes(&outputs),
+    )
+}
+
+fn whole_path_source_cone_root(
+    producer: &VerifierProducerSourceIdentity,
+) -> fs_checker::ContentHash {
+    let mut bytes = Vec::new();
+    push_text(&mut bytes, "fs-flywheel-e2e/whole-path-source-cone/v1");
+    push_hash(&mut bytes, producer.producer_source_root());
+    push_hash(&mut bytes, producer.dependency_source_root());
+    push_hash(&mut bytes, producer.workspace_manifest_root());
+    for source in [
+        &include_bytes!("acceptance.rs")[..],
+        &include_bytes!("../Cargo.toml")[..],
+        &include_bytes!("../src/lib.rs")[..],
+        &include_bytes!("../../../Cargo.toml")[..],
+        &include_bytes!("../../fs-ir/Cargo.toml")[..],
+        &include_bytes!("../../fs-ir/src/lib.rs")[..],
+        &include_bytes!("../../fs-ir/src/ast.rs")[..],
+        &include_bytes!("../../fs-ir/src/sexpr.rs")[..],
+        &include_bytes!("../../fs-ir/src/lower.rs")[..],
+        &include_bytes!("../../fs-ir/src/study.rs")[..],
+        &include_bytes!("../../fs-ir/src/admission.rs")[..],
+        &include_bytes!("../../fs-ir/src/planner.rs")[..],
+        &include_bytes!("../../fs-ir/src/anytime.rs")[..],
+        &include_bytes!("../../fs-plan/Cargo.toml")[..],
+        &include_bytes!("../../fs-plan/src/lib.rs")[..],
+        &include_bytes!("../../fs-plan/src/voi.rs")[..],
+        &include_bytes!("../../fs-package/Cargo.toml")[..],
+        &include_bytes!("../../fs-package/src/lib.rs")[..],
+        &include_bytes!("../../fs-package/src/origin.rs")[..],
+        &include_bytes!("../../fs-checker/Cargo.toml")[..],
+        &include_bytes!("../../fs-checker/src/lib.rs")[..],
+        &include_bytes!("../../fs-checker/src/semantic.rs")[..],
+        &include_bytes!("../../fs-evidence/Cargo.toml")[..],
+        &include_bytes!("../../fs-evidence/src/lib.rs")[..],
+        &include_bytes!("../../fs-evidence/src/color.rs")[..],
+        &include_bytes!("../../fs-evidence/src/admitted.rs")[..],
+        &include_bytes!("../../fs-ledger/Cargo.toml")[..],
+        &include_bytes!("../../fs-ledger/src/lib.rs")[..],
+        &include_bytes!("../../fs-ledger/src/hash.rs")[..],
+        &include_bytes!("../../fs-blake3/Cargo.toml")[..],
+        &include_bytes!("../../fs-blake3/src/lib.rs")[..],
+        &include_bytes!("../../fs-blake3/src/identity.rs")[..],
+    ] {
+        push_bytes(&mut bytes, source);
+    }
+    fs_ledger::hash_bytes(&bytes)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WholePathReplayManifest {
+    schema_version: u32,
+    admission_ir_root: fs_checker::ContentHash,
+    capability_decision_root: fs_checker::ContentHash,
+    query_root: fs_checker::ContentHash,
+    qoi_root: fs_checker::ContentHash,
+    units: String,
+    interval_sequence_root: fs_checker::ContentHash,
+    verifier_receipts_root: fs_checker::ContentHash,
+    ladder_root: fs_checker::ContentHash,
+    escalation_root: fs_checker::ContentHash,
+    cache_snapshot_root: fs_checker::ContentHash,
+    cache_mutations_root: fs_checker::ContentHash,
+    voi_inputs_root: fs_checker::ContentHash,
+    voi_outputs_root: fs_checker::ContentHash,
+    package_root: fs_checker::ContentHash,
+    checker_decision_root: fs_checker::ContentHash,
+    checker_receipt_root: fs_checker::ContentHash,
+    budget_root: fs_checker::ContentHash,
+    tolerance_bits: u64,
+    planner_budget_bits: u64,
+    planner_spent_bits: u64,
+    verifier_work: [u128; 6],
+    cancellation: String,
+    source_cone_root: fs_checker::ContentHash,
+    lock_root: fs_checker::ContentHash,
+    toolchain_root: fs_checker::ContentHash,
+    replay_verifier: String,
+}
+
+impl WholePathReplayManifest {
+    fn root(&self) -> fs_checker::ContentHash {
+        let mut bytes = b"fs-flywheel-e2e/whole-path-manifest/v1".to_vec();
+        bytes.extend_from_slice(&self.schema_version.to_le_bytes());
+        for root in [
+            self.admission_ir_root,
+            self.capability_decision_root,
+            self.query_root,
+            self.qoi_root,
+        ] {
+            push_hash(&mut bytes, root);
+        }
+        push_text(&mut bytes, &self.units);
+        for root in [
+            self.interval_sequence_root,
+            self.verifier_receipts_root,
+            self.ladder_root,
+            self.escalation_root,
+            self.cache_snapshot_root,
+            self.cache_mutations_root,
+            self.voi_inputs_root,
+            self.voi_outputs_root,
+            self.package_root,
+            self.checker_decision_root,
+            self.checker_receipt_root,
+            self.budget_root,
+        ] {
+            push_hash(&mut bytes, root);
+        }
+        bytes.extend_from_slice(&self.tolerance_bits.to_le_bytes());
+        bytes.extend_from_slice(&self.planner_budget_bits.to_le_bytes());
+        bytes.extend_from_slice(&self.planner_spent_bits.to_le_bytes());
+        for work in self.verifier_work {
+            bytes.extend_from_slice(&work.to_le_bytes());
+        }
+        push_text(&mut bytes, &self.cancellation);
+        push_hash(&mut bytes, self.source_cone_root);
+        push_hash(&mut bytes, self.lock_root);
+        push_hash(&mut bytes, self.toolchain_root);
+        push_text(&mut bytes, &self.replay_verifier);
+        fs_ledger::hash_bytes(&bytes)
+    }
+
+    fn verifies(&self, expected: fs_checker::ContentHash) -> bool {
+        self.root() == expected
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn ac_004_g5_whole_path_replay() -> Result<(), PlanError> {
     use fs_ir::anytime::run_anytime;
-    let run = || -> Result<(Vec<u64>, fs_package::ContentHash), PlanError> {
+    let run = || -> Result<WholePathReplayManifest, PlanError> {
+        let cx = admission_cx();
+        let node = sexpr::parse(WEDGE).expect("whole-path replay IR parses");
+        let admission = admission::admit(&node, &cx);
+        assert!(admission.admitted, "whole-path replay begins admitted");
+
         let family = steep_family()?;
-        let mut cache = MemCache::default();
+        let budgets = [30.0, 400.0];
+        let mut cache = RecordingCache::default();
         let mut costs = CostTable::new(200.0)?;
-        let report = run_anytime(
+        let report = run_anytime(&family, 1.0, 6e-3, &budgets, &RUNGS, &mut cache, &mut costs)?;
+        assert!(
+            !report.trajectory.is_empty(),
+            "replay retains every interval step"
+        );
+
+        let mut receipt_sequence = Vec::new();
+        push_text(
+            &mut receipt_sequence,
+            "fs-flywheel-e2e/verifier-receipt-sequence/v1",
+        );
+        receipt_sequence.extend_from_slice(
+            &u64::try_from(report.trajectory.len())
+                .expect("bounded receipt sequence fits u64")
+                .to_le_bytes(),
+        );
+        for step in &report.trajectory {
+            let resolver = AuthenticReceiptResolver::from_original_step(
+                &family,
+                1.0,
+                6e-3,
+                step.budget,
+                step.spent,
+                &RUNGS,
+                step.verifier_receipt.clone(),
+            );
+            assert!(
+                resolver.resolve().is_ok(),
+                "every original trajectory receipt independently replays"
+            );
+            assert_eq!(
+                resolver.receipt.bound_hi().to_bits(),
+                step.bound.to_bits(),
+                "receipt sequence binds every interval endpoint"
+            );
+            assert_eq!(resolver.receipt.flux_hash(), step.flux_hash);
+            assert_eq!(
+                resolver.receipt.verifier_family(),
+                step.verifier_family.as_str()
+            );
+            assert_eq!(resolver.receipt, step.verifier_receipt);
+            for root in [
+                resolver.receipt.artifact_root().content_hash(),
+                resolver.receipt.problem_root(),
+                resolver.receipt.candidate_root(),
+                resolver.receipt.mesh_root(),
+                resolver.receipt.operator_root(),
+                resolver.receipt.coefficient_root(),
+                resolver.receipt.query_root(),
+            ] {
+                push_hash(&mut receipt_sequence, root);
+            }
+        }
+
+        let final_step = report.trajectory.last().expect("final original receipt");
+        let resolver = AuthenticReceiptResolver::from_original_step(
             &family,
             1.0,
             6e-3,
-            &[30.0, 400.0],
+            final_step.budget,
+            final_step.spent,
             &RUNGS,
-            &mut cache,
-            &mut costs,
-        )?;
-        let bits: Vec<u64> = report
-            .trajectory
-            .iter()
-            .map(|s| s.bound.to_bits())
-            .collect();
+            final_step.verifier_receipt.clone(),
+        );
+        let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(Some(&resolver)) else {
+            panic!("the final replay receipt must independently resolve");
+        };
+        let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
         let pkg = signed_fixture(
-            EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock")).with_claim({
-                let Color::Verified { lo, hi } =
-                    report.trajectory.last().expect("step").color.clone()
-                else {
-                    panic!("the replay trajectory ends verified");
-                };
-                Claim::from_certificate(
-                    "wedge-qoi-interval",
-                    "replay claim",
-                    lo,
-                    hi,
-                    "fs-wedge/dwr-certifier",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                )
-            }),
+            EvidencePackage::new(provenance.clone())
+                .with_claim(resolved.claim())
+                .with_claim(physical_qoi_no_claim(
+                    "whole-path replay has no authentic physical-QoI certifier",
+                    report
+                        .trajectory
+                        .last()
+                        .expect("final interval")
+                        .bound
+                        .max(f64::MIN_POSITIVE),
+                )),
             "acceptance-gate/ac-004",
         );
-        Ok((bits, pkg.try_merkle_root().expect("bounded fixture root")))
+        let package_root = pkg.try_merkle_root().expect("bounded fixture root");
+        let source_verifier = ReceiptCertificateVerifier::from_resolver(&resolver, provenance, 0)
+            .expect("whole-path receipt resolves before the solver-free package check");
+        let signature_verifier = ExactRootSignatureVerifier {
+            domain: "acceptance-gate/ac-004",
+        };
+        let capabilities = fs_checker::VerificationCapabilities::deny_all()
+            .with_source_certificates(&source_verifier);
+        let check = fs_checker::check_with_capabilities(
+            &pkg,
+            Some(package_root),
+            Some(&signature_verifier),
+            &capabilities,
+        );
+        assert!(
+            check.passed(),
+            "whole-path checker receipt must be positive"
+        );
+        assert!(check.validate_decision_hash());
+        let checker_receipt = check
+            .receipt()
+            .expect("positive whole-path check retains its policy receipt");
+        assert!(checker_receipt.validate_hash());
+
+        let final_bound = report.trajectory.last().expect("final interval").bound;
+        let (voi_inputs_root, voi_outputs_root) = voi_manifest_roots(final_bound);
+        let producer = resolver.receipt.producer();
+        let mut qoi = Vec::new();
+        push_text(&mut qoi, PHYSICAL_QOI_ID);
+        push_text(&mut qoi, PHYSICAL_QOI_UNITS);
+        push_text(&mut qoi, QOI_ID);
+        push_text(&mut qoi, QOI_UNITS);
+        push_hash(&mut qoi, resolver.receipt.query_root());
+        let mut budget = Vec::new();
+        push_text(&mut budget, "fs-flywheel-e2e/whole-path-budgets/v1");
+        budget.extend_from_slice(&6e-3_f64.to_bits().to_le_bytes());
+        budget.extend_from_slice(&resolver.planner_budget.to_bits().to_le_bytes());
+        budget.extend_from_slice(&resolver.planner_spent.to_bits().to_le_bytes());
+        for work in resolver.receipt.work_plan() {
+            budget.extend_from_slice(&work.to_le_bytes());
+        }
+
+        Ok(WholePathReplayManifest {
+            schema_version: 1,
+            admission_ir_root: admission_ir_root(&admission),
+            capability_decision_root: admission_decision_root(&admission, &cx),
+            query_root: fs_ledger::hash_bytes(WEDGE.as_bytes()),
+            qoi_root: fs_ledger::hash_bytes(&qoi),
+            units: format!(
+                "physical={PHYSICAL_QOI_UNITS};proxy={QOI_UNITS};physical-promotion=gated"
+            ),
+            interval_sequence_root: interval_sequence_root(&report.trajectory),
+            verifier_receipts_root: fs_ledger::hash_bytes(&receipt_sequence),
+            ladder_root: ladder_root(&budgets, &RUNGS),
+            escalation_root: escalation_root(&report.trajectory),
+            cache_snapshot_root: RecordingCache::initial_snapshot_root(),
+            cache_mutations_root: cache.committed_mutations_root(),
+            voi_inputs_root,
+            voi_outputs_root,
+            package_root,
+            checker_decision_root: check.decision_hash(),
+            checker_receipt_root: checker_receipt.receipt_hash(),
+            budget_root: fs_ledger::hash_bytes(&budget),
+            tolerance_bits: 6e-3_f64.to_bits(),
+            planner_budget_bits: resolver.planner_budget.to_bits(),
+            planner_spent_bits: resolver.planner_spent.to_bits(),
+            verifier_work: resolver.receipt.work_plan(),
+            cancellation: if report.stopped_by_observer() {
+                "observer-stopped/partial/no-promotion".to_string()
+            } else {
+                "completed-drained-finalized-published".to_string()
+            },
+            source_cone_root: whole_path_source_cone_root(producer),
+            lock_root: producer.workspace_lock_root(),
+            toolchain_root: producer.toolchain_root(),
+            replay_verifier: "fs-flywheel-e2e/whole-path-replay-verifier/v1".to_string(),
+        })
     };
-    let (bits_a, root_a) = run()?;
-    let (bits_b, root_b) = run()?;
-    assert_eq!(bits_a, bits_b, "the trajectory replays bit-exact");
-    assert_eq!(root_a, root_b, "the artifact hash replays exactly");
+    let manifest_a = run()?;
+    let manifest_b = run()?;
+    assert_eq!(
+        manifest_a, manifest_b,
+        "every whole-path semantic component replays bit-exact"
+    );
+    let expected = manifest_a.root();
+    assert!(manifest_b.verifies(expected));
+
+    macro_rules! manifest_mutation {
+        ($field:literal, $mutation:expr) => {{
+            let mut changed = manifest_a.clone();
+            $mutation(&mut changed);
+            assert!(
+                !changed.verifies(expected),
+                "mutating or deleting {} must fail the whole-path manifest",
+                $field
+            );
+        }};
+    }
+    manifest_mutation!("schema version", |m: &mut WholePathReplayManifest| m
+        .schema_version +=
+        1);
+    manifest_mutation!("admission IR", |m: &mut WholePathReplayManifest| m
+        .admission_ir_root =
+        flip(m.admission_ir_root));
+    manifest_mutation!("capability decision", |m: &mut WholePathReplayManifest| m
+        .capability_decision_root =
+        flip(m.capability_decision_root));
+    manifest_mutation!("query", |m: &mut WholePathReplayManifest| m.query_root =
+        flip(m.query_root));
+    manifest_mutation!("QoI", |m: &mut WholePathReplayManifest| m.qoi_root =
+        flip(m.qoi_root));
+    manifest_mutation!("units", |m: &mut WholePathReplayManifest| m
+        .units
+        .push_str("-foreign"));
+    manifest_mutation!("interval sequence", |m: &mut WholePathReplayManifest| m
+        .interval_sequence_root =
+        flip(m.interval_sequence_root));
+    manifest_mutation!(
+        "authentic receipt sequence",
+        |m: &mut WholePathReplayManifest| m.verifier_receipts_root =
+            fs_ledger::hash_bytes(b"deleted receipts")
+    );
+    manifest_mutation!("ladder", |m: &mut WholePathReplayManifest| m.ladder_root =
+        flip(m.ladder_root));
+    manifest_mutation!("escalation decisions", |m: &mut WholePathReplayManifest| {
+        m.escalation_root = flip(m.escalation_root)
+    });
+    manifest_mutation!("cache snapshot", |m: &mut WholePathReplayManifest| m
+        .cache_snapshot_root =
+        flip(m.cache_snapshot_root));
+    manifest_mutation!("cache mutations", |m: &mut WholePathReplayManifest| m
+        .cache_mutations_root =
+        fs_ledger::hash_bytes(b"deleted cache mutations"));
+    manifest_mutation!("VoI inputs", |m: &mut WholePathReplayManifest| m
+        .voi_inputs_root =
+        flip(m.voi_inputs_root));
+    manifest_mutation!("VoI outputs", |m: &mut WholePathReplayManifest| m
+        .voi_outputs_root =
+        flip(m.voi_outputs_root));
+    manifest_mutation!("package root", |m: &mut WholePathReplayManifest| m
+        .package_root =
+        flip(m.package_root));
+    manifest_mutation!("checker decision", |m: &mut WholePathReplayManifest| m
+        .checker_decision_root =
+        flip(m.checker_decision_root));
+    manifest_mutation!("checker receipt", |m: &mut WholePathReplayManifest| m
+        .checker_receipt_root =
+        flip(m.checker_receipt_root));
+    manifest_mutation!(
+        "budgets and consumption",
+        |m: &mut WholePathReplayManifest| m.budget_root = flip(m.budget_root)
+    );
+    manifest_mutation!("tolerance", |m: &mut WholePathReplayManifest| m
+        .tolerance_bits ^=
+        1);
+    manifest_mutation!("planner budget", |m: &mut WholePathReplayManifest| m
+        .planner_budget_bits ^=
+        1);
+    manifest_mutation!("planner consumption", |m: &mut WholePathReplayManifest| {
+        m.planner_spent_bits ^= 1
+    });
+    manifest_mutation!("verifier work", |m: &mut WholePathReplayManifest| m
+        .verifier_work[0] +=
+        1);
+    manifest_mutation!(
+        "cancellation disposition",
+        |m: &mut WholePathReplayManifest| m.cancellation.push_str("-partial")
+    );
+    manifest_mutation!("producer source cone", |m: &mut WholePathReplayManifest| {
+        m.source_cone_root = flip(m.source_cone_root)
+    });
+    manifest_mutation!("workspace lock", |m: &mut WholePathReplayManifest| m
+        .lock_root =
+        flip(m.lock_root));
+    manifest_mutation!("toolchain", |m: &mut WholePathReplayManifest| m
+        .toolchain_root =
+        flip(m.toolchain_root));
+    manifest_mutation!("replay verifier", |m: &mut WholePathReplayManifest| m
+        .replay_verifier
+        .push_str("-substituted"));
+    println!(
+        "{{\"schema_version\":1,\"suite\":\"fs-flywheel-e2e/acceptance\",\
+         \"case\":\"ac-004\",\"seed\":\"0x5EED0008\",\"units\":\"{}\",\
+         \"budget_root\":\"{}\",\"tolerance_bits\":\"{:016x}\",\
+         \"planner_budget_bits\":\"{:016x}\",\"planner_spent_bits\":\"{:016x}\",\
+         \"verifier_work\":{:?},\"cancellation\":\"{}\",\
+         \"manifest_root\":\"{expected}\",\"verifier_receipts_root\":\"{}\",\
+         \"checker_receipt_root\":\"{}\",\"replay_verifier\":\"{}\",\
+         \"physical_promotion\":\"estimated-no-claim\"}}",
+        manifest_a.units,
+        manifest_a.budget_root,
+        manifest_a.tolerance_bits,
+        manifest_a.planner_budget_bits,
+        manifest_a.planner_spent_bits,
+        manifest_a.verifier_work,
+        manifest_a.cancellation,
+        manifest_a.verifier_receipts_root,
+        manifest_a.checker_receipt_root,
+        manifest_a.replay_verifier,
+    );
     verdict(
         "ac-004",
-        "the whole path — discharge, trajectory, package root — replays bit-exact (G5)",
+        "the whole path binds admission, capabilities, query/QoI/units, every interval and \
+         authentic verifier receipt, ladder/escalation, cache state/mutations, VoI, package and \
+         checker receipts, budgets/cancellation, and source-cone/lock/toolchain inputs; binary \
+         attestation remains a no-claim, every bound field replays bit-exact, and every mutation \
+         fails closed (G5)",
     );
     Ok(())
 }
 
 #[test]
-fn ac_005_laundering_invariant_across_the_path() {
+fn ac_005_laundering_invariant_across_the_path() -> Result<(), PlanError> {
     // An ESTIMATED intermediate anywhere in the composition can never
     // surface as VERIFIED — checked at the color algebra AND at the
     // package layer.
@@ -527,23 +1545,21 @@ fn ac_005_laundering_invariant_across_the_path() {
     );
     // At the package layer the breakdown keeps them apart — an audit
     // sees exactly how much of the answer is estimated.
+    let family = steep_family()?;
+    let resolver = AuthenticReceiptResolver::capture(&family, 1.0, 6e-3, 400.0, &RUNGS)?;
+    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(Some(&resolver)) else {
+        panic!("the authentic hard component must resolve");
+    };
     let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
-    let (hard_claim, hard_certificate) = certificate_claim(
-        &provenance,
-        0,
-        "hard",
-        "certified part",
-        1.0,
-        1.1,
-        "test-solver/cert",
-    );
+    let hard_claim = resolved.claim();
     let pkg = signed_fixture(
-        EvidencePackage::new(provenance)
+        EvidencePackage::new(provenance.clone())
             .with_claim(hard_claim)
             .with_claim(Claim::estimated("soft", "estimated part", "dwr-guess", 0.1)),
         "acceptance-gate/ac-005",
     );
-    let source_verifier = ExactCertificateVerifier(vec![hard_certificate]);
+    let source_verifier = ReceiptCertificateVerifier::from_resolver(&resolver, provenance, 0)
+        .expect("hard-component receipt resolves before package checking");
     let signature_verifier = ExactRootSignatureVerifier {
         domain: "acceptance-gate/ac-005",
     };
@@ -552,7 +1568,7 @@ fn ac_005_laundering_invariant_across_the_path() {
         .with_signatures(&signature_verifier);
     let breakdown = pkg
         .color_breakdown_with(&capabilities)
-        .expect("the exact source certificate authenticates");
+        .expect("the authentic verifier receipt authorizes the proxy claim");
     assert!(
         breakdown.verified == 1 && breakdown.estimated == 1,
         "the package cannot blur colors: {breakdown:?}"
@@ -562,4 +1578,5 @@ fn ac_005_laundering_invariant_across_the_path() {
         "estimated inputs never launder to verified — enforced by the compose algebra \
          and visible in the package breakdown",
     );
+    Ok(())
 }
