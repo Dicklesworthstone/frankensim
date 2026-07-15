@@ -23,13 +23,18 @@ use fs_blake3::identity::{
 };
 use fs_qty::{Angle, Dims, QtyAny, Time};
 
-/// Current version of the spectral problem admission schema.
-pub const SPECTRAL_PROBLEM_SCHEMA_VERSION: u32 = 1;
-/// Maximum structure claims admitted before any sorting or pair checks.
+/// Current version of the spectral problem admission and identity schema.
+///
+/// Version 2 binds the root-relative promotion audit carried by every
+/// favorable witness. Version-1 descriptors are refused rather than silently
+/// reinterpreted under the stronger identity encoding.
+pub const SPECTRAL_PROBLEM_SCHEMA_VERSION: u32 = 2;
+/// Maximum structure claims admitted by the v1 Rust descriptor layout before
+/// any sorting or pair checks. Identity schema v2 leaves this envelope intact.
 pub const MAX_STRUCTURE_CLAIMS_V1: usize = 256;
-/// Maximum mutually compatible regularity families in one v1 problem. This is
-/// also the pre-sort input cap; adding a new v1 family requires revisiting the
-/// canonical envelope and this bound together.
+/// Maximum mutually compatible regularity families in the v1 Rust descriptor
+/// layout. This is also the pre-sort input cap; adding a new family requires
+/// revisiting the canonical envelope and this bound together.
 pub const MAX_REGULARITY_CLAIMS_V1: usize = 5;
 
 const IDENTITY_LIMITS: CanonicalLimits = CanonicalLimits::new(1 << 18, 1 << 16, 16, 4096, 4096);
@@ -123,10 +128,10 @@ opaque_digest_id!(
 );
 
 /// Static identity schema for a fully validated spectral problem descriptor.
-pub enum SpectralProblemIdentitySchemaV1 {}
+pub enum SpectralProblemIdentitySchemaV2 {}
 
-impl CanonicalSchema for SpectralProblemIdentitySchemaV1 {
-    const DOMAIN: &'static str = "org.frankensim.fs-spectral.problem-semantic.v1";
+impl CanonicalSchema for SpectralProblemIdentitySchemaV2 {
+    const DOMAIN: &'static str = "org.frankensim.fs-spectral.problem-semantic.v2";
     const NAME: &'static str = "spectral-problem-semantic";
     const VERSION: u32 = SPECTRAL_PROBLEM_SCHEMA_VERSION;
     const CONTEXT: &'static str = "operator, form, role, structure witnesses, units, scaling, metrics, regularity, ordering, and requested scope";
@@ -386,7 +391,7 @@ impl AdmittedSpectralWitnessV1 {
 
 /// Typed semantic identity of one validated problem descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SpectralProblemId(ProblemSemanticId<SpectralProblemIdentitySchemaV1>);
+pub struct SpectralProblemId(ProblemSemanticId<SpectralProblemIdentitySchemaV2>);
 
 impl SpectralProblemId {
     /// Exact typed digest bytes.
@@ -3294,7 +3299,7 @@ fn canonical_problem_id(
         .collect();
     regularity_payloads.sort();
 
-    CanonicalEncoder::<ProblemSemanticId<SpectralProblemIdentitySchemaV1>, _>::new(
+    CanonicalEncoder::<ProblemSemanticId<SpectralProblemIdentitySchemaV2>, _>::new(
         IDENTITY_LIMITS,
         NeverCancel,
     )?

@@ -243,6 +243,14 @@ canonical-byte roots and lengths, and the fixed context. Its versioned witness
 encoding binds those fields in addition to the pre-existing subject, anchor,
 verifier, and policy identities.
 
+This authority strengthening intentionally advances the current spectral
+problem admission/identity schema to version 2 and the problem identity domain
+to `org.frankensim.fs-spectral.problem-semantic.v2`. Version-1 problem
+descriptors are refused as legacy input; they are never silently rehashed under
+the stronger witness encoding. `SpectralProblemSpecV1` remains the Rust layout
+name for the descriptor shape, while its explicit `schema_version` field
+selects the admitted identity semantics.
+
 Every consuming validator recomputes the expected typed proposition ID and its
 independent canonical-preimage root and byte length. All must match. The audit
 record retains anchor, verifier, policy, trust state, and the explicit

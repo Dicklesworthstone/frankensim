@@ -458,34 +458,40 @@ fn has_truth_issue(
 }
 
 #[test]
-fn unknown_decoded_schema_versions_fail_closed_before_identity_admission() {
+fn legacy_and_unknown_schema_versions_fail_closed_before_identity_admission() {
     let axes = standard_axes(0, 2);
-    let found = SPECTRAL_PROBLEM_SCHEMA_VERSION + 1;
-    let report = validate_problem(SpectralProblemSpecV1::with_schema_version(
-        found,
-        axes.subject,
-        axes.scalar,
-        axes.class,
-        StructureProfileV1::new(Vec::new()),
-        axes.scaling,
-        SpectralSpaceContextV1::new(
-            axes.domain,
-            axes.codomain,
-            GaugeConventionV1::Unknown,
-            ZeroPaddingConventionV1::Unknown,
-        ),
-        RegularityProfileV1::new(Vec::new()),
-        SpectralOrderingV1::SetValued,
-        CompletenessScopeV1::CandidateOnly,
-    ))
-    .unwrap_err();
+    assert_eq!(SPECTRAL_PROBLEM_SCHEMA_VERSION, 2);
     assert_eq!(
-        report.issues(),
-        &[SpectralAdmissionIssueV1::UnsupportedSchemaVersion {
-            found,
-            supported: SPECTRAL_PROBLEM_SCHEMA_VERSION,
-        }]
+        SpectralProblemIdentitySchemaV2::DOMAIN,
+        "org.frankensim.fs-spectral.problem-semantic.v2"
     );
+    for found in [1, SPECTRAL_PROBLEM_SCHEMA_VERSION + 1] {
+        let report = validate_problem(SpectralProblemSpecV1::with_schema_version(
+            found,
+            axes.subject,
+            axes.scalar,
+            axes.class,
+            StructureProfileV1::new(Vec::new()),
+            axes.scaling,
+            SpectralSpaceContextV1::new(
+                axes.domain,
+                axes.codomain,
+                GaugeConventionV1::Unknown,
+                ZeroPaddingConventionV1::Unknown,
+            ),
+            RegularityProfileV1::new(Vec::new()),
+            SpectralOrderingV1::SetValued,
+            CompletenessScopeV1::CandidateOnly,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            report.issues(),
+            &[SpectralAdmissionIssueV1::UnsupportedSchemaVersion {
+                found,
+                supported: SPECTRAL_PROBLEM_SCHEMA_VERSION,
+            }]
+        );
+    }
 }
 
 #[test]
