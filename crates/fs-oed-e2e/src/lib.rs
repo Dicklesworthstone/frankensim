@@ -266,7 +266,7 @@ pub enum OedError {
         /// Admitted worst-case campaign work bound.
         admitted_work_units: u128,
         /// Structured lower-layer phase and progress evidence.
-        source: AssimError,
+        source: Box<AssimError>,
     },
     /// Executed logical work did not match the exact realized shape or exceeded
     /// the admitted worst-case bound.
@@ -396,9 +396,8 @@ impl fmt::Display for OedError {
 impl std::error::Error for OedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::BeliefInvariant(source)
-            | Self::Assimilation { source, .. }
-            | Self::AssimilationCancelled { source, .. } => Some(source),
+            Self::BeliefInvariant(source) | Self::Assimilation { source, .. } => Some(source),
+            Self::AssimilationCancelled { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
@@ -1424,7 +1423,7 @@ fn execute_placements(
                     completed_placements: progress.completed_placements,
                     completed_work_units: progress.completed_work_units,
                     admitted_work_units: plan.admitted_work_units,
-                    source,
+                    source: Box::new(source),
                 }
             } else {
                 OedError::Assimilation {

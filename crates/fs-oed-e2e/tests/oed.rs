@@ -625,13 +625,16 @@ fn g4_lower_assimilation_cancellation_preserves_both_progress_ledgers() {
             completed_placements,
             completed_work_units,
             admitted_work_units,
-            source:
-                AssimError::Cancelled {
-                    phase,
-                    completed,
-                    planned,
-                },
+            source,
         } => {
+            let AssimError::Cancelled {
+                phase,
+                completed,
+                planned,
+            } = source.as_ref()
+            else {
+                panic!("expected nested cancellation source, got {source:?}");
+            };
             assert!(candidates.iter().any(|entry| entry.name() == candidate));
             assert_eq!(completed_placements, 0);
             // The OED ledger includes the selected-action lookup and the
@@ -679,9 +682,10 @@ fn g4_finalization_quota_sweep_covers_identity_and_publication_boundaries() {
                 completed_placements,
                 completed_work_units,
                 admitted_work_units,
-                source: AssimError::Cancelled { .. },
+                source,
                 ..
             }) => {
+                assert!(matches!(source.as_ref(), AssimError::Cancelled { .. }));
                 assert_eq!(completed_placements, 0);
                 assert_eq!(completed_work_units, 209);
                 assert_eq!(admitted_work_units, 301);
