@@ -16,11 +16,18 @@
 //! kernels — NO platform libm in any path that feeds function state
 //! (workspace contract rule).
 
+pub mod budget;
 pub mod cheb2;
 pub mod colleague;
 pub(crate) mod fma;
 pub mod fourier;
 pub mod orr_sommerfeld;
+
+pub use budget::{
+    BuildRun, CHEB_BUDGET_SCHEMA_VERSION, ChebAdmission, ChebBudget, ChebError, EigsRun,
+    WorkReceipt, admit_adaptive_build, admit_dirichlet_eigs, admit_root_scan,
+    dirichlet_laplace_eigs_budgeted, try_build_budgeted,
+};
 
 use fs_fft::{dct2, dct3};
 
@@ -30,7 +37,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A smooth function on [a, b] as a truncated Chebyshev series
 /// f(x) ≈ Σ' cₖ·Tₖ(t(x)) with t the affine pullback to [−1, 1]
 /// (the k = 0 term is halved — the DCT-II convention).
-#[derive(Debug, Clone)]
+/// Equality is exact bitwise structural equality (domain + coefficient
+/// bits) — the replay/parity notion the budgeted paths certify.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cheb1 {
     a: f64,
     b: f64,

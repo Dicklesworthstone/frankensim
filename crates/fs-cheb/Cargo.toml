@@ -11,12 +11,15 @@ description = "Chebfun-style function objects: adaptive Chebyshev expansions, sp
 layer = "L1"
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
 fs-fft = { path = "../fs-fft" }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true

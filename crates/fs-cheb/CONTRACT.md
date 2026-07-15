@@ -8,8 +8,37 @@
 Chebfun-style function objects (plan §6.5): smooth 1D functions as
 adaptively truncated Chebyshev expansions, plus spectral collocation
 differentiation matrices. Layer: **L1**. Deps: fs-fft (DCT/FFT pair),
-fs-la (LU/eigen paths), fs-math (strict elementary functions), and
-fs-ivl (interval root certification).
+fs-la (LU/eigen paths), fs-math (strict elementary functions),
+fs-ivl (interval root certification), and fs-exec (`Cx` for the
+budgeted, cancellable entry points).
+
+## Budgets and admission (`budget` module, bead sj31i.55 slice 1)
+- `ChebBudget` (schema `CHEB_BUDGET_SCHEMA_VERSION = 1`, non-exhaustive,
+  explicit caps: retained coefficients, total adaptive samples,
+  collocation dimension, abstract work ops, peak temporary bytes) plus
+  `admit_adaptive_build` / `admit_dirichlet_eigs` / `admit_root_scan`:
+  the worst-case samples/coefficients/work/temporary-bytes formulas run
+  as EXACT `u128` arithmetic BEFORE any allocation or function
+  evaluation. `usize::MAX`-shaped requests refuse as typed
+  `ChebError::Overflow` — never a saturated size that still iterates,
+  panics, or allocates. `ChebAdmission` (sealed) is the evidence the
+  preflight ran.
+- Budgeted, cancellable entry points thread an explicit `Cx` and poll
+  at bounded boundaries: `try_build_budgeted` (per adaptive round;
+  bitwise-identical to `Cheb1::build` on the happy path; `Cancelled`
+  carries a `resume_from` grid whose resumption is deterministic and
+  bitwise-equivalent to an uncancelled run),
+  `dirichlet_laplace_eigs_budgeted` (per shift and per 10 inverse-power
+  sweeps; the converged eigenvalue PREFIX is retained on cancellation —
+  each shift converges independently), and `Cheb1::roots_budgeted`
+  (per 64 scan cells; cancellation returns NO partial — an incomplete
+  scan is not a root-set claim). Terminal states are explicit:
+  `Complete`/`Cancelled` run enums with deterministic `WorkReceipt`s,
+  typed `ChebError` refusals (`Domain`/`Shape`/`CapExceeded`/`Overflow`/
+  `Unresolved`/`NonFinite`/`Numerical`/`Cancelled`) where the classic
+  APIs panic. The budgeted eigensolve also refuses `k > 64` (the fixed
+  FD surrogate supplies at most 64 shifts; the classic API silently
+  shorts).
 
 ## Public types and semantics
 - `Cheb1` — coefficients over FIRST-KIND Chebyshev points (roots grid):
@@ -123,8 +152,12 @@ is accepted from a stale binary. The coupling remains registered in
 changes cannot strand it.
 
 ## Cancellation behavior
-Construction is bounded (max_degree cap); no poll points needed at v1
-scales.
+The classic entry points are bounded (max_degree cap) with no poll
+points — retained unchanged this slice for their existing callers. The
+budgeted twins poll `cx.checkpoint()` at bounded boundaries (adaptive
+round / eigen shift + 10-sweep / 64 scan cells) and drain to explicit
+`Cancelled` states: resumable for construction, prefix-retaining for
+the eigensolve, refusing without partials for the root scan.
 
 ## Unsafe boundary
 One registered capsule: `src/fma/mod.rs` (+ SAFETY.md beside it, entry
@@ -148,6 +181,14 @@ None.
 ## Conformance tests
 tests/cheb_battery.rs (recovery, calculus, plateau robustness, roots,
 collocation accuracy, eigen demo, golden hash).
+
+tests/budget_battery.rs (bead sj31i.55, cases cb-001..cb-006): G0
+admission boundary tables incl. `usize::MAX` requests refusing before
+allocation and exact at-cap/one-over pairs; typed domain refusals;
+bitwise parity between budgeted and classic construction/eigensolve/
+root paths; real cancellation with deterministic resume equivalence
+and prefix retention; typed `Unresolved`/`NonFinite` refusals where
+the classic API panics; receipt determinism (G5).
 
 ## Variants (bead kw89)
 
@@ -204,3 +245,15 @@ structs.
   no FrankenScipy cross-checks yet.
 - `mul` may overshoot the minimal degree (resample-based); fine for
   correctness, recorded for the perf lane.
+- Budget slice 1 covers the adaptive constructor, the Dirichlet
+  eigensolve, and the sign-grid root scan ONLY. `cheb2`, `colleague`,
+  `fourier`, `orr_sommerfeld`, algebra (`add`/`mul`), calculus, and the
+  classic panicking entry points are NOT yet budgeted/cancellable —
+  tracked as the bead's remaining scope. The classic APIs keep their
+  panicking contracts unchanged for existing callers this slice.
+- `roots_budgeted` types the scan/conditioning refusals, but the shared
+  bisection/Newton refinement helper retains its internal
+  resolvability assert (numeric evidence, not size arithmetic); full
+  typed conversion of refinement is remaining scope.
+- The abstract op counts in receipts are ADMITTED worst-case bounds,
+  not measured cycle counts; no performance claim is attached.
