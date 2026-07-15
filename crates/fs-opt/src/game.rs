@@ -1026,6 +1026,15 @@ pub enum GameSemanticIssueV1 {
         /// Offending variable.
         variable: GameVariableV1,
     },
+    /// Quantifier polarity contradicts the fixed controller/adversary roles.
+    QuantifierPolarityMismatch {
+        /// Offending variable.
+        variable: GameVariableV1,
+        /// Supplied polarity.
+        found: GameQuantifierV1,
+        /// Polarity required by the v1 player model.
+        required: GameQuantifierV1,
+    },
     /// Duplicate information grant for one player/subject.
     DuplicateInformationGrant,
     /// An information grant itself exposes future values.
@@ -1516,6 +1525,20 @@ fn validate_quantifiers(ir: &GameProblemIrV1, issues: &mut Vec<GameSemanticIssue
                 variable: clause.variable,
             });
         }
+        let required = match clause.variable {
+            GameVariableV1::Control => Some(GameQuantifierV1::Exists),
+            GameVariableV1::Disturbance => Some(GameQuantifierV1::ForAll),
+            GameVariableV1::InitialState | GameVariableV1::Parameter => None,
+        };
+        if let Some(required) = required
+            && clause.quantifier != required
+        {
+            issues.push(GameSemanticIssueV1::QuantifierPolarityMismatch {
+                variable: clause.variable,
+                found: clause.quantifier,
+                required,
+            });
+        }
     }
     for required in [GameVariableV1::Control, GameVariableV1::Disturbance] {
         if !seen.contains(&required) {
@@ -1671,7 +1694,7 @@ fn access_is_permitted(access: StrategyAccessV1, availability: ObservationAvaila
         ObservationAvailabilityV1::Delayed {
             lag: observation_lag,
         } => match access {
-            StrategyAccessV1::InitialOnly => true,
+            StrategyAccessV1::InitialOnly => observation_lag == 0.0,
             StrategyAccessV1::Delayed { lag: strategy_lag } => strategy_lag >= observation_lag,
             StrategyAccessV1::Current
             | StrategyAccessV1::HistoryThroughCurrent

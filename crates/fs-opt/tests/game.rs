@@ -312,6 +312,39 @@ fn hidden_and_delayed_disturbances_enforce_information_timing() {
         });
     assert_issue(too_early, GameSemanticIssueV1::ObservationTimingMismatch);
 
+    let mut unavailable_at_initial_choice = base_ir();
+    set_disturbance_grant(
+        &mut unavailable_at_initial_choice,
+        ObservationAvailabilityV1::Delayed { lag: 0.5 },
+    );
+    let strategy = controller_strategy(&mut unavailable_at_initial_choice);
+    strategy.representation = StrategyRepresentationV1::OpenLoop {
+        artifact: GameStrategyArtifactIdV1::from_bytes(bytes(48)),
+    };
+    strategy.dependencies = vec![StrategyDependencyV1 {
+        subject: InformationSubjectV1::Disturbance,
+        access: StrategyAccessV1::InitialOnly,
+    }];
+    assert_issue(
+        unavailable_at_initial_choice,
+        GameSemanticIssueV1::ObservationTimingMismatch,
+    );
+
+    let mut zero_lag_initial = base_ir();
+    set_disturbance_grant(
+        &mut zero_lag_initial,
+        ObservationAvailabilityV1::Delayed { lag: 0.0 },
+    );
+    let strategy = controller_strategy(&mut zero_lag_initial);
+    strategy.representation = StrategyRepresentationV1::OpenLoop {
+        artifact: GameStrategyArtifactIdV1::from_bytes(bytes(49)),
+    };
+    strategy.dependencies = vec![StrategyDependencyV1 {
+        subject: InformationSubjectV1::Disturbance,
+        access: StrategyAccessV1::InitialOnly,
+    }];
+    validate(zero_lag_initial);
+
     let mut admitted = base_ir();
     set_disturbance_grant(
         &mut admitted,
@@ -327,6 +360,55 @@ fn hidden_and_delayed_disturbances_enforce_information_timing() {
         access: StrategyAccessV1::Delayed { lag: 0.5 },
     });
     validate(admitted);
+}
+
+#[test]
+fn controller_and_disturbance_quantifiers_match_player_roles() {
+    let mut universal_control = base_ir();
+    let clauses = [
+        universal_control.quantifiers.clauses()[0],
+        universal_control.quantifiers.clauses()[1],
+        universal_control.quantifiers.clauses()[2],
+    ];
+    universal_control.quantifiers = GameQuantifierPrefixV1::new(vec![
+        GameQuantifierClauseV1 {
+            quantifier: GameQuantifierV1::ForAll,
+            ..clauses[0]
+        },
+        clauses[1],
+        clauses[2],
+    ]);
+    assert_issue(
+        universal_control,
+        GameSemanticIssueV1::QuantifierPolarityMismatch {
+            variable: GameVariableV1::Control,
+            found: GameQuantifierV1::ForAll,
+            required: GameQuantifierV1::Exists,
+        },
+    );
+
+    let mut existential_disturbance = base_ir();
+    let clauses = [
+        existential_disturbance.quantifiers.clauses()[0],
+        existential_disturbance.quantifiers.clauses()[1],
+        existential_disturbance.quantifiers.clauses()[2],
+    ];
+    existential_disturbance.quantifiers = GameQuantifierPrefixV1::new(vec![
+        clauses[0],
+        GameQuantifierClauseV1 {
+            quantifier: GameQuantifierV1::Exists,
+            ..clauses[1]
+        },
+        clauses[2],
+    ]);
+    assert_issue(
+        existential_disturbance,
+        GameSemanticIssueV1::QuantifierPolarityMismatch {
+            variable: GameVariableV1::Disturbance,
+            found: GameQuantifierV1::Exists,
+            required: GameQuantifierV1::ForAll,
+        },
+    );
 }
 
 #[test]

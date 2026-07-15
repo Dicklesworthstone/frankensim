@@ -225,10 +225,15 @@ structure; FLUX/UQ execute it.
    disturbance followed by an existential open-loop control refuses as a
    trajectory-clairvoyant lowering, while an explicitly nonanticipative policy
    may use only observations and delays granted by its information pattern.
-   Future access always refuses. Hidden, delayed, mode, event, model-version,
-   frame, unit, and typed-domain mismatches fail closed before publication.
-   Equivalent ordering of semantic sets replays to one receipt, but swapped
-   quantifiers or strategy classes produce distinct identities.
+   A positive-lag grant never authorizes time-zero `InitialOnly` access; that
+   access is a subset only of initial, current, history, or zero-lag grants.
+   Future access always refuses. V1 fixes the player roles to existential
+   control and universal disturbance; opposite polarities refuse instead of
+   being sealed with contradictory strategy ownership. Hidden, delayed, mode,
+   event, model-version, frame, unit, and typed-domain mismatches fail closed
+   before publication. Equivalent ordering of semantic sets replays to one
+   receipt, but swapped quantifier order or strategy classes produce distinct
+   identities.
 
 ## Error model
 
