@@ -444,9 +444,10 @@ impl TriComplex2 {
     /// Build an admissible complex under an explicit durable lineage and
     /// caller-owned vertex keys.
     ///
-    /// Construction refuses malformed indices, repeated keys/cells,
-    /// non-manifold or incoherently oriented edges, non-finite embedding data,
-    /// negative axisymmetric radii, and non-representable measures.
+    /// Construction refuses payloads without a two-cell, malformed indices,
+    /// repeated keys/cells, non-manifold or incoherently oriented edges,
+    /// non-finite embedding data, negative axisymmetric radii, and
+    /// non-representable measures.
     pub fn from_triangles(
         lineage: TriComplex2LineageId,
         vertices: Vec<[f64; 2]>,
@@ -476,6 +477,9 @@ impl TriComplex2 {
                 vertices: vertices.len(),
                 keys: vertex_keys.len(),
             });
+        }
+        if faces.is_empty() {
+            return Err(TriComplex2Error::NoFaces);
         }
 
         let mut seen_keys = BTreeMap::new();
@@ -891,6 +895,8 @@ pub enum TriComplex2Error {
     Identity(CanonicalError),
     /// Metric metadata was invalid.
     Metric(Metric2Error),
+    /// No two-dimensional cell was supplied.
+    NoFaces,
     /// Vertex and key tables differed in length.
     VertexKeyCount {
         /// Coordinate count.
@@ -1000,6 +1006,7 @@ impl fmt::Display for TriComplex2Error {
             Self::EmptyLineageNamespace => f.write_str("TriComplex2 lineage namespace is empty"),
             Self::Identity(error) => write!(f, "TriComplex2 identity refused: {error}"),
             Self::Metric(error) => write!(f, "TriComplex2 metric refused: {error}"),
+            Self::NoFaces => f.write_str("TriComplex2 requires at least one face"),
             Self::VertexKeyCount { vertices, keys } => {
                 write!(
                     f,

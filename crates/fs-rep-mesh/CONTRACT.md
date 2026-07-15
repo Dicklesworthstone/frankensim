@@ -24,9 +24,9 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
   embedding dimension 2, oriented face rows, canonical edges, exact integer
   d0/d1, caller-owned stable vertex keys, typed vertex/edge/face `EntityId`s,
   and prevalidated cell measures. Construction rejects malformed indices,
-  repeated keys/cells, non-manifold or same-direction shared edges, non-finite
-  coordinates, negative axisymmetric radii, degenerate faces, and
-  non-representable measures.
+  payloads without a two-cell, repeated keys/cells, non-manifold or
+  same-direction shared edges, non-finite coordinates, negative axisymmetric
+  radii, degenerate faces, and non-representable measures.
 - `TriComplex2LineageId` / `TriFeatureId` — schema- and role-typed entity
   identities from `fs-blake3`. A lineage binds an exact caller-owned namespace;
   a feature binds that lineage, its topological dimension, and the canonical
@@ -169,18 +169,21 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
     chart evaluation and returned with completed triangle/evaluation progress.
     Existing sphere/box exact-distance certificate coverage remains in
     rmesh-008.
-11. The 2-D complex battery (rmesh-011) checks d1∘d0 = 0 exactly over seeded
-    admissible fans, refuses a flipped shared-edge orientation, matches
-    hand-computed whole-boundary and selected-face traces, preserves vertex and
-    surviving boundary-edge typed IDs across append-only refinement, and
-    reproduces the closed-form full-turn axisymmetric triangle measure.
+11. The 2-D complex battery (rmesh-011) refuses face-less payloads rather than
+    labeling a lower-dimensional object as topological dimension 2, checks
+    d1∘d0 = 0 exactly over seeded admissible fans, refuses a flipped shared-edge
+    orientation, matches hand-computed whole-boundary and selected-face traces,
+    preserves vertex and surviving boundary-edge typed IDs across append-only
+    refinement, and reproduces the closed-form full-turn axisymmetric triangle
+    measure.
 
 ## Error model
 Structured teaching errors (`MeshBuildError`, `TriComplex2Error`,
 `Metric2Error`, `ContourError`, `BracketCertificateError`, and wrapped
-`SamplingDomainError`). TriComplex2 errors retain the offending cell, edge,
-face pair, coordinate bits, trace selection, or canonical-identity refusal;
-no partial complex or feature table is published. Contour errors
+`SamplingDomainError`). TriComplex2 errors retain a missing two-cell condition,
+the offending cell, edge, face pair, coordinate bits, trace selection, or
+canonical-identity refusal; no partial complex or feature table is published.
+Contour errors
 name invalid spacing/regularization, excessive resolution, checked
 grid/coordinate overflow, non-finite chart samples or gradients,
 non-representable derived arithmetic, cancellation, and empty zero sets.

@@ -609,6 +609,10 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
         .expect("valid typed lineage");
     let planar = Metric2::planar(1.0).expect("unit planar thickness");
 
+    let faceless =
+        TriComplex2::from_triangles(lineage, vec![[0.0, 0.0]], vec![10], Vec::new(), planar);
+    assert!(matches!(faceless, Err(TriComplex2Error::NoFaces)));
+
     // G0: deterministic admissible fans exercise d1*d0 exactly. A failing
     // assertion names the fan, basis vertex, and complete integer chain.
     let mut fan_count = 0usize;
@@ -741,7 +745,8 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
         "rmesh-011",
         true,
         &format!(
-            "{fan_count} seeded admissible fans satisfy d1*d0=0 exactly (seed {SEED:#x}); \
+            "face-less pseudo-2D payload refused; {fan_count} seeded admissible fans satisfy \
+             d1*d0=0 exactly (seed {SEED:#x}); \
              flipped adjacency refused; whole/subcomplex traces match hand orientation; \
              vertex and boundary-edge EntityIds survive append-only refinement; \
              full-turn axisymmetric triangle measure={measured:.17e}"
