@@ -16,34 +16,57 @@ sensitivity's color). Pure, deterministic.
   — cost-optimal tolerances `tᵢ ∝ (cᵢ / sᵢ²)^{1/3}`, normalized so the QoI
   variance `Σ sᵢ²(tᵢ/k)²` exactly meets the budget. Each `TolItem` records the
   tolerance, its certified sensitivity + color, and an `Action` (Tighten /
-  Loosen / Unchanged vs baseline).
+  Loosen / Unchanged vs baseline). Normalization is evaluated in log space so
+  finite positive inputs do not overflow merely because a sensitivity is
+  squared; a mathematically unrepresentable public result is refused.
 - `robustness_check(&Allocation, extreme_qois, nominal_qoi, k, margin) ->
-  RobustnessVerdict` — compares the first-order `linearized_std` against the QoI
-  at sampled tolerance-band extremes; `confirmed` iff the extremes stay within
-  `k · linearized_std · (1 + margin)`.
-- `gdt_report(&Allocation) -> Vec<Suggestion>` — every entry (and every loosened
-  tolerance) carries the certified sensitivity + color that justifies it.
+  Result<RobustnessVerdict, ToleranceError>` — compares the first-order
+  `linearized_std` against the QoI at sampled tolerance-band extremes;
+  `confirmed` iff the extremes stay within `k · linearized_std · (1 + margin)`.
+  An empty extreme set has no evidentiary meaning and is a structured refusal,
+  never a vacuous confirmation.
+- `gdt_report(&Allocation) -> Result<Vec<Suggestion>, ToleranceError>` — every
+  entry (and every loosened tolerance) carries the certified sensitivity + color
+  that justifies it. Forged/deserialized items with unsafe fields or ambiguous
+  names are refused before report publication.
 - `variance_budget(spec_margin, target) -> Result<f64, ToleranceError>` — the
   budget for `P(|QoI − nom| ≤ spec_margin) ≥ target`, via the inverse normal.
-- `ToleranceError` — `NoFeatures` / `NonPositive` / `BadBudget`.
+  The quantile is evaluated from the central probability or upper-tail mass
+  directly, so representable targets adjacent to zero and one do not first
+  round to the singular CDF endpoints.
+- `ToleranceError` identifies the exact invalid feature field, public argument,
+  sampled extreme, canonical-name collision, or derived quantity. Numeric
+  reasons are stable `ScalarIssue` values rather than formatted floating-point
+  text.
 
 ## Invariants
 
 - The allocation TIGHTENS high-sensitivity features and LOOSENS low-sensitivity
   ones, and meets the variance budget exactly (`achieved_variance == budget`).
+- Every admitted scalar is finite and in its declared domain. Every published
+  tolerance, cost, variance, standard deviation, deviation, and bound is finite;
+  positive quantities remain strictly positive.
+- Feature names are non-empty, have no surrounding whitespace or control
+  characters, and are unique under locale-independent Unicode lowercase
+  comparison. Output order is input order, which is also the stable tie-break.
 - `robustness_check` flags where the first-order linearization is exceeded at
-  the band extremes (it does not silently trust the linearization).
+  the band extremes. It refuses empty, non-finite, negative-domain, or
+  unrepresentable evidence rather than silently trusting the linearization.
 - Every GD&T suggestion carries a certified sensitivity (with its color) — no
   unjustified tolerance change.
 
 ## Error model
 
-Structured `ToleranceError`; no panics.
+Structured `ToleranceError`; no panics. NaN never reaches `f64::max` or a
+comparison: all scalar inputs are admitted before arithmetic, each derived
+quantity is checked before publication, and sampled maxima use an explicit
+ordered comparison over finite values.
 
 ## Determinism class
 
 Fully deterministic: the allocation, robustness check, and budget are pure
-functions of the inputs.
+functions of the inputs. Accumulation and output use input order; canonical-name
+collision reporting always identifies the first and colliding input positions.
 
 ## Cancellation behavior
 
@@ -59,11 +82,17 @@ None.
 
 ## Conformance tests
 
-`tests/toleralloc.rs` (Proposal 11, 6 cases): tolerance is spent where
-sensitivity is large (tighten high / loosen low, budget met); bad-input
-rejection; the band-extremes robustness check (confirm + flag); the GD&T report
-attaches a certified sensitivity to every loosened tolerance; the variance
-budget follows the in-spec probability; determinism.
+`tests/toleralloc.rs` covers tolerance direction and budget adherence;
+field-specific zero/negative/NaN/infinity rejection; empty, unstable, duplicate,
+and case-colliding names; finite boundary behavior and derived overflow refusal;
+empty/poisoned/unrepresentable robustness evidence; GD&T sensitivity carriage;
+probability-to-variance conversion; G3 common-sensitivity rescaling; and G5
+repeatability plus input-order tie-breaking.
+
+The stricter robustness/admission policy is evidence-semantic. The consuming
+`fs-diffreal-e2e` tolerance fixture binds it as
+`fs-diffreal-e2e/tolerance-allocation-fixture/v2`; v1 evidence must not be
+silently reinterpreted under this contract.
 
 ## No-claim boundaries
 
@@ -74,5 +103,8 @@ budget follows the in-spec probability; determinism.
   full correlated / higher-order propagation is a refinement.
 - The cost model `cᵢ / tᵢ` is a convex placeholder; a real manufacturing cost
   curve is a drop-in.
+- Canonical ambiguity detection uses deterministic Unicode lowercase comparison,
+  not full Unicode normalization or locale-sensitive case folding. Callers that
+  need a narrower naming grammar must enforce it before allocation.
 - Emitting the report into a GD&T/CAD annotation format is a downstream
   integration.

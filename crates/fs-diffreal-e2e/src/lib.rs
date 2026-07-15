@@ -49,7 +49,7 @@ pub const DIFFERENTIATION_EVIDENCE_IDENTITY: &str = "fs-diffreal-e2e/differentia
 /// Versioned fixture identity expected for the as-built/assimilation stage.
 pub const AS_BUILT_EVIDENCE_IDENTITY: &str = "fs-diffreal-e2e/as-built-fixture/v1";
 /// Versioned fixture identity expected for the tolerance-allocation stage.
-pub const TOLERANCE_EVIDENCE_IDENTITY: &str = "fs-diffreal-e2e/tolerance-allocation-fixture/v1";
+pub const TOLERANCE_EVIDENCE_IDENTITY: &str = "fs-diffreal-e2e/tolerance-allocation-fixture/v2";
 /// Versioned fixture identity expected for the spacetime-integration stage.
 pub const SPACETIME_EVIDENCE_IDENTITY: &str = "fs-diffreal-e2e/spacetime-integration-gate/v1";
 
@@ -655,7 +655,20 @@ pub fn stage_tolerance_allocation() -> StageLog {
     assertions_passed &= tighten_high && loosen_low;
 
     // the GD&T report attaches a certified sensitivity to every loosened tol.
-    let report = gdt_report(&alloc);
+    let report = match gdt_report(&alloc) {
+        Ok(report) => report,
+        Err(error) => {
+            let code = "diffreal.tolerance.report-refused";
+            let detail = format!("the fixed GD&T report fixture was refused: {error:?}");
+            return StageLog::new(
+                TOLERANCE_STAGE,
+                StageRequirement::Required,
+                StageStatus::Refused(StageReason::new(code, detail.clone())),
+                TOLERANCE_EVIDENCE_IDENTITY,
+                vec![format!("REFUSED[{code}]: {detail}")],
+            );
+        }
+    };
     let justified = report
         .iter()
         .filter(|s| s.action == Action::Loosen)
@@ -668,7 +681,20 @@ pub fn stage_tolerance_allocation() -> StageLog {
 
     // the band-extremes check confirms the P(in-spec) constraint: the QoI at
     // sampled ±t corners stays within k·σ of nominal (σ ≈ √budget ≈ 0.39).
-    let verdict = robustness_check(&alloc, &[0.9, -0.8, 0.5], 0.0, 3.0, 0.2);
+    let verdict = match robustness_check(&alloc, &[0.9, -0.8, 0.5], 0.0, 3.0, 0.2) {
+        Ok(verdict) => verdict,
+        Err(error) => {
+            let code = "diffreal.tolerance.robustness-refused";
+            let detail = format!("the fixed tolerance-robustness fixture was refused: {error:?}");
+            return StageLog::new(
+                TOLERANCE_STAGE,
+                StageRequirement::Required,
+                StageStatus::Refused(StageReason::new(code, detail.clone())),
+                TOLERANCE_EVIDENCE_IDENTITY,
+                vec![format!("REFUSED[{code}]: {detail}")],
+            );
+        }
+    };
     events.push(format!(
         "robustness confirmed = {} (linearized std {:.3})",
         verdict.confirmed, verdict.linearized_std
