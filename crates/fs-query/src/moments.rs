@@ -18,7 +18,7 @@
 //! translated`], whose covariance laws are outward-rounded exact
 //! identities.
 
-use crate::QueryError;
+use crate::{ContactInflation, QueryError};
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, TraceStepClaim};
@@ -230,6 +230,37 @@ pub fn geometric_moments(
     h: f64,
     cx: &Cx<'_>,
 ) -> Result<GeometricMoments, QueryError> {
+    geometric_moments_with_inflation(chart, domain, h, cx, ContactInflation::exact_zero())
+}
+
+/// Certified moments with a proof-bearing absolute representation error added
+/// to every cell's exact-distance classification radius.
+///
+/// The uncertainty can only turn sure inside/outside cells into conservative
+/// boundary-band cells. It cannot tighten an integral enclosure. Exact zero
+/// delegates with the original classification-radius bits unchanged.
+///
+/// # Errors
+/// The refusals from [`geometric_moments`], plus
+/// [`QueryError::InvalidContactInflation`] if the cell radius and retained
+/// uncertainty cannot be combined in the finite domain.
+pub fn geometric_moments_with_inflation(
+    chart: &dyn Chart,
+    domain: &Aabb,
+    h: f64,
+    cx: &Cx<'_>,
+    inflation: ContactInflation,
+) -> Result<GeometricMoments, QueryError> {
+    geometric_moments_impl(chart, domain, h, cx, inflation)
+}
+
+fn geometric_moments_impl(
+    chart: &dyn Chart,
+    domain: &Aabb,
+    h: f64,
+    cx: &Cx<'_>,
+    inflation: ContactInflation,
+) -> Result<GeometricMoments, QueryError> {
     let claim = chart.trace_step_claim();
     if claim != TraceStepClaim::ExactDistance {
         return Err(QueryError::MomentsUncertifiedChart { claim });
@@ -260,6 +291,7 @@ pub fn geometric_moments(
         }
     }
     let (dims, width, radius, cell_vol) = moment_grid(&min, &max, h)?;
+    let classification_radius = inflation.inflate_nonnegative(radius)?;
     let mut acc = MomentAccumulator {
         volume: MomentEnclosure::ZERO,
         first: [MomentEnclosure::ZERO; 3],
@@ -291,8 +323,8 @@ pub fn geometric_moments(
                 let sample = chart.eval(p, cx);
                 let enclosure = chart.trace_value_enclosure(p, &sample, cx);
                 validate_moment_enclosure(&enclosure, center)?;
-                let field_hi = (enclosure.hi + radius).next_up();
-                let field_lo = (enclosure.lo - radius).next_down();
+                let field_hi = (enclosure.hi + classification_radius).next_up();
+                let field_lo = (enclosure.lo - classification_radius).next_down();
                 if field_hi <= 0.0 {
                     sure_cells += 1;
                     accumulate_sure(&mut acc, cell_vol, center, width);

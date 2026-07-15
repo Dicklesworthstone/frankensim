@@ -19,7 +19,7 @@
 //!   declines a gradient or the difference is degenerate. No
 //!   certificate accompanies it.
 
-use crate::QueryError;
+use crate::{ContactInflation, QueryError};
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::Cx;
 use fs_geom::{Chart, Point3, TraceStepClaim, Vec3};
@@ -47,6 +47,9 @@ pub struct GapSample {
 pub struct ImplicitGapOracle<'a> {
     a: &'a dyn Chart,
     b: &'a dyn Chart,
+    inflation_a: ContactInflation,
+    inflation_b: ContactInflation,
+    total_inflation: ContactInflation,
 }
 
 impl<'a> ImplicitGapOracle<'a> {
@@ -58,6 +61,32 @@ impl<'a> ImplicitGapOracle<'a> {
     /// [`QueryError::SeparationRequiresExactDistance`] naming the
     /// offending input (`"a"` or `"b"`) and its weaker claim.
     pub fn new(a: &'a dyn Chart, b: &'a dyn Chart) -> Result<ImplicitGapOracle<'a>, QueryError> {
+        Self::new_with_inflation(
+            a,
+            b,
+            ContactInflation::exact_zero(),
+            ContactInflation::exact_zero(),
+        )
+    }
+
+    /// Pair two charts while retaining each chart's proof-bearing absolute
+    /// representation/motion uncertainty.
+    ///
+    /// Each radius participates independently in the outside/inside tests,
+    /// while their outward-rounded sum widens the signed-distance sum. A
+    /// positive overlap witness therefore shrinks by the uncertainty that can
+    /// move either boundary toward the probe.
+    ///
+    /// # Errors
+    /// The exact-distance refusals from [`Self::new`], plus
+    /// [`QueryError::InvalidContactInflation`] if the two radii cannot be
+    /// composed within the finite domain.
+    pub fn new_with_inflation(
+        a: &'a dyn Chart,
+        b: &'a dyn Chart,
+        inflation_a: ContactInflation,
+        inflation_b: ContactInflation,
+    ) -> Result<ImplicitGapOracle<'a>, QueryError> {
         for (label, chart) in [("a", a), ("b", b)] {
             let claim = chart.trace_step_claim();
             if claim != TraceStepClaim::ExactDistance {
@@ -67,7 +96,14 @@ impl<'a> ImplicitGapOracle<'a> {
                 });
             }
         }
-        Ok(ImplicitGapOracle { a, b })
+        let total_inflation = inflation_a.compose(inflation_b)?;
+        Ok(ImplicitGapOracle {
+            a,
+            b,
+            inflation_a,
+            inflation_b,
+            total_inflation,
+        })
     }
 
     /// Evaluate the local gap quantities at `p`.
@@ -96,14 +132,21 @@ impl<'a> ImplicitGapOracle<'a> {
         let enc_b = self.b.trace_value_enclosure(p, &sample_b, cx);
         validate_gap_enclosure(&enc_a, p)?;
         validate_gap_enclosure(&enc_b, p)?;
-        let sum_lo = (enc_a.lo + enc_b.lo).next_down();
-        let sum_hi = (enc_a.hi + enc_b.hi).next_up();
-        let separation_upper = if enc_a.lo > 0.0 && enc_b.lo > 0.0 {
+        let nominal_sum_lo = (enc_a.lo + enc_b.lo).next_down();
+        let nominal_sum_hi = (enc_a.hi + enc_b.hi).next_up();
+        let sum_lo = self.total_inflation.deflate_lower(nominal_sum_lo)?;
+        let sum_hi = self.total_inflation.inflate_upper(nominal_sum_hi)?;
+        let outside_a = self.inflation_a.deflate_lower(enc_a.lo)? > 0.0;
+        let outside_b = self.inflation_b.deflate_lower(enc_b.lo)? > 0.0;
+        let separation_upper = if outside_a && outside_b {
             Some(sum_hi)
         } else {
             None
         };
-        let max_hi = enc_a.hi.max(enc_b.hi);
+        let max_hi = self
+            .inflation_a
+            .inflate_upper(enc_a.hi)?
+            .max(self.inflation_b.inflate_upper(enc_b.hi)?);
         let overlap_inradius = if max_hi < 0.0 {
             Some((-max_hi).next_down())
         } else {

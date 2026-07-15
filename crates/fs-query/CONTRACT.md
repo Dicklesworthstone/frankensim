@@ -12,6 +12,14 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
 
 ## Public types and semantics
 
+- `ContactInflation`: a private-radius, proof-bearing absolute-error carrier
+  for contact-adjacent queries. `from_conversion` accepts only an unforgeable
+  `Certified<T>` receipt, `from_motion` does the same for absolute motion-model
+  error, and `from_route` independently revalidates a router `ChainOutcome` as
+  finite, ordered, rigorous, nonnegative absolute-error evidence containing
+  its QoI. Composition is outward-rounded and refuses overflow. `exact_zero`
+  is reserved for native geometry with no unrecorded conversion or motion
+  uncertainty and is a bitwise identity.
 - `closest_point` / `closest_point_clipped`: damped Newton projection along the chart gradient;
   the post-projection RESIDUAL is measured and reported, never
   assumed. Charts that honestly decline gradients (mesh charts near
@@ -41,6 +49,9 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   volume; `translated` applies the exact translation-covariance /
   parallel-axis laws with outward rounding. The domain must contain the
   chart's support box: moments are whole-region claims.
+  `geometric_moments_with_inflation` adds the retained absolute error to every
+  cell-classification radius, so uncertainty can move sure cells into the
+  conservative boundary band but can never tighten an enclosure.
 - `ConvexSupportMap` (`ConvexSphere`, `ConvexBox`) and
   `convex_separation` → `ConvexSeparation`: certified `[lo, hi]`
   distance enclosures between compact convex sets via deterministic
@@ -51,7 +62,8 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   zero. `separation_proven` is exactly `lo > 0`; every early stop
   (iteration cap, nonsmooth `1/k` residual) widens the bracket, never
   falsifies it. Constructors validate geometry; degraded arithmetic
-  refuses typed.
+  refuses typed. `convex_separation_with_inflation` subtracts the composed
+  retained radius from `lo`, adds it to `hi`, and re-derives the verdict.
 - `FeatureComplex` (`Feature::{Vertex, Edge, Face}`) and
   `ccd_candidates`: the typed vertex/edge/face decomposition of a
   triangle boundary with outward-rounded per-feature boxes, and
@@ -63,6 +75,9 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   inputs), and exceeding the caller's pair cap refuses rather than
   truncates. Degenerate triangles, bad indices, non-finite positions
   or inflations, and the `MAX_COMPLEX_FEATURES` ceiling refuse typed.
+  `ccd_candidates_with_inflation` adds each side's retained error to its own
+  motion window before BVH construction; larger evidence radii can only add
+  candidates.
 - `ImplicitGapOracle` → `GapSample`: pointwise SDF-pair contact
   queries over two exact-distance charts (weaker claims refuse at
   construction, reusing `SeparationRequiresExactDistance`). The
@@ -72,8 +87,11 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   certified common-ball radius exactly when `max(φ_A, φ_B)` is
   certified negative — a pointwise witness, never a penetration depth;
   `normal` is an uncertified Estimate-class contact axis that is
-  absent whenever a gradient is honestly declined. Malformed evidence
-  refuses per sample; cancellation is checked after each chart call.
+  absent whenever a gradient is honestly declined. `new_with_inflation`
+  widens the sum by both radii, tests outside/inside against each side's own
+  radius, and shrinks overlap witnesses rather than laundering them.
+  Malformed evidence refuses per sample; cancellation is checked after each
+  chart call.
 - `CodimThickness` / `codim_gap` / `codim_gap_from_separation` →
   `CodimGap` with `CodimVerdict::{ProvenClear, ProvenContact,
   Unresolved}`: shell/rod contact as an outward-rounded effective-gap
@@ -83,7 +101,9 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   qualify), contact proofs need the upper bound realized between
   actual midsurface points — the separation composition DOWNGRADES
   contact to `Unresolved` when the caller cannot vouch for the
-  witnesses. A straddling bracket claims nothing.
+  witnesses. `codim_gap_with_inflation` widens the midsurface-distance
+  enclosure before thickness subtraction. A straddling bracket claims
+  nothing.
 - `DeformationMap` / `DeformedChart`: the deformable-adapter hook —
   a certified pull-back into a reference configuration presents a
   reference exact-distance chart as a CURRENT-configuration
@@ -199,7 +219,10 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
 
 ## Error model
 
-`QueryError` teaching errors: `NoGradient` (with the location),
+`ContactInflationError` refuses non-rigorous, negative, non-finite, inverted,
+QoI-inconsistent, or arithmetically overflowing conversion/router evidence.
+`QueryError::InvalidContactInflation` carries that refusal at query boundaries.
+Other `QueryError` teaching errors: `NoGradient` (with the location),
 `SamplingDomain` (the structured `fs-geom` admission refusal),
 `InvalidOffsetRadius`, `InvalidFiniteDifferenceStep`, `InvalidPointSample`,
 `InvalidPointArithmetic`, `InvalidBoundaryIndex`, `SamplingGridTooLarge`,
@@ -226,7 +249,9 @@ silent truncation), `CodimInvalidThickness`, `CodimInvalidDistance`,
 ## Determinism class
 
 Fully deterministic: fixed iteration counts, canonical grid orders,
-no randomness. Identical inputs give identical answers bitwise.
+no randomness. Identical inputs give identical answers bitwise. Exact-zero
+inflation delegates with the original floating-point inputs unchanged;
+positive composition and endpoint changes use fixed outward rounding.
 
 ## Cancellation behavior
 
@@ -284,6 +309,9 @@ construction/sample refusals, and no distance-claim laundering into
 exact-distance consumers. The moments battery adds gm-006 (torus and
 hollow-shell closed forms) and gm-007 (an open mesh refuses mass
 properties through capability routing).
+`tests/inflation.rs` — conversion/router receipt refusal, exact-zero bit
+neutrality, outward widening and witness shrinking, and monotonicity across
+convex, implicit-gap, codimensional, CCD, and moments consumers.
 
 ## No-claim boundaries
 
@@ -353,3 +381,9 @@ properties through capability routing).
   `support_slack()`.
 - Chart-native fast paths (mesh BVH closest-point dispatch instead of
   generic Newton) are perf-lane work; answers here are correct first.
+- The plain query entry points assert that no conversion/motion uncertainty
+  exists outside the chart's own retained sample evidence. A caller that
+  obtained a chart through a router/converter, or that has a separate motion
+  error, must use the corresponding `*_with_inflation` entry point. The
+  carrier validates receipts and arithmetic; it cannot detect a caller that
+  deliberately pairs a valid receipt with the wrong chart.

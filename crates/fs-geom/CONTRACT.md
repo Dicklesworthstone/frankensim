@@ -131,6 +131,8 @@ Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs, fs-sparse.
   local receipt; exact requires zero), and records actuals through `CostOracle`
   (an L2-clean abstraction — HELM
   wires the ledger tune table behind it; `MemoryCostOracle` in-process).
+  `ChainOutcome` is opaque outside `fs-geom`; read-only receipt and measured-cost
+  accessors prevent callers from fabricating route authority.
   Oracle reads are fallible and scoped to the exact `ConverterSpec`; one-pass
   read snapshots are identity-bound into opaque `RoutePlan`s and rechecked
   before and after execution. `CostOracle::record_batch` is fallible:

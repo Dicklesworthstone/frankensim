@@ -20,7 +20,7 @@
 //! contains zero proves nothing beyond "separation unproven" —
 //! penetration-depth certificates (EPA-style) are a later rjnd part.
 
-use crate::QueryError;
+use crate::{ContactInflation, QueryError};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Point3, Vec3};
 
@@ -315,6 +315,42 @@ pub fn convex_separation(
         }
     }
     Ok(best)
+}
+
+/// Certified convex separation with representation/motion uncertainty
+/// composed into both sides of the distance bracket.
+///
+/// The ordinary support-map result is retained as the nominal geometric
+/// enclosure. The two proof-bearing inflations are then added on the
+/// uncertainty side: the lower endpoint moves down, the upper endpoint moves
+/// up, and the separation verdict is re-derived. Exact-zero inflations are a
+/// bitwise identity.
+///
+/// # Errors
+/// The refusals from [`convex_separation`], plus
+/// [`QueryError::InvalidContactInflation`] if the two finite radii cannot be
+/// composed or applied without overflow.
+pub fn convex_separation_with_inflation(
+    a: &dyn ConvexSupportMap,
+    b: &dyn ConvexSupportMap,
+    max_iterations: u32,
+    cx: &Cx<'_>,
+    inflation_a: ContactInflation,
+    inflation_b: ContactInflation,
+) -> Result<ConvexSeparation, QueryError> {
+    let nominal = convex_separation(a, b, max_iterations, cx)?;
+    let inflation = inflation_a.compose(inflation_b)?;
+    if inflation.radius() == 0.0 {
+        return Ok(nominal);
+    }
+    let lo = inflation.deflate_nonnegative(nominal.lo)?;
+    let hi = inflation.inflate_upper(nominal.hi)?;
+    Ok(ConvexSeparation {
+        lo,
+        hi,
+        separation_proven: lo > 0.0,
+        ..nominal
+    })
 }
 
 fn support_pair(

@@ -16,7 +16,7 @@
 //! feature identifier), and the pair count is bounded by an explicit
 //! refusal, never truncated silently.
 
-use crate::QueryError;
+use crate::{ContactInflation, QueryError};
 use fs_exec::Cx;
 
 /// Hard bound on features per complex.
@@ -379,4 +379,41 @@ pub fn ccd_candidates(
     }
     pairs.sort_unstable();
     Ok(pairs)
+}
+
+/// Conservative CCD candidates with each side's representation/motion error
+/// added to its declared swept radius.
+///
+/// The added radius is proof-bearing and rounded outward before BVH
+/// construction. Increasing either inflation can therefore only retain or add
+/// candidate pairs. Exact-zero inflations delegate with the original motion
+/// bits unchanged.
+///
+/// # Errors
+/// The refusals from [`ccd_candidates`], plus
+/// [`QueryError::InvalidContactInflation`] if a finite motion radius cannot be
+/// inflated without overflow.
+pub fn ccd_candidates_with_inflation(
+    a: &FeatureComplex,
+    b: &FeatureComplex,
+    motion_a: f64,
+    motion_b: f64,
+    max_pairs: usize,
+    cx: &Cx<'_>,
+    inflation_a: ContactInflation,
+    inflation_b: ContactInflation,
+) -> Result<Vec<(usize, usize)>, QueryError> {
+    if inflation_a.radius() == 0.0 && inflation_b.radius() == 0.0 {
+        return ccd_candidates(a, b, motion_a, motion_b, max_pairs, cx);
+    }
+    for motion in [motion_a, motion_b] {
+        if !motion.is_finite() || motion < 0.0 {
+            return Err(QueryError::FeatureInvalidInflation {
+                inflation_bits: motion.to_bits(),
+            });
+        }
+    }
+    let motion_a = inflation_a.inflate_nonnegative(motion_a)?;
+    let motion_b = inflation_b.inflate_nonnegative(motion_b)?;
+    ccd_candidates(a, b, motion_a, motion_b, max_pairs, cx)
 }

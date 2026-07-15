@@ -47,20 +47,29 @@ mod convex;
 mod deform;
 mod features;
 mod gap;
+mod inflation;
 mod moments;
 
-pub use codim::{CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation};
+pub use codim::{
+    CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation,
+    codim_gap_with_inflation,
+};
 pub use deform::{DeformationMap, DeformedChart};
 
-pub use features::{Feature, FeatureComplex, MAX_COMPLEX_FEATURES, ccd_candidates};
+pub use features::{
+    Feature, FeatureComplex, MAX_COMPLEX_FEATURES, ccd_candidates, ccd_candidates_with_inflation,
+};
 pub use gap::{GapSample, ImplicitGapOracle};
+pub use inflation::{ContactInflation, ContactInflationError};
 
 pub use convex::{
     CONVEX_SEPARATION_DEFAULT_ITERATIONS, CONVEX_SEPARATION_MAX_ITERATIONS, ConvexBox,
     ConvexSeparation, ConvexSphere, ConvexSupportMap, convex_separation,
+    convex_separation_with_inflation,
 };
 pub use moments::{
     GeometricMoments, MAX_MOMENT_CELLS, MomentEnclosure, SecondMoments, geometric_moments,
+    geometric_moments_with_inflation,
 };
 
 /// Crate version, re-exported for provenance stamping.
@@ -69,6 +78,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Teaching errors for the query layer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryError {
+    /// Conversion/motion uncertainty could not enter a contact bound
+    /// without weakening or fabricating its receipt.
+    InvalidContactInflation(ContactInflationError),
     /// The chart offers no gradient where one is required.
     NoGradient {
         /// Where.
@@ -288,6 +300,9 @@ impl core::fmt::Display for QueryError {
     #[allow(clippy::too_many_lines)] // Exhaustive, one-line-per-variant diagnostics stay co-located.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            QueryError::InvalidContactInflation(error) => {
+                write!(f, "contact-bound inflation refused: {error}")
+            }
             QueryError::NoGradient { at } => write!(
                 f,
                 "the chart offers no gradient at ({}, {}, {}); closest-point, thickness, \
@@ -464,6 +479,12 @@ impl core::fmt::Display for QueryError {
 }
 
 impl std::error::Error for QueryError {}
+
+impl From<ContactInflationError> for QueryError {
+    fn from(error: ContactInflationError) -> Self {
+        Self::InvalidContactInflation(error)
+    }
+}
 
 impl From<SamplingDomainError> for QueryError {
     fn from(error: SamplingDomainError) -> Self {

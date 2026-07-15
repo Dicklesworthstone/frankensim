@@ -22,7 +22,7 @@
 //! primitives). [`codim_gap_from_separation`] composes with
 //! [`crate::ConvexSeparation`] under exactly that reading.
 
-use crate::{ConvexSeparation, QueryError};
+use crate::{ContactInflation, ConvexSeparation, QueryError};
 
 /// A certified codimensional thickness radius (half-thickness for a
 /// shell, cross-section radius for a rod), measured outward from the
@@ -117,6 +117,36 @@ pub fn codim_gap(
         CodimVerdict::Unresolved
     };
     Ok(CodimGap { lo, hi, verdict })
+}
+
+/// Effective codimensional gap with representation/motion uncertainty on
+/// both midsurface inputs.
+///
+/// The ordinary distance enclosure is validated first. The composed
+/// proof-bearing radius then lowers its nonnegative lower endpoint and raises
+/// its upper endpoint before thickness is subtracted. Exact-zero inflations
+/// return the bit-identical ordinary result.
+///
+/// # Errors
+/// The refusals from [`codim_gap`], plus
+/// [`QueryError::InvalidContactInflation`] if the two radii cannot be composed
+/// or applied without finite outward-rounded endpoints.
+pub fn codim_gap_with_inflation(
+    distance_lo: f64,
+    distance_hi: f64,
+    a: CodimThickness,
+    b: CodimThickness,
+    inflation_a: ContactInflation,
+    inflation_b: ContactInflation,
+) -> Result<CodimGap, QueryError> {
+    let nominal = codim_gap(distance_lo, distance_hi, a, b)?;
+    let inflation = inflation_a.compose(inflation_b)?;
+    if inflation.radius() == 0.0 {
+        return Ok(nominal);
+    }
+    let widened_lo = inflation.deflate_nonnegative(distance_lo)?;
+    let widened_hi = inflation.inflate_upper(distance_hi)?;
+    codim_gap(widened_lo, widened_hi, a, b)
 }
 
 /// Compose with a convex midsurface-hull separation.

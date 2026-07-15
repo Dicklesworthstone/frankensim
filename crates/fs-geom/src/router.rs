@@ -1689,9 +1689,23 @@ impl core::error::Error for EdgeOutcomeError {}
 #[derive(Debug, Clone)]
 pub struct ChainOutcome {
     /// Composed achieved-error evidence for the whole chain.
-    pub receipt: Evidence<f64>,
+    receipt: Evidence<f64>,
     /// Total measured cost, seconds.
-    pub measured_cost_s: f64,
+    measured_cost_s: f64,
+}
+
+impl ChainOutcome {
+    /// Immutable composed achieved-error evidence minted by router execution.
+    #[must_use]
+    pub const fn receipt(&self) -> &Evidence<f64> {
+        &self.receipt
+    }
+
+    /// Total measured execution cost in seconds.
+    #[must_use]
+    pub const fn measured_cost_s(&self) -> f64 {
+        self.measured_cost_s
+    }
 }
 
 /// An execution failure, attributed to its edge.
