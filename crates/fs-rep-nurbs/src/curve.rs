@@ -27,6 +27,7 @@ const CURVE_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_REMOVAL_MAX_DERIVED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_BEZIER_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const CURVE_ELEVATION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_CANCELLATION_STRIDE: usize = 64;
 
 fn curve_poll_due(
@@ -53,6 +54,7 @@ enum CurveWorkRun<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BezierConversionPlan {
     pub(crate) insertions: usize,
+    pub(crate) distinct_knot_count: usize,
     pub(crate) final_knot_count: usize,
     pub(crate) final_control_count: usize,
     pub(crate) work_units: u128,
@@ -62,6 +64,24 @@ pub(crate) struct BezierConversionPlan {
     pub(crate) peak_allocated_bytes: u128,
     /// Retained bytes in the returned converted curve.
     pub(crate) converted_bytes: u128,
+}
+
+/// Checked shape/work/retained-memory plan for exact degree elevation.
+///
+/// The borrowed source generation is excluded from retained-byte accounting.
+/// The plan includes the simultaneously-live Bezier generation, elevation
+/// metadata, and final knot/control payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CurveElevationPlan {
+    distinct_knot_count: usize,
+    segment_count: usize,
+    elevated_degree: usize,
+    elevated_order: usize,
+    elevated_degree_i64: i64,
+    final_knot_count: usize,
+    final_control_count: usize,
+    work_units: u128,
+    peak_retained_bytes: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +126,180 @@ fn curve_storage_bytes<S: Scalar>(
         .ok_or_else(|| NurbsError::Domain {
             what: "Bezier curve-storage accounting overflows u128".to_string(),
         })
+}
+
+fn enforce_curve_elevation_envelope(
+    work_units: u128,
+    peak_retained_bytes: u128,
+) -> Result<(), NurbsError> {
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve degree elevation requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    if peak_retained_bytes > CURVE_ELEVATION_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve degree elevation can retain {peak_retained_bytes} derived payload bytes above defensive ceiling {CURVE_ELEVATION_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn plan_curve_elevation<S: Scalar>(
+    degree: usize,
+    bezier: BezierConversionPlan,
+) -> Result<CurveElevationPlan, NurbsError> {
+    if bezier.distinct_knot_count < 2 {
+        return Err(NurbsError::Structure {
+            what: "degree elevation requires at least two distinct knots".to_string(),
+        });
+    }
+    let segment_count =
+        bezier
+            .distinct_knot_count
+            .checked_sub(1)
+            .ok_or_else(|| NurbsError::Structure {
+                what: "degree-elevation segment count underflows usize".to_string(),
+            })?;
+    let elevated_degree = degree.checked_add(1).ok_or_else(|| NurbsError::Structure {
+        what: "degree elevation overflows spline-degree arithmetic".to_string(),
+    })?;
+    let elevated_order = degree.checked_add(2).ok_or_else(|| NurbsError::Structure {
+        what: "degree elevation overflows spline-order arithmetic".to_string(),
+    })?;
+    let elevated_degree_i64 =
+        i64::try_from(elevated_degree).map_err(|_| NurbsError::Structure {
+            what: "degree elevation exceeds the scalar integer-lift domain".to_string(),
+        })?;
+    let final_knot_count = bezier
+        .final_knot_count
+        .checked_add(bezier.distinct_knot_count)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation final knot count overflows usize".to_string(),
+        })?;
+    let final_control_count = bezier
+        .final_control_count
+        .checked_add(segment_count)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation final control count overflows usize".to_string(),
+        })?;
+
+    // Conservative aggregate envelope for the already-priced Bezier
+    // conversion, post-conversion run/span scans, four-lane binomial blends,
+    // output assembly, and both derived structural validation passes.
+    let knot_run_scan = (bezier.final_knot_count as u128)
+        .checked_mul(CURVE_BEZIER_SCAN_WORK_PER_KNOT)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation knot-run scan work overflows u128".to_string(),
+        })?;
+    let span_scan = (bezier.final_control_count as u128)
+        .checked_mul(4)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation span scan work overflows u128".to_string(),
+        })?;
+    let blend_work = (degree as u128)
+        .checked_mul(segment_count as u128)
+        .and_then(|work| work.checked_mul(CURVE_BEZIER_BLEND_WORK_PER_CONTROL))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation blend work overflows u128".to_string(),
+        })?;
+    let control_assembly = (final_control_count as u128)
+        .checked_mul(4)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation control assembly work overflows u128".to_string(),
+        })?;
+    let knot_assembly = final_knot_count as u128;
+    let one_knot_validation = (final_knot_count as u128)
+        .checked_mul(CURVE_KNOT_VALIDATION_WORK_PER_ENTRY)
+        .and_then(|work| work.checked_add(elevated_degree as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation knot-validation work overflows u128".to_string(),
+        })?;
+    let derived_validation = one_knot_validation
+        .checked_mul(2)
+        .and_then(|work| {
+            work.checked_add(
+                (final_control_count as u128).checked_mul(CURVE_VALIDATION_WORK_PER_CONTROL)?,
+            )
+        })
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation derived-validation work overflows u128".to_string(),
+        })?;
+    let work_units = bezier
+        .work_units
+        .checked_add(knot_run_scan)
+        .and_then(|work| work.checked_add(span_scan))
+        .and_then(|work| work.checked_add(blend_work))
+        .and_then(|work| work.checked_add(control_assembly))
+        .and_then(|work| work.checked_add(knot_assembly))
+        .and_then(|work| work.checked_add(derived_validation))
+        .and_then(|work| work.checked_add(32))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation aggregate work overflows u128".to_string(),
+        })?;
+
+    // Preserve deterministic refusal precedence: aggregate work is rejected
+    // before retained-storage arithmetic or its ceiling is considered.
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve degree elevation requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+
+    let break_bytes = (bezier.distinct_knot_count as u128)
+        .checked_mul(core::mem::size_of::<S>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation break-storage accounting overflows u128".to_string(),
+        })?;
+    let multiplicity_bytes = (bezier.distinct_knot_count as u128)
+        .checked_mul(core::mem::size_of::<usize>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation multiplicity-storage accounting overflows u128".to_string(),
+        })?;
+    let elevated_bytes = curve_storage_bytes::<S>(final_knot_count, final_control_count)?;
+    let assembly_bytes = bezier
+        .converted_bytes
+        .checked_add(break_bytes)
+        .and_then(|bytes| bytes.checked_add(multiplicity_bytes))
+        .and_then(|bytes| bytes.checked_add(elevated_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "degree-elevation retained-byte accounting overflows u128".to_string(),
+        })?;
+    let peak_retained_bytes = bezier.peak_allocated_bytes.max(assembly_bytes);
+    let plan = CurveElevationPlan {
+        distinct_knot_count: bezier.distinct_knot_count,
+        segment_count,
+        elevated_degree,
+        elevated_order,
+        elevated_degree_i64,
+        final_knot_count,
+        final_control_count,
+        work_units,
+        peak_retained_bytes,
+    };
+    enforce_curve_elevation_envelope(plan.work_units, plan.peak_retained_bytes)?;
+    Ok(plan)
+}
+
+fn push_curve_elevation_value<T>(
+    values: &mut Vec<T>,
+    value: T,
+    planned_len: usize,
+    payload: &'static str,
+) -> Result<(), NurbsError> {
+    if values.len() >= planned_len {
+        return Err(NurbsError::Structure {
+            what: format!("degree-elevation {payload} exceeded its checked plan"),
+        });
+    }
+    values.push(value);
+    Ok(())
 }
 
 fn preflight_curve_copy<S: Scalar>(
@@ -626,7 +820,6 @@ fn bezier_pre_scan_work(knot_count: usize) -> Result<u128, NurbsError> {
         })
 }
 
-#[cfg(test)]
 fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
     curve: AdmittedNurbsCurve<'_, S, DIM>,
 ) -> Result<BezierConversionPlan, NurbsError> {
@@ -661,8 +854,15 @@ fn plan_bezier_conversion_with_poll<S: Scalar, const DIM: usize>(
 
     let mut operations_since_poll = 0usize;
     let mut insertions = 0usize;
+    let mut distinct_knot_count = 0usize;
     let mut run_start = 0usize;
     while run_start < entries.len() {
+        distinct_knot_count =
+            distinct_knot_count
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "Bezier distinct-knot count overflows usize".to_string(),
+                })?;
         let knot = entries[run_start];
         let mut run_end = run_start + 1;
         while run_end < entries.len() && entries[run_end] == knot {
@@ -737,6 +937,7 @@ fn plan_bezier_conversion_with_poll<S: Scalar, const DIM: usize>(
     }
     Ok(CurveWorkRun::Complete(BezierConversionPlan {
         insertions,
+        distinct_knot_count,
         final_knot_count,
         final_control_count,
         work_units,
@@ -2449,21 +2650,54 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// conformance suite proves it with rational equality).
     ///
     /// # Errors
-    /// Propagates structural/domain errors.
+    /// Propagates checked work, retained-memory, allocation, numeric-domain,
+    /// and structural refusals. The borrowed source generation is excluded
+    /// from the 64 MiB simultaneously-live derived-payload envelope.
     pub fn elevate_degree(&self) -> Result<Self, NurbsError> {
-        self.validate_live_structure()?;
-        let p = self.knots.degree;
-        let bez = self.to_bezier_form()?;
+        let admitted = self.admit()?;
+        let p = admitted.knots().degree();
+        let bezier_plan = plan_bezier_conversion(admitted)?;
+        let plan = plan_curve_elevation::<S>(p, bezier_plan)?;
+        let bez = admitted.to_bezier_form()?;
+        if bez.knots.knots.len() != bezier_plan.final_knot_count
+            || bez.cpw.len() != bezier_plan.final_control_count
+        {
+            return Err(NurbsError::Structure {
+                what: "degree-elevation Bezier conversion disagreed with its checked plan"
+                    .to_string(),
+            });
+        }
+
         // Collect distinct knots and their multiplicities in order. Ordinary
         // Bezier-form joins have multiplicity p and share one endpoint; a
         // legal full break has multiplicity p+1 and owns two independent
         // endpoints. Elevation must preserve that distinction.
         let mut breaks: Vec<S> = Vec::new();
+        breaks
+            .try_reserve_exact(plan.distinct_knot_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "degree-elevation break-table allocation was refused".to_string(),
+            })?;
         let mut multiplicities: Vec<usize> = Vec::new();
+        multiplicities
+            .try_reserve_exact(plan.distinct_knot_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "degree-elevation multiplicity-table allocation was refused".to_string(),
+            })?;
         for &u in &bez.knots.knots {
             if breaks.last() != Some(&u) {
-                breaks.push(u);
-                multiplicities.push(1);
+                push_curve_elevation_value(
+                    &mut breaks,
+                    u,
+                    plan.distinct_knot_count,
+                    "break table",
+                )?;
+                push_curve_elevation_value(
+                    &mut multiplicities,
+                    1,
+                    plan.distinct_knot_count,
+                    "multiplicity table",
+                )?;
             } else if let Some(multiplicity) = multiplicities.last_mut() {
                 *multiplicity =
                     multiplicity
@@ -2473,85 +2707,113 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                         })?;
             }
         }
+        if breaks.len() != plan.distinct_knot_count
+            || multiplicities.len() != plan.distinct_knot_count
+        {
+            return Err(NurbsError::Structure {
+                what: "degree-elevation knot runs disagreed with their checked plan".to_string(),
+            });
+        }
+
         // Elevate each Bézier segment: Q_0 = P_0; Q_{p+1} = P_p;
         // Q_i = (i/(p+1)) P_{i-1} + (1 - i/(p+1)) P_i.
-        let segment_spans: Vec<usize> = (p..bez.knots.control_count())
-            .filter(|&span| bez.knots.knots[span] < bez.knots.knots[span + 1])
-            .collect();
-        let seg_count = breaks.len() - 1;
-        if segment_spans.len() != seg_count {
+        let mut new_cpw: Vec<[S; 4]> = Vec::new();
+        new_cpw
+            .try_reserve_exact(plan.final_control_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "degree-elevation control-net allocation was refused".to_string(),
+            })?;
+        let denominator = S::from_int(plan.elevated_degree_i64);
+        let mut segment = 0usize;
+        for span in p..bez.knots.control_count() {
+            if bez.knots.knots[span] >= bez.knots.knots[span + 1] {
+                continue;
+            }
+            if segment >= plan.segment_count {
+                return Err(NurbsError::Structure {
+                    what: "degree elevation found more nonempty spans than its checked plan"
+                        .to_string(),
+                });
+            }
+            let pts = &bez.cpw[span - p..=span];
+            let include_left_endpoint = if segment == 0 {
+                true
+            } else {
+                let input_join_multiplicity =
+                    *multiplicities
+                        .get(segment)
+                        .ok_or_else(|| NurbsError::Structure {
+                            what: "degree elevation could not pair a span with its left knot run"
+                                .to_string(),
+                        })?;
+                match input_join_multiplicity {
+                    m if m == p => false,
+                    m if m == plan.elevated_degree => true,
+                    m => {
+                        return Err(NurbsError::Structure {
+                            what: format!(
+                                "Bezier-form join multiplicity {m} is neither degree {p} nor full break {}",
+                                plan.elevated_degree
+                            ),
+                        });
+                    }
+                }
+            };
+            if include_left_endpoint {
+                push_curve_elevation_value(
+                    &mut new_cpw,
+                    pts[0],
+                    plan.final_control_count,
+                    "control net",
+                )?;
+            }
+            for i in 1..=p {
+                let numerator = i64::try_from(i).map_err(|_| NurbsError::Structure {
+                    what: "degree elevation exceeds the scalar integer-lift domain".to_string(),
+                })?;
+                let alpha = S::from_int(numerator) / denominator;
+                let mut v = [S::zero(); 4];
+                for ((slot, &a), &b) in v.iter_mut().zip(&pts[i - 1]).zip(&pts[i]) {
+                    *slot = alpha * a + (S::one() - alpha) * b;
+                }
+                push_curve_elevation_value(
+                    &mut new_cpw,
+                    v,
+                    plan.final_control_count,
+                    "control net",
+                )?;
+            }
+            push_curve_elevation_value(
+                &mut new_cpw,
+                pts[p],
+                plan.final_control_count,
+                "control net",
+            )?;
+            segment = segment
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Structure {
+                    what: "degree-elevation segment traversal overflowed usize".to_string(),
+                })?;
+        }
+        if segment != plan.segment_count || new_cpw.len() != plan.final_control_count {
             return Err(NurbsError::Structure {
                 what: "degree elevation could not pair every distinct knot interval with one nonempty span"
                     .to_string(),
             });
         }
-        let mut new_cpw: Vec<[S; 4]> = Vec::new();
-        new_cpw
-            .try_reserve(bez.cpw.len().saturating_add(seg_count))
-            .map_err(|_| NurbsError::Domain {
-                what: "degree-elevation control-net allocation was refused".to_string(),
-            })?;
-        let elevated_order = p.checked_add(2).ok_or_else(|| NurbsError::Structure {
-            what: "degree elevation overflows spline-order arithmetic".to_string(),
-        })?;
-        let elevated_order_i64 =
-            i64::try_from(elevated_order).map_err(|_| NurbsError::Structure {
-                what: "degree elevation exceeds the scalar integer-lift domain".to_string(),
-            })?;
-        for (seg, &span) in segment_spans.iter().enumerate() {
-            let pts = &bez.cpw[span - p..=span];
-            let mut q = Vec::with_capacity(p + 2);
-            q.push(pts[0]);
-            for i in 1..=p {
-                let numerator = i64::try_from(i).map_err(|_| NurbsError::Structure {
-                    what: "degree elevation exceeds the scalar integer-lift domain".to_string(),
-                })?;
-                let alpha = S::from_int(numerator) / S::from_int(elevated_order_i64 - 1);
-                let mut v = [S::zero(); 4];
-                for ((slot, &a), &b) in v.iter_mut().zip(&pts[i - 1]).zip(&pts[i]) {
-                    *slot = alpha * a + (S::one() - alpha) * b;
-                }
-                q.push(v);
-            }
-            q.push(pts[p]);
-            if seg == 0 {
-                new_cpw.extend_from_slice(&q);
-            } else {
-                let input_join_multiplicity = multiplicities[seg];
-                match input_join_multiplicity {
-                    m if m == p => {
-                        // A Bezier-form C0 join shares its endpoint.
-                        new_cpw.extend_from_slice(&q[1..]);
-                    }
-                    m if m == p + 1 => {
-                        // A full break is discontinuous and owns both limiting
-                        // endpoints. Do not manufacture continuity by dropping
-                        // the right segment's first control point.
-                        new_cpw.extend_from_slice(&q);
-                    }
-                    m => {
-                        return Err(NurbsError::Structure {
-                            what: format!(
-                                "Bezier-form join multiplicity {m} is neither degree {p} nor full break {}",
-                                p + 1
-                            ),
-                        });
-                    }
-                }
-            }
-        }
+
         // Elevation raises every multiplicity by one, preserving continuity
         // order. Endpoints therefore have p+2 copies, C0 joins p+1, and full
         // discontinuities p+2.
         let mut new_knots = Vec::new();
         new_knots
-            .try_reserve(bez.knots.knots.len().saturating_add(breaks.len()))
+            .try_reserve_exact(plan.final_knot_count)
             .map_err(|_| NurbsError::Domain {
                 what: "degree-elevation knot allocation was refused".to_string(),
             })?;
         for (bi, (&b, &old_multiplicity)) in breaks.iter().zip(multiplicities.iter()).enumerate() {
             let mult = if bi == 0 || bi == breaks.len() - 1 {
-                p + 2
+                plan.elevated_order
             } else {
                 old_multiplicity
                     .checked_add(1)
@@ -2560,11 +2822,21 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                     })?
             };
             for _ in 0..mult {
-                new_knots.push(b);
+                push_curve_elevation_value(
+                    &mut new_knots,
+                    b,
+                    plan.final_knot_count,
+                    "knot vector",
+                )?;
             }
         }
+        if new_knots.len() != plan.final_knot_count {
+            return Err(NurbsError::Structure {
+                what: "degree-elevation knot assembly disagreed with its checked plan".to_string(),
+            });
+        }
         let elevated = NurbsCurve {
-            knots: KnotVector::new(new_knots, p + 1)?,
+            knots: KnotVector::new(new_knots, plan.elevated_degree)?,
             cpw: new_cpw,
         };
         elevated.validate_live_structure()?;
@@ -3384,6 +3656,26 @@ mod tests {
             &weights,
         )
         .expect("high-degree insertion curve")
+    }
+
+    fn quadratic_join_curve() -> NurbsCurve<f64, 1> {
+        NurbsCurve::new(
+            KnotVector::new(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0], 2)
+                .expect("quadratic join knots"),
+            &[[0.0], [0.25], [0.75], [1.0]],
+            &[1.0; 4],
+        )
+        .expect("quadratic join curve")
+    }
+
+    fn linear_full_break_curve() -> NurbsCurve<f64, 1> {
+        NurbsCurve::new(
+            KnotVector::new(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0], 1)
+                .expect("linear full-break knots"),
+            &[[0.0], [0.25], [0.75], [1.0]],
+            &[1.0; 4],
+        )
+        .expect("linear full-break curve")
     }
 
     #[test]
@@ -4957,6 +5249,7 @@ mod tests {
             .bezier_conversion_plan()
             .expect("checked conversion plan");
         assert_eq!(plan.insertions, 1);
+        assert_eq!(plan.distinct_knot_count, 3);
         assert_eq!(plan.final_knot_count, 8);
         assert_eq!(plan.final_control_count, 5);
         assert!(plan.work_units > 0);
@@ -4979,6 +5272,117 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn degree_elevation_plan_counts_single_join_and_full_break_shapes() {
+        let cases = [
+            (line_curve(), 2, 1, 2, 3, 6, 3),
+            (quadratic_join_curve(), 3, 2, 3, 4, 11, 7),
+            (linear_full_break_curve(), 3, 2, 2, 3, 9, 6),
+        ];
+        for (
+            curve,
+            distinct_knot_count,
+            segment_count,
+            elevated_degree,
+            elevated_order,
+            final_knot_count,
+            final_control_count,
+        ) in cases
+        {
+            let admitted = curve.admit().expect("admitted elevation source");
+            let bezier = plan_bezier_conversion(admitted).expect("Bezier plan");
+            let plan = plan_curve_elevation::<f64>(admitted.knots().degree(), bezier)
+                .expect("degree-elevation plan");
+            assert_eq!(plan.distinct_knot_count, distinct_knot_count);
+            assert_eq!(plan.segment_count, segment_count);
+            assert_eq!(plan.elevated_degree, elevated_degree);
+            assert_eq!(plan.elevated_order, elevated_order);
+            assert_eq!(plan.final_knot_count, final_knot_count);
+            assert_eq!(plan.final_control_count, final_control_count);
+
+            let elevated = curve.elevate_degree().expect("bounded degree elevation");
+            assert_eq!(elevated.knots.knots().len(), plan.final_knot_count);
+            assert_eq!(elevated.cpw.len(), plan.final_control_count);
+        }
+    }
+
+    #[test]
+    fn degree_elevation_plan_matches_work_and_peak_live_formulas() {
+        let curve = quadratic_join_curve();
+        let admitted = curve.admit().expect("admitted quadratic join");
+        let bezier = plan_bezier_conversion(admitted).expect("Bezier plan");
+        let plan = plan_curve_elevation::<f64>(admitted.knots().degree(), bezier)
+            .expect("degree-elevation plan");
+
+        let expected_work = bezier.work_units
+            + 4 * bezier.final_knot_count as u128
+            + 4 * bezier.final_control_count as u128
+            + 32 * admitted.knots().degree() as u128 * plan.segment_count as u128
+            + 4 * plan.final_control_count as u128
+            + plan.final_knot_count as u128
+            + 2 * (16 * plan.final_knot_count as u128 + plan.elevated_degree as u128)
+            + 16 * plan.final_control_count as u128
+            + 32;
+        assert_eq!(plan.work_units, expected_work);
+
+        let metadata_bytes = plan.distinct_knot_count as u128
+            * (core::mem::size_of::<f64>() + core::mem::size_of::<usize>()) as u128;
+        let assembly_bytes = bezier.converted_bytes
+            + metadata_bytes
+            + curve_storage_bytes::<f64>(plan.final_knot_count, plan.final_control_count)
+                .expect("elevated storage bytes");
+        assert_eq!(
+            plan.peak_retained_bytes,
+            bezier.peak_allocated_bytes.max(assembly_bytes)
+        );
+    }
+
+    #[test]
+    fn degree_elevation_envelope_is_boundary_exact_and_work_first() {
+        assert!(
+            enforce_curve_elevation_envelope(
+                BASIS_MAX_WORK_UNITS,
+                CURVE_ELEVATION_MAX_RETAINED_BYTES - 1,
+            )
+            .is_ok()
+        );
+        assert!(
+            enforce_curve_elevation_envelope(
+                BASIS_MAX_WORK_UNITS,
+                CURVE_ELEVATION_MAX_RETAINED_BYTES,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            enforce_curve_elevation_envelope(
+                BASIS_MAX_WORK_UNITS,
+                CURVE_ELEVATION_MAX_RETAINED_BYTES + 1,
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("retain")
+        ));
+        assert!(matches!(
+            enforce_curve_elevation_envelope(
+                BASIS_MAX_WORK_UNITS + 1,
+                CURVE_ELEVATION_MAX_RETAINED_BYTES + 1,
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("work")
+        ));
+
+        let pre_memory_refusal = BezierConversionPlan {
+            insertions: 0,
+            distinct_knot_count: 2,
+            final_knot_count: 4,
+            final_control_count: 2,
+            work_units: BASIS_MAX_WORK_UNITS,
+            peak_allocated_bytes: u128::MAX,
+            converted_bytes: u128::MAX,
+        };
+        assert!(matches!(
+            plan_curve_elevation::<f64>(1, pre_memory_refusal),
+            Err(NurbsError::Domain { ref what }) if what.contains("work")
+        ));
     }
 
     #[test]
