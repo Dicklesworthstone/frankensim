@@ -3,13 +3,13 @@
 //! summary; assertion messages retain the exact failing iteration/decision.
 
 use fs_solver::{
-    BlockOperator2, BlockOperator3, BlockSchur2, DefinitenessEvidence, FgmresState,
+    BlockError, BlockOperator2, BlockOperator3, BlockSchur2, DefinitenessEvidence, FgmresState,
     FlexiblePreconditioner, Globalization, GlobalizationDecision, LineSearchConfig, LinearOp,
     LinearSolverKind, LinearSystemFinding, LinearSystemVerifier, LinearVerificationError,
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonStallDiagnosis, NonlinearProblem,
     NullspaceEvidence, PreconditionerClass, RealEquivalentComplexOp, RectLinearOp, SchurSolveSign,
     SolverAdmissionError, SourceCompatibility, SquareBlock, SymmetryEvidence, TrustRegionConfig,
-    admit_linear_solver, verify_linear_system,
+    ZeroBlock, admit_linear_solver, verify_linear_system,
 };
 use fs_sparse::precond::Precond;
 
@@ -91,6 +91,21 @@ impl LinearOp for DenseSquare {
     fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
         self.0.apply_transpose(x, y);
     }
+}
+
+#[test]
+fn block_operator_refuses_zero_aggregate_dimension() {
+    let zero = ZeroBlock::new(0, 0);
+    let blocks: [[&dyn RectLinearOp; 2]; 2] = [[&zero, &zero], [&zero, &zero]];
+
+    assert!(matches!(
+        BlockOperator2::new(blocks),
+        Err(BlockError::Empty)
+    ));
+    verdict(
+        "block-zero-dimension-refusal",
+        "a populated block table cannot admit a vacuous zero-dimensional solver operator",
+    );
 }
 
 #[test]

@@ -151,7 +151,7 @@ pub enum BlockError {
 impl fmt::Display for BlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => f.write_str("block operator must contain at least one block"),
+            Self::Empty => f.write_str("block operator must have nonzero aggregate dimension"),
             Self::RowMismatch {
                 row,
                 expected,
@@ -249,6 +249,9 @@ impl<'a, const N: usize> BlockOperator<'a, N> {
         }
         let rows = checked_total(&row_sizes)?;
         let cols = checked_total(&col_sizes)?;
+        if rows == 0 && cols == 0 {
+            return Err(BlockError::Empty);
+        }
         if rows != cols {
             return Err(BlockError::NotSquare { rows, cols });
         }

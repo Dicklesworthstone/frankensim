@@ -27,7 +27,9 @@ diagnoses, never timeout mysteries).
   algebra with fixed-order primal and transpose application.
   `SquareBlock` explicitly adapts a `LinearOp` without a blanket
   implementation that makes method names ambiguous; `ZeroBlock`
-  represents structural zeros. `RealEquivalentComplexOp`
+  represents structural zeros, but an aggregate zero-dimensional
+  block partition is refused as `BlockError::Empty` rather than
+  becoming a vacuous solver operator. `RealEquivalentComplexOp`
   maps `A + iB` to the real block form `[[A,-B],[B,A]]`.
   `BlockSchur2` is an injected block-LDU preconditioner whose caller
   supplies the two diagonal solves and chooses the Schur sign.
@@ -134,8 +136,9 @@ diagnoses, never timeout mysteries).
 - The V-cycle preconditioner is symmetric (identical pre/post
   smoothing, Galerkin-consistent transfers, near-exact coarse).
 - Transposed solves share every piece of primal infrastructure.
-- Block row/column partitions are validated once, then traversed in
-  stable index order for both primal and transpose applications.
+- Block row/column partitions and their nonzero aggregate dimension
+  are validated once, then traversed in stable index order for both
+  primal and transpose applications.
 - A solver admission decision can only be constructed from a coherent
   local verifier finding; the decision function cannot silently
   upgrade missing or contradictory evidence into a stronger solver
