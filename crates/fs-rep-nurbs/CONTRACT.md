@@ -19,9 +19,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
 ## Public types and semantics
 
 - `Rat` — exact i128 rational scalar (gcd-reduced, overflow-CHECKED:
-  leaving the exactness domain is currently a named panic, never wraparound).
-  `NurbsError::Exactness` is reserved for the successor fallible exact API; the
-  present operator traits cannot transport it.
+  leaving the exactness domain is never silent wraparound). Fallible exact
+  helpers return `NurbsError::Exactness`; the present operator traits cannot
+  transport it and retain a named panic at that boundary.
 - `Scalar` — the field abstraction; the SAME generic basis/curve/surface
   code runs at `f64` (fast) and `Rat` (exact). The conformance suite
   also instantiates it at a test dual, so derivative checks flow through
@@ -163,9 +163,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
 
 ## Error model
 
-`NurbsError`: `Structure`, `Domain`, `Exactness`. `Exactness` is reserved for
-the planned fallible rational API; current `Rat` overflow panics with a named
-message (exactness-domain exit — a documented boundary, not a data path).
+`NurbsError`: `Structure`, `Domain`, `Exactness`. Fallible exact helpers use
+`Exactness` for an unrepresentable reduced result. Current `Rat` operator-trait
+overflow still panics with a named message because those traits cannot return a
+typed refusal (exactness-domain exit — a documented boundary, never wraparound).
 
 ## Determinism class
 
@@ -182,9 +183,18 @@ views make repeated source validation unnecessary for basis, evaluation,
 partials, and span boxes. The production `fs-render` ray path preflights sealed
 metadata and cancellation, then binds one admitted surface across domain lookup,
 seed evaluation, and Newton partials.
-Owning conversion, insertion, derivative, closest, SDF, trim-subdivision, and
-refit paths are not all migrated yet; they make no claim of caller-budgeted
-preflight or end-to-end validate-once execution. Closest-point admission validates the sealed structure,
+Owning trim classification now binds one admitted patch/loop/curve generation
+through exact Bezier conversion, span boxes, and winding. Its checked conversion
+plan charges scan/insertion work and old-plus-new curve storage before the first
+clone; all patch-owned source curves, each subdivision insertion, and the
+simultaneously retained converted curve, span boxes, and offending intervals are
+admitted under a 64 MiB defensive peak before allocation. Offending intervals
+use fallible reservation and winding projects controls on demand without
+retaining a second polygon. An admitted patch can classify repeatedly without
+revalidating its immutable source.
+Owning derivative, closest, SDF, and refit paths are not all migrated yet; they
+make no claim of caller-budgeted preflight or end-to-end validate-once execution.
+Closest-point admission validates the sealed structure,
 including finite Cartesian projections and normal positive floating weights,
 and charges a stage-faithful knot-insertion, expanded-grid, run-scan, and
 queue-seeding estimate before conversion, including when the requested split
@@ -194,7 +204,9 @@ same split/frontier model and additionally charges structure-sensitive
 polishing, sign-repair, and trim coefficients; a shell for which even a
 zero-split query exceeds the ceiling is not constructible. The
 legacy refit path has validated static work/allocation/probe caps but no `Cx`;
-these APIs are not yet P7 cancellation-correct. The successor budgeted
+trim classification likewise retains a static process ceiling rather than a
+caller-owned affine budget and has no `Cx`; these APIs are not yet P7
+cancellation-correct. The successor budgeted
 interfaces are tracked explicitly and must add bounded polling plus
 request→drain→finalize semantics before promotion.
 

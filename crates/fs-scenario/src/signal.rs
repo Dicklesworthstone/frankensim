@@ -332,7 +332,7 @@ impl TimeSignal {
                 }
                 let mut time_nonfinite = false;
                 let mut order_invalid = false;
-                let mut previous = None;
+                let mut previous: Option<f64> = None;
                 for &time in times {
                     checkpoint("signal table times")?;
                     time_nonfinite |= !time.is_finite();

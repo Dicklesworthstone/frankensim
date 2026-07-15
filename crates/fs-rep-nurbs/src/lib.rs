@@ -45,14 +45,14 @@ pub enum NurbsError {
         /// Diagnosis.
         what: String,
     },
-    /// A parameter outside the knot domain.
+    /// A parameter-domain violation or defensive work/memory envelope refusal.
     Domain {
         /// Diagnosis.
         what: String,
     },
-    /// The exact-arithmetic domain was exceeded (i128 overflow). Reserved for
-    /// the planned fallible exact backend; current `Rat` operators fail with a
-    /// named panic at that boundary rather than wrapping.
+    /// The exact-arithmetic domain was exceeded. Fallible exact helpers return
+    /// this refusal; current `Rat` operator traits cannot transport it and fail
+    /// with a named panic at that boundary rather than wrapping.
     Exactness {
         /// Diagnosis.
         what: String,

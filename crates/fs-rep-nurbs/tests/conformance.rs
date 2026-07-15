@@ -610,6 +610,106 @@ fn nb_003a_trim_classification_refuses_many_tiny_loops_before_deep_validation() 
 }
 
 #[test]
+fn nb_003b_admitted_trim_classification_matches_independent_validation_g3() {
+    let outer = poly_loop(&[[0, 0], [10, 0], [10, 10], [0, 10]], 1);
+    let hole = poly_loop(&[[3, 3], [7, 3], [7, 7], [3, 7]], 1)
+        .reversed_for_hole()
+        .expect("clockwise hole");
+    let patch = TrimmedPatch::new(vec![outer.try_clone().expect("fallible outer copy"), hole]);
+    let admitted = patch.admit().expect("admitted trimmed patch");
+    assert_eq!(admitted.admitted_loops().len(), patch.loops().len());
+
+    let queries = [
+        [Rat::int(1), Rat::int(1)],
+        [Rat::int(5), Rat::int(5)],
+        [Rat::int(0), Rat::int(5)],
+        [Rat::int(12), Rat::int(5)],
+    ];
+    for query in queries {
+        assert_eq!(
+            admitted.classify(query).expect("admitted classification"),
+            patch.classify(query).expect("independent classification")
+        );
+    }
+    let box_min = [Rat::int(1), Rat::int(1)];
+    let box_max = [Rat::int(2), Rat::int(2)];
+    assert_eq!(
+        admitted
+            .classify_box(box_min, box_max)
+            .expect("admitted box classification"),
+        patch
+            .classify_box(box_min, box_max)
+            .expect("independent box classification")
+    );
+
+    let quadratic_knots = KnotVector::new(
+        vec![
+            Rat::int(0),
+            Rat::int(0),
+            Rat::int(0),
+            Rat::new(1, 3),
+            Rat::new(2, 3),
+            Rat::int(1),
+            Rat::int(1),
+            Rat::int(1),
+        ],
+        2,
+    )
+    .expect("quadratic loop knots");
+    let quadratic_points = [
+        [Rat::int(0), Rat::int(0)],
+        [Rat::int(10), Rat::int(0)],
+        [Rat::int(10), Rat::int(10)],
+        [Rat::int(0), Rat::int(10)],
+        [Rat::int(0), Rat::int(0)],
+    ];
+    let quadratic_weights = [Rat::int(1); 5];
+    let quadratic_loop = TrimLoop::new(
+        NurbsCurve::new(quadratic_knots, &quadratic_points, &quadratic_weights)
+            .expect("quadratic loop curve"),
+    )
+    .expect("closed quadratic loop");
+    let source_curve = quadratic_loop.curve();
+    let refined_curve = source_curve
+        .to_bezier_form()
+        .expect("exact Bezier refinement");
+    assert!(
+        refined_curve.knots().knots().len() > source_curve.knots().knots().len(),
+        "fixture must exercise real interior-knot insertion"
+    );
+    assert!(
+        refined_curve.homogeneous_control_points().len()
+            > source_curve.homogeneous_control_points().len(),
+        "Bezier refinement must grow the control net"
+    );
+    let source_patch = TrimmedPatch::new(vec![
+        quadratic_loop
+            .try_clone()
+            .expect("fallible quadratic-loop copy"),
+    ]);
+    let refined_patch = TrimmedPatch::new(vec![
+        TrimLoop::new(refined_curve).expect("refined closed quadratic loop"),
+    ]);
+    for query in [
+        [Rat::int(5), Rat::int(5)],
+        [Rat::int(0), Rat::int(0)],
+        [Rat::int(20), Rat::int(20)],
+    ] {
+        assert_eq!(
+            refined_patch
+                .classify(query)
+                .expect("refined classification"),
+            source_patch.classify(query).expect("source classification"),
+            "exact Bezier refinement must preserve certified classification"
+        );
+    }
+    verdict(
+        "nb-003b",
+        "admitted trim parity and exact Bezier-refinement classification invariance",
+    );
+}
+
+#[test]
 fn nb_004_measured_closest_point_brackets_the_oracle() {
     let mut seed = 0x9B_0004u64;
     // Curves.

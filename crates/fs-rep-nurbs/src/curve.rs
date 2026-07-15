@@ -11,8 +11,248 @@ use crate::basis::{AdmittedKnotVector, BASIS_MAX_WORK_UNITS, KnotVector, Scalar}
 // Conservative price for finite/weight/projection/canonical-lane validation of
 // one homogeneous control. Structural admission must precede the full scan.
 const CURVE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
+// Keep this conservative price aligned with KnotVector's private validation
+// envelope: every derived insertion constructs and then revalidates its knots.
+const CURVE_KNOT_VALIDATION_WORK_PER_ENTRY: u128 = 16;
+const CURVE_BEZIER_SCAN_WORK_PER_KNOT: u128 = 4;
+const CURVE_BEZIER_BLEND_WORK_PER_CONTROL: u128 = 32;
 const CURVE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const CURVE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const CURVE_BEZIER_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+
+/// Checked shape/work/retained-memory plan for exact Bezier conversion.
+/// Fields are crate-visible so trim/closest primitives can compose this
+/// conversion phase with their own simultaneously-live scratch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BezierConversionPlan {
+    pub(crate) insertions: usize,
+    pub(crate) final_knot_count: usize,
+    pub(crate) final_control_count: usize,
+    pub(crate) work_units: u128,
+    /// Bytes allocated by the conversion at its peak, excluding the borrowed
+    /// source generation. With insertions this is the current derived curve
+    /// plus the next derived curve under construction.
+    pub(crate) peak_allocated_bytes: u128,
+    /// Retained bytes in the returned converted curve.
+    pub(crate) converted_bytes: u128,
+}
+
+fn curve_storage_bytes<S: Scalar>(
+    knot_count: usize,
+    control_count: usize,
+) -> Result<u128, NurbsError> {
+    let knot_bytes = (knot_count as u128)
+        .checked_mul(core::mem::size_of::<S>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier knot-storage accounting overflows u128".to_string(),
+        })?;
+    let control_bytes = (control_count as u128)
+        .checked_mul(core::mem::size_of::<[S; 4]>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier control-storage accounting overflows u128".to_string(),
+        })?;
+    knot_bytes
+        .checked_add(control_bytes)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier curve-storage accounting overflows u128".to_string(),
+        })
+}
+
+fn refinement_work_upper_bound(
+    degree: usize,
+    initial_knot_count: usize,
+    initial_control_count: usize,
+    direct_insertions: usize,
+    bezier_insertions: usize,
+) -> Result<u128, NurbsError> {
+    let total_insertions = direct_insertions
+        .checked_add(bezier_insertions)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve refinement insertion count overflows usize".to_string(),
+        })?;
+    let final_knot_count = initial_knot_count
+        .checked_add(total_insertions)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve refinement knot count overflows usize".to_string(),
+        })?;
+    let final_control_count = initial_control_count
+        .checked_add(total_insertions)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve refinement control count overflows usize".to_string(),
+        })?;
+
+    // Conversion scans once to construct its plan and once per target-search
+    // pass, including the final no-target pass. Reserve one additional scan so
+    // callers such as trim can inspect the plan before invoking conversion
+    // without leaving that preflight work uncharged.
+    let scan_passes =
+        (bezier_insertions as u128)
+            .checked_add(3)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Bezier target-scan pass count overflows u128".to_string(),
+            })?;
+    let scan_work = (final_knot_count as u128)
+        .checked_mul(CURVE_BEZIER_SCAN_WORK_PER_KNOT)
+        .and_then(|work| work.checked_mul(scan_passes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier target-scan work overflows u128".to_string(),
+        })?;
+    let clone_work = (final_control_count as u128)
+        .checked_mul(4)
+        .and_then(|work| work.checked_add(final_knot_count as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier source-copy work overflows u128".to_string(),
+        })?;
+
+    // Each insertion performs a span search, copies both output arrays,
+    // blends at most `degree` homogeneous controls, validates the constructed
+    // KnotVector, then validates the published NurbsCurve (which scans those
+    // knots a second time). Price every generation at the final, largest
+    // shape so the aggregate bound is monotone and conservative.
+    let knot_validation = (final_knot_count as u128)
+        .checked_mul(CURVE_KNOT_VALIDATION_WORK_PER_ENTRY)
+        .and_then(|work| work.checked_add(degree as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier knot-validation work overflows u128".to_string(),
+        })?;
+    let curve_validation = (final_control_count as u128)
+        .checked_mul(CURVE_VALIDATION_WORK_PER_CONTROL)
+        .and_then(|work| work.checked_add(knot_validation))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier curve-validation work overflows u128".to_string(),
+        })?;
+    let copy_work = (final_control_count as u128)
+        .checked_mul(4)
+        .and_then(|work| work.checked_add(final_knot_count as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier insertion-copy work overflows u128".to_string(),
+        })?;
+    let blend_work = (degree as u128)
+        .checked_mul(CURVE_BEZIER_BLEND_WORK_PER_CONTROL)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier blend work overflows u128".to_string(),
+        })?;
+    let per_insertion = (final_control_count as u128)
+        .checked_add(copy_work)
+        .and_then(|work| work.checked_add(blend_work))
+        .and_then(|work| work.checked_add(knot_validation))
+        .and_then(|work| work.checked_add(curve_validation))
+        .and_then(|work| work.checked_add(32))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier per-insertion work overflows u128".to_string(),
+        })?;
+    let insertion_work = (total_insertions as u128)
+        .checked_mul(per_insertion)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier aggregate insertion work overflows u128".to_string(),
+        })?;
+
+    scan_work
+        .checked_add(clone_work)
+        .and_then(|work| work.checked_add(insertion_work))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier aggregate refinement work overflows u128".to_string(),
+        })
+}
+
+fn bezier_pre_scan_work(knot_count: usize) -> Result<u128, NurbsError> {
+    (knot_count as u128)
+        .checked_mul(CURVE_BEZIER_SCAN_WORK_PER_KNOT)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier pre-scan work overflows u128".to_string(),
+        })
+}
+
+fn plan_bezier_conversion<S: Scalar, const DIM: usize>(
+    curve: AdmittedNurbsCurve<'_, S, DIM>,
+) -> Result<BezierConversionPlan, NurbsError> {
+    let knots = curve.knots();
+    let degree = knots.degree();
+    let (lo, hi) = knots.domain();
+    let entries = knots.knots();
+    let pre_scan_work = bezier_pre_scan_work(entries.len())?;
+    if pre_scan_work > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "Bezier pre-scan requests {pre_scan_work} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    let mut insertions = 0usize;
+    let mut run_start = 0usize;
+    while run_start < entries.len() {
+        let knot = entries[run_start];
+        let mut run_end = run_start + 1;
+        while run_end < entries.len() && entries[run_end] == knot {
+            run_end += 1;
+        }
+        let multiplicity = run_end - run_start;
+        if knot > lo && knot < hi && multiplicity < degree {
+            insertions = insertions
+                .checked_add(degree - multiplicity)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "Bezier insertion-count accounting overflows usize".to_string(),
+                })?;
+        }
+        run_start = run_end;
+    }
+
+    let final_knot_count =
+        entries
+            .len()
+            .checked_add(insertions)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Bezier final knot count overflows usize".to_string(),
+            })?;
+    let final_control_count = curve
+        .homogeneous_control_points()
+        .len()
+        .checked_add(insertions)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Bezier final control count overflows usize".to_string(),
+        })?;
+    let work_units = refinement_work_upper_bound(
+        degree,
+        entries.len(),
+        curve.homogeneous_control_points().len(),
+        0,
+        insertions,
+    )?;
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "Bezier conversion requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+
+    let converted_bytes = curve_storage_bytes::<S>(final_knot_count, final_control_count)?;
+    let peak_allocated_bytes = if insertions == 0 {
+        converted_bytes
+    } else {
+        converted_bytes
+            .checked_mul(2)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Bezier conversion peak retained-byte accounting overflows u128".to_string(),
+            })?
+    };
+    if peak_allocated_bytes > CURVE_BEZIER_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "Bezier conversion can retain {peak_allocated_bytes} bytes above defensive ceiling {CURVE_BEZIER_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+
+    Ok(BezierConversionPlan {
+        insertions,
+        final_knot_count,
+        final_control_count,
+        work_units,
+        peak_allocated_bytes,
+        converted_bytes,
+    })
+}
 
 /// One span's Cartesian control box: (min, max, t0, t1).
 pub type SpanBox<S, const DIM: usize> = ([S; DIM], [S; DIM], S, S);
@@ -381,6 +621,70 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
         }
         Ok(out)
     }
+
+    /// Insert one knot while reusing this exact source admission.
+    ///
+    /// The returned curve is a new sealed generation and is validated before
+    /// publication; only the unchanged source scan is elided.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the open domain or when checked output
+    /// sizing/allocation is refused; [`NurbsError::Structure`] if the derived
+    /// generation is not a valid curve.
+    pub fn insert_knot(&self, t: S) -> Result<NurbsCurve<S, DIM>, NurbsError> {
+        self.inner.insert_knot_after_validation(t)
+    }
+
+    /// Convert this admitted generation to exact Bezier form without
+    /// repeating structural validation of the unchanged source. Planning still
+    /// scans knot runs once to determine the exact refinement envelope.
+    ///
+    /// Each newly derived generation is still validated before it becomes the
+    /// input to the next insertion.
+    ///
+    /// # Errors
+    /// Propagates checked sizing, allocation, numeric-domain, and structural
+    /// refusals from exact knot insertion.
+    pub fn to_bezier_form(&self) -> Result<NurbsCurve<S, DIM>, NurbsError> {
+        self.inner.to_bezier_form_after_validation()
+    }
+
+    /// Return the checked Bezier conversion envelope without allocating.
+    pub(crate) fn bezier_conversion_plan(&self) -> Result<BezierConversionPlan, NurbsError> {
+        plan_bezier_conversion(*self)
+    }
+
+    /// Constant-time charge required before scanning knot runs to construct a
+    /// Bezier conversion plan.
+    pub(crate) fn bezier_pre_scan_work(&self) -> Result<u128, NurbsError> {
+        bezier_pre_scan_work(self.knots().knots().len())
+    }
+
+    /// Conservatively price direct insertions followed by Bezier conversion
+    /// at the largest derived generation, without scanning or allocating.
+    pub(crate) fn projected_refinement_work(
+        &self,
+        direct_insertions: usize,
+        bezier_insertions: usize,
+    ) -> Result<u128, NurbsError> {
+        refinement_work_upper_bound(
+            self.knots().degree(),
+            self.knots().knots().len(),
+            self.homogeneous_control_points().len(),
+            direct_insertions,
+            bezier_insertions,
+        )
+    }
+
+    /// Build per-span Cartesian control boxes from this admitted generation
+    /// without rescanning its sealed source structure.
+    ///
+    /// # Errors
+    /// Returns a structured refusal when traversal work, retained bytes, or
+    /// output allocation exceed the defensive envelope.
+    pub fn span_boxes(&self) -> Result<Vec<SpanBox<S, DIM>>, NurbsError> {
+        self.inner.span_boxes_after_validation()
+    }
 }
 
 impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
@@ -390,7 +694,10 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// [`NurbsError::Domain`] outside the OPEN domain interior or when checked
     /// output sizing/allocation/validation is refused.
     pub fn insert_knot(&self, t: S) -> Result<Self, NurbsError> {
-        self.validate_live_structure()?;
+        self.admit()?.insert_knot(t)
+    }
+
+    fn insert_knot_after_validation(&self, t: S) -> Result<Self, NurbsError> {
         let admitted_knots = self.knots.admitted_after_validation();
         let (lo, hi) = admitted_knots.domain();
         if t <= lo || hi <= t {
@@ -540,20 +847,28 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// multiplicity `degree` (EXACT). Returns the refined curve.
     ///
     /// # Errors
-    /// Propagates structural errors (none for valid inputs).
+    /// Propagates checked work, retained-memory, allocation, numeric-domain,
+    /// and structural refusals from exact knot insertion.
     pub fn to_bezier_form(&self) -> Result<Self, NurbsError> {
-        self.validate_live_structure()?;
+        self.admit()?.to_bezier_form()
+    }
+
+    fn to_bezier_form_after_validation(&self) -> Result<Self, NurbsError> {
+        self.admitted_after_validation().bezier_conversion_plan()?;
         let p = self.knots.degree;
         let mut cur = self.try_clone()?;
         loop {
             // Find an interior knot with multiplicity < p.
-            let (lo, hi) = cur.knots.domain()?;
+            let admitted = cur.admitted_after_validation();
+            let knots = admitted.knots();
+            let (lo, hi) = knots.domain();
+            let knot_entries = knots.knots();
             let mut target = None;
             let mut i = 0;
-            while i < cur.knots.knots.len() {
-                let t = cur.knots.knots[i];
+            while i < knot_entries.len() {
+                let t = knot_entries[i];
                 let mut run_end = i + 1;
-                while run_end < cur.knots.knots.len() && cur.knots.knots[run_end] == t {
+                while run_end < knot_entries.len() && knot_entries[run_end] == t {
                     run_end += 1;
                 }
                 if t > lo && t < hi && run_end - i < p {
@@ -563,7 +878,7 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 i = run_end;
             }
             match target {
-                Some(t) => cur = cur.insert_knot(t)?,
+                Some(t) => cur = admitted.insert_knot(t)?,
                 None => return Ok(cur),
             }
         }
@@ -704,9 +1019,13 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// bounds that span.
     ///
     /// # Errors
-    /// Propagates domain errors (none for valid curves).
+    /// Propagates structural errors and checked work, retained-memory, or
+    /// allocation refusals.
     pub fn span_boxes(&self) -> Result<Vec<SpanBox<S, DIM>>, NurbsError> {
-        self.validate_live_structure()?;
+        self.admit()?.span_boxes()
+    }
+
+    fn span_boxes_after_validation(&self) -> Result<Vec<SpanBox<S, DIM>>, NurbsError> {
         let p = self.knots.degree;
         let span_capacity = preflight_span_boxes(
             self.knots.control_count(),
@@ -1221,6 +1540,57 @@ impl<const DIM: usize> AdmittedNurbsCurve<'_, f64, DIM> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rat::Rat;
+
+    #[test]
+    fn admitted_bezier_conversion_is_exact_and_preflighted() {
+        let knots = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 2),
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("quadratic knots");
+        let curve = NurbsCurve::<Rat, 1>::new(
+            knots,
+            &[[Rat::int(0)], [Rat::int(1)], [Rat::int(2)], [Rat::int(3)]],
+            &[Rat::int(1); 4],
+        )
+        .expect("quadratic curve");
+        let admitted = curve.admit().expect("admitted curve");
+        let plan = admitted
+            .bezier_conversion_plan()
+            .expect("checked conversion plan");
+        assert_eq!(plan.insertions, 1);
+        assert_eq!(plan.final_knot_count, 8);
+        assert_eq!(plan.final_control_count, 5);
+        assert!(plan.work_units > 0);
+        assert!(plan.converted_bytes > 0);
+        assert!(plan.peak_allocated_bytes >= plan.converted_bytes);
+
+        let bezier = admitted.to_bezier_form().expect("Bezier conversion");
+        for parameter in [Rat::int(0), Rat::new(1, 4), Rat::new(3, 4), Rat::int(1)] {
+            assert_eq!(
+                admitted.eval(parameter).expect("source evaluation"),
+                bezier.eval(parameter).expect("converted evaluation")
+            );
+        }
+        assert_eq!(
+            bezier
+                .admit()
+                .expect("admitted converted curve")
+                .span_boxes()
+                .expect("admitted span boxes")
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn span_box_preflight_prices_scan_work_and_retained_output() {
