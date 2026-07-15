@@ -36,6 +36,8 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   and safe mutation while the view is live is unrepresentable. Owning
   convenience calls remain fallible; basis allocation is fallible and
   triangular degree work shares the defensive legacy ceiling.
+  `AdmittedKnotVector::basis_with_cx` returns transactional `BasisRun` state:
+  complete span/values or cancellation with no partial row.
 - `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation in dimensions 0–3;
   construction rejects non-finite homogeneous products rather than accepting
   finite source values whose multiplication overflowed. f64 derivatives
@@ -184,9 +186,14 @@ limits. Direct `KnotVector` domain/span/basis admission charges live-knot
 validation, worst-case span search, and Cox–de Boor triangular degree work
 before allocating or iterating. Borrowed admitted knot, curve, and surface
 views make repeated source validation unnecessary for basis, evaluation,
-partials, and span boxes. The production `fs-render` ray path preflights sealed
-metadata and cancellation, then binds one admitted surface across domain lookup,
-seed evaluation, and Newton partials.
+partials, and span boxes. The admitted-only `basis_with_cx` path preserves
+constant-time parameter/work-refusal precedence, polls before allocation and
+publication plus every 64 logical span/initialization/triangle/finite-check
+operations, and drops all scratch on `BasisRun::Cancelled`. It deliberately
+does not claim cancellation-bounded owning admission, caller-budget
+consumption, or executor drain/finalize authority. The production `fs-render`
+ray path preflights sealed metadata and cancellation, then binds one admitted
+surface across domain lookup, seed evaluation, and Newton partials.
 Owning trim classification now binds one admitted patch/loop/curve generation
 through exact Bezier conversion, span boxes, and winding. Its checked conversion
 plan charges scan/insertion work and old-plus-new curve storage before the first

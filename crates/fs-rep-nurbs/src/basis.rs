@@ -4,10 +4,17 @@
 
 use crate::NurbsError;
 use crate::rat::Rat;
+use fs_exec::Cx;
 
-/// Defensive ceiling on Cox-de Boor triangular work in the legacy unbudgeted
-/// basis API. Typed caller budgets and cancellation belong to its successor.
+/// Defensive ceiling on Cox-de Boor triangular work in the measured basis
+/// APIs. Typed caller budgets and cancellation-aware owning admission remain
+/// successor work.
 pub const BASIS_MAX_WORK_UNITS: u128 = 16_777_216;
+
+// An admitted basis evaluation polls after at most this many logical span,
+// initialization, triangle, or finite-check operations. The caller still owns
+// request -> drain -> finalize; this primitive only observes the shared gate.
+const BASIS_CANCELLATION_STRIDE: usize = 64;
 
 // Conservative price for finite/order/run/multiplicity/clamping validation of
 // one public knot entry. This intentionally overcounts the simple comparisons:
@@ -119,6 +126,33 @@ pub struct KnotVector<S: Scalar> {
 #[derive(Debug, Clone, Copy)]
 pub struct AdmittedKnotVector<'a, S: Scalar> {
     inner: &'a KnotVector<S>,
+}
+
+/// Transactional terminal state of one cancellation-aware basis evaluation.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BasisRun<S: Scalar> {
+    /// The complete nonzero basis row is safe to publish.
+    Complete {
+        /// Knot span containing the requested parameter.
+        span: usize,
+        /// `degree + 1` nonzero basis values in ascending control index.
+        values: Vec<S>,
+    },
+    /// Cancellation was observed at a bounded poll; no partial row escapes.
+    Cancelled,
+}
+
+fn basis_poll_due(
+    operations_since_poll: &mut usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> bool {
+    *operations_since_poll += 1;
+    if *operations_since_poll < BASIS_CANCELLATION_STRIDE {
+        return false;
+    }
+    *operations_since_poll = 0;
+    should_cancel()
 }
 
 impl<S: Scalar> KnotVector<S> {
@@ -557,13 +591,80 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
         self.basis_after_preflight(t)
     }
 
+    /// Evaluate all nonzero basis values with bounded cancellation polling.
+    ///
+    /// This method is deliberately available only on an admitted immutable
+    /// snapshot: it does not imply that the owning [`KnotVector::admit`]
+    /// structural scan is cancellation-aware. Cancellation is checked after
+    /// cheap request/work admission, at fixed work strides, before each
+    /// allocation, and immediately before publication. [`BasisRun::Cancelled`]
+    /// carries no partial basis row. The caller remains responsible for
+    /// draining and finalizing any surrounding executor scope; `Cx` budgets are
+    /// not consumed by this measured primitive.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for domain, work, allocation, or finite
+    /// arithmetic failures that precede successful publication.
+    pub fn basis_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<BasisRun<S>, NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.basis_operation_work()?,
+            "admitted basis evaluation",
+        )?;
+        self.basis_after_preflight_with_poll(t, || cx.checkpoint().is_err())
+    }
+
     fn basis_after_preflight(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
+        match self.basis_after_preflight_with_poll(t, || false)? {
+            BasisRun::Complete { span, values } => Ok((span, values)),
+            BasisRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling basis evaluation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn basis_after_preflight_with_poll(
+        &self,
+        t: S,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<BasisRun<S>, NurbsError> {
         let inner = self.inner;
         let p = inner.degree;
         let order = p.checked_add(1).ok_or_else(|| NurbsError::Domain {
             what: "basis order overflows usize".to_string(),
         })?;
-        let span = inner.span_after_validation(t)?;
+        let (lo, hi) = inner.validated_domain();
+        if !t.is_finite() || t < lo || t > hi {
+            return Err(NurbsError::Domain {
+                what: format!("parameter {t:?} outside {lo:?}..{hi:?}"),
+            });
+        }
+        if should_cancel() {
+            return Ok(BasisRun::Cancelled);
+        }
+
+        let mut operations_since_poll = 0usize;
+        let n_last = inner.control_count() - 1;
+        let span = if t == hi {
+            // Admission guarantees a non-empty span, so this cannot underflow.
+            let mut span = n_last;
+            while inner.knots[span] == inner.knots[span + 1] {
+                span -= 1;
+                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
+            span
+        } else {
+            let mut span = p;
+            while span < n_last && inner.knots[span + 1] <= t {
+                span += 1;
+                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
+            span
+        };
+
         let mut n = Vec::new();
         let mut left = Vec::new();
         let mut right = Vec::new();
@@ -572,38 +673,93 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
             (&mut left, "left workspace"),
             (&mut right, "right workspace"),
         ] {
+            if should_cancel() {
+                return Ok(BasisRun::Cancelled);
+            }
+            operations_since_poll = 0;
             buffer
                 .try_reserve_exact(order)
                 .map_err(|_| NurbsError::Domain {
                     what: format!("basis {stage} allocation was refused"),
                 })?;
-            buffer.resize(order, S::zero());
+            for _ in 0..order {
+                buffer.push(S::zero());
+                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
+            }
         }
         n[0] = S::one();
         for j in 1..=p {
             left[j] = t - inner.knots[span + 1 - j];
             right[j] = inner.knots[span + j] - t;
+            if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(BasisRun::Cancelled);
+            }
             let mut saved = S::zero();
             for r in 0..j {
                 let denom = right[r + 1] + left[j - r];
                 let temp = n[r] / denom;
                 n[r] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
+                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(BasisRun::Cancelled);
+                }
             }
             n[j] = saved;
         }
-        if n.iter().copied().any(|value| !value.is_finite()) {
-            return Err(NurbsError::Domain {
-                what: format!("basis evaluation at {t:?} left the finite numeric domain"),
-            });
+        for value in &n {
+            if !value.is_finite() {
+                return Err(NurbsError::Domain {
+                    what: format!("basis evaluation at {t:?} left the finite numeric domain"),
+                });
+            }
+            if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(BasisRun::Cancelled);
+            }
         }
-        Ok((span, n))
+        if should_cancel() {
+            return Ok(BasisRun::Cancelled);
+        }
+        Ok(BasisRun::Complete { span, values: n })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::types::Budget;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    fn with_basis_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        if cancelled {
+            gate.request();
+        }
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0xB4515,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+
+    fn cancellation_fixture() -> KnotVector<f64> {
+        let degree = 16;
+        let mut knots = vec![0.0; degree + 1];
+        knots.extend(vec![1.0; degree + 1]);
+        KnotVector::new(knots, degree).expect("cancellation fixture")
+    }
 
     #[test]
     fn construction_admits_work_before_the_first_knot_scan() {
@@ -630,6 +786,89 @@ mod tests {
             matches!(exact_cap, NurbsError::Structure { .. }),
             "an exact-cap request must reach semantic validation"
         );
+    }
+
+    #[test]
+    fn admitted_basis_cancellation_is_transactional_and_preserves_request_precedence() {
+        let knots = cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        with_basis_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .basis_with_cx(0.5, cx)
+                    .expect("valid request reaches cancellation"),
+                BasisRun::Cancelled
+            );
+            assert!(
+                matches!(
+                    admitted.basis_with_cx(f64::NAN, cx),
+                    Err(NurbsError::Domain { .. })
+                ),
+                "constant-time request validation must precede cancellation"
+            );
+        });
+    }
+
+    #[test]
+    fn admitted_basis_cancellation_replays_at_a_fixed_poll_ordinal() {
+        let knots = cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = admitted
+                .basis_after_preflight_with_poll(0.5, || {
+                    polls += 1;
+                    polls == 6
+                })
+                .expect("valid basis arithmetic");
+            (outcome, polls)
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first, (BasisRun::Cancelled, 6));
+    }
+
+    #[test]
+    fn admitted_basis_with_cx_matches_legacy_exactly() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.25, 0.75, 1.0, 1.0, 1.0], 2)
+            .expect("quadratic multispan knots");
+        let admitted = knots.admit().expect("admitted fixture");
+        let legacy = admitted.basis(0.6).expect("legacy basis");
+        with_basis_cx(false, |cx| {
+            let run = admitted.basis_with_cx(0.6, cx).expect("cancellable basis");
+            assert_eq!(
+                run,
+                BasisRun::Complete {
+                    span: legacy.0,
+                    values: legacy.1,
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn admitted_basis_final_checkpoint_gates_publication() {
+        let knots = cancellation_fixture();
+        let admitted = knots.admit().expect("admitted fixture");
+        let mut total_polls = 0usize;
+        let complete = admitted
+            .basis_after_preflight_with_poll(0.5, || {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy basis run");
+        assert!(matches!(complete, BasisRun::Complete { .. }));
+
+        let mut replay_polls = 0usize;
+        let cancelled = admitted
+            .basis_after_preflight_with_poll(0.5, || {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("final-checkpoint cancellation");
+        assert_eq!(cancelled, BasisRun::Cancelled);
+        assert_eq!(replay_polls, total_polls);
     }
 
     #[test]
