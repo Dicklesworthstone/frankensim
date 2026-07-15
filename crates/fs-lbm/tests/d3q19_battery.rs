@@ -9,8 +9,8 @@
 //! `cargo test -p fs-lbm --release --test d3q19_battery -- --ignored`.
 
 use fs_lbm::d3q19::{
-    CollisionError3, CollisionModel3, D3Q19_BIT_SEMANTICS_VERSION, E3, OPP3, Q3, W3, W36,
-    collide_cell3,
+    CollisionError3, CollisionModel3, D3Q19_BIT_SEMANTICS_VERSION,
+    D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, E3, OPP3, Q3, W3, W36, collide_cell3,
 };
 use fs_lbm::{Duct, duct_analytic, equilibrium3};
 
@@ -25,6 +25,7 @@ fn verdict(name: &str, pass: bool, details: &str) {
 #[test]
 fn lattice_invariants_hold_exactly() {
     assert_eq!(D3Q19_BIT_SEMANTICS_VERSION, 1);
+    assert_eq!(D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, 1);
     // The float weights are exactly the ×36 integers.
     for i in 0..Q3 {
         assert_eq!(W3[i].to_bits(), (W36[i] as f64 / 36.0).to_bits());
@@ -351,6 +352,134 @@ fn central_moment_collision_is_conservative_and_explicitly_bounded() {
             [1e-7, 0.0, 0.0],
         ),
         Err(CollisionError3::CentralMomentForceUnsupported { .. })
+    ));
+}
+
+/// lbm3-002d (G0/G3): the reduced D3Q19 cumulant projection preserves
+/// macroscopic invariants and axis permutation covariance, fixes equilibrium,
+/// and remains observably nonlinear relative to equal-rate central moments.
+#[test]
+fn reduced_cumulant_projection_is_conservative_covariant_and_nonlinear() {
+    let rho = 1.01;
+    let velocity = [0.027, -0.019, 0.011];
+    let mut populations = equilibrium3(rho, velocity);
+    for (direction, value) in populations.iter_mut().enumerate() {
+        *value += (direction as f64 - 9.0) * 1e-5;
+    }
+    let tau = 0.81;
+    let second_order_rate = 1.0 / tau;
+    let model = CollisionModel3::ReducedCumulant {
+        second_order_rate,
+        third_order_rate: 1.35,
+        fourth_order_rate: 1.72,
+    };
+    let post = collide_cell3(populations, model, [0.0; 3])
+        .expect("admissible reduced-cumulant projection");
+
+    let conserved = |values: &[f64; Q3]| {
+        let density = values.iter().sum::<f64>();
+        let momentum: [f64; 3] = core::array::from_fn(|axis| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(direction, value)| {
+                    let component = match axis {
+                        0 => E3[direction].0,
+                        1 => E3[direction].1,
+                        _ => E3[direction].2,
+                    };
+                    f64::from(component) * value
+                })
+                .sum::<f64>()
+        });
+        (density, momentum)
+    };
+    let (before_density, before_momentum) = conserved(&populations);
+    let (after_density, after_momentum) = conserved(&post);
+    assert!((after_density - before_density).abs() < 5e-13);
+    for axis in 0..3 {
+        assert!((after_momentum[axis] - before_momentum[axis]).abs() < 5e-13);
+    }
+
+    let equal_cumulant = collide_cell3(
+        populations,
+        CollisionModel3::ReducedCumulant {
+            second_order_rate,
+            third_order_rate: second_order_rate,
+            fourth_order_rate: second_order_rate,
+        },
+        [0.0; 3],
+    )
+    .expect("admissible equal-rate reduced cumulants");
+    let equal_central = collide_cell3(
+        populations,
+        CollisionModel3::CentralMoment {
+            second_order_rate,
+            higher_order_rate: second_order_rate,
+        },
+        [0.0; 3],
+    )
+    .expect("admissible equal-rate central moments");
+    let nonlinear_delta = equal_cumulant
+        .iter()
+        .zip(equal_central)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        nonlinear_delta > 1e-12,
+        "cumulant relaxation must not masquerade as linear central-moment/BGK relaxation"
+    );
+
+    let swap_xy = |values: [f64; Q3]| {
+        core::array::from_fn(|target| {
+            let target_velocity = E3[target];
+            let source_velocity = (target_velocity.1, target_velocity.0, target_velocity.2);
+            let source = E3
+                .iter()
+                .position(|candidate| *candidate == source_velocity)
+                .expect("D3Q19 is closed under x/y permutation");
+            values[source]
+        })
+    };
+    let rotated_input = swap_xy(populations);
+    let rotated_post = collide_cell3(rotated_input, model, [0.0; 3])
+        .expect("axis-permuted reduced-cumulant projection");
+    let expected_rotated_post = swap_xy(post);
+    let covariance_delta = rotated_post
+        .iter()
+        .zip(expected_rotated_post)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        covariance_delta < 5e-13,
+        "x/y permutation covariance drifted by {covariance_delta:.3e}"
+    );
+
+    let equilibrium = equilibrium3(rho, velocity);
+    let equilibrium_post =
+        collide_cell3(equilibrium, model, [0.0; 3]).expect("equilibrium is admissible");
+    let fixed_point_delta = equilibrium
+        .iter()
+        .zip(equilibrium_post)
+        .map(|(before, after)| (before - after).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(fixed_point_delta < 5e-13);
+
+    assert!(matches!(
+        CollisionModel3::ReducedCumulant {
+            second_order_rate,
+            third_order_rate: 1.0,
+            fourth_order_rate: 2.0,
+        }
+        .validate(),
+        Err(CollisionError3::InvalidMomentRelaxationRate {
+            moment_order: 4,
+            ..
+        })
+    ));
+    assert!(matches!(
+        collide_cell3(populations, model, [0.0, 0.0, 1e-7]),
+        Err(CollisionError3::ReducedCumulantForceUnsupported { .. })
     ));
 }
 

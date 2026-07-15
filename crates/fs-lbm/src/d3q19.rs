@@ -35,6 +35,15 @@ pub use boundary::{
 /// change that can move result bits.
 pub const D3Q19_BIT_SEMANTICS_VERSION: u32 = 1;
 
+/// Bit-semantics version for the optional moment-space collision surface.
+///
+/// This is intentionally independent of [`D3Q19_BIT_SEMANTICS_VERSION`]: the
+/// frozen BGK grids keep their established golden, while changes to the
+/// centered basis, relaxation grouping, cumulant projection, `mul_add` chains,
+/// or deterministic solve order bump this version and require their own
+/// golden evidence.
+pub const D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION: u32 = 1;
+
 /// The D3Q19 population count.
 pub const Q3: usize = 19;
 
@@ -156,10 +165,9 @@ const CENTRAL_MOMENT_EXPONENTS3: [[u8; 3]; Q3] = [
 
 /// Selectable D3Q19 collision law for the shared per-cell kernel.
 ///
-/// The frozen BGK law remains the grid default. The central-moment rung is an
-/// unforced, correctness-first reference operator; it exposes independent
-/// second- and higher-order relaxation without claiming a production
-/// high-Reynolds-number model.
+/// The frozen BGK law remains the grid default. The central-moment and reduced
+/// cumulant rungs are unforced, correctness-first reference operators; neither
+/// claims a production high-Reynolds-number model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CollisionModel3 {
     /// Single-relaxation-time BGK collision.
@@ -179,6 +187,21 @@ pub enum CollisionModel3 {
         second_order_rate: f64,
         /// Relaxation rate for the nine degree-three/four moments.
         higher_order_rate: f64,
+    },
+    /// Reduced cumulant projection onto the 19 independent D3Q19 moments.
+    ///
+    /// Second- and third-order cumulants equal their central moments. The
+    /// three represented fourth-order cumulants (`C220`, `C202`, and `C022`)
+    /// use the nonlinear product corrections from Geier et al. This is not the
+    /// paper's D3Q27 operator: D3Q19 omits eight velocities and the associated
+    /// independent moments, corrections, and isotropy.
+    ReducedCumulant {
+        /// Relaxation rate for the six degree-two cumulants.
+        second_order_rate: f64,
+        /// Relaxation rate for the six represented degree-three cumulants.
+        third_order_rate: f64,
+        /// Relaxation rate for the three represented degree-four cumulants.
+        fourth_order_rate: f64,
     },
 }
 
@@ -200,6 +223,15 @@ impl CollisionModel3 {
                 validate_moment_rate(2, second_order_rate)?;
                 validate_moment_rate(3, higher_order_rate)
             }
+            Self::ReducedCumulant {
+                second_order_rate,
+                third_order_rate,
+                fourth_order_rate,
+            } => {
+                validate_moment_rate(2, second_order_rate)?;
+                validate_moment_rate(3, third_order_rate)?;
+                validate_moment_rate(4, fourth_order_rate)
+            }
         }
     }
 }
@@ -220,9 +252,9 @@ pub enum CollisionError3 {
         /// Rejected relaxation time.
         tau: f64,
     },
-    /// A central-moment relaxation rate is outside `(0, 2)`.
+    /// A moment-space relaxation rate is outside `(0, 2)`.
     InvalidMomentRelaxationRate {
-        /// Lowest total moment order governed by this rate (`2` or `3`).
+        /// Lowest total moment order governed by this rate (`2`, `3`, or `4`).
         moment_order: u8,
         /// Rejected relaxation rate.
         rate: f64,
@@ -258,6 +290,11 @@ pub enum CollisionError3 {
         /// Rejected body-force vector.
         force: [f64; 3],
     },
+    /// Reduced-cumulant forcing is not yet admitted by its contract.
+    ReducedCumulantForceUnsupported {
+        /// Rejected body-force vector.
+        force: [f64; 3],
+    },
     /// The centered monomial transform could not be solved reliably.
     SingularCentralMomentTransform {
         /// Pivot column that lost rank.
@@ -282,7 +319,7 @@ impl core::fmt::Display for CollisionError3 {
             }
             Self::InvalidMomentRelaxationRate { moment_order, rate } => write!(
                 f,
-                "D3Q19 order-{moment_order}+ relaxation rate {rate} must be finite and in (0, 2)"
+                "D3Q19 moment-order family {moment_order} relaxation rate {rate} must be finite and in (0, 2)"
             ),
             Self::NonFiniteForce { axis, value } => {
                 write!(f, "D3Q19 force axis {axis} is non-finite ({value})")
@@ -300,6 +337,10 @@ impl core::fmt::Display for CollisionError3 {
             Self::CentralMomentForceUnsupported { force } => write!(
                 f,
                 "D3Q19 central-moment collision does not yet admit body force {force:?}"
+            ),
+            Self::ReducedCumulantForceUnsupported { force } => write!(
+                f,
+                "D3Q19 reduced-cumulant collision does not yet admit body force {force:?}"
             ),
             Self::SingularCentralMomentTransform { column, pivot_abs } => write!(
                 f,
@@ -426,7 +467,7 @@ fn collide_cell3_with_projection(
             second_order_rate,
             higher_order_rate,
         } => {
-            if force.iter().any(|component| component.abs() > 0.0) {
+            if has_nonzero_force3(force) {
                 return Err(CollisionError3::CentralMomentForceUnsupported { force });
             }
             collide_central_moments3(
@@ -437,7 +478,28 @@ fn collide_cell3_with_projection(
                 higher_order_rate,
             )
         }
+        CollisionModel3::ReducedCumulant {
+            second_order_rate,
+            third_order_rate,
+            fourth_order_rate,
+        } => {
+            if has_nonzero_force3(force) {
+                return Err(CollisionError3::ReducedCumulantForceUnsupported { force });
+            }
+            collide_reduced_cumulants3(
+                populations,
+                equilibrium,
+                velocity,
+                second_order_rate,
+                third_order_rate,
+                fourth_order_rate,
+            )
+        }
     }
+}
+
+fn has_nonzero_force3(force: [f64; 3]) -> bool {
+    force.iter().any(|component| component.abs() > 0.0)
 }
 
 fn centered_power3(value: f64, exponent: u8) -> f64 {
@@ -469,7 +531,7 @@ fn apply_moment_matrix3(matrix: &[[f64; Q3]; Q3], populations: [f64; Q3]) -> [f6
     core::array::from_fn(|moment| {
         let mut value = 0.0;
         for (direction, population) in populations.into_iter().enumerate() {
-            value += matrix[moment][direction] * population;
+            value = matrix[moment][direction].mul_add(population, value);
         }
         value
     })
@@ -492,9 +554,81 @@ fn collide_central_moments3(
         } else {
             higher_order_rate
         };
-        relaxed[moment] = moments[moment] + rate * (equilibrium_moments[moment] - moments[moment]);
+        relaxed[moment] = rate.mul_add(
+            equilibrium_moments[moment] - moments[moment],
+            moments[moment],
+        );
     }
     let post = solve_moment_system3(matrix, relaxed)?;
+    for (direction, value) in post.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CollisionError3::NonFiniteOutput { direction, value });
+        }
+    }
+    Ok(post)
+}
+
+fn fourth_order_pair_product3(first: f64, second: f64, cross: f64) -> f64 {
+    first.mul_add(second, 2.0 * cross * cross)
+}
+
+// Geier et al. (2015), Eqs. 46-52, use unnormalized cumulants C = rho*c.
+// On this reduced D3Q19 basis the only independent order-four instances are
+// C220, C202, and C022; each subtracts its paired normal stresses and twice
+// the squared cross stress divided by density.
+fn reduced_cumulants_from_moments3(moments: [f64; Q3]) -> [f64; Q3] {
+    let inverse_density = 1.0 / moments[0];
+    let mut cumulants = moments;
+    let xy = fourth_order_pair_product3(moments[4], moments[5], moments[7]);
+    let xz = fourth_order_pair_product3(moments[4], moments[6], moments[8]);
+    let yz = fourth_order_pair_product3(moments[5], moments[6], moments[9]);
+    cumulants[16] = (-xy).mul_add(inverse_density, moments[16]);
+    cumulants[17] = (-xz).mul_add(inverse_density, moments[17]);
+    cumulants[18] = (-yz).mul_add(inverse_density, moments[18]);
+    cumulants
+}
+
+fn reduced_moments_from_cumulants3(cumulants: [f64; Q3]) -> [f64; Q3] {
+    let inverse_density = 1.0 / cumulants[0];
+    let mut moments = cumulants;
+    let xy = fourth_order_pair_product3(cumulants[4], cumulants[5], cumulants[7]);
+    let xz = fourth_order_pair_product3(cumulants[4], cumulants[6], cumulants[8]);
+    let yz = fourth_order_pair_product3(cumulants[5], cumulants[6], cumulants[9]);
+    moments[16] = xy.mul_add(inverse_density, cumulants[16]);
+    moments[17] = xz.mul_add(inverse_density, cumulants[17]);
+    moments[18] = yz.mul_add(inverse_density, cumulants[18]);
+    moments
+}
+
+fn collide_reduced_cumulants3(
+    populations: [f64; Q3],
+    equilibrium: [f64; Q3],
+    velocity: [f64; 3],
+    second_order_rate: f64,
+    third_order_rate: f64,
+    fourth_order_rate: f64,
+) -> Result<[f64; Q3], CollisionError3> {
+    let matrix = central_moment_matrix3(velocity);
+    let moments = apply_moment_matrix3(&matrix, populations);
+    let equilibrium_moments = apply_moment_matrix3(&matrix, equilibrium);
+    let cumulants = reduced_cumulants_from_moments3(moments);
+    let equilibrium_cumulants = reduced_cumulants_from_moments3(equilibrium_moments);
+    let mut relaxed = cumulants;
+    for moment in 4..Q3 {
+        let rate = if moment < 10 {
+            second_order_rate
+        } else if moment < 16 {
+            third_order_rate
+        } else {
+            fourth_order_rate
+        };
+        relaxed[moment] = rate.mul_add(
+            equilibrium_cumulants[moment] - cumulants[moment],
+            cumulants[moment],
+        );
+    }
+    let relaxed_moments = reduced_moments_from_cumulants3(relaxed);
+    let post = solve_moment_system3(matrix, relaxed_moments)?;
     for (direction, value) in post.into_iter().enumerate() {
         if !value.is_finite() {
             return Err(CollisionError3::NonFiniteOutput { direction, value });
@@ -532,9 +666,9 @@ fn solve_moment_system3(
             let factor = coefficients[column] / pivot;
             coefficients[column] = 0.0;
             for (coefficient, value) in coefficients.iter_mut().enumerate().skip(column + 1) {
-                *value -= factor * pivot_coefficients[coefficient];
+                *value = (-factor).mul_add(pivot_coefficients[coefficient], *value);
             }
-            rhs[row] -= factor * pivot_rhs;
+            rhs[row] = (-factor).mul_add(pivot_rhs, rhs[row]);
         }
     }
 
@@ -542,7 +676,7 @@ fn solve_moment_system3(
     for row in (0..Q3).rev() {
         let mut value = rhs[row];
         for (column, solved) in solution.iter().enumerate().skip(row + 1) {
-            value -= matrix[row][column] * solved;
+            value = (-matrix[row][column]).mul_add(*solved, value);
         }
         solution[row] = value / matrix[row][row];
     }

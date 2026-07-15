@@ -42,8 +42,14 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   checked per-cell collision authority used by both D3Q19 grids. `Bgk { tau }`
   retains each frozen force-projection arithmetic path. The unforced
   `CentralMoment` reference rung relaxes a full-rank centered D3Q19 monomial
-  basis with independent second/higher-order rates. Both paths reject invalid
+  basis with independent second/higher-order rates. `ReducedCumulant` applies
+  the nonlinear `C220`/`C202`/`C022` corrections to the three independent
+  fourth-order rows represented by that basis. All paths reject invalid
   parameters or state before publication.
+- `D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION` — independent version for the
+  optional moment-space basis, rate grouping, `mul_add` chains, cumulant
+  projection, and deterministic back-transform. It does not refreeze the
+  established BGK grid golden.
 - `Face3`, `FaceBoundary3`, and `BoundarySpec3` — six-face axis-aligned
   boundary declarations: paired periodic faces, tangential moving/stationary
   halfway walls, regularized velocity faces, and isothermal pressure/density
@@ -73,6 +79,10 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
 - Equal-rate central-moment collision reduces to BGK within deterministic
   transform/solve roundoff. Split higher-order relaxation changes
   nonequilibrium modes without relaxing degree-zero/one invariants.
+- Reduced-cumulant collision preserves degree-zero/one invariants, fixes the
+  discrete equilibrium to solve roundoff, and is covariant under Cartesian
+  axis permutation when rates are equal within each represented order. Its
+  nonlinear fourth-order relaxation does not reduce to BGK at equal rates.
 - MASS is conserved by a closed-domain step (collision, forcing, streaming,
   and bounce-back all conserve mass). Prescribed velocity/pressure faces are
   open-system flux boundaries and do not claim global mass conservation.
@@ -126,7 +136,7 @@ first-interior open-face layer, and topology mutation after initialization.
 Boundary-grid perturbation rejects non-finite amplitudes or magnitudes at least
 one before changing populations or locking topology.
 `collide_cell3` returns typed errors rather than publishing non-finite or
-non-positive cell states. The central-moment rung additionally refuses rates
+non-positive cell states. Both moment-space rungs additionally refuse rates
 outside `(0, 2)`, nonzero body forcing, or a numerically rank-deficient moment
 transform.
 
@@ -176,7 +186,8 @@ shear-wave decay-rate transmission, first-order labels).
 moments/opposites, equilibrium moments, mass conservation, analytic
 rectangular-duct flow, replay determinism, the registered core golden, shared
 kernel bit-equivalence, BGK/central-moment equal-rate equivalence, split-rate
-conservation, and fail-closed inputs.
+conservation, reduced-cumulant equilibrium/nonlinearity/axis-covariance laws,
+and fail-closed inputs.
 
 `tests/d3q19_boundaries.rs` (bead 40p2) covers all six hand-enumerated planar
 link masks, aligned deterministic mask ordering, the exact 18 links around one
@@ -191,15 +202,16 @@ a boundary replay-hash candidate. Ignored release fixtures carry the full
 ## No-claim boundaries
 
 - D3Q19 grids remain BGK + Guo on a dense set of aligned SoA tiles. The
-  selectable central-moment cell operator is a deterministic `O(Q^3)`
-  correctness reference: it is unforced and has no performance or high-Re
-  stability claim. D3Q27, sparse active-tile storage/sweeps, a production
-  cumulant collision, momentum-exchange drag/lift, and bandwidth roofline /
-  fs-tilelang kernels remain staged. Geier et al.'s primary cumulant derivation
-  (doi:10.1016/j.camwa.2015.05.001) explicitly restricts itself to D3Q27 after
-  identifying non-refining D3Q19 anisotropy; therefore this crate makes no
-  "Geier D3Q19" or high-Re cumulant claim. Any reduced D3Q19 experiment must be
-  separately named, gated, and tested without borrowing the D3Q27 evidence.
+  selectable central-moment and `ReducedCumulant` cell operators are
+  deterministic `O(Q^3)` correctness references: they are unforced and have no
+  performance or high-Re stability claim. D3Q27, sparse active-tile
+  storage/sweeps, a production cumulant collision, momentum-exchange
+  drag/lift, and bandwidth roofline / fs-tilelang kernels remain staged. Geier
+  et al.'s primary derivation (doi:10.1016/j.camwa.2015.05.001) explicitly
+  restricts itself to D3Q27 after identifying non-refining D3Q19 anisotropy.
+  `ReducedCumulant` therefore implements only the general cumulant definitions
+  for the independent D3Q19 `C220`/`C202`/`C022` projection; it is not a
+  "Geier D3Q19" operator and cannot borrow the paper's high-Re evidence.
 - SDF voxelization is midpoint classification followed by stair-step halfway
   bounce-back. It is second-order for the represented flat, lattice-aligned
   halfway wall, not a second-order certificate against the original continuous
