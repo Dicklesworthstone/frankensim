@@ -104,6 +104,8 @@ differentiable lift). Pure Rust throughout.
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy
   conservation; cosine importance sampling gives zero variance).
+- G3 RADIANCE RESCALING: coherently rescaling incident radiance rescales the
+  furnace result by the same factor under an explicit numeric tolerance.
 - MIS WEIGHT-SUM: the two balance weights at a sample sum to `1` (no energy lost
   or gained at strategy boundaries).
 - MIS integration is unbiased (converges to `∫f`).
@@ -212,6 +214,11 @@ unit vectors with the right pdf; the furnace test conserves energy exactly; MIS
 weights sum to one (+ heuristic ordering); MIS integration is unbiased;
 hero-wavelength integration exact on a constant / accurate on a ramp;
 determinism.
+
+`tests/metamorphic.rs`: the shared shrinkable G3 relation harness applies a
+declared radiance-unit rescaling to the production Lambertian furnace kernel.
+The existing translated-scene frame-invariance pin in `tests/charts.rs` remains
+independent.
 
 `tests/diff_battery.rs` (bead qfx.5, feature `differentiable`): edge-aware
 gradient vs central FD, the frozen-crossing negative control, shrinking

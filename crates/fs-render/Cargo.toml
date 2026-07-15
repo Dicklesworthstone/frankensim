@@ -24,6 +24,7 @@ fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-lbm = { path = "../fs-lbm" }
+fs-propcheck = { path = "../fs-propcheck" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 
 [features]
