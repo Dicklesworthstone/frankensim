@@ -9,7 +9,10 @@ claims via envelope containment.
 Layer L3. Depends on `fs-iface` (L3, `SpaceType` for typed interface
 quantities) and `fs-evidence` (UTIL, the `Color` lattice). Pure, deterministic
 composition logic — it does not run solves or produce certificates, it
-composes existing ones.
+composes existing ones. The `deployment` module also owns the typed contract
+between a floating design twin and one exact deployed target; it freezes proof
+assumptions and adjudicates proof evidence but does not implement a controller,
+plant solver, compiler, or theorem prover.
 
 ## Public types and semantics
 
@@ -29,6 +32,29 @@ composes existing ones.
   `SystemClaim` whose certificate is the WEAKEST member's color.
 - `ContractError` — `BadInterval` / `UnknownContract` / `MissingCondition` /
   `OutsideEnvelope` / `ColorDiscipline` / `CircularDependency`.
+- `deployment::DeploymentRefinementSpec` names both transition systems, the
+  exact device and toolchain, state/observation maps, units/frames, clocks,
+  quantization/saturation, plant, environment/disturbances, fault and safe
+  state, horizon/invariant/objective, permitted error, relation strength,
+  assumptions, capabilities, and bounded offline proof resources.
+- `DeploymentRefinementProblem::admit` validates that complete seam and seals
+  it. v1 refuses missing maps, schema drift, implicit unit/frame conversion,
+  non-commensurate clocks, contradictory numeric/timing envelopes, omitted
+  faults, different safe states, unavailable capabilities, unbounded proof
+  resources, and malformed identities or bounded sets.
+- `RefinementRelation` keeps trace inclusion, approximate simulation,
+  approximate bisimulation, robust invariant, and performance bound distinct.
+  `ProofAxis` independently names numeric, temporal, functional, and safety
+  obligations; evidence on one axis cannot discharge another.
+- `DeploymentRefinementManifest` retains schema-v1 canonical bytes and their
+  FNV-1a replay root. A live target retains exact identities, maps,
+  numeric/timing/fault/safe-state semantics, relation, budgets, and assumptions;
+  environment and disturbance sets may narrow but never enlarge.
+- `discharge_universal_claim` is the only constructor for a
+  `DeploymentRefinementReceipt`. It requires exactly one established static or
+  exhaustive proof for every axis against the frozen root. Measurement,
+  Unknown, Refuted, missing/duplicate axes, zero hashes, and stale roots are
+  typed refusals.
 
 ## Invariants
 
@@ -41,19 +67,34 @@ composes existing ones.
 - A nonlinear contract cannot be verified-color.
 - The requires-graph is acyclic; a shared sub-contract (diamond) is resolved
   once, not flagged as a cycle.
+- Deployment evidence is target- and assumption-specific. Changing a target or
+  toolchain version, saturation, relation strength, environment domain, fault
+  model, or safe state invalidates reuse. Measured traces cannot manufacture a
+  universal-refinement receipt.
+- Numeric, temporal, functional, and safety proof axes remain distinct. A
+  receipt carries all four records in stable order and the exact relation it
+  established.
 
 ## Error model
 
-Structured `ContractError` values (refusals that teach), never panics.
+Structured `ContractError` and `DeploymentRefinementError` values (refusals
+that teach), never panics for admitted input.
 
 ## Determinism class
 
-Fully deterministic: composition is a pure function of `(library, root, ops)`;
-members are returned sorted; replay reproduces the claim.
+Fully deterministic on one toolchain/ISA: composition is a pure function of
+`(library, root, ops)`; members are returned sorted. Deployment manifests use
+ordered maps/sets and exact IEEE-754 bits, so identical admitted inputs produce
+identical canonical bytes and roots. Cross-toolchain proof equivalence is not
+claimed; the toolchain is a semantic identity field.
 
 ## Cancellation behavior
 
-None (synchronous pure functions).
+Composition is synchronous pure work. Deployment admission/identity work is
+bounded to 64 entries per collection and 65,536 aggregate UTF-8 bytes. The
+offline proof budget carries nonzero work, memory, wall-time, and cancellation
+poll-stride limits; external proof engines must honor them. This crate does not
+run those engines or poll cancellation itself.
 
 ## Unsafe boundary
 
@@ -72,6 +113,13 @@ outside-envelope and missing-condition rejection; nonlinear-cannot-be-verified
 color discipline; circular-dependency rejection; the diamond shared
 sub-contract; unknown-contract rejection; determinism.
 
+`tests/deployment.rs` (I05.6a; G0/G3): four-axis obligation separation;
+missing maps; observation-schema, clock, unit, and frame mismatch; fault
+omission; safe-state and capability refusal; saturation, target-version,
+environment, fault, and safe-state drift; sound environment narrowing;
+schema/root/byte replay; stable serialization; missing/duplicate proof axes;
+measured/Unknown/Refuted refusal; and non-replay across relation strengths.
+
 ## No-claim boundaries
 
 - Composition rule v1 is deliberately primitive ENVELOPE CONTAINMENT over
@@ -85,3 +133,14 @@ sub-contract; unknown-contract rejection; determinism.
 - The `SpaceType` interface tag is carried on quantities; cross-contract
   coupling-type compatibility checking (via fs-iface's checker) is a later
   integration.
+- Deployment v1 supports identity-preserving units and frames only. An explicit
+  certified conversion/transform contract is future work; names that merely
+  look convertible are refused.
+- Integer-commensurate clocks are an admission prerequisite, not proof of WCET,
+  schedulability, latency, or closed-loop timing. Those remain temporal-axis
+  obligations for an independent checker.
+- A `DeploymentRefinementReceipt` says only that supplied evidence discharged
+  the frozen obligations. It does not validate the physical plant abstraction,
+  certify hardware, qualify a compiler, prove regulatory compliance, or extend
+  beyond the exact target, environment, fault set, horizon, objective, and
+  relation in its manifest.

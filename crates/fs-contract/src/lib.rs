@@ -20,6 +20,9 @@
 //! Envelope quantities are typed by their interface function-space role
 //! ([`fs_iface::SpaceType`]). Everything here is pure and deterministic.
 
+/// Typed floating-design to deployed-target refinement contracts.
+pub mod deployment;
+
 use fs_evidence::{Color, ColorRank};
 use fs_iface::SpaceType;
 use std::collections::BTreeMap;
