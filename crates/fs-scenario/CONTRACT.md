@@ -211,8 +211,9 @@ per-combination term entries and every net-flux checkpoint set. The explicit
 before preflight, at every top-level and nested record visited while constructing
 the semantic plan, after planning, after fixed phases, at every frame-index row,
 frame-cycle traversal/finalization step, and frame validation row, at
-BC/case/combination term/ensemble/contact boundaries, before and after each
-net-flux provider evaluation, at every tabulated signal scalar and Chebyshev
+BC/case/combination term/ensemble/contact boundaries, at every unordered
+contact-pair classification group (including all-unique inputs), before and
+after each net-flux provider evaluation, at every tabulated signal scalar and Chebyshev
 coefficient, throughout index population/sort steps, and after private
 validation before publication. Net-flux checkpoint sorting polls throughout
 the in-place heap sort rather than only after an opaque library sort; set

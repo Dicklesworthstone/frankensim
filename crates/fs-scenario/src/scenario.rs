@@ -1402,6 +1402,9 @@ impl Scenario {
 
         let mut start = 0usize;
         while start < index.entries.len() {
+            // A collection of all-unique pairs skips every duplicate-only
+            // loop below, so the outer group boundary must poll on its own.
+            checkpoint("contact conflict groups")?;
             let key = &index.entries[start].0;
             let mut end = start + 1;
             while end < index.entries.len() && &index.entries[end].0 == key {
@@ -1605,7 +1608,8 @@ mod validation_internal_tests {
     use super::{
         Combination, ContactLaw, ContactModel, DIAGNOSTIC_IDENTITY_PREVIEW_BYTES,
         DiagnosticIdentity, Environment, LoadCase, Scenario, ValidationBudget, ValidationError,
-        dedup_validation_times, reserve_validation_times, sort_validation_index,
+        ValidationIndex, contact_pair, dedup_validation_times, reserve_validation_times,
+        sort_validation_index,
     };
     use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
     use crate::ensemble::{SpectrumModel, StochasticEnsemble};
@@ -1810,6 +1814,62 @@ mod validation_internal_tests {
         assert_ne!(factor_findings[0], factor_findings[1]);
     }
 
+    #[test]
+    fn unique_contact_groups_poll_cancellation_at_each_group() {
+        let mut scenario = Scenario::new("unique-contacts", 3, Environment::earth_lab());
+        scenario.contacts.extend([
+            ContactLaw {
+                region_a: "a".to_string(),
+                region_b: "b".to_string(),
+                model: ContactModel::Frictionless,
+            },
+            ContactLaw {
+                region_a: "c".to_string(),
+                region_b: "d".to_string(),
+                model: ContactModel::Frictionless,
+            },
+            ContactLaw {
+                region_a: "e".to_string(),
+                region_b: "f".to_string(),
+                model: ContactModel::Frictionless,
+            },
+        ]);
+        let index = ValidationIndex::build(
+            scenario
+                .contacts
+                .iter()
+                .enumerate()
+                .map(|(row, contact)| (contact_pair(contact), row)),
+            "unique contact test index",
+            &mut |_| Ok(()),
+        )
+        .expect("fallible contact index allocation");
+
+        let mut groups = 0usize;
+        let result = scenario.contact_pair_conflicts(&index, &mut |phase| {
+            assert_eq!(phase, "contact conflict groups");
+            groups += 1;
+            if groups == 2 {
+                Err(ValidationError::Cancelled {
+                    phase,
+                    completed: 0,
+                    planned: 0,
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(groups, 2);
+        assert!(matches!(
+            result,
+            Err(ValidationError::Cancelled {
+                phase: "contact conflict groups",
+                completed: 0,
+                planned: 0,
+            })
+        ));
+    }
+
     fn phase_matrix_flow(region: &str, value: f64) -> BoundaryCondition {
         BoundaryCondition {
             region: region.to_string(),
@@ -1896,6 +1956,7 @@ mod validation_internal_tests {
             "case boundary conditions",
             "combination terms",
             "ensembles",
+            "contact conflict groups",
             "contact conflict models",
             "contacts",
             "net-flux set classification",
