@@ -10,7 +10,6 @@ use crate::ensemble::StochasticEnsemble;
 use crate::frame::{FrameMotion, FrameTree};
 use fs_exec::Cx;
 use fs_qty::{Dims, QtyAny};
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 const ACCEL_DIMS: Dims = Dims([1, 0, -2, 0, 0, 0]);
@@ -342,6 +341,95 @@ pub enum ContactModel {
     Tied,
 }
 
+struct ValidationIndex<K> {
+    entries: Vec<(K, usize)>,
+}
+
+fn sift_validation_heap<T: Ord, E>(
+    values: &mut [T],
+    mut root: usize,
+    end: usize,
+    phase: &'static str,
+    checkpoint: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> Result<(), E> {
+    loop {
+        checkpoint(phase)?;
+        let Some(left) = root.checked_mul(2).and_then(|value| value.checked_add(1)) else {
+            return Ok(());
+        };
+        if left >= end {
+            return Ok(());
+        }
+        let right = left + 1;
+        let child = if right < end && values[left] < values[right] {
+            right
+        } else {
+            left
+        };
+        if values[root] >= values[child] {
+            return Ok(());
+        }
+        values.swap(root, child);
+        root = child;
+    }
+}
+
+pub(crate) fn sort_validation_index<T: Ord, E>(
+    values: &mut [T],
+    phase: &'static str,
+    checkpoint: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> Result<(), E> {
+    let len = values.len();
+    for root in (0..len / 2).rev() {
+        sift_validation_heap(values, root, len, phase, checkpoint)?;
+    }
+    for end in (1..len).rev() {
+        checkpoint(phase)?;
+        values.swap(0, end);
+        sift_validation_heap(values, 0, end, phase, checkpoint)?;
+    }
+    Ok(())
+}
+
+impl<K: Ord> ValidationIndex<K> {
+    fn build(
+        entries: impl ExactSizeIterator<Item = (K, usize)>,
+        resource: &'static str,
+        checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
+    ) -> Result<Self, ValidationError> {
+        let requested = entries.len();
+        let mut sorted = Vec::new();
+        reserve_validation(&mut sorted, requested, resource)?;
+        for entry in entries {
+            checkpoint(resource)?;
+            sorted.push(entry);
+        }
+        sort_validation_index(&mut sorted, resource, checkpoint)?;
+        Ok(Self { entries: sorted })
+    }
+
+    fn first_row(&self, key: &K) -> Option<usize> {
+        let position = self
+            .entries
+            .partition_point(|(candidate, _)| candidate < key);
+        self.entries
+            .get(position)
+            .and_then(|(candidate, row)| (candidate == key).then_some(*row))
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        self.first_row(key).is_some()
+    }
+}
+
+fn contact_pair(contact: &ContactLaw) -> (&str, &str) {
+    if contact.region_a <= contact.region_b {
+        (contact.region_a.as_str(), contact.region_b.as_str())
+    } else {
+        (contact.region_b.as_str(), contact.region_a.as_str())
+    }
+}
+
 fn enforce_limit(
     resource: &'static str,
     requested: usize,
@@ -426,13 +514,21 @@ fn bc_flux_checkpoints(bc: &BoundaryCondition) -> usize {
     }
 }
 
-fn reserve_validation_times(times: &mut Vec<f64>, requested: usize) -> Result<(), ValidationError> {
-    times
+fn reserve_validation<T>(
+    values: &mut Vec<T>,
+    requested: usize,
+    resource: &'static str,
+) -> Result<(), ValidationError> {
+    values
         .try_reserve_exact(requested)
         .map_err(|_| ValidationError::AllocationRefused {
-            resource: "net-flux checkpoints",
+            resource,
             requested,
         })
+}
+
+fn reserve_validation_times(times: &mut Vec<f64>, requested: usize) -> Result<(), ValidationError> {
+    reserve_validation(times, requested, "net-flux checkpoints")
 }
 
 /// The scenario root value.
@@ -705,24 +801,37 @@ impl Scenario {
             checked_count_add(&mut record_visits, count, "validation record visits")?;
         }
         let mut index_items = frames
-            .checked_mul(2)
+            .checked_mul(3)
             .ok_or(ValidationError::WorkPlanOverflow {
                 phase: "frame index item count",
             })?;
-        for count in [cases, combinations, ensembles, contacts] {
+        for count in [cases, combinations, combination_terms, ensembles, contacts] {
             checked_count_add(&mut index_items, count, "validation index item count")?;
         }
-        let largest_index = [frames, cases, combinations, ensembles, contacts]
-            .into_iter()
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(ValidationError::WorkPlanOverflow {
-                phase: "validation index height",
-            })?;
+        let largest_index = [
+            frames,
+            cases,
+            combinations,
+            combination_terms,
+            ensembles,
+            contacts,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(ValidationError::WorkPlanOverflow {
+            phase: "validation index height",
+        })?;
         let index_height = ceil_log2(largest_index);
+        let index_work_per_item = index_height
+            .checked_mul(2)
+            .and_then(|work| work.checked_add(2))
+            .ok_or(ValidationError::WorkPlanOverflow {
+                phase: "validation index work multiplier",
+            })?;
         let index_work = work_units(index_items, "validation index work")?
-            .checked_mul(index_height)
+            .checked_mul(index_work_per_item)
             .ok_or(ValidationError::WorkPlanOverflow {
                 phase: "validation index work",
             })?;
@@ -845,14 +954,29 @@ impl Scenario {
         checkpoint("environment")?;
         self.frames.check_with_checkpoint(&mut out, checkpoint)?;
         checkpoint("frames")?;
-        let frame_ids: BTreeSet<u32> = self.frames.frames.iter().map(|frame| frame.id.0).collect();
+        let frame_ids = ValidationIndex::build(
+            self.frames
+                .frames
+                .iter()
+                .enumerate()
+                .map(|(row, frame)| (frame.id.0, row)),
+            "scenario frame id index",
+            checkpoint,
+        )?;
+        let first_case_by_name = ValidationIndex::build(
+            self.cases
+                .iter()
+                .enumerate()
+                .map(|(row, case)| (case.name.as_str(), row)),
+            "case name index",
+            checkpoint,
+        )?;
         for bc in &self.base_bcs {
             bc.check_with_checkpoint(&mut out, checkpoint)?;
             Self::check_bc_frame(bc, &frame_ids, &mut out);
             checkpoint("base boundary conditions")?;
         }
 
-        let mut first_case_by_name = BTreeMap::new();
         for (i, case) in self.cases.iter().enumerate() {
             if case.name.is_empty() {
                 out.push(Violation {
@@ -861,7 +985,10 @@ impl Scenario {
                     fix: "give every load case a nonempty exact UTF-8 name".to_string(),
                 });
             }
-            if let Some(&first) = first_case_by_name.get(case.name.as_str()) {
+            let first = first_case_by_name
+                .first_row(&case.name.as_str())
+                .unwrap_or(i);
+            if first != i {
                 out.push(Violation {
                     code: "case-name-duplicate",
                     what: format!(
@@ -870,8 +997,6 @@ impl Scenario {
                     ),
                     fix: "give every load case a unique name".to_string(),
                 });
-            } else {
-                first_case_by_name.insert(case.name.as_str(), i);
             }
             for bc in &case.bcs {
                 bc.check_with_checkpoint(&mut out, checkpoint)?;
@@ -881,7 +1006,14 @@ impl Scenario {
             checkpoint("load cases")?;
         }
 
-        let mut first_combo_by_name = BTreeMap::new();
+        let first_combo_by_name = ValidationIndex::build(
+            self.combinations
+                .iter()
+                .enumerate()
+                .map(|(row, combo)| (combo.name.as_str(), row)),
+            "combination name index",
+            checkpoint,
+        )?;
         for (combo_index, combo) in self.combinations.iter().enumerate() {
             if combo.name.is_empty() {
                 out.push(Violation {
@@ -890,7 +1022,10 @@ impl Scenario {
                     fix: "give every combination a nonempty exact UTF-8 name".to_string(),
                 });
             }
-            if let Some(&first) = first_combo_by_name.get(combo.name.as_str()) {
+            let first = first_combo_by_name
+                .first_row(&combo.name.as_str())
+                .unwrap_or(combo_index);
+            if first != combo_index {
                 out.push(Violation {
                     code: "combo-name-duplicate",
                     what: format!(
@@ -899,11 +1034,17 @@ impl Scenario {
                     ),
                     fix: "give every combination a unique name".to_string(),
                 });
-            } else {
-                first_combo_by_name.insert(combo.name.as_str(), combo_index);
             }
 
-            let mut first_term_by_case = BTreeMap::new();
+            let first_term_by_case = ValidationIndex::build(
+                combo
+                    .terms
+                    .iter()
+                    .enumerate()
+                    .map(|(row, (case, _))| (case.as_str(), row)),
+                "combination term index",
+                checkpoint,
+            )?;
             for (term_index, (case, factor)) in combo.terms.iter().enumerate() {
                 if case.is_empty() {
                     out.push(Violation {
@@ -915,7 +1056,10 @@ impl Scenario {
                         fix: "reference a nonempty defined load-case name".to_string(),
                     });
                 }
-                if let Some(&first) = first_term_by_case.get(case.as_str()) {
+                let first = first_term_by_case
+                    .first_row(&case.as_str())
+                    .unwrap_or(term_index);
+                if first != term_index {
                     out.push(Violation {
                         code: "combo-term-duplicate",
                         what: format!(
@@ -924,10 +1068,8 @@ impl Scenario {
                         ),
                         fix: "combine repeated case factors into one term".to_string(),
                     });
-                } else {
-                    first_term_by_case.insert(case.as_str(), term_index);
                 }
-                if !first_case_by_name.contains_key(case.as_str()) {
+                if !first_case_by_name.contains(&case.as_str()) {
                     out.push(Violation {
                         code: "combo-case-missing",
                         what: format!(
@@ -949,10 +1091,20 @@ impl Scenario {
             checkpoint("combinations")?;
         }
 
-        let mut first_ensemble_by_name = BTreeMap::new();
+        let first_ensemble_by_name = ValidationIndex::build(
+            self.ensembles
+                .iter()
+                .enumerate()
+                .map(|(row, ensemble)| (ensemble.name.as_str(), row)),
+            "ensemble name index",
+            checkpoint,
+        )?;
         for (ensemble_index, e) in self.ensembles.iter().enumerate() {
             e.check(&mut out);
-            if let Some(&first) = first_ensemble_by_name.get(e.name.as_str()) {
+            let first = first_ensemble_by_name
+                .first_row(&e.name.as_str())
+                .unwrap_or(ensemble_index);
+            if first != ensemble_index {
                 out.push(Violation {
                     code: "ensemble-name-duplicate",
                     what: format!(
@@ -961,13 +1113,18 @@ impl Scenario {
                     ),
                     fix: "give every ensemble a unique name".to_string(),
                 });
-            } else {
-                first_ensemble_by_name.insert(e.name.as_str(), ensemble_index);
             }
             checkpoint("ensembles")?;
         }
 
-        let mut first_contact_by_pair = BTreeMap::new();
+        let first_contact_by_pair = ValidationIndex::build(
+            self.contacts
+                .iter()
+                .enumerate()
+                .map(|(row, contact)| (contact_pair(contact), row)),
+            "contact pair index",
+            checkpoint,
+        )?;
         for (contact_index, c) in self.contacts.iter().enumerate() {
             if c.region_a.is_empty() || c.region_b.is_empty() {
                 out.push(Violation {
@@ -989,12 +1146,16 @@ impl Scenario {
                     fix: "name two distinct contact regions".to_string(),
                 });
             }
-            let pair = if c.region_a <= c.region_b {
-                (c.region_a.as_str(), c.region_b.as_str())
-            } else {
-                (c.region_b.as_str(), c.region_a.as_str())
-            };
-            if let Some(&(first, first_model)) = first_contact_by_pair.get(&pair) {
+            let pair = contact_pair(c);
+            let first = first_contact_by_pair
+                .first_row(&pair)
+                .unwrap_or(contact_index);
+            if first != contact_index {
+                let first_model = self
+                    .contacts
+                    .get(first)
+                    .map(|contact| &contact.model)
+                    .unwrap_or(&c.model);
                 let (code, fix) = if first_model == &c.model {
                     (
                         "contact-pair-duplicate",
@@ -1013,8 +1174,6 @@ impl Scenario {
                     ),
                     fix: fix.to_string(),
                 });
-            } else {
-                first_contact_by_pair.insert(pair, (contact_index, &c.model));
             }
             if let ContactModel::Coulomb { mu_s, mu_k } = c.model
                 && !(mu_s.is_finite() && mu_k.is_finite() && mu_k >= 0.0 && mu_s >= mu_k)
@@ -1034,7 +1193,11 @@ impl Scenario {
         Ok(out)
     }
 
-    fn check_bc_frame(bc: &BoundaryCondition, frame_ids: &BTreeSet<u32>, out: &mut Vec<Violation>) {
+    fn check_bc_frame(
+        bc: &BoundaryCondition,
+        frame_ids: &ValidationIndex<u32>,
+        out: &mut Vec<Violation>,
+    ) {
         if bc.frame != 0 && !frame_ids.contains(&bc.frame) {
             out.push(Violation {
                 code: "bc-frame-missing",
@@ -1191,7 +1354,7 @@ impl Scenario {
 mod validation_internal_tests {
     use super::{
         Environment, LoadCase, Scenario, ValidationBudget, ValidationError,
-        reserve_validation_times,
+        reserve_validation_times, sort_validation_index,
     };
 
     #[test]
@@ -1274,5 +1437,27 @@ mod validation_internal_tests {
                 "preflight case boundary counts"
             ]
         );
+    }
+
+    #[test]
+    fn index_sort_is_total_ordered_and_cancellable() {
+        let mut values = vec![("b", 2usize), ("a", 3), ("a", 1), ("c", 0)];
+        let mut polls = 0usize;
+        sort_validation_index(&mut values, "test index sort", &mut |phase| {
+            assert_eq!(phase, "test index sort");
+            polls += 1;
+            Ok::<(), core::convert::Infallible>(())
+        })
+        .expect("infallible checkpoint");
+        assert_eq!(values, [("a", 1), ("a", 3), ("b", 2), ("c", 0)]);
+        assert!(polls >= values.len());
+
+        let mut cancelled = vec![3u32, 2, 1, 0];
+        let mut calls = 0usize;
+        let result = sort_validation_index(&mut cancelled, "cancel sort", &mut |_| {
+            calls += 1;
+            if calls == 2 { Err("cancelled") } else { Ok(()) }
+        });
+        assert_eq!(result, Err("cancelled"));
     }
 }

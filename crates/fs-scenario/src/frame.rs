@@ -6,7 +6,7 @@
 //! solver crash).
 
 use crate::ScenarioError;
-use crate::scenario::{ValidationError, Violation};
+use crate::scenario::{ValidationError, Violation, sort_validation_index};
 use crate::signal::TimeSignal;
 use fs_ga::{Motor, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
@@ -398,8 +398,8 @@ impl FrameTree {
             first_by_id.push((frame.id.0, index));
             first_by_name.push((frame.name.as_str(), index));
         }
-        first_by_id.sort_unstable();
-        first_by_name.sort_unstable();
+        sort_validation_index(&mut first_by_id, "frame id index sort", checkpoint)?;
+        sort_validation_index(&mut first_by_name, "frame name index sort", checkpoint)?;
         let reaches_cycle = self.validation_cycle_flags(&first_by_id, checkpoint)?;
 
         for (i, f) in self.frames.iter().enumerate() {
@@ -594,14 +594,12 @@ mod validation_internal_tests {
             })
         ));
         assert!(findings.is_empty());
+        assert_eq!(&visited[..2], ["frame index", "frame index"]);
+        assert!(visited.contains(&"frame id index sort"));
+        assert!(visited.contains(&"frame name index sort"));
         assert_eq!(
-            visited,
-            [
-                "frame index",
-                "frame index",
-                "frame cycle start",
-                "frame cycle traversal",
-            ]
+            &visited[visited.len() - 2..],
+            ["frame cycle start", "frame cycle traversal"]
         );
     }
 

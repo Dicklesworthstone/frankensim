@@ -184,18 +184,23 @@ before executing. Net-flux validation streams base and optional-case slices
 without materializing a vector for every effective set; its exact raw
 checkpoint capacity is fallibly reserved before append/sort. Its
 identity/reference phase uses deterministic O(N log N) indexes and its
-frame ID/name indexes and linear cycle traversal scratch are exactly and
-fallibly reserved before population; the indexes sort in place with row index
-as the total-order tiebreaker. The explicit `Cx` lane polls
+frame ID/name, frame-membership, case, combination, term, ensemble, and
+unordered-contact indexes plus linear cycle traversal scratch are exactly and
+fallibly reserved before population; every index sorts in place with row index
+as the total-order tiebreaker using a deterministic checkpointed heap sort. The
+preflight work total counts each index population item and a conservative heap
+comparison/swap envelope, including per-combination term entries. The explicit
+`Cx` lane polls
 before preflight, at every top-level and nested record visited while constructing
 the semantic plan, after planning, after fixed phases, at every frame-index row,
 frame-cycle traversal/finalization step, and frame validation row, at
 BC/case/combination term/ensemble/contact boundaries, before and after each
 net-flux provider evaluation, at every tabulated signal scalar and Chebyshev
-coefficient, and after private validation before publication. Tabulated signal
-validity and ordering are accumulated in one pass while retaining diagnostic
-order. A request observed at any checkpoint publishes no partial findings.
-Fallible scenario-level index/output reservation remains active work under
+coefficient, throughout index population/sort steps, and after private
+validation before publication. Tabulated signal validity and ordering are
+accumulated in one pass while retaining diagnostic order. A request observed at
+any checkpoint publishes no partial findings.
+Fallible finding-output reservation remains active work under
 `frankensim-sj31i.24`. No loop is admitted from an unchecked float-to-size
 conversion.
 
