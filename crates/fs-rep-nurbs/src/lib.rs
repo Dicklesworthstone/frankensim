@@ -38,8 +38,9 @@ pub use curve::{
 };
 pub use rat::Rat;
 pub use surface::{
-    AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceCloneRun, SurfaceEvaluationRun,
-    SurfaceHomogeneousEvaluationRun, SurfaceInsertionRun, SurfacePartialsRun, SurfaceSpanBoxesRun,
+    AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceCloneRun,
+    SurfaceConstructionRun, SurfaceEvaluationRun, SurfaceHomogeneousEvaluationRun,
+    SurfaceInsertionRun, SurfacePartialsRun, SurfaceSpanBoxesRun,
 };
 pub use trim::{
     AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimClassificationRun, TrimLoop,

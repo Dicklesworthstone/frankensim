@@ -103,7 +103,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   legal discontinuous full breaks whose independent endpoints and raised
   multiplicity are preserved; minimal-multiplicity elevation is a follow-up).
 - `NurbsSurface<S>` — sealed tensor-product representation with checked
-  Cartesian/homogeneous construction. Owning `try_clone_with_cx` returns
+  Cartesian/homogeneous construction. Homogeneous
+  `from_homogeneous_with_cx` returns transactional `SurfaceConstructionRun`
+  state and publishes only a completely validated sealed owner. Owning
+  `try_clone_with_cx` returns
   transactional `SurfaceCloneRun` state and publishes only a complete sealed
   copy after checked work and a 64 MiB retained-output gate.
   `AdmittedNurbsSurface` reuses one source validation through tensor evaluation,
@@ -399,14 +402,25 @@ publication checkpoint. `SurfaceEvaluationRun::Cancelled` carries no partial
 accumulator or point and drops any allocated basis workspaces. Generic scalar
 operations remain non-preemptible, and neither primitive claims exact
 caller-budget consumption, executor drain/finalize, or resumability.
+`NurbsSurface::from_homogeneous_with_cx` preserves aggregate validation-work
+refusal precedence, then carries one gate through ordered U-knot, V-knot, outer
+and inner grid-shape, weight, finite-lane, Cartesian-projection, row-major
+control validation, and final owned publication.
+`SurfaceConstructionRun::Cancelled` exposes no partially validated surface and
+drops all caller-transferred nested storage. The synchronous homogeneous
+constructor shares the same validation core. It allocates no derived payload
+and adds no clone-style retained-output cap. Individual scalar operations and
+nested-vector destruction remain non-preemptible, and the primitive adds no
+exact caller-budget, wall-time, drain/finalize, resumability, regularity,
+topology, or geometric-certificate claim.
 `NurbsSurface::admit_with_cx` preserves
 checked static work-refusal precedence, then carries one cancellation gate
 through U-knot validation, V-knot validation, grid-shape and row-major control
 validation, and final authority publication. It allocates no payload and does
 not certify regularity, trimming, topology, closest-point bounds, or rendering.
-Surface construction, aggregate affine-budget consumption, and executor
-drain/finalize remain caller responsibilities; allocator calls and individual
-scalar operations are not wall-time preemptible. The owning
+Surface construction ownership, aggregate affine-budget consumption, and
+executor drain/finalize remain outside the admission claim; allocator calls
+and individual scalar operations are not wall-time preemptible. The owning
 `KnotVector::new_with_cx` path preserves constant-time degree/length and static
 validation-work refusal precedence, then carries one gate through finite-value,
 ordering, multiplicity, clamping, and nonempty-domain validation plus final

@@ -317,6 +317,20 @@ pub struct AdmittedNurbsSurface<'a, S: Scalar> {
     inner: &'a NurbsSurface<S>,
 }
 
+/// Transactional terminal state of cancellation-aware homogeneous surface
+/// construction.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum SurfaceConstructionRun<S: Scalar> {
+    /// Validation completed and the sealed surface is safe to publish.
+    Complete {
+        /// Newly validated exact surface generation.
+        surface: NurbsSurface<S>,
+    },
+    /// Cancellation was observed; the unpublished owned candidate was dropped.
+    Cancelled,
+}
+
 /// Transactional terminal state of a cancellation-aware fallible surface copy.
 #[must_use]
 #[derive(Debug, PartialEq)]
@@ -918,13 +932,62 @@ impl<S: Scalar> NurbsSurface<S> {
         knots_v: KnotVector<S>,
         cpw: Vec<Vec<[S; 4]>>,
     ) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        match Self::from_homogeneous_with_poll(knots_u, knots_v, cpw, &mut never_cancel)? {
+            SurfaceWorkRun::Complete(surface) => Ok(surface),
+            SurfaceWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling homogeneous surface construction observed cancellation"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Build from an owned homogeneous control net with bounded cancellation
+    /// polling.
+    ///
+    /// Aggregate validation-work refusal precedes cancellation. One `Cx` then
+    /// spans U-knot validation, V-knot validation, outer/inner grid shape,
+    /// weight, finite, Cartesian-projection, row-major control checks, and
+    /// final owned publication. Cancellation drops all caller-transferred
+    /// nested storage without exposing a partially validated surface.
+    /// Construction allocates no derived payload and adds no clone-style
+    /// retained-output cap.
+    /// Individual scalar operations and nested-vector destruction are not
+    /// preemptible. This primitive does not consume the `Cx` budget or own
+    /// request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous constructor's work, knot, control-grid, weight,
+    /// or finite-arithmetic refusal when it wins before an observed
+    /// cancellation.
+    pub fn from_homogeneous_with_cx(
+        knots_u: KnotVector<S>,
+        knots_v: KnotVector<S>,
+        cpw: Vec<Vec<[S; 4]>>,
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceConstructionRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match Self::from_homogeneous_with_poll(knots_u, knots_v, cpw, &mut should_cancel)? {
+            SurfaceWorkRun::Complete(surface) => Ok(SurfaceConstructionRun::Complete { surface }),
+            SurfaceWorkRun::Cancelled => Ok(SurfaceConstructionRun::Cancelled),
+        }
+    }
+
+    fn from_homogeneous_with_poll(
+        knots_u: KnotVector<S>,
+        knots_v: KnotVector<S>,
+        cpw: Vec<Vec<[S; 4]>>,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceWorkRun<Self>, NurbsError> {
         let candidate = NurbsSurface {
             knots_u,
             knots_v,
             cpw,
         };
-        candidate.validate_live_structure()?;
-        Ok(candidate)
+        match candidate.validate_live_structure_with_poll(should_cancel)? {
+            SurfaceValidationOutcome::Complete => Ok(SurfaceWorkRun::Complete(candidate)),
+            SurfaceValidationOutcome::Cancelled => Ok(SurfaceWorkRun::Cancelled),
+        }
     }
 
     /// Borrow the sealed u knot vector.
@@ -1013,8 +1076,9 @@ impl<S: Scalar> NurbsSurface<S> {
     /// Checked validation-work refusal retains synchronous precedence. The U
     /// knot, V knot, and row-major homogeneous-control scans share one gate,
     /// and a final checkpoint gates publication of the lifetime-bound admitted
-    /// view. This method does not make construction cancellation-aware and
-    /// does not consume the `Cx` budget or finalize its executor scope.
+    /// view. Cancellation-aware homogeneous ownership transfer is provided
+    /// separately by [`Self::from_homogeneous_with_cx`]. This method does not
+    /// consume the `Cx` budget or finalize its executor scope.
     ///
     /// # Errors
     /// Returns the synchronous admission's work, knot, control-grid, weight,
@@ -2263,7 +2327,9 @@ mod tests {
             let mut entries = Vec::with_capacity(control_count + 2);
             entries.extend([0.0, 0.0]);
             for index in 1..control_count - 1 {
-                entries.push(index as f64 / (control_count - 1) as f64);
+                #[allow(clippy::cast_precision_loss)]
+                let knot = index as f64 / (control_count - 1) as f64;
+                entries.push(knot);
             }
             entries.extend([1.0, 1.0]);
             KnotVector::new(entries, 1).expect("long linear knots")
@@ -2375,6 +2441,166 @@ mod tests {
             output,
         )
         .expect("oracle v surface")
+    }
+
+    #[test]
+    fn homogeneous_surface_construction_with_cx_is_transactional_and_exact() {
+        let expected = bilinear_surface();
+        with_surface_cx(true, |cx| {
+            assert_eq!(
+                NurbsSurface::<f64>::from_homogeneous_with_cx(
+                    expected.knots_u.clone(),
+                    expected.knots_v.clone(),
+                    expected.cpw.clone(),
+                    cx,
+                )
+                .expect("valid pre-cancelled construction"),
+                SurfaceConstructionRun::Cancelled
+            );
+        });
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::<f64>::from_homogeneous_with_cx(
+                    expected.knots_u.clone(),
+                    expected.knots_v.clone(),
+                    expected.cpw.clone(),
+                    cx,
+                )
+                .expect("active homogeneous construction"),
+                SurfaceConstructionRun::Complete {
+                    surface: expected.try_clone().expect("expected surface copy"),
+                }
+            );
+        });
+
+        let exact = exact_asymmetric_surface();
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::<Rat>::from_homogeneous_with_cx(
+                    exact.knots_u.clone(),
+                    exact.knots_v.clone(),
+                    exact.cpw.clone(),
+                    cx,
+                )
+                .expect("active exact construction"),
+                SurfaceConstructionRun::Complete {
+                    surface: exact.try_clone().expect("expected exact surface copy"),
+                }
+            );
+        });
+
+        with_surface_cx(true, |cx| {
+            let mut invalid_u = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("u knots");
+            invalid_u.knots.clear();
+            assert!(matches!(
+                NurbsSurface::<f64>::from_homogeneous_with_cx(
+                    invalid_u,
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("v knots"),
+                    Vec::new(),
+                    cx,
+                ),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+
+        let control_count = 1_023usize;
+        let make_large_knots = || {
+            let mut entries = Vec::with_capacity(control_count + 2);
+            entries.extend([0.0, 0.0]);
+            for index in 1..control_count - 1 {
+                entries.push(index as f64 / (control_count - 1) as f64);
+            }
+            entries.extend([1.0, 1.0]);
+            KnotVector::new(entries, 1).expect("large linear knots")
+        };
+        let knots_u = make_large_knots();
+        let knots_v = make_large_knots();
+        assert_eq!(
+            NurbsSurface::<f64>::validation_work_for(&knots_u, &knots_v)
+                .expect("cap-plus-fifty work"),
+            BASIS_MAX_WORK_UNITS + 50
+        );
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                NurbsSurface::<f64>::from_homogeneous_with_cx(knots_u, knots_v, Vec::new(), cx,),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
+
+        let make_line_knots =
+            || KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear knots");
+        let mut malformed = vec![vec![[0.0, 0.0, 0.0, 1.0]; 2]; 2];
+        malformed[0][0] = [f64::MAX, 0.0, 0.0, f64::MIN_POSITIVE];
+        let legacy_error =
+            NurbsSurface::from_homogeneous(make_line_knots(), make_line_knots(), malformed.clone())
+                .expect_err("legacy non-finite projection");
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::from_homogeneous_with_cx(
+                    make_line_knots(),
+                    make_line_knots(),
+                    malformed,
+                    cx,
+                )
+                .expect_err("cancellable non-finite projection"),
+                legacy_error
+            );
+        });
+    }
+
+    #[test]
+    fn homogeneous_surface_construction_cancels_inside_controls_and_at_publication() {
+        let source = high_degree_surface();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = NurbsSurface::<f64>::from_homogeneous_with_poll(
+                source.knots_u.clone(),
+                source.knots_v.clone(),
+                source.cpw.clone(),
+                &mut should_cancel,
+            )
+            .expect("valid cancellable construction");
+            (matches!(outcome, SurfaceWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(12), run(12));
+        assert_eq!(run(12), (true, 12));
+
+        let source = bilinear_surface();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            NurbsSurface::<f64>::from_homogeneous_with_poll(
+                source.knots_u.clone(),
+                source.knots_v.clone(),
+                source.cpw.clone(),
+                &mut never_cancel,
+            )
+            .expect("healthy construction"),
+            SurfaceWorkRun::Complete(_)
+        ));
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(matches!(
+            NurbsSurface::<f64>::from_homogeneous_with_poll(
+                source.knots_u.clone(),
+                source.knots_v.clone(),
+                source.cpw.clone(),
+                &mut cancel_at_publication,
+            )
+            .expect("publication cancellation"),
+            SurfaceWorkRun::Cancelled
+        ));
+        assert_eq!(replay_polls, total_polls);
     }
 
     #[test]
