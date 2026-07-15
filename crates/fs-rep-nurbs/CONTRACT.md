@@ -105,8 +105,11 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   first partials, and per-span control boxes. Owning `admit_with_cx` returns
   `SurfaceAdmissionRun` and gates the
   lifetime-bound structural authority after U-knot, V-knot, and row-major
-  control-net validation. Its admitted-only `eval_with_cx` returns transactional
-  `SurfaceEvaluationRun` state and never publishes a partial Cartesian point;
+  control-net validation. Its admitted-only `eval_homogeneous_with_cx` returns
+  transactional `SurfaceHomogeneousEvaluationRun` state and never publishes a
+  partial finite homogeneous representation. Its admitted-only `eval_with_cx`
+  returns transactional `SurfaceEvaluationRun` state and never publishes a
+  partial Cartesian point;
   its f64-only admitted `partials_with_cx` returns transactional
   `SurfacePartialsRun` state and publishes value plus both first partials only
   as one complete result;
@@ -360,12 +363,25 @@ partial owned generations and returns `CurveBezierRun::Cancelled`. Individual
 allocator calls and scalar operations are not preemptible; the API claims a
 logical-operation bound, not a wall-time bound, and does not claim owning curve
 admission, `Cx` budget consumption, or executor drain/finalize authority.
-`AdmittedNurbsSurface::eval_with_cx` evaluates the U basis and then the V basis
-under one cancellation gate, preserving the synchronous U-major/V-minor tensor
-arithmetic order. It polls the pair product and homogeneous lane updates after
-at most 64 logical operations and gates final Cartesian publication.
-`SurfaceEvaluationRun::Cancelled` carries no partial accumulator or point and
-drops any allocated basis workspaces. `NurbsSurface::admit_with_cx` preserves
+`AdmittedNurbsSurface::eval_homogeneous_with_cx` evaluates the U basis and then
+the V basis under one cancellation gate, preserving the synchronous
+U-major/V-minor tensor arithmetic order. It polls the pair product and four
+homogeneous lane updates after at most 64 logical operations, checks all four
+accumulated components for finiteness, and gates final homogeneous publication.
+`SurfaceHomogeneousEvaluationRun::Cancelled` carries no partial representation
+and drops any allocated basis workspaces. This path does not require an
+admissible weight or divide into Cartesian coordinates, so it claims no
+normalization, Cartesian-finiteness, regularity, topology, or geometric
+certificate.
+`AdmittedNurbsSurface::eval_with_cx` consumes the same internal tensor
+accumulation directly, preserves the lane-three denominator-refusal-before-poll
+ordering, continues the fixed-stride remainder through Cartesian checks, and
+retains its existing final publication gate without adding the homogeneous
+publication checkpoint. `SurfaceEvaluationRun::Cancelled` carries no partial
+accumulator or point and drops any allocated basis workspaces. Generic scalar
+operations remain non-preemptible, and neither primitive claims exact
+caller-budget consumption, executor drain/finalize, or resumability.
+`NurbsSurface::admit_with_cx` preserves
 checked static work-refusal precedence, then carries one cancellation gate
 through U-knot validation, V-knot validation, grid-shape and row-major control
 validation, and final authority publication. It allocates no payload and does

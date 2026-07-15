@@ -349,6 +349,19 @@ pub enum SurfaceAdmissionRun<'a, S: Scalar> {
     Cancelled,
 }
 
+/// Transactional terminal state of cancellation-aware homogeneous evaluation.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SurfaceHomogeneousEvaluationRun<S: Scalar> {
+    /// The complete finite homogeneous point `(w*x, w*y, w*z, w)`.
+    Complete {
+        /// Evaluated four-lane homogeneous storage.
+        homogeneous: [S; 4],
+    },
+    /// Cancellation was observed; no partial homogeneous point was published.
+    Cancelled,
+}
+
 /// Transactional terminal state of cancellation-aware Cartesian evaluation.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
@@ -1583,27 +1596,87 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
     /// [`NurbsError::Domain`] outside either parameter domain or when basis
     /// work/allocation is refused.
     pub fn eval_homogeneous(&self, u: S, v: S) -> Result<[S; 4], NurbsError> {
-        let knots_u = self.knots_u();
-        let knots_v = self.knots_v();
-        let (su, bu) = knots_u.basis(u)?;
-        let (sv, bv) = knots_v.basis(v)?;
-        let (pu, pv) = (knots_u.degree(), knots_v.degree());
-        let mut acc = [S::zero(); 4];
-        for (r, &wu) in bu.iter().enumerate() {
-            for (c, &wv) in bv.iter().enumerate() {
-                let cp = &self.inner.cpw[su - pu + r][sv - pv + c];
-                let w = wu * wv;
-                for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                    *a = *a + w * x;
-                }
-            }
+        let mut never_cancel = || false;
+        match self.eval_homogeneous_with_poll(u, v, &mut never_cancel)? {
+            SurfaceHomogeneousEvaluationRun::Complete { homogeneous } => Ok(homogeneous),
+            SurfaceHomogeneousEvaluationRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling homogeneous surface evaluation observed cancellation"
+                    .to_string(),
+            }),
         }
-        if acc.iter().copied().any(|component| !component.is_finite()) {
-            return Err(NurbsError::Domain {
-                what: "homogeneous surface evaluation left the finite numeric domain".to_string(),
-            });
+    }
+
+    /// Evaluate a homogeneous point with bounded cancellation polling.
+    ///
+    /// This admitted-only path carries one gate through ordered U then V basis
+    /// construction, tensor contraction, finite-component checks, and final
+    /// homogeneous publication. It does not require an admissible denominator
+    /// or divide into Cartesian coordinates. The caller remains responsible
+    /// for owning surface admission, `Cx` budget consumption, and request ->
+    /// drain -> finalize semantics around this primitive.
+    ///
+    /// # Errors
+    /// Returns the same U/V parameter, work, allocation, and homogeneous
+    /// finite-arithmetic refusals as [`Self::eval_homogeneous`] when they win
+    /// before an observed cancellation.
+    pub fn eval_homogeneous_with_cx(
+        &self,
+        u: S,
+        v: S,
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceHomogeneousEvaluationRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.eval_homogeneous_with_poll(u, v, &mut should_cancel)
+    }
+
+    /// Evaluate an admitted homogeneous point while sharing a compound
+    /// caller's cancellation callback.
+    pub(crate) fn eval_homogeneous_with_poll(
+        &self,
+        u: S,
+        v: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceHomogeneousEvaluationRun<S>, NurbsError> {
+        let (span_u, basis_u) = match self.knots_u().basis_with_poll(u, should_cancel)? {
+            BasisRun::Complete { span, values } => (span, values),
+            BasisRun::Cancelled => return Ok(SurfaceHomogeneousEvaluationRun::Cancelled),
+        };
+        let (span_v, basis_v) = match self.knots_v().basis_with_poll(v, should_cancel)? {
+            BasisRun::Complete { span, values } => (span, values),
+            BasisRun::Cancelled => return Ok(SurfaceHomogeneousEvaluationRun::Cancelled),
+        };
+        self.eval_homogeneous_from_basis_with_poll(
+            span_u,
+            &basis_u,
+            span_v,
+            &basis_v,
+            should_cancel,
+        )
+    }
+
+    fn eval_homogeneous_from_basis_with_poll(
+        &self,
+        span_u: usize,
+        basis_u: &[S],
+        span_v: usize,
+        basis_v: &[S],
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<SurfaceHomogeneousEvaluationRun<S>, NurbsError> {
+        let (homogeneous, _) = match self.accumulate_homogeneous_from_basis_with_poll(
+            span_u,
+            basis_u,
+            span_v,
+            basis_v,
+            false,
+            &mut should_cancel,
+        )? {
+            SurfaceWorkRun::Complete(accumulation) => accumulation,
+            SurfaceWorkRun::Cancelled => return Ok(SurfaceHomogeneousEvaluationRun::Cancelled),
+        };
+        if should_cancel() {
+            return Ok(SurfaceHomogeneousEvaluationRun::Cancelled);
         }
-        Ok(acc)
+        Ok(SurfaceHomogeneousEvaluationRun::Complete { homogeneous })
     }
 
     /// Cartesian evaluation without rescanning the sealed snapshot.
@@ -1680,46 +1753,18 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         basis_v: &[S],
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
-        if should_cancel() {
-            return Ok(SurfaceEvaluationRun::Cancelled);
-        }
-        let degree_u = self.knots_u().degree();
-        let degree_v = self.knots_v().degree();
-        let mut operations_since_poll = 0usize;
-        let mut homogeneous = [S::zero(); 4];
-        for (row_offset, &weight_u) in basis_u.iter().enumerate() {
-            for (column_offset, &weight_v) in basis_v.iter().enumerate() {
-                let control = &self.inner.cpw[span_u - degree_u + row_offset]
-                    [span_v - degree_v + column_offset];
-                let tensor_weight = weight_u * weight_v;
-                if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
-                    return Ok(SurfaceEvaluationRun::Cancelled);
-                }
-                for (accumulator, &component) in homogeneous.iter_mut().zip(control) {
-                    *accumulator = *accumulator + tensor_weight * component;
-                    if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
-                        return Ok(SurfaceEvaluationRun::Cancelled);
-                    }
-                }
-            }
-        }
-        for (index, &component) in homogeneous.iter().enumerate() {
-            if !component.is_finite() {
-                return Err(NurbsError::Domain {
-                    what: "homogeneous surface evaluation left the finite numeric domain"
-                        .to_string(),
-                });
-            }
-            if index == 3 && !component.is_admissible_weight() {
-                return Err(NurbsError::Domain {
-                    what: "surface evaluation produced an inadmissible rational denominator"
-                        .to_string(),
-                });
-            }
-            if surface_poll_due(&mut operations_since_poll, &mut should_cancel) {
-                return Ok(SurfaceEvaluationRun::Cancelled);
-            }
-        }
+        let (homogeneous, mut operations_since_poll) = match self
+            .accumulate_homogeneous_from_basis_with_poll(
+                span_u,
+                basis_u,
+                span_v,
+                basis_v,
+                true,
+                &mut should_cancel,
+            )? {
+            SurfaceWorkRun::Complete(accumulation) => accumulation,
+            SurfaceWorkRun::Cancelled => return Ok(SurfaceEvaluationRun::Cancelled),
+        };
 
         let point = [
             homogeneous[0] / homogeneous[3],
@@ -1740,6 +1785,62 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
             return Ok(SurfaceEvaluationRun::Cancelled);
         }
         Ok(SurfaceEvaluationRun::Complete { point })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accumulate_homogeneous_from_basis_with_poll(
+        &self,
+        span_u: usize,
+        basis_u: &[S],
+        span_v: usize,
+        basis_v: &[S],
+        require_admissible_weight: bool,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceWorkRun<([S; 4], usize)>, NurbsError> {
+        if should_cancel() {
+            return Ok(SurfaceWorkRun::Cancelled);
+        }
+        let degree_u = self.knots_u().degree();
+        let degree_v = self.knots_v().degree();
+        let mut operations_since_poll = 0usize;
+        let mut homogeneous = [S::zero(); 4];
+        for (row_offset, &weight_u) in basis_u.iter().enumerate() {
+            for (column_offset, &weight_v) in basis_v.iter().enumerate() {
+                let control = &self.inner.cpw[span_u - degree_u + row_offset]
+                    [span_v - degree_v + column_offset];
+                let tensor_weight = weight_u * weight_v;
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfaceWorkRun::Cancelled);
+                }
+                for (accumulator, &component) in homogeneous.iter_mut().zip(control) {
+                    *accumulator = *accumulator + tensor_weight * component;
+                    if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(SurfaceWorkRun::Cancelled);
+                    }
+                }
+            }
+        }
+        for (index, &component) in homogeneous.iter().enumerate() {
+            if !component.is_finite() {
+                return Err(NurbsError::Domain {
+                    what: "homogeneous surface evaluation left the finite numeric domain"
+                        .to_string(),
+                });
+            }
+            if require_admissible_weight && index == 3 && !component.is_admissible_weight() {
+                return Err(NurbsError::Domain {
+                    what: "surface evaluation produced an inadmissible rational denominator"
+                        .to_string(),
+                });
+            }
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(SurfaceWorkRun::Cancelled);
+            }
+        }
+        Ok(SurfaceWorkRun::Complete((
+            homogeneous,
+            operations_since_poll,
+        )))
     }
 
     /// Per-span Cartesian control boxes without a second structural scan.
@@ -2646,6 +2747,53 @@ mod tests {
     }
 
     #[test]
+    fn admitted_homogeneous_surface_evaluation_with_cx_is_transactional_and_exact() {
+        let surface = asymmetric_surface();
+        let admitted = surface.admit().expect("admitted surface");
+        with_surface_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .eval_homogeneous_with_cx(0.25, 0.75, cx)
+                    .expect("valid homogeneous request"),
+                SurfaceHomogeneousEvaluationRun::Cancelled
+            );
+            assert!(matches!(
+                admitted.eval_homogeneous_with_cx(-1.0, 0.75, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .eval_homogeneous_with_cx(0.25, 0.75, cx)
+                    .expect("active homogeneous context"),
+                SurfaceHomogeneousEvaluationRun::Complete {
+                    homogeneous: admitted
+                        .eval_homogeneous(0.25, 0.75)
+                        .expect("legacy homogeneous evaluation"),
+                }
+            );
+        });
+
+        let exact = exact_asymmetric_surface();
+        let exact_admitted = exact.admit().expect("admitted exact surface");
+        let quarter = Rat::new(1, 4);
+        let three_quarters = Rat::new(3, 4);
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                exact_admitted
+                    .eval_homogeneous_with_cx(quarter, three_quarters, cx)
+                    .expect("active exact homogeneous context"),
+                SurfaceHomogeneousEvaluationRun::Complete {
+                    homogeneous: exact_admitted
+                        .eval_homogeneous(quarter, three_quarters)
+                        .expect("legacy exact homogeneous evaluation"),
+                }
+            );
+        });
+    }
+
+    #[test]
     fn admitted_surface_partials_with_cx_are_transactional_and_exact() {
         let surface = bilinear_surface();
         let admitted = surface.admit().expect("admitted bilinear plane");
@@ -2881,12 +3029,88 @@ mod tests {
         assert_eq!(run(), run());
         assert_eq!(run(), (SurfaceEvaluationRun::Cancelled, 2));
 
+        let homogeneous_run = || {
+            let mut polls = 0usize;
+            let outcome = admitted
+                .eval_homogeneous_from_basis_with_poll(span_u, &basis_u, span_v, &basis_v, || {
+                    polls += 1;
+                    polls == 2
+                })
+                .expect("finite homogeneous tensor contraction");
+            (outcome, polls)
+        };
+        assert_eq!(homogeneous_run(), homogeneous_run());
+        assert_eq!(
+            homogeneous_run(),
+            (SurfaceHomogeneousEvaluationRun::Cancelled, 2)
+        );
+
         let bilinear = bilinear_surface();
         let admitted_bilinear = bilinear.admit().expect("admitted bilinear plane");
         let (bilinear_span_u, bilinear_basis_u) =
             admitted_bilinear.knots_u().basis(0.5).expect("u basis");
         let (bilinear_span_v, bilinear_basis_v) =
             admitted_bilinear.knots_v().basis(0.5).expect("v basis");
+        let mut homogeneous_total_polls = 0usize;
+        assert!(matches!(
+            admitted_bilinear
+                .eval_homogeneous_from_basis_with_poll(
+                    bilinear_span_u,
+                    &bilinear_basis_u,
+                    bilinear_span_v,
+                    &bilinear_basis_v,
+                    || {
+                        homogeneous_total_polls += 1;
+                        false
+                    },
+                )
+                .expect("healthy homogeneous bilinear evaluation"),
+            SurfaceHomogeneousEvaluationRun::Complete { .. }
+        ));
+        assert_eq!(homogeneous_total_polls, 2);
+        let mut homogeneous_replay_polls = 0usize;
+        assert_eq!(
+            admitted_bilinear
+                .eval_homogeneous_from_basis_with_poll(
+                    bilinear_span_u,
+                    &bilinear_basis_u,
+                    bilinear_span_v,
+                    &bilinear_basis_v,
+                    || {
+                        homogeneous_replay_polls += 1;
+                        homogeneous_replay_polls == homogeneous_total_polls
+                    },
+                )
+                .expect("homogeneous publication cancellation"),
+            SurfaceHomogeneousEvaluationRun::Cancelled
+        );
+        assert_eq!(homogeneous_replay_polls, homogeneous_total_polls);
+
+        let mut full_homogeneous_polls = 0usize;
+        let mut never_cancel = || {
+            full_homogeneous_polls += 1;
+            false
+        };
+        assert!(matches!(
+            admitted_bilinear
+                .eval_homogeneous_with_poll(0.5, 0.5, &mut never_cancel)
+                .expect("healthy full homogeneous evaluation"),
+            SurfaceHomogeneousEvaluationRun::Complete { .. }
+        ));
+        assert_eq!(full_homogeneous_polls, 12);
+        let mut full_homogeneous_replay = 0usize;
+        let mut cancel_at_homogeneous_publication = || {
+            full_homogeneous_replay += 1;
+            full_homogeneous_replay == full_homogeneous_polls
+        };
+        assert_eq!(
+            admitted_bilinear
+                .eval_homogeneous_with_poll(0.5, 0.5, &mut cancel_at_homogeneous_publication,)
+                .expect("full homogeneous publication cancellation"),
+            SurfaceHomogeneousEvaluationRun::Cancelled
+        );
+        assert_eq!(full_homogeneous_replay, full_homogeneous_polls);
+
         let mut total_polls = 0usize;
         assert!(matches!(
             admitted_bilinear
@@ -2921,6 +3145,48 @@ mod tests {
             SurfaceEvaluationRun::Cancelled
         );
         assert_eq!(replay_polls, 2);
+    }
+
+    #[test]
+    fn surface_denominator_refusal_beats_the_lane_three_stride_poll() {
+        let degree_u = 2usize;
+        let degree_v = 3usize;
+        let surface = NurbsSurface::new(
+            KnotVector::new(
+                [vec![0.0; degree_u + 1], vec![1.0; degree_u + 1]].concat(),
+                degree_u,
+            )
+            .expect("quadratic u knots"),
+            KnotVector::new(
+                [vec![0.0; degree_v + 1], vec![1.0; degree_v + 1]].concat(),
+                degree_v,
+            )
+            .expect("cubic v knots"),
+            &vec![vec![[0.0; 3]; degree_v + 1]; degree_u + 1],
+            &vec![vec![1.0; degree_v + 1]; degree_u + 1],
+        )
+        .expect("single tensor patch");
+        let admitted = surface.admit().expect("admitted tensor patch");
+        let mut polls = 0usize;
+        let mut cancel_at_lane_three = || {
+            polls += 1;
+            polls == 2
+        };
+        let error = admitted
+            .accumulate_homogeneous_from_basis_with_poll(
+                degree_u,
+                &[0.0; 3],
+                degree_v,
+                &[0.0; 4],
+                true,
+                &mut cancel_at_lane_three,
+            )
+            .expect_err("zero denominator must refuse before its stride poll");
+        assert!(matches!(
+            error,
+            NurbsError::Domain { ref what } if what.contains("inadmissible rational denominator")
+        ));
+        assert_eq!(polls, 1, "lane-three refusal must precede callback two");
     }
 
     #[test]
