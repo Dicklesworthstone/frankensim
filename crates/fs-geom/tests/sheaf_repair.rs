@@ -716,7 +716,7 @@ fn sr_008_bounded_decomposition_accounts_before_work() {
     });
     verdict(
         "sr-008",
-        "bounded decomposition retains exact work and memory consumption and refuses under-budget or non-finite requests before publication",
+        "bounded decomposition retains exact operator work plus its conservative memory envelope and refuses under-budget or non-finite requests before publication",
     );
 }
 

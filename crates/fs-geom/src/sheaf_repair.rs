@@ -531,7 +531,7 @@ pub enum SheafRepairError {
     /// The conservative live/retained scalar envelope exceeds the admitted
     /// memory cap.
     MemoryBudgetExceeded {
-        /// Exact required scalar slots.
+        /// Conservative admitted scalar-slot envelope.
         required: u128,
         /// Caller-admitted ceiling.
         cap: usize,
@@ -570,7 +570,7 @@ impl core::fmt::Display for SheafRepairError {
             ),
             Self::MemoryBudgetExceeded { required, cap } => write!(
                 f,
-                "sheaf repair requires {required} scalar slots above cap {cap}"
+                "sheaf repair scalar envelope requires {required} slots above cap {cap}"
             ),
             Self::BudgetArithmeticOverflow { stage } => {
                 write!(
