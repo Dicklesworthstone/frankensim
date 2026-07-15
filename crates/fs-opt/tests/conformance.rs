@@ -8,8 +8,9 @@
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_opt::{
-    Class, ConstraintKind, DescentOptions, Manifold, OptError, OptimizerFamily, ProblemBuilder,
-    ProblemTag, Sense, descend_fn, descend_ir, eval, parse, problem_hash, serialize,
+    Class, ConstraintKind, DescentOptions, FiveToSixRule, Manifold, OptError, OptimizerFamily,
+    ProblemBuilder, ProblemTag, Sense, WireVersion, descend_fn, descend_ir, eval, parse,
+    parse_with_version, problem_hash, serialize,
 };
 use fs_qty::Dims;
 
@@ -20,6 +21,16 @@ fn verdict(case: &str, pass: bool, detail: &str) {
         if pass { "pass" } else { "fail" }
     );
     assert!(pass, "case {case}: {detail}");
+}
+
+fn wire_with_hash(body: &str) -> String {
+    let hash = body
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{body}hash {hash:016X}\n")
 }
 
 struct Lcg(u64);
@@ -322,14 +333,66 @@ fn opt_002_roundtrip_and_hash() {
     let integrity = matches!(parse(&corrupt), Err(OptError::Parse { what, .. })
         if what.contains("integrity hash mismatch"));
     // Garbage directive → parse error with its line number.
-    let garbage = "fsopt v1\nwat 1 2 3\n";
-    let teaches = matches!(parse(garbage), Err(OptError::Parse { line: 2, .. }));
+    let garbage = wire_with_hash("fsopt v2\nwat 1 2 3\nbudget 0\n");
+    let teaches = matches!(
+        parse(&garbage),
+        Err(OptError::Parse { line: 2, what }) if what.contains("unknown directive")
+    );
     verdict(
         "opt-002",
         roundtrip && hash_stable && hash_matches && hash_differs && integrity && teaches,
         "build->serialize->parse round-trips to an IDENTICAL problem (floats travel \
          as bit patterns); hashes are stable across identical builds, differ across \
          edits, and guard integrity (tampered text refuses with the line named)",
+    );
+}
+
+/// opt-002b — exact v1 migration decisions carry a validated structured event
+/// binding source/target versions, rule, both complete artifacts, and the
+/// legacy FNV identity.
+#[test]
+fn opt_002b_legacy_crosswalk_receipt_is_structured_and_logged() {
+    const LEGACY: &str = concat!(
+        "fsopt v1\n",
+        "expr 0 const 3FF0000000000000 (1,2,3,4,5)\n",
+        "objective min 0 3FF0000000000000\n",
+        "budget 0\n",
+        "hash EA73E3CB2B7DE122\n",
+    );
+    let decoded = parse_with_version(LEGACY).expect("pinned v1 artifact");
+    let canonical = serialize(decoded.problem());
+    let receipt = decoded.migration().expect("v1 migration receipt");
+    let verified = receipt.verifies(LEGACY.as_bytes(), canonical.as_bytes());
+    let pass = decoded.source_version() == WireVersion::V1
+        && receipt.source_version() == WireVersion::V1
+        && receipt.target_version() == WireVersion::V2
+        && receipt.rule() == FiveToSixRule::AppendMoleZero
+        && verified;
+    let mut emitter = fs_obs::Emitter::new("fs-opt/conformance", "opt-002b/crosswalk");
+    let line = emitter
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: "opt-dimension-crosswalk".to_string(),
+                json: format!(
+                    "{{\"source_version\":\"{:?}\",\"target_version\":\"{:?}\",\"rule\":\"{:?}\",\"source_fnv\":\"{:016X}\",\"old_hash\":\"{}\",\"new_hash\":\"{}\",\"verified\":{verified}}}",
+                    receipt.source_version(),
+                    receipt.target_version(),
+                    receipt.rule(),
+                    decoded.source_hash(),
+                    receipt.old_hash(),
+                    receipt.new_hash(),
+                ),
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("crosswalk event validates");
+    println!("{line}");
+    verdict(
+        "opt-002b/crosswalk",
+        pass,
+        "exact v1 bytes map only by AppendMoleZero and bind both complete artifacts",
     );
 }
 

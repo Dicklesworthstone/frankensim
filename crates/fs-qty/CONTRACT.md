@@ -44,7 +44,10 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   finite-value round-trip. `decode_json` also accepts the exact historical
   implicit or explicit v1 five-vector wire, appends `mol=0`, and returns an
   immutable BLAKE3 `old_hash -> new_hash` semantic-crosswalk receipt. The
-  convenience `from_json` refuses v1 so callers cannot discard that evidence.
+  source bytes must equal their version's canonical writer shape; whitespace,
+  field-order, and numeric-spelling mutations refuse before a receipt can be
+  issued. The convenience `from_json` refuses v1 so callers cannot discard
+  that evidence.
 - `semantic` — privately validated `SemanticQty`/`SemanticType` carriers keep
   dimensionally identical meanings distinct: absolute/delta temperature,
   mechanical/electrical angle and angular velocity, torque/energy,
@@ -73,12 +76,22 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   affine and legal only as a lone unit; compounds are rejected with guidance.
 - Accumulated unit exponents beyond ±60 are rejected as unphysical.
 - Semantic carriers validate dimensions, finiteness, amplitude/range domains,
-  and exact source/target kinds before any named conversion. Pole-pair counts
-  are positive and their electrical phase offsets are finite; angle maps apply
-  the offset while angular-velocity maps do not. Affine temperature algebra
-  and offset-bearing angle maps accept only static/instantaneous point values;
-  peak/RMS aggregates fail with a typed form-policy error. Linear angular-
-  velocity amplitudes may still cross pole-pair domains without the offset.
+  and exact source/target kinds before any named conversion. An exhaustive,
+  closed kind/form matrix admits instantaneous, peak, RMS, and paired phasor
+  forms only for temperature differences, angles/angular velocities, torque,
+  pressure, stress/strain, and acoustic pressure. Absolute temperature,
+  energy, composition, mass/amount/molar mass/concentrations,
+  entropy/heat-capacity, and acoustic power are static-only and fail with a
+  typed form-policy error at carrier construction. Pole-pair counts are
+  positive and their electrical phase offsets are finite; angle maps apply the
+  offset while angular-velocity maps do not. Offset-bearing operations accept
+  only static/instantaneous point values, while linear waveform amplitudes may
+  cross domains without applying an offset.
+- Positive scalar mass/amount and concentration-basis conversions never retain
+  a rounded zero. If the exact positive result is below the representable f64
+  domain, the conversion returns a typed representability refusal; a true zero
+  source remains a legal exact zero. Non-finite overflow remains a structured
+  finite-value refusal.
 - Composition values are immutable, nonempty, finite unit fractions whose
   deterministic input-order sum is one within the fixed documented tolerance;
   mass/mole conversion is whole-vector and requires one positive finite molar
@@ -103,8 +116,9 @@ platform-dependent elementary math. Semantic conversions use only fixed
 constants and basic arithmetic; acoustic levels deliberately do not calculate
 logarithms. JSON writing uses Rust's shortest-round-trip float formatting;
 migration receipts hash the exact supplied v1 bytes and exact canonical v2
-bytes with `fs-blake3`. Chemical content identities use deterministic canonical
-encodings and domain-separated `fs-blake3` hashes.
+bytes with `fs-blake3`; noncanonical source spellings cannot mint receipts.
+Chemical content identities use deterministic canonical encodings and
+domain-separated `fs-blake3` hashes.
 
 ## Cancellation behavior
 Scalar operations are O(1), parsing and composition conversion are O(input
@@ -125,12 +139,15 @@ public API unchanged).
 bit-agreement (qty-002), v1/v2 JSON and pinned crosswalk receipts (qty-003),
 dimension safety (qty-004), parser totality over garbage (qty-005), plus 1,200
 deterministic fs-propcheck cases for six-component dimension-vector laws with
-shrinking enabled and fixed cases retained. Unit tests include the 20k-case
-seeded garbage battery, new-token collision cases, nonzero-mole round trips,
-strict wire-version/arity refusals, every semantic distinction and named
-conversion (including negative/boundary cases), immutable chemistry identities,
-axis/order mismatches, exact elemental/charge conservation, and checked
-multiply/add overflow. Compile-fail doctests prove the type-level rejections.
+shrinking enabled and fixed cases retained. The exhaustive qty-007 Cartesian
+kind/form/phasor matrix emits one JSONL admission/refusal record per case, and
+qty-008 proves parser-to-semantic unit-rescaling invariance. Unit tests include
+the 20k-case seeded garbage battery, new-token collision cases, nonzero-mole
+round trips, strict canonical v1/v2 mutation and arity refusals, every semantic
+distinction and named conversion (including exact-bit subnormal boundaries),
+immutable chemistry identities, axis/order mismatches, exact elemental/charge
+conservation, and checked multiply/add overflow. Compile-fail doctests prove
+the type-level rejections.
 
 ## No-claim boundaries
 - Luminous-intensity (`cd`) dimensions; candela stays out until photometry is
@@ -145,7 +162,7 @@ multiply/add overflow. Compile-fail doctests prove the type-level rejections.
   derived-unit naming like "Pa"); format→parse round-trip is guaranteed for
   dimensionless only.
 - General complex arithmetic or signal processing; `PhasorQty` only binds a
-  real/imaginary pair to one kind and peak/RMS convention.
+  real/imaginary pair to one waveform-capable kind and peak/RMS convention.
 - Logarithmic acoustic conversion; `AcousticLevel` validates and retains an
   explicit positive physical reference but delegates logarithms to the owning
   acoustics/math layer.

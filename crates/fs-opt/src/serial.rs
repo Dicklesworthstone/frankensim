@@ -1029,7 +1029,7 @@ mod tests {
         assert!(
             !receipt.verifies(
                 legacy_text.as_bytes(),
-                canonical[..canonical_hash_line].as_bytes()
+                &canonical.as_bytes()[..canonical_hash_line]
             ),
             "the new hash binds the complete canonical artifact"
         );

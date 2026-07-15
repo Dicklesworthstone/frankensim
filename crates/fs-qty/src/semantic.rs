@@ -36,8 +36,7 @@ const INSTANTANEOUS_FORM: u8 = 1 << 1;
 const PEAK_FORM: u8 = 1 << 2;
 const RMS_FORM: u8 = 1 << 3;
 const PHASOR_FORM: u8 = 1 << 4;
-const WAVEFORM_FORMS: u8 =
-    STATIC_FORM | INSTANTANEOUS_FORM | PEAK_FORM | RMS_FORM | PHASOR_FORM;
+const WAVEFORM_FORMS: u8 = STATIC_FORM | INSTANTANEOUS_FORM | PEAK_FORM | RMS_FORM | PHASOR_FORM;
 
 /// Domain attached to an angle or angular velocity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1844,6 +1843,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fail-closed pole-pair domain and refusal matrix.
     fn g0_pole_pair_map_changes_domain_and_rejects_wrong_source() {
         assert!(matches!(
             PolePairPhaseMap::new(0),
@@ -1982,6 +1982,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One crossed kind/form/domain Gauntlet battery.
     fn g0_crossed_kind_form_and_domain_battery_fails_closed() {
         let absolute = absolute_temperature_kelvin(300.0).expect("absolute temperature");
         let difference = temperature_difference_kelvin(5.0).expect("temperature difference");
@@ -2182,11 +2183,7 @@ mod tests {
                 half,
             ),
             mass_concentration_to_amount_concentration(
-                quantity(
-                    minimum,
-                    QuantityKind::MassConcentration,
-                    ValueForm::Static,
-                ),
+                quantity(minimum, QuantityKind::MassConcentration, ValueForm::Static),
                 twice,
             ),
             amount_concentration_to_mass_concentration(
@@ -2210,11 +2207,8 @@ mod tests {
             ));
         }
 
-        let amount = mass_to_amount(
-            quantity(next, QuantityKind::Mass, ValueForm::Static),
-            twice,
-        )
-        .expect("the adjacent subnormal remains representable");
+        let amount = mass_to_amount(quantity(next, QuantityKind::Mass, ValueForm::Static), twice)
+            .expect("the adjacent subnormal remains representable");
         assert_eq!(amount.value().to_bits(), minimum.to_bits());
         assert_eq!(
             amount_to_mass(amount, twice)

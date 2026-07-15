@@ -140,13 +140,13 @@ fn qty_005_parser_total_over_garbage() {
     verdict("qty-005/no-panic", true, "2000 garbage inputs, no panic");
 }
 
-fn logged_parser_refusal(case: &str, input: &str, expected: ParseErrorKind) {
+fn logged_parser_refusal(case: &str, input: &str, expected: &ParseErrorKind) {
     let outcome = std::panic::catch_unwind(|| parse_qty(input));
     match outcome {
         Ok(Err(error)) => verdict(
             case,
             error.input == input
-                && error.kind == expected
+                && &error.kind == expected
                 && error.at <= input.len()
                 && !error.help.is_empty(),
             &format!(
@@ -198,7 +198,7 @@ fn qty_006_exponent_and_nonfinite_boundaries_are_total() {
         ("qty-006/derived-over-cap", "1Pa^31"),
         ("qty-006/derived-hostile", "1Pa^127"),
     ] {
-        logged_parser_refusal(case, input, ParseErrorKind::BadExponent);
+        logged_parser_refusal(case, input, &ParseErrorKind::BadExponent);
     }
 
     let repeated_positive = format!("1{}", vec!["m"; 61].join("*"));
@@ -206,12 +206,12 @@ fn qty_006_exponent_and_nonfinite_boundaries_are_total() {
     logged_parser_refusal(
         "qty-006/repeated-positive",
         &repeated_positive,
-        ParseErrorKind::BadExponent,
+        &ParseErrorKind::BadExponent,
     );
     logged_parser_refusal(
         "qty-006/repeated-negative",
         &repeated_negative,
-        ParseErrorKind::BadExponent,
+        &ParseErrorKind::BadExponent,
     );
 
     for (case, input) in [
@@ -226,7 +226,7 @@ fn qty_006_exponent_and_nonfinite_boundaries_are_total() {
         ("qty-006/division-underflow", "1e-308rad/THz^25"),
         ("qty-006/division-by-underflow", "1rad/THz^-30"),
     ] {
-        logged_parser_refusal(case, input, ParseErrorKind::NonFiniteValue);
+        logged_parser_refusal(case, input, &ParseErrorKind::NonFiniteValue);
     }
 }
 
@@ -325,9 +325,7 @@ fn qty_007_semantic_kind_form_matrix_is_sealed_and_logged() {
                 }) => !expected && source == semantic_type,
                 Err(_) => false,
             };
-            let pass = actual == expected
-                && typed
-                && kind.admits_scalar_form(form) == expected;
+            let pass = actual == expected && typed && kind.admits_scalar_form(form) == expected;
             println!(
                 "{{\"suite\":\"fs-qty/conformance\",\"case\":\"qty-007/scalar-form\",\"kind\":\"{kind:?}\",\"form\":\"{form:?}\",\"expected\":\"{}\",\"actual\":\"{}\",\"verdict\":\"{}\"}}",
                 if expected { "admit" } else { "refuse" },
@@ -353,15 +351,16 @@ fn qty_007_semantic_kind_form_matrix_is_sealed_and_logged() {
                 PhasorAmplitude::Rms => ValueForm::Rms,
             };
             let typed = match outcome {
-                Ok(phasor) => waveform
-                    && phasor.real().value.to_bits() == (-1.0f64).to_bits()
-                    && phasor.imaginary().value.to_bits() == 2.0f64.to_bits(),
+                Ok(phasor) => {
+                    waveform
+                        && phasor.real().value.to_bits() == (-1.0f64).to_bits()
+                        && phasor.imaginary().value.to_bits() == 2.0f64.to_bits()
+                }
                 Err(SemanticError::UnsupportedForm {
                     source,
                     requirement: FormRequirement::StaticOnly,
                     ..
-                }) => !waveform
-                    && source == SemanticType::new(kind, requested_form),
+                }) => !waveform && source == SemanticType::new(kind, requested_form),
                 Err(_) => false,
             };
             let pass = actual == waveform && typed && kind.admits_phasor() == waveform;
@@ -376,7 +375,10 @@ fn qty_007_semantic_kind_form_matrix_is_sealed_and_logged() {
             }
         }
     }
-    assert!(failures.is_empty(), "semantic matrix failures: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "semantic matrix failures: {failures:?}"
+    );
 }
 
 fn semantic_from_literal(text: &str, kind: QuantityKind) -> SemanticQty {
@@ -428,9 +430,8 @@ fn qty_008_mass_amount_unit_rescaling_is_metamorphic() {
     let amount_concentration =
         mass_concentration_to_amount_concentration(mass_concentration, molar_mass)
             .expect("concentration basis conversion");
-    let recovered =
-        amount_concentration_to_mass_concentration(amount_concentration, molar_mass)
-            .expect("concentration inverse");
+    let recovered = amount_concentration_to_mass_concentration(amount_concentration, molar_mass)
+        .expect("concentration inverse");
     verdict(
         "qty-008/concentration-rescaling",
         within_conversion_enclosure(amount_concentration.value(), 1.0)

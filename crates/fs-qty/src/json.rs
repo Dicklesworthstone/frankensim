@@ -355,6 +355,36 @@ impl Cursor<'_> {
     }
 }
 
+fn validate_canonical_source(
+    text: &str,
+    qty: QtyAny,
+    source_version: QtyWireVersion,
+    explicit_version: bool,
+) -> Result<(), JsonError> {
+    let canonical_source = match (source_version, explicit_version) {
+        (QtyWireVersion::LegacyFive, false) => to_legacy_json(qty),
+        (QtyWireVersion::LegacyFive, true) => legacy_json(qty, true),
+        (QtyWireVersion::SixBase, true) => to_json(qty),
+        (QtyWireVersion::SixBase, false) => Err(JsonError {
+            at: 0,
+            message: "six-base quantity JSON requires an explicit schema_version".to_string(),
+        }),
+    }?;
+    if text == canonical_source {
+        return Ok(());
+    }
+    let at = text
+        .bytes()
+        .zip(canonical_source.bytes())
+        .position(|(actual, canonical)| actual != canonical)
+        .unwrap_or(text.len().min(canonical_source.len()));
+    Err(JsonError {
+        at,
+        message: "quantity JSON must exactly match its canonical versioned encoding; preserve historical v1 bytes and use to_json for v2"
+            .to_string(),
+    })
+}
+
 /// Decode either exact legacy v1 five-vector JSON or current v2 six-vector
 /// JSON. The field order is fixed within each schema.
 ///
@@ -437,24 +467,7 @@ pub fn decode_json(text: &str) -> Result<DecodedQty, JsonError> {
         });
     }
     let qty = QtyAny::new(value, Dims([m, kg, s, k, a, mol]));
-    let canonical_source = match (source_version, explicit_version) {
-        (QtyWireVersion::LegacyFive, false) => to_legacy_json(qty)?,
-        (QtyWireVersion::LegacyFive, true) => legacy_json(qty, true)?,
-        (QtyWireVersion::SixBase, true) => to_json(qty)?,
-        (QtyWireVersion::SixBase, false) => unreachable!("implicit input is always legacy v1"),
-    };
-    if text != canonical_source {
-        let at = text
-            .bytes()
-            .zip(canonical_source.bytes())
-            .position(|(actual, canonical)| actual != canonical)
-            .unwrap_or(text.len().min(canonical_source.len()));
-        return Err(JsonError {
-            at,
-            message: "quantity JSON must exactly match its canonical versioned encoding; preserve historical v1 bytes and use to_json for v2"
-                .to_string(),
-        });
-    }
+    validate_canonical_source(text, qty, source_version, explicit_version)?;
     let migration = if source_version == QtyWireVersion::LegacyFive {
         let new_bytes = to_json(qty)?;
         Some(DimensionCrosswalkReceipt {
@@ -598,11 +611,7 @@ mod tests {
         for expected in [0.0_f64, -0.0, 0.125, -3.5e-9, 6.022_140_76e23] {
             let text = to_json(QtyAny::dimensionless(expected)).expect("canonical number");
             let decoded = decode_json(&text).unwrap_or_else(|e| panic!("must accept {text}: {e}"));
-            assert_eq!(
-                decoded.qty().value.to_bits(),
-                expected.to_bits(),
-                "{text}"
-            );
+            assert_eq!(decoded.qty().value.to_bits(), expected.to_bits(), "{text}");
         }
 
         for raw in ["+1", "01", "-01", ".5", "1.", "1e", "1e+", "1e999"] {

@@ -820,14 +820,14 @@ mod hardening {
     use super::{ParseErrorKind, parse_qty};
     use crate::Dims;
 
-    fn structured_refusal(input: &str, expected_kind: ParseErrorKind, expected_at: usize) {
+    fn structured_refusal(input: &str, expected_kind: &ParseErrorKind, expected_at: usize) {
         let outcome = std::panic::catch_unwind(|| parse_qty(input));
         assert!(outcome.is_ok(), "parser panicked for {input:?}");
         let error = outcome
             .expect("panic outcome checked")
             .expect_err("hostile literal must refuse");
         assert_eq!(error.input, input, "error lost its source input");
-        assert_eq!(error.kind, expected_kind, "wrong refusal for {input:?}");
+        assert_eq!(&error.kind, expected_kind, "wrong refusal for {input:?}");
         assert_eq!(error.at, expected_at, "wrong byte offset for {input:?}");
         assert!(
             error.at <= input.len(),
@@ -947,7 +947,7 @@ mod hardening {
             ("1Pa^127", 3),
             ("  1m^-128", 4),
         ] {
-            structured_refusal(input, ParseErrorKind::BadExponent, at);
+            structured_refusal(input, &ParseErrorKind::BadExponent, at);
         }
     }
 
@@ -998,7 +998,7 @@ mod hardening {
             ("1e-308rad/THz^25", 13),
             ("1rad/THz^-30", 8),
         ] {
-            structured_refusal(input, ParseErrorKind::NonFiniteValue, at);
+            structured_refusal(input, &ParseErrorKind::NonFiniteValue, at);
         }
     }
 
@@ -1006,7 +1006,7 @@ mod hardening {
     fn textual_zero_remains_valid_with_large_exponents() {
         for input in ["0", "-0.0", "0e999", "-0e999"] {
             let quantity = parse_qty(input).unwrap_or_else(|error| panic!("{input}: {error}"));
-            assert_eq!(quantity.value, 0.0, "{input}");
+            assert_eq!(quantity.value.abs().to_bits(), 0.0_f64.to_bits(), "{input}");
             assert!(quantity.dims.is_none(), "{input}");
         }
     }
