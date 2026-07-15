@@ -1907,9 +1907,10 @@ mod cap_allocation_tests {
         // Exact expression comparison must decline it, retain the PDE,
         // and find that PDE (not the colliding entry) on the next call.
         let fingerprint = super::ExprFingerprint::pde("flow", variable, false, Dims::NONE);
-        builder
+        let replaced = builder
             .intern
             .insert(fingerprint, super::InternEntry::One(unrelated));
+        assert!(replaced.is_none(), "synthetic collision key is fresh");
         let pde = builder
             .pde_residual("flow", variable, false, Dims::NONE)
             .expect("colliding fingerprint still admits distinct expression");
