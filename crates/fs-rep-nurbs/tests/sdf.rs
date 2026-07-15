@@ -312,20 +312,13 @@ fn ns_003_trim_downgrade_is_honest() {
     // Keep only the NORTHERN parameter half (v in [1/2, 1] is north because
     // the sphere profile runs south to north): CCW square in (u, v).
     let keep_north = poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16);
-    let trim = TrimmedPatch {
-        loops: vec![keep_north],
-        max_subdivision: 24,
-    };
-    let mut malformed_trim = trim.clone();
-    malformed_trim.loops[0].curve.knots.knots.clear();
-    assert!(
-        ShellSdf::new(
-            vec![sphere()],
-            vec![Some(malformed_trim)],
-            Orientation::Outward,
-        )
-        .is_err(),
-        "shell ingestion must revalidate caller-mutable trim structure"
+    let trim = TrimmedPatch::with_max_subdivision(vec![keep_north], 24);
+    assert_eq!(
+        trim.admit()
+            .expect("sealed trim admission")
+            .max_subdivision(),
+        24,
+        "shell ingestion receives an immutable validated trim snapshot"
     );
     let shell =
         ShellSdf::new(vec![sphere()], vec![Some(trim)], Orientation::Outward).expect("shell");
@@ -344,10 +337,10 @@ fn ns_003_trim_downgrade_is_honest() {
     let alternate = ShellSdf::new(
         vec![sphere(), sphere()],
         vec![
-            Some(TrimmedPatch {
-                loops: vec![poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16)],
-                max_subdivision: 24,
-            }),
+            Some(TrimmedPatch::with_max_subdivision(
+                vec![poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16)],
+                24,
+            )),
             None,
         ],
         Orientation::Outward,
@@ -376,10 +369,10 @@ fn ns_003_trim_downgrade_is_honest() {
         let chart = ShellSdfChart::new(
             ShellSdf::new(
                 vec![sphere()],
-                vec![Some(TrimmedPatch {
-                    loops: vec![poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16)],
-                    max_subdivision: 24,
-                })],
+                vec![Some(TrimmedPatch::with_max_subdivision(
+                    vec![poly_loop(&[[0, 8], [16, 8], [16, 16], [0, 16]], 16)],
+                    24,
+                ))],
                 Orientation::Outward,
             )
             .expect("shell"),
@@ -419,9 +412,10 @@ fn ns_004_frame_invariance_g3() {
     // same offset: the measured bracket should agree tightly.
     let base =
         ShellSdf::new(vec![torus(1.0, 0.3)], vec![None], Orientation::Outward).expect("shell");
-    let mut moved_surface = torus(1.0, 0.3);
+    let source_surface = torus(1.0, 0.3);
+    let mut moved_controls = source_surface.homogeneous_control_net().to_vec();
     let t = [13.0, -7.0, 3.5];
-    for row in &mut moved_surface.cpw {
+    for row in &mut moved_controls {
         for h in row.iter_mut() {
             let w = h[3];
             h[0] += t[0] * w;
@@ -429,6 +423,12 @@ fn ns_004_frame_invariance_g3() {
             h[2] += t[2] * w;
         }
     }
+    let moved_surface = NurbsSurface::from_homogeneous(
+        source_surface.knots_u().clone(),
+        source_surface.knots_v().clone(),
+        moved_controls,
+    )
+    .expect("translated sealed surface");
     let moved =
         ShellSdf::new(vec![moved_surface], vec![None], Orientation::Outward).expect("shell");
     let mut state = 0xfeed_f00d;
@@ -553,12 +553,19 @@ fn ns_005_adaptive_tile_generation() {
     let corner = tile.values[0];
     assert!(corner > 0.0, "corner outside: {corner}");
     assert!(mid < 0.0, "center inside: {mid}");
-    let mut far_surface = sphere();
-    for row in &mut far_surface.cpw {
+    let source_surface = sphere();
+    let mut far_controls = source_surface.homogeneous_control_net().to_vec();
+    for row in &mut far_controls {
         for control in row {
             control[0] += 1.0e39 * control[3];
         }
     }
+    let far_surface = NurbsSurface::from_homogeneous(
+        source_surface.knots_u().clone(),
+        source_surface.knots_v().clone(),
+        far_controls,
+    )
+    .expect("far translated sealed surface");
     let far_chart = ShellSdfChart::new(
         ShellSdf::new(vec![far_surface], vec![None], Orientation::Unknown)
             .expect("finite far shell"),

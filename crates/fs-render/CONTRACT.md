@@ -40,9 +40,9 @@ differentiable lift). Pure Rust throughout.
   spheres fail to overlap). `ray_intersect_nurbs` is grid-seeded 3×3
   Newton on `S(u,v) − o − t·d` with the `[S_u, S_v, −d]` Jacobian. Its
   allocation-bearing legacy seed grid is checked, capped, and fallibly
-  reserved before evaluation; malformed mutable NURBS state, invalid settings,
-  resource refusal, cancellation, and bounded-search nonconvergence remain
-  distinct typed outcomes. The current Newton path has no exclusion theorem,
+  reserved before evaluation; defensive sealed-source invariant failure,
+  invalid settings, resource refusal, cancellation, and bounded-search
+  nonconvergence remain distinct typed outcomes. The current Newton path has no exclusion theorem,
   so exhausted starts fail closed as `IterationLimit`; `Ok(None)` is reserved
   for a future certified miss. Jacobian columns and residuals are normalized
   before the dimensionless angular-volume condition test, and residual/normal

@@ -6,28 +6,75 @@
 //! knot vectors are a documented follow-up).
 
 use crate::NurbsError;
-use crate::basis::{KnotVector, Scalar};
+use crate::basis::{BASIS_MAX_WORK_UNITS, KnotVector, Scalar};
+
+// Conservative price for finite/weight/projection/canonical-lane validation of
+// one homogeneous control. Structural admission must precede the full scan.
+const CURVE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
 
 /// One span's Cartesian control box: (min, max, t0, t1).
 pub type SpanBox<S, const DIM: usize> = ([S; DIM], [S; DIM], S, S);
 
 /// A rational curve in `DIM` dimensions: homogeneous control points
 /// `(w·x…, w)` over a clamped knot vector.
+///
+/// ```compile_fail
+/// use fs_rep_nurbs::{KnotVector, NurbsCurve};
+/// let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).unwrap();
+/// let mut curve = NurbsCurve::new(knots, &[[0.0], [1.0]], &[1.0, 1.0]).unwrap();
+/// curve.cpw.clear();
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct NurbsCurve<S: Scalar, const DIM: usize> {
     /// The knot vector.
-    pub knots: KnotVector<S>,
+    pub(crate) knots: KnotVector<S>,
     /// Homogeneous control points: `DIM` weighted coordinates + weight.
-    pub cpw: Vec<[S; 4]>,
+    pub(crate) cpw: Vec<[S; 4]>,
+}
+
+/// A validate-once borrow of one exact immutable curve snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedNurbsCurve<'a, S: Scalar, const DIM: usize> {
+    inner: &'a NurbsCurve<S, DIM>,
 }
 
 impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
+    fn validation_work_for(
+        knots: &KnotVector<S>,
+        control_count: usize,
+    ) -> Result<u128, NurbsError> {
+        knots
+            .validation_work()?
+            .checked_add(
+                (control_count as u128)
+                    .checked_mul(CURVE_VALIDATION_WORK_PER_CONTROL)
+                    .ok_or_else(|| NurbsError::Domain {
+                        what: "curve control-validation work overflows u128".to_string(),
+                    })?,
+            )
+            .ok_or_else(|| NurbsError::Domain {
+                what: "curve structure-validation work overflows u128".to_string(),
+            })
+    }
+
+    fn enforce_validation_work(work: u128) -> Result<(), NurbsError> {
+        if work > BASIS_MAX_WORK_UNITS {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "curve structure validation requests {work} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_live_structure(&self) -> Result<(), NurbsError> {
         if DIM > 3 {
             return Err(NurbsError::Structure {
                 what: format!("curve dimension {DIM} exceeds the homogeneous storage limit 3"),
             });
         }
+        Self::enforce_validation_work(Self::validation_work_for(&self.knots, self.cpw.len())?)?;
         self.knots.validate_live()?;
         if self.cpw.len() != self.knots.control_count()
             || self.cpw.iter().any(|control| {
@@ -40,10 +87,14 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                         .iter()
                         .copied()
                         .any(|component| !component.quotient_is_finite(control[3]))
+                    || control[DIM..3]
+                        .iter()
+                        .copied()
+                        .any(|component| component != S::zero())
             })
         {
             return Err(NurbsError::Structure {
-                what: "live curve control net must match its knots and retain finite homogeneous coordinates with admissible weights"
+                what: "live curve control net must match its knots, retain finite homogeneous coordinates with admissible weights, and zero inactive coordinate lanes"
                     .to_string(),
             });
         }
@@ -54,13 +105,13 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     ///
     /// # Errors
     /// [`NurbsError::Structure`] on count mismatch, non-finite coordinates, or
-    /// non-positive/non-finite weights.
+    /// non-positive/non-finite weights; [`NurbsError::Domain`] when validation
+    /// work or homogeneous-control allocation is refused.
     pub fn new(
         knots: KnotVector<S>,
         points: &[[S; DIM]],
         weights: &[S],
     ) -> Result<Self, NurbsError> {
-        knots.validate_live()?;
         if DIM > 3 {
             return Err(NurbsError::Structure {
                 what: format!("curve dimension {DIM} exceeds the homogeneous storage limit 3"),
@@ -76,6 +127,8 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 ),
             });
         }
+        Self::enforce_validation_work(Self::validation_work_for(&knots, points.len())?)?;
+        knots.validate_live()?;
         if weights.iter().copied().any(|w| !w.is_admissible_weight()) {
             return Err(NurbsError::Structure {
                 what: "weights must be finite, positive, and numerically admissible".to_string(),
@@ -91,18 +144,19 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 what: "control-point coordinates must be finite".to_string(),
             });
         }
-        let cpw: Vec<[S; 4]> = points
-            .iter()
-            .zip(weights)
-            .map(|(p, &w)| {
-                let mut h = [S::zero(); 4];
-                for (slot, &c) in h.iter_mut().zip(p.iter()) {
-                    *slot = c * w;
-                }
-                h[3] = w;
-                h
-            })
-            .collect();
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(points.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "curve homogeneous-control allocation was refused".to_string(),
+            })?;
+        for (point, &weight) in points.iter().zip(weights) {
+            let mut homogeneous = [S::zero(); 4];
+            for (slot, &coordinate) in homogeneous.iter_mut().zip(point.iter()) {
+                *slot = coordinate * weight;
+            }
+            homogeneous[3] = weight;
+            cpw.push(homogeneous);
+        }
         if points.iter().zip(&cpw).any(|(point, homogeneous)| {
             point
                 .iter()
@@ -128,17 +182,94 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         Ok(NurbsCurve { knots, cpw })
     }
 
+    /// Build from a homogeneous control net, validating every coordinate and
+    /// weight before the sealed representation is exposed.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] on a knot/control count mismatch, an invalid
+    /// knot vector, a non-finite coordinate, a noncanonical inactive lane, or
+    /// an inadmissible weight; [`NurbsError::Domain`] when validation work is
+    /// refused.
+    pub fn from_homogeneous(knots: KnotVector<S>, cpw: Vec<[S; 4]>) -> Result<Self, NurbsError> {
+        let candidate = NurbsCurve { knots, cpw };
+        candidate.validate_live_structure()?;
+        Ok(candidate)
+    }
+
+    /// Borrow the curve's sealed knot vector.
+    #[must_use]
+    pub const fn knots(&self) -> &KnotVector<S> {
+        &self.knots
+    }
+
+    /// Borrow the sealed homogeneous control points.
+    #[must_use]
+    pub fn homogeneous_control_points(&self) -> &[[S; 4]] {
+        &self.cpw
+    }
+
+    /// Validate this exact immutable curve snapshot once.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] when the sealed source is internally invalid;
+    /// [`NurbsError::Domain`] when validation work exceeds the defensive cap.
+    pub fn admit(&self) -> Result<AdmittedNurbsCurve<'_, S, DIM>, NurbsError> {
+        self.validate_live_structure()?;
+        Ok(self.admitted_after_validation())
+    }
+
+    pub(crate) const fn admitted_after_validation(&self) -> AdmittedNurbsCurve<'_, S, DIM> {
+        AdmittedNurbsCurve { inner: self }
+    }
+
     /// Homogeneous evaluation (the shared exact/fast core).
     ///
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn eval_homogeneous(&self, t: S) -> Result<[S; 4], NurbsError> {
-        self.validate_live_structure()?;
-        let (span, basis) = self.knots.basis(t)?;
-        let p = self.knots.degree;
+        self.admit()?.eval_homogeneous(t)
+    }
+
+    /// Cartesian evaluation.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the domain.
+    pub fn eval(&self, t: S) -> Result<[S; DIM], NurbsError> {
+        self.admit()?.eval(t)
+    }
+}
+
+impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
+    /// The exact immutable source bound to this view.
+    #[must_use]
+    pub const fn source(&self) -> &'a NurbsCurve<S, DIM> {
+        self.inner
+    }
+
+    /// Borrow the already-validated knot-vector view.
+    #[must_use]
+    pub fn knots(&self) -> crate::basis::AdmittedKnotVector<'a, S> {
+        self.inner.knots.admitted_after_validation()
+    }
+
+    /// Borrow the sealed homogeneous control points.
+    #[must_use]
+    pub fn homogeneous_control_points(&self) -> &'a [[S; 4]] {
+        &self.inner.cpw
+    }
+
+    /// Homogeneous evaluation without rescanning curve or knot structure.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the domain or when basis work/allocation
+    /// is refused.
+    pub fn eval_homogeneous(&self, t: S) -> Result<[S; 4], NurbsError> {
+        let knots = self.knots();
+        let (span, basis) = knots.basis(t)?;
+        let p = knots.degree();
         let mut acc = [S::zero(); 4];
         for (r, &b) in basis.iter().enumerate() {
-            let cp = &self.cpw[span - p + r];
+            let cp = &self.inner.cpw[span - p + r];
             for (a, &c) in acc.iter_mut().zip(cp.iter()) {
                 *a = *a + b * c;
             }
@@ -178,22 +309,38 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         }
         Ok(out)
     }
+}
 
+impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// EXACT Boehm knot insertion at `t` (multiplicity one per call).
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] outside the OPEN domain interior.
+    /// [`NurbsError::Domain`] outside the OPEN domain interior or when checked
+    /// output sizing/allocation/validation is refused.
     pub fn insert_knot(&self, t: S) -> Result<Self, NurbsError> {
         self.validate_live_structure()?;
-        let (lo, hi) = self.knots.domain()?;
+        let admitted_knots = self.knots.admitted_after_validation();
+        let (lo, hi) = admitted_knots.domain();
         if t <= lo || hi <= t {
             return Err(NurbsError::Domain {
                 what: format!("insertion parameter {t:?} must be interior to {lo:?}..{hi:?}"),
             });
         }
         let p = self.knots.degree;
-        let k = self.knots.span(t)?;
-        let mut new_cpw = Vec::with_capacity(self.cpw.len() + 1);
+        let k = admitted_knots.span(t)?;
+        let new_control_count =
+            self.cpw
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "inserted control count overflows usize".to_string(),
+                })?;
+        let mut new_cpw = Vec::new();
+        new_cpw
+            .try_reserve_exact(new_control_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "inserted curve-control allocation was refused".to_string(),
+            })?;
         new_cpw.extend_from_slice(&self.cpw[..=k - p]);
         for i in (k - p + 1)..=k {
             let denom = self.knots.knots[i + p] - self.knots.knots[i];
@@ -205,12 +352,24 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             new_cpw.push(q);
         }
         new_cpw.extend_from_slice(&self.cpw[k..]);
-        let mut new_knots = self.knots.knots.clone();
-        new_knots.insert(k + 1, t);
-        Ok(NurbsCurve {
-            knots: KnotVector::new(new_knots, p)?,
-            cpw: new_cpw,
-        })
+        let new_knot_count =
+            self.knots
+                .knots
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "inserted knot count overflows usize".to_string(),
+                })?;
+        let mut new_knots = Vec::new();
+        new_knots
+            .try_reserve_exact(new_knot_count)
+            .map_err(|_| NurbsError::Domain {
+                what: "inserted knot-vector allocation was refused".to_string(),
+            })?;
+        new_knots.extend_from_slice(&self.knots.knots[..=k]);
+        new_knots.push(t);
+        new_knots.extend_from_slice(&self.knots.knots[k + 1..]);
+        NurbsCurve::from_homogeneous(KnotVector::new(new_knots, p)?, new_cpw)
     }
 
     /// EXACT knot removal (inverse of [`Self::insert_knot`]) — succeeds
@@ -633,6 +792,23 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
     /// [`NurbsError::Domain`] outside the parameter domain or above the
     /// defensive legacy order ceiling.
     pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<[f64; DIM]>, NurbsError> {
+        self.derivatives_impl(t, order, true)
+    }
+
+    fn derivatives_after_validation(
+        &self,
+        t: f64,
+        order: usize,
+    ) -> Result<Vec<[f64; DIM]>, NurbsError> {
+        self.derivatives_impl(t, order, false)
+    }
+
+    fn derivatives_impl(
+        &self,
+        t: f64,
+        order: usize,
+        validate_structure: bool,
+    ) -> Result<Vec<[f64; DIM]>, NurbsError> {
         if DIM > 3 {
             return Err(NurbsError::Structure {
                 what: format!("curve dimension {DIM} exceeds the homogeneous storage limit 3"),
@@ -651,7 +827,9 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
                 what: "derivative parameter must be finite".to_string(),
             });
         }
-        self.validate_live_structure()?;
+        if validate_structure {
+            self.validate_live_structure()?;
+        }
         let p = self.knots.degree;
         let homogeneous_order = order.min(p);
         let structure_extent = (self.cpw.len() as u128)
@@ -730,7 +908,7 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
                 ),
             });
         }
-        let (lo, hi) = self.knots.domain()?;
+        let (lo, hi) = self.knots.admitted_after_validation().domain();
         if t > lo && t < hi {
             let multiplicity = self.knots.knots.iter().filter(|&&knot| knot == t).count();
             if multiplicity > 0 && (multiplicity > p || order > p - multiplicity) {
@@ -843,5 +1021,17 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
             out.push(jet);
         }
         Ok(out)
+    }
+}
+
+impl<const DIM: usize> AdmittedNurbsCurve<'_, f64, DIM> {
+    /// Derivatives of the admitted curve without rescanning its source
+    /// structure.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the parameter domain or above the
+    /// defensive legacy order/work/allocation ceilings.
+    pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<[f64; DIM]>, NurbsError> {
+        self.inner.derivatives_after_validation(t, order)
     }
 }

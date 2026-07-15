@@ -4,8 +4,10 @@
 //! boxes (the convex-hull property in both directions).
 
 use crate::NurbsError;
-use crate::basis::{KnotVector, Scalar};
+use crate::basis::{BASIS_MAX_WORK_UNITS, KnotVector, Scalar};
 use crate::curve::NurbsCurve;
+
+const SURFACE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
 
 /// One (u-span × v-span) control box: (min, max, (u0, u1), (v0, v1)).
 pub type SurfaceSpanBox<S> = ([S; 3], [S; 3], (S, S), (S, S));
@@ -14,18 +16,66 @@ pub type SurfaceSpanBox<S> = ([S; 3], [S; 3], (S, S), (S, S));
 pub type SurfacePartials = ([f64; 3], [f64; 3], [f64; 3]);
 
 /// A rational tensor-product surface in 3D.
+///
+/// ```compile_fail
+/// use fs_rep_nurbs::{KnotVector, NurbsSurface};
+/// let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).unwrap();
+/// let mut surface = NurbsSurface::new(
+///     knots.clone(), knots,
+///     &vec![vec![[0.0, 0.0, 0.0]; 2]; 2],
+///     &vec![vec![1.0; 2]; 2],
+/// ).unwrap();
+/// surface.cpw.clear();
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct NurbsSurface<S: Scalar> {
     /// Knots in u.
-    pub knots_u: KnotVector<S>,
+    pub(crate) knots_u: KnotVector<S>,
     /// Knots in v.
-    pub knots_v: KnotVector<S>,
+    pub(crate) knots_v: KnotVector<S>,
     /// Homogeneous control net `cpw[i][j]`, i along u, j along v.
-    pub cpw: Vec<Vec<[S; 4]>>,
+    pub(crate) cpw: Vec<Vec<[S; 4]>>,
+}
+
+/// A validate-once borrow of one exact immutable surface snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedNurbsSurface<'a, S: Scalar> {
+    inner: &'a NurbsSurface<S>,
 }
 
 impl<S: Scalar> NurbsSurface<S> {
+    fn validation_work_for(
+        knots_u: &KnotVector<S>,
+        knots_v: &KnotVector<S>,
+    ) -> Result<u128, NurbsError> {
+        let controls = (knots_u.control_count() as u128)
+            .checked_mul(knots_v.control_count() as u128)
+            .and_then(|count| count.checked_mul(SURFACE_VALIDATION_WORK_PER_CONTROL))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "surface control-validation work overflows u128".to_string(),
+            })?;
+        knots_u
+            .validation_work()?
+            .checked_add(knots_v.validation_work()?)
+            .and_then(|work| work.checked_add(controls))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "surface structure-validation work overflows u128".to_string(),
+            })
+    }
+
+    fn enforce_validation_work(work: u128) -> Result<(), NurbsError> {
+        if work > BASIS_MAX_WORK_UNITS {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "surface structure validation requests {work} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn validate_live_structure(&self) -> Result<(), NurbsError> {
+        Self::enforce_validation_work(Self::validation_work_for(&self.knots_u, &self.knots_v)?)?;
         self.knots_u.validate_live()?;
         self.knots_v.validate_live()?;
         let expected_u = self.knots_u.control_count();
@@ -58,13 +108,15 @@ impl<S: Scalar> NurbsSurface<S> {
     ///
     /// # Errors
     /// [`NurbsError::Structure`] on grid/count mismatches, non-finite
-    /// coordinates, or non-positive/non-finite weights.
+    /// coordinates, or non-positive/non-finite weights; [`NurbsError::Domain`]
+    /// when validation work or a control-net allocation is refused.
     pub fn new(
         knots_u: KnotVector<S>,
         knots_v: KnotVector<S>,
         points: &[Vec<[S; 3]>],
         weights: &[Vec<S>],
     ) -> Result<Self, NurbsError> {
+        Self::enforce_validation_work(Self::validation_work_for(&knots_u, &knots_v)?)?;
         knots_u.validate_live()?;
         knots_v.validate_live()?;
         let (nu, nv) = (knots_u.control_count(), knots_v.control_count());
@@ -73,7 +125,10 @@ impl<S: Scalar> NurbsSurface<S> {
                 what: format!("expected {nu} control rows, got {}", points.len()),
             });
         }
-        let mut cpw = Vec::with_capacity(nu);
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(nu).map_err(|_| NurbsError::Domain {
+            what: "surface control-row allocation was refused".to_string(),
+        })?;
         for (prow, wrow) in points.iter().zip(weights) {
             if prow.len() != nv || wrow.len() != nv {
                 return Err(NurbsError::Structure {
@@ -96,7 +151,10 @@ impl<S: Scalar> NurbsSurface<S> {
                     what: "control-point coordinates must be finite".to_string(),
                 });
             }
-            let mut row = Vec::with_capacity(nv);
+            let mut row = Vec::new();
+            row.try_reserve_exact(nv).map_err(|_| NurbsError::Domain {
+                what: "surface homogeneous-control row allocation was refused".to_string(),
+            })?;
             for (p, &w) in prow.iter().zip(wrow) {
                 let homogeneous = [p[0] * w, p[1] * w, p[2] * w, w];
                 if p.iter()
@@ -132,19 +190,205 @@ impl<S: Scalar> NurbsSurface<S> {
         })
     }
 
+    /// Build from a homogeneous control net, validating the complete sealed
+    /// representation before exposing it.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] for invalid knots, grid shape, coordinates,
+    /// Cartesian projections, or weights; [`NurbsError::Domain`] when
+    /// validation work is refused.
+    pub fn from_homogeneous(
+        knots_u: KnotVector<S>,
+        knots_v: KnotVector<S>,
+        cpw: Vec<Vec<[S; 4]>>,
+    ) -> Result<Self, NurbsError> {
+        let candidate = NurbsSurface {
+            knots_u,
+            knots_v,
+            cpw,
+        };
+        candidate.validate_live_structure()?;
+        Ok(candidate)
+    }
+
+    /// Borrow the sealed u knot vector.
+    #[must_use]
+    pub const fn knots_u(&self) -> &KnotVector<S> {
+        &self.knots_u
+    }
+
+    /// Borrow the sealed v knot vector.
+    #[must_use]
+    pub const fn knots_v(&self) -> &KnotVector<S> {
+        &self.knots_v
+    }
+
+    /// Borrow the sealed homogeneous control net.
+    #[must_use]
+    pub fn homogeneous_control_net(&self) -> &[Vec<[S; 4]>] {
+        &self.cpw
+    }
+
+    /// Validate this exact immutable surface snapshot once.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] when the sealed source is internally invalid;
+    /// [`NurbsError::Domain`] when validation work exceeds the defensive cap.
+    pub fn admit(&self) -> Result<AdmittedNurbsSurface<'_, S>, NurbsError> {
+        self.validate_live_structure()?;
+        Ok(AdmittedNurbsSurface { inner: self })
+    }
+
     /// Homogeneous evaluation.
     ///
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn eval_homogeneous(&self, u: S, v: S) -> Result<[S; 4], NurbsError> {
+        self.admit()?.eval_homogeneous(u, v)
+    }
+
+    /// Cartesian evaluation.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the domain.
+    pub fn eval(&self, u: S, v: S) -> Result<[S; 3], NurbsError> {
+        self.admit()?.eval(u, v)
+    }
+
+    /// EXACT knot insertion in the u direction (Boehm on every column).
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] for a non-interior parameter.
+    pub fn insert_knot_u(&self, t: S) -> Result<Self, NurbsError> {
         self.validate_live_structure()?;
-        let (su, bu) = self.knots_u.basis(u)?;
-        let (sv, bv) = self.knots_v.basis(v)?;
-        let (pu, pv) = (self.knots_u.degree, self.knots_v.degree);
+        // Reuse the curve algorithm column-wise via a 1-D homogeneous
+        // "curve" whose control points are rows of the net.
+        let nv = self.knots_v.control_count();
+        let mut new_rows: Option<Vec<Vec<[S; 4]>>> = None;
+        let mut new_knots: Option<KnotVector<S>> = None;
+        for j in 0..nv {
+            let mut column = Vec::new();
+            column
+                .try_reserve_exact(self.cpw.len())
+                .map_err(|_| NurbsError::Domain {
+                    what: "surface u-insertion column allocation was refused".to_string(),
+                })?;
+            column.extend(self.cpw.iter().map(|row| row[j]));
+            let curve = NurbsCurve::<S, 3>::from_homogeneous(self.knots_u.try_clone()?, column)?;
+            let refined = curve.insert_knot(t)?;
+            if new_rows.is_none() {
+                let mut rows = Vec::new();
+                rows.try_reserve_exact(refined.cpw.len())
+                    .map_err(|_| NurbsError::Domain {
+                        what: "surface u-insertion row-table allocation was refused".to_string(),
+                    })?;
+                for _ in 0..refined.cpw.len() {
+                    let mut row = Vec::new();
+                    row.try_reserve_exact(nv).map_err(|_| NurbsError::Domain {
+                        what: "surface u-insertion output-row allocation was refused".to_string(),
+                    })?;
+                    rows.push(row);
+                }
+                new_rows = Some(rows);
+            }
+            let rows = new_rows.as_mut().expect("initialized above");
+            for (i, cp) in refined.cpw.iter().enumerate() {
+                rows[i].push(*cp);
+            }
+            new_knots = Some(refined.knots);
+        }
+        NurbsSurface::from_homogeneous(
+            new_knots.expect("nv >= 1"),
+            self.knots_v.try_clone()?,
+            new_rows.expect("nv >= 1"),
+        )
+    }
+
+    /// EXACT knot insertion in the v direction.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] for a non-interior parameter.
+    pub fn insert_knot_v(&self, t: S) -> Result<Self, NurbsError> {
+        self.validate_live_structure()?;
+        let mut new_cpw = Vec::new();
+        new_cpw
+            .try_reserve_exact(self.cpw.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "surface v-insertion row-table allocation was refused".to_string(),
+            })?;
+        let mut new_knots = None;
+        for row in &self.cpw {
+            let mut controls = Vec::new();
+            controls
+                .try_reserve_exact(row.len())
+                .map_err(|_| NurbsError::Domain {
+                    what: "surface v-insertion control-row allocation was refused".to_string(),
+                })?;
+            controls.extend_from_slice(row);
+            let curve = NurbsCurve::<S, 3>::from_homogeneous(self.knots_v.try_clone()?, controls)?;
+            let refined = curve.insert_knot(t)?;
+            new_knots = Some(refined.knots);
+            new_cpw.push(refined.cpw);
+        }
+        NurbsSurface::from_homogeneous(
+            self.knots_u.try_clone()?,
+            new_knots.expect("nu >= 1"),
+            new_cpw,
+        )
+    }
+
+    /// Per-(u-span × v-span) Cartesian control boxes: each patch of the
+    /// surface lies inside its sub-net's box (convex-hull property).
+    ///
+    /// # Errors
+    /// Returns [`NurbsError::Structure`] when the sealed representation does
+    /// not satisfy its knot/control-net invariants, or [`NurbsError::Domain`]
+    /// when validation work or output allocation is refused.
+    pub fn span_boxes(&self) -> Result<Vec<SurfaceSpanBox<S>>, NurbsError> {
+        self.admit()?.span_boxes()
+    }
+}
+
+impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
+    /// The exact immutable source bound to this view.
+    #[must_use]
+    pub const fn source(&self) -> &'a NurbsSurface<S> {
+        self.inner
+    }
+
+    /// Borrow the admitted u knot vector without rescanning it.
+    #[must_use]
+    pub fn knots_u(&self) -> crate::basis::AdmittedKnotVector<'a, S> {
+        self.inner.knots_u.admitted_after_validation()
+    }
+
+    /// Borrow the admitted v knot vector without rescanning it.
+    #[must_use]
+    pub fn knots_v(&self) -> crate::basis::AdmittedKnotVector<'a, S> {
+        self.inner.knots_v.admitted_after_validation()
+    }
+
+    /// Borrow the sealed homogeneous control net.
+    #[must_use]
+    pub fn homogeneous_control_net(&self) -> &'a [Vec<[S; 4]>] {
+        &self.inner.cpw
+    }
+
+    /// Homogeneous evaluation without rescanning surface or knot structure.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside either parameter domain or when basis
+    /// work/allocation is refused.
+    pub fn eval_homogeneous(&self, u: S, v: S) -> Result<[S; 4], NurbsError> {
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        let (su, bu) = knots_u.basis(u)?;
+        let (sv, bv) = knots_v.basis(v)?;
+        let (pu, pv) = (knots_u.degree(), knots_v.degree());
         let mut acc = [S::zero(); 4];
         for (r, &wu) in bu.iter().enumerate() {
             for (c, &wv) in bv.iter().enumerate() {
-                let cp = &self.cpw[su - pu + r][sv - pv + c];
+                let cp = &self.inner.cpw[su - pu + r][sv - pv + c];
                 let w = wu * wv;
                 for (a, &x) in acc.iter_mut().zip(cp.iter()) {
                     *a = *a + w * x;
@@ -159,10 +403,11 @@ impl<S: Scalar> NurbsSurface<S> {
         Ok(acc)
     }
 
-    /// Cartesian evaluation.
+    /// Cartesian evaluation without rescanning the sealed snapshot.
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] outside the domain.
+    /// [`NurbsError::Domain`] outside either domain or for an inadmissible
+    /// rational result.
     pub fn eval(&self, u: S, v: S) -> Result<[S; 3], NurbsError> {
         let h = self.eval_homogeneous(u, v)?;
         if !h[3].is_admissible_weight() {
@@ -184,86 +429,40 @@ impl<S: Scalar> NurbsSurface<S> {
         Ok(point)
     }
 
-    /// EXACT knot insertion in the u direction (Boehm on every column).
+    /// Per-span Cartesian control boxes without a second structural scan.
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] for a non-interior parameter.
-    pub fn insert_knot_u(&self, t: S) -> Result<Self, NurbsError> {
-        self.validate_live_structure()?;
-        // Reuse the curve algorithm column-wise via a 1-D homogeneous
-        // "curve" whose control points are rows of the net.
-        let nv = self.knots_v.control_count();
-        let mut new_rows: Option<Vec<Vec<[S; 4]>>> = None;
-        let mut new_knots: Option<KnotVector<S>> = None;
-        for j in 0..nv {
-            let column: Vec<[S; 4]> = self.cpw.iter().map(|row| row[j]).collect();
-            let curve = NurbsCurve::<S, 3> {
-                knots: self.knots_u.clone(),
-                cpw: column,
-            };
-            let refined = curve.insert_knot(t)?;
-            let rows =
-                new_rows.get_or_insert_with(|| vec![Vec::with_capacity(nv); refined.cpw.len()]);
-            for (i, cp) in refined.cpw.iter().enumerate() {
-                rows[i].push(*cp);
-            }
-            new_knots = Some(refined.knots);
-        }
-        Ok(NurbsSurface {
-            knots_u: new_knots.expect("nv >= 1"),
-            knots_v: self.knots_v.clone(),
-            cpw: new_rows.expect("nv >= 1"),
-        })
-    }
-
-    /// EXACT knot insertion in the v direction.
-    ///
-    /// # Errors
-    /// [`NurbsError::Domain`] for a non-interior parameter.
-    pub fn insert_knot_v(&self, t: S) -> Result<Self, NurbsError> {
-        self.validate_live_structure()?;
-        let mut new_cpw = Vec::with_capacity(self.cpw.len());
-        let mut new_knots = None;
-        for row in &self.cpw {
-            let curve = NurbsCurve::<S, 3> {
-                knots: self.knots_v.clone(),
-                cpw: row.clone(),
-            };
-            let refined = curve.insert_knot(t)?;
-            new_knots = Some(refined.knots.clone());
-            new_cpw.push(refined.cpw);
-        }
-        Ok(NurbsSurface {
-            knots_u: self.knots_u.clone(),
-            knots_v: new_knots.expect("nu >= 1"),
-            cpw: new_cpw,
-        })
-    }
-
-    /// Per-(u-span × v-span) Cartesian control boxes: each patch of the
-    /// surface lies inside its sub-net's box (convex-hull property).
-    ///
-    /// # Errors
-    /// Returns [`NurbsError::Structure`] when the mutable public representation
-    /// no longer satisfies its knot/control-net invariants.
+    /// Returns a structured allocation refusal when the output cannot grow.
     pub fn span_boxes(&self) -> Result<Vec<SurfaceSpanBox<S>>, NurbsError> {
-        self.validate_live_structure()?;
-        let (pu, pv) = (self.knots_u.degree, self.knots_v.degree);
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        let (pu, pv) = (knots_u.degree(), knots_v.degree());
         let mut out = Vec::new();
-        for su in pu..self.knots_u.control_count() {
-            let (u0, u1) = (self.knots_u.knots[su], self.knots_u.knots[su + 1]);
+        let span_capacity = knots_u
+            .control_count()
+            .saturating_sub(pu)
+            .checked_mul(knots_v.control_count().saturating_sub(pv))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "surface span-box count overflows usize".to_string(),
+            })?;
+        out.try_reserve_exact(span_capacity)
+            .map_err(|_| NurbsError::Domain {
+                what: "surface span-box allocation was refused".to_string(),
+            })?;
+        for su in pu..knots_u.control_count() {
+            let (u0, u1) = (knots_u.knots()[su], knots_u.knots()[su + 1]);
             if u1 <= u0 {
                 continue;
             }
-            for sv in pv..self.knots_v.control_count() {
-                let (v0, v1) = (self.knots_v.knots[sv], self.knots_v.knots[sv + 1]);
+            for sv in pv..knots_v.control_count() {
+                let (v0, v1) = (knots_v.knots()[sv], knots_v.knots()[sv + 1]);
                 if v1 <= v0 {
                     continue;
                 }
                 let mut min = [S::zero(); 3];
                 let mut max = [S::zero(); 3];
                 let mut first = true;
-                for row in &self.cpw[su - pu..=su] {
+                for row in &self.inner.cpw[su - pu..=su] {
                     for cp in &row[sv - pv..=sv] {
                         let w = cp[3];
                         for d in 0..3 {
@@ -297,49 +496,63 @@ impl NurbsSurface<f64> {
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
-        self.validate_live_structure()?;
+        self.admit()?.partials(u, v)
+    }
+}
+
+impl AdmittedNurbsSurface<'_, f64> {
+    /// Value and first partials without rescanning the source surface.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] outside the domain or when temporary isocurve
+    /// construction/evaluation is refused.
+    pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
         // u-partial: build the v-evaluated control column, differentiate
         // as a u-curve; symmetrically for v.
-        let (sv, bv) = self.knots_v.basis(v)?;
-        let pv = self.knots_v.degree;
-        let u_net: Vec<[f64; 4]> = self
-            .cpw
-            .iter()
-            .map(|row| {
-                let mut acc = [0.0f64; 4];
-                for (c, &wv) in bv.iter().enumerate() {
-                    let cp = &row[sv - pv + c];
-                    for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                        *a += wv * x;
-                    }
+        let knots_v = self.knots_v();
+        let (sv, bv) = knots_v.basis(v)?;
+        let pv = knots_v.degree();
+        let mut u_net = Vec::new();
+        u_net
+            .try_reserve_exact(self.inner.cpw.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "surface u-isocurve allocation was refused".to_string(),
+            })?;
+        for row in &self.inner.cpw {
+            let mut acc = [0.0f64; 4];
+            for (c, &wv) in bv.iter().enumerate() {
+                let cp = &row[sv - pv + c];
+                for (a, &x) in acc.iter_mut().zip(cp.iter()) {
+                    *a += wv * x;
                 }
-                acc
-            })
-            .collect();
-        let u_curve = NurbsCurve::<f64, 3> {
-            knots: self.knots_u.clone(),
-            cpw: u_net,
-        };
-        let du = u_curve.derivatives(u, 1)?;
-        let (su, bu) = self.knots_u.basis(u)?;
-        let pu = self.knots_u.degree;
-        let v_net: Vec<[f64; 4]> = (0..self.knots_v.control_count())
-            .map(|j| {
-                let mut acc = [0.0f64; 4];
-                for (r, &wu) in bu.iter().enumerate() {
-                    let cp = &self.cpw[su - pu + r][j];
-                    for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                        *a += wu * x;
-                    }
+            }
+            u_net.push(acc);
+        }
+        let u_curve =
+            NurbsCurve::<f64, 3>::from_homogeneous(self.inner.knots_u.try_clone()?, u_net)?;
+        let du = u_curve.admitted_after_validation().derivatives(u, 1)?;
+        let knots_u = self.knots_u();
+        let (su, bu) = knots_u.basis(u)?;
+        let pu = knots_u.degree();
+        let mut v_net = Vec::new();
+        v_net
+            .try_reserve_exact(knots_v.control_count())
+            .map_err(|_| NurbsError::Domain {
+                what: "surface v-isocurve allocation was refused".to_string(),
+            })?;
+        for j in 0..knots_v.control_count() {
+            let mut acc = [0.0f64; 4];
+            for (r, &wu) in bu.iter().enumerate() {
+                let cp = &self.inner.cpw[su - pu + r][j];
+                for (a, &x) in acc.iter_mut().zip(cp.iter()) {
+                    *a += wu * x;
                 }
-                acc
-            })
-            .collect();
-        let v_curve = NurbsCurve::<f64, 3> {
-            knots: self.knots_v.clone(),
-            cpw: v_net,
-        };
-        let dv = v_curve.derivatives(v, 1)?;
+            }
+            v_net.push(acc);
+        }
+        let v_curve =
+            NurbsCurve::<f64, 3>::from_homogeneous(self.inner.knots_v.try_clone()?, v_net)?;
+        let dv = v_curve.admitted_after_validation().derivatives(v, 1)?;
         Ok((du[0], du[1], dv[1]))
     }
 }

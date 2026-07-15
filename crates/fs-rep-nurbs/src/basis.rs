@@ -12,7 +12,7 @@ pub const BASIS_MAX_WORK_UNITS: u128 = 16_777_216;
 // Conservative price for finite/order/run/multiplicity/clamping validation of
 // one public knot entry. This intentionally overcounts the simple comparisons:
 // admission must happen before any full scan, not after three nominally cheap
-// passes over caller-mutable storage.
+// passes over untrusted storage.
 const KNOT_VALIDATION_WORK_PER_ENTRY: u128 = 16;
 
 /// The field the spline algebra runs over.
@@ -93,31 +93,64 @@ impl Scalar for Rat {
 }
 
 /// A clamped knot vector for degree-p splines.
+///
+/// The representation is sealed after construction. Callers can inspect it
+/// through [`Self::knots`] and [`Self::degree`], but cannot mutate around a
+/// successful validation:
+///
+/// ```compile_fail
+/// use fs_rep_nurbs::KnotVector;
+/// let mut knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).unwrap();
+/// knots.knots.clear();
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnotVector<S: Scalar> {
     /// Non-decreasing knots (first/last with multiplicity p+1).
-    pub knots: Vec<S>,
+    pub(crate) knots: Vec<S>,
     /// Polynomial degree.
-    pub degree: usize,
+    pub(crate) degree: usize,
+}
+
+/// A validate-once borrow of one exact immutable knot-vector snapshot.
+///
+/// The borrow is the authority: safe Rust cannot mutate or replace the source
+/// while this view is live, so no content hash or recomputed token is needed to
+/// detect stale structure.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedKnotVector<'a, S: Scalar> {
+    inner: &'a KnotVector<S>,
 }
 
 impl<S: Scalar> KnotVector<S> {
-    fn admitted_scan_work(&self, include_span_search: bool) -> Result<u128, NurbsError> {
+    pub(crate) fn validation_work(&self) -> Result<u128, NurbsError> {
         let knot_count = self.knots.len() as u128;
-        let mut work = knot_count
+        knot_count
             .checked_mul(KNOT_VALIDATION_WORK_PER_ENTRY)
             .and_then(|work| work.checked_add(self.degree as u128))
             .ok_or_else(|| NurbsError::Domain {
                 what: "knot-scan work accounting overflows u128".to_string(),
+            })
+    }
+
+    fn span_search_work(&self) -> u128 {
+        self.control_count() as u128
+    }
+
+    fn basis_operation_work(&self) -> Result<u128, NurbsError> {
+        let order = self
+            .degree
+            .checked_add(1)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis order overflows usize".to_string(),
             })?;
-        if include_span_search {
-            work = work
-                .checked_add(self.control_count() as u128)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "span-search work accounting overflows u128".to_string(),
-                })?;
-        }
-        Ok(work)
+        (self.degree as u128)
+            .checked_mul(order as u128)
+            .map(|product| product / 2)
+            .and_then(|work| work.checked_add(order as u128))
+            .and_then(|work| work.checked_add(self.span_search_work()))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis-work accounting overflows u128".to_string(),
+            })
     }
 
     fn enforce_work(units: u128, operation: &str) -> Result<(), NurbsError> {
@@ -162,10 +195,9 @@ impl<S: Scalar> KnotVector<S> {
         Ok(span)
     }
 
-    /// Revalidate the current public fields before any indexing algorithm uses
-    /// them. This is intentionally allocation-free: callers can mutate the
-    /// early-stage public representation after construction, and safe public
-    /// input must become a structured refusal rather than an index panic.
+    /// Validate the sealed fields before any indexing algorithm uses them.
+    /// This remains allocation-free defense for crate-internal construction;
+    /// public callers cannot mutate the representation after construction.
     pub(crate) fn validate_live(&self) -> Result<(), NurbsError> {
         let endpoint_multiplicity =
             self.degree
@@ -238,7 +270,8 @@ impl<S: Scalar> KnotVector<S> {
     /// Validate and construct.
     ///
     /// # Errors
-    /// [`NurbsError::Structure`] on ordering/clamping defects.
+    /// [`NurbsError::Structure`] on ordering/clamping defects, or
+    /// [`NurbsError::Domain`] when validation work exceeds the defensive cap.
     pub fn new(knots: Vec<S>, degree: usize) -> Result<Self, NurbsError> {
         let endpoint_multiplicity = degree.checked_add(1).ok_or_else(|| NurbsError::Structure {
             what: format!("degree {degree} overflows knot-count arithmetic"),
@@ -258,6 +291,13 @@ impl<S: Scalar> KnotVector<S> {
                 ),
             });
         }
+        let validation_work = (knots.len() as u128)
+            .checked_mul(KNOT_VALIDATION_WORK_PER_ENTRY)
+            .and_then(|work| work.checked_add(degree as u128))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-construction work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(validation_work, "knot-vector construction")?;
         if knots.iter().copied().any(|knot| !knot.is_finite()) {
             return Err(NurbsError::Structure {
                 what: "knots must be finite".to_string(),
@@ -306,6 +346,53 @@ impl<S: Scalar> KnotVector<S> {
         Ok(KnotVector { knots, degree })
     }
 
+    /// Borrow the immutable knot entries.
+    #[must_use]
+    pub fn knots(&self) -> &[S] {
+        &self.knots
+    }
+
+    /// Polynomial degree.
+    #[must_use]
+    pub const fn degree(&self) -> usize {
+        self.degree
+    }
+
+    /// Fallibly copy this sealed knot vector without revalidating unchanged
+    /// entries.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when the destination allocation is refused.
+    pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let mut knots = Vec::new();
+        knots
+            .try_reserve_exact(self.knots.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-vector copy allocation was refused".to_string(),
+            })?;
+        knots.extend_from_slice(&self.knots);
+        Ok(KnotVector {
+            knots,
+            degree: self.degree,
+        })
+    }
+
+    /// Validate this exact immutable snapshot once and bind the proof to its
+    /// borrow lifetime.
+    ///
+    /// # Errors
+    /// Returns a structured refusal when validation work exceeds the defensive
+    /// ceiling or the representation is malformed.
+    pub fn admit(&self) -> Result<AdmittedKnotVector<'_, S>, NurbsError> {
+        Self::enforce_work(self.validation_work()?, "knot-vector admission")?;
+        self.validate_live()?;
+        Ok(self.admitted_after_validation())
+    }
+
+    pub(crate) const fn admitted_after_validation(&self) -> AdmittedKnotVector<'_, S> {
+        AdmittedKnotVector { inner: self }
+    }
+
     /// Number of basis functions / control points.
     #[must_use]
     pub fn control_count(&self) -> usize {
@@ -316,17 +403,14 @@ impl<S: Scalar> KnotVector<S> {
             .unwrap_or(0)
     }
 
-    /// The parametric domain `[u_min, u_max]`, after revalidating the mutable
-    /// early-stage public representation.
+    /// The parametric domain `[u_min, u_max]`, after structural admission.
     ///
     /// # Errors
     /// [`NurbsError::Structure`] when the knot vector was mutated into an
     /// invalid shape; [`NurbsError::Domain`] when the defensive live-scan work
     /// ceiling is exceeded.
     pub fn domain(&self) -> Result<(S, S), NurbsError> {
-        Self::enforce_work(self.admitted_scan_work(false)?, "knot-domain validation")?;
-        self.validate_live()?;
-        Ok(self.validated_domain())
+        self.admit().map(|admitted| admitted.domain())
     }
 
     /// The knot span index containing `t` (Piegl–Tiller A2.1 semantics;
@@ -336,9 +420,15 @@ impl<S: Scalar> KnotVector<S> {
     /// [`NurbsError::Domain`] outside the parameter domain or when defensive
     /// live-validation/span-search work admission refuses the request.
     pub fn span(&self, t: S) -> Result<usize, NurbsError> {
-        Self::enforce_work(self.admitted_scan_work(true)?, "knot-span evaluation")?;
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.span_search_work())
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-span work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "knot-span evaluation")?;
         self.validate_live()?;
-        self.span_after_validation(t)
+        self.admitted_after_validation().span_after_preflight(t)
     }
 
     /// All nonzero basis-function values at `t` (Cox–de Boor triangle,
@@ -349,26 +439,86 @@ impl<S: Scalar> KnotVector<S> {
     /// validation, span-search, triangular-work, or allocation admission
     /// refuses the request.
     pub fn basis(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
-        let p = self.degree;
-        let order = p.checked_add(1).ok_or_else(|| NurbsError::Domain {
-            what: "basis order overflows usize".to_string(),
-        })?;
-        let triangular_work = (p as u128)
-            .checked_mul(order as u128)
-            .map(|product| product / 2)
-            .and_then(|work| work.checked_add(order as u128))
-            .ok_or_else(|| NurbsError::Domain {
-                what: "basis-work accounting overflows u128".to_string(),
-            })?;
         let total_work = self
-            .admitted_scan_work(true)?
-            .checked_add(triangular_work)
+            .validation_work()?
+            .checked_add(self.basis_operation_work()?)
             .ok_or_else(|| NurbsError::Domain {
                 what: "basis total-work accounting overflows u128".to_string(),
             })?;
         Self::enforce_work(total_work, "basis evaluation")?;
         self.validate_live()?;
-        let span = self.span_after_validation(t)?;
+        self.admitted_after_validation().basis_after_preflight(t)
+    }
+}
+
+impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
+    /// The exact immutable source bound to this view.
+    #[must_use]
+    pub const fn source(&self) -> &'a KnotVector<S> {
+        self.inner
+    }
+
+    /// Borrow the validated knot entries.
+    #[must_use]
+    pub fn knots(&self) -> &'a [S] {
+        self.inner.knots()
+    }
+
+    /// Polynomial degree.
+    #[must_use]
+    pub const fn degree(&self) -> usize {
+        self.inner.degree()
+    }
+
+    /// Number of basis functions / control points.
+    #[must_use]
+    pub fn control_count(&self) -> usize {
+        self.inner.control_count()
+    }
+
+    /// The already-validated parametric domain.
+    #[must_use]
+    pub fn domain(&self) -> (S, S) {
+        self.inner.validated_domain()
+    }
+
+    /// Resolve a knot span without rescanning structure.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for out-of-domain parameters or excessive
+    /// span-search work.
+    pub fn span(&self, t: S) -> Result<usize, NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.span_search_work(),
+            "admitted knot-span evaluation",
+        )?;
+        self.span_after_preflight(t)
+    }
+
+    fn span_after_preflight(&self, t: S) -> Result<usize, NurbsError> {
+        self.inner.span_after_validation(t)
+    }
+
+    /// Evaluate all nonzero basis values without rescanning the sealed source.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for domain, work, allocation, or finite
+    /// arithmetic failures.
+    pub fn basis(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
+        KnotVector::<S>::enforce_work(
+            self.inner.basis_operation_work()?,
+            "admitted basis evaluation",
+        )?;
+        self.basis_after_preflight(t)
+    }
+
+    fn basis_after_preflight(&self, t: S) -> Result<(usize, Vec<S>), NurbsError> {
+        let inner = self.inner;
+        let p = inner.degree;
+        let order = p.checked_add(1).ok_or_else(|| NurbsError::Domain {
+            what: "basis order overflows usize".to_string(),
+        })?;
+        let span = inner.span_after_validation(t)?;
         let mut n = Vec::new();
         let mut left = Vec::new();
         let mut right = Vec::new();
@@ -386,8 +536,8 @@ impl<S: Scalar> KnotVector<S> {
         }
         n[0] = S::one();
         for j in 1..=p {
-            left[j] = t - self.knots[span + 1 - j];
-            right[j] = self.knots[span + j] - t;
+            left[j] = t - inner.knots[span + 1 - j];
+            right[j] = inner.knots[span + j] - t;
             let mut saved = S::zero();
             for r in 0..j {
                 let denom = right[r + 1] + left[j - r];
@@ -438,12 +588,12 @@ mod tests {
     }
 
     #[test]
-    fn domain_and_basis_fail_closed_on_mutation_and_quadratic_work() {
+    fn domain_and_basis_fail_closed_on_internal_corruption_and_quadratic_work() {
         let mut malformed = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("valid line knots");
         malformed.knots.clear();
         assert!(
             malformed.domain().is_err(),
-            "safe public mutation must not turn domain access into an indexing panic"
+            "crate-internal corruption must not turn domain access into an indexing panic"
         );
 
         let degree = 6_000usize;

@@ -30,10 +30,12 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   by a basis value can underflow an otherwise positive denominator.
 - `KnotVector` (finite, nondecreasing, exact clamped-end multiplicity
   `degree+1`, no knot run above `degree+1`), Cox–de Boor basis
-  (Piegl–Tiller A2.2 shape). Domain access is fallible because fields remain
-  publicly mutable in this early API; domain/span/basis calls price full live
-  knot validation and worst-case span search before scanning, basis allocation
-  is fallible, and triangular degree work shares the defensive legacy ceiling.
+  (Piegl–Tiller A2.2 shape). Knot storage and degree are sealed behind checked
+  construction and read-only accessors. `AdmittedKnotVector` borrows one exact
+  immutable snapshot, so its domain/span/basis path reuses structural validation
+  and safe mutation while the view is live is unrepresentable. Owning
+  convenience calls remain fallible; basis allocation is fallible and
+  triangular degree work shares the defensive legacy ceiling.
 - `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation in dimensions 0–3;
   construction rejects non-finite homogeneous products rather than accepting
   finite source values whose multiplication overflowed. f64 derivatives
@@ -44,20 +46,25 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   degree). At an interior repeated knot, this API returns only ordinary
   derivatives through the knot's continuity order and refuses requests that
   would silently mean a one-sided jet;
-  EXACT Boehm `insert_knot`; EXACT `remove_knot` (reconstruction checked
+  checked Cartesian or homogeneous construction seals the knot/control
+  representation. `AdmittedNurbsCurve` binds a validated immutable snapshot
+  and evaluation consumes its admitted knot view without a second structural
+  scan. EXACT Boehm `insert_knot`; EXACT `remove_knot` (reconstruction checked
   with scalar EQUALITY — in `Rat` a proof); Bézier decomposition; EXACT
   `elevate_degree` (per-segment binomial elevation reassembled on a
   full-multiplicity knot vector — valid and evaluation-identical, including
   legal discontinuous full breaks whose independent endpoints and raised
   multiplicity are preserved; minimal-multiplicity elevation is a follow-up).
-- `NurbsSurface<S>` — tensor-product evaluation, EXACT directional knot
-  insertion, first partials via isocurve nets, per-span control boxes.
+- `NurbsSurface<S>` — sealed tensor-product representation with checked
+  Cartesian/homogeneous construction. `AdmittedNurbsSurface` reuses one source
+  validation through tensor evaluation, first partials, and per-span control
+  boxes; directional knot insertion remains an owning transformation.
 - `TrimLoop`/`TrimmedPatch` — trim curves in EXACT RATIONAL form
   (closure and continuity validated by rational equality, including exact
-  left/right-limit agreement at any full knot break). Mutable public early-stage
-  representations are revalidated at classification and shell-ingestion
-  boundaries. Aggregate loop-count/structure validation is admitted before
-  the first deep scan and spends the same defensive classification budget;
+  left/right-limit agreement at any full knot break). Loop, curve, and
+  subdivision storage is sealed; borrowed admitted views bind closure and
+  structure validation to the immutable source. Aggregate loop-count/structure
+  validation is admitted before the first deep scan and spends the same defensive classification budget;
   shell ingestion shares a bounded construction-validation ledger across all
   trims. `classify` is CERTIFIED:
   outside every Bézier span hull ⇒ the exactly-computed control-polygon
@@ -170,11 +177,14 @@ everywhere; best-first ties broken by a monotone logical insertion identity.
 Trim and closest-point subdivision loops carry explicit static iteration
 limits. Direct `KnotVector` domain/span/basis admission charges live-knot
 validation, worst-case span search, and Cox–de Boor triangular degree work
-before scanning, allocating, or iterating. Curve/surface wrappers and the
-derivative path still perform an initial live-structure scan before their
-operation-specific admission; the validate-once, preflight-first successor is
-tracked as a P0 execution-safety dependency and these paths make no claim of
-caller-budgeted preflight yet. Closest-point admission also validates the live public structure,
+before allocating or iterating. Borrowed admitted knot, curve, and surface
+views make repeated source validation unnecessary for basis, evaluation,
+partials, and span boxes. The production `fs-render` ray path preflights sealed
+metadata and cancellation, then binds one admitted surface across domain lookup,
+seed evaluation, and Newton partials.
+Owning conversion, insertion, derivative, closest, SDF, trim-subdivision, and
+refit paths are not all migrated yet; they make no claim of caller-budgeted
+preflight or end-to-end validate-once execution. Closest-point admission validates the sealed structure,
 including finite Cartesian projections and normal positive floating weights,
 and charges a stage-faithful knot-insertion, expanded-grid, run-scan, and
 queue-seeding estimate before conversion, including when the requested split
@@ -187,6 +197,10 @@ legacy refit path has validated static work/allocation/probe caps but no `Cx`;
 these APIs are not yet P7 cancellation-correct. The successor budgeted
 interfaces are tracked explicitly and must add bounded polling plus
 request→drain→finalize semantics before promotion.
+
+Structural admission proves representation well-formedness only. It does not
+grant enclosure, geometric certification, cancellation, caller-budget,
+allocation-completeness, replay, or downstream publication authority.
 
 ## Unsafe boundary
 

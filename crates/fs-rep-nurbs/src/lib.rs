@@ -23,13 +23,13 @@ pub mod sdf;
 pub mod surface;
 pub mod trim;
 
-pub use basis::{KnotVector, Scalar};
+pub use basis::{AdmittedKnotVector, KnotVector, Scalar};
 pub use boolean::{BooleanOp, BooleanPolicy, BooleanRefusal, boolean};
 pub use closest::{DistanceBracketEstimate, closest_point_curve, closest_point_surface};
-pub use curve::NurbsCurve;
+pub use curve::{AdmittedNurbsCurve, NurbsCurve};
 pub use rat::Rat;
-pub use surface::NurbsSurface;
-pub use trim::{Classification, TrimLoop, TrimmedPatch};
+pub use surface::{AdmittedNurbsSurface, NurbsSurface};
+pub use trim::{AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimmedPatch};
 
 use core::fmt;
 

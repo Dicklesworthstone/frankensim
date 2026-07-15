@@ -136,18 +136,88 @@ fn rat_curve(seed: &mut u64) -> NurbsCurve<Rat, 3> {
 
 /// The f64 shadow of a rational curve.
 fn to_f64_curve(c: &NurbsCurve<Rat, 3>) -> NurbsCurve<f64, 3> {
-    NurbsCurve {
-        knots: KnotVector::new(
-            c.knots.knots.iter().map(|r| r.to_f64()).collect(),
-            c.knots.degree,
+    NurbsCurve::from_homogeneous(
+        KnotVector::new(
+            c.knots().knots().iter().map(|r| r.to_f64()).collect(),
+            c.knots().degree(),
         )
         .expect("knots"),
-        cpw: c
-            .cpw
+        c.homogeneous_control_points()
             .iter()
             .map(|h| [h[0].to_f64(), h[1].to_f64(), h[2].to_f64(), h[3].to_f64()])
             .collect(),
-    }
+    )
+    .expect("homogeneous f64 shadow")
+}
+
+#[test]
+fn nb_000_sealed_representations_bind_validate_once_views() {
+    let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("knots");
+    let admitted_knots = knots.admit().expect("admitted knots");
+    assert_eq!(admitted_knots.knots(), &[0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(admitted_knots.degree(), 1);
+    assert_eq!(admitted_knots.domain(), (0.0, 1.0));
+    assert_eq!(admitted_knots.basis(0.25), knots.basis(0.25));
+    let source_from_temporary_view = knots.admit().expect("temporary admitted knots").source();
+    assert_eq!(source_from_temporary_view.degree(), 1);
+
+    let curve = NurbsCurve::new(knots.clone(), &[[0.0], [1.0]], &[1.0, 1.0]).expect("curve");
+    let admitted_curve = curve.admit().expect("admitted curve");
+    assert_eq!(admitted_curve.eval(0.25), curve.eval(0.25));
+    assert_eq!(admitted_curve.homogeneous_control_points().len(), 2);
+    let knots_from_temporary_curve_view = curve.admit().expect("temporary admitted curve").knots();
+    assert_eq!(knots_from_temporary_curve_view.domain(), (0.0, 1.0));
+    assert!(
+        NurbsCurve::<f64, 1>::from_homogeneous(
+            knots.clone(),
+            vec![[0.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]],
+        )
+        .is_err(),
+        "inactive homogeneous coordinate lanes must remain canonical zeroes"
+    );
+
+    let surface = NurbsSurface::new(
+        knots.clone(),
+        knots,
+        &vec![vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]; 2],
+        &vec![vec![1.0; 2]; 2],
+    )
+    .expect("surface");
+    let admitted_surface = surface.admit().expect("admitted surface");
+    assert_eq!(admitted_surface.eval(0.25, 0.75), surface.eval(0.25, 0.75));
+    assert_eq!(admitted_surface.homogeneous_control_net().len(), 2);
+    let u_knots_from_temporary_surface_view = surface
+        .admit()
+        .expect("temporary admitted surface")
+        .knots_u();
+    assert_eq!(u_knots_from_temporary_surface_view.domain(), (0.0, 1.0));
+
+    let trim = poly_loop(&[[0, 0], [1, 0], [1, 1], [0, 1]], 1);
+    let patch = TrimmedPatch::with_max_subdivision(vec![trim], 7);
+    assert_eq!(patch.loops().len(), 1);
+    assert_eq!(patch.max_subdivision(), 7);
+    assert_eq!(patch.admit().expect("admitted patch").loops().len(), 1);
+
+    let large_lo = Rat::int(i128::MAX - 10);
+    let large_hi = Rat::int(i128::MAX - 1);
+    let large_domain_loop = TrimLoop::new(
+        NurbsCurve::new(
+            KnotVector::new(vec![large_lo, large_lo, large_hi, large_hi], 1)
+                .expect("large same-sign domain"),
+            &[[Rat::int(0), Rat::int(0)]; 2],
+            &[Rat::int(1); 2],
+        )
+        .expect("large-domain curve"),
+    )
+    .expect("large-domain loop");
+    assert!(
+        large_domain_loop.reversed_for_hole().is_ok(),
+        "knot mirroring must not form the overflowing intermediate lo + hi"
+    );
+    verdict(
+        "nb-000",
+        "sealed representations and lifetime-bound validate-once views",
+    );
 }
 
 #[test]
@@ -163,29 +233,29 @@ fn nb_001_g0_laws_and_dual_derivatives() {
         Rat::new(9, 10),
         Rat::int(1),
     ] {
-        let (_, basis) = rc.knots.basis(t).expect("basis");
+        let (_, basis) = rc.knots().basis(t).expect("basis");
         let sum = basis.iter().fold(Rat::int(0), |a, &b| a + b);
         assert_eq!(sum, Rat::int(1), "partition of unity must be exact");
     }
     // Endpoint interpolation (clamped): C(0) = P0, C(1) = Pn.
     let start = rc.eval(Rat::int(0)).expect("eval");
+    let first_control = rc.homogeneous_control_points()[0];
     let p0 = [
-        rc.cpw[0][0] / rc.cpw[0][3],
-        rc.cpw[0][1] / rc.cpw[0][3],
-        rc.cpw[0][2] / rc.cpw[0][3],
+        first_control[0] / first_control[3],
+        first_control[1] / first_control[3],
+        first_control[2] / first_control[3],
     ];
     assert_eq!(start, p0, "clamped endpoint interpolation is exact");
     // Derivative via the crate's own generic eval over a test dual ==
     // the analytic derivative pipeline.
     for &t in &[0.15f64, 0.4, 0.55, 0.83] {
-        let dual_curve = NurbsCurve::<TDual, 3> {
-            knots: KnotVector::new(
-                fc.knots.knots.iter().map(|&u| TDual::con(u)).collect(),
-                fc.knots.degree,
+        let dual_curve = NurbsCurve::<TDual, 3>::from_homogeneous(
+            KnotVector::new(
+                fc.knots().knots().iter().map(|&u| TDual::con(u)).collect(),
+                fc.knots().degree(),
             )
             .expect("knots"),
-            cpw: fc
-                .cpw
+            fc.homogeneous_control_points()
                 .iter()
                 .map(|h| {
                     [
@@ -196,7 +266,8 @@ fn nb_001_g0_laws_and_dual_derivatives() {
                     ]
                 })
                 .collect(),
-        };
+        )
+        .expect("dual homogeneous curve");
         let dval = dual_curve.eval(TDual::var(t)).expect("dual eval");
         let ders = fc.derivatives(t, 1).expect("ders");
         for k in 0..3 {
@@ -230,7 +301,7 @@ fn nb_002_refinement_is_exact_in_rational_arithmetic() {
             .insert_knot(Rat::new(4, 5))
             .expect("insert 4/5");
         let elevated = refined.elevate_degree().expect("elevate");
-        assert_eq!(elevated.knots.degree, c.knots.degree + 1);
+        assert_eq!(elevated.knots().degree(), c.knots().degree() + 1);
         for t in [
             Rat::int(0),
             Rat::new(1, 7),
@@ -323,8 +394,8 @@ fn nb_002_refinement_is_exact_in_rational_arithmetic() {
         .expect("full-break elevation");
     assert_eq!(
         elevated_discontinuous
-            .knots
-            .knots
+            .knots()
+            .knots()
             .iter()
             .filter(|&&knot| knot == half)
             .count(),
@@ -483,11 +554,14 @@ fn nb_003_trim_classification_adversarial_battery() {
         Classification::Outside,
         "inside the sliver hole"
     );
-    let mut caller_mutated = patch2.clone();
-    caller_mutated.loops[0].curve.knots.knots.clear();
-    assert!(
-        caller_mutated.classify(q(1, 1, 1)).is_err(),
-        "safe mutation of the early public representation must refuse instead of indexing"
+    assert_eq!(
+        patch2
+            .admit()
+            .expect("sealed patch admission")
+            .loops()
+            .len(),
+        2,
+        "validated loop structure stays bound to the immutable patch borrow"
     );
     assert_eq!(
         patch2.classify(q(50, 25, 10)).expect("c"),
@@ -546,7 +620,7 @@ fn nb_004_measured_closest_point_brackets_the_oracle() {
         }
         let estimate = closest_point_curve(&c, q, 1e-7, 4000).expect("estimate");
         // Dense-sampling oracle.
-        let (lo, hi) = c.knots.domain().expect("validated oracle domain");
+        let (lo, hi) = c.knots().domain().expect("validated oracle domain");
         let mut oracle = f64::INFINITY;
         for k in 0..=100_000 {
             let t = lo + (hi - lo) * f64::from(k) / 100_000.0;
@@ -741,28 +815,19 @@ fn nb_004b_closest_point_numeric_edge_regressions() {
         closest_point_curve(&signed_zero_curve, [0.5, 0.25, 0.0], 0.0, 2).is_ok(),
         "live validation uses the constructor's mathematical equality for signed zero"
     );
-    let mut invalid_projection = line.clone();
-    invalid_projection.cpw[0] = [f64::MAX, 0.0, 0.0, 0.5];
+    let mut invalid_controls = line.homogeneous_control_points().to_vec();
+    invalid_controls[0] = [f64::MAX, 0.0, 0.0, 0.5];
     assert!(
-        closest_point_curve(&invalid_projection, [0.0; 3], 0.0, 0).is_err(),
-        "live homogeneous controls with infinite Cartesian projection must fail closed"
-    );
-    assert!(
-        invalid_projection.span_boxes().is_err(),
-        "control boxes must not return infinite Cartesian bounds from finite homogeneous inputs"
+        NurbsCurve::<f64, 3>::from_homogeneous(line.knots().clone(), invalid_controls).is_err(),
+        "checked homogeneous construction must reject an infinite Cartesian projection"
     );
     let box_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("box knots");
-    let mut invalid_surface = NurbsSurface::new(
-        box_knots.clone(),
-        box_knots,
-        &vec![vec![[0.0, 0.0, 0.0]; 2]; 2],
-        &vec![vec![1.0; 2]; 2],
-    )
-    .expect("surface");
-    invalid_surface.cpw[0][0] = [f64::MAX, 0.0, 0.0, 0.5];
+    let mut invalid_surface_controls = vec![vec![[0.0, 0.0, 0.0, 1.0]; 2]; 2];
+    invalid_surface_controls[0][0] = [f64::MAX, 0.0, 0.0, 0.5];
     assert!(
-        invalid_surface.span_boxes().is_err(),
-        "surface boxes must reject division-overflow projections"
+        NurbsSurface::from_homogeneous(box_knots.clone(), box_knots, invalid_surface_controls,)
+            .is_err(),
+        "checked homogeneous surface construction must reject division-overflow projections"
     );
     let minimum_subnormal = f64::from_bits(1);
     let underflow_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("underflow knots");
@@ -788,26 +853,16 @@ fn nb_004b_closest_point_numeric_edge_regressions() {
         .is_err(),
         "surface construction shares the nonzero-underflow refusal"
     );
-    let mut malformed_curve = line.clone();
-    malformed_curve.cpw.pop();
-    assert!(malformed_curve.eval(0.5).is_err());
-    assert!(malformed_curve.insert_knot(0.5).is_err());
-    assert!(malformed_curve.span_boxes().is_err());
-    let malformed_knots = KnotVector {
-        knots: Vec::new(),
-        degree: usize::MAX,
-    };
+    let mut truncated_controls = line.homogeneous_control_points().to_vec();
+    truncated_controls.pop();
     assert!(
-        malformed_knots.domain().is_err(),
-        "fallible domain access revalidates public fields before indexing"
+        NurbsCurve::<f64, 3>::from_homogeneous(line.knots().clone(), truncated_controls).is_err(),
+        "checked homogeneous construction rejects control-count mismatches"
     );
+    let malformed_knots = KnotVector::<f64>::new(Vec::new(), usize::MAX);
     assert!(
-        NurbsCurve::<f64, 3>::new(malformed_knots.clone(), &[], &[]).is_err(),
-        "fallible curve construction revalidates public knot fields before count arithmetic"
-    );
-    assert!(
-        NurbsSurface::new(malformed_knots.clone(), malformed_knots, &[], &[]).is_err(),
-        "fallible surface construction revalidates public knot fields before indexing"
+        malformed_knots.is_err(),
+        "checked knot construction rejects impossible degree/count arithmetic"
     );
     let high_degree = 6_000usize;
     let mut high_degree_knots = vec![0.0; high_degree + 1];
@@ -953,11 +1008,10 @@ fn nb_006_surface_refinement_exact_and_partials_check() {
         );
     }
     // f64 partials vs central differences.
-    let fs = NurbsSurface::<f64> {
-        knots_u: KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).expect("kv"),
-        knots_v: KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).expect("kv"),
-        cpw: s
-            .cpw
+    let fs = NurbsSurface::<f64>::from_homogeneous(
+        KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).expect("kv"),
+        KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).expect("kv"),
+        s.homogeneous_control_net()
             .iter()
             .map(|row| {
                 row.iter()
@@ -965,7 +1019,8 @@ fn nb_006_surface_refinement_exact_and_partials_check() {
                     .collect()
             })
             .collect(),
-    };
+    )
+    .expect("f64 homogeneous surface");
     let (u, v) = (0.37, 0.61);
     let (val, su, sv) = fs.partials(u, v).expect("partials");
     let h = 1e-6;

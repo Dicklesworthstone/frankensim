@@ -1644,12 +1644,15 @@ fn rb_003b_nurbs_ray_admission_is_bounded_and_fail_closed() {
         Err(NurbsRayError::WorkLimit { .. })
     ));
 
-    let mut malformed = sphere;
-    malformed.cpw.clear();
-    assert!(matches!(
-        ray_intersect_nurbs(&malformed, &ray, 8, 1e-9),
-        Err(NurbsRayError::InvalidSurface(_))
-    ));
+    assert!(
+        fs_rep_nurbs::NurbsSurface::from_homogeneous(
+            sphere.knots_u().clone(),
+            sphere.knots_v().clone(),
+            Vec::new(),
+        )
+        .is_err(),
+        "sealed surfaces cannot be constructed with an empty control net"
+    );
     let geometric_miss = Ray {
         origin: Point3::new(3.0, 3.0, 3.0),
         dir: Vec3::new(1.0, 0.0, 0.0),

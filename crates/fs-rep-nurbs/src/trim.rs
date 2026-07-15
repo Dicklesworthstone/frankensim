@@ -18,7 +18,7 @@ use crate::rat::Rat;
 /// to the successor API.
 pub(crate) const TRIM_CLASSIFY_MAX_WORK_UNITS: u128 = 1_048_576;
 
-/// Minimum charge for admitting one caller-mutable loop before inspecting its
+/// Minimum charge for admitting one sealed loop before inspecting its
 /// knot/control metadata. This makes a huge collection of individually tiny
 /// loops reject in O(1), rather than spending unbounded time merely discovering
 /// that the aggregate validation exceeds the legacy synchronous envelope.
@@ -26,18 +26,38 @@ const TRIM_MIN_LOOP_VALIDATION_WORK_UNITS: u128 = 64;
 
 /// One closed trim loop: an exact rational curve in (u, v) parameter
 /// space (closure is validated).
+///
+/// The exact curve is read-only after construction; callers use
+/// [`TrimLoop::curve`] for inspection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimLoop {
     /// The exact 2-D curve.
-    pub curve: NurbsCurve<Rat, 2>,
+    pub(crate) curve: NurbsCurve<Rat, 2>,
+}
+
+/// A validate-once borrow of one exact immutable trim-loop snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedTrimLoop<'a> {
+    inner: &'a TrimLoop,
 }
 
 impl TrimLoop {
     fn validate_live(&self) -> Result<(), NurbsError> {
-        self.curve.validate_live_structure()?;
-        let (lo, hi) = self.curve.knots.domain()?;
-        let start = self.curve.eval(lo)?;
-        let end = self.curve.eval(hi)?;
+        self.admit().map(|_| ())
+    }
+
+    /// Validate closure, continuity, knots, and controls once and bind the
+    /// proof to this immutable borrow.
+    ///
+    /// # Errors
+    /// [`NurbsError::Structure`] when the loop is not a valid closed continuous
+    /// exact curve.
+    pub fn admit(&self) -> Result<AdmittedTrimLoop<'_>, NurbsError> {
+        let curve = self.curve.admit()?;
+        let knots = curve.knots();
+        let (lo, hi) = knots.domain();
+        let start = curve.eval(lo)?;
+        let end = curve.eval(hi)?;
         if start != end {
             return Err(NurbsError::Structure {
                 what: "trim loop must close exactly (rational endpoint equality)".to_string(),
@@ -49,25 +69,25 @@ impl TrimLoop {
         // loop must be continuous for the control-polygon homotopy/winding
         // proof. Permit the expressive full-break representation only when
         // those limits agree exactly in Cartesian space.
-        let p = self.curve.knots.degree;
+        let p = knots.degree();
+        let knot_entries = knots.knots();
+        let controls = curve.homogeneous_control_points();
         let mut run_start = 0usize;
-        while run_start < self.curve.knots.knots.len() {
+        while run_start < knot_entries.len() {
             let mut run_end = run_start + 1;
-            while run_end < self.curve.knots.knots.len()
-                && self.curve.knots.knots[run_end] == self.curve.knots.knots[run_start]
-            {
+            while run_end < knot_entries.len() && knot_entries[run_end] == knot_entries[run_start] {
                 run_end += 1;
             }
-            let is_interior = run_start != 0 && run_end != self.curve.knots.knots.len();
+            let is_interior = run_start != 0 && run_end != knot_entries.len();
             if is_interior && run_end - run_start == p + 1 {
-                let left = self.curve.cpw[run_start - 1];
-                let right = self.curve.cpw[run_start];
+                let left = controls[run_start - 1];
+                let right = controls[run_start];
                 for coordinate in 0..2 {
                     if left[coordinate] * right[3] != right[coordinate] * left[3] {
                         return Err(NurbsError::Structure {
                             what: format!(
                                 "trim loop is discontinuous at full knot break {:?}",
-                                self.curve.knots.knots[run_start]
+                                knot_entries[run_start]
                             ),
                         });
                     }
@@ -75,7 +95,7 @@ impl TrimLoop {
             }
             run_start = run_end;
         }
-        Ok(())
+        Ok(AdmittedTrimLoop { inner: self })
     }
 
     /// Validate closure and construct.
@@ -89,32 +109,61 @@ impl TrimLoop {
         Ok(candidate)
     }
 
+    /// Borrow the sealed exact curve.
+    #[must_use]
+    pub const fn curve(&self) -> &NurbsCurve<Rat, 2> {
+        &self.curve
+    }
+
     /// The same loop with reversed orientation (holes are wound opposite
     /// to outers under the nonzero rule): control points reversed, knot
     /// vector mirrored about the domain.
     ///
     /// # Errors
-    /// [`NurbsError::Structure`] when caller mutation has invalidated closure,
-    /// continuity, knots, or the control net.
+    /// [`NurbsError::Structure`] when closure, continuity, knots, or the control
+    /// net are invalid.
     pub fn reversed_for_hole(&self) -> Result<TrimLoop, NurbsError> {
-        self.validate_live()?;
-        let (lo, hi) = self.curve.knots.domain()?;
-        let knots: Vec<Rat> = self
-            .curve
-            .knots
-            .knots
-            .iter()
-            .rev()
-            .map(|&u| lo + hi - u)
-            .collect();
-        let cpw: Vec<[Rat; 4]> = self.curve.cpw.iter().rev().copied().collect();
-        TrimLoop::new(NurbsCurve {
-            knots: crate::basis::KnotVector {
-                knots,
-                degree: self.curve.knots.degree,
-            },
-            cpw,
+        let admitted = self.admit()?;
+        let curve = admitted.curve();
+        let admitted_knots = curve.knots();
+        let (lo, hi) = admitted_knots.domain();
+        let mut knots = Vec::new();
+        knots
+            .try_reserve_exact(admitted_knots.knots().len())
+            .map_err(|_| NurbsError::Domain {
+                what: "reversed trim-knot allocation was refused".to_string(),
+            })?;
+        for &knot in admitted_knots.knots().iter().rev() {
+            knots.push(lo + (hi - knot));
+        }
+        let controls = curve.homogeneous_control_points();
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(controls.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "reversed trim-control allocation was refused".to_string(),
+            })?;
+        cpw.extend(controls.iter().rev().copied());
+        let reversed_knots = crate::basis::KnotVector::new(knots, admitted_knots.degree())?;
+        let reversed_curve = NurbsCurve::from_homogeneous(reversed_knots, cpw)?;
+        // Reversal of an admitted curve preserves exact endpoint closure and
+        // full-break continuity while only changing orientation.
+        Ok(TrimLoop {
+            curve: reversed_curve,
         })
+    }
+}
+
+impl<'a> AdmittedTrimLoop<'a> {
+    /// The exact immutable source bound to this view.
+    #[must_use]
+    pub const fn source(&self) -> &'a TrimLoop {
+        self.inner
+    }
+
+    /// Borrow the admitted exact curve without rescanning it.
+    #[must_use]
+    pub fn curve(&self) -> crate::curve::AdmittedNurbsCurve<'a, Rat, 2> {
+        self.inner.curve.admitted_after_validation()
     }
 }
 
@@ -133,13 +182,25 @@ pub enum Classification {
 /// A trimmed patch: parameter-space loops over any surface. (The surface
 /// itself is not needed for classification, which happens in parameter
 /// space; carrying it is the B-rep bookkeeping.)
+///
+/// ```compile_fail
+/// use fs_rep_nurbs::TrimmedPatch;
+/// let mut patch = TrimmedPatch::new(Vec::new());
+/// patch.loops.clear();
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimmedPatch {
     /// Outer boundary + hole loops (orientation encodes solidity via the
     /// nonzero-winding rule: outer CCW, holes CW).
-    pub loops: Vec<TrimLoop>,
+    pub(crate) loops: Vec<TrimLoop>,
     /// Exact-subdivision depth before declaring `Boundary`.
-    pub max_subdivision: u32,
+    pub(crate) max_subdivision: u32,
+}
+
+/// A validate-once borrow of one exact immutable trimmed-patch snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedTrimmedPatch<'a> {
+    inner: &'a TrimmedPatch,
 }
 
 impl TrimmedPatch {
@@ -147,6 +208,13 @@ impl TrimmedPatch {
         &self,
         work_remaining: &mut u128,
     ) -> Result<(), NurbsError> {
+        self.admit_with_budget(work_remaining).map(|_| ())
+    }
+
+    fn admit_with_budget<'a>(
+        &'a self,
+        work_remaining: &mut u128,
+    ) -> Result<AdmittedTrimmedPatch<'a>, NurbsError> {
         let minimum_work = (self.loops.len() as u128)
             .checked_mul(TRIM_MIN_LOOP_VALIDATION_WORK_UNITS)
             .ok_or_else(|| NurbsError::Domain {
@@ -169,9 +237,9 @@ impl TrimmedPatch {
         })?;
         spend_trim_work(work_remaining, validation_work, "live validation")?;
         for trim_loop in &self.loops {
-            trim_loop.validate_live()?;
+            trim_loop.admit()?;
         }
-        Ok(())
+        Ok(AdmittedTrimmedPatch { inner: self })
     }
 
     /// Construct with the default certification depth.
@@ -181,6 +249,38 @@ impl TrimmedPatch {
             loops,
             max_subdivision: 12,
         }
+    }
+
+    /// Construct with an explicit exact-subdivision limit.
+    #[must_use]
+    pub fn with_max_subdivision(loops: Vec<TrimLoop>, max_subdivision: u32) -> Self {
+        TrimmedPatch {
+            loops,
+            max_subdivision,
+        }
+    }
+
+    /// Borrow the sealed loop collection.
+    #[must_use]
+    pub fn loops(&self) -> &[TrimLoop] {
+        &self.loops
+    }
+
+    /// Exact-subdivision depth before an ambiguous query becomes `Boundary`.
+    #[must_use]
+    pub const fn max_subdivision(&self) -> u32 {
+        self.max_subdivision
+    }
+
+    /// Validate this exact immutable patch snapshot once under the defensive
+    /// aggregate trim budget.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for excessive validation work or an
+    /// invalid loop.
+    pub fn admit(&self) -> Result<AdmittedTrimmedPatch<'_>, NurbsError> {
+        let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
+        self.admit_with_budget(&mut work_remaining)
     }
 
     /// Certified classification of a parameter-space point.
@@ -203,7 +303,7 @@ impl TrimmedPatch {
     /// structural errors from exact subdivision.
     pub fn classify_box(&self, min: [Rat; 2], max: [Rat; 2]) -> Result<Classification, NurbsError> {
         let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
-        self.validate_live_with_budget(&mut work_remaining)?;
+        let admitted = self.admit_with_budget(&mut work_remaining)?;
         if min[0] > max[0] || min[1] > max[1] {
             return Err(NurbsError::Domain {
                 what: "trim classification box must be componentwise ordered".to_string(),
@@ -212,13 +312,13 @@ impl TrimmedPatch {
         let two = Rat::int(2);
         let witness = [(min[0] + max[0]) / two, (min[1] + max[1]) / two];
         let mut winding = 0i64;
-        for l in &self.loops {
+        for l in admitted.loops() {
             match loop_winding_box(
                 &l.curve,
                 min,
                 max,
                 witness,
-                self.max_subdivision,
+                admitted.max_subdivision(),
                 &mut work_remaining,
             )? {
                 Some(w) => winding += w,
@@ -230,6 +330,26 @@ impl TrimmedPatch {
         } else {
             Classification::Outside
         })
+    }
+}
+
+impl<'a> AdmittedTrimmedPatch<'a> {
+    /// The exact immutable source bound to this view.
+    #[must_use]
+    pub const fn source(&self) -> &'a TrimmedPatch {
+        self.inner
+    }
+
+    /// Borrow the sealed, already-validated loops.
+    #[must_use]
+    pub fn loops(&self) -> &'a [TrimLoop] {
+        &self.inner.loops
+    }
+
+    /// Exact-subdivision depth before an ambiguous query becomes `Boundary`.
+    #[must_use]
+    pub const fn max_subdivision(&self) -> u32 {
+        self.inner.max_subdivision
     }
 }
 
@@ -254,10 +374,9 @@ fn trim_loop_validation_work(curve: &NurbsCurve<Rat, 2>) -> Result<u128, NurbsEr
         .ok_or_else(|| NurbsError::Domain {
             what: "trim structure-validation accounting overflows u128".to_string(),
         })?;
-    // Closure evaluates both endpoints and the live public representation is
-    // revalidated by the generic curve/basis APIs. Eight scans is conservative
-    // for that present implementation and includes the full-break continuity
-    // walk.
+    // Closure evaluates both endpoints through one admitted curve. Eight scans
+    // remains a conservative legacy charge for closure, basis work, projection,
+    // and the full-break continuity walk.
     scanned_entries
         .checked_mul(8)
         .map(|work| work.max(TRIM_MIN_LOOP_VALIDATION_WORK_UNITS))

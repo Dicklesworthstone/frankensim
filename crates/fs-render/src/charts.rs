@@ -70,7 +70,7 @@ pub enum NurbsRayError {
         /// Actionable diagnosis.
         what: &'static str,
     },
-    /// The caller-mutable NURBS representation failed live validation.
+    /// The sealed NURBS source failed structural admission.
     InvalidSurface(NurbsError),
     /// The deterministic legacy work envelope was exceeded.
     ResourceLimit {
@@ -1484,22 +1484,24 @@ fn preflight_nurbs_ray_work(
         requested: u128::MAX,
         cap: NURBS_RAY_MAX_WORK_UNITS,
     };
-    let order_u = (surface.knots_u.degree as u128)
+    let knots_u = surface.knots_u();
+    let knots_v = surface.knots_v();
+    let order_u = (knots_u.degree() as u128)
         .checked_add(1)
         .ok_or_else(limit)?;
-    let order_v = (surface.knots_v.degree as u128)
+    let order_v = (knots_v.degree() as u128)
         .checked_add(1)
         .ok_or_else(limit)?;
-    let knot_entries = (surface.knots_u.knots.len() as u128)
-        .checked_add(surface.knots_v.knots.len() as u128)
+    let knot_entries = (knots_u.knots().len() as u128)
+        .checked_add(knots_v.knots().len() as u128)
         .ok_or_else(limit)?;
-    let controls = (surface.knots_u.control_count() as u128)
-        .checked_mul(surface.knots_v.control_count() as u128)
+    let controls = (knots_u.control_count() as u128)
+        .checked_mul(knots_v.control_count() as u128)
         .ok_or_else(limit)?;
-    // Price repeated live structure validation, both basis triangles and the
-    // tensor-product accumulation. `partials` constructs/evaluates additional
-    // isocurves; eight base evaluations per Newton step is conservative for
-    // the current implementation.
+    // Retain the historical conservative validation-shaped charge even though
+    // this path now binds one admitted surface for the whole invocation. Both
+    // basis triangles, tensor accumulation, and temporary isocurves remain
+    // priced; eight base evaluations per Newton step is conservative.
     let knot_work = knot_entries.checked_mul(64).ok_or_else(limit)?;
     let control_work = controls.checked_mul(16).ok_or_else(limit)?;
     let basis_work = order_u
@@ -1571,20 +1573,18 @@ fn ray_intersect_nurbs_impl(
             what: "ray origin/direction must be finite and direction nonzero",
         });
     };
-    let (ulo, uhi) = surface
-        .knots_u
-        .domain()
-        .map_err(NurbsRayError::InvalidSurface)?;
-    let (vlo, vhi) = surface
-        .knots_v
-        .domain()
-        .map_err(NurbsRayError::InvalidSurface)?;
     let direction_norm_squared = ray.dir.dot(ray.dir);
     if !direction_norm_squared.is_finite() || direction_norm_squared <= 0.0 {
         return Err(NurbsRayError::InvalidInput {
             what: "scaled ray direction has no finite positive squared norm",
         });
     }
+    let surface = surface.admit().map_err(NurbsRayError::InvalidSurface)?;
+    if let Some(cx) = cx {
+        cx.checkpoint().map_err(NurbsRayError::from)?;
+    }
+    let (ulo, uhi) = surface.knots_u().domain();
+    let (vlo, vhi) = surface.knots_v().domain();
     // Seed ranking: distance from the sample point to the ray LINE.
     let mut seeds: Vec<(f64, f64, f64, f64)> = Vec::new(); // (dist, u, v, t)
     seeds
