@@ -845,8 +845,31 @@ fn as_dims(sx: &Sx, wire: DimensionWire) -> Result<Dims, ScenarioError> {
     as_dims_at(as_list(sx, "dims")?, wire)
 }
 
+fn reserve_decoded<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    resource: &str,
+) -> Result<(), ScenarioError> {
+    values
+        .try_reserve_exact(additional)
+        .map_err(|allocation_error| {
+            err(
+                0,
+                &format!(
+                    "IR decoded {resource} allocation for {additional} elements was refused: {allocation_error}"
+                ),
+            )
+        })
+}
+
 fn as_floats(sx: &Sx, head: &str) -> Result<Vec<f64>, ScenarioError> {
-    as_list(sx, head)?.iter().map(as_f64).collect()
+    let items = as_list(sx, head)?;
+    let mut values = Vec::new();
+    reserve_decoded(&mut values, items.len(), head)?;
+    for item in items {
+        values.push(as_f64(item)?);
+    }
+    Ok(values)
 }
 
 fn as_vec3(sx: &Sx) -> Result<Vec3, ScenarioError> {
@@ -1315,5 +1338,26 @@ pub fn check_round_trip(s: &Scenario, out: &mut Vec<Violation>) {
             what: format!("scenario {:?} canonical IR failed to reparse: {e}", s.name),
             fix: "report this as an fs-scenario IR bug".to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod allocation_internal_tests {
+    use super::reserve_decoded;
+    use crate::ScenarioError;
+
+    #[test]
+    fn decoded_float_allocation_refusal_is_typed() {
+        let mut values = Vec::<f64>::new();
+        let error = reserve_decoded(&mut values, usize::MAX, "float-list test")
+            .expect_err("impossible decoded capacity must be refused");
+
+        assert!(matches!(
+            error,
+            ScenarioError::Parse { at: 0, what }
+                if what.contains("IR decoded float-list test allocation")
+                    && what.contains("was refused")
+        ));
+        assert!(values.is_empty());
     }
 }

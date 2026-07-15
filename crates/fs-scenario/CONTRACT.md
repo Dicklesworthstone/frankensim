@@ -92,8 +92,9 @@ flagships.
   tree growth; caller-selected depth may tighten but cannot exceed the
   recursive implementation's hard safety ceiling. Non-finite wire numbers and
   invalid Chebyshev constructor inputs are structured parse refusals, never
-  panics. The byte/node limits also bound decoder collection sizes, but are not
-  a separately metered exact heap-byte budget.
+  panics. Syntax-tree growth, atom buffers, and decoded floating-point lists
+  reserve fallibly. The byte/node limits also bound decoder collection sizes,
+  but are not a separately metered exact heap-byte budget.
 
 ## Invariants
 
@@ -356,8 +357,8 @@ None.
   `Scenario::validate` before solver admission. Input/node/list limits bound
   decoder cardinality. Semantic validation has its own explicit work plan and
   must not reuse syntax limits as an admission receipt. Exact decoded-heap
-  accounting plus fallible semantic-index/finding reservation remain active
-  work under `frankensim-sj31i.24`.
+  accounting plus fallible reservation for the remaining decoded collections
+  and semantic findings remain active work under `frankensim-sj31i.24`.
 - **Finding capacity is not exact diagnostic-heap admission**: bounded identity
   previews prevent one long combination name from being copied in full into
   every term finding, but other diagnostic fields and each final `String`
