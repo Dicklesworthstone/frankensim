@@ -3,7 +3,9 @@
 //! (steady Poiseuille channel flow matches the analytic parabola), and the
 //! lattice-scaling assistant's stability bookkeeping.
 
-use fs_lbm::{Color, Lbm, MACH_LIMIT, equilibrium, plan_scaling, poiseuille_analytic};
+use fs_lbm::{
+    Cell, Color, Grid, Lbm, MACH_LIMIT, Q, equilibrium, plan_scaling, poiseuille_analytic,
+};
 
 #[test]
 fn the_equilibrium_recovers_its_moments() {
@@ -92,4 +94,89 @@ fn the_solver_is_deterministic() {
     a.run(100);
     b.run(100);
     assert_eq!(a.x_velocity_profile(), b.x_velocity_profile());
+}
+
+#[test]
+fn d2q9_wall_momentum_has_exact_link_sign_and_obstacle_selection() {
+    let mut grid = Grid::uniform(3, 3, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.flags.fill(Cell::Gas);
+    let fluid = grid.idx(1, 1);
+    let left_wall = grid.idx(0, 1);
+    let right_wall = grid.idx(2, 1);
+    grid.flags[fluid] = Cell::Fluid;
+    grid.flags[left_wall] = Cell::Wall;
+    grid.flags[right_wall] = Cell::Wall;
+
+    let mut post = vec![[0.0; Q]; grid.nx * grid.ny];
+    // D2Q9 directions 1 and 3 point east and west. An east-going population
+    // of 0.25 transfers +2f = +0.5 x-momentum to the right wall.
+    post[fluid][1] = 0.25;
+    // The west-going population would transfer -0.75 to the left wall.
+    post[fluid][3] = 0.375;
+
+    let mut right_only = vec![false; grid.nx * grid.ny];
+    right_only[right_wall] = true;
+    let right_receipt = grid.stream_from_with_wall_momentum(&post, &right_only);
+    assert_eq!(right_receipt.measured_links, 1);
+    assert_eq!(right_receipt.wall_impulse[0].to_bits(), 0.5f64.to_bits());
+    assert_eq!(right_receipt.wall_impulse[1].to_bits(), 0.0f64.to_bits());
+    assert_eq!(grid.f[fluid][3].to_bits(), 0.25f64.to_bits());
+
+    let mut both = right_only;
+    both[left_wall] = true;
+    let both_receipt = grid.stream_from_with_wall_momentum(&post, &both);
+    assert_eq!(both_receipt.measured_links, 2);
+    assert_eq!(both_receipt.wall_impulse[0].to_bits(), (-0.25f64).to_bits());
+    assert_eq!(both_receipt.wall_impulse[1].to_bits(), 0.0f64.to_bits());
+    assert_eq!(grid.f[fluid][1].to_bits(), 0.375f64.to_bits());
+}
+
+#[test]
+fn d2q9_wall_momentum_is_zero_at_rest_and_replays_bitwise() {
+    let mut resting = Grid::uniform(5, 5, 0.8);
+    let resting_wall = resting.idx(2, 2);
+    resting.flags[resting_wall] = Cell::Wall;
+    let mut resting_mask = vec![false; resting.nx * resting.ny];
+    resting_mask[resting_wall] = true;
+    let resting_post = resting.f.clone();
+    let resting_receipt = resting.stream_from_with_wall_momentum(&resting_post, &resting_mask);
+    assert_eq!(resting_receipt.measured_links, 8);
+    assert!(resting_receipt.wall_impulse[0].abs() < 1e-15);
+    assert!(resting_receipt.wall_impulse[1].abs() < 1e-15);
+
+    let mut first = Grid::uniform(7, 7, 0.8);
+    let wall = first.idx(3, 3);
+    let upstream = first.idx(2, 3);
+    first.flags[wall] = Cell::Wall;
+    first.f[upstream] = equilibrium(1.0, 0.04, 0.01);
+    let mut second = first.clone();
+    let mut mask = vec![false; first.nx * first.ny];
+    mask[wall] = true;
+    let (mut first_scratch, mut second_scratch) = (Vec::new(), Vec::new());
+    let mut observed_nonzero_impulse = false;
+
+    for _ in 0..12 {
+        let first_receipt = first.step_with_wall_momentum(&mut first_scratch, &mask);
+        let second_receipt = second.step_with_wall_momentum(&mut second_scratch, &mask);
+        observed_nonzero_impulse |= first_receipt.wall_impulse != [0.0, 0.0];
+        assert_eq!(first_receipt, second_receipt);
+    }
+    assert!(observed_nonzero_impulse);
+    assert_eq!(first.f, second.f);
+}
+
+#[test]
+fn d2q9_wall_momentum_refuses_invalid_masks_before_advancing() {
+    let mut grid = Grid::uniform(3, 3, 0.8);
+    let original = grid.f.clone();
+    let mut scratch = Vec::new();
+    let non_wall_mask = vec![true; grid.nx * grid.ny];
+    let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = grid.step_with_wall_momentum(&mut scratch, &non_wall_mask);
+    }));
+    assert!(refusal.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
 }

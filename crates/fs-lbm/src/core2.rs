@@ -53,6 +53,21 @@ pub struct Moments {
     pub u: [f64; 2],
 }
 
+/// Momentum delivered to a selected set of stationary halfway-bounce-back
+/// wall cells during one D2Q9 stream.
+///
+/// `wall_impulse` uses lattice momentum units. With the lattice time step
+/// equal to one it is also the raw lattice force; callers remain responsible
+/// for physical-unit and drag/lift normalization.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[must_use]
+pub struct MomentumExchange2 {
+    /// Net `(x, y)` impulse delivered by the fluid to selected walls.
+    pub wall_impulse: [f64; 2],
+    /// Number of selected fluid-wall links included in the sum.
+    pub measured_links: usize,
+}
+
 impl Grid {
     /// A grid of fluid at rest (unit density), uniform `tau`.
     #[must_use]
@@ -208,9 +223,34 @@ impl Grid {
         Some(self.idx(sx, sy))
     }
 
-    /// Stream `post` into `self.f` (fluid pull; wall and out-of-domain
-    /// pulls bounce back).
-    pub fn stream_from(&mut self, post: &[[f64; Q]]) {
+    fn validate_stream_input(&self, post: &[[f64; Q]]) {
+        assert_eq!(
+            post.len(),
+            self.nx * self.ny,
+            "post-collision population count must match the grid"
+        );
+    }
+
+    fn validate_measured_walls(&self, measured_walls: &[bool]) {
+        assert_eq!(
+            measured_walls.len(),
+            self.nx * self.ny,
+            "measured-wall mask length must match the grid"
+        );
+        for (index, (&measured, &flag)) in measured_walls.iter().zip(&self.flags).enumerate() {
+            assert!(
+                !measured || flag == Cell::Wall,
+                "measured-wall mask selects non-wall cell {index}"
+            );
+        }
+    }
+
+    fn stream_from_inner(
+        &mut self,
+        post: &[[f64; Q]],
+        measured_walls: Option<&[bool]>,
+    ) -> MomentumExchange2 {
+        let mut receipt = MomentumExchange2::default();
         for y in 0..self.ny {
             for x in 0..self.nx {
                 let i = self.idx(x, y);
@@ -220,7 +260,19 @@ impl Grid {
                 for q in 0..Q {
                     let pulled = match self.source(x, y, q) {
                         Some(s) if matches!(self.flags[s], Cell::Wall | Cell::Gas) => {
-                            post[i][OPP[q]]
+                            let reflected = post[i][OPP[q]];
+                            if self.flags[s] == Cell::Wall
+                                && measured_walls.is_some_and(|mask| mask[s])
+                            {
+                                // Pull direction q points from the wall back into
+                                // the fluid. The fluid momentum change is
+                                // +2 f_post c_q, so the opposite impulse delivered
+                                // to the stationary wall is -2 f_post c_q.
+                                receipt.wall_impulse[0] -= 2.0 * reflected * f64::from(E[q].0);
+                                receipt.wall_impulse[1] -= 2.0 * reflected * f64::from(E[q].1);
+                                receipt.measured_links += 1;
+                            }
+                            reflected
                         }
                         Some(s) => post[s][q],
                         None => post[i][OPP[q]],
@@ -229,6 +281,29 @@ impl Grid {
                 }
             }
         }
+        receipt
+    }
+
+    /// Stream `post` into `self.f` (fluid pull; wall and out-of-domain
+    /// pulls bounce back).
+    pub fn stream_from(&mut self, post: &[[f64; Q]]) {
+        self.validate_stream_input(post);
+        let _ = self.stream_from_inner(post, None);
+    }
+
+    /// Stream while measuring momentum delivered to selected wall cells.
+    ///
+    /// Only bounce-back links whose source cell is both [`Cell::Wall`] and
+    /// `true` in `measured_walls` contribute. Gas-boundary and non-periodic
+    /// exterior bounces are deliberately excluded.
+    pub fn stream_from_with_wall_momentum(
+        &mut self,
+        post: &[[f64; Q]],
+        measured_walls: &[bool],
+    ) -> MomentumExchange2 {
+        self.validate_stream_input(post);
+        self.validate_measured_walls(measured_walls);
+        self.stream_from_inner(post, Some(measured_walls))
     }
 
     /// One plain step (no free-surface bookkeeping).
@@ -237,6 +312,23 @@ impl Grid {
         let post = std::mem::take(scratch);
         self.stream_from(&post);
         *scratch = post;
+    }
+
+    /// One plain step plus a raw stationary-wall momentum-exchange receipt.
+    ///
+    /// The mask is validated before collision, so a malformed measurement
+    /// request cannot partially advance the grid.
+    pub fn step_with_wall_momentum(
+        &mut self,
+        scratch: &mut Vec<[f64; Q]>,
+        measured_walls: &[bool],
+    ) -> MomentumExchange2 {
+        self.validate_measured_walls(measured_walls);
+        self.collide_into(scratch);
+        let post = std::mem::take(scratch);
+        let receipt = self.stream_from_inner(&post, Some(measured_walls));
+        *scratch = post;
+        receipt
     }
 }
 

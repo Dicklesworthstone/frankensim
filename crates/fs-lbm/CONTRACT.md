@@ -24,6 +24,10 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   flags, vector gravity, per-cell relaxation time, per-cell external force,
   periodicity flags, deterministic collide/stream steps, and gas/wall
   boundary bounce handling for the plain non-free-surface step.
+  `core2::MomentumExchange2`, `stream_from_with_wall_momentum`, and
+  `step_with_wall_momentum` add an opt-in raw lattice-impulse receipt for an
+  explicitly selected subset of stationary wall cells without changing the
+  legacy step path.
 - `rheology::Rheology`, `rheology::update_tau`, and
   `rheology::channel_flow` — local apparent-viscosity laws and explicit
   τ updates with floor/cap counts for cells outside the representable
@@ -97,6 +101,10 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
 - Gas cells do not act as fluid population sources in the plain dense-grid
   stream step; absent gas-side populations bounce at the fluid boundary until
   explicit free-surface bookkeeping lands.
+- D2Q9 wall momentum exchange sums `-2 f_post c_q` in fixed row-major/link
+  order for selected stationary halfway-bounce-back links. Gas and exterior
+  bounces are excluded; an isolated wall in equilibrium fluid has zero net
+  impulse, and selecting one obstacle cannot silently include another.
 - Rheology laws reject non-finite or non-positive physical parameters, and
   every update reports floor/cap counts when viscosity leaves the representable
   τ window.
@@ -128,6 +136,9 @@ Most operations are total over physically admissible inputs. Constructors and
 parameter helpers panic on nonsensical requests: zero dimensions, non-finite
 forces/relaxation times, non-positive viscosities/rheology indices, non-positive
 Rayleigh height, or non-positive Reynolds/length in the scaling assistant.
+D2Q9 momentum measurement additionally requires a full-grid boolean mask whose
+selected entries are all `Cell::Wall`; this is checked before a measured step
+can mutate populations.
 D3Q19 boundary construction additionally rejects non-4-multiple dimensions,
 tile-count overflow, invalid collision parameters, moment-space collision with
 nonzero force, unpaired periodic faces, non-tangential/non-finite or
@@ -166,7 +177,9 @@ None.
 `tests/lbm.rs` covers the v0 core: equilibrium moments; mass conservation;
 Poiseuille flow matches the analytic parabola (symmetric, centered); the
 scaling assistant derives τ + flags stability + colors the plan; it rejects a
-high-Mach plan and nonsense inputs; determinism.
+high-Mach plan and nonsense inputs; determinism; exact one-link wall-impulse
+sign/magnitude, obstacle selection, equilibrium cancellation, replay
+determinism, and pre-step mask refusal for D2Q9 momentum exchange.
 
 `tests/extensions.rs` covers the current extension scaffolding: power-law and
 Newtonian-limit channel profiles, Carreau plateaus, Rayleigh-Bénard onset
@@ -210,8 +223,10 @@ pressure-Poiseuille gates.
   selectable central-moment and `ReducedCumulant` cell operators are
   deterministic `O(Q^3)` correctness references: they are unforced and have no
   performance or high-Re stability claim. D3Q27, sparse active-tile
-  storage/sweeps, a production cumulant collision, momentum-exchange
-  drag/lift, and bandwidth roofline / fs-tilelang kernels remain staged. Geier
+  storage/sweeps, a production cumulant collision, normalized drag/lift
+  histories, and bandwidth roofline / fs-tilelang kernels remain staged. The
+  raw D2Q9 stationary-wall momentum receipt is not a normalized aerodynamic
+  coefficient. Geier
   et al.'s primary derivation (doi:10.1016/j.camwa.2015.05.001) explicitly
   restricts itself to D3Q27 after identifying non-refining D3Q19 anisotropy.
   `ReducedCumulant` therefore implements only the general cumulant definitions
@@ -221,6 +236,11 @@ pressure-Poiseuille gates.
   bounce-back. It is second-order for the represented flat, lattice-aligned
   halfway wall, not a second-order certificate against the original continuous
   curved SDF. Interpolated Bouzidi-type curved boundaries remain staged.
+- D2Q9 `MomentumExchange2` is a raw stationary-wall lattice impulse over the
+  caller's exact cell mask. It does not apply physical-unit conversion,
+  reference-area normalization, moving-wall correction, curved-boundary
+  interpolation, blockage correction, averaging, or shedding-frequency
+  estimation; therefore it is not yet the Re=100 cylinder Cd/St validation.
 - The face-generic regularized closure was selected instead of six
   face-specialized Zou-He tables because its Hermite stress projection has an
   independent second-moment oracle and preserves arbitrary tangential target
