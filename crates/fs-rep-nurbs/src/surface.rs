@@ -8,12 +8,96 @@ use crate::basis::{BASIS_MAX_WORK_UNITS, KnotVector, Scalar};
 use crate::curve::NurbsCurve;
 
 const SURFACE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
+const SURFACE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
+const SURFACE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 
 /// One (u-span × v-span) control box: (min, max, (u0, u1), (v0, v1)).
 pub type SurfaceSpanBox<S> = ([S; 3], [S; 3], (S, S), (S, S));
 
 /// Value + first partials `(S, S_u, S_v)`.
 pub type SurfacePartials = ([f64; 3], [f64; 3], [f64; 3]);
+
+fn enforce_span_box_envelope(work: u128, retained_bytes: u128) -> Result<(), NurbsError> {
+    if work > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "surface span-box traversal requests {work} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    if retained_bytes > SURFACE_SPAN_BOX_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "surface span boxes retain {retained_bytes} bytes above defensive ceiling {SURFACE_SPAN_BOX_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn preflight_span_boxes(
+    control_count_u: usize,
+    control_count_v: usize,
+    degree_u: usize,
+    degree_v: usize,
+    retained_bytes_per_box: usize,
+) -> Result<usize, NurbsError> {
+    let span_count_u =
+        control_count_u
+            .checked_sub(degree_u)
+            .ok_or_else(|| NurbsError::Structure {
+                what: "surface u degree exceeds its admitted control count".to_string(),
+            })?;
+    let span_count_v =
+        control_count_v
+            .checked_sub(degree_v)
+            .ok_or_else(|| NurbsError::Structure {
+                what: "surface v degree exceeds its admitted control count".to_string(),
+            })?;
+    let span_capacity =
+        span_count_u
+            .checked_mul(span_count_v)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "surface span-box count overflows usize".to_string(),
+            })?;
+    let order_u = degree_u.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface u order overflows usize during span-box admission".to_string(),
+    })?;
+    let order_v = degree_v.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface v order overflows usize during span-box admission".to_string(),
+    })?;
+    let control_visits = (span_capacity as u128)
+        .checked_mul(order_u as u128)
+        .and_then(|work| work.checked_mul(order_v as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface span-box control-scan work overflows u128".to_string(),
+        })?;
+    // Worst case: Su outer span checks, two checks/write-accounting units per
+    // candidate box, and a conservative 16 units for each overlapping control
+    // visit (three Cartesian projections plus comparisons).
+    let traversal_work =
+        (span_count_u as u128)
+            .checked_add((span_capacity as u128).checked_mul(2).ok_or_else(|| {
+                NurbsError::Domain {
+                    what: "surface span-box candidate work overflows u128".to_string(),
+                }
+            })?)
+            .and_then(|work| {
+                control_visits
+                    .checked_mul(SURFACE_SPAN_BOX_WORK_PER_CONTROL)
+                    .and_then(|control_work| work.checked_add(control_work))
+            })
+            .ok_or_else(|| NurbsError::Domain {
+                what: "surface span-box traversal work overflows u128".to_string(),
+            })?;
+    let retained_bytes = (span_capacity as u128)
+        .checked_mul(retained_bytes_per_box as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface span-box retained-byte accounting overflows u128".to_string(),
+        })?;
+    enforce_span_box_envelope(traversal_work, retained_bytes)?;
+    Ok(span_capacity)
+}
 
 /// A rational tensor-product surface in 3D.
 ///
@@ -432,19 +516,20 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
     /// Per-span Cartesian control boxes without a second structural scan.
     ///
     /// # Errors
-    /// Returns a structured allocation refusal when the output cannot grow.
+    /// Returns a structured refusal when nested control scans, retained output,
+    /// or the output allocation exceed the defensive legacy envelope.
     pub fn span_boxes(&self) -> Result<Vec<SurfaceSpanBox<S>>, NurbsError> {
         let knots_u = self.knots_u();
         let knots_v = self.knots_v();
         let (pu, pv) = (knots_u.degree(), knots_v.degree());
+        let span_capacity = preflight_span_boxes(
+            knots_u.control_count(),
+            knots_v.control_count(),
+            pu,
+            pv,
+            core::mem::size_of::<SurfaceSpanBox<S>>(),
+        )?;
         let mut out = Vec::new();
-        let span_capacity = knots_u
-            .control_count()
-            .saturating_sub(pu)
-            .checked_mul(knots_v.control_count().saturating_sub(pv))
-            .ok_or_else(|| NurbsError::Domain {
-                what: "surface span-box count overflows usize".to_string(),
-            })?;
         out.try_reserve_exact(span_capacity)
             .map_err(|_| NurbsError::Domain {
                 what: "surface span-box allocation was refused".to_string(),
@@ -554,5 +639,56 @@ impl AdmittedNurbsSurface<'_, f64> {
             NurbsCurve::<f64, 3>::from_homogeneous(self.inner.knots_v.try_clone()?, v_net)?;
         let dv = v_curve.admitted_after_validation().derivatives(v, 1)?;
         Ok((du[0], du[1], dv[1]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Rat;
+
+    #[test]
+    fn span_box_preflight_prices_nested_scans_and_retained_output() {
+        let bytes_per_box = core::mem::size_of::<SurfaceSpanBox<f64>>();
+        assert_eq!(
+            preflight_span_boxes(2, 2, 1, 1, bytes_per_box).expect("one bilinear box"),
+            1
+        );
+        assert!(
+            enforce_span_box_envelope(BASIS_MAX_WORK_UNITS, SURFACE_SPAN_BOX_MAX_RETAINED_BYTES)
+                .is_ok(),
+            "both exact ceilings are admitted"
+        );
+        assert!(matches!(
+            enforce_span_box_envelope(
+                BASIS_MAX_WORK_UNITS + 1,
+                SURFACE_SPAN_BOX_MAX_RETAINED_BYTES
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("work")
+        ));
+        assert!(matches!(
+            enforce_span_box_envelope(
+                BASIS_MAX_WORK_UNITS,
+                SURFACE_SPAN_BOX_MAX_RETAINED_BYTES + 1
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("retain")
+        ));
+
+        let work_error = preflight_span_boxes(512, 512, 255, 255, bytes_per_box)
+            .expect_err("high-degree overlap must be refused before allocation");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("traversal")
+        ));
+
+        let rat_box_bytes = core::mem::size_of::<SurfaceSpanBox<Rat>>();
+        preflight_span_boxes(458, 458, 1, 1, rat_box_bytes)
+            .expect("the Rat payload immediately below the retained-byte cap is admitted");
+        let retained_error = preflight_span_boxes(459, 459, 1, 1, rat_box_bytes)
+            .expect_err("the next Rat span grid exceeds retained bytes before allocation");
+        assert!(matches!(
+            retained_error,
+            NurbsError::Domain { ref what } if what.contains("retain")
+        ));
     }
 }

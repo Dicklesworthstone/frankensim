@@ -70,7 +70,8 @@ pub enum NurbsRayError {
         /// Actionable diagnosis.
         what: &'static str,
     },
-    /// The sealed NURBS source failed structural admission.
+    /// The sealed NURBS source failed structural admission or a typed
+    /// evaluation/derivative request refused.
     InvalidSurface(NurbsError),
     /// The deterministic legacy work envelope was exceeded.
     ResourceLimit {
@@ -110,7 +111,12 @@ impl core::fmt::Display for NurbsRayError {
         match self {
             Self::Cancelled => formatter.write_str("NURBS ray intersection cancelled"),
             Self::InvalidInput { what } => write!(formatter, "invalid NURBS ray input: {what}"),
-            Self::InvalidSurface(error) => write!(formatter, "invalid NURBS ray surface: {error}"),
+            Self::InvalidSurface(error) => {
+                write!(
+                    formatter,
+                    "NURBS ray surface admission/evaluation failed: {error}"
+                )
+            }
             Self::ResourceLimit { requested, cap } => write!(
                 formatter,
                 "NURBS ray seed request {requested} exceeds defensive ceiling {cap}"
@@ -1636,9 +1642,7 @@ fn ray_intersect_nurbs_impl(
             if let Some(cx) = cx {
                 cx.checkpoint().map_err(NurbsRayError::from)?;
             }
-            let Ok((pos, su, sv)) = partials else {
-                break;
-            };
+            let (pos, su, sv) = partials.map_err(NurbsRayError::InvalidSurface)?;
             let f = [
                 pos[0] - ray.origin.x - t * ray.dir.x,
                 pos[1] - ray.origin.y - t * ray.dir.y,

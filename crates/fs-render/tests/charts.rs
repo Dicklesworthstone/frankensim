@@ -1644,6 +1644,37 @@ fn rb_003b_nurbs_ray_admission_is_bounded_and_fail_closed() {
         Err(NurbsRayError::WorkLimit { .. })
     ));
 
+    let overflow_knots =
+        fs_rep_nurbs::KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear knots");
+    let overflow_partials = fs_rep_nurbs::NurbsSurface::new(
+        overflow_knots.clone(),
+        overflow_knots,
+        &[
+            vec![[-f64::MAX, 0.0, 0.0], [-f64::MAX, 1.0, 0.0]],
+            vec![[f64::MAX, 0.0, 0.0], [f64::MAX, 1.0, 0.0]],
+        ],
+        &[vec![1.0; 2], vec![1.0; 2]],
+    )
+    .expect("finite surface whose u derivative overflows");
+    assert!(
+        overflow_partials.eval(0.5, 0.5).is_ok(),
+        "the seed value remains finite"
+    );
+    assert!(matches!(
+        overflow_partials.partials(0.5, 0.5),
+        Err(fs_rep_nurbs::NurbsError::Domain { .. })
+    ));
+    let overflow_ray = Ray {
+        origin: Point3::new(0.0, 0.5, 1.0),
+        dir: Vec3::new(0.0, 0.0, -1.0),
+    };
+    assert!(matches!(
+        ray_intersect_nurbs(&overflow_partials, &overflow_ray, 1, 1e-9),
+        Err(NurbsRayError::InvalidSurface(
+            fs_rep_nurbs::NurbsError::Domain { .. }
+        ))
+    ));
+
     assert!(
         fs_rep_nurbs::NurbsSurface::from_homogeneous(
             sphere.knots_u().clone(),

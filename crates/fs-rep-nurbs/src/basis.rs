@@ -122,14 +122,17 @@ pub struct AdmittedKnotVector<'a, S: Scalar> {
 }
 
 impl<S: Scalar> KnotVector<S> {
-    pub(crate) fn validation_work(&self) -> Result<u128, NurbsError> {
-        let knot_count = self.knots.len() as u128;
-        knot_count
+    fn validation_work_for(knot_count: usize, degree: usize) -> Result<u128, NurbsError> {
+        (knot_count as u128)
             .checked_mul(KNOT_VALIDATION_WORK_PER_ENTRY)
-            .and_then(|work| work.checked_add(self.degree as u128))
+            .and_then(|work| work.checked_add(degree as u128))
             .ok_or_else(|| NurbsError::Domain {
                 what: "knot-scan work accounting overflows u128".to_string(),
             })
+    }
+
+    pub(crate) fn validation_work(&self) -> Result<u128, NurbsError> {
+        Self::validation_work_for(self.knots.len(), self.degree)
     }
 
     fn span_search_work(&self) -> u128 {
@@ -291,12 +294,7 @@ impl<S: Scalar> KnotVector<S> {
                 ),
             });
         }
-        let validation_work = (knots.len() as u128)
-            .checked_mul(KNOT_VALIDATION_WORK_PER_ENTRY)
-            .and_then(|work| work.checked_add(degree as u128))
-            .ok_or_else(|| NurbsError::Domain {
-                what: "knot-construction work accounting overflows u128".to_string(),
-            })?;
+        let validation_work = Self::validation_work_for(knots.len(), degree)?;
         Self::enforce_work(validation_work, "knot-vector construction")?;
         if knots.iter().copied().any(|knot| !knot.is_finite()) {
             return Err(NurbsError::Structure {
@@ -559,6 +557,33 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn construction_admits_work_before_the_first_knot_scan() {
+        let exact_cap_count = 1_048_575usize;
+        assert_eq!(
+            KnotVector::<f64>::validation_work_for(exact_cap_count, 16).expect("exact-cap work"),
+            BASIS_MAX_WORK_UNITS
+        );
+        assert_eq!(
+            KnotVector::<f64>::validation_work_for(exact_cap_count, 17).expect("cap-plus-one work"),
+            BASIS_MAX_WORK_UNITS + 1
+        );
+
+        let over_cap = KnotVector::new(vec![f64::NAN; exact_cap_count], 17)
+            .expect_err("cap-plus-one construction must be refused");
+        assert!(
+            matches!(over_cap, NurbsError::Domain { .. }),
+            "work refusal must precede the non-finite scalar scan"
+        );
+
+        let exact_cap = KnotVector::new(vec![f64::NAN; exact_cap_count], 16)
+            .expect_err("the exact-cap request reaches finite-value validation");
+        assert!(
+            matches!(exact_cap, NurbsError::Structure { .. }),
+            "an exact-cap request must reach semantic validation"
+        );
+    }
 
     #[test]
     fn empty_domain_knot_vector_is_rejected_not_paniced() {
