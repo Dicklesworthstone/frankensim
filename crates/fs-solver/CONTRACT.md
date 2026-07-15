@@ -210,10 +210,17 @@ a fixed envelope (≤ 80) while identity-preconditioned counts blow up
 (hard corner m = 4, r = 4: 9 vs 1192 — a 132× advantage), solutions
 matching identity-CG to 1e−7; deterministic dot; golden hash (bumped
 at x08j with justification: the smoother change is semantic).
-`tests/metamorphic.rs`: a declared, jointly shrinkable adjoint/finite-difference
-relation exercises both production actions of a general `CsrOp` on an exact
-bounded-integer fixture. The broader GMRES transpose/LU pin above remains
-independent.
+`tests/metamorphic.rs`: relation `general-csr-linear-adjoint-difference`
+exercises both production actions of `fs-solver::CsrOp::general` through the
+shared, jointly shrinkable adjoint/finite-difference harness (seed
+`0x2ACE_0004`, 384 cases, exact finite-bit tolerance). The fixture is one fixed
+nonsymmetric 3x3 integer-valued CSR matrix with objective `[1, -2, 3]`; base
+coordinates and a nonzero direction lie in `[-8, 8]`, and the jointly
+shrinkable integer step lies in `[-3, 3]`. It checks that the primal finite
+difference equals the `apply_transpose` directional derivative and that the
+adjoint action is stable across the transform. This code-first declaration is
+proof-pending until the owning-crate batch suite passes. The broader GMRES
+transpose/LU pin above remains independent.
 `tests/stokes_battery.rs` (5 cases): FEEC tensor Stokes fixture with
 P-MINRES + blockdiag(p-MG, pressure mass) agrees with a dense
 constant-pressure-pinned LU reference on m = 2, r = 2; velocity is
@@ -269,6 +276,12 @@ receipt, and outer split replay.
 - No dense output of Krylov bases, no eigenvalue estimation service,
   no threading (fs-exec drivers own parallelism), no G4 cancellation
   storms yet (needs the Cx wiring).
+- The G3 CSR adopter proves only an exact relation on one fixed 3x3 matrix and
+  bounded integer-valued vectors/steps whose binary64 arithmetic is exact. It
+  does not establish adjoint accuracy under general floating-point roundoff,
+  arbitrary sparse operators or dimensions, nonlinear finite differences,
+  Krylov convergence, or derivative correctness for solver clients. Its
+  declaration is not evidence of a passing batch run.
 - The verifier is an injected evidence grammar, not an automatic
   symmetry/definiteness/nullspace certifier. Its receipt retains only
   dimension, verifier identity, and findings: it does not content-bind

@@ -120,10 +120,13 @@ reused by two operators, and a planted violation that jointly shrinks to
 `input=100, transform=7` before checking its structured failure context.
 Owning-crate G3 adopters exercise six production surfaces without removing
 their fixed pins: `fs-la::gemm_f64`, `fs-fft::Fft::forward`,
-`fs-conform::Converter::apply`, both actions of `fs-solver::CsrOp::general`,
-`fs-opt::descend_fn`, and `fs-render::Lambertian::furnace_radiance`. Their
-relation ids, seeds, case counts, tolerances, and no-claim boundaries live in
-the corresponding crate contracts.
+`fs-geom::fixtures::SphereChart::convert`, both actions of
+`fs-solver::CsrOp::general`, `fs-opt::descend_fn`, and
+`fs-render::Lambertian::furnace_radiance`. Their relation ids, seeds, case
+counts, tolerances, and no-claim boundaries live in the corresponding crate
+contracts. Separately, `fs-conform` applies the same engine to its test-local
+`Mtx` implementation of the public `Converter` SDK trait; that is SDK harness
+coverage and is not counted as a production geometry conversion.
 
 ## No-claim boundaries
 No statistical coverage claims for f64 generation (uniform-ish plus deliberate

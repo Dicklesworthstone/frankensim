@@ -215,10 +215,17 @@ weights sum to one (+ heuristic ordering); MIS integration is unbiased;
 hero-wavelength integration exact on a constant / accurate on a ramp;
 determinism.
 
-`tests/metamorphic.rs`: the shared shrinkable G3 relation harness applies a
-declared radiance-unit rescaling to the production Lambertian furnace kernel.
-The existing translated-scene frame-invariance pin in `tests/charts.rs` remains
-independent.
+`tests/metamorphic.rs`: relation
+`lambertian-radiance-scale-equivariance` applies the shared shrinkable G3
+unit-rescaling harness to production
+`fs-render::Lambertian::furnace_radiance` (seed `0x2ACE_0006`, 384 cases,
+absolute-or-relative tolerance `max_abs = 2e-12`,
+`max_relative = 2e-12`). Each case draws albedo in `[0.05, 0.95)`, incident
+radiance in `[0.125, 32)`, and a jointly shrinkable exponent in `[-3, 3]`; the
+transform and expected output both use the exact power-of-two scale `2^e`.
+This code-first declaration is proof-pending until the owning-crate batch suite
+passes. The existing translated-scene frame-invariance pin in
+`tests/charts.rs` remains independent.
 
 `tests/diff_battery.rs` (bead qfx.5, feature `differentiable`): edge-aware
 gradient vs central FD, the frozen-crossing negative control, shrinking
@@ -251,6 +258,12 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   staged.
 - `mis_integrate_unit` is a 1-D demonstrator of the balance heuristic; the
   production MIS lives in the path integrator across BSDF/light strategies.
+- The G3 furnace adopter covers only bounded positive scalar albedo/radiance,
+  exact power-of-two unit rescaling, and the `16`-sample furnace call. It does
+  not establish a runtime physical-unit system, arbitrary-scale conditioning,
+  Monte Carlo error bounds, spectral/path-integrator rescaling, or the separate
+  translated-scene frame-invariance claim. Its declaration is not evidence of
+  a passing batch run.
 
 ## No-claim boundaries (differentiable)
 
