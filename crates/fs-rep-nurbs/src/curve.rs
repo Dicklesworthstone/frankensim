@@ -684,6 +684,20 @@ pub struct AdmittedNurbsCurve<'a, S: Scalar, const DIM: usize> {
     inner: &'a NurbsCurve<S, DIM>,
 }
 
+/// Transactional terminal state of cancellation-aware homogeneous curve
+/// construction.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum CurveConstructionRun<S: Scalar, const DIM: usize> {
+    /// Validation completed and the sealed curve is safe to publish.
+    Complete {
+        /// Newly validated exact curve generation.
+        curve: NurbsCurve<S, DIM>,
+    },
+    /// Cancellation was observed; the unpublished owned candidate was dropped.
+    Cancelled,
+}
+
 /// Transactional terminal state of a cancellation-aware fallible curve copy.
 #[must_use]
 #[derive(Debug, PartialEq)]
@@ -998,9 +1012,53 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// an inadmissible weight; [`NurbsError::Domain`] when validation work is
     /// refused.
     pub fn from_homogeneous(knots: KnotVector<S>, cpw: Vec<[S; 4]>) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        match Self::from_homogeneous_with_poll(knots, cpw, &mut never_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(curve),
+            CurveWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling homogeneous curve construction observed cancellation"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Build from an owned homogeneous control net with bounded cancellation
+    /// polling.
+    ///
+    /// Dimension and aggregate validation-work refusals precede cancellation.
+    /// One `Cx` then spans knot validation, control-count, weight, finite,
+    /// Cartesian-projection, and inactive-lane checks plus final owned
+    /// publication. Cancellation drops both caller-transferred inputs without
+    /// exposing a partially validated curve. Individual scalar operations and
+    /// destruction are not preemptible. This primitive does not consume the
+    /// `Cx` budget or own request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous constructor's dimension, work, knot,
+    /// control-count, weight, finite-arithmetic, or canonical-lane refusal when
+    /// it wins before an observed cancellation.
+    pub fn from_homogeneous_with_cx(
+        knots: KnotVector<S>,
+        cpw: Vec<[S; 4]>,
+        cx: &Cx<'_>,
+    ) -> Result<CurveConstructionRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match Self::from_homogeneous_with_poll(knots, cpw, &mut should_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(CurveConstructionRun::Complete { curve }),
+            CurveWorkRun::Cancelled => Ok(CurveConstructionRun::Cancelled),
+        }
+    }
+
+    fn from_homogeneous_with_poll(
+        knots: KnotVector<S>,
+        cpw: Vec<[S; 4]>,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Self>, NurbsError> {
         let candidate = NurbsCurve { knots, cpw };
-        candidate.validate_live_structure()?;
-        Ok(candidate)
+        match candidate.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => Ok(CurveWorkRun::Complete(candidate)),
+            CurveWorkRun::Cancelled => Ok(CurveWorkRun::Cancelled),
+        }
     }
 
     /// Borrow the curve's sealed knot vector.
@@ -1115,8 +1173,9 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// Dimension and checked validation-work refusal retain their synchronous
     /// precedence. The knot and homogeneous-control scans share one gate, and
     /// a final checkpoint gates publication of the lifetime-bound admitted
-    /// view. This method does not make construction cancellation-aware and
-    /// does not consume the `Cx` budget or finalize its executor scope.
+    /// view. Cancellation-aware homogeneous ownership transfer is provided
+    /// separately by [`Self::from_homogeneous_with_cx`]. This method does not
+    /// consume the `Cx` budget or finalize its executor scope.
     ///
     /// # Errors
     /// Returns the synchronous admission's dimension, work, knot, control-count,
@@ -3166,6 +3225,154 @@ mod tests {
             &weights,
         )
         .expect("high-degree insertion curve")
+    }
+
+    #[test]
+    fn homogeneous_curve_construction_with_cx_is_transactional_and_exact() {
+        let expected = line_curve();
+        with_curve_cx(true, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::from_homogeneous_with_cx(
+                    expected.knots.clone(),
+                    expected.cpw.clone(),
+                    cx,
+                )
+                .expect("valid pre-cancelled construction"),
+                CurveConstructionRun::Cancelled
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::from_homogeneous_with_cx(
+                    expected.knots.clone(),
+                    expected.cpw.clone(),
+                    cx,
+                )
+                .expect("active homogeneous construction"),
+                CurveConstructionRun::Complete {
+                    curve: expected.try_clone().expect("expected curve copy"),
+                }
+            );
+        });
+
+        let zero = Rat::int(0);
+        let one = Rat::int(1);
+        let exact = NurbsCurve::<Rat, 1>::from_homogeneous(
+            KnotVector::new(vec![zero, zero, one, one], 1).expect("exact line knots"),
+            vec![[zero, zero, zero, one], [one, zero, zero, one]],
+        )
+        .expect("exact homogeneous line");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<Rat, 1>::from_homogeneous_with_cx(
+                    exact.knots.clone(),
+                    exact.cpw.clone(),
+                    cx,
+                )
+                .expect("active exact construction"),
+                CurveConstructionRun::Complete {
+                    curve: exact.try_clone().expect("expected exact curve copy"),
+                }
+            );
+        });
+
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                NurbsCurve::<f64, 4>::from_homogeneous_with_cx(
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                    vec![[0.0, 0.0, 0.0, 1.0]; 2],
+                    cx,
+                ),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+
+        let over_cap_control_count = 1_048_572usize;
+        let line_knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        assert_eq!(
+            NurbsCurve::<f64, 1>::validation_work_for(&line_knots, over_cap_control_count)
+                .expect("cap-plus-one work"),
+            BASIS_MAX_WORK_UNITS + 1
+        );
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                NurbsCurve::<f64, 1>::from_homogeneous_with_cx(
+                    line_knots,
+                    vec![[0.0, 0.0, 0.0, 1.0]; over_cap_control_count],
+                    cx,
+                ),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
+
+        let legacy_error = NurbsCurve::<f64, 1>::from_homogeneous(
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+            vec![[0.0, 0.0, 0.0, 1.0]],
+        )
+        .expect_err("legacy control-count mismatch");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::from_homogeneous_with_cx(
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                    vec![[0.0, 0.0, 0.0, 1.0]],
+                    cx,
+                )
+                .expect_err("cancellable control-count mismatch"),
+                legacy_error
+            );
+        });
+    }
+
+    #[test]
+    fn homogeneous_curve_construction_cancels_inside_controls_and_at_publication() {
+        let source = long_linear_curve();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = NurbsCurve::<f64, 1>::from_homogeneous_with_poll(
+                source.knots.clone(),
+                source.cpw.clone(),
+                &mut should_cancel,
+            )
+            .expect("valid cancellable construction");
+            (matches!(outcome, CurveWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(13), run(13));
+        assert_eq!(run(13), (true, 13));
+
+        let source = line_curve();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            NurbsCurve::<f64, 1>::from_homogeneous_with_poll(
+                source.knots.clone(),
+                source.cpw.clone(),
+                &mut never_cancel,
+            )
+            .expect("healthy construction"),
+            CurveWorkRun::Complete(_)
+        ));
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(matches!(
+            NurbsCurve::<f64, 1>::from_homogeneous_with_poll(
+                source.knots.clone(),
+                source.cpw.clone(),
+                &mut cancel_at_publication,
+            )
+            .expect("publication cancellation"),
+            CurveWorkRun::Cancelled
+        ));
+        assert_eq!(replay_polls, total_polls);
     }
 
     #[test]
