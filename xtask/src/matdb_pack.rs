@@ -896,7 +896,7 @@ fn resolve_safe_source(root: &Path, relative: &Path, id: &str) -> Result<PathBuf
 }
 
 fn read_bounded_regular(path: &Path, limit: usize, subject: &str) -> Result<Vec<u8>, CompileError> {
-    let mut file = File::open(path).map_err(|error| {
+    let file = File::open(path).map_err(|error| {
         CompileError::new(
             "input_unavailable",
             subject,
@@ -4165,11 +4165,9 @@ mod tests {
         let retained = read_bounded_regular(&output, compiled.bytes.len(), "test-output")
             .expect("published output");
         assert_eq!(retained, compiled.bytes);
-        assert_eq!(
-            NormalizedPack::from_bytes_verified(compiled.pack.content_hash(), &retained)
-                .expect("published runtime artifact"),
-            compiled.pack
-        );
+        let decoded = NormalizedPack::from_bytes_verified(compiled.pack.content_hash(), &retained)
+            .expect("published runtime artifact");
+        assert_eq!(&decoded, compiled.pack.material());
     }
 
     #[test]
