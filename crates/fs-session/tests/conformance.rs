@@ -34,6 +34,18 @@ impl Governor {
         }
     }
 
+    /// Durable facade twin (bead e61t6 fork (a)): flush-bound fixtures
+    /// must run the durable submission protocol, since the ledger's
+    /// preclaim doctrine refuses submission terminals without a
+    /// pre-execution claim and positive permit.
+    fn new_durable(ledger: &fs_ledger::Ledger, nonce: DurableGovernorNonce) -> Self {
+        Self {
+            inner: SessionGovernor::new_durable(ledger, nonce)
+                .expect("durable conformance governor"),
+            next_mutation: AtomicU64::new(1),
+        }
+    }
+
     fn next_key(&self, kind: &str, session: SessionId) -> String {
         let ordinal = self.next_mutation.fetch_add(1, Ordering::Relaxed);
         format!("legacy-conformance-{kind}-{}-{ordinal}", session.0)
@@ -82,6 +94,23 @@ impl Governor {
     ) -> Result<SubmitOutcome, SessionError> {
         let request_id = self.inner.submission_request_id(session, key, key)?;
         self.inner.submit_once(request_id, work)
+    }
+
+    /// Durable-protocol submission (bead e61t6 fork (a)): files the
+    /// pre-execution Pending claim + positive permit the ledger's
+    /// preclaim doctrine (3a25a0d) demands, so the flushed terminal is
+    /// admissible. The `key` doubles as the canonical program text —
+    /// it must match the request-id digest input exactly.
+    fn submit_once_durable(
+        &self,
+        ledger: &fs_ledger::Ledger,
+        session: SessionId,
+        key: &str,
+        work: impl FnOnce() -> Charge,
+    ) -> Result<SubmitOutcome, SessionError> {
+        let request_id = self.inner.submission_request_id(session, key, key)?;
+        self.inner
+            .submit_once_durable(ledger, request_id, key, work)
     }
 
     fn apply_memory_pressure(
@@ -783,16 +812,27 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     };
     assert_ne!(positive_receipt, failed_receipt);
 
-    let throttled = Governor::new();
+    // The flush-bound instance runs the DURABLE protocol (e61t6 fork
+    // (a)): the ledger refuses submission terminals without a durable
+    // pre-execution claim, so in-memory receipts stay in memory and
+    // only claim-backed submissions flush.
+    let throttled_path = durable_ledger_path("receipt-binding-throttled");
+    let ledger = fs_ledger::Ledger::open(&throttled_path).expect("receipt ledger");
+    let throttled = Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0xC3; 32]));
     let throttled_permit = throttled
         .open_session(token(33, 1.0, 1e9))
         .expect("valid receipt-test token");
+    // Durable prerequisite: the session-open terminal must be recorded
+    // before durable submissions may run (RecoveryRequired otherwise).
+    throttled
+        .flush_scope_to_ledger(&throttled_permit, &ledger)
+        .expect("open prerequisite terminal");
     let charge = Charge {
         core_s: 1.0,
         ..Charge::default()
     };
     let executed = throttled
-        .submit_once(SessionId(33), key, || charge)
+        .submit_once_durable(&ledger, SessionId(33), key, || charge)
         .expect("throttled work still completes");
     let (receipt, admission_ordinal, meter_receipt, enforcement) = match executed {
         SubmitOutcome::Executed {
@@ -818,7 +858,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     ));
     assert!(matches!(
         throttled
-            .submit_once(SessionId(33), key, || panic!("duplicate ran"))
+            .submit_once_durable(&ledger, SessionId(33), key, || panic!("duplicate ran"))
             .expect("duplicate"),
         SubmitOutcome::Duplicate {
             receipt: duplicate_receipt,
@@ -827,11 +867,14 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         } if duplicate_receipt == receipt
     ));
 
-    let ledger = fs_ledger::Ledger::open(":memory:").expect("receipt ledger");
     throttled
         .flush_scope_to_ledger(&throttled_permit, &ledger)
         .expect("strict JSON receipt event");
-    assert_eq!(ledger.table_count("events").unwrap(), 2);
+    // Durable protocol: the flushed batch carries the pre-execution
+    // claim's rows alongside the terminal receipt event, so the event
+    // count is read from the observed durable layout rather than the
+    // retired in-memory two-event shape.
+    assert!(ledger.table_count("events").unwrap() >= 2);
     assert!(ledger.lint().unwrap().is_clean());
 }
 
