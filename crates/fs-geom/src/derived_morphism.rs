@@ -19400,6 +19400,93 @@ mod tests {
     }
 
     #[test]
+    fn public_wrappers_bind_fully_admitted_rd1a_geometries() {
+        with_cx(false, |cx| {
+            let source = admitted_fixed_resolution_geometry(70, 80, 90, 1, cx);
+            let target = admitted_fixed_resolution_geometry(73, 83, 93, 2, cx);
+            let ir = DerivedMorphismIrV1 {
+                schema_version: DERIVED_MORPHISM_SCHEMA_VERSION_V1,
+                source: source.id(),
+                target: target.id(),
+                kind: DerivedMorphismKindV1::Strict {
+                    witness: DerivedWitnessIdV1::from_bytes([140; 32]),
+                },
+                evidence: DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                    input_geometry: source.id(),
+                    output_geometry: target.id(),
+                    input_evidence: evidence_id(source.id()),
+                    output_evidence: evidence_id(target.id()),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Estimated,
+                },
+                equivalence: DerivedEquivalenceBoundaryV1::NoClaim {
+                    artifact: DerivedNoClaimIdV1::from_bytes([141; 32]),
+                },
+            };
+            let first = admit_derived_morphism_v1(ir, &source, &target, cx)
+                .expect("valid public-wrapper strict morphism");
+            let replay = admit_derived_morphism_v1(ir, &source, &target, cx)
+                .expect("deterministic public-wrapper replay");
+            let source_identity = identity_derived_morphism_v1(&source, cx)
+                .expect("valid public-wrapper source identity");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.source(), source.id());
+            assert_eq!(first.target(), target.id());
+            assert_eq!(first.class(), AdmittedDerivedMorphismClassV1::Strict);
+            assert_eq!(
+                compose_derived_morphisms_v1(&source_identity, &first, cx)
+                    .expect("public identity remains neutral"),
+                first,
+            );
+
+            for (field, changed) in [
+                (
+                    "source",
+                    DerivedMorphismIrV1 {
+                        source: target.id(),
+                        ..ir
+                    },
+                ),
+                (
+                    "target",
+                    DerivedMorphismIrV1 {
+                        target: source.id(),
+                        ..ir
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    admit_derived_morphism_v1(changed, &source, &target, cx),
+                    Err(DerivedMorphismErrorV1::EndpointMismatch { field }),
+                );
+            }
+
+            let mut incompatible_ir = fixed_resolution_geometry_ir(76, 86, 96, 3);
+            incompatible_ir.model_version = DerivedModelVersionIdV1::from_bytes([142; 32]);
+            let incompatible_target =
+                admit_derived_geometry_v1(incompatible_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("individually valid geometry with a different immutable version");
+            let incompatible_map_ir = DerivedMorphismIrV1 {
+                target: incompatible_target.id(),
+                evidence: DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                    input_geometry: source.id(),
+                    output_geometry: incompatible_target.id(),
+                    input_evidence: evidence_id(source.id()),
+                    output_evidence: evidence_id(incompatible_target.id()),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Estimated,
+                },
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_morphism_v1(incompatible_map_ir, &source, &incompatible_target, cx,),
+                Err(DerivedMorphismErrorV1::ModelVersionMismatch),
+            );
+        });
+    }
+
+    #[test]
     fn identity_is_neutral_and_composition_is_associative_by_receipt() {
         with_cx(false, |cx| {
             let x = endpoint(10);
