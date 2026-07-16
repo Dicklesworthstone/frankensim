@@ -32,12 +32,17 @@ use fs_qty::Dims;
 
 mod cards;
 mod interface;
+mod query;
 
 pub use cards::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, MATDB_SCHEMA_VERSION,
     MaterialCard, MaterialStateId,
 };
 pub use interface::{InterfaceSystemCard, SurfaceSpec, SystemContext};
+pub use query::{
+    EvaluationDecision, MATDB_EVALUATOR_VERSION, MaterialAnswer, PropertySample,
+    PropertyUsageReceipt, QueryPoint, SelectionPolicy,
+};
 
 /// Hash domain for property-claim canonical identity.
 const CLAIM_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.property-claim.v1";
@@ -137,6 +142,56 @@ pub enum MatDbError {
         /// Which field.
         field: &'static str,
     },
+    /// A query coordinate is non-finite.
+    NonFiniteQueryPoint {
+        /// The axis.
+        axis: String,
+        /// The offending bits.
+        bits: u64,
+    },
+    /// No claim carries the queried property name.
+    UnknownProperty {
+        /// The name.
+        property: String,
+    },
+    /// The point lies outside every claim's validity: THE extrapolation
+    /// refusal. Nothing is evaluated.
+    NoClaimInDomain {
+        /// The property.
+        property: String,
+        /// How many claims were considered (all out of domain).
+        considered: usize,
+    },
+    /// The selection policy cannot narrow the in-domain candidates to
+    /// one claim; fusion must be explicit, so ambiguity refuses.
+    AmbiguousSelection {
+        /// The property.
+        property: String,
+        /// The surviving candidates.
+        candidates: Vec<ClaimId>,
+    },
+    /// A curve claim's abscissa axis is missing from the query point.
+    MissingQueryAxis {
+        /// The required axis.
+        axis: String,
+    },
+    /// The requested abscissa lies outside the curve's knot span
+    /// (extrapolation beyond data refuses even inside validity).
+    OutsideKnotSpan {
+        /// The abscissa axis.
+        axis: String,
+        /// The requested coordinate.
+        requested: f64,
+        /// First knot.
+        lo: f64,
+        /// Last knot.
+        hi: f64,
+    },
+    /// The claim's payload/policy combination cannot answer this query.
+    UnsupportedEvaluation {
+        /// What is wrong.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for MatDbError {
@@ -206,6 +261,45 @@ impl fmt::Display for MatDbError {
                 f,
                 "interface system field '{field}' is blank; the system identity is incomplete"
             ),
+            MatDbError::NonFiniteQueryPoint { axis, bits } => {
+                write!(f, "query axis '{axis}' is non-finite (bits {bits:#018x})")
+            }
+            MatDbError::UnknownProperty { property } => {
+                write!(f, "no claim carries property '{property}'")
+            }
+            MatDbError::NoClaimInDomain {
+                property,
+                considered,
+            } => write!(
+                f,
+                "extrapolation refused: the query point is outside the validity of every one of \
+                 the {considered} claim(s) for '{property}'"
+            ),
+            MatDbError::AmbiguousSelection {
+                property,
+                candidates,
+            } => write!(
+                f,
+                "{} in-domain claims for '{property}' survive the policy; fusion must be an \
+                 explicit policy, so ambiguity refuses",
+                candidates.len()
+            ),
+            MatDbError::MissingQueryAxis { axis } => {
+                write!(f, "the query point lacks required abscissa axis '{axis}'")
+            }
+            MatDbError::OutsideKnotSpan {
+                axis,
+                requested,
+                lo,
+                hi,
+            } => write!(
+                f,
+                "abscissa '{axis}' = {requested} is outside the knot span [{lo}, {hi}]; \
+                 extrapolation beyond data refuses"
+            ),
+            MatDbError::UnsupportedEvaluation { reason } => {
+                write!(f, "unsupported evaluation: {reason}")
+            }
         }
     }
 }
