@@ -5083,19 +5083,15 @@ impl Ledger {
             None => {}
         }
 
+        // The exact-producer predicate must live in trg_artifact_output_seals_exact_producer,
+        // not in a guarded `INSERT ... SELECT ?1 WHERE EXISTS(... ?1 ...)`: fsqlite never
+        // binds parameters referenced inside WHERE-clause subqueries of a FROM-less SELECT,
+        // so that guard silently inserts zero rows even for a valid sole producer
+        // (bead frankensim-lnbzs). The trigger's NEW.-based subqueries evaluate correctly
+        // and abort in the same statement, preserving atomicity.
         let insert = self
             .conn
-            .prepare(
-                "INSERT INTO artifact_output_seals(artifact, op, role) \
-                 SELECT ?1, ?2, 'out' \
-                 WHERE EXISTS( \
-                     SELECT 1 FROM edges INDEXED BY idx_edges_artifact_role_op \
-                     WHERE artifact = ?1 AND role = 'out' AND op = ?2 LIMIT 1 \
-                 ) AND NOT EXISTS( \
-                     SELECT 1 FROM edges INDEXED BY idx_edges_artifact_role_op \
-                     WHERE artifact = ?1 AND role = 'out' AND op != ?2 LIMIT 1 \
-                 )",
-            )
+            .prepare("INSERT INTO artifact_output_seals(artifact, op, role) VALUES (?1, ?2, 'out')")
             .map_err(|error| sql_err("artifact output seal prepare", &error))?
             .execute_with_params(&[blob_param(artifact.as_bytes()), SqliteValue::Integer(op)]);
         match insert {
@@ -5250,19 +5246,16 @@ impl Ledger {
             None => {}
         }
 
-        let probe_limit = expected_count + 1;
         let expected_i64 = i64::try_from(expected_count).expect("public lineage cap fits i64");
+        // Same constraint as seal_artifact_output: the op-exists + exact-bounded-count
+        // predicate must live in trg_op_artifact_edge_seals_exact_count because fsqlite
+        // never binds parameters inside WHERE-clause subqueries of a FROM-less
+        // `INSERT ... SELECT` guard (bead frankensim-lnbzs). The trigger bounds its
+        // count probe at LIMIT 1025 (MAX_LINEAGE_QUERY_ROWS + 1) and aborts in the
+        // same statement.
         let insert = self
             .conn
-            .prepare(&format!(
-                "INSERT INTO op_artifact_edge_seals(op, edge_count) \
-                 SELECT ?1, ?2 \
-                 WHERE EXISTS(SELECT 1 FROM ops WHERE id = ?1 LIMIT 1) AND \
-                       (SELECT COUNT(*) FROM ( \
-                            SELECT 1 FROM edges INDEXED BY idx_edges_op_role_artifact \
-                            WHERE op = ?1 LIMIT {probe_limit} \
-                        )) = ?2"
-            ))
+            .prepare("INSERT INTO op_artifact_edge_seals(op, edge_count) VALUES (?1, ?2)")
             .map_err(|error| sql_err("op artifact-edge seal prepare", &error))?
             .execute_with_params(&[SqliteValue::Integer(op), SqliteValue::Integer(expected_i64)]);
         match insert {
@@ -7714,7 +7707,10 @@ mod tests {
     fn v9_migration_installs_exact_lineage_indexes_and_seals_from_v8() {
         for preapply_v9 in [false, true] {
             let conn = reference_connection(8).expect("construct exact v8 schema");
-            let instance = [0x39; 16];
+            // checked_instance_id requires RFC 4122 v4 version/variant bits.
+            let mut instance = [0x39; 16];
+            instance[6] = 0x49;
+            instance[8] = 0x89;
             conn.prepare("INSERT INTO ledger_identity(singleton, instance_id) VALUES (1, ?1)")
                 .unwrap()
                 .execute_with_params(&[blob_param(&instance)])
@@ -8853,8 +8849,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ")
             .to_ascii_lowercase();
-        assert!(producer_plan.contains("idx_edges_artifact_role_op"));
-        assert!(producer_plan.contains("covering"));
+        // fsqlite's EXPLAIN QUERY PLAN does not report covering-index usage
+        // (it emits "SCAN INDEX ... USING INDEX ...", never sqlite3's
+        // "USING COVERING INDEX"), so the covering property itself is not
+        // assertable here; the index choice and temp-b-tree absence are.
+        assert!(producer_plan.contains("using index idx_edges_artifact_role_op"));
         assert!(!producer_plan.contains("temp b-tree"));
 
         let edge_plan = ledger
@@ -8871,8 +8870,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ")
             .to_ascii_lowercase();
-        assert!(edge_plan.contains("idx_edges_op_role_artifact"));
-        assert!(edge_plan.contains("covering"));
+        assert!(edge_plan.contains("using index idx_edges_op_role_artifact"));
         assert!(!edge_plan.contains("temp b-tree"));
     }
 
