@@ -5,6 +5,11 @@ use core::num::NonZeroU64;
 use fs_blake3::ContentHash;
 use fs_evidence::vv::*;
 use fs_ir::machine::assurance::*;
+use fs_ir::machine::assurance_codec::{
+    MAX_MACHINE_ASSURANCE_VV_CASE_RECEIPTS, MachineAssuranceAstAdmissionError,
+    MachineAssuranceCodecRule, admit_machine_assurance_ast_v1, parse_machine_assurance_program_v1,
+    parse_machine_assurance_v1, write_machine_assurance_program_v1, write_machine_assurance_v1,
+};
 use fs_ir::machine::semantics::{
     AdmittedMachineBehavior, BodyMotion, ConditionBinding, ConditionSource, ConditionTarget,
     ConditionValueRef, MachineBehaviorDraft, MotionBinding, StateSlotContract,
@@ -16,6 +21,7 @@ use fs_ir::machine::{
     SubsystemSpec, TerminalCausality, TerminalId, TerminalQuantitySpec, TerminalShape,
     TerminalSpec,
 };
+use fs_ir::{Node, NodeKind, VersionedProgram};
 use fs_qty::Dims;
 
 fn nz(value: u64) -> NonZeroU64 {
@@ -1224,4 +1230,174 @@ fn g3_behavior_and_policy_artifacts_move_identity_independently() {
         .admit_against(&graph, &changed_behavior, &[case.clone()])
         .expect_err("behavior from a different graph refuses");
     assert!(rules(&refusal).contains(&MachineAssuranceRule::BehaviorGraphMismatch));
+}
+
+fn list_items_mut(node: &mut Node) -> &mut Vec<Node> {
+    let NodeKind::List(items) = &mut node.kind else {
+        panic!("fixture node must be a list")
+    };
+    items
+}
+
+#[test]
+fn g0_assurance_codec_roundtrips_versioned_sexpr_and_json_with_live_authority() {
+    let (graph, behavior, case) = admitted_stack(11.0);
+    let admitted = valid_assurance(&case)
+        .admit_against(&graph, &behavior, &[case.clone()])
+        .expect("assurance fixture admits");
+    let program = write_machine_assurance_program_v1(&admitted).expect("assurance encodes");
+    let sexpr = program
+        .print_sexpr_checked()
+        .expect("canonical assurance s-expression");
+    let json = program
+        .print_json_checked()
+        .expect("canonical assurance JSON");
+    let from_sexpr = VersionedProgram::parse_sexpr(&sexpr).expect("s-expression reparses");
+    let from_json = VersionedProgram::parse_json(&json).expect("JSON reparses");
+
+    for artifact in [&from_sexpr, &from_json] {
+        let decoded =
+            parse_machine_assurance_program_v1(artifact).expect("assurance program decodes");
+        assert_eq!(decoded.base_graph(), graph.identity());
+        assert_eq!(decoded.base_behavior(), behavior.identity());
+        let readmitted = decoded
+            .admit_against(&graph, &behavior, &[case.clone()])
+            .expect("decoded assurance admits with the live V&V case");
+        assert_eq!(readmitted.identity(), admitted.identity());
+        assert!(
+            write_machine_assurance_v1(&readmitted)
+                .expect("readmitted assurance re-encodes")
+                .same_shape(artifact.program())
+        );
+    }
+}
+
+#[test]
+fn g0_serialized_vv_commitment_cannot_mint_assurance_authority() {
+    let (graph, behavior, case) = admitted_stack(11.0);
+    let admitted = valid_assurance(&case)
+        .admit_against(&graph, &behavior, &[case.clone()])
+        .expect("assurance fixture admits");
+    let node = write_machine_assurance_v1(&admitted).expect("assurance encodes");
+    let error = parse_machine_assurance_v1(&node)
+        .expect("assurance syntax decodes")
+        .admit_against(&graph, &behavior, &[])
+        .expect_err("serialized commitments are not admitted V&V authority");
+    let MachineAssuranceAstAdmissionError::Assurance(refusal) = error else {
+        panic!("missing live authority must reach semantic assurance admission")
+    };
+    assert!(rules(&refusal).contains(&MachineAssuranceRule::MissingVvCase));
+}
+
+#[test]
+fn g0_changed_missing_and_duplicate_vv_commitments_refuse_after_real_admission() {
+    let (graph, behavior, case) = admitted_stack(11.0);
+    let admitted = valid_assurance(&case)
+        .admit_against(&graph, &behavior, &[case.clone()])
+        .expect("assurance fixture admits");
+    let canonical = write_machine_assurance_v1(&admitted).expect("assurance encodes");
+
+    let mut changed = canonical.clone();
+    let root = list_items_mut(&mut changed);
+    let commitments = list_items_mut(&mut root[3]);
+    let binding = list_items_mut(&mut commitments[1]);
+    binding[2] = Node::synthetic(NodeKind::Str("99".to_owned()));
+    let changed_error =
+        admit_machine_assurance_ast_v1(&changed, &graph, &behavior, &[case.clone()])
+            .expect_err("changed schema commitment refuses");
+    assert!(matches!(
+        changed_error,
+        MachineAssuranceAstAdmissionError::VvCaseBindingMismatch { .. }
+    ));
+
+    let mut missing = canonical.clone();
+    list_items_mut(&mut list_items_mut(&mut missing)[3]).truncate(1);
+    let missing_error =
+        admit_machine_assurance_ast_v1(&missing, &graph, &behavior, &[case.clone()])
+            .expect_err("missing commitment refuses");
+    assert!(matches!(
+        missing_error,
+        MachineAssuranceAstAdmissionError::VvCaseBindingMismatch { .. }
+    ));
+
+    let mut duplicate = canonical;
+    let commitments = list_items_mut(&mut list_items_mut(&mut duplicate)[3]);
+    commitments.push(commitments[1].clone());
+    let duplicate_error =
+        admit_machine_assurance_ast_v1(&duplicate, &graph, &behavior, &[case.clone()])
+            .expect_err("duplicate commitment refuses");
+    assert!(matches!(
+        duplicate_error,
+        MachineAssuranceAstAdmissionError::VvCaseBindingMismatch { .. }
+    ));
+}
+
+#[test]
+fn g0_assurance_base_binding_refuses_before_invalid_draft_semantics() {
+    let (graph, behavior, case) = admitted_stack(11.0);
+    let admitted = valid_assurance(&case)
+        .admit_against(&graph, &behavior, &[case.clone()])
+        .expect("assurance fixture admits");
+    let mut node = write_machine_assurance_v1(&admitted).expect("assurance encodes");
+    let root = list_items_mut(&mut node);
+    list_items_mut(&mut root[1])[1] =
+        Node::synthetic(NodeKind::Str(format!("{:02x}", 0x55).repeat(32)));
+    list_items_mut(&mut root[4]).truncate(1);
+
+    let error = admit_machine_assurance_ast_v1(&node, &graph, &behavior, &[case])
+        .expect_err("wrong base graph refuses before empty sensors");
+    assert!(matches!(
+        error,
+        MachineAssuranceAstAdmissionError::BaseGraphMismatch { .. }
+    ));
+}
+
+#[test]
+fn g3_rich_assurance_codec_preserves_every_nested_permutation_identity() {
+    let (graph, behavior, case) = admitted_stack(11.0);
+    let admitted = permutation_assurance(&case)
+        .admit_against(&graph, &behavior, &[case.clone()])
+        .expect("rich assurance admits");
+    let node = write_machine_assurance_v1(&admitted).expect("rich assurance encodes");
+    let readmitted = parse_machine_assurance_v1(&node)
+        .expect("rich assurance decodes")
+        .admit_against(&graph, &behavior, &[case])
+        .expect("rich assurance readmits");
+    assert_eq!(readmitted.identity(), admitted.identity());
+    assert_eq!(readmitted.identity_receipt(), admitted.identity_receipt());
+}
+
+#[test]
+fn g0_assurance_codec_reports_exact_digest_path_and_resource_first_precedence() {
+    let (graph, behavior, case) = admitted_stack(11.0);
+    let admitted = valid_assurance(&case)
+        .admit_against(&graph, &behavior, &[case])
+        .expect("assurance fixture admits");
+    let canonical = write_machine_assurance_v1(&admitted).expect("assurance encodes");
+
+    let mut uppercase = canonical.clone();
+    let root = list_items_mut(&mut uppercase);
+    let commitments = list_items_mut(&mut root[3]);
+    let binding = list_items_mut(&mut commitments[1]);
+    binding[4] = Node::synthetic(NodeKind::Str("AA".repeat(32)));
+    let reference_error = parse_machine_assurance_v1(&uppercase)
+        .expect_err("uppercase content hash is not canonical assurance syntax");
+    assert_eq!(
+        reference_error.rule(),
+        MachineAssuranceCodecRule::InvalidReference
+    );
+    assert_eq!(reference_error.path(), "$[3][1][4]");
+
+    let mut oversized = canonical;
+    let commitments = list_items_mut(&mut list_items_mut(&mut oversized)[3]);
+    let repeated = commitments[1].clone();
+    commitments.extend((1..MAX_MACHINE_ASSURANCE_VV_CASE_RECEIPTS).map(|_| repeated.clone()));
+    commitments.push(Node::synthetic(NodeKind::Float(f64::NAN)));
+    let resource_error = parse_machine_assurance_v1(&oversized)
+        .expect_err("public receipt cap must precede recursive AST validation");
+    assert_eq!(
+        resource_error.rule(),
+        MachineAssuranceCodecRule::ResourceLimit
+    );
+    assert_eq!(resource_error.path(), "$[3]");
 }

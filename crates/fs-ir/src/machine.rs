@@ -22,6 +22,7 @@
 //! and inverse/equivalence claims remain outside this module's authority.
 
 pub mod assurance;
+pub mod assurance_codec;
 pub mod codec;
 pub mod lowering;
 pub mod semantics;

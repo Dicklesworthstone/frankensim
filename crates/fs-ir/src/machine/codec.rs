@@ -36,14 +36,14 @@ use super::semantics::{
 use super::{
     AdmittedMachineGraph, BodyId, ClockId, ClockSpec, ContactFeatureId, FrameBinding,
     InterfaceBinding, InterfaceCardRef, InterfaceId, InterfaceOrientation,
-    MAX_MACHINE_GRAPH_CLOCKS, MAX_MACHINE_GRAPH_INTERFACES, MAX_MACHINE_GRAPH_MATERIALS,
-    MAX_MACHINE_GRAPH_OWNED_ELEMENTS, MAX_MACHINE_GRAPH_PORTS, MAX_MACHINE_GRAPH_RELATIONS,
-    MAX_MACHINE_GRAPH_SUBSYSTEMS, MAX_MACHINE_GRAPH_TERMINALS, MachineClock, MachineElementId,
-    MachineGraphDraft, MachineGraphIdV1, MachineGraphRefusal, MachineIdError,
-    MachineReferenceError, MaterialBinding, MaterialCardRef, MaterialTarget, ModelRef,
-    OrientationParity, PortEnergyRole, PortId, PortSpec, RelationId, RelationMode, RelationSpec,
-    SolvePolicyRef, StateSlotId, SubsystemId, SubsystemSpec, SurfacePatchId, TerminalCausality,
-    TerminalId, TerminalQuantitySpec, TerminalShape, TerminalSpec,
+    MAX_MACHINE_ENTITY_KEY_BYTES, MAX_MACHINE_GRAPH_CLOCKS, MAX_MACHINE_GRAPH_INTERFACES,
+    MAX_MACHINE_GRAPH_MATERIALS, MAX_MACHINE_GRAPH_OWNED_ELEMENTS, MAX_MACHINE_GRAPH_PORTS,
+    MAX_MACHINE_GRAPH_RELATIONS, MAX_MACHINE_GRAPH_SUBSYSTEMS, MAX_MACHINE_GRAPH_TERMINALS,
+    MachineClock, MachineElementId, MachineGraphDraft, MachineGraphIdV1, MachineGraphRefusal,
+    MachineIdError, MachineReferenceError, MaterialBinding, MaterialCardRef, MaterialTarget,
+    ModelRef, OrientationParity, PortEnergyRole, PortId, PortSpec, RelationId, RelationMode,
+    RelationSpec, SolvePolicyRef, StateSlotId, SubsystemId, SubsystemSpec, SurfacePatchId,
+    TerminalCausality, TerminalId, TerminalQuantitySpec, TerminalShape, TerminalSpec,
 };
 
 /// Version of the canonical Machine-graph FrankenScript form.
@@ -1011,7 +1011,7 @@ fn preflight_graph_caps(node: &Node) -> Result<(), MachineGraphCodecError> {
     Ok(())
 }
 
-fn recognized_form_items<'a>(node: &'a Node, expected_head: &str) -> Option<&'a [Node]> {
+pub(super) fn recognized_form_items<'a>(node: &'a Node, expected_head: &str) -> Option<&'a [Node]> {
     let NodeKind::List(items) = &node.kind else {
         return None;
     };
@@ -1356,7 +1356,10 @@ fn parse_terminal(node: &Node, path: &str) -> Result<TerminalSpec, MachineGraphC
     })
 }
 
-fn parse_quantity(node: &Node, path: &str) -> Result<TerminalQuantitySpec, MachineGraphCodecError> {
+pub(super) fn parse_quantity(
+    node: &Node,
+    path: &str,
+) -> Result<TerminalQuantitySpec, MachineGraphCodecError> {
     let (head, args) = raw_form(node, path)?;
     match head {
         "dims" => {
@@ -1499,7 +1502,10 @@ fn parse_value_form(node: &Node, path: &str) -> Result<ValueForm, MachineGraphCo
     }
 }
 
-fn parse_shape(node: &Node, path: &str) -> Result<TerminalShape, MachineGraphCodecError> {
+pub(super) fn parse_shape(
+    node: &Node,
+    path: &str,
+) -> Result<TerminalShape, MachineGraphCodecError> {
     let (head, args) = raw_form(node, path)?;
     match head {
         "scalar" => {
@@ -1538,7 +1544,7 @@ fn parse_causality(node: &Node, path: &str) -> Result<TerminalCausality, Machine
     }
 }
 
-fn parse_frame(node: &Node, path: &str) -> Result<FrameBinding, MachineGraphCodecError> {
+pub(super) fn parse_frame(node: &Node, path: &str) -> Result<FrameBinding, MachineGraphCodecError> {
     let args = exact_form(node, "frame", 2, path)?;
     let orientation = match symbol(&args[1], &format!("{path}[2]"))? {
         "preserving" => OrientationParity::Preserving,
@@ -1552,8 +1558,9 @@ fn parse_frame(node: &Node, path: &str) -> Result<FrameBinding, MachineGraphCode
             ));
         }
     };
-    FrameBinding::new(string(&args[0], &format!("{path}[1]"))?, orientation)
-        .map_err(|error| id_error(&args[0], &format!("{path}[1]"), "frame-binding", &error))
+    parse_id(&args[0], "frame-binding", &format!("{path}[1]"), |key| {
+        FrameBinding::new(key, orientation)
+    })
 }
 
 fn parse_port(node: &Node, path: &str) -> Result<PortSpec, MachineGraphCodecError> {
@@ -2330,7 +2337,7 @@ where
     Ok(decoded)
 }
 
-fn parse_id<T, F>(
+pub(super) fn parse_id<T, F>(
     node: &Node,
     role: &str,
     path: &str,
@@ -2340,10 +2347,24 @@ where
     F: FnOnce(&str) -> Result<T, MachineIdError>,
 {
     let key = string(node, path)?;
+    if key.len() > MAX_MACHINE_ENTITY_KEY_BYTES {
+        return Err(MachineGraphCodecError {
+            rule: MachineGraphCodecRule::InvalidIdentifier,
+            span: node.span,
+            path: path.to_string().into_boxed_str(),
+            detail: format!(
+                "{role} exceeds the {MAX_MACHINE_ENTITY_KEY_BYTES}-byte Machine key limit"
+            )
+            .into_boxed_str(),
+            hint: "use a bounded canonical Machine identifier key"
+                .to_string()
+                .into_boxed_str(),
+        });
+    }
     constructor(key).map_err(|error| id_error(node, path, role, &error))
 }
 
-fn parse_reference<T, F>(
+pub(super) fn parse_reference<T, F>(
     node: &Node,
     role: &str,
     path: &str,
@@ -2354,6 +2375,20 @@ where
 {
     let args = exact_form(node, "ref", 3, path)?;
     let namespace = string(&args[0], &format!("{path}[1]"))?;
+    if namespace.len() > MAX_MACHINE_ENTITY_KEY_BYTES {
+        return Err(MachineGraphCodecError {
+            rule: MachineGraphCodecRule::InvalidReference,
+            span: args[0].span,
+            path: format!("{path}[1]").into_boxed_str(),
+            detail: format!(
+                "{role} namespace exceeds the {MAX_MACHINE_ENTITY_KEY_BYTES}-byte Machine key limit"
+            )
+            .into_boxed_str(),
+            hint: "use a bounded canonical external-reference namespace"
+                .to_string()
+                .into_boxed_str(),
+        });
+    }
     let version = parse_nonzero_u64(&args[1], &format!("{path}[2]"))?;
     let digest = parse_digest(&args[2], &format!("{path}[3]"))?;
     constructor(namespace, version, digest).map_err(|error| match error {
@@ -2381,7 +2416,7 @@ where
     })
 }
 
-fn parse_u64(node: &Node, path: &str) -> Result<u64, MachineGraphCodecError> {
+pub(super) fn parse_u64(node: &Node, path: &str) -> Result<u64, MachineGraphCodecError> {
     let text = string(node, path)?;
     if text.is_empty()
         || (text.len() > 1 && text.starts_with('0'))
@@ -2402,7 +2437,7 @@ fn parse_nonzero_u64(node: &Node, path: &str) -> Result<NonZeroU64, MachineGraph
     NonZeroU64::new(value).ok_or_else(|| number_error(node, path, "value must be nonzero"))
 }
 
-fn parse_digest(node: &Node, path: &str) -> Result<[u8; 32], MachineGraphCodecError> {
+pub(super) fn parse_digest(node: &Node, path: &str) -> Result<[u8; 32], MachineGraphCodecError> {
     let text = string(node, path)?;
     if text.len() != 64
         || !text
@@ -2576,7 +2611,7 @@ fn arity_error(
     )
 }
 
-fn string<'a>(node: &'a Node, path: &str) -> Result<&'a str, MachineGraphCodecError> {
+pub(super) fn string<'a>(node: &'a Node, path: &str) -> Result<&'a str, MachineGraphCodecError> {
     match &node.kind {
         NodeKind::Str(value) => Ok(value),
         _ => Err(unexpected(
@@ -2588,7 +2623,7 @@ fn string<'a>(node: &'a Node, path: &str) -> Result<&'a str, MachineGraphCodecEr
     }
 }
 
-fn symbol<'a>(node: &'a Node, path: &str) -> Result<&'a str, MachineGraphCodecError> {
+pub(super) fn symbol<'a>(node: &'a Node, path: &str) -> Result<&'a str, MachineGraphCodecError> {
     match &node.kind {
         NodeKind::Symbol(value) => Ok(value),
         _ => Err(unexpected(
@@ -2600,7 +2635,7 @@ fn symbol<'a>(node: &'a Node, path: &str) -> Result<&'a str, MachineGraphCodecEr
     }
 }
 
-fn reserved_vec<T>(
+pub(super) fn reserved_vec<T>(
     count: usize,
     node: &Node,
     path: &str,
@@ -2920,11 +2955,11 @@ fn behavior_resource_error(node: &Node, path: &str, detail: &str) -> MachineBeha
     }
 }
 
-fn sym(value: &str) -> Node {
+pub(super) fn sym(value: &str) -> Node {
     Node::synthetic(NodeKind::Symbol(value.to_string()))
 }
 
-fn string_node(value: &str) -> Node {
+pub(super) fn string_node(value: &str) -> Node {
     Node::synthetic(NodeKind::Str(value.to_string()))
 }
 
@@ -2936,22 +2971,22 @@ fn float_node(value: f64) -> Node {
     Node::synthetic(NodeKind::Float(value))
 }
 
-fn form(head: &str, args: Vec<Node>) -> Node {
+pub(super) fn form(head: &str, args: Vec<Node>) -> Node {
     let mut items = Vec::with_capacity(args.len() + 1);
     items.push(sym(head));
     items.extend(args);
     Node::synthetic(NodeKind::List(items))
 }
 
-fn section(head: &str, entries: Vec<Node>) -> Node {
+pub(super) fn section(head: &str, entries: Vec<Node>) -> Node {
     form(head, entries)
 }
 
-fn u64_node(value: u64) -> Node {
+pub(super) fn u64_node(value: u64) -> Node {
     string_node(&value.to_string())
 }
 
-fn digest_hex(digest: [u8; 32]) -> String {
+pub(super) fn digest_hex(digest: [u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut text = String::with_capacity(64);
     for byte in digest {
@@ -2961,7 +2996,7 @@ fn digest_hex(digest: [u8; 32]) -> String {
     text
 }
 
-fn validation_path(detail: &str) -> Box<str> {
+pub(super) fn validation_path(detail: &str) -> Box<str> {
     detail
         .strip_prefix("invalid AST at ")
         .and_then(|rest| rest.split_once(':').map(|(path, _)| path))
@@ -2971,7 +3006,7 @@ fn validation_path(detail: &str) -> Box<str> {
         .into_boxed_str()
 }
 
-fn reference_node(namespace: &str, version: NonZeroU64, digest: [u8; 32]) -> Node {
+pub(super) fn reference_node(namespace: &str, version: NonZeroU64, digest: [u8; 32]) -> Node {
     form(
         "ref",
         vec![
@@ -3072,7 +3107,7 @@ fn write_terminal(terminal: &TerminalSpec) -> Node {
     )
 }
 
-fn write_quantity(quantity: TerminalQuantitySpec) -> Node {
+pub(super) fn write_quantity(quantity: TerminalQuantitySpec) -> Node {
     match quantity {
         TerminalQuantitySpec::Dimensional(Dims(dims)) => form(
             "dims",
@@ -3147,7 +3182,7 @@ fn write_angle_domain(domain: AngleDomain) -> Node {
     })
 }
 
-fn write_shape(shape: TerminalShape) -> Node {
+pub(super) fn write_shape(shape: TerminalShape) -> Node {
     match shape {
         TerminalShape::Scalar => form("scalar", Vec::new()),
         TerminalShape::Vector { components } => form("vector", vec![u64_node(components.get())]),
@@ -3247,7 +3282,7 @@ fn write_interface(interface: &InterfaceBinding) -> Node {
     )
 }
 
-fn write_frame(frame: &FrameBinding) -> Node {
+pub(super) fn write_frame(frame: &FrameBinding) -> Node {
     form(
         "frame",
         vec![
@@ -3528,7 +3563,7 @@ fn write_tolerance_target(target: &ToleranceTarget) -> Node {
     }
 }
 
-fn write_machine_element(element: &MachineElementId) -> Node {
+pub(super) fn write_machine_element(element: &MachineElementId) -> Node {
     let (head, key) = match element {
         MachineElementId::Body(id) => ("body", id.canonical_key()),
         MachineElementId::SurfacePatch(id) => ("surface-patch", id.canonical_key()),
