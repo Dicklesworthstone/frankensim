@@ -114,6 +114,30 @@ pub struct LoopReport {
     pub headline_node: u64,
 }
 
+/// Why [`LoopReport::admitted_headline`] refused (bead 6pf9).
+#[derive(Debug)]
+pub enum HeadlineAdmissionRefusal {
+    /// The retained lineage refused to mint: unknown node, waiver taint,
+    /// non-positive rank, or replay divergence.
+    Mint(fs_ledger::colors::ColorAdmissionRefusal),
+    /// The minted receipt failed admission against the same lineage.
+    /// Unreachable for a self-consistent report; surfaced, never panicked.
+    Admission(fs_evidence::AdmissionRejection),
+}
+
+impl core::fmt::Display for HeadlineAdmissionRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Mint(refusal) => write!(f, "headline admission refused at minting: {refusal}"),
+            Self::Admission(rejection) => {
+                write!(f, "headline admission refused at verification: {rejection}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HeadlineAdmissionRefusal {}
+
 impl LoopReport {
     /// The current scientifically admissible headline color, resolved from
     /// its retained lineage. A waived headline is intentionally unavailable
@@ -123,6 +147,41 @@ impl LoopReport {
         self.color_graph
             .node(self.headline_node)
             .and_then(ColorNode::scientific_color)
+    }
+
+    /// The campaign headline as ADMITTED scientific evidence (bead 6pf9):
+    /// the retained lineage itself mints the admission receipt and
+    /// re-verifies it against its replay-audited node state, so a positive
+    /// headline converts to an [`fs_evidence::AdmittedColor`] carrying the
+    /// exact node lineage, while waived, estimated, and replay-divergent
+    /// headlines refuse with the exact gate. Positive campaign reporting
+    /// should consume this instead of the raw [`Self::headline`] color.
+    ///
+    /// # Errors
+    /// [`HeadlineAdmissionRefusal`] naming the refusing gate.
+    pub fn admitted_headline(
+        &self,
+    ) -> Result<fs_evidence::AdmittedColor, HeadlineAdmissionRefusal> {
+        let receipt = self
+            .color_graph
+            .admission_receipt(self.headline_node)
+            .map_err(HeadlineAdmissionRefusal::Mint)?;
+        let color = self
+            .color_graph
+            .node(self.headline_node)
+            .and_then(ColorNode::scientific_color)
+            .cloned()
+            .ok_or(HeadlineAdmissionRefusal::Mint(
+                fs_ledger::colors::ColorAdmissionRefusal::WaiverTainted {
+                    node: self.headline_node,
+                },
+            ))?;
+        fs_evidence::AdmittedColor::from_receipt(
+            color,
+            receipt,
+            &fs_ledger::colors::LedgerColorAdmissionVerifier::new(&self.color_graph),
+        )
+        .map_err(HeadlineAdmissionRefusal::Admission)
     }
 
     /// The G5 trace hash over every report field and every retained evidence

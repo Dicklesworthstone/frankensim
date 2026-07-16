@@ -608,3 +608,48 @@ fn fw_008_zero_work_speedups_are_neutral_and_finite() {
     );
     assert_eq!(composed.to_bits(), 1.0_f64.to_bits());
 }
+
+#[test]
+fn fw_010_admitted_headline_carries_lineage_and_refuses_estimated() {
+    use fs_flywheel_e2e::HeadlineAdmissionRefusal;
+    use fs_ledger::colors::ColorAdmissionRefusal;
+
+    // No speculation: the headline stays positive and must convert to
+    // admitted evidence whose lineage names the exact headline node.
+    let baseline = run_loop(&LoopConfig::baseline(), 12, 7);
+    let headline = baseline
+        .headline()
+        .expect("baseline run resolves a scientific headline")
+        .clone();
+    assert!(
+        !matches!(headline, Color::Estimated { .. }),
+        "baseline headline is positive: {headline:?}"
+    );
+    let admitted = baseline
+        .admitted_headline()
+        .expect("a positive replayable headline admits");
+    assert_eq!(admitted.admitted_color(), &headline);
+    assert_eq!(
+        admitted.receipt().node_hash(),
+        baseline
+            .color_graph
+            .node(baseline.headline_node)
+            .expect("headline node exists")
+            .hash(),
+        "the admission lineage names the exact headline node"
+    );
+
+    // Speculation fired: the headline is estimated (fw_002) and admission
+    // must refuse NotPositive rather than laundering the rank upward.
+    let composed = run_loop(&LoopConfig::composed(), 12, 7);
+    let refusal = composed
+        .admitted_headline()
+        .expect_err("an estimated headline never acquires scientific admission");
+    assert!(
+        matches!(
+            refusal,
+            HeadlineAdmissionRefusal::Mint(ColorAdmissionRefusal::NotPositive { .. })
+        ),
+        "estimated headline refuses at the minting gate: {refusal}"
+    );
+}

@@ -34,6 +34,15 @@ the Ambition-Tag rule.
   gate (laundering-across-the-loop). `LoopReport::headline()` resolves only
   `ColorNode::scientific_color()`: a waived or unresolved node fails closed
   instead of exposing its unverified declaration as the scientific headline.
+  `LoopReport::admitted_headline()` (bead 6pf9) goes further: the retained
+  lineage itself mints an `fs_evidence::AdmissionReceipt` for the headline
+  node and re-verifies it through `LedgerColorAdmissionVerifier`, so a
+  positive replayable headline converts to an opaque
+  `fs_evidence::AdmittedColor` carrying the exact node lineage, while
+  estimated, waived, and replay-divergent headlines refuse with the exact
+  gate (`HeadlineAdmissionRefusal`). Positive campaign reporting should
+  consume the admitted form; the raw `headline()` color remains a declared
+  candidate.
 - The compounding measurement follows the review-round-3 protocol:
   isolated AND composed over 5 seeded replays, composed >
   max(isolated) by the stated 1.15x margin, coefficient of variation
