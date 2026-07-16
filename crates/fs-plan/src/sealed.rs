@@ -23,12 +23,21 @@ use crate::cost::{CostModel, CostPrediction, CostRefusal};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CostEvidenceClass {
     /// Minted by the exact roofline loader after full receipt,
-    /// provenance, dependency, and build-identity validation.
+    /// provenance, dependency, and build-identity validation, AND
+    /// still inside the caller's freshness contract at assessment.
     ExactRooflineReceipt,
     /// Explicitly provisional: caller-fitted observations with NO
     /// receipt validation. Useful for tests and non-authoritative
     /// hints; every consumer sees this label and must surface it.
     ProvisionalUnaudited,
+    /// Receipt-backed evidence whose FRESHNESS contract is violated at
+    /// assessment time (bead jle3m): aged past the caller's horizon,
+    /// recorded on a different machine fingerprint, or carrying a
+    /// future timestamp. Ranks BELOW a fresh provisional fit: a
+    /// violated contract is a red flag, not neutral seniority — a
+    /// year-old sealed roofline must never outrank a fresh fit
+    /// forever.
+    StaleRooflineReceipt,
 }
 
 impl CostEvidenceClass {
@@ -38,8 +47,87 @@ impl CostEvidenceClass {
         match self {
             CostEvidenceClass::ExactRooflineReceipt => "exact-roofline-receipt",
             CostEvidenceClass::ProvisionalUnaudited => "provisional-unaudited",
+            CostEvidenceClass::StaleRooflineReceipt => "stale-roofline-receipt",
         }
     }
+
+    /// Total evidence lattice (bead jle3m):
+    /// fresh exact (2) > fresh provisional (1) > stale exact (0).
+    /// Weakest-wins folds compare ranks; mixing can only degrade.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            CostEvidenceClass::ExactRooflineReceipt => 2,
+            CostEvidenceClass::ProvisionalUnaudited => 1,
+            CostEvidenceClass::StaleRooflineReceipt => 0,
+        }
+    }
+
+    /// The weaker of two classes under [`Self::rank`].
+    #[must_use]
+    pub const fn weakest(self, other: CostEvidenceClass) -> CostEvidenceClass {
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
+/// Preregistered freshness contract for assessing sealed evidence
+/// (bead jle3m). Pure data: the caller supplies the observation time
+/// and current machine fingerprint at assessment — this crate never
+/// reads a clock or the host identity itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreshnessPolicy {
+    horizon_ns: i64,
+}
+
+impl FreshnessPolicy {
+    /// A policy that ages receipts out after `horizon_ns`.
+    ///
+    /// # Errors
+    /// Refuses a non-positive horizon (a zero horizon would stale
+    /// every receipt at its own recording instant).
+    pub const fn new(horizon_ns: i64) -> Result<FreshnessPolicy, CostRefusal> {
+        if horizon_ns <= 0 {
+            return Err(CostRefusal::InvalidFreshnessHorizon { horizon_ns });
+        }
+        Ok(FreshnessPolicy { horizon_ns })
+    }
+
+    /// The admitted horizon in ledger nanoseconds.
+    #[must_use]
+    pub const fn horizon_ns(self) -> i64 {
+        self.horizon_ns
+    }
+}
+
+/// Why an assessment kept or degraded a sealed model's class
+/// (bead jle3m). Retained alongside the assessed class so consumers
+/// and routers can distinguish age from drift without re-deriving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StalenessVerdict {
+    /// Inside the freshness contract on the same machine.
+    Fresh,
+    /// Not receipt-backed; freshness does not apply.
+    NotApplicable,
+    /// Older than the policy horizon at the supplied observation time.
+    AgedOut {
+        /// Observed age (observation time minus recording time).
+        age_ns: i64,
+        /// The policy horizon it exceeded.
+        horizon_ns: i64,
+    },
+    /// Recorded under a different machine fingerprint than the one
+    /// supplied at assessment.
+    MachineDrift,
+    /// Recorded in the future of the supplied observation time —
+    /// clock skew or forged provenance; fail closed as stale.
+    FutureRecording {
+        /// How far in the future the recording claims to be.
+        ahead_ns: i64,
+    },
 }
 
 /// The validated scope a sealed model speaks for. For provisional
@@ -182,6 +270,72 @@ impl SealedCostModel {
         self.class
     }
 
+    /// Assess the minted class against the caller's freshness
+    /// contract (bead jle3m): receipt-backed evidence degrades to
+    /// [`CostEvidenceClass::StaleRooflineReceipt`] when aged past the
+    /// horizon, recorded under a different machine fingerprint, or
+    /// carrying a future timestamp. Provisional evidence is untouched
+    /// (freshness cannot upgrade anything). Pure: `now_ns` and
+    /// `current_machine` are supplied by the caller.
+    #[must_use]
+    pub fn assess(
+        &self,
+        now_ns: i64,
+        current_machine: &[u8],
+        policy: FreshnessPolicy,
+    ) -> (CostEvidenceClass, StalenessVerdict) {
+        if self.class != CostEvidenceClass::ExactRooflineReceipt {
+            return (self.class, StalenessVerdict::NotApplicable);
+        }
+        if self.scope.machine != current_machine {
+            return (
+                CostEvidenceClass::StaleRooflineReceipt,
+                StalenessVerdict::MachineDrift,
+            );
+        }
+        let recorded = self.scope.recorded_at_ns;
+        if recorded > now_ns {
+            return (
+                CostEvidenceClass::StaleRooflineReceipt,
+                StalenessVerdict::FutureRecording {
+                    ahead_ns: recorded - now_ns,
+                },
+            );
+        }
+        let age_ns = now_ns - recorded;
+        if age_ns > policy.horizon_ns() {
+            return (
+                CostEvidenceClass::StaleRooflineReceipt,
+                StalenessVerdict::AgedOut {
+                    age_ns,
+                    horizon_ns: policy.horizon_ns(),
+                },
+            );
+        }
+        (
+            CostEvidenceClass::ExactRooflineReceipt,
+            StalenessVerdict::Fresh,
+        )
+    }
+
+    /// Predict wall cost at `size` with the class ASSESSED against the
+    /// freshness contract instead of the mint-time stamp.
+    ///
+    /// # Errors
+    /// Exactly [`CostModel::predict`]'s refusals.
+    pub fn predict_assessed(
+        &self,
+        size: f64,
+        now_ns: i64,
+        current_machine: &[u8],
+        policy: FreshnessPolicy,
+    ) -> Result<(SealedCostPrediction, StalenessVerdict), CostRefusal> {
+        let (class, verdict) = self.assess(now_ns, current_machine, policy);
+        let mut sealed = self.predict(size)?;
+        sealed.evidence = class;
+        Ok((sealed, verdict))
+    }
+
     /// Predict wall cost at `size`, carrying scope and class.
     ///
     /// # Errors
@@ -235,6 +389,138 @@ mod tests {
             })
             .collect();
         CostModel::fit(&obs).expect("fits")
+    }
+
+    fn exact_sealed(recorded_at_ns: i64, machine: &[u8]) -> SealedCostModel {
+        SealedCostModel::mint_exact(
+            fitted(),
+            CostModelScope::from_validated(
+                "gemm-f64".to_string(),
+                "square".to_string(),
+                machine.to_vec(),
+                "run-receipt-digest".to_string(),
+                7,
+                "build-identity".to_string(),
+                recorded_at_ns,
+            ),
+        )
+    }
+
+    #[test]
+    fn freshness_policy_refuses_nonpositive_horizons() {
+        assert!(matches!(
+            FreshnessPolicy::new(0),
+            Err(CostRefusal::InvalidFreshnessHorizon { horizon_ns: 0 })
+        ));
+        assert!(matches!(
+            FreshnessPolicy::new(-1),
+            Err(CostRefusal::InvalidFreshnessHorizon { horizon_ns: -1 })
+        ));
+        assert_eq!(
+            FreshnessPolicy::new(1)
+                .expect("one nanosecond")
+                .horizon_ns(),
+            1
+        );
+    }
+
+    #[test]
+    fn assessment_keeps_fresh_receipts_exact_at_the_boundary() {
+        let sealed = exact_sealed(1_000, b"machine-a");
+        let policy = FreshnessPolicy::new(500).expect("policy");
+        // Exactly at the horizon is still fresh (age == horizon).
+        assert_eq!(
+            sealed.assess(1_500, b"machine-a", policy),
+            (
+                CostEvidenceClass::ExactRooflineReceipt,
+                StalenessVerdict::Fresh
+            )
+        );
+        // One past the horizon ages out with exact accounting.
+        assert_eq!(
+            sealed.assess(1_501, b"machine-a", policy),
+            (
+                CostEvidenceClass::StaleRooflineReceipt,
+                StalenessVerdict::AgedOut {
+                    age_ns: 501,
+                    horizon_ns: 500
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn machine_drift_and_future_recordings_fail_closed() {
+        let sealed = exact_sealed(1_000, b"machine-a");
+        let policy = FreshnessPolicy::new(1_000_000).expect("policy");
+        assert_eq!(
+            sealed.assess(1_100, b"machine-b", policy),
+            (
+                CostEvidenceClass::StaleRooflineReceipt,
+                StalenessVerdict::MachineDrift
+            )
+        );
+        assert_eq!(
+            sealed.assess(900, b"machine-a", policy),
+            (
+                CostEvidenceClass::StaleRooflineReceipt,
+                StalenessVerdict::FutureRecording { ahead_ns: 100 }
+            )
+        );
+    }
+
+    #[test]
+    fn provisional_evidence_is_untouched_by_assessment() {
+        let sealed = SealedCostModel::provisional_unaudited(fitted(), "unit-test");
+        let policy = FreshnessPolicy::new(1).expect("policy");
+        assert_eq!(
+            sealed.assess(i64::MAX, b"any-machine", policy),
+            (
+                CostEvidenceClass::ProvisionalUnaudited,
+                StalenessVerdict::NotApplicable
+            )
+        );
+    }
+
+    #[test]
+    fn assessed_predictions_carry_the_degraded_class() {
+        let sealed = exact_sealed(1_000, b"machine-a");
+        let policy = FreshnessPolicy::new(500).expect("policy");
+        let (fresh, verdict) = sealed
+            .predict_assessed(512.0, 1_200, b"machine-a", policy)
+            .expect("predicts");
+        assert_eq!(fresh.evidence, CostEvidenceClass::ExactRooflineReceipt);
+        assert_eq!(verdict, StalenessVerdict::Fresh);
+        let (stale, verdict) = sealed
+            .predict_assessed(512.0, 9_000, b"machine-a", policy)
+            .expect("predicts");
+        assert_eq!(stale.evidence, CostEvidenceClass::StaleRooflineReceipt);
+        assert!(matches!(verdict, StalenessVerdict::AgedOut { .. }));
+        // The numeric bands are identical; only the evidence label
+        // degrades — staleness never rewrites the science.
+        assert_eq!(fresh.prediction, stale.prediction);
+        // The mint-time stamp itself is immutable.
+        assert_eq!(
+            sealed.evidence_class(),
+            CostEvidenceClass::ExactRooflineReceipt
+        );
+    }
+
+    #[test]
+    fn the_evidence_lattice_never_upgrades_by_mixing() {
+        use CostEvidenceClass::{
+            ExactRooflineReceipt as Exact, ProvisionalUnaudited as Provisional,
+            StaleRooflineReceipt as Stale,
+        };
+        assert!(Exact.rank() > Provisional.rank());
+        assert!(Provisional.rank() > Stale.rank());
+        assert_eq!(Exact.weakest(Provisional), Provisional);
+        assert_eq!(Provisional.weakest(Stale), Stale);
+        assert_eq!(Exact.weakest(Stale), Stale);
+        assert_eq!(Exact.weakest(Exact), Exact);
+        // A year-old sealed roofline no longer outranks a fresh
+        // provisional fit: the stale class loses the fold.
+        assert_eq!(Stale.weakest(Provisional), Stale);
     }
 
     #[test]

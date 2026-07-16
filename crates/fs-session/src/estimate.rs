@@ -203,14 +203,13 @@ pub fn estimate(
             unmodeled.push(verb.clone());
             continue;
         };
-        // Weakest-wins (bead 2pmb): one provisional contributor marks
-        // the whole estimate; receipts cannot be upgraded by mixing.
-        weakest_cost_evidence = Some(match (weakest_cost_evidence, model.evidence_class()) {
-            (Some(CostEvidenceClass::ProvisionalUnaudited), _)
-            | (_, CostEvidenceClass::ProvisionalUnaudited) => {
-                CostEvidenceClass::ProvisionalUnaudited
-            }
-            _ => CostEvidenceClass::ExactRooflineReceipt,
+        // Weakest-wins (beads 2pmb + jle3m): one weaker contributor
+        // marks the whole estimate under the total evidence lattice
+        // (fresh exact > fresh provisional > stale exact); receipts
+        // cannot be upgraded by mixing.
+        weakest_cost_evidence = Some(match weakest_cost_evidence {
+            Some(current) => current.weakest(model.evidence_class()),
+            None => model.evidence_class(),
         });
         let prediction = model
             .predict(*size)

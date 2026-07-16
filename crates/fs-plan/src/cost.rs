@@ -54,6 +54,12 @@ pub enum CostRefusal {
         /// Maximum observations retained by one model.
         limit: usize,
     },
+    /// A freshness policy declared a non-positive horizon
+    /// (bead jle3m).
+    InvalidFreshnessHorizon {
+        /// The refused horizon in ledger nanoseconds.
+        horizon_ns: i64,
+    },
     /// A fit or prediction produced a nonfinite intermediate/result.
     ArithmeticFailure {
         /// Failing numerical stage.
@@ -90,6 +96,10 @@ impl core::fmt::Display for CostRefusal {
             CostRefusal::ObservationLimit { limit } => {
                 write!(f, "cost model observation limit {limit} is exhausted")
             }
+            CostRefusal::InvalidFreshnessHorizon { horizon_ns } => write!(
+                f,
+                "freshness horizon must be positive; got {horizon_ns} ns                  (a zero horizon stales every receipt at its own recording instant)"
+            ),
             CostRefusal::ArithmeticFailure { stage } => {
                 write!(f, "cost model refused nonfinite arithmetic during {stage}")
             }

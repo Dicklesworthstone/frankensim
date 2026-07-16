@@ -53,6 +53,18 @@ the anytime-valid audit threshold used by authenticated authority.
   declared hard bound.
 - `sealed::SealedCostModel` / `SealedCostPrediction` / `CostModelScope` /
   `CostEvidenceClass` (bead 2pmb) — authority carriers for cost models.
+- `FreshnessPolicy` / `StalenessVerdict` / `SealedCostModel::assess` /
+  `predict_assessed` (bead jle3m) — the class DEGRADES with age and
+  machine drift under a caller-preregistered horizon: receipt-backed
+  evidence assessed past the horizon, under a different machine
+  fingerprint, or with a future timestamp becomes
+  `StaleRooflineReceipt`, which ranks BELOW a fresh provisional fit in
+  the total lattice (`rank`/`weakest`: fresh exact > fresh provisional
+  > stale exact) — a year-old sealed roofline can no longer outrank a
+  fresh fit forever. Assessment is pure (caller supplies `now_ns` and
+  the current machine fingerprint; this crate never reads a clock or
+  host identity); the mint-time stamp is immutable and the numeric
+  bands never change — only the evidence label degrades.
   `CostModel` stays freely constructible provisional MATH; the sealed
   type is the AUTHORITY: its `ExactRooflineReceipt` class is mintable
   only by `cost_model_from_tune` after full validation, with the

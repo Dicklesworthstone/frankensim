@@ -46,7 +46,10 @@ pub use oracle::{
     ROOFLINE_RECEIPT_VERSION, ROOFLINE_ROW_SCHEMA, ROOFLINE_TUNE_SHAPE_PREFIX, TuneModelError,
     cost_model_from_tune,
 };
-pub use sealed::{CostEvidenceClass, CostModelScope, SealedCostModel, SealedCostPrediction};
+pub use sealed::{
+    CostEvidenceClass, CostModelScope, FreshnessPolicy, SealedCostModel, SealedCostPrediction,
+    StalenessVerdict,
+};
 #[cfg(feature = "voi-queries")]
 pub use voi::{
     MAX_VOI_AUDIT_RECORDS, MAX_VOI_EVALUATIONS, MAX_VOI_GRID, MAX_VOI_NAME_BYTES, MAX_VOI_NODES,
