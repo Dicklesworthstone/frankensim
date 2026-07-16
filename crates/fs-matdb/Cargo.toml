@@ -1,0 +1,19 @@
+[package]
+name = "fs-matdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Immutable, provenance-complete cross-physics material data: typed property claims with validity domains, uncertainty, and receipts."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
+
+[lints]
+workspace = true

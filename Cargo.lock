@@ -891,6 +891,9 @@ dependencies = [
 name = "fs-cheb"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
+ "fs-alloc",
+ "fs-exec",
  "fs-fft",
  "fs-ivl",
  "fs-la",
@@ -1089,6 +1092,7 @@ version = "0.0.1"
 dependencies = [
  "fs-exec",
  "fs-math",
+ "fs-propcheck",
  "fs-roofline",
  "fs-simd",
 ]
@@ -1211,6 +1215,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-geom",
+ "fs-math",
  "fs-obs",
  "fs-opt",
  "fs-query",
@@ -1223,10 +1228,12 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-ivl",
  "fs-obs",
+ "fs-propcheck",
  "fs-sparse",
 ]
 
@@ -1235,6 +1242,9 @@ name = "fs-govern"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-checker",
+ "fs-ledger",
+ "fs-package",
 ]
 
 [[package]]
@@ -1280,7 +1290,9 @@ dependencies = [
 name = "fs-ir"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-geom",
  "fs-plan",
  "fs-qty",
@@ -1332,6 +1344,7 @@ name = "fs-lbm"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-fft",
  "fs-math",
 ]
 
@@ -1341,6 +1354,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-qty",
  "fs-regime",
  "fsqlite",
@@ -1362,6 +1376,15 @@ dependencies = [
  "fs-ledger",
  "fs-render",
  "fs-rep-frep",
+]
+
+[[package]]
+name = "fs-matdb"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-qty",
 ]
 
 [[package]]
@@ -1437,6 +1460,7 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-qty",
  "fs-toleralloc",
  "fs-voi",
 ]
@@ -1467,6 +1491,7 @@ dependencies = [
  "fs-exec",
  "fs-math",
  "fs-obs",
+ "fs-propcheck",
  "fs-qty",
 ]
 
@@ -1597,6 +1622,7 @@ dependencies = [
  "fs-img",
  "fs-lbm",
  "fs-math",
+ "fs-propcheck",
  "fs-rand",
  "fs-rep-frep",
  "fs-rep-nurbs",
@@ -1718,8 +1744,10 @@ dependencies = [
 name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-cheb",
+ "fs-exec",
  "fs-ga",
  "fs-ledger",
  "fs-math",
@@ -1812,6 +1840,7 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-opdsl",
+ "fs-propcheck",
  "fs-rand",
  "fs-sparse",
  "fs-spectral",
@@ -1846,9 +1875,14 @@ version = "0.0.1"
 name = "fs-spectral"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
+ "fs-la",
+ "fs-math",
  "fs-qty",
+ "fs-sparse",
 ]
 
 [[package]]
@@ -1902,6 +1936,9 @@ name = "fs-time"
 version = "0.0.1"
 dependencies = [
  "fs-ad",
+ "fs-alloc",
+ "fs-blake3",
+ "fs-exec",
  "fs-ga",
  "fs-la",
  "fs-math",
@@ -1913,6 +1950,7 @@ name = "fs-toleralloc"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-math",
 ]
 
 [[package]]
@@ -2008,6 +2046,7 @@ dependencies = [
 name = "fs-verify"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-evidence",
  "fs-math",
  "fs-obs",
@@ -2031,6 +2070,13 @@ name = "fs-viz"
 version = "0.0.1"
 
 [[package]]
+name = "fs-vmanifest"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+]
+
+[[package]]
 name = "fs-voi"
 version = "0.0.1"
 
@@ -2046,6 +2092,14 @@ dependencies = [
  "fs-obs",
  "fs-qty",
  "fsqlite",
+]
+
+[[package]]
+name = "fs-vvreg"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-evidence",
 ]
 
 [[package]]
@@ -2261,6 +2315,7 @@ name = "fsqlite-pager"
 version = "0.1.16"
 dependencies = [
  "argon2",
+ "blake3",
  "bumpalo",
  "chacha20poly1305",
  "dashmap",
@@ -2319,6 +2374,7 @@ dependencies = [
  "simdutf8",
  "smallvec",
  "tracing",
+ "web-time",
  "xxhash-rust",
 ]
 
@@ -2357,6 +2413,7 @@ dependencies = [
  "pollster",
  "smallvec",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]
@@ -3682,6 +3739,16 @@ name = "web-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8622dcb61c0bcc9fffa6938bed81210af2da9a7e4a1a834b2e37a59b6dfb6141"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

@@ -45,6 +45,7 @@ members = [
     "crates/fs-dfo",
     "crates/fs-exec",
     "crates/fs-math",
+    "crates/fs-matdb",
     "crates/fs-la",
     "crates/fs-lattice",
     "crates/fs-sparse",
