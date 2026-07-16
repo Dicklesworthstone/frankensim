@@ -2094,3 +2094,113 @@ fn sr_019_numerics_budget_refusal_is_transactional_and_retryable() {
         "mid-schedule and final-publication poll exhaustion mint no candidate authority, while a fresh admitted retry exactly reproduces the completed report",
     );
 }
+
+#[test]
+fn sr_020_exact_path_subdivision_preserves_endpoint_section_and_nullity() {
+    let coarse =
+        AdmittedSheafSkeleton::try_new(2, vec![(0, 1)], Vec::new()).expect("coarse path admits");
+    // Give the inserted midpoint canonical index 0. The two endpoint edges
+    // then point away from it, so transporting the coarse endpoint section
+    // `[2]` across the subdivision yields the signed half-edge cochain
+    // `[-1, 1]`. Pinning the midpoint also makes the two leaf solves
+    // independent, avoiding a convergence-rate assumption in this topology
+    // metamorphic.
+    let subdivided = AdmittedSheafSkeleton::try_new(3, vec![(0, 1), (0, 2)], Vec::new())
+        .expect("midpoint-rooted subdivided path admits");
+    let tolerance = 1e-12;
+    let budget = numerics_budget(4);
+
+    let coarse =
+        with_cx(|cx| assess_hodge_decomposition_bounded(&coarse, &[2.0], tolerance, budget, cx));
+    let SheafNumericsOutcome::Converged(coarse) = coarse else {
+        panic!("the coarse exact path must converge: {coarse:?}");
+    };
+    let subdivided = with_cx(|cx| {
+        assess_hodge_decomposition_bounded(&subdivided, &[-1.0, 1.0], tolerance, budget, cx)
+    });
+    let SheafNumericsOutcome::Converged(subdivided) = subdivided else {
+        panic!("the subdivided exact path must converge: {subdivided:?}");
+    };
+
+    assert_eq!(coarse.exact(), &[2.0]);
+    assert_eq!(subdivided.exact(), &[-1.0, 1.0]);
+    for (label, decomposition) in [("coarse", &coarse), ("subdivided", &subdivided)] {
+        assert!(
+            decomposition.coexact().iter().all(|value| *value == 0.0),
+            "{label} triangle-adjoint candidate must remain exactly zero"
+        );
+        assert!(
+            decomposition
+                .harmonic()
+                .iter()
+                .all(|value| value.abs() <= tolerance),
+            "{label} remainder must vanish within the declared tolerance"
+        );
+        let receipt = decomposition.receipt();
+        for (name, bounds) in [
+            (
+                "primal normal equation",
+                receipt.primal_normal_equation.normalized,
+            ),
+            (
+                "dual normal equation",
+                receipt.dual_normal_equation.normalized,
+            ),
+            (
+                "remainder/exact orthogonality",
+                receipt.remainder_exact_orthogonality.normalized,
+            ),
+            (
+                "coboundary/triangle orthogonality",
+                receipt.coboundary_triangle_orthogonality.normalized,
+            ),
+            (
+                "coboundary/remainder orthogonality",
+                receipt.coboundary_remainder_orthogonality.normalized,
+            ),
+            (
+                "triangle/remainder orthogonality",
+                receipt.triangle_remainder_orthogonality.normalized,
+            ),
+            ("reconstruction", receipt.reconstruction.normalized),
+        ] {
+            assert!(
+                bounds.hi() <= tolerance,
+                "{label} {name} must meet the declared tolerance: {bounds:?}"
+            );
+        }
+    }
+
+    let coarse_endpoint = coarse.potential()[1] - coarse.potential()[0];
+    let subdivided_endpoint = subdivided.potential()[2] - subdivided.potential()[1];
+    assert_eq!(coarse_endpoint, 2.0);
+    assert!(
+        (subdivided_endpoint - 2.0).abs() <= tolerance,
+        "subdivision must preserve the endpoint potential difference: {subdivided_endpoint}"
+    );
+
+    let SheafSpectrumScope::Unknown(coarse_spectrum) = &coarse.receipt().spectrum;
+    let SheafSpectrumScope::Unknown(subdivided_spectrum) = &subdivided.receipt().spectrum;
+    for (label, spectrum) in [
+        ("coarse", coarse_spectrum),
+        ("subdivided", subdivided_spectrum),
+    ] {
+        assert_eq!(
+            (spectrum.nullspace.lower, spectrum.nullspace.upper),
+            (1, 1),
+            "{label} connected path has exact structural nullity one"
+        );
+        assert_eq!(spectrum.nullspace.component_roots, &[0]);
+        assert_eq!(spectrum.structural_zero_cluster.multiplicity_lower, 1);
+        assert_eq!(spectrum.structural_zero_cluster.multiplicity_upper, 1);
+    }
+    assert_eq!(coarse_spectrum.normalization_scale, 2.0);
+    assert_eq!(subdivided_spectrum.normalization_scale, 4.0);
+    assert_eq!(coarse_spectrum.unresolved_modes, 2);
+    assert_eq!(subdivided_spectrum.unresolved_modes, 3);
+
+    verdict(
+        "sr-020",
+        "subdividing one exact path edge preserves its endpoint section and structural nullity while retaining mesh-specific candidates and unresolved-mode counts",
+    );
+}
