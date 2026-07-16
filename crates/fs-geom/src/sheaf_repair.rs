@@ -2216,10 +2216,21 @@ fn least_squares_bounded(
     Ok(x)
 }
 
+// Merge compatibility promises the legacy diagnostic's exact published bits,
+// while the separate convergence-assessment lane must survive extreme finite
+// magnitudes. Keep those arithmetic contracts explicit instead of letting one
+// silently replace the other again.
+#[derive(Clone, Copy)]
+enum HodgeFractionMode {
+    LegacyOrdered,
+    ScaleSafe,
+}
+
 fn hodge_decompose_accounted_with_roots(
     skeleton: &AdmittedSheafSkeleton,
     mismatch: &[f64],
     component_roots: &[usize],
+    fraction_mode: HodgeFractionMode,
     accountant: &mut RepairAccountant<'_, '_>,
 ) -> Result<HodgeSplit, SheafRepairError> {
     validate_bounded_cochain(
@@ -2262,15 +2273,27 @@ fn hodge_decompose_accounted_with_roots(
         )?
     };
     let harmonic = checked_difference(&first_residual, &coexact, "harmonic-residual", accountant)?;
-    let total = checked_scaled_l2(mismatch, "input-norm", accountant)?;
-    let fractions = if total.scale == 0.0 {
-        (0.0, 0.0, 0.0)
-    } else {
-        (
-            checked_energy_ratio(&exact, total, "exact-norm", accountant)?,
-            checked_energy_ratio(&coexact, total, "coexact-norm", accountant)?,
-            checked_energy_ratio(&harmonic, total, "harmonic-norm", accountant)?,
-        )
+    let fractions = match fraction_mode {
+        HodgeFractionMode::LegacyOrdered => {
+            let total = checked_norm2(mismatch, "input-norm", accountant)?.max(f64::MIN_POSITIVE);
+            (
+                checked_norm2(&exact, "exact-norm", accountant)? / total,
+                checked_norm2(&coexact, "coexact-norm", accountant)? / total,
+                checked_norm2(&harmonic, "harmonic-norm", accountant)? / total,
+            )
+        }
+        HodgeFractionMode::ScaleSafe => {
+            let total = checked_scaled_l2(mismatch, "input-norm", accountant)?;
+            if total.scale == 0.0 {
+                (0.0, 0.0, 0.0)
+            } else {
+                (
+                    checked_energy_ratio(&exact, total, "exact-norm", accountant)?,
+                    checked_energy_ratio(&coexact, total, "coexact-norm", accountant)?,
+                    checked_energy_ratio(&harmonic, total, "harmonic-norm", accountant)?,
+                )
+            }
+        }
     };
     if [fractions.0, fractions.1, fractions.2]
         .into_iter()
@@ -2297,7 +2320,13 @@ pub(super) fn hodge_decompose_accounted(
     // Preserve the legacy fixed-sweep diagnostic exactly. The parallel
     // numerical-assessment API below owns per-component gauge pinning and is
     // the only path allowed to promote a tolerance-qualified view.
-    hodge_decompose_accounted_with_roots(skeleton, mismatch, &[0], accountant)
+    hodge_decompose_accounted_with_roots(
+        skeleton,
+        mismatch,
+        &[0],
+        HodgeFractionMode::LegacyOrdered,
+        accountant,
+    )
 }
 
 /// Run the fixed-iteration Hodge-inspired diagnostic over sealed incidence
@@ -2685,6 +2714,7 @@ fn assess_hodge_decomposition_inner(
         skeleton,
         mismatch,
         &component_partition.roots,
+        HodgeFractionMode::ScaleSafe,
         &mut accountant,
     )?;
 
