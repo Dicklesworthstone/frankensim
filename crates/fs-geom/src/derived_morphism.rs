@@ -30,6 +30,9 @@
 //! A generic inverse-law packet binds oppositely oriented morphisms, exact
 //! endpoint identities, both structural round-trip composites, and two nominal
 //! comparison children without promoting either morphism to an inverse.
+//! Exact forward and reverse fixed-foot span-morphism packets can then be
+//! assembled with the inverse-law packet for their apex maps, but the resulting
+//! structural candidate still grants no span-equivalence authority.
 //! A standalone token binds a fixed-resolution quasi-isomorphism
 //! *candidate* to an exact refinement path and exact local presentations,
 //! without granting theorem authority. Another candidate retains exhaustive
@@ -85,6 +88,8 @@ pub const DERIVED_SPAN_PULLBACK_SQUARE_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 pub const DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for generic structural inverse-law candidates.
 pub const DERIVED_MORPHISM_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for structural span-equivalence candidate assemblies.
+pub const DERIVED_SPAN_EQUIVALENCE_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for direct chart-transition inverse-law candidate receipts.
 pub const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
@@ -127,6 +132,10 @@ const DERIVED_SPAN_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
 // complete 19-field parallel-comparison child schema trees.
 const DERIVED_MORPHISM_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 58, 1 << 11, 4096);
+// Eleven parent fields, two six-field spans, two complete 67-field span-morphism
+// children, and one complete 58-field morphism inverse-law child.
+const DERIVED_SPAN_EQUIVALENCE_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 215, 1 << 11, 4096);
 // Ten parent fields plus two six-field structural-morphism child schemas.
 const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 22, 1 << 11, 4096);
@@ -453,6 +462,47 @@ impl CanonicalSchema for DerivedMorphismInverseLawCandidateIdentitySchemaV1 {
 /// Typed identity of one generic structural inverse-law candidate.
 pub type DerivedMorphismInverseLawCandidateIdV1 =
     EvidenceNodeId<DerivedMorphismInverseLawCandidateIdentitySchemaV1>;
+
+static DERIVED_SPAN_MORPHISM_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedSpanMorphismCandidateIdV1>();
+static DERIVED_MORPHISM_INVERSE_LAW_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedMorphismInverseLawCandidateIdV1>();
+
+/// Domain-separated identity for one structural span-equivalence candidate.
+pub enum DerivedSpanEquivalenceCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedSpanEquivalenceCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.structural-span-equivalence-candidate.v1";
+    const NAME: &'static str = "structural-declared-span-equivalence-candidate";
+    const VERSION: u32 = DERIVED_SPAN_EQUIVALENCE_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact common outer geometries, source and target span apexes, ordered forward and reverse fixed-foot span-morphism children, one exact apex-morphism inverse-law child, one nominal span-equivalence declaration, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("outer-source-geometry", WireType::Bytes),
+        FieldSpec::required("outer-target-geometry", WireType::Bytes),
+        FieldSpec::required("source-apex-geometry", WireType::Bytes),
+        FieldSpec::required("target-apex-geometry", WireType::Bytes),
+        FieldSpec::child_of("source-span", &DERIVED_SPAN_CORRESPONDENCE_CHILD_V1),
+        FieldSpec::child_of("target-span", &DERIVED_SPAN_CORRESPONDENCE_CHILD_V1),
+        FieldSpec::child_of(
+            "forward-span-morphism",
+            &DERIVED_SPAN_MORPHISM_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of(
+            "reverse-span-morphism",
+            &DERIVED_SPAN_MORPHISM_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of(
+            "apex-inverse-law",
+            &DERIVED_MORPHISM_INVERSE_LAW_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::required("nominal-span-equivalence-declaration", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one structural span-equivalence candidate.
+pub type DerivedSpanEquivalenceCandidateIdV1 =
+    EvidenceNodeId<DerivedSpanEquivalenceCandidateIdentitySchemaV1>;
 
 /// Domain-separated identity for one structural direct chart-transition pair.
 pub enum DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 {}
@@ -879,6 +929,28 @@ impl DerivedSpanMorphismDeclarationIdV1 {
     }
 }
 
+/// Nominal declaration that two fixed-foot spans are equivalent.
+///
+/// These bytes are retained for an independent checker. They do not prove
+/// either span-morphism triangle, either apex inverse law, or any categorical,
+/// bicategorical, semantic, evidential, or physical equivalence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedSpanEquivalenceDeclarationIdV1([u8; 32]);
+
+impl DerivedSpanEquivalenceDeclarationIdV1 {
+    /// Construct a nominal span-equivalence declaration from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Nominal declaration that a proposed apex and projections form a pullback.
 ///
 /// The bytes do not prove square commutativity, existence, universality,
@@ -1235,6 +1307,32 @@ pub struct DerivedMorphismInverseLawCandidateIrV1 {
     /// Nominal aggregate inverse-law declaration for independent checking.
     pub nominal_inverse_law: DerivedMorphismInverseLawDeclarationIdV1,
     /// Explicit denial of path equality, inverse, isomorphism, and equivalence authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
+/// Versioned structural request assembling a span-equivalence candidate.
+///
+/// The exact fixed-foot spans, forward and reverse span-morphism candidates,
+/// and generic inverse-law packet for their apex morphisms are all supplied as
+/// typed children. Admission audits their complete cross-binding but does not
+/// promote any nominal comparison to equality or equivalence authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedSpanEquivalenceCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact structural source span `outer_source <- source_apex -> outer_target`.
+    pub source_span: DerivedSpanCorrespondenceIdV1,
+    /// Exact structural target span `outer_source <- target_apex -> outer_target`.
+    pub target_span: DerivedSpanCorrespondenceIdV1,
+    /// Exact fixed-foot structural candidate from source span to target span.
+    pub forward_span_morphism: DerivedSpanMorphismCandidateIdV1,
+    /// Exact fixed-foot structural candidate from target span to source span.
+    pub reverse_span_morphism: DerivedSpanMorphismCandidateIdV1,
+    /// Exact generic inverse-law candidate for the two apex morphisms.
+    pub apex_inverse_law: DerivedMorphismInverseLawCandidateIdV1,
+    /// Nominal aggregate span-equivalence declaration for independent checking.
+    pub nominal_span_equivalence: DerivedSpanEquivalenceDeclarationIdV1,
+    /// Explicit denial of inverse, equivalence, coherence, and semantic authority.
     pub no_authority: DerivedNoClaimIdV1,
 }
 
@@ -2522,6 +2620,58 @@ impl fmt::Display for DerivedMorphismInverseLawCandidateErrorV1 {
 }
 
 impl core::error::Error for DerivedMorphismInverseLawCandidateErrorV1 {}
+
+/// Structured refusal from structural span-equivalence candidate admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedSpanEquivalenceCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required child, declaration, or no-authority ID is zero.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw direct-child ID does not name the supplied sealed child.
+    ChildIdentityMismatch {
+        /// Stable direct-child field.
+        field: &'static str,
+    },
+    /// The two spans do not retain one exact ordered pair of outer endpoints.
+    OuterEndpointMismatch {
+        /// Stable source/target outer endpoint relation.
+        field: &'static str,
+    },
+    /// A span-morphism child is not bound to the exact ordered spans or selectors.
+    SpanMorphismBindingMismatch {
+        /// Stable forward/reverse transitive binding relation.
+        field: &'static str,
+    },
+    /// The inverse-law child is not bound to the exact ordered apex maps/selectors.
+    ApexInverseLawBindingMismatch {
+        /// Stable inverse-law transitive binding relation.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedSpanEquivalenceCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "span equivalence candidate refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedSpanEquivalenceCandidateErrorV1 {}
 
 /// Structured refusal from direct chart-transition inverse-law candidate admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3842,6 +3992,109 @@ impl AdmittedDerivedMorphismInverseLawCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedMorphismInverseLawCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed structural span-equivalence candidate.
+///
+/// The token retains exact fixed-foot spans, ordered forward and reverse
+/// span-morphism candidates, and the exact inverse-law candidate for their apex
+/// morphisms. It proves none of the nested nominal relations and exposes no
+/// span equivalence, invertibility, unit/counit, triangle, coherence, evidence,
+/// functionality, semantic, or physical-correspondence authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedSpanEquivalenceCandidateV1 {
+    outer_source: DerivedGeometryIdV1,
+    outer_target: DerivedGeometryIdV1,
+    source_apex: DerivedGeometryIdV1,
+    target_apex: DerivedGeometryIdV1,
+    source_span: DerivedSpanCorrespondenceIdV1,
+    target_span: DerivedSpanCorrespondenceIdV1,
+    forward_span_morphism: DerivedSpanMorphismCandidateIdV1,
+    reverse_span_morphism: DerivedSpanMorphismCandidateIdV1,
+    apex_inverse_law: DerivedMorphismInverseLawCandidateIdV1,
+    nominal_span_equivalence: DerivedSpanEquivalenceDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedSpanEquivalenceCandidateIdV1>,
+}
+
+impl AdmittedDerivedSpanEquivalenceCandidateV1 {
+    /// Exact common outer source geometry.
+    #[must_use]
+    pub const fn outer_source(&self) -> DerivedGeometryIdV1 {
+        self.outer_source
+    }
+
+    /// Exact common outer target geometry.
+    #[must_use]
+    pub const fn outer_target(&self) -> DerivedGeometryIdV1 {
+        self.outer_target
+    }
+
+    /// Exact source-span apex.
+    #[must_use]
+    pub const fn source_apex(&self) -> DerivedGeometryIdV1 {
+        self.source_apex
+    }
+
+    /// Exact target-span apex.
+    #[must_use]
+    pub const fn target_apex(&self) -> DerivedGeometryIdV1 {
+        self.target_apex
+    }
+
+    /// Exact typed source-span child.
+    #[must_use]
+    pub const fn source_span(&self) -> DerivedSpanCorrespondenceIdV1 {
+        self.source_span
+    }
+
+    /// Exact typed target-span child.
+    #[must_use]
+    pub const fn target_span(&self) -> DerivedSpanCorrespondenceIdV1 {
+        self.target_span
+    }
+
+    /// Exact fixed-foot source-to-target span-morphism candidate.
+    #[must_use]
+    pub const fn forward_span_morphism(&self) -> DerivedSpanMorphismCandidateIdV1 {
+        self.forward_span_morphism
+    }
+
+    /// Exact fixed-foot target-to-source span-morphism candidate.
+    #[must_use]
+    pub const fn reverse_span_morphism(&self) -> DerivedSpanMorphismCandidateIdV1 {
+        self.reverse_span_morphism
+    }
+
+    /// Exact inverse-law candidate for the ordered apex morphisms.
+    #[must_use]
+    pub const fn apex_inverse_law(&self) -> DerivedMorphismInverseLawCandidateIdV1 {
+        self.apex_inverse_law
+    }
+
+    /// Nominal span-equivalence declaration; not authenticated here.
+    #[must_use]
+    pub const fn nominal_span_equivalence(&self) -> DerivedSpanEquivalenceDeclarationIdV1 {
+        self.nominal_span_equivalence
+    }
+
+    /// Explicit artifact denying span-equivalence authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed structural span-equivalence candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedSpanEquivalenceCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedSpanEquivalenceCandidateIdV1> {
         self.receipt
     }
 }
@@ -8305,6 +8558,270 @@ pub fn admit_derived_morphism_inverse_law_candidate_v1(
     })
 }
 
+fn span_equivalence_candidate_receipt(
+    ir: &DerivedSpanEquivalenceCandidateIrV1,
+    source_span: &AdmittedDerivedSpanCorrespondenceV1,
+    target_span: &AdmittedDerivedSpanCorrespondenceV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedSpanEquivalenceCandidateIdV1>,
+    DerivedSpanEquivalenceCandidateErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => DerivedSpanEquivalenceCandidateErrorV1::Cancelled {
+            stage: "span-equivalence-identity",
+        },
+        other => DerivedSpanEquivalenceCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedSpanEquivalenceCandidateIdV1, _>::new(
+        DERIVED_SPAN_EQUIVALENCE_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "outer-source-geometry"),
+        source_span.source().as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "outer-target-geometry"),
+            source_span.target().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "source-apex-geometry"),
+            source_span.apex().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "target-apex-geometry"),
+            target_span.apex().as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.child(Field::new(4, "source-span"), ir.source_span))
+    .and_then(|encoder| encoder.child(Field::new(5, "target-span"), ir.target_span))
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(6, "forward-span-morphism"),
+            ir.forward_span_morphism,
+        )
+    })
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(7, "reverse-span-morphism"),
+            ir.reverse_span_morphism,
+        )
+    })
+    .and_then(|encoder| encoder.child(Field::new(8, "apex-inverse-law"), ir.apex_inverse_law))
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(9, "nominal-span-equivalence-declaration"),
+            ir.nominal_span_equivalence.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(10, "no-authority"), ir.no_authority.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Admit one structural candidate that two fixed-foot spans are equivalent.
+///
+/// Admission binds exact source and target spans, an exact forward
+/// span-morphism candidate, an exact reverse candidate, and the exact generic
+/// inverse-law packet for their ordered apex morphisms. Every outer-foot,
+/// apex, span-child, direction, and apex-map seam is checked transitively.
+///
+/// This shape-only assembly authenticates none of its nominal relations. In
+/// particular it proves no commuting triangle, invertible 2-cell, apex inverse
+/// or isomorphism, path equality, unit/counit or triangle identity, naturality,
+/// coherence, interchange, composition, pullback, base-change, execution,
+/// evidence preservation, functionality, semantic agreement, physical
+/// correspondence, span equivalence, or conversion to an equivalence boundary.
+///
+/// # Errors
+/// Returns a typed refusal for schema, zero identity, raw/sealed direct-child
+/// mismatch, unequal outer feet, forward/reverse span binding, apex inverse-law
+/// binding, cancellation, or canonical identity defects. No partial token
+/// escapes.
+#[must_use = "a structural span-equivalence packet grants no equivalence authority"]
+#[allow(clippy::too_many_lines)] // One bounded transitive audit over five sealed children.
+pub fn admit_derived_span_equivalence_candidate_v1(
+    ir: &DerivedSpanEquivalenceCandidateIrV1,
+    source_span: &AdmittedDerivedSpanCorrespondenceV1,
+    target_span: &AdmittedDerivedSpanCorrespondenceV1,
+    forward_span_morphism: &AdmittedDerivedSpanMorphismCandidateV1,
+    reverse_span_morphism: &AdmittedDerivedSpanMorphismCandidateV1,
+    apex_inverse_law: &AdmittedDerivedMorphismInverseLawCandidateV1,
+    cx: &Cx<'_>,
+) -> Result<AdmittedDerivedSpanEquivalenceCandidateV1, DerivedSpanEquivalenceCandidateErrorV1> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanEquivalenceCandidateErrorV1::Cancelled {
+            stage: "span-equivalence-entry",
+        });
+    }
+    if ir.schema_version != DERIVED_SPAN_EQUIVALENCE_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedSpanEquivalenceCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_SPAN_EQUIVALENCE_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.source_span.as_bytes(), "source-span"),
+        (ir.target_span.as_bytes(), "target-span"),
+        (ir.forward_span_morphism.as_bytes(), "forward-span-morphism"),
+        (ir.reverse_span_morphism.as_bytes(), "reverse-span-morphism"),
+        (ir.apex_inverse_law.as_bytes(), "apex-inverse-law"),
+        (
+            ir.nominal_span_equivalence.as_bytes(),
+            "nominal-span-equivalence-declaration",
+        ),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(DerivedSpanEquivalenceCandidateErrorV1::MissingIdentity { field });
+        }
+    }
+    for (matches, field) in [
+        (ir.source_span == source_span.id(), "source-span"),
+        (ir.target_span == target_span.id(), "target-span"),
+        (
+            ir.forward_span_morphism == forward_span_morphism.id(),
+            "forward-span-morphism",
+        ),
+        (
+            ir.reverse_span_morphism == reverse_span_morphism.id(),
+            "reverse-span-morphism",
+        ),
+        (
+            ir.apex_inverse_law == apex_inverse_law.id(),
+            "apex-inverse-law",
+        ),
+    ] {
+        if !matches {
+            return Err(DerivedSpanEquivalenceCandidateErrorV1::ChildIdentityMismatch { field });
+        }
+    }
+    for (matches, field) in [
+        (
+            source_span.source() == target_span.source(),
+            "outer-source-geometry",
+        ),
+        (
+            source_span.target() == target_span.target(),
+            "outer-target-geometry",
+        ),
+    ] {
+        if !matches {
+            return Err(DerivedSpanEquivalenceCandidateErrorV1::OuterEndpointMismatch { field });
+        }
+    }
+    for (matches, field) in [
+        (
+            forward_span_morphism.source_span() == source_span.id(),
+            "forward-source-span",
+        ),
+        (
+            forward_span_morphism.target_span() == target_span.id(),
+            "forward-target-span",
+        ),
+        (
+            forward_span_morphism.outer_source() == source_span.source(),
+            "forward-outer-source",
+        ),
+        (
+            forward_span_morphism.outer_target() == source_span.target(),
+            "forward-outer-target",
+        ),
+        (
+            forward_span_morphism.source_apex() == source_span.apex(),
+            "forward-source-apex",
+        ),
+        (
+            forward_span_morphism.target_apex() == target_span.apex(),
+            "forward-target-apex",
+        ),
+        (
+            reverse_span_morphism.source_span() == target_span.id(),
+            "reverse-source-span",
+        ),
+        (
+            reverse_span_morphism.target_span() == source_span.id(),
+            "reverse-target-span",
+        ),
+        (
+            reverse_span_morphism.outer_source() == source_span.source(),
+            "reverse-outer-source",
+        ),
+        (
+            reverse_span_morphism.outer_target() == source_span.target(),
+            "reverse-outer-target",
+        ),
+        (
+            reverse_span_morphism.source_apex() == target_span.apex(),
+            "reverse-source-apex",
+        ),
+        (
+            reverse_span_morphism.target_apex() == source_span.apex(),
+            "reverse-target-apex",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedSpanEquivalenceCandidateErrorV1::SpanMorphismBindingMismatch { field },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            apex_inverse_law.source() == source_span.apex(),
+            "apex-inverse-source",
+        ),
+        (
+            apex_inverse_law.target() == target_span.apex(),
+            "apex-inverse-target",
+        ),
+        (
+            apex_inverse_law.forward() == forward_span_morphism.apex_morphism(),
+            "apex-inverse-forward-morphism",
+        ),
+        (
+            apex_inverse_law.reverse() == reverse_span_morphism.apex_morphism(),
+            "apex-inverse-reverse-morphism",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedSpanEquivalenceCandidateErrorV1::ApexInverseLawBindingMismatch { field },
+            );
+        }
+    }
+
+    let receipt = span_equivalence_candidate_receipt(ir, source_span, target_span, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanEquivalenceCandidateErrorV1::Cancelled {
+            stage: "span-equivalence-publication",
+        });
+    }
+    Ok(AdmittedDerivedSpanEquivalenceCandidateV1 {
+        outer_source: source_span.source(),
+        outer_target: source_span.target(),
+        source_apex: source_span.apex(),
+        target_apex: target_span.apex(),
+        source_span: ir.source_span,
+        target_span: ir.target_span,
+        forward_span_morphism: ir.forward_span_morphism,
+        reverse_span_morphism: ir.reverse_span_morphism,
+        apex_inverse_law: ir.apex_inverse_law,
+        nominal_span_equivalence: ir.nominal_span_equivalence,
+        no_authority: ir.no_authority,
+        receipt,
+    })
+}
+
 fn direct_declared_chart_map(
     field: &'static str,
     morphism: &AdmittedDerivedMorphismV1,
@@ -12204,6 +12721,279 @@ mod tests {
         )
     }
 
+    struct SpanEquivalenceCandidateFixtureV1 {
+        source_span: AdmittedDerivedSpanCorrespondenceV1,
+        target_span: AdmittedDerivedSpanCorrespondenceV1,
+        forward_span_morphism: AdmittedDerivedSpanMorphismCandidateV1,
+        reverse_span_morphism: AdmittedDerivedSpanMorphismCandidateV1,
+        apex_inverse_law: AdmittedDerivedMorphismInverseLawCandidateV1,
+        ir: DerivedSpanEquivalenceCandidateIrV1,
+    }
+
+    #[allow(clippy::too_many_lines)] // Builds both span triangles and both apex round trips exactly.
+    fn span_equivalence_candidate_fixture(cx: &Cx<'_>) -> SpanEquivalenceCandidateFixtureV1 {
+        let apex_fixture = morphism_inverse_law_candidate_fixture(cx);
+        let source_apex = GeometryEndpointV1::from_admitted(&apex_fixture.source);
+        let target_apex = GeometryEndpointV1::from_admitted(&apex_fixture.target);
+        let outer_source = endpoint(101);
+        let outer_target = endpoint(102);
+
+        let source_left_leg = admit_strict(
+            source_apex,
+            outer_source,
+            103,
+            ColorRank::Validated,
+            ColorRank::Validated,
+            cx,
+        );
+        let source_right_leg = admit_strict(
+            source_apex,
+            outer_target,
+            104,
+            ColorRank::Validated,
+            ColorRank::Validated,
+            cx,
+        );
+        let target_left_leg = admit_strict(
+            target_apex,
+            outer_source,
+            105,
+            ColorRank::Validated,
+            ColorRank::Validated,
+            cx,
+        );
+        let target_right_leg = admit_strict(
+            target_apex,
+            outer_target,
+            106,
+            ColorRank::Validated,
+            ColorRank::Validated,
+            cx,
+        );
+        let source_span = admit_derived_span_correspondence_v1(
+            span_ir(
+                outer_source,
+                source_apex,
+                outer_target,
+                &source_left_leg,
+                &source_right_leg,
+                107,
+            ),
+            &source_left_leg,
+            &source_right_leg,
+            cx,
+        )
+        .expect("valid equivalence source span");
+        let target_span = admit_derived_span_correspondence_v1(
+            span_ir(
+                outer_source,
+                target_apex,
+                outer_target,
+                &target_left_leg,
+                &target_right_leg,
+                108,
+            ),
+            &target_left_leg,
+            &target_right_leg,
+            cx,
+        )
+        .expect("valid equivalence target span");
+
+        let admit_comparison = |left: &AdmittedDerivedMorphismV1,
+                                right: &AdmittedDerivedMorphismV1,
+                                seed: u8|
+         -> AdmittedDerivedParallelMorphismComparisonCandidateV1 {
+            let ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+                schema_version: DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1,
+                left: left.id(),
+                right: right.id(),
+                comparison_scope: DerivedMorphismComparisonScopeIdV1::from_bytes([seed; 32]),
+                nominal_relation: DerivedParallelMorphismRelationDeclarationIdV1::from_bytes(
+                    [seed.wrapping_add(1); 32],
+                ),
+                no_authority: DerivedNoClaimIdV1::from_bytes([seed.wrapping_add(2); 32]),
+            };
+            admit_derived_parallel_morphism_comparison_candidate_v1(&ir, left, right, cx)
+                .expect("valid span-equivalence leg comparison")
+        };
+
+        let forward_left_route =
+            compose_derived_morphisms_v1(&apex_fixture.forward, &target_left_leg, cx)
+                .expect("valid forward left route");
+        let forward_right_route =
+            compose_derived_morphisms_v1(&apex_fixture.forward, &target_right_leg, cx)
+                .expect("valid forward right route");
+        let forward_left_comparison = admit_comparison(&source_left_leg, &forward_left_route, 109);
+        let forward_right_comparison =
+            admit_comparison(&source_right_leg, &forward_right_route, 112);
+        let forward_ir = DerivedSpanMorphismCandidateIrV1 {
+            schema_version: DERIVED_SPAN_MORPHISM_CANDIDATE_SCHEMA_VERSION_V1,
+            source_span: source_span.id(),
+            target_span: target_span.id(),
+            apex_morphism: apex_fixture.forward.id(),
+            left_leg_comparison: forward_left_comparison.id(),
+            right_leg_comparison: forward_right_comparison.id(),
+            nominal_span_morphism: DerivedSpanMorphismDeclarationIdV1::from_bytes([115; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([116; 32]),
+        };
+        let forward_span_morphism = admit_derived_span_morphism_candidate_v1(
+            &forward_ir,
+            &source_span,
+            &target_span,
+            &apex_fixture.forward,
+            &source_left_leg,
+            &source_right_leg,
+            &target_left_leg,
+            &target_right_leg,
+            &forward_left_comparison,
+            &forward_right_comparison,
+            cx,
+        )
+        .expect("valid forward span-morphism candidate");
+
+        let reverse_left_route =
+            compose_derived_morphisms_v1(&apex_fixture.reverse, &source_left_leg, cx)
+                .expect("valid reverse left route");
+        let reverse_right_route =
+            compose_derived_morphisms_v1(&apex_fixture.reverse, &source_right_leg, cx)
+                .expect("valid reverse right route");
+        let reverse_left_comparison = admit_comparison(&target_left_leg, &reverse_left_route, 117);
+        let reverse_right_comparison =
+            admit_comparison(&target_right_leg, &reverse_right_route, 120);
+        let reverse_ir = DerivedSpanMorphismCandidateIrV1 {
+            schema_version: DERIVED_SPAN_MORPHISM_CANDIDATE_SCHEMA_VERSION_V1,
+            source_span: target_span.id(),
+            target_span: source_span.id(),
+            apex_morphism: apex_fixture.reverse.id(),
+            left_leg_comparison: reverse_left_comparison.id(),
+            right_leg_comparison: reverse_right_comparison.id(),
+            nominal_span_morphism: DerivedSpanMorphismDeclarationIdV1::from_bytes([123; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([124; 32]),
+        };
+        let reverse_span_morphism = admit_derived_span_morphism_candidate_v1(
+            &reverse_ir,
+            &target_span,
+            &source_span,
+            &apex_fixture.reverse,
+            &target_left_leg,
+            &target_right_leg,
+            &source_left_leg,
+            &source_right_leg,
+            &reverse_left_comparison,
+            &reverse_right_comparison,
+            cx,
+        )
+        .expect("valid reverse span-morphism candidate");
+        let apex_inverse_law =
+            admit_morphism_inverse_law_with_ir(&apex_fixture, &apex_fixture.ir, cx)
+                .expect("valid apex inverse-law candidate");
+        let ir = DerivedSpanEquivalenceCandidateIrV1 {
+            schema_version: DERIVED_SPAN_EQUIVALENCE_CANDIDATE_SCHEMA_VERSION_V1,
+            source_span: source_span.id(),
+            target_span: target_span.id(),
+            forward_span_morphism: forward_span_morphism.id(),
+            reverse_span_morphism: reverse_span_morphism.id(),
+            apex_inverse_law: apex_inverse_law.id(),
+            nominal_span_equivalence: DerivedSpanEquivalenceDeclarationIdV1::from_bytes([125; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([126; 32]),
+        };
+        SpanEquivalenceCandidateFixtureV1 {
+            source_span,
+            target_span,
+            forward_span_morphism,
+            reverse_span_morphism,
+            apex_inverse_law,
+            ir,
+        }
+    }
+
+    fn admit_span_equivalence_with_ir(
+        fixture: &SpanEquivalenceCandidateFixtureV1,
+        ir: &DerivedSpanEquivalenceCandidateIrV1,
+        cx: &Cx<'_>,
+    ) -> Result<AdmittedDerivedSpanEquivalenceCandidateV1, DerivedSpanEquivalenceCandidateErrorV1>
+    {
+        admit_derived_span_equivalence_candidate_v1(
+            ir,
+            &fixture.source_span,
+            &fixture.target_span,
+            &fixture.forward_span_morphism,
+            &fixture.reverse_span_morphism,
+            &fixture.apex_inverse_law,
+            cx,
+        )
+    }
+
+    fn span_correspondence_with_test_selectors(
+        span: &AdmittedDerivedSpanCorrespondenceV1,
+        source: DerivedGeometryIdV1,
+        apex: DerivedGeometryIdV1,
+        target: DerivedGeometryIdV1,
+    ) -> AdmittedDerivedSpanCorrespondenceV1 {
+        AdmittedDerivedSpanCorrespondenceV1 {
+            source,
+            apex,
+            target,
+            left_leg: span.left_leg(),
+            right_leg: span.right_leg(),
+            no_claim: span.no_claim(),
+            receipt: span.identity_receipt(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // Defensive forged-token seam helper.
+    fn span_morphism_with_test_bindings(
+        candidate: &AdmittedDerivedSpanMorphismCandidateV1,
+        outer_source: DerivedGeometryIdV1,
+        outer_target: DerivedGeometryIdV1,
+        source_apex: DerivedGeometryIdV1,
+        target_apex: DerivedGeometryIdV1,
+        source_span: DerivedSpanCorrespondenceIdV1,
+        target_span: DerivedSpanCorrespondenceIdV1,
+        apex_morphism: DerivedMorphismIdV1,
+    ) -> AdmittedDerivedSpanMorphismCandidateV1 {
+        AdmittedDerivedSpanMorphismCandidateV1 {
+            outer_source,
+            outer_target,
+            source_apex,
+            target_apex,
+            source_span,
+            target_span,
+            apex_morphism,
+            left_leg_comparison: candidate.left_leg_comparison(),
+            right_leg_comparison: candidate.right_leg_comparison(),
+            left_target_route: candidate.left_target_route(),
+            right_target_route: candidate.right_target_route(),
+            nominal_span_morphism: candidate.nominal_span_morphism(),
+            no_authority: candidate.no_authority(),
+            receipt: candidate.identity_receipt(),
+        }
+    }
+
+    fn morphism_inverse_law_with_test_bindings(
+        candidate: &AdmittedDerivedMorphismInverseLawCandidateV1,
+        source: DerivedGeometryIdV1,
+        target: DerivedGeometryIdV1,
+        forward: DerivedMorphismIdV1,
+        reverse: DerivedMorphismIdV1,
+    ) -> AdmittedDerivedMorphismInverseLawCandidateV1 {
+        AdmittedDerivedMorphismInverseLawCandidateV1 {
+            source,
+            target,
+            forward,
+            reverse,
+            source_identity: candidate.source_identity(),
+            target_identity: candidate.target_identity(),
+            source_round_trip: candidate.source_round_trip(),
+            target_round_trip: candidate.target_round_trip(),
+            source_round_trip_comparison: candidate.source_round_trip_comparison(),
+            target_round_trip_comparison: candidate.target_round_trip_comparison(),
+            nominal_inverse_law: candidate.nominal_inverse_law(),
+            no_authority: candidate.no_authority(),
+            receipt: candidate.identity_receipt(),
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // Constructs every sealed child in the structural square.
     fn span_pullback_square_candidate_fixture(cx: &Cx<'_>) -> SpanPullbackSquareCandidateFixtureV1 {
         let source = endpoint(200);
@@ -14623,7 +15413,7 @@ mod tests {
             let wrong_target = admit_strict(
                 endpoint(160),
                 endpoint(191),
-                192,
+                196,
                 ColorRank::Verified,
                 ColorRank::Estimated,
                 cx,
@@ -15847,6 +16637,650 @@ mod tests {
                 admit_morphism_inverse_law_with_ir(&fixture, &fixture.ir, cx),
                 Err(DerivedMorphismInverseLawCandidateErrorV1::Cancelled {
                     stage: "morphism-inverse-law-entry",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn span_equivalence_candidates_bind_exact_spans_maps_and_apex_inverse_packet() {
+        assert_ne!(
+            <DerivedSpanEquivalenceCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedSpanMorphismCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+        );
+        assert_ne!(
+            <DerivedSpanEquivalenceCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedMorphismInverseLawCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+        );
+        assert_eq!(
+            <DerivedSpanEquivalenceCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS.len(),
+            11,
+        );
+        assert_eq!(
+            DERIVED_SPAN_EQUIVALENCE_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+            215,
+        );
+        for (field, expected_domain) in [
+            (
+                4,
+                <DerivedSpanCorrespondenceIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            ),
+            (
+                5,
+                <DerivedSpanCorrespondenceIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            ),
+            (
+                6,
+                <DerivedSpanMorphismCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            ),
+            (
+                7,
+                <DerivedSpanMorphismCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            ),
+            (
+                8,
+                <DerivedMorphismInverseLawCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            ),
+        ] {
+            let spec = &DerivedSpanEquivalenceCandidateIdentitySchemaV1::FIELDS[field];
+            assert_eq!(spec.wire_type(), WireType::Child);
+            assert_eq!(
+                spec.child_spec().expect("typed child schema").domain(),
+                expected_domain,
+            );
+        }
+
+        with_cx(false, |cx| {
+            let fixture = span_equivalence_candidate_fixture(cx);
+            let first = admit_span_equivalence_with_ir(&fixture, &fixture.ir, cx)
+                .expect("valid structural span-equivalence candidate");
+            let replay = admit_span_equivalence_with_ir(&fixture, &fixture.ir, cx)
+                .expect("deterministic span-equivalence replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.outer_source(), fixture.source_span.source());
+            assert_eq!(first.outer_target(), fixture.source_span.target());
+            assert_eq!(first.source_apex(), fixture.source_span.apex());
+            assert_eq!(first.target_apex(), fixture.target_span.apex());
+            assert_eq!(first.source_span(), fixture.source_span.id());
+            assert_eq!(first.target_span(), fixture.target_span.id());
+            assert_eq!(
+                first.forward_span_morphism(),
+                fixture.forward_span_morphism.id(),
+            );
+            assert_eq!(
+                first.reverse_span_morphism(),
+                fixture.reverse_span_morphism.id(),
+            );
+            assert_eq!(first.apex_inverse_law(), fixture.apex_inverse_law.id());
+            assert_eq!(
+                first.nominal_span_equivalence(),
+                fixture.ir.nominal_span_equivalence,
+            );
+            assert_eq!(first.no_authority(), fixture.ir.no_authority);
+            assert_eq!(first.id(), first.identity_receipt().id());
+            assert_ne!(
+                first.no_authority(),
+                fixture.forward_span_morphism.no_authority(),
+                "the aggregate retains its own explicit no-authority boundary",
+            );
+            assert_ne!(
+                fixture.forward_span_morphism.no_authority(),
+                fixture.reverse_span_morphism.no_authority(),
+                "nested no-authority artifacts remain independently scoped",
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Eleven parent fields plus five recursive child trees.
+    fn span_equivalence_receipt_binds_every_selector_child_and_order() {
+        with_cx(false, |cx| {
+            let fixture = span_equivalence_candidate_fixture(cx);
+            let baseline = span_equivalence_candidate_receipt(
+                &fixture.ir,
+                &fixture.source_span,
+                &fixture.target_span,
+                cx,
+            )
+            .expect("baseline span-equivalence receipt")
+            .id();
+
+            macro_rules! assert_ir_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = fixture.ir;
+                    changed.$field = $value;
+                    let changed = span_equivalence_candidate_receipt(
+                        &changed,
+                        &fixture.source_span,
+                        &fixture.target_span,
+                        cx,
+                    )
+                    .expect("changed span-equivalence receipt")
+                    .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_ir_field_moves_identity!(
+                source_span,
+                DerivedSpanCorrespondenceIdV1::parse_slice(&[127; 32])
+                    .expect("nonzero changed source span")
+            );
+            assert_ir_field_moves_identity!(
+                target_span,
+                DerivedSpanCorrespondenceIdV1::parse_slice(&[128; 32])
+                    .expect("nonzero changed target span")
+            );
+            assert_ir_field_moves_identity!(
+                forward_span_morphism,
+                DerivedSpanMorphismCandidateIdV1::parse_slice(&[129; 32])
+                    .expect("nonzero changed forward span morphism")
+            );
+            assert_ir_field_moves_identity!(
+                reverse_span_morphism,
+                DerivedSpanMorphismCandidateIdV1::parse_slice(&[130; 32])
+                    .expect("nonzero changed reverse span morphism")
+            );
+            assert_ir_field_moves_identity!(
+                apex_inverse_law,
+                DerivedMorphismInverseLawCandidateIdV1::parse_slice(&[131; 32])
+                    .expect("nonzero changed apex inverse law")
+            );
+            assert_ir_field_moves_identity!(
+                nominal_span_equivalence,
+                DerivedSpanEquivalenceDeclarationIdV1::from_bytes([132; 32])
+            );
+            assert_ir_field_moves_identity!(
+                no_authority,
+                DerivedNoClaimIdV1::from_bytes([133; 32])
+            );
+
+            for (field, changed_source, changed_target) in [
+                (
+                    "outer-source-geometry",
+                    span_correspondence_with_test_selectors(
+                        &fixture.source_span,
+                        geometry_id(134),
+                        fixture.source_span.apex(),
+                        fixture.source_span.target(),
+                    ),
+                    span_correspondence_with_test_selectors(
+                        &fixture.target_span,
+                        geometry_id(134),
+                        fixture.target_span.apex(),
+                        fixture.target_span.target(),
+                    ),
+                ),
+                (
+                    "outer-target-geometry",
+                    span_correspondence_with_test_selectors(
+                        &fixture.source_span,
+                        fixture.source_span.source(),
+                        fixture.source_span.apex(),
+                        geometry_id(135),
+                    ),
+                    span_correspondence_with_test_selectors(
+                        &fixture.target_span,
+                        fixture.target_span.source(),
+                        fixture.target_span.apex(),
+                        geometry_id(135),
+                    ),
+                ),
+                (
+                    "source-apex-geometry",
+                    span_correspondence_with_test_selectors(
+                        &fixture.source_span,
+                        fixture.source_span.source(),
+                        geometry_id(136),
+                        fixture.source_span.target(),
+                    ),
+                    span_correspondence_with_test_selectors(
+                        &fixture.target_span,
+                        fixture.target_span.source(),
+                        fixture.target_span.apex(),
+                        fixture.target_span.target(),
+                    ),
+                ),
+                (
+                    "target-apex-geometry",
+                    span_correspondence_with_test_selectors(
+                        &fixture.source_span,
+                        fixture.source_span.source(),
+                        fixture.source_span.apex(),
+                        fixture.source_span.target(),
+                    ),
+                    span_correspondence_with_test_selectors(
+                        &fixture.target_span,
+                        fixture.target_span.source(),
+                        geometry_id(137),
+                        fixture.target_span.target(),
+                    ),
+                ),
+            ] {
+                let changed = span_equivalence_candidate_receipt(
+                    &fixture.ir,
+                    &changed_source,
+                    &changed_target,
+                    cx,
+                )
+                .expect("changed selector receipt")
+                .id();
+                assert_ne!(baseline, changed, "{field}");
+            }
+
+            let swapped = DerivedSpanEquivalenceCandidateIrV1 {
+                forward_span_morphism: fixture.reverse_span_morphism.id(),
+                reverse_span_morphism: fixture.forward_span_morphism.id(),
+                ..fixture.ir
+            };
+            let swapped_id = span_equivalence_candidate_receipt(
+                &swapped,
+                &fixture.source_span,
+                &fixture.target_span,
+                cx,
+            )
+            .expect("swapped child order remains encodable")
+            .id();
+            assert_ne!(baseline, swapped_id, "forward/reverse ordering");
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Schema, raw, transitive, order, forged-token, and cancellation matrix.
+    fn span_equivalence_refuses_false_or_stale_structural_bindings() {
+        let fixture = with_cx(false, span_equivalence_candidate_fixture);
+        with_cx(false, |cx| {
+            let bad_schema = DerivedSpanEquivalenceCandidateIrV1 {
+                schema_version: 2,
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_span_equivalence_with_ir(&fixture, &bad_schema, cx),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::UnsupportedSchemaVersion {
+                        found: 2,
+                        supported: DERIVED_SPAN_EQUIVALENCE_CANDIDATE_SCHEMA_VERSION_V1,
+                    }
+                )
+            );
+
+            for (field, changed_ir) in [
+                (
+                    "source-span",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        source_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[0; 32])
+                            .expect("zero source span remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "target-span",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        target_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[0; 32])
+                            .expect("zero target span remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "forward-span-morphism",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        forward_span_morphism: DerivedSpanMorphismCandidateIdV1::parse_slice(
+                            &[0; 32],
+                        )
+                        .expect("zero forward span morphism remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "reverse-span-morphism",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        reverse_span_morphism: DerivedSpanMorphismCandidateIdV1::parse_slice(
+                            &[0; 32],
+                        )
+                        .expect("zero reverse span morphism remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "apex-inverse-law",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        apex_inverse_law: DerivedMorphismInverseLawCandidateIdV1::parse_slice(
+                            &[0; 32],
+                        )
+                        .expect("zero apex inverse law remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "nominal-span-equivalence-declaration",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        nominal_span_equivalence: DerivedSpanEquivalenceDeclarationIdV1::from_bytes(
+                            [0; 32],
+                        ),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_span_equivalence_with_ir(&fixture, &changed_ir, cx),
+                    Err(DerivedSpanEquivalenceCandidateErrorV1::MissingIdentity {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            for (field, changed_ir) in [
+                (
+                    "source-span",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        source_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[138; 32])
+                            .expect("nonzero wrong source span"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "target-span",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        target_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[139; 32])
+                            .expect("nonzero wrong target span"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "forward-span-morphism",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        forward_span_morphism: DerivedSpanMorphismCandidateIdV1::parse_slice(
+                            &[140; 32],
+                        )
+                        .expect("nonzero wrong forward span morphism"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "reverse-span-morphism",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        reverse_span_morphism: DerivedSpanMorphismCandidateIdV1::parse_slice(
+                            &[141; 32],
+                        )
+                        .expect("nonzero wrong reverse span morphism"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "apex-inverse-law",
+                    DerivedSpanEquivalenceCandidateIrV1 {
+                        apex_inverse_law: DerivedMorphismInverseLawCandidateIdV1::parse_slice(
+                            &[142; 32],
+                        )
+                        .expect("nonzero wrong apex inverse law"),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_span_equivalence_with_ir(&fixture, &changed_ir, cx),
+                    Err(
+                        DerivedSpanEquivalenceCandidateErrorV1::ChildIdentityMismatch {
+                            field: found,
+                        }
+                    ) if found == field
+                ));
+            }
+
+            let wrong_outer_source = span_correspondence_with_test_selectors(
+                &fixture.target_span,
+                geometry_id(143),
+                fixture.target_span.apex(),
+                fixture.target_span.target(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &wrong_outer_source,
+                    &fixture.forward_span_morphism,
+                    &fixture.reverse_span_morphism,
+                    &fixture.apex_inverse_law,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::OuterEndpointMismatch {
+                        field: "outer-source-geometry",
+                    }
+                )
+            ));
+
+            let wrong_outer_target = span_correspondence_with_test_selectors(
+                &fixture.target_span,
+                fixture.target_span.source(),
+                fixture.target_span.apex(),
+                geometry_id(144),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &wrong_outer_target,
+                    &fixture.forward_span_morphism,
+                    &fixture.reverse_span_morphism,
+                    &fixture.apex_inverse_law,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::OuterEndpointMismatch {
+                        field: "outer-target-geometry",
+                    }
+                )
+            ));
+
+            let wrong_forward = span_morphism_with_test_bindings(
+                &fixture.forward_span_morphism,
+                fixture.forward_span_morphism.outer_source(),
+                fixture.forward_span_morphism.outer_target(),
+                fixture.forward_span_morphism.source_apex(),
+                fixture.forward_span_morphism.target_apex(),
+                fixture.target_span.id(),
+                fixture.forward_span_morphism.target_span(),
+                fixture.forward_span_morphism.apex_morphism(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &wrong_forward,
+                    &fixture.reverse_span_morphism,
+                    &fixture.apex_inverse_law,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::SpanMorphismBindingMismatch {
+                        field: "forward-source-span",
+                    }
+                )
+            ));
+
+            let raw_and_forged_forward_ir = DerivedSpanEquivalenceCandidateIrV1 {
+                forward_span_morphism: DerivedSpanMorphismCandidateIdV1::parse_slice(&[145; 32])
+                    .expect("nonzero mismatched forward child"),
+                ..fixture.ir
+            };
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &raw_and_forged_forward_ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &wrong_forward,
+                    &fixture.reverse_span_morphism,
+                    &fixture.apex_inverse_law,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::ChildIdentityMismatch {
+                        field: "forward-span-morphism",
+                    }
+                )
+            ));
+
+            let wrong_reverse = span_morphism_with_test_bindings(
+                &fixture.reverse_span_morphism,
+                fixture.reverse_span_morphism.outer_source(),
+                fixture.reverse_span_morphism.outer_target(),
+                fixture.reverse_span_morphism.source_apex(),
+                geometry_id(146),
+                fixture.reverse_span_morphism.source_span(),
+                fixture.reverse_span_morphism.target_span(),
+                fixture.reverse_span_morphism.apex_morphism(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.forward_span_morphism,
+                    &wrong_reverse,
+                    &fixture.apex_inverse_law,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::SpanMorphismBindingMismatch {
+                        field: "reverse-target-apex",
+                    }
+                )
+            ));
+
+            let wrong_inverse_endpoint = morphism_inverse_law_with_test_bindings(
+                &fixture.apex_inverse_law,
+                geometry_id(145),
+                fixture.apex_inverse_law.target(),
+                fixture.apex_inverse_law.forward(),
+                fixture.apex_inverse_law.reverse(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.forward_span_morphism,
+                    &fixture.reverse_span_morphism,
+                    &wrong_inverse_endpoint,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::ApexInverseLawBindingMismatch {
+                        field: "apex-inverse-source",
+                    }
+                )
+            ));
+
+            let wrong_inverse_target = morphism_inverse_law_with_test_bindings(
+                &fixture.apex_inverse_law,
+                fixture.apex_inverse_law.source(),
+                geometry_id(147),
+                fixture.apex_inverse_law.forward(),
+                fixture.apex_inverse_law.reverse(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.forward_span_morphism,
+                    &fixture.reverse_span_morphism,
+                    &wrong_inverse_target,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::ApexInverseLawBindingMismatch {
+                        field: "apex-inverse-target",
+                    }
+                )
+            ));
+
+            let wrong_inverse_forward = morphism_inverse_law_with_test_bindings(
+                &fixture.apex_inverse_law,
+                fixture.apex_inverse_law.source(),
+                fixture.apex_inverse_law.target(),
+                fixture.reverse_span_morphism.apex_morphism(),
+                fixture.apex_inverse_law.reverse(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.forward_span_morphism,
+                    &fixture.reverse_span_morphism,
+                    &wrong_inverse_forward,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::ApexInverseLawBindingMismatch {
+                        field: "apex-inverse-forward-morphism",
+                    }
+                )
+            ));
+
+            let wrong_inverse_reverse = morphism_inverse_law_with_test_bindings(
+                &fixture.apex_inverse_law,
+                fixture.apex_inverse_law.source(),
+                fixture.apex_inverse_law.target(),
+                fixture.apex_inverse_law.forward(),
+                fixture.forward_span_morphism.apex_morphism(),
+            );
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.forward_span_morphism,
+                    &fixture.reverse_span_morphism,
+                    &wrong_inverse_reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::ApexInverseLawBindingMismatch {
+                        field: "apex-inverse-reverse-morphism",
+                    }
+                )
+            ));
+
+            let swapped_ir = DerivedSpanEquivalenceCandidateIrV1 {
+                forward_span_morphism: fixture.reverse_span_morphism.id(),
+                reverse_span_morphism: fixture.forward_span_morphism.id(),
+                ..fixture.ir
+            };
+            assert!(matches!(
+                admit_derived_span_equivalence_candidate_v1(
+                    &swapped_ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.reverse_span_morphism,
+                    &fixture.forward_span_morphism,
+                    &fixture.apex_inverse_law,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanEquivalenceCandidateErrorV1::SpanMorphismBindingMismatch {
+                        field: "forward-source-span",
+                    }
+                )
+            ));
+        });
+
+        with_cx(true, |cx| {
+            assert_eq!(
+                admit_span_equivalence_with_ir(&fixture, &fixture.ir, cx),
+                Err(DerivedSpanEquivalenceCandidateErrorV1::Cancelled {
+                    stage: "span-equivalence-entry",
                 })
             );
         });
