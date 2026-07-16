@@ -233,7 +233,10 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   only the cellular sign and must be re-admitted with two target constraint
   receipt IDs that reuse neither source receipt; those presented IDs are not
   themselves verified authority, and a target current-realization map remains
-  a separate explicit declaration.
+  a separate explicit declaration. A `GeometricCoil` is only re-declared on
+  the explicitly mapped phase/component with caller-supplied connectivity and
+  manufacturing artifact IDs that reuse neither source artifact; no geometry
+  is transported, and a target winding-realization map remains separate.
   Checked combination occurs before coefficient application so two reversals
   cancel exactly without a spurious intermediate `i64` overflow.
 - Vector families (vecfam battery): dimension counts r = 1..4 match
@@ -417,7 +420,8 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   Multiphase/component and driven/return permutation fixtures pin complete
   semantic squares, explicit current-sign compensation, generic-versus-physical
   transport separation, current-times-winding invariance, cell-natural
-  distributed-current transport with fresh nominal constraint receipts, and
+  distributed-current transport with fresh nominal constraint receipts,
+  geometric-coil redeclaration with fresh nominal realization artifacts, and
   invalid twins.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
@@ -560,9 +564,10 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   own explicit schemas and evidence.
 - An admitted physical relabel covers only its enumerated bijections. It does
   not authenticate a MachineGraph or netlist equivalence, authenticate fresh
-  distributed-current constraint receipts, transport arbitrary real fields,
-  geometric coils, or conversion maps, infer phase sequence or polarity, or
-  establish refinement/remesh/cut/topology-event naturality.
+  distributed-current constraint receipts or geometric-coil artifacts,
+  transport arbitrary real fields, geometric data, or conversion maps, infer
+  phase sequence or polarity, or establish
+  refinement/remesh/cut/topology-event naturality.
 - No field transfer, current-density solve, electromagnetic force, material,
   thermal, manufacturability, geometric embedding, cancellation-latency,
   performance, or authority-receipt claim follows from these types.

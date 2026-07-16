@@ -2867,6 +2867,62 @@ impl TerminalRelativePhysicalRelabel {
         .map_err(Into::into)
     }
 
+    /// Re-declare a geometric coil on the mapped target phase/component using
+    /// fresh target-side realization artifacts.
+    ///
+    /// This operation intentionally does not claim to transport geometry. It
+    /// maps only the admitted nominal phase/component bindings; the caller must
+    /// supply new connectivity and manufacturing artifacts, neither of which
+    /// may reuse either source artifact. A target winding-realization map must
+    /// also be declared separately.
+    #[allow(clippy::too_many_arguments)]
+    pub fn redeclare_geometric_coil(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        coil: &GeometricCoil,
+        target_id: PhysicalObjectId,
+        target_connectivity_artifact: StableId,
+        target_manufacturing_artifact: StableId,
+    ) -> Result<GeometricCoil, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        self.verify_value_pair("geometric coil source", coil.pair)?;
+        let (target_phase, _) = self.required_phase_image(&coil.phase)?;
+        let target_phase = target_phase.clone();
+        let target_component = self.component_image(&coil.component).ok_or_else(|| {
+            TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                role: "conductor component",
+                id: coil.component.as_str().to_owned(),
+            }
+        })?;
+        let target_component = target_component.clone();
+
+        for (role, artifact) in [
+            ("connectivity", &target_connectivity_artifact),
+            ("manufacturing", &target_manufacturing_artifact),
+        ] {
+            if artifact == coil.connectivity_artifact() || artifact == coil.manufacturing_artifact()
+            {
+                return Err(
+                    TerminalRelativePhysicalRelabelError::GeometricCoilArtifactNotFresh {
+                        role,
+                        artifact: artifact.as_str().to_owned(),
+                    },
+                );
+            }
+        }
+
+        GeometricCoil::try_new(
+            target_id,
+            target,
+            target_phase,
+            target_component,
+            target_connectivity_artifact,
+            target_manufacturing_artifact,
+        )
+        .map_err(Into::into)
+    }
+
     /// Admit the exact inverse physical relabeling.
     pub fn inverse(
         &self,
@@ -5806,6 +5862,13 @@ pub enum TerminalRelativePhysicalRelabelError {
         role: &'static str,
         /// Reused source receipt identity.
         receipt: String,
+    },
+    /// A target geometric-coil artifact reused source realization evidence.
+    GeometricCoilArtifactNotFresh {
+        /// Target artifact role being supplied.
+        role: &'static str,
+        /// Reused source artifact identity.
+        artifact: String,
     },
     /// A pair or transported value was not bound to the expected endpoint.
     PairIdentityMismatch {

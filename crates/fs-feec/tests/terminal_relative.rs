@@ -729,6 +729,63 @@ fn two_phase_distributed_values(currents: [&DistributedCurrent; 2]) -> [f64; 2] 
     [values[0].unwrap(), values[1].unwrap()]
 }
 
+fn geometric_coil_fixture(
+    pair: &TerminalRelativePair,
+    phase: &str,
+    component: &str,
+    id: &str,
+    connectivity_artifact: &str,
+    manufacturing_artifact: &str,
+) -> GeometricCoil {
+    GeometricCoil::try_new(
+        PhysicalObjectId::new(id).unwrap(),
+        pair,
+        PhaseId::new(phase).unwrap(),
+        ConductorComponentId::new(component).unwrap(),
+        stable(connectivity_artifact),
+        stable(manufacturing_artifact),
+    )
+    .expect("geometric coil fixture")
+}
+
+fn redeclare_two_phase_geometric_coil(
+    relabel: &TerminalRelativePhysicalRelabel,
+    pair: &TerminalRelativePair,
+    coil: &GeometricCoil,
+    target_id: &str,
+    target_connectivity_artifact: &str,
+    target_manufacturing_artifact: &str,
+) -> GeometricCoil {
+    let target_id = PhysicalObjectId::new(target_id).unwrap();
+    let target_connectivity_artifact = stable(target_connectivity_artifact);
+    let target_manufacturing_artifact = stable(target_manufacturing_artifact);
+    let target = relabel
+        .redeclare_geometric_coil(
+            pair,
+            pair,
+            coil,
+            target_id.clone(),
+            target_connectivity_artifact.clone(),
+            target_manufacturing_artifact.clone(),
+        )
+        .expect("redeclare two-phase geometric coil");
+    let target_ref = target.object_ref();
+    assert_eq!(target_ref.pair_id(), pair.identity());
+    assert_eq!(
+        target_ref.identity(),
+        &PhysicalObjectIdentity::Declared(target_id)
+    );
+    assert_eq!(
+        target.connectivity_artifact(),
+        &target_connectivity_artifact
+    );
+    assert_eq!(
+        target.manufacturing_artifact(),
+        &target_manufacturing_artifact
+    );
+    target
+}
+
 #[test]
 fn i13_2a_001_exact_incidence_accepts_a_triangle_and_rejects_d_squared_defect() {
     let vertices_and_edges = vec![
@@ -2971,6 +3028,312 @@ fn i13_2a_026_distributed_current_transport_refuses_stale_or_aliased_receipts() 
         ),
         Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
             role: "distributed current source",
+            expected: pair.identity(),
+            actual: wrong_pair.identity(),
+        })
+    );
+}
+
+#[test]
+fn i13_2a_027_geometric_coil_redeclaration_has_exact_p_s_c_semantic_images() {
+    let pair = disconnected_two_phase_pair();
+    let identity = TerminalRelativePhysicalRelabel::identity_on(&pair).expect("physical identity");
+    let phase_swap = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_preserve_swap_cell_entries(),
+        two_phase_preserve_swap_semantics(),
+    )
+    .expect("phase swap");
+    let terminal_reversal = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_terminal_reverse_cell_entries(),
+        two_phase_terminal_reverse_semantics(),
+    )
+    .expect("terminal/current reversal");
+    let composed = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_composed_cell_entries(),
+        two_phase_composed_semantics(),
+    )
+    .expect("composed physical relabel");
+    let coil_a = geometric_coil_fixture(
+        &pair,
+        "phase/a",
+        "component/a",
+        "object/coil/source-a",
+        "artifact/coil/source-a-connectivity",
+        "artifact/coil/source-a-manufacturing",
+    );
+    let coil_b = geometric_coil_fixture(
+        &pair,
+        "phase/b",
+        "component/b",
+        "object/coil/source-b",
+        "artifact/coil/source-b-connectivity",
+        "artifact/coil/source-b-manufacturing",
+    );
+
+    for (name, relabel, expected) in [
+        (
+            "identity",
+            &identity,
+            [("phase/a", "component/a"), ("phase/b", "component/b")],
+        ),
+        (
+            "swap",
+            &phase_swap,
+            [("phase/b", "component/b"), ("phase/a", "component/a")],
+        ),
+        (
+            "reverse",
+            &terminal_reversal,
+            [("phase/a", "component/a"), ("phase/b", "component/b")],
+        ),
+        (
+            "composed",
+            &composed,
+            [("phase/b", "component/b"), ("phase/a", "component/a")],
+        ),
+    ] {
+        let target_a = redeclare_two_phase_geometric_coil(
+            relabel,
+            &pair,
+            &coil_a,
+            &format!("object/coil/{name}-from-a"),
+            &format!("artifact/coil/{name}-from-a-connectivity"),
+            &format!("artifact/coil/{name}-from-a-manufacturing"),
+        );
+        let target_b = redeclare_two_phase_geometric_coil(
+            relabel,
+            &pair,
+            &coil_b,
+            &format!("object/coil/{name}-from-b"),
+            &format!("artifact/coil/{name}-from-b-connectivity"),
+            &format!("artifact/coil/{name}-from-b-manufacturing"),
+        );
+        let target_a_ref = target_a.object_ref();
+        let target_b_ref = target_b.object_ref();
+        assert_eq!(
+            [
+                (target_a_ref.phase().as_str(), target_a.component().as_str()),
+                (target_b_ref.phase().as_str(), target_b.component().as_str()),
+            ],
+            expected,
+            "(phase, component) images for {name}"
+        );
+    }
+}
+
+#[test]
+fn i13_2a_028_geometric_coil_redeclaration_commutes_and_rebuilds_winding_map() {
+    let pair = disconnected_two_phase_pair();
+    let phase_swap = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_preserve_swap_cell_entries(),
+        two_phase_preserve_swap_semantics(),
+    )
+    .expect("phase swap");
+    let terminal_reversal = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_terminal_reverse_cell_entries(),
+        two_phase_terminal_reverse_semantics(),
+    )
+    .expect("terminal/current reversal");
+    let composed = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_composed_cell_entries(),
+        two_phase_composed_semantics(),
+    )
+    .expect("direct composed action");
+    let source_coil = geometric_coil_fixture(
+        &pair,
+        "phase/a",
+        "component/a",
+        "object/coil/composition-source-a",
+        "artifact/coil/composition-source-a-connectivity",
+        "artifact/coil/composition-source-a-manufacturing",
+    );
+    let intermediate = redeclare_two_phase_geometric_coil(
+        &phase_swap,
+        &pair,
+        &source_coil,
+        "object/coil/composition-intermediate-b",
+        "artifact/coil/composition-intermediate-b-connectivity",
+        "artifact/coil/composition-intermediate-b-manufacturing",
+    );
+    let sequential = redeclare_two_phase_geometric_coil(
+        &terminal_reversal,
+        &pair,
+        &intermediate,
+        "object/coil/composition-final-b",
+        "artifact/coil/composition-final-b-connectivity",
+        "artifact/coil/composition-final-b-manufacturing",
+    );
+    let direct = redeclare_two_phase_geometric_coil(
+        &composed,
+        &pair,
+        &source_coil,
+        "object/coil/composition-final-b",
+        "artifact/coil/composition-final-b-connectivity",
+        "artifact/coil/composition-final-b-manufacturing",
+    );
+    assert_ne!(intermediate.object_ref(), sequential.object_ref());
+    assert_ne!(
+        intermediate.connectivity_artifact(),
+        sequential.connectivity_artifact()
+    );
+    assert_ne!(
+        intermediate.manufacturing_artifact(),
+        sequential.manufacturing_artifact()
+    );
+    assert_eq!(sequential, direct);
+    assert_eq!(direct.object_ref().phase().as_str(), "phase/b");
+    assert_eq!(direct.component().as_str(), "component/b");
+
+    let source_winding =
+        IntegralWindingRepresentative::try_new(&pair, PhaseId::new("phase/a").unwrap(), vec![3])
+            .expect("source phase-a winding");
+    let source_map = DeclaredPhysicalMap::try_new(
+        ConversionMapId::new("map/winding-realization/source-a").unwrap(),
+        DeclaredPhysicalMapKind::WindingRealization,
+        source_winding.object_ref(),
+        source_coil.object_ref(),
+        stable("artifact/winding-realization/source-a"),
+    )
+    .expect("source winding-realization map");
+    let target_winding = composed
+        .transport_winding_representative(&pair, &pair, &source_winding)
+        .expect("transport winding through composed physical relabel");
+    let target_map_id = ConversionMapId::new("map/winding-realization/target-b").unwrap();
+    let target_map_artifact = stable("artifact/winding-realization/target-b");
+    let target_map = DeclaredPhysicalMap::try_new(
+        target_map_id.clone(),
+        DeclaredPhysicalMapKind::WindingRealization,
+        target_winding.object_ref(),
+        direct.object_ref(),
+        target_map_artifact.clone(),
+    )
+    .expect("fresh target winding-realization map");
+    assert_eq!(target_winding.chain().phase().as_str(), "phase/b");
+    assert_eq!(target_winding.chain().coefficients(), &[3]);
+    assert_ne!(target_map.id(), source_map.id());
+    assert_ne!(target_map.map_artifact(), source_map.map_artifact());
+    assert_eq!(target_map.id(), &target_map_id);
+    assert_eq!(
+        target_map.kind(),
+        DeclaredPhysicalMapKind::WindingRealization
+    );
+    assert_eq!(target_map.source(), &target_winding.object_ref());
+    assert_eq!(target_map.target(), &direct.object_ref());
+    assert_eq!(target_map.map_artifact(), &target_map_artifact);
+}
+
+#[test]
+fn i13_2a_029_geometric_coil_redeclaration_refuses_stale_or_aliased_artifacts() {
+    let wrong_pair = pair(89, false);
+    let pair = disconnected_two_phase_pair();
+    let identity = TerminalRelativePhysicalRelabel::identity_on(&pair).expect("physical identity");
+    let source = geometric_coil_fixture(
+        &pair,
+        "phase/a",
+        "component/a",
+        "object/coil/artifact-source-a",
+        "artifact/coil/artifact-source-a-connectivity",
+        "artifact/coil/artifact-source-a-manufacturing",
+    );
+
+    for (case, connectivity, manufacturing, expected_role, expected_artifact) in [
+        (
+            "connectivity-reuses-source-connectivity",
+            "artifact/coil/artifact-source-a-connectivity",
+            "artifact/coil/fresh-manufacturing-1",
+            "connectivity",
+            "artifact/coil/artifact-source-a-connectivity",
+        ),
+        (
+            "connectivity-reuses-source-manufacturing",
+            "artifact/coil/artifact-source-a-manufacturing",
+            "artifact/coil/fresh-manufacturing-2",
+            "connectivity",
+            "artifact/coil/artifact-source-a-manufacturing",
+        ),
+        (
+            "manufacturing-reuses-source-connectivity",
+            "artifact/coil/fresh-connectivity-3",
+            "artifact/coil/artifact-source-a-connectivity",
+            "manufacturing",
+            "artifact/coil/artifact-source-a-connectivity",
+        ),
+        (
+            "manufacturing-reuses-source-manufacturing",
+            "artifact/coil/fresh-connectivity-4",
+            "artifact/coil/artifact-source-a-manufacturing",
+            "manufacturing",
+            "artifact/coil/artifact-source-a-manufacturing",
+        ),
+    ] {
+        assert_eq!(
+            identity.redeclare_geometric_coil(
+                &pair,
+                &pair,
+                &source,
+                PhysicalObjectId::new(format!("object/coil/rejected-{case}")).unwrap(),
+                stable(connectivity),
+                stable(manufacturing),
+            ),
+            Err(
+                TerminalRelativePhysicalRelabelError::GeometricCoilArtifactNotFresh {
+                    role: expected_role,
+                    artifact: expected_artifact.to_owned(),
+                }
+            ),
+            "freshness case {case}"
+        );
+    }
+
+    let aliased_artifact = "artifact/coil/fresh-but-aliased-target";
+    assert_eq!(
+        identity.redeclare_geometric_coil(
+            &pair,
+            &pair,
+            &source,
+            PhysicalObjectId::new("object/coil/rejected-aliased-target-artifacts").unwrap(),
+            stable(aliased_artifact),
+            stable(aliased_artifact),
+        ),
+        Err(TerminalRelativePhysicalRelabelError::TerminalRelative(
+            TerminalRelativeError::DuplicateIdentity {
+                role: "coil realization artifact",
+                id: aliased_artifact.to_owned(),
+            }
+        ))
+    );
+
+    let wrong_pair_coil = geometric_coil_fixture(
+        &wrong_pair,
+        "phase/a",
+        "component/winding",
+        "object/coil/wrong-pair",
+        "artifact/coil/wrong-pair-connectivity",
+        "artifact/coil/wrong-pair-manufacturing",
+    );
+    assert_eq!(
+        identity.redeclare_geometric_coil(
+            &pair,
+            &pair,
+            &wrong_pair_coil,
+            PhysicalObjectId::new("object/coil/rejected-wrong-pair").unwrap(),
+            wrong_pair_coil.connectivity_artifact().clone(),
+            wrong_pair_coil.manufacturing_artifact().clone(),
+        ),
+        Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+            role: "geometric coil source",
             expected: pair.identity(),
             actual: wrong_pair.identity(),
         })
