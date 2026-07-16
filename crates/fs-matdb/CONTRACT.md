@@ -66,6 +66,17 @@ persistence.
   reproduces its semantic id, and then byte-reproduces the full stream.
   `from_bytes_verified` additionally requires the externally pinned whole-pack
   identity before any top-level metadata/statistics mutation can be accepted.
+- `NormalizedModelPack` — a separate bounded `FSMODPK` v1 transport for
+  immutable `ConstitutiveModelCard`s. Model cards are not laundered into
+  scalar property claims: the pack retains each law/version, dimensioned
+  parameter block, state convention, validity domain, source hashes, and
+  provenance, plus one `ModelNormalizationReceipt` for every parameter and
+  both endpoints of every validity interval. Cards encode in full-content-hash
+  order; source hashes and receipt targets are strictly ordered and
+  deduplicated. `from_bytes_verified` pins the whole model-pack identity before
+  decoding, while each serialized card identity must independently reproduce.
+  A downstream law adapter (for example the NASA-9 adapter in
+  `fs-thermochem`) must still validate the exact law-specific schema.
 - `JointStatistics` — a named, explicitly ordered component block for one
   observed dataset. `StatisticMember` addresses a scalar claim or one curve
   knot's abscissa/ordinate, so multiple knots never collapse into one random
@@ -163,6 +174,13 @@ persistence.
   joint blocks encode in `(observation id, block id)` order; normalization
   receipts encode in structured-target order. Duplicate unordered entries
   refuse. Portable packs require finite values and canonical positive zero.
+- MODEL-PACK CANONICALITY: cards encode in full semantic-id order and require
+  nonempty sorted source hashes plus an exact provenance artifact. Every
+  normalized parameter and validity endpoint has exactly one structurally
+  linked receipt; dangling, missing, duplicate, parameter-dimension-mismatched,
+  or endpoint-transform-incoherent receipts refuse. The model pack does not
+  infer a law schema from parameter names; validity-axis dimensions remain
+  compiler-declared because the shared validity type does not store them.
 - JOINT STATISTICS STAY JOINT: covariance/correlation are never collapsed into
   nominal values or caveat text. Member order and every lower-triangle entry
   are identity-bearing normalized bytes.
@@ -259,6 +277,12 @@ normalization target, negative statistical scale, contradictory validity-axis
 dimensions, partial frame receipt, untrusted-count preflight,
 truncation, trailing-byte, and semantic-id tamper refusals.
 
+`tests/model_pack.rs`: G0 canonical two-card permutation and exact binary
+round-trip; G3 complete receipt coverage, parameter-dimension linkage,
+validity-endpoint transform coherence, portable positive-zero/source/provenance
+gates, nested card-identity tampering, whole-pack tampering, and trailing-byte
+refusals.
+
 ## No-claim boundaries
 
 - Storing a claim asserts NOTHING about its truth: fs-matdb records who
@@ -280,6 +304,10 @@ truncation, trailing-byte, and semantic-id tamper refusals.
   or other raw formats and does not decide whether terms permit
   redistribution; those are L6/offline compiler responsibilities. A nonblank
   retained decision is provenance, not legal advice.
+- The model-pack codec proves transport integrity and generic card admission,
+  not that an arbitrary card is NASA-9, Arrhenius kinetics, or any other named
+  physical law. Executable consumers retain that law-specific validation
+  obligation; no kinetics executor or species-to-card association is claimed.
 - Joint statistics are preserved and validated but are not yet selected or
   propagated by `PropertyUsageReceipt`; no query result may claim correlated
   uncertainty until that later authority surface binds the exact block.

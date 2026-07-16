@@ -32,6 +32,7 @@ use fs_qty::Dims;
 
 mod cards;
 mod interface;
+mod model_pack;
 mod pack;
 mod query;
 
@@ -42,6 +43,10 @@ pub use cards::{
     LawParameter, MATDB_SCHEMA_VERSION, MaterialCard, MaterialStateId,
 };
 pub use interface::{InterfaceSystemCard, SurfaceSpec, SystemContext};
+pub use model_pack::{
+    MODEL_PACK_SCHEMA_VERSION, MODEL_PACK_TARGET_BASIS, ModelNormalizationReceipt,
+    ModelNormalizationTarget, NormalizedModelPack,
+};
 pub use pack::{
     JointStatistics, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS, NormalizationReceipt,
     NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
