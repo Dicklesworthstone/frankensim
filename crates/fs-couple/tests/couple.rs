@@ -2,31 +2,36 @@
 //! ports, the Dirac interconnection's exact power conservation, the energy
 //! audit (passivity measured, not assumed), the Aitken relaxation factor, and
 //! the load-bearing added-mass comparison: naive staggering diverges where
-//! Aitken-relaxed coupling stays stable. The PortSchema v2 PR-1/PR-2 and
-//! StreamPort PR-3 batteries pin migrations, typed relations, and chart
-//! admission without claiming the PR-4 window audits.
+//! Aitken-relaxed coupling stays stable. The PortSchema v2 PR-1/PR-2,
+//! StreamPort PR-3, and closed accounting-window PR-4 batteries pin typed
+//! relations, chart admission, balance completeness, and retained red reports.
 
 use core::num::NonZeroUsize;
 
 use fs_couple::{
-    AccountingBoundary, AitkenRelaxation, AmountFlowRate, BoundaryTreatment,
-    ChemicalEnergyAccounting, ChemicalEnergyInput, ChemicalEnergyMode, ConjugatePotentialChart,
-    ConjugatePotentialKind, ConservationRole, ConservativeJunction, CoordinateBinding, CoupleError,
-    DeviatoricStressWork, DissipationEvidence, DissipationLaw, DissipativeRelation, EnergyAudit,
-    EntropyFlowRate, EulerLegendreCrosswalk, ExactIdentityProofRef, FieldMeasureSide, FsiResult,
-    InternalEnergyCauchyWorkChart, MovingStreamEnthalpyChart, PORT_SCHEMA_VERSION, Port, PortKind,
-    PortOrientation, PortPrimitive, PortSchema, PortTimestamp, PortValueShape, PortVariable,
-    PowerPairing, PressureWorkCrosswalk, STREAM_PORT_VERSION, SourceClass, SourceOrReservoir,
-    SpecificEnergy, StableId, StorageElement, StoragePotential, StreamChartBinding,
-    StreamConstituentFlow, StreamConstituentId, StreamEnergyChart, StreamIdentity,
-    StreamKinematics, StreamPort, StreamStressWorkConvention, interconnect, interface_power,
-    iterate_aitken, iterate_fixed_relaxation,
+    ACCOUNTING_WINDOW_VERSION, AccountingBoundary, AccountingWindowInterval, AccountingWindowSpec,
+    AitkenRelaxation, AmountFlowRate, BoundaryEntropyBreakdown, BoundaryTemperatureReference,
+    BoundaryTreatment, ChemicalEnergyAccounting, ChemicalEnergyInput, ChemicalEnergyMode,
+    ConjugatePotentialChart, ConjugatePotentialKind, ConservationRole, ConservativeJunction,
+    CoordinateBinding, CoupleError, DeviatoricStressWork, DissipationEvidence, DissipationLaw,
+    DissipativeRelation, EnergyAudit, Entropy, EntropyFlowRate, EulerLegendreCrosswalk,
+    ExactIdentityProofRef, ExergyEnvironment, FieldMeasureSide, FsiResult,
+    IntegratedWindowTransfer, InternalEnergyCauchyWorkChart, MovingStreamEnthalpyChart,
+    PORT_SCHEMA_VERSION, Port, PortKind, PortOrientation, PortPrimitive, PortSchema, PortTimestamp,
+    PortValueShape, PortVariable, PowerPairing, PressureWorkCrosswalk, STREAM_PORT_VERSION,
+    SourceClass, SourceOrReservoir, SpecificEnergy, StableId, StorageElement, StoragePotential,
+    StreamChartBinding, StreamConstituentFlow, StreamConstituentId, StreamEnergyChart,
+    StreamIdentity, StreamKinematics, StreamPort, StreamStressWorkConvention, WindowAuditReport,
+    WindowAuditTolerances, WindowBalance, WindowBalanceLaw, WindowBoundaryContribution,
+    WindowChargeEvidenceSubject, WindowChargeSchema, WindowElementAmount, WindowElementSchema,
+    WindowEndpoint, WindowEvidenceRef, WindowEvidenceRole, WindowInventorySnapshot,
+    WindowManifestEntry, interconnect, interface_power, iterate_aitken, iterate_fixed_relaxation,
 };
 use fs_iface::SpaceType;
 use fs_qty::chemistry::{ElementId, SpeciesId};
 use fs_qty::{
-    Area, Density, Dims, Force, MassFlowRate, Power, Pressure, Temperature, Velocity,
-    VolumetricFlowRate,
+    Amount, Area, Density, Dims, ElectricCharge, Energy, Force, Mass, MassFlowRate, Power,
+    Pressure, Temperature, Velocity, VolumetricFlowRate,
 };
 
 fn stable(value: &str) -> StableId {
@@ -166,6 +171,270 @@ fn assert_fsi_result_bits_eq(actual: FsiResult, expected: FsiResult) {
         actual.final_residual.to_bits(),
         expected.final_residual.to_bits()
     );
+}
+
+fn assert_f64_bits_eq(actual: f64, expected: f64) {
+    assert_eq!(actual.to_bits(), expected.to_bits());
+}
+
+fn window_interval() -> AccountingWindowInterval {
+    AccountingWindowInterval::try_new(
+        stable("window/pr4"),
+        PortTimestamp::new(stable("clock/coupling-window"), 10),
+        PortTimestamp::new(stable("clock/coupling-window"), 12),
+    )
+    .unwrap()
+}
+
+fn window_evidence(
+    label: &str,
+    role: WindowEvidenceRole,
+    interval: &AccountingWindowInterval,
+) -> WindowEvidenceRef {
+    WindowEvidenceRef::new(
+        stable(&format!("receipt/window-{label}")),
+        stable("verifier/window-v1"),
+        stable(&format!("digest/window-{label}")),
+        role,
+        interval.clone(),
+    )
+}
+
+fn window_closure_evidence(
+    label: &str,
+    interval: &AccountingWindowInterval,
+    manifest: &[WindowManifestEntry],
+) -> WindowEvidenceRef {
+    window_evidence(
+        label,
+        WindowEvidenceRole::manifest_closure(manifest),
+        interval,
+    )
+}
+
+fn hydrogen_amount(value: f64) -> WindowElementAmount {
+    WindowElementAmount::try_new(ElementId::new("H").unwrap(), Amount::new(value)).unwrap()
+}
+
+fn window_balance(
+    energy: f64,
+    mass: f64,
+    hydrogen: f64,
+    charge: f64,
+    entropy: f64,
+) -> WindowBalance {
+    WindowBalance::try_new(
+        Energy::new(energy),
+        Mass::new(mass),
+        [hydrogen_amount(hydrogen)],
+        ElectricCharge::new(charge),
+        Entropy::new(entropy),
+    )
+    .unwrap()
+}
+
+fn boundary_entropy(
+    label: &str,
+    interval: &AccountingWindowInterval,
+    values: [f64; 4],
+) -> BoundaryEntropyBreakdown {
+    let temperature_reference = if values[2].to_bits() << 1 == 0 && values[3].to_bits() << 1 == 0 {
+        BoundaryTemperatureReference::not_applicable(stable("rationale/no-heat-radiation"))
+    } else {
+        BoundaryTemperatureReference::try_constant(
+            Temperature::new(400.0),
+            window_evidence(
+                &format!("temperature-{label}"),
+                WindowEvidenceRole::BoundaryTemperature {
+                    contribution_id: stable(&format!("contribution/{label}")),
+                },
+                interval,
+            ),
+        )
+        .unwrap()
+    };
+    BoundaryEntropyBreakdown::try_new(
+        Entropy::new(values[0]),
+        Entropy::new(values[1]),
+        Entropy::new(values[2]),
+        Entropy::new(values[3]),
+        temperature_reference,
+    )
+    .unwrap()
+}
+
+fn window_stream(label: &str) -> StreamPort {
+    let binding = StreamChartBinding::try_new(
+        stable(&format!("port/window-{label}")),
+        stable("state/window-stream-v1"),
+        stable("basis/window-species-v1"),
+        [species_id("H")],
+        stable("reference/window-chemical-v1"),
+        CoordinateBinding::new(
+            stable("basis/window-cartesian"),
+            stable("frame/window"),
+            PortOrientation::OutwardFromOwner,
+        ),
+        PortTimestamp::new(stable("clock/coupling-window"), 11),
+        stable("gravity/window-datum-v1"),
+        StreamStressWorkConvention::CauchyTensionPositiveOutwardPower,
+    )
+    .unwrap();
+    let chart = canonical_moving_chart(&binding);
+    complete_stream(binding, [species_flow("H", 1.0)], 53.0, chart).unwrap()
+}
+
+fn external_window_entry(label: &str, interval: &AccountingWindowInterval) -> WindowManifestEntry {
+    let port = window_stream(label);
+    let contribution_id = stable(&format!("contribution/{label}"));
+    let boundary = AccountingBoundary::new(
+        stable(&format!("boundary/window-{label}")),
+        port.binding().coordinates().clone(),
+        BoundaryTreatment::ExternalReservoirExchange,
+    );
+    WindowManifestEntry::external_stream_port(
+        contribution_id.clone(),
+        stable(&format!("exchange/{label}")),
+        stable(&format!("reservoir/{label}")),
+        &port,
+        boundary,
+        window_evidence(
+            &format!("binding-{label}"),
+            WindowEvidenceRole::ManifestBinding {
+                contribution_id,
+                local_port_id: port.binding().port_id().clone(),
+            },
+            interval,
+        ),
+    )
+    .unwrap()
+}
+
+fn audited_window_elements(interval: &AccountingWindowInterval) -> WindowElementSchema {
+    let elements = vec![ElementId::new("H").unwrap()];
+    WindowElementSchema::try_audited(
+        elements.clone(),
+        window_evidence(
+            "element-projection",
+            WindowEvidenceRole::ElementProjection { elements },
+            interval,
+        ),
+    )
+    .unwrap()
+}
+
+fn direct_window_charge(interval: &AccountingWindowInterval) -> WindowChargeSchema {
+    let basis = stable("basis/direct-coulomb-v1");
+    WindowChargeSchema::DirectCoulomb {
+        basis: basis.clone(),
+        projection_evidence: window_evidence(
+            "charge-projection",
+            WindowEvidenceRole::ChargeProjection {
+                subject: WindowChargeEvidenceSubject::DirectCoulomb { basis },
+            },
+            interval,
+        ),
+    }
+}
+
+fn zero_window_tolerances() -> WindowAuditTolerances {
+    WindowAuditTolerances::try_new(
+        Energy::new(0.0),
+        Mass::new(0.0),
+        Amount::new(0.0),
+        ElectricCharge::new(0.0),
+        Entropy::new(0.0),
+    )
+    .unwrap()
+}
+
+fn window_energy_reference() -> StableId {
+    stable("reference/window-energy-v1")
+}
+
+fn window_spec(labels: &[&str], environment: Option<ExergyEnvironment>) -> AccountingWindowSpec {
+    let interval = window_interval();
+    let manifest: Vec<_> = labels
+        .iter()
+        .map(|label| external_window_entry(label, &interval))
+        .collect();
+    let closure_evidence = window_closure_evidence("closure", &interval, &manifest);
+    AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        audited_window_elements(&interval),
+        direct_window_charge(&interval),
+        stable("convention/entropy-pr4"),
+        manifest,
+        zero_window_tolerances(),
+        environment,
+        closure_evidence,
+    )
+    .unwrap()
+}
+
+fn window_snapshot(
+    spec: &AccountingWindowSpec,
+    endpoint: WindowEndpoint,
+    balance: WindowBalance,
+) -> WindowInventorySnapshot {
+    let label = match endpoint {
+        WindowEndpoint::Initial => "initial-state",
+        WindowEndpoint::Final => "final-state",
+    };
+    WindowInventorySnapshot::try_new(
+        spec,
+        endpoint,
+        balance,
+        window_evidence(
+            label,
+            WindowEvidenceRole::Inventory {
+                endpoint,
+                energy_reference: spec.energy_reference().clone(),
+            },
+            spec.interval(),
+        ),
+    )
+    .unwrap()
+}
+
+fn window_contribution(
+    spec: &AccountingWindowSpec,
+    label: &str,
+    values: [f64; 4],
+    entropy: [f64; 4],
+) -> WindowBoundaryContribution {
+    let transfer = IntegratedWindowTransfer::try_new(
+        Energy::new(values[0]),
+        Mass::new(values[1]),
+        [hydrogen_amount(values[2])],
+        ElectricCharge::new(values[3]),
+        boundary_entropy(label, spec.interval(), entropy),
+        stable("convention/entropy-pr4"),
+    )
+    .unwrap();
+    let contribution_id = stable(&format!("contribution/{label}"));
+    let local_port_id = spec
+        .manifest()
+        .iter()
+        .find(|entry| entry.contribution_id() == &contribution_id)
+        .map(|entry| entry.local_port_id().clone())
+        .unwrap();
+    WindowBoundaryContribution::try_new(
+        spec,
+        &contribution_id,
+        transfer,
+        window_evidence(
+            &format!("integration-{label}"),
+            WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: contribution_id.clone(),
+                local_port_id,
+                energy_reference: spec.energy_reference().clone(),
+            },
+            spec.interval(),
+        ),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -1855,6 +2124,857 @@ fn light_added_mass_converges_even_naively() {
     let r = iterate_fixed_relaxation(0.5, 3.0, 0.0, 1.0, 100, 1e-9);
     assert!(r.converged);
     assert!((r.solution - 2.0).abs() < 1e-6); // x* = 3/(1+0.5) = 2
+}
+
+#[test]
+fn accounting_window_closes_all_pr4_balances_and_retains_exergy() {
+    let environment =
+        ExergyEnvironment::try_new(stable("environment/reference"), Temperature::new(300.0))
+            .unwrap();
+    let spec = window_spec(&["inlet", "outlet", "source"], Some(environment));
+    let initial = window_snapshot(
+        &spec,
+        WindowEndpoint::Initial,
+        window_balance(100.0, 10.0, 10.0, 0.0, 20.0),
+    );
+    let final_snapshot = window_snapshot(
+        &spec,
+        WindowEndpoint::Final,
+        window_balance(115.0, 13.0, 13.0, 1.0, 24.0),
+    );
+    let inlet = window_contribution(
+        &spec,
+        "inlet",
+        [20.0, 3.0, 3.0, 1.0],
+        [1.5, -0.25, 0.75, -0.25],
+    );
+    let outlet = window_contribution(
+        &spec,
+        "outlet",
+        [-10.0, -2.0, -2.0, -0.5],
+        [-0.75, 0.0, 0.0, 0.0],
+    );
+    let source = window_contribution(
+        &spec,
+        "source",
+        [5.0, 2.0, 2.0, 0.5],
+        [1.0, 0.5, 0.25, 0.25],
+    );
+
+    let report =
+        WindowAuditReport::audit(spec, initial, final_snapshot, [source, outlet, inlet]).unwrap();
+
+    assert_eq!(report.spec().version(), ACCOUNTING_WINDOW_VERSION);
+    assert!(report.is_green(), "report={report:#?}");
+    assert_eq!(
+        report.residuals().first_law().value().to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        report.residuals().mass().value().to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        report.residuals().charge().value().to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        report.residuals().elements()[0].amount().value().to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_f64_bits_eq(report.residuals().entropy_generation().value(), 1.0);
+    assert_f64_bits_eq(report.exergy().unwrap().destruction().value(), 300.0);
+
+    let contribution_ids: Vec<_> = report
+        .contributions()
+        .iter()
+        .map(|entry| entry.manifest_entry().contribution_id().as_str())
+        .collect();
+    assert_eq!(
+        contribution_ids,
+        [
+            "contribution/inlet",
+            "contribution/outlet",
+            "contribution/source"
+        ]
+    );
+    assert_f64_bits_eq(
+        report.contributions()[0].transfer().energy_into().value(),
+        20.0,
+    );
+    assert_f64_bits_eq(
+        report.contributions()[0]
+            .transfer()
+            .entropy_into()
+            .total()
+            .value(),
+        1.75,
+    );
+    assert!(matches!(
+        report.contributions()[0]
+            .transfer()
+            .entropy_into()
+            .temperature_reference(),
+        BoundaryTemperatureReference::Constant { .. }
+    ));
+}
+
+#[test]
+fn physical_window_failures_return_a_retained_red_report() {
+    let spec = window_spec(&["inlet", "outlet", "source"], None);
+    let initial = window_snapshot(
+        &spec,
+        WindowEndpoint::Initial,
+        window_balance(100.0, 10.0, 10.0, 0.0, 20.0),
+    );
+    let final_snapshot = window_snapshot(
+        &spec,
+        WindowEndpoint::Final,
+        window_balance(116.0, 13.0, 13.0, 1.0, 22.0),
+    );
+    let contributions = [
+        window_contribution(
+            &spec,
+            "inlet",
+            [20.0, 3.0, 3.0, 1.0],
+            [1.5, -0.25, 0.75, -0.25],
+        ),
+        window_contribution(
+            &spec,
+            "outlet",
+            [-10.0, -2.0, -2.0, -0.5],
+            [-0.75, 0.0, 0.0, 0.0],
+        ),
+        window_contribution(
+            &spec,
+            "source",
+            [5.0, 2.0, 2.0, 0.5],
+            [1.0, 0.5, 0.25, 0.25],
+        ),
+    ];
+
+    let report = WindowAuditReport::audit(spec, initial, final_snapshot, contributions).unwrap();
+    assert!(!report.is_green());
+    assert_f64_bits_eq(report.residuals().first_law().value(), 1.0);
+    assert_f64_bits_eq(report.residuals().entropy_generation().value(), -1.0);
+    assert!(
+        report
+            .violations()
+            .iter()
+            .any(|violation| matches!(violation.law(), WindowBalanceLaw::FirstLaw))
+    );
+    let entropy_violation = report
+        .violations()
+        .iter()
+        .find(|violation| matches!(violation.law(), WindowBalanceLaw::EntropyGeneration))
+        .unwrap();
+    assert_f64_bits_eq(entropy_violation.residual_si(), -1.0);
+    assert_eq!(entropy_violation.contribution_ids().len(), 3);
+    assert_eq!(entropy_violation.port_ids().len(), 3);
+    assert_eq!(entropy_violation.exchange_ids().len(), 3);
+}
+
+#[test]
+fn accounting_window_admission_refuses_missing_or_foreign_evidence() {
+    let spec = window_spec(&["inlet", "source"], None);
+    let initial = window_snapshot(
+        &spec,
+        WindowEndpoint::Initial,
+        window_balance(0.0, 0.0, 0.0, 0.0, 0.0),
+    );
+    let final_snapshot = window_snapshot(
+        &spec,
+        WindowEndpoint::Final,
+        window_balance(1.0, 0.0, 0.0, 0.0, 0.0),
+    );
+    let inlet = window_contribution(&spec, "inlet", [1.0, 0.0, 0.0, 0.0], [0.0; 4]);
+    let missing =
+        WindowAuditReport::audit(spec.clone(), initial, final_snapshot, [inlet]).unwrap_err();
+    assert!(matches!(
+        missing,
+        CoupleError::AccountingWindowContributionSetMismatch {
+            missing,
+            unexpected
+        } if missing == vec!["contribution/source".to_string()] && unexpected.is_empty()
+    ));
+
+    let transfer = IntegratedWindowTransfer::try_new(
+        Energy::new(1.0),
+        Mass::new(0.0),
+        [hydrogen_amount(0.0)],
+        ElectricCharge::new(0.0),
+        boundary_entropy("inlet", spec.interval(), [0.0; 4]),
+        stable("convention/entropy-pr4"),
+    )
+    .unwrap();
+    let wrong_role = WindowBoundaryContribution::try_new(
+        &spec,
+        &stable("contribution/inlet"),
+        transfer,
+        window_evidence(
+            "wrong-integration-role",
+            WindowEvidenceRole::manifest_closure(spec.manifest()),
+            spec.interval(),
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        wrong_role,
+        CoupleError::AccountingWindowEvidenceRoleMismatch {
+            expected: "integrated_transfer",
+            actual: "manifest_closure"
+        }
+    ));
+
+    let wrong_closure = window_evidence(
+        "wrong-closure-subject",
+        WindowEvidenceRole::manifest_closure(&spec.manifest()[..1]),
+        spec.interval(),
+    );
+    let closure_error = AccountingWindowSpec::try_new(
+        spec.interval().clone(),
+        spec.energy_reference().clone(),
+        spec.element_schema().clone(),
+        spec.charge_schema().clone(),
+        spec.entropy_convention().clone(),
+        spec.manifest().to_vec(),
+        spec.tolerances(),
+        None,
+        wrong_closure,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        closure_error,
+        CoupleError::AccountingWindowContextMismatch {
+            field: "evidence_subject"
+        }
+    ));
+}
+
+#[test]
+fn accounting_context_cannot_be_rebound_across_window_specs() {
+    let interval = window_interval();
+    let make_charge_schema = |label: &str| {
+        let basis = stable(&format!("basis/{label}"));
+        WindowChargeSchema::DirectCoulomb {
+            basis: basis.clone(),
+            projection_evidence: window_evidence(
+                &format!("charge-{label}"),
+                WindowEvidenceRole::ChargeProjection {
+                    subject: WindowChargeEvidenceSubject::DirectCoulomb { basis },
+                },
+                &interval,
+            ),
+        }
+    };
+    let spec_a = AccountingWindowSpec::try_new(
+        interval.clone(),
+        stable("reference/energy-a"),
+        WindowElementSchema::not_applicable(stable("rationale/context-a")),
+        make_charge_schema("charge-a"),
+        stable("convention/entropy-a"),
+        [],
+        zero_window_tolerances(),
+        None,
+        window_closure_evidence("context-a-closure", &interval, &[]),
+    )
+    .unwrap();
+    let spec_b = AccountingWindowSpec::try_new(
+        interval.clone(),
+        stable("reference/energy-b"),
+        WindowElementSchema::not_applicable(stable("rationale/context-a")),
+        make_charge_schema("charge-b"),
+        stable("convention/entropy-b"),
+        [],
+        zero_window_tolerances(),
+        None,
+        window_closure_evidence("context-b-closure", spec_a.interval(), &[]),
+    )
+    .unwrap();
+    let balance = WindowBalance::try_new(
+        Energy::new(0.0),
+        Mass::new(0.0),
+        [],
+        ElectricCharge::new(0.0),
+        Entropy::new(0.0),
+    )
+    .unwrap();
+    let initial = window_snapshot(&spec_a, WindowEndpoint::Initial, balance.clone());
+    let final_snapshot = window_snapshot(&spec_a, WindowEndpoint::Final, balance);
+
+    let error = WindowAuditReport::audit(spec_b, initial, final_snapshot, []).unwrap_err();
+    assert!(matches!(
+        error,
+        CoupleError::AccountingWindowContextMismatch {
+            field: "snapshot_energy_reference"
+        }
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn window_port_kinds_gate_their_admissible_balance_axes() {
+    let interval = window_interval();
+    let stream_entry = external_window_entry("schema-required", &interval);
+    let stream_manifest = [stream_entry];
+    let stream_closure =
+        window_closure_evidence("missing-elements-closure", &interval, &stream_manifest);
+    let missing_elements = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        WindowElementSchema::not_applicable(stable("rationale/incorrectly-nonchemical")),
+        direct_window_charge(&interval),
+        stable("convention/entropy-pr4"),
+        stream_manifest,
+        zero_window_tolerances(),
+        None,
+        stream_closure,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        missing_elements,
+        CoupleError::AccountingWindowElementSchemaRequired
+    ));
+
+    let port = scalar_schema(
+        PortKind::ThermalTemperatureEntropy,
+        "port/window-thermal",
+        "frame/window-thermal",
+        PortOrientation::OutwardFromOwner,
+        11,
+    );
+    let contribution_id = stable("contribution/thermal");
+    let entry = WindowManifestEntry::external_power_port(
+        contribution_id.clone(),
+        stable("exchange/thermal"),
+        stable("reservoir/thermal"),
+        &port,
+        AccountingBoundary::new(
+            stable("boundary/window-thermal"),
+            port.coordinates().clone(),
+            BoundaryTreatment::ExternalReservoirExchange,
+        ),
+        window_evidence(
+            "binding-thermal",
+            WindowEvidenceRole::ManifestBinding {
+                contribution_id: contribution_id.clone(),
+                local_port_id: port.id().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap();
+    let thermal_manifest = [entry];
+    let thermal_closure = window_closure_evidence("thermal-closure", &interval, &thermal_manifest);
+    let spec = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        WindowElementSchema::not_applicable(stable("rationale/nonchemical-thermal")),
+        WindowChargeSchema::ProvenNeutral {
+            projection_evidence: window_evidence(
+                "thermal-neutrality",
+                WindowEvidenceRole::ChargeProjection {
+                    subject: WindowChargeEvidenceSubject::ProvenNeutral,
+                },
+                &interval,
+            ),
+        },
+        stable("convention/entropy-pr4"),
+        thermal_manifest,
+        zero_window_tolerances(),
+        None,
+        thermal_closure,
+    )
+    .unwrap();
+    let transfer = IntegratedWindowTransfer::try_new(
+        Energy::new(0.0),
+        Mass::new(1.0),
+        [],
+        ElectricCharge::new(0.0),
+        boundary_entropy("thermal", &interval, [0.0; 4]),
+        stable("convention/entropy-pr4"),
+    )
+    .unwrap();
+    let error = WindowBoundaryContribution::try_new(
+        &spec,
+        &contribution_id,
+        transfer,
+        window_evidence(
+            "integration-thermal",
+            WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: contribution_id.clone(),
+                local_port_id: port.id().clone(),
+                energy_reference: spec.energy_reference().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CoupleError::AccountingWindowPortTransferMismatch {
+            field: "mass_on_power_port",
+            ..
+        }
+    ));
+
+    let thermal_identity_error = WindowBoundaryContribution::try_new(
+        &spec,
+        &contribution_id,
+        IntegratedWindowTransfer::try_new(
+            Energy::new(401.0),
+            Mass::new(0.0),
+            [],
+            ElectricCharge::new(0.0),
+            boundary_entropy("thermal", &interval, [0.0, 0.0, 1.0, 0.0]),
+            stable("convention/entropy-pr4"),
+        )
+        .unwrap(),
+        window_evidence(
+            "integration-thermal-identity",
+            WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: contribution_id.clone(),
+                local_port_id: port.id().clone(),
+                energy_reference: spec.energy_reference().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        thermal_identity_error,
+        CoupleError::AccountingWindowPortTransferMismatch {
+            field: "constant_temperature_energy_entropy_identity",
+            ..
+        }
+    ));
+    let constant_radiation_error = WindowBoundaryContribution::try_new(
+        &spec,
+        &contribution_id,
+        IntegratedWindowTransfer::try_new(
+            Energy::new(0.0),
+            Mass::new(0.0),
+            [],
+            ElectricCharge::new(0.0),
+            boundary_entropy("thermal", &interval, [0.0, 0.0, 0.0, 1.0]),
+            stable("convention/entropy-pr4"),
+        )
+        .unwrap(),
+        window_evidence(
+            "integration-thermal-radiation",
+            WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: contribution_id.clone(),
+                local_port_id: port.id().clone(),
+                energy_reference: spec.energy_reference().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        constant_radiation_error,
+        CoupleError::AccountingWindowPortTransferMismatch {
+            field: "constant_temperature_radiation_requires_profile",
+            ..
+        }
+    ));
+
+    let mechanical_port = scalar_schema(
+        PortKind::MechanicalForceVelocity,
+        "port/window-mechanical",
+        "frame/window-mechanical",
+        PortOrientation::OutwardFromOwner,
+        11,
+    );
+    let mechanical_contribution_id = stable("contribution/mechanical");
+    let mechanical_entry = WindowManifestEntry::external_power_port(
+        mechanical_contribution_id.clone(),
+        stable("exchange/mechanical"),
+        stable("reservoir/mechanical"),
+        &mechanical_port,
+        AccountingBoundary::new(
+            stable("boundary/window-mechanical"),
+            mechanical_port.coordinates().clone(),
+            BoundaryTreatment::ExternalReservoirExchange,
+        ),
+        window_evidence(
+            "binding-mechanical",
+            WindowEvidenceRole::ManifestBinding {
+                contribution_id: mechanical_contribution_id.clone(),
+                local_port_id: mechanical_port.id().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap();
+    let mechanical_manifest = [mechanical_entry];
+    let mechanical_spec = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        WindowElementSchema::not_applicable(stable("rationale/nonchemical-mechanical")),
+        WindowChargeSchema::ProvenNeutral {
+            projection_evidence: window_evidence(
+                "mechanical-neutrality",
+                WindowEvidenceRole::ChargeProjection {
+                    subject: WindowChargeEvidenceSubject::ProvenNeutral,
+                },
+                &interval,
+            ),
+        },
+        stable("convention/entropy-pr4"),
+        mechanical_manifest.clone(),
+        zero_window_tolerances(),
+        None,
+        window_closure_evidence("mechanical-closure", &interval, &mechanical_manifest),
+    )
+    .unwrap();
+    let cancelling_entropy_error = WindowBoundaryContribution::try_new(
+        &mechanical_spec,
+        &mechanical_contribution_id,
+        IntegratedWindowTransfer::try_new(
+            Energy::new(0.0),
+            Mass::new(0.0),
+            [],
+            ElectricCharge::new(0.0),
+            boundary_entropy("mechanical", &interval, [1.0, -1.0, 0.0, 0.0]),
+            stable("convention/entropy-pr4"),
+        )
+        .unwrap(),
+        window_evidence(
+            "integration-mechanical",
+            WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: mechanical_contribution_id.clone(),
+                local_port_id: mechanical_port.id().clone(),
+                energy_reference: mechanical_spec.energy_reference().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cancelling_entropy_error,
+        CoupleError::AccountingWindowPortTransferMismatch {
+            field: "entropy_on_nonthermal_power_port",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn boundary_entropy_and_nonfinite_inputs_fail_closed() {
+    let interval = window_interval();
+    let wrong_element_subject = WindowElementSchema::try_audited(
+        [ElementId::new("O").unwrap()],
+        window_evidence(
+            "wrong-element-subject",
+            WindowEvidenceRole::ElementProjection {
+                elements: vec![ElementId::new("H").unwrap()],
+            },
+            &interval,
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        wrong_element_subject,
+        CoupleError::AccountingWindowContextMismatch {
+            field: "evidence_subject"
+        }
+    ));
+
+    let wrong_charge_subject = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        WindowElementSchema::not_applicable(stable("rationale/nonchemical")),
+        WindowChargeSchema::ProvenNeutral {
+            projection_evidence: window_evidence(
+                "wrong-charge-subject",
+                WindowEvidenceRole::ChargeProjection {
+                    subject: WindowChargeEvidenceSubject::DirectCoulomb {
+                        basis: stable("basis/foreign-charge"),
+                    },
+                },
+                &interval,
+            ),
+        },
+        stable("convention/entropy-pr4"),
+        [],
+        zero_window_tolerances(),
+        None,
+        window_closure_evidence("wrong-charge-closure", &interval, &[]),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        wrong_charge_subject,
+        CoupleError::AccountingWindowContextMismatch {
+            field: "evidence_subject"
+        }
+    ));
+
+    assert!(matches!(
+        BoundaryTemperatureReference::try_constant(
+            Temperature::new(0.0),
+            window_evidence(
+                "zero-temperature",
+                WindowEvidenceRole::BoundaryTemperature {
+                    contribution_id: stable("contribution/temperature")
+                },
+                &interval,
+            )
+        ),
+        Err(CoupleError::NonPositiveBoundaryTemperature)
+    ));
+    assert!(matches!(
+        BoundaryEntropyBreakdown::try_new(
+            Entropy::new(0.0),
+            Entropy::new(0.0),
+            Entropy::new(1.0),
+            Entropy::new(0.0),
+            BoundaryTemperatureReference::not_applicable(stable("rationale/missing-temperature"))
+        ),
+        Err(CoupleError::AccountingWindowTemperatureReferenceRequired)
+    ));
+    assert!(matches!(
+        WindowBalance::try_new(
+            Energy::new(f64::NAN),
+            Mass::new(0.0),
+            [hydrogen_amount(0.0)],
+            ElectricCharge::new(0.0),
+            Entropy::new(0.0)
+        ),
+        Err(CoupleError::NonFiniteAccountingWindowValue {
+            field: "energy",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn canonical_compensated_window_sum_is_permutation_stable() {
+    let spec = window_spec(&["a-large", "b-cancel", "c-unit"], None);
+    let initial = window_snapshot(
+        &spec,
+        WindowEndpoint::Initial,
+        window_balance(0.0, 0.0, 0.0, 0.0, 0.0),
+    );
+    let final_snapshot = window_snapshot(
+        &spec,
+        WindowEndpoint::Final,
+        window_balance(1.0, 0.0, 0.0, 0.0, 0.0),
+    );
+    let contributions = [
+        window_contribution(&spec, "a-large", [1.0e16, 0.0, 0.0, 0.0], [0.0; 4]),
+        window_contribution(&spec, "b-cancel", [-1.0e16, 0.0, 0.0, 0.0], [0.0; 4]),
+        window_contribution(&spec, "c-unit", [1.0, 0.0, 0.0, 0.0], [0.0; 4]),
+    ];
+    let permutations = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut residual_bits = None;
+    for permutation in permutations {
+        let report = WindowAuditReport::audit(
+            spec.clone(),
+            initial.clone(),
+            final_snapshot.clone(),
+            permutation.map(|index| contributions[index].clone()),
+        )
+        .unwrap();
+        assert!(
+            report.is_green(),
+            "permutation={permutation:?}, report={report:#?}"
+        );
+        let bits = report.residuals().first_law().value().to_bits();
+        assert_eq!(bits, 0.0_f64.to_bits());
+        assert_eq!(*residual_bits.get_or_insert(bits), bits);
+    }
+}
+
+#[test]
+fn explicitly_closed_isolated_window_audits_without_boundary_rows() {
+    let interval = window_interval();
+    let spec = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        WindowElementSchema::not_applicable(stable("rationale/nonchemical-isolated")),
+        WindowChargeSchema::ProvenNeutral {
+            projection_evidence: window_evidence(
+                "isolated-neutrality",
+                WindowEvidenceRole::ChargeProjection {
+                    subject: WindowChargeEvidenceSubject::ProvenNeutral,
+                },
+                &interval,
+            ),
+        },
+        stable("convention/entropy-pr4"),
+        [],
+        zero_window_tolerances(),
+        None,
+        window_closure_evidence("isolated-closure", &interval, &[]),
+    )
+    .unwrap();
+    let initial_balance = WindowBalance::try_new(
+        Energy::new(10.0),
+        Mass::new(1.0),
+        [],
+        ElectricCharge::new(0.0),
+        Entropy::new(2.0),
+    )
+    .unwrap();
+    let final_balance = WindowBalance::try_new(
+        Energy::new(10.0),
+        Mass::new(1.0),
+        [],
+        ElectricCharge::new(0.0),
+        Entropy::new(2.5),
+    )
+    .unwrap();
+    let initial = window_snapshot(&spec, WindowEndpoint::Initial, initial_balance);
+    let final_snapshot = window_snapshot(&spec, WindowEndpoint::Final, final_balance);
+
+    let report = WindowAuditReport::audit(spec, initial, final_snapshot, []).unwrap();
+    assert!(report.is_green(), "report={report:#?}");
+    assert!(report.contributions().is_empty());
+    assert!(report.exchanges().is_empty());
+    assert_f64_bits_eq(report.residuals().entropy_generation().value(), 0.5);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn hidden_internal_entropy_source_is_localized_to_its_exact_pair() {
+    let interval = window_interval();
+    let port_a = window_stream("pair-a");
+    let port_b = window_stream("pair-b");
+    let contribution_a = stable("contribution/pair-a");
+    let contribution_b = stable("contribution/pair-b");
+    let pair = WindowManifestEntry::internal_stream_pair(
+        stable("exchange/internal-pair"),
+        contribution_a.clone(),
+        &port_a,
+        contribution_b.clone(),
+        &port_b,
+        window_evidence(
+            "binding-pair-a",
+            WindowEvidenceRole::ManifestBinding {
+                contribution_id: contribution_a,
+                local_port_id: port_a.binding().port_id().clone(),
+            },
+            &interval,
+        ),
+        window_evidence(
+            "binding-pair-b",
+            WindowEvidenceRole::ManifestBinding {
+                contribution_id: contribution_b,
+                local_port_id: port_b.binding().port_id().clone(),
+            },
+            &interval,
+        ),
+    )
+    .unwrap();
+
+    let one_sided_manifest = [pair[0].clone()];
+    let one_sided_closure =
+        window_closure_evidence("one-sided-closure", &interval, &one_sided_manifest);
+    let one_sided = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        audited_window_elements(&interval),
+        direct_window_charge(&interval),
+        stable("convention/entropy-pr4"),
+        one_sided_manifest,
+        zero_window_tolerances(),
+        None,
+        one_sided_closure,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        one_sided,
+        CoupleError::MalformedAccountingWindowExchange {
+            field: "internal_cardinality",
+            ..
+        }
+    ));
+
+    let mut full_manifest = pair.to_vec();
+    full_manifest.push(external_window_entry("pair-mask", &interval));
+    let pair_closure = window_closure_evidence("pair-closure", &interval, &full_manifest);
+    let spec = AccountingWindowSpec::try_new(
+        interval.clone(),
+        window_energy_reference(),
+        audited_window_elements(&interval),
+        direct_window_charge(&interval),
+        stable("convention/entropy-pr4"),
+        full_manifest,
+        zero_window_tolerances(),
+        None,
+        pair_closure,
+    )
+    .unwrap();
+    let initial = window_snapshot(
+        &spec,
+        WindowEndpoint::Initial,
+        window_balance(0.0, 0.0, 0.0, 0.0, 0.0),
+    );
+    let final_snapshot = window_snapshot(
+        &spec,
+        WindowEndpoint::Final,
+        window_balance(0.0, 0.0, 0.0, 0.0, 0.0),
+    );
+    let pair_a = window_contribution(&spec, "pair-a", [5.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]);
+    let pair_b = window_contribution(
+        &spec,
+        "pair-b",
+        [-4.0, 0.0, 0.0, 0.0],
+        [-0.75, 0.0, 0.0, 0.0],
+    );
+    let mask = window_contribution(&spec, "pair-mask", [-1.0, 0.0, 0.0, 0.0], [0.0; 4]);
+    let report =
+        WindowAuditReport::audit(spec, initial, final_snapshot, [mask, pair_b, pair_a]).unwrap();
+    assert!(!report.is_green());
+    assert_f64_bits_eq(report.residuals().first_law().value(), 0.0);
+    assert_f64_bits_eq(report.residuals().entropy_generation().value(), -0.25);
+    assert!(
+        report
+            .violations()
+            .iter()
+            .all(|violation| !matches!(violation.law(), WindowBalanceLaw::FirstLaw))
+    );
+    let internal_exchange = report
+        .exchanges()
+        .iter()
+        .find(|exchange| exchange.exchange_id().as_str() == "exchange/internal-pair")
+        .unwrap();
+    assert_f64_bits_eq(internal_exchange.energy_into().value(), 1.0);
+    assert_f64_bits_eq(internal_exchange.entropy_into().value(), 0.25);
+    let energy_pair_violation = report
+        .violations()
+        .iter()
+        .find(|violation| matches!(violation.law(), WindowBalanceLaw::InternalFirstLaw))
+        .unwrap();
+    assert_f64_bits_eq(energy_pair_violation.residual_si(), 1.0);
+    assert_eq!(energy_pair_violation.exchange_ids().len(), 1);
+    let pair_violation = report
+        .violations()
+        .iter()
+        .find(|violation| matches!(violation.law(), WindowBalanceLaw::InternalEntropyTransfer))
+        .unwrap();
+    assert_f64_bits_eq(pair_violation.residual_si(), 0.25);
+    assert_eq!(
+        pair_violation
+            .contribution_ids()
+            .iter()
+            .map(StableId::as_str)
+            .collect::<Vec<_>>(),
+        ["contribution/pair-a", "contribution/pair-b"]
+    );
+    assert_eq!(pair_violation.port_ids().len(), 2);
+    assert_eq!(
+        pair_violation.exchange_ids()[0].as_str(),
+        "exchange/internal-pair"
+    );
 }
 
 #[test]

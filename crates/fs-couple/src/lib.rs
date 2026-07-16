@@ -20,7 +20,9 @@
 //! mass, constituent amount, momentum, energy, and entropy. Its single
 //! [`StreamEnergyChart`] is structural, and alternate thermodynamic charts
 //! require context-bound exact pressure-work or Euler/Legendre crosswalks.
-//! This admission layer does not perform the later closed-window audits.
+//! [`AccountingWindowSpec`] and [`WindowAuditReport`] separately audit
+//! pre-integrated, window-bound storage and port contributions without
+//! pretending that a logical clock tick is a physical duration.
 //!
 //! For the hard, strongly-coupled cases, [`AitkenRelaxation`] gives dynamic
 //! interface relaxation: on the classic ADDED-MASS-INSTABILITY fixture (a light
@@ -34,8 +36,8 @@ use core::num::NonZeroUsize;
 use fs_iface::SpaceType;
 use fs_qty::chemistry::{ElementId, SpeciesId};
 use fs_qty::{
-    Density, Dims, Force, MassFlowRate, Power, Pressure, Qty, Temperature, Velocity,
-    VolumetricFlowRate,
+    Amount, Density, Dims, ElectricCharge, Energy, Force, Mass, MassFlowRate, Power, Pressure, Qty,
+    Temperature, Velocity, VolumetricFlowRate,
 };
 
 /// Current public port-schema version.
@@ -44,11 +46,17 @@ pub const PORT_SCHEMA_VERSION: u16 = 2;
 /// Current public stream-port version.
 pub const STREAM_PORT_VERSION: u16 = 1;
 
+/// Current closed accounting-window schema version.
+pub const ACCOUNTING_WINDOW_VERSION: u16 = 1;
+
 /// Moles per second.
 pub type AmountFlowRate = Qty<0, 0, -1, 0, 0, 1>;
 
 /// Watts per kelvin.
 pub type EntropyFlowRate = Qty<2, 1, -3, -1, 0, 0>;
+
+/// Joules per kelvin.
+pub type Entropy = Qty<2, 1, -2, -1, 0, 0>;
 
 /// Joules per kilogram.
 pub type SpecificEnergy = Qty<2, 0, -2, 0, 0, 0>;
@@ -2584,6 +2592,2788 @@ pub enum PortPrimitive {
     SourceOrReservoir(SourceOrReservoir),
 }
 
+/// Closed logical interval over which already-integrated balances are audited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountingWindowInterval {
+    id: StableId,
+    start: PortTimestamp,
+    end: PortTimestamp,
+}
+
+impl AccountingWindowInterval {
+    /// Admit one non-empty interval in a single named logical clock.
+    ///
+    /// Logical tick differences are not interpreted as seconds. Boundary
+    /// contributions require separate integration evidence.
+    ///
+    /// # Errors
+    ///
+    /// Refuses different clock domains or `end.tick <= start.tick`.
+    pub fn try_new(
+        id: StableId,
+        start: PortTimestamp,
+        end: PortTimestamp,
+    ) -> Result<Self, CoupleError> {
+        if start.clock != end.clock {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "interval_clock",
+            });
+        }
+        if end.tick <= start.tick {
+            return Err(CoupleError::InvalidAccountingWindowInterval {
+                start_tick: start.tick,
+                end_tick: end.tick,
+            });
+        }
+        Ok(Self { id, start, end })
+    }
+
+    /// Stable window identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Inclusive initial logical timestamp.
+    #[must_use]
+    pub fn start(&self) -> &PortTimestamp {
+        &self.start
+    }
+
+    /// Inclusive final logical timestamp.
+    #[must_use]
+    pub fn end(&self) -> &PortTimestamp {
+        &self.end
+    }
+
+    fn contains(&self, timestamp: &PortTimestamp) -> bool {
+        timestamp.clock == self.start.clock
+            && (self.start.tick..=self.end.tick).contains(&timestamp.tick)
+    }
+}
+
+/// Semantic role and subject bound by one retained window-evidence statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowEvidenceRole {
+    /// Evidence that one exact declared boundary/source manifest is complete.
+    ManifestClosure {
+        /// Canonically ordered complete row subjects covered by the statement.
+        rows: Vec<WindowManifestRowSubject>,
+    },
+    /// Evidence binding one manifest row to its local port.
+    ManifestBinding {
+        /// Expected contribution row.
+        contribution_id: StableId,
+        /// Local port named by the row.
+        local_port_id: StableId,
+    },
+    /// Evidence for one exact stored-state endpoint.
+    Inventory {
+        /// Initial or final state covered by the statement.
+        endpoint: WindowEndpoint,
+        /// Common stored/transfer energy-reference contract.
+        energy_reference: StableId,
+    },
+    /// Evidence for physical-time integration and sign normalization.
+    IntegratedTransfer {
+        /// Filled contribution row.
+        contribution_id: StableId,
+        /// Local port whose values were integrated.
+        local_port_id: StableId,
+        /// Common stored/transfer energy-reference contract.
+        energy_reference: StableId,
+    },
+    /// Boundary-temperature evidence for one contribution.
+    BoundaryTemperature {
+        /// Contribution whose heat/radiation entropy uses the temperature.
+        contribution_id: StableId,
+    },
+    /// Species/direct-element projection evidence for one exact window axis.
+    ElementProjection {
+        /// Canonically ordered element axis named by the statement.
+        elements: Vec<ElementId>,
+    },
+    /// Direct-coulomb, species-charge, or neutrality projection evidence.
+    ChargeProjection {
+        /// Exact charge policy and basis named by the statement.
+        subject: WindowChargeEvidenceSubject,
+    },
+}
+
+impl WindowEvidenceRole {
+    fn diagnostic_label(&self) -> &'static str {
+        match self {
+            Self::ManifestClosure { .. } => "manifest_closure",
+            Self::ManifestBinding { .. } => "manifest_binding",
+            Self::Inventory { .. } => "inventory",
+            Self::IntegratedTransfer { .. } => "integrated_transfer",
+            Self::BoundaryTemperature { .. } => "boundary_temperature",
+            Self::ElementProjection { .. } => "element_projection",
+            Self::ChargeProjection { .. } => "charge_projection",
+        }
+    }
+
+    /// Bind closure evidence to the complete canonical manifest structure.
+    #[must_use]
+    pub fn manifest_closure(manifest: &[WindowManifestEntry]) -> Self {
+        let mut rows: Vec<_> = manifest
+            .iter()
+            .map(WindowManifestRowSubject::from_entry)
+            .collect();
+        rows.sort_by(|left, right| left.contribution_id.cmp(&right.contribution_id));
+        Self::ManifestClosure { rows }
+    }
+}
+
+/// Exact charge-policy subject named by a retained evidence statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowChargeEvidenceSubject {
+    /// Direct coulomb values under this basis/sign convention.
+    DirectCoulomb {
+        /// Charge basis and sign convention.
+        basis: StableId,
+    },
+    /// Species amounts projected to coulombs under this complete basis.
+    SpeciesProjection {
+        /// Species-charge and molar-charge convention.
+        basis: StableId,
+    },
+    /// Exact zero charge under a retained neutrality claim.
+    ProvenNeutral,
+}
+
+/// Retained reference to evidence covering one exact accounting interval.
+///
+/// `fs-couple` checks the interval binding but does not execute the named
+/// verifier or validate the referenced artifact contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowEvidenceRef {
+    receipt_id: StableId,
+    verifier_id: StableId,
+    statement_digest: StableId,
+    role: WindowEvidenceRole,
+    interval: Box<AccountingWindowInterval>,
+}
+
+impl WindowEvidenceRef {
+    /// Name one retained interval-bound evidence artifact.
+    #[must_use]
+    pub fn new(
+        receipt_id: StableId,
+        verifier_id: StableId,
+        statement_digest: StableId,
+        role: WindowEvidenceRole,
+        interval: AccountingWindowInterval,
+    ) -> Self {
+        Self {
+            receipt_id,
+            verifier_id,
+            statement_digest,
+            role,
+            interval: Box::new(interval),
+        }
+    }
+
+    /// Evidence receipt identifier.
+    #[must_use]
+    pub fn receipt_id(&self) -> &StableId {
+        &self.receipt_id
+    }
+
+    /// Verifier implementation named by the receipt.
+    #[must_use]
+    pub fn verifier_id(&self) -> &StableId {
+        &self.verifier_id
+    }
+
+    /// Digest of the retained evidence statement.
+    #[must_use]
+    pub fn statement_digest(&self) -> &StableId {
+        &self.statement_digest
+    }
+
+    /// Exact semantic role and subject named by the statement.
+    #[must_use]
+    pub fn role(&self) -> &WindowEvidenceRole {
+        &self.role
+    }
+
+    /// Exact logical interval covered by the statement.
+    #[must_use]
+    pub fn interval(&self) -> &AccountingWindowInterval {
+        self.interval.as_ref()
+    }
+}
+
+/// One canonically identified elemental amount in an inventory or transfer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowElementAmount {
+    element: ElementId,
+    amount: Amount,
+}
+
+impl WindowElementAmount {
+    /// Construct one finite elemental amount.
+    ///
+    /// # Errors
+    ///
+    /// [`CoupleError::NonFiniteAccountingWindowValue`] for a non-finite amount.
+    pub fn try_new(element: ElementId, amount: Amount) -> Result<Self, CoupleError> {
+        ensure_finite_window_value("element_amount", Some(element.as_str()), amount.value())?;
+        Ok(Self { element, amount })
+    }
+
+    /// Element identifier.
+    #[must_use]
+    pub fn element(&self) -> &ElementId {
+        &self.element
+    }
+
+    /// Signed amount in moles.
+    #[must_use]
+    pub fn amount(&self) -> Amount {
+        self.amount
+    }
+}
+
+/// Integrated extensive values used by one side of a window balance.
+///
+/// Boundary transfers use the single convention "positive into the audited
+/// system". Inventory snapshots use ordinary stored values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowBalance {
+    energy: Energy,
+    mass: Mass,
+    element_amounts: Vec<WindowElementAmount>,
+    charge: ElectricCharge,
+    entropy: Entropy,
+}
+
+impl WindowBalance {
+    /// Admit finite values and canonicalize the element axis.
+    ///
+    /// # Errors
+    ///
+    /// Refuses non-finite values or duplicate element identifiers.
+    pub fn try_new(
+        energy: Energy,
+        mass: Mass,
+        element_amounts: impl IntoIterator<Item = WindowElementAmount>,
+        charge: ElectricCharge,
+        entropy: Entropy,
+    ) -> Result<Self, CoupleError> {
+        ensure_finite_window_value("energy", None, energy.value())?;
+        ensure_finite_window_value("mass", None, mass.value())?;
+        ensure_finite_window_value("charge", None, charge.value())?;
+        ensure_finite_window_value("entropy", None, entropy.value())?;
+        let mut element_amounts: Vec<_> = element_amounts.into_iter().collect();
+        element_amounts.sort_by(|left, right| left.element.cmp(&right.element));
+        for pair in element_amounts.windows(2) {
+            if pair[0].element == pair[1].element {
+                return Err(CoupleError::DuplicateAccountingWindowElement {
+                    element: pair[0].element.as_str().to_string(),
+                });
+            }
+        }
+        Ok(Self {
+            energy,
+            mass,
+            element_amounts,
+            charge,
+            entropy,
+        })
+    }
+
+    /// Stored or integrated energy in joules.
+    #[must_use]
+    pub fn energy(&self) -> Energy {
+        self.energy
+    }
+
+    /// Stored or integrated mass in kilograms.
+    #[must_use]
+    pub fn mass(&self) -> Mass {
+        self.mass
+    }
+
+    /// Canonically ordered elemental amounts.
+    #[must_use]
+    pub fn element_amounts(&self) -> &[WindowElementAmount] {
+        &self.element_amounts
+    }
+
+    /// Stored or integrated electric charge in coulombs.
+    #[must_use]
+    pub fn charge(&self) -> ElectricCharge {
+        self.charge
+    }
+
+    /// Stored or integrated entropy in joules per kelvin.
+    #[must_use]
+    pub fn entropy(&self) -> Entropy {
+        self.entropy
+    }
+}
+
+/// Boundary-temperature evidence used to interpret heat/radiation entropy.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundaryTemperatureReference {
+    /// No heat- or radiation-mediated entropy is present in this contribution.
+    NotApplicable {
+        /// Retained rationale for the no-claim boundary.
+        rationale: StableId,
+    },
+    /// One strictly positive boundary temperature was used for integration.
+    Constant {
+        /// Absolute temperature in kelvin.
+        temperature: Temperature,
+        /// Evidence for the temperature and its applicability to this row.
+        evidence: WindowEvidenceRef,
+    },
+    /// A caller-integrated temperature profile is retained by identity.
+    Profile {
+        /// Temperature-profile artifact identifier.
+        profile: StableId,
+        /// Evidence for the profile and its applicability to this row.
+        evidence: WindowEvidenceRef,
+    },
+}
+
+impl BoundaryTemperatureReference {
+    /// Declare that no boundary-temperature interpretation is applicable.
+    #[must_use]
+    pub fn not_applicable(rationale: StableId) -> Self {
+        Self::NotApplicable { rationale }
+    }
+
+    /// Admit one finite, strictly positive constant boundary temperature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoupleError::NonPositiveBoundaryTemperature`] for NaN,
+    /// infinity, zero, or a negative absolute temperature.
+    pub fn try_constant(
+        temperature: Temperature,
+        evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        if !temperature.value().is_finite() || temperature.value() <= 0.0 {
+            return Err(CoupleError::NonPositiveBoundaryTemperature);
+        }
+        Ok(Self::Constant {
+            temperature,
+            evidence,
+        })
+    }
+
+    /// Retain a caller-integrated boundary-temperature profile by identity.
+    #[must_use]
+    pub fn profile(profile: StableId, evidence: WindowEvidenceRef) -> Self {
+        Self::Profile { profile, evidence }
+    }
+
+    fn evidence(&self) -> Option<&WindowEvidenceRef> {
+        match self {
+            Self::NotApplicable { .. } => None,
+            Self::Constant { evidence, .. } | Self::Profile { evidence, .. } => Some(evidence),
+        }
+    }
+}
+
+/// Explicit integrated boundary-entropy mechanisms, all positive into system.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundaryEntropyBreakdown {
+    advected: Entropy,
+    diffusive_chemical: Entropy,
+    heat: Entropy,
+    radiation: Entropy,
+    temperature_reference: BoundaryTemperatureReference,
+}
+
+impl BoundaryEntropyBreakdown {
+    /// Admit all four mandatory signed entropy-transfer slots.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a non-finite term or a non-finite fixed-order total.
+    pub fn try_new(
+        advected: Entropy,
+        diffusive_chemical: Entropy,
+        heat: Entropy,
+        radiation: Entropy,
+        temperature_reference: BoundaryTemperatureReference,
+    ) -> Result<Self, CoupleError> {
+        for (field, value) in [
+            ("entropy_advected", advected.value()),
+            ("entropy_diffusive_chemical", diffusive_chemical.value()),
+            ("entropy_heat", heat.value()),
+            ("entropy_radiation", radiation.value()),
+        ] {
+            ensure_finite_window_value(field, None, value)?;
+        }
+        let breakdown = Self {
+            advected,
+            diffusive_chemical,
+            heat,
+            radiation,
+            temperature_reference,
+        };
+        if (heat.value().abs() > 0.0 || radiation.value().abs() > 0.0)
+            && matches!(
+                &breakdown.temperature_reference,
+                BoundaryTemperatureReference::NotApplicable { .. }
+            )
+        {
+            return Err(CoupleError::AccountingWindowTemperatureReferenceRequired);
+        }
+        ensure_finite_window_value("entropy_boundary_total", None, breakdown.total().value())?;
+        Ok(breakdown)
+    }
+
+    /// Advected entropy transfer.
+    #[must_use]
+    pub fn advected(&self) -> Entropy {
+        self.advected
+    }
+
+    /// Diffusive and chemical-potential entropy transfer.
+    #[must_use]
+    pub fn diffusive_chemical(&self) -> Entropy {
+        self.diffusive_chemical
+    }
+
+    /// Heat-mediated entropy transfer under explicit boundary temperatures.
+    #[must_use]
+    pub fn heat(&self) -> Entropy {
+        self.heat
+    }
+
+    /// Radiation-mediated entropy transfer.
+    #[must_use]
+    pub fn radiation(&self) -> Entropy {
+        self.radiation
+    }
+
+    /// Boundary-temperature evidence used for heat/radiation interpretation.
+    #[must_use]
+    pub fn temperature_reference(&self) -> &BoundaryTemperatureReference {
+        &self.temperature_reference
+    }
+
+    /// Fixed-order total boundary entropy transfer.
+    #[must_use]
+    pub fn total(&self) -> Entropy {
+        Entropy::new(
+            ((self.advected.value() + self.diffusive_chemical.value()) + self.heat.value())
+                + self.radiation.value(),
+        )
+    }
+}
+
+/// Whether and how elemental conservation is claimed for a window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowElementSchema {
+    /// No elemental balance is applicable; the rationale is retained.
+    NotApplicable {
+        /// Evidence/rationale identifier explaining the non-chemical window.
+        rationale: StableId,
+    },
+    /// Exact named element axis is audited after an external projection.
+    Audited {
+        /// Canonically ordered element identifiers.
+        elements: Vec<ElementId>,
+        /// Evidence binding species/direct-element projection to this axis.
+        projection_evidence: WindowEvidenceRef,
+    },
+}
+
+impl WindowElementSchema {
+    /// Declare a non-chemical window explicitly.
+    #[must_use]
+    pub fn not_applicable(rationale: StableId) -> Self {
+        Self::NotApplicable { rationale }
+    }
+
+    /// Admit a non-empty duplicate-free elemental audit axis.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an empty or duplicate element axis.
+    pub fn try_audited(
+        elements: impl IntoIterator<Item = ElementId>,
+        projection_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        let mut elements: Vec<_> = elements.into_iter().collect();
+        if elements.is_empty() {
+            return Err(CoupleError::EmptyAccountingWindowElementAxis);
+        }
+        elements.sort();
+        for pair in elements.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(CoupleError::DuplicateAccountingWindowElement {
+                    element: pair[0].as_str().to_string(),
+                });
+            }
+        }
+        require_window_evidence_role(
+            &projection_evidence,
+            &WindowEvidenceRole::ElementProjection {
+                elements: elements.clone(),
+            },
+        )?;
+        Ok(Self::Audited {
+            elements,
+            projection_evidence,
+        })
+    }
+
+    /// Element axis, empty only for an explicitly non-chemical window.
+    #[must_use]
+    pub fn elements(&self) -> &[ElementId] {
+        match self {
+            Self::NotApplicable { .. } => &[],
+            Self::Audited { elements, .. } => elements,
+        }
+    }
+
+    /// Projection receipt for an audited elemental axis.
+    #[must_use]
+    pub fn projection_evidence(&self) -> Option<&WindowEvidenceRef> {
+        match self {
+            Self::NotApplicable { .. } => None,
+            Self::Audited {
+                projection_evidence,
+                ..
+            } => Some(projection_evidence),
+        }
+    }
+}
+
+/// Evidence policy governing the window's direct coulomb balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowChargeSchema {
+    /// Charge is supplied directly in coulombs under a named basis/convention.
+    DirectCoulomb {
+        /// Charge basis and sign convention.
+        basis: StableId,
+        /// Evidence binding the direct values to the declared convention.
+        projection_evidence: WindowEvidenceRef,
+    },
+    /// Species amounts were projected through an explicit charge/Faraday map.
+    SpeciesProjection {
+        /// Species-charge basis and molar-charge convention.
+        basis: StableId,
+        /// Evidence for the species-to-coulomb projection.
+        projection_evidence: WindowEvidenceRef,
+    },
+    /// Every charge value must be exactly zero under retained neutrality proof.
+    ProvenNeutral {
+        /// Evidence for the bound neutrality claim.
+        projection_evidence: WindowEvidenceRef,
+    },
+}
+
+impl WindowChargeSchema {
+    /// Evidence governing the charge values admitted by this schema.
+    #[must_use]
+    pub fn projection_evidence(&self) -> &WindowEvidenceRef {
+        match self {
+            Self::DirectCoulomb {
+                projection_evidence,
+                ..
+            }
+            | Self::SpeciesProjection {
+                projection_evidence,
+                ..
+            }
+            | Self::ProvenNeutral {
+                projection_evidence,
+            } => projection_evidence,
+        }
+    }
+
+    fn evidence_role(&self) -> WindowEvidenceRole {
+        let subject = match self {
+            Self::DirectCoulomb { basis, .. } => WindowChargeEvidenceSubject::DirectCoulomb {
+                basis: basis.clone(),
+            },
+            Self::SpeciesProjection { basis, .. } => {
+                WindowChargeEvidenceSubject::SpeciesProjection {
+                    basis: basis.clone(),
+                }
+            }
+            Self::ProvenNeutral { .. } => WindowChargeEvidenceSubject::ProvenNeutral,
+        };
+        WindowEvidenceRole::ChargeProjection { subject }
+    }
+}
+
+/// Typed acceptance tolerances for a physical accounting-window audit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowAuditTolerances {
+    energy: Energy,
+    mass: Mass,
+    amount: Amount,
+    charge: ElectricCharge,
+    entropy: Entropy,
+}
+
+impl WindowAuditTolerances {
+    /// Admit finite nonnegative tolerances for every audited balance.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a non-finite or negative tolerance.
+    pub fn try_new(
+        energy: Energy,
+        mass: Mass,
+        amount: Amount,
+        charge: ElectricCharge,
+        entropy: Entropy,
+    ) -> Result<Self, CoupleError> {
+        for (field, value) in [
+            ("energy_tolerance", energy.value()),
+            ("mass_tolerance", mass.value()),
+            ("amount_tolerance", amount.value()),
+            ("charge_tolerance", charge.value()),
+            ("entropy_tolerance", entropy.value()),
+        ] {
+            ensure_nonnegative_window_value(field, value)?;
+        }
+        Ok(Self {
+            energy,
+            mass,
+            amount,
+            charge,
+            entropy,
+        })
+    }
+
+    /// First-law tolerance in joules.
+    #[must_use]
+    pub fn energy(self) -> Energy {
+        self.energy
+    }
+
+    /// Mass-balance tolerance in kilograms.
+    #[must_use]
+    pub fn mass(self) -> Mass {
+        self.mass
+    }
+
+    /// Per-element tolerance in moles.
+    #[must_use]
+    pub fn amount(self) -> Amount {
+        self.amount
+    }
+
+    /// Charge-balance tolerance in coulombs.
+    #[must_use]
+    pub fn charge(self) -> ElectricCharge {
+        self.charge
+    }
+
+    /// One-sided entropy-generation tolerance in joules per kelvin.
+    #[must_use]
+    pub fn entropy(self) -> Entropy {
+        self.entropy
+    }
+}
+
+/// Explicit environment for the optional Gouy-Stodola exergy diagnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExergyEnvironment {
+    id: StableId,
+    temperature: Temperature,
+}
+
+impl ExergyEnvironment {
+    /// Admit a finite, strictly positive reference temperature.
+    ///
+    /// # Errors
+    ///
+    /// [`CoupleError::NonPositiveExergyTemperature`] otherwise.
+    pub fn try_new(id: StableId, temperature: Temperature) -> Result<Self, CoupleError> {
+        if !temperature.value().is_finite() || temperature.value() <= 0.0 {
+            return Err(CoupleError::NonPositiveExergyTemperature);
+        }
+        Ok(Self { id, temperature })
+    }
+
+    /// Environment identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Reference temperature.
+    #[must_use]
+    pub fn temperature(&self) -> Temperature {
+        self.temperature
+    }
+}
+
+/// Topological role of one expected window contribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowExchangeRole {
+    /// One side of an internal two-port transfer; both sides share an exchange.
+    InternalTransfer,
+    /// Exchange with an explicitly external reservoir.
+    ExternalExchange,
+    /// Source term included inside the audited model.
+    IncludedSource,
+}
+
+/// Physical vocabulary carried by a window-manifest port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPortKind {
+    /// Ordinary power-conjugate port.
+    Power(PortKind),
+    /// Multi-balance stream bundle.
+    Stream,
+}
+
+/// Complete structural subject of one manifest row, excluding its evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowManifestRowSubject {
+    contribution_id: StableId,
+    exchange_id: StableId,
+    local_port_id: StableId,
+    counterparty_id: StableId,
+    role: WindowExchangeRole,
+    port_kind: WindowPortKind,
+    stream_binding: Option<Box<StreamChartBinding>>,
+    timestamp: PortTimestamp,
+    boundary: Option<AccountingBoundary>,
+}
+
+impl WindowManifestRowSubject {
+    fn from_entry(entry: &WindowManifestEntry) -> Self {
+        Self {
+            contribution_id: entry.contribution_id.clone(),
+            exchange_id: entry.exchange_id.clone(),
+            local_port_id: entry.local_port_id.clone(),
+            counterparty_id: entry.counterparty_id.clone(),
+            role: entry.role,
+            port_kind: entry.port_kind,
+            stream_binding: entry.stream_binding.clone(),
+            timestamp: entry.timestamp.clone(),
+            boundary: entry.boundary.clone(),
+        }
+    }
+}
+
+/// One expected contribution in a complete accounting-window manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowManifestEntry {
+    contribution_id: StableId,
+    exchange_id: StableId,
+    local_port_id: StableId,
+    counterparty_id: StableId,
+    role: WindowExchangeRole,
+    port_kind: WindowPortKind,
+    stream_binding: Option<Box<StreamChartBinding>>,
+    timestamp: PortTimestamp,
+    boundary: Option<AccountingBoundary>,
+    binding_evidence: WindowEvidenceRef,
+}
+
+impl WindowManifestEntry {
+    /// Build both sides of one admitted internal power-port pair.
+    ///
+    /// # Errors
+    ///
+    /// Refuses schemas that are not conjugate under the existing junction
+    /// admission rules or evidence bound to a different window.
+    pub fn internal_power_pair(
+        exchange_id: StableId,
+        contribution_a_id: StableId,
+        port_a: &PortSchema,
+        contribution_b_id: StableId,
+        port_b: &PortSchema,
+        binding_evidence_a: WindowEvidenceRef,
+        binding_evidence_b: WindowEvidenceRef,
+    ) -> Result<[Self; 2], CoupleError> {
+        if let Some(field) = port_a.first_conjugacy_mismatch(port_b) {
+            return Err(CoupleError::IncompatiblePortSchemas {
+                a: port_a.id.as_str().to_string(),
+                b: port_b.id.as_str().to_string(),
+                field,
+            });
+        }
+        let first = Self::internal(
+            contribution_a_id,
+            exchange_id.clone(),
+            port_a.id.clone(),
+            port_b.id.clone(),
+            WindowPortKind::Power(port_a.kind),
+            None,
+            port_a.timestamp.clone(),
+            binding_evidence_a,
+        )?;
+        let second = Self::internal(
+            contribution_b_id,
+            exchange_id,
+            port_b.id.clone(),
+            port_a.id.clone(),
+            WindowPortKind::Power(port_b.kind),
+            None,
+            port_b.timestamp.clone(),
+            binding_evidence_b,
+        )?;
+        Ok([first, second])
+    }
+
+    /// Build both sides of one context-compatible internal stream pair.
+    ///
+    /// # Errors
+    ///
+    /// Refuses reused IDs or mismatched state, constituent, frame, clock,
+    /// gravity, or stress-work context.
+    pub fn internal_stream_pair(
+        exchange_id: StableId,
+        contribution_a_id: StableId,
+        port_a: &StreamPort,
+        contribution_b_id: StableId,
+        port_b: &StreamPort,
+        binding_evidence_a: WindowEvidenceRef,
+        binding_evidence_b: WindowEvidenceRef,
+    ) -> Result<[Self; 2], CoupleError> {
+        require_internal_stream_pair(port_a.binding(), port_b.binding())?;
+        let first = Self::internal(
+            contribution_a_id,
+            exchange_id.clone(),
+            port_a.binding.port_id.clone(),
+            port_b.binding.port_id.clone(),
+            WindowPortKind::Stream,
+            Some(Box::new(port_a.binding.clone())),
+            port_a.binding.timestamp.clone(),
+            binding_evidence_a,
+        )?;
+        let second = Self::internal(
+            contribution_b_id,
+            exchange_id,
+            port_b.binding.port_id.clone(),
+            port_a.binding.port_id.clone(),
+            WindowPortKind::Stream,
+            Some(Box::new(port_b.binding.clone())),
+            port_b.binding.timestamp.clone(),
+            binding_evidence_b,
+        )?;
+        Ok([first, second])
+    }
+
+    /// Bind an ordinary port to an external accounting boundary.
+    ///
+    /// # Errors
+    ///
+    /// Refuses the wrong boundary treatment, coordinate mismatch, non-outward
+    /// orientation, or identity aliasing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn external_power_port(
+        contribution_id: StableId,
+        exchange_id: StableId,
+        counterparty_id: StableId,
+        port: &PortSchema,
+        boundary: AccountingBoundary,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        Self::external(
+            contribution_id,
+            exchange_id,
+            port.id.clone(),
+            counterparty_id,
+            WindowPortKind::Power(port.kind),
+            None,
+            port.coordinates.clone(),
+            port.timestamp.clone(),
+            boundary,
+            binding_evidence,
+        )
+    }
+
+    /// Bind a stream port to an external accounting boundary.
+    ///
+    /// # Errors
+    ///
+    /// Refuses the wrong boundary treatment, coordinate mismatch, non-outward
+    /// orientation, or identity aliasing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn external_stream_port(
+        contribution_id: StableId,
+        exchange_id: StableId,
+        counterparty_id: StableId,
+        port: &StreamPort,
+        boundary: AccountingBoundary,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        Self::external(
+            contribution_id,
+            exchange_id,
+            port.binding.port_id.clone(),
+            counterparty_id,
+            WindowPortKind::Stream,
+            Some(Box::new(port.binding.clone())),
+            port.binding.coordinates.clone(),
+            port.binding.timestamp.clone(),
+            boundary,
+            binding_evidence,
+        )
+    }
+
+    /// Bind an admitted included source and its explicit accounting boundary.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a boundary not declared as an included source term.
+    pub fn included_source(
+        contribution_id: StableId,
+        source: &SourceOrReservoir,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        if source.boundary.treatment != BoundaryTreatment::IncludedSourceTerm {
+            return Err(CoupleError::AccountingWindowBoundaryTreatmentMismatch {
+                boundary: source.boundary.id.as_str().to_string(),
+                expected: BoundaryTreatment::IncludedSourceTerm,
+                actual: source.boundary.treatment,
+            });
+        }
+        Self::from_parts(
+            contribution_id,
+            source.id.clone(),
+            source.port.id.clone(),
+            source.boundary.id.clone(),
+            WindowExchangeRole::IncludedSource,
+            WindowPortKind::Power(source.port.kind),
+            None,
+            source.port.timestamp.clone(),
+            Some(source.boundary.clone()),
+            binding_evidence,
+        )
+    }
+
+    /// Bind an admitted external source/reservoir exchange.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a boundary not declared as an outward external reservoir exchange.
+    pub fn external_source(
+        contribution_id: StableId,
+        source: &SourceOrReservoir,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        if source.boundary.treatment != BoundaryTreatment::ExternalReservoirExchange {
+            return Err(CoupleError::AccountingWindowBoundaryTreatmentMismatch {
+                boundary: source.boundary.id.as_str().to_string(),
+                expected: BoundaryTreatment::ExternalReservoirExchange,
+                actual: source.boundary.treatment,
+            });
+        }
+        if source.boundary.coordinates.orientation != PortOrientation::OutwardFromOwner {
+            return Err(CoupleError::AccountingWindowBoundaryRequiresOutward {
+                boundary: source.boundary.id.as_str().to_string(),
+            });
+        }
+        Self::from_parts(
+            contribution_id,
+            source.id.clone(),
+            source.port.id.clone(),
+            source.boundary.id.clone(),
+            WindowExchangeRole::ExternalExchange,
+            WindowPortKind::Power(source.port.kind),
+            None,
+            source.port.timestamp.clone(),
+            Some(source.boundary.clone()),
+            binding_evidence,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn internal(
+        contribution_id: StableId,
+        exchange_id: StableId,
+        local_port_id: StableId,
+        counterparty_id: StableId,
+        port_kind: WindowPortKind,
+        stream_binding: Option<Box<StreamChartBinding>>,
+        timestamp: PortTimestamp,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        Self::from_parts(
+            contribution_id,
+            exchange_id,
+            local_port_id,
+            counterparty_id,
+            WindowExchangeRole::InternalTransfer,
+            port_kind,
+            stream_binding,
+            timestamp,
+            None,
+            binding_evidence,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn external(
+        contribution_id: StableId,
+        exchange_id: StableId,
+        local_port_id: StableId,
+        counterparty_id: StableId,
+        port_kind: WindowPortKind,
+        stream_binding: Option<Box<StreamChartBinding>>,
+        coordinates: CoordinateBinding,
+        timestamp: PortTimestamp,
+        boundary: AccountingBoundary,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        if boundary.treatment != BoundaryTreatment::ExternalReservoirExchange {
+            return Err(CoupleError::AccountingWindowBoundaryTreatmentMismatch {
+                boundary: boundary.id.as_str().to_string(),
+                expected: BoundaryTreatment::ExternalReservoirExchange,
+                actual: boundary.treatment,
+            });
+        }
+        if coordinates != boundary.coordinates {
+            return Err(CoupleError::AccountingBoundaryMismatch {
+                port: local_port_id.as_str().to_string(),
+                boundary: boundary.id.as_str().to_string(),
+            });
+        }
+        if coordinates.orientation != PortOrientation::OutwardFromOwner {
+            return Err(CoupleError::AccountingWindowBoundaryRequiresOutward {
+                boundary: boundary.id.as_str().to_string(),
+            });
+        }
+        Self::from_parts(
+            contribution_id,
+            exchange_id,
+            local_port_id,
+            counterparty_id,
+            WindowExchangeRole::ExternalExchange,
+            port_kind,
+            stream_binding,
+            timestamp,
+            Some(boundary),
+            binding_evidence,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        contribution_id: StableId,
+        exchange_id: StableId,
+        local_port_id: StableId,
+        counterparty_id: StableId,
+        role: WindowExchangeRole,
+        port_kind: WindowPortKind,
+        stream_binding: Option<Box<StreamChartBinding>>,
+        timestamp: PortTimestamp,
+        boundary: Option<AccountingBoundary>,
+        binding_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        for (left, right) in [
+            (&contribution_id, &exchange_id),
+            (&contribution_id, &local_port_id),
+            (&contribution_id, &counterparty_id),
+            (&exchange_id, &local_port_id),
+            (&exchange_id, &counterparty_id),
+            (&local_port_id, &counterparty_id),
+        ] {
+            if left == right {
+                return Err(CoupleError::DuplicateIdentity {
+                    id: left.as_str().to_string(),
+                });
+            }
+        }
+        if let Some(boundary) = &boundary {
+            for id in [&contribution_id, &exchange_id, &local_port_id] {
+                if id == &boundary.id {
+                    return Err(CoupleError::DuplicateIdentity {
+                        id: boundary.id.as_str().to_string(),
+                    });
+                }
+            }
+        }
+        if matches!(port_kind, WindowPortKind::Stream) != stream_binding.is_some() {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "manifest_stream_binding",
+            });
+        }
+        require_window_evidence_role(
+            &binding_evidence,
+            &WindowEvidenceRole::ManifestBinding {
+                contribution_id: contribution_id.clone(),
+                local_port_id: local_port_id.clone(),
+            },
+        )?;
+        Ok(Self {
+            contribution_id,
+            exchange_id,
+            local_port_id,
+            counterparty_id,
+            role,
+            port_kind,
+            stream_binding,
+            timestamp,
+            boundary,
+            binding_evidence,
+        })
+    }
+
+    /// Expected contribution identifier.
+    #[must_use]
+    pub fn contribution_id(&self) -> &StableId {
+        &self.contribution_id
+    }
+
+    /// Pair/relation/exchange group used for localization.
+    #[must_use]
+    pub fn exchange_id(&self) -> &StableId {
+        &self.exchange_id
+    }
+
+    /// Port whose signed integrated values occupy this manifest row.
+    #[must_use]
+    pub fn local_port_id(&self) -> &StableId {
+        &self.local_port_id
+    }
+
+    /// Opposite port, reservoir, source boundary, or environment identity.
+    #[must_use]
+    pub fn counterparty_id(&self) -> &StableId {
+        &self.counterparty_id
+    }
+
+    /// Internal, external, or included-source role.
+    #[must_use]
+    pub fn role(&self) -> WindowExchangeRole {
+        self.role
+    }
+
+    /// Physical port vocabulary.
+    #[must_use]
+    pub fn port_kind(&self) -> WindowPortKind {
+        self.port_kind
+    }
+
+    /// Complete thermodynamic context retained for a stream row.
+    #[must_use]
+    pub fn stream_binding(&self) -> Option<&StreamChartBinding> {
+        self.stream_binding.as_deref()
+    }
+
+    /// Port schema timestamp retained for clock/window admission.
+    #[must_use]
+    pub fn timestamp(&self) -> &PortTimestamp {
+        &self.timestamp
+    }
+
+    /// Explicit accounting boundary for external/source entries.
+    #[must_use]
+    pub fn boundary(&self) -> Option<&AccountingBoundary> {
+        self.boundary.as_ref()
+    }
+
+    /// Evidence binding this contribution to its local port; closure evidence
+    /// separately binds the complete row including counterparty and topology.
+    #[must_use]
+    pub fn binding_evidence(&self) -> &WindowEvidenceRef {
+        &self.binding_evidence
+    }
+}
+
+/// Complete declared boundary/source set and acceptance policy for one window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountingWindowSpec {
+    version: u16,
+    interval: AccountingWindowInterval,
+    energy_reference: StableId,
+    element_schema: WindowElementSchema,
+    charge_schema: WindowChargeSchema,
+    entropy_convention: StableId,
+    manifest: Vec<WindowManifestEntry>,
+    tolerances: WindowAuditTolerances,
+    environment: Option<ExergyEnvironment>,
+    closure_evidence: WindowEvidenceRef,
+}
+
+impl AccountingWindowSpec {
+    /// Admit a complete, canonically ordered expected-contribution manifest.
+    ///
+    /// # Errors
+    ///
+    /// Refuses duplicate contribution or local-port IDs, out-of-window
+    /// timestamps, malformed internal pairs, or foreign evidence. An empty
+    /// manifest is a valid isolated window only under the explicit closure
+    /// evidence supplied here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        interval: AccountingWindowInterval,
+        energy_reference: StableId,
+        element_schema: WindowElementSchema,
+        charge_schema: WindowChargeSchema,
+        entropy_convention: StableId,
+        manifest: impl IntoIterator<Item = WindowManifestEntry>,
+        tolerances: WindowAuditTolerances,
+        environment: Option<ExergyEnvironment>,
+        closure_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        require_window_interval(&interval, closure_evidence.interval())?;
+        if let Some(projection_evidence) = element_schema.projection_evidence() {
+            require_window_interval(&interval, projection_evidence.interval())?;
+            require_window_evidence_role(
+                projection_evidence,
+                &WindowEvidenceRole::ElementProjection {
+                    elements: element_schema.elements().to_vec(),
+                },
+            )?;
+        }
+        require_window_interval(&interval, charge_schema.projection_evidence().interval())?;
+        require_window_evidence_role(
+            charge_schema.projection_evidence(),
+            &charge_schema.evidence_role(),
+        )?;
+        let mut manifest: Vec<_> = manifest.into_iter().collect();
+        manifest.sort_by(|left, right| left.contribution_id.cmp(&right.contribution_id));
+        require_window_evidence_role(
+            &closure_evidence,
+            &WindowEvidenceRole::manifest_closure(&manifest),
+        )?;
+        for pair in manifest.windows(2) {
+            if pair[0].contribution_id == pair[1].contribution_id {
+                return Err(CoupleError::DuplicateAccountingWindowContribution {
+                    contribution: pair[0].contribution_id.as_str().to_string(),
+                });
+            }
+        }
+        let mut local_ports: Vec<_> = manifest.iter().map(|entry| &entry.local_port_id).collect();
+        local_ports.sort();
+        for pair in local_ports.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(CoupleError::DuplicateAccountingWindowPort {
+                    port: pair[0].as_str().to_string(),
+                });
+            }
+        }
+        for entry in &manifest {
+            if !interval.contains(&entry.timestamp) {
+                return Err(CoupleError::AccountingWindowContextMismatch {
+                    field: "manifest_timestamp",
+                });
+            }
+            require_window_interval(&interval, entry.binding_evidence.interval())?;
+        }
+        let requires_elements = manifest.iter().any(|entry| {
+            matches!(
+                entry.port_kind,
+                WindowPortKind::Stream
+                    | WindowPortKind::Power(PortKind::ChemicalPotentialAmountFlow)
+            )
+        });
+        if requires_elements && matches!(&element_schema, WindowElementSchema::NotApplicable { .. })
+        {
+            return Err(CoupleError::AccountingWindowElementSchemaRequired);
+        }
+        validate_window_manifest_groups(&manifest)?;
+        validate_window_stream_contexts(&manifest)?;
+        Ok(Self {
+            version: ACCOUNTING_WINDOW_VERSION,
+            interval,
+            energy_reference,
+            element_schema,
+            charge_schema,
+            entropy_convention,
+            manifest,
+            tolerances,
+            environment,
+            closure_evidence,
+        })
+    }
+
+    /// Accounting-window schema version.
+    #[must_use]
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Exact logical interval.
+    #[must_use]
+    pub fn interval(&self) -> &AccountingWindowInterval {
+        &self.interval
+    }
+
+    /// Common state/stream energy-reference contract for this audit.
+    #[must_use]
+    pub fn energy_reference(&self) -> &StableId {
+        &self.energy_reference
+    }
+
+    /// Element projection/applicability schema.
+    #[must_use]
+    pub fn element_schema(&self) -> &WindowElementSchema {
+        &self.element_schema
+    }
+
+    /// Direct-coulomb/species-projection/neutrality charge policy.
+    #[must_use]
+    pub fn charge_schema(&self) -> &WindowChargeSchema {
+        &self.charge_schema
+    }
+
+    /// Nonequilibrium convention shared by every entropy ledger row.
+    #[must_use]
+    pub fn entropy_convention(&self) -> &StableId {
+        &self.entropy_convention
+    }
+
+    /// Canonically ordered expected contribution rows.
+    #[must_use]
+    pub fn manifest(&self) -> &[WindowManifestEntry] {
+        &self.manifest
+    }
+
+    /// Typed physical acceptance tolerances.
+    #[must_use]
+    pub fn tolerances(&self) -> WindowAuditTolerances {
+        self.tolerances
+    }
+
+    /// Optional environment for `T0 * S_gen`.
+    #[must_use]
+    pub fn environment(&self) -> Option<&ExergyEnvironment> {
+        self.environment.as_ref()
+    }
+
+    /// Evidence claiming that the declared manifest is complete.
+    #[must_use]
+    pub fn closure_evidence(&self) -> &WindowEvidenceRef {
+        &self.closure_evidence
+    }
+
+    fn manifest_entry(&self, contribution_id: &StableId) -> Option<&WindowManifestEntry> {
+        self.manifest
+            .binary_search_by(|entry| entry.contribution_id.cmp(contribution_id))
+            .ok()
+            .map(|index| &self.manifest[index])
+    }
+}
+
+/// Initial or final endpoint of an accounting window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowEndpoint {
+    /// Stored state at `interval.start`.
+    Initial,
+    /// Stored state at `interval.end`.
+    Final,
+}
+
+/// Evidence-bound stored extensive values at one exact window endpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowInventorySnapshot {
+    interval: AccountingWindowInterval,
+    energy_reference: StableId,
+    element_schema: WindowElementSchema,
+    charge_schema: WindowChargeSchema,
+    entropy_convention: StableId,
+    endpoint: WindowEndpoint,
+    balance: WindowBalance,
+    state_evidence: WindowEvidenceRef,
+}
+
+impl WindowInventorySnapshot {
+    /// Admit one endpoint inventory against a window's exact element schema.
+    ///
+    /// # Errors
+    ///
+    /// Refuses foreign evidence, an element-axis mismatch, or negative stored
+    /// mass/element amounts. Energy and entropy reference values may be signed.
+    pub fn try_new(
+        spec: &AccountingWindowSpec,
+        endpoint: WindowEndpoint,
+        balance: WindowBalance,
+        state_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        require_window_interval(&spec.interval, state_evidence.interval())?;
+        require_window_evidence_role(
+            &state_evidence,
+            &WindowEvidenceRole::Inventory {
+                endpoint,
+                energy_reference: spec.energy_reference.clone(),
+            },
+        )?;
+        require_window_element_axis(&spec.element_schema, &balance, "inventory_element_axis")?;
+        require_window_charge_admission(&spec.charge_schema, &balance, "inventory_charge")?;
+        if balance.mass.value() < 0.0 {
+            return Err(CoupleError::NegativeAccountingWindowInventory { field: "mass" });
+        }
+        if balance
+            .element_amounts
+            .iter()
+            .any(|entry| entry.amount.value() < 0.0)
+        {
+            return Err(CoupleError::NegativeAccountingWindowInventory {
+                field: "element_amount",
+            });
+        }
+        Ok(Self {
+            interval: spec.interval.clone(),
+            energy_reference: spec.energy_reference.clone(),
+            element_schema: spec.element_schema.clone(),
+            charge_schema: spec.charge_schema.clone(),
+            entropy_convention: spec.entropy_convention.clone(),
+            endpoint,
+            balance,
+            state_evidence,
+        })
+    }
+
+    /// Initial or final endpoint.
+    #[must_use]
+    pub fn endpoint(&self) -> WindowEndpoint {
+        self.endpoint
+    }
+
+    /// Stored extensive values.
+    #[must_use]
+    pub fn balance(&self) -> &WindowBalance {
+        &self.balance
+    }
+
+    /// Evidence covering this state snapshot.
+    #[must_use]
+    pub fn state_evidence(&self) -> &WindowEvidenceRef {
+        &self.state_evidence
+    }
+}
+
+/// Pre-integrated transfer values, normalized positive into the audited system.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntegratedWindowTransfer {
+    energy_into: Energy,
+    mass_into: Mass,
+    element_amounts_into: Vec<WindowElementAmount>,
+    charge_into: ElectricCharge,
+    entropy_into: BoundaryEntropyBreakdown,
+    entropy_convention: StableId,
+}
+
+impl IntegratedWindowTransfer {
+    /// Admit one finite, explicit integrated transfer decomposition.
+    ///
+    /// The caller must integrate in physical time and normalize an
+    /// owner-outward stream by negating its integrated rates. The retained
+    /// integration evidence carries that obligation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses duplicate element IDs or a non-finite fixed-order total.
+    pub fn try_new(
+        energy_into: Energy,
+        mass_into: Mass,
+        element_amounts_into: impl IntoIterator<Item = WindowElementAmount>,
+        charge_into: ElectricCharge,
+        entropy_into: BoundaryEntropyBreakdown,
+        entropy_convention: StableId,
+    ) -> Result<Self, CoupleError> {
+        let balance = WindowBalance::try_new(
+            energy_into,
+            mass_into,
+            element_amounts_into,
+            charge_into,
+            entropy_into.total(),
+        )?;
+        Ok(Self {
+            energy_into: balance.energy,
+            mass_into: balance.mass,
+            element_amounts_into: balance.element_amounts,
+            charge_into: balance.charge,
+            entropy_into,
+            entropy_convention,
+        })
+    }
+
+    /// Integrated energy transfer, positive into system.
+    #[must_use]
+    pub fn energy_into(&self) -> Energy {
+        self.energy_into
+    }
+
+    /// Integrated mass transfer, positive into system.
+    #[must_use]
+    pub fn mass_into(&self) -> Mass {
+        self.mass_into
+    }
+
+    /// Integrated elemental transfers, positive into system.
+    #[must_use]
+    pub fn element_amounts_into(&self) -> &[WindowElementAmount] {
+        &self.element_amounts_into
+    }
+
+    /// Integrated charge transfer, positive into system.
+    #[must_use]
+    pub fn charge_into(&self) -> ElectricCharge {
+        self.charge_into
+    }
+
+    /// Explicit advected/diffusive/heat/radiation entropy transfer.
+    #[must_use]
+    pub fn entropy_into(&self) -> &BoundaryEntropyBreakdown {
+        &self.entropy_into
+    }
+
+    /// Nonequilibrium convention governing the four entropy slots.
+    #[must_use]
+    pub fn entropy_convention(&self) -> &StableId {
+        &self.entropy_convention
+    }
+
+    fn as_balance(&self) -> WindowBalance {
+        WindowBalance {
+            energy: self.energy_into,
+            mass: self.mass_into,
+            element_amounts: self.element_amounts_into.clone(),
+            charge: self.charge_into,
+            entropy: self.entropy_into.total(),
+        }
+    }
+}
+
+/// One complete manifest row filled with pre-integrated physical values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowBoundaryContribution {
+    manifest_entry: WindowManifestEntry,
+    energy_reference: StableId,
+    element_schema: WindowElementSchema,
+    charge_schema: WindowChargeSchema,
+    transfer: IntegratedWindowTransfer,
+    integration_evidence: WindowEvidenceRef,
+}
+
+impl WindowBoundaryContribution {
+    /// Fill one expected manifest row.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an undeclared ID, element-axis mismatch, or evidence bound to a
+    /// different interval.
+    pub fn try_new(
+        spec: &AccountingWindowSpec,
+        contribution_id: &StableId,
+        transfer: IntegratedWindowTransfer,
+        integration_evidence: WindowEvidenceRef,
+    ) -> Result<Self, CoupleError> {
+        let manifest_entry = spec.manifest_entry(contribution_id).ok_or_else(|| {
+            CoupleError::AccountingWindowContributionSetMismatch {
+                missing: Vec::new(),
+                unexpected: vec![contribution_id.as_str().to_string()],
+            }
+        })?;
+        require_window_interval(&spec.interval, integration_evidence.interval())?;
+        require_window_evidence_role(
+            &integration_evidence,
+            &WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: manifest_entry.contribution_id.clone(),
+                local_port_id: manifest_entry.local_port_id.clone(),
+                energy_reference: spec.energy_reference.clone(),
+            },
+        )?;
+        if let Some(temperature_evidence) = transfer.entropy_into.temperature_reference.evidence() {
+            require_window_interval(&spec.interval, temperature_evidence.interval())?;
+            require_window_evidence_role(
+                temperature_evidence,
+                &WindowEvidenceRole::BoundaryTemperature {
+                    contribution_id: manifest_entry.contribution_id.clone(),
+                },
+            )?;
+        }
+        require_window_element_axis(
+            &spec.element_schema,
+            &transfer.as_balance(),
+            "transfer_element_axis",
+        )?;
+        require_window_charge_admission(
+            &spec.charge_schema,
+            &transfer.as_balance(),
+            "transfer_charge",
+        )?;
+        validate_window_transfer_shape(manifest_entry, &transfer)?;
+        Ok(Self {
+            manifest_entry: manifest_entry.clone(),
+            energy_reference: spec.energy_reference.clone(),
+            element_schema: spec.element_schema.clone(),
+            charge_schema: spec.charge_schema.clone(),
+            transfer,
+            integration_evidence,
+        })
+    }
+
+    /// Complete expected manifest row.
+    #[must_use]
+    pub fn manifest_entry(&self) -> &WindowManifestEntry {
+        &self.manifest_entry
+    }
+
+    /// Signed values normalized positive into system.
+    #[must_use]
+    pub fn transfer(&self) -> &IntegratedWindowTransfer {
+        &self.transfer
+    }
+
+    /// Physical-time integration and sign-normalization evidence.
+    #[must_use]
+    pub fn integration_evidence(&self) -> &WindowEvidenceRef {
+        &self.integration_evidence
+    }
+}
+
+/// Conservation/inequality axis named by a physical window violation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowBalanceLaw {
+    /// First-law energy closure.
+    FirstLaw,
+    /// Total mass closure.
+    Mass,
+    /// One elemental-amount closure.
+    Element(ElementId),
+    /// Electric-charge closure.
+    Charge,
+    /// Nonnegative entropy generation.
+    EntropyGeneration,
+    /// Pair-local energy closure for an internal transfer.
+    InternalFirstLaw,
+    /// Pair-local mass closure for an internal transfer.
+    InternalMass,
+    /// Pair-local elemental closure for an internal transfer.
+    InternalElement(ElementId),
+    /// Pair-local charge closure for an internal transfer.
+    InternalCharge,
+    /// Pair-local entropy-transfer closure for an internal transfer.
+    InternalEntropyTransfer,
+}
+
+/// Structured physical failure retaining all nonzero involved ledger rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAuditViolation {
+    law: WindowBalanceLaw,
+    residual_si: f64,
+    tolerance_si: f64,
+    contribution_ids: Vec<StableId>,
+    port_ids: Vec<StableId>,
+    exchange_ids: Vec<StableId>,
+}
+
+impl WindowAuditViolation {
+    /// Failed balance or one-sided inequality.
+    #[must_use]
+    pub fn law(&self) -> &WindowBalanceLaw {
+        &self.law
+    }
+
+    /// Signed residual in the coherent SI unit implied by [`Self::law`].
+    #[must_use]
+    pub fn residual_si(&self) -> f64 {
+        self.residual_si
+    }
+
+    /// Typed policy tolerance expressed in the same coherent SI unit.
+    #[must_use]
+    pub fn tolerance_si(&self) -> f64 {
+        self.tolerance_si
+    }
+
+    /// Canonically ordered nonzero contribution rows involved in this axis.
+    #[must_use]
+    pub fn contribution_ids(&self) -> &[StableId] {
+        &self.contribution_ids
+    }
+
+    /// Canonically ordered local ports involved in this axis.
+    #[must_use]
+    pub fn port_ids(&self) -> &[StableId] {
+        &self.port_ids
+    }
+
+    /// Canonically ordered pair/relation/exchange groups involved in this axis.
+    #[must_use]
+    pub fn exchange_ids(&self) -> &[StableId] {
+        &self.exchange_ids
+    }
+}
+
+/// Per-pair/relation energy and entropy ledger for localization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowExchangeLedger {
+    exchange_id: StableId,
+    role: WindowExchangeRole,
+    contribution_ids: Vec<StableId>,
+    port_ids: Vec<StableId>,
+    energy_into: Energy,
+    mass_into: Mass,
+    element_amounts_into: Vec<WindowElementAmount>,
+    charge_into: ElectricCharge,
+    entropy_into: Entropy,
+}
+
+impl WindowExchangeLedger {
+    /// Pair/relation/exchange identifier.
+    #[must_use]
+    pub fn exchange_id(&self) -> &StableId {
+        &self.exchange_id
+    }
+
+    /// Internal transfer, external exchange, or included source.
+    #[must_use]
+    pub fn role(&self) -> WindowExchangeRole {
+        self.role
+    }
+
+    /// Canonically ordered contribution rows in this group.
+    #[must_use]
+    pub fn contribution_ids(&self) -> &[StableId] {
+        &self.contribution_ids
+    }
+
+    /// Canonically ordered local ports in this group.
+    #[must_use]
+    pub fn port_ids(&self) -> &[StableId] {
+        &self.port_ids
+    }
+
+    /// Net integrated energy into the audited system from this group.
+    #[must_use]
+    pub fn energy_into(&self) -> Energy {
+        self.energy_into
+    }
+
+    /// Net integrated mass into the audited system from this group.
+    #[must_use]
+    pub fn mass_into(&self) -> Mass {
+        self.mass_into
+    }
+
+    /// Net integrated elemental amounts into the system from this group.
+    #[must_use]
+    pub fn element_amounts_into(&self) -> &[WindowElementAmount] {
+        &self.element_amounts_into
+    }
+
+    /// Net integrated charge into the audited system from this group.
+    #[must_use]
+    pub fn charge_into(&self) -> ElectricCharge {
+        self.charge_into
+    }
+
+    /// Net integrated entropy into the audited system from this group.
+    #[must_use]
+    pub fn entropy_into(&self) -> Entropy {
+        self.entropy_into
+    }
+}
+
+/// Typed residuals for all PR-4 closed-window laws.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowResiduals {
+    first_law: Energy,
+    mass: Mass,
+    elements: Vec<WindowElementAmount>,
+    charge: ElectricCharge,
+    entropy_generation: Entropy,
+}
+
+impl WindowResiduals {
+    /// `delta stored energy - total energy into system`.
+    #[must_use]
+    pub fn first_law(&self) -> Energy {
+        self.first_law
+    }
+
+    /// `delta stored mass - total mass into system`.
+    #[must_use]
+    pub fn mass(&self) -> Mass {
+        self.mass
+    }
+
+    /// Per-element `delta stored - total into system` residuals.
+    #[must_use]
+    pub fn elements(&self) -> &[WindowElementAmount] {
+        &self.elements
+    }
+
+    /// `delta stored charge - total charge into system`.
+    #[must_use]
+    pub fn charge(&self) -> ElectricCharge {
+        self.charge
+    }
+
+    /// `delta stored entropy - total boundary/source entropy into system`.
+    #[must_use]
+    pub fn entropy_generation(&self) -> Entropy {
+        self.entropy_generation
+    }
+}
+
+/// Optional Gouy-Stodola diagnostic, not a complete availability balance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExergyLedger {
+    environment: ExergyEnvironment,
+    entropy_generation: Entropy,
+    destruction: Energy,
+}
+
+impl ExergyLedger {
+    /// Explicit reference environment.
+    #[must_use]
+    pub fn environment(&self) -> &ExergyEnvironment {
+        &self.environment
+    }
+
+    /// Audited entropy generation used in the product.
+    #[must_use]
+    pub fn entropy_generation(&self) -> Entropy {
+        self.entropy_generation
+    }
+
+    /// `T0 * S_gen` in joules; may be slightly negative within tolerance.
+    #[must_use]
+    pub fn destruction(&self) -> Energy {
+        self.destruction
+    }
+}
+
+/// Retained green or red result of one structurally complete physical audit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAuditReport {
+    spec: AccountingWindowSpec,
+    initial: WindowInventorySnapshot,
+    final_snapshot: WindowInventorySnapshot,
+    contributions: Vec<WindowBoundaryContribution>,
+    exchanges: Vec<WindowExchangeLedger>,
+    residuals: WindowResiduals,
+    violations: Vec<WindowAuditViolation>,
+    exergy: Option<ExergyLedger>,
+}
+
+impl WindowAuditReport {
+    /// Audit a complete set of pre-integrated window contributions.
+    ///
+    /// A physically red window returns `Ok(Self)` with retained violations.
+    /// `Err` is reserved for malformed, incomplete, foreign, duplicate, or
+    /// non-finite evidence/input.
+    pub fn audit(
+        spec: AccountingWindowSpec,
+        initial: WindowInventorySnapshot,
+        final_snapshot: WindowInventorySnapshot,
+        contributions: impl IntoIterator<Item = WindowBoundaryContribution>,
+    ) -> Result<Self, CoupleError> {
+        require_window_snapshot(&spec, &initial, WindowEndpoint::Initial)?;
+        require_window_snapshot(&spec, &final_snapshot, WindowEndpoint::Final)?;
+        let mut contributions: Vec<_> = contributions.into_iter().collect();
+        contributions.sort_by(|left, right| {
+            left.manifest_entry
+                .contribution_id
+                .cmp(&right.manifest_entry.contribution_id)
+        });
+        for pair in contributions.windows(2) {
+            if pair[0].manifest_entry.contribution_id == pair[1].manifest_entry.contribution_id {
+                return Err(CoupleError::DuplicateAccountingWindowContribution {
+                    contribution: pair[0].manifest_entry.contribution_id.as_str().to_string(),
+                });
+            }
+        }
+        require_complete_window_contributions(&spec, &contributions)?;
+        let residuals = compute_window_residuals(&spec, &initial, &final_snapshot, &contributions)?;
+        let exchanges = build_window_exchange_ledger(&contributions)?;
+        let violations = build_window_violations(&spec, &residuals, &contributions, &exchanges);
+        let exergy = spec
+            .environment
+            .clone()
+            .map(|environment| {
+                let destruction =
+                    environment.temperature.value() * residuals.entropy_generation.value();
+                ensure_finite_window_value("exergy_destruction", None, destruction)?;
+                Ok(ExergyLedger {
+                    environment,
+                    entropy_generation: residuals.entropy_generation,
+                    destruction: Energy::new(destruction),
+                })
+            })
+            .transpose()?;
+
+        Ok(Self {
+            spec,
+            initial,
+            final_snapshot,
+            contributions,
+            exchanges,
+            residuals,
+            violations,
+            exergy,
+        })
+    }
+
+    /// Window specification and completeness evidence.
+    #[must_use]
+    pub fn spec(&self) -> &AccountingWindowSpec {
+        &self.spec
+    }
+
+    /// Initial retained inventory.
+    #[must_use]
+    pub fn initial(&self) -> &WindowInventorySnapshot {
+        &self.initial
+    }
+
+    /// Final retained inventory.
+    #[must_use]
+    pub fn final_snapshot(&self) -> &WindowInventorySnapshot {
+        &self.final_snapshot
+    }
+
+    /// Complete canonical per-port ledger with raw signed contributions.
+    #[must_use]
+    pub fn contributions(&self) -> &[WindowBoundaryContribution] {
+        &self.contributions
+    }
+
+    /// Canonical pair/relation/exchange localization ledger.
+    #[must_use]
+    pub fn exchanges(&self) -> &[WindowExchangeLedger] {
+        &self.exchanges
+    }
+
+    /// All computed physical residuals, including raw entropy generation.
+    #[must_use]
+    pub fn residuals(&self) -> &WindowResiduals {
+        &self.residuals
+    }
+
+    /// All physical failures; empty means the declared balances are green.
+    #[must_use]
+    pub fn violations(&self) -> &[WindowAuditViolation] {
+        &self.violations
+    }
+
+    /// Whether every equality and the one-sided entropy inequality passes.
+    #[must_use]
+    pub fn is_green(&self) -> bool {
+        self.violations.is_empty()
+    }
+
+    /// Optional narrow `T0 * S_gen` diagnostic.
+    #[must_use]
+    pub fn exergy(&self) -> Option<&ExergyLedger> {
+        self.exergy.as_ref()
+    }
+}
+
+fn ensure_finite_window_value(
+    field: &'static str,
+    context: Option<&str>,
+    value: f64,
+) -> Result<(), CoupleError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(CoupleError::NonFiniteAccountingWindowValue {
+            field,
+            context: context.map(str::to_string),
+        })
+    }
+}
+
+fn ensure_nonnegative_window_value(field: &'static str, value: f64) -> Result<(), CoupleError> {
+    ensure_finite_window_value(field, None, value)?;
+    if value < 0.0 {
+        Err(CoupleError::NegativeAccountingWindowTolerance { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_window_evidence_role(
+    evidence: &WindowEvidenceRef,
+    expected: &WindowEvidenceRole,
+) -> Result<(), CoupleError> {
+    if &evidence.role == expected {
+        Ok(())
+    } else if evidence.role.diagnostic_label() == expected.diagnostic_label() {
+        Err(CoupleError::AccountingWindowContextMismatch {
+            field: "evidence_subject",
+        })
+    } else {
+        Err(CoupleError::AccountingWindowEvidenceRoleMismatch {
+            expected: expected.diagnostic_label(),
+            actual: evidence.role.diagnostic_label(),
+        })
+    }
+}
+
+fn validate_window_manifest_groups(manifest: &[WindowManifestEntry]) -> Result<(), CoupleError> {
+    let mut exchange_ids: Vec<_> = manifest
+        .iter()
+        .map(|entry| entry.exchange_id.clone())
+        .collect();
+    exchange_ids.sort();
+    exchange_ids.dedup();
+    for exchange_id in exchange_ids {
+        let group: Vec<_> = manifest
+            .iter()
+            .filter(|entry| entry.exchange_id == exchange_id)
+            .collect();
+        let role = group[0].role;
+        if group.iter().any(|entry| entry.role != role) {
+            return Err(CoupleError::MalformedAccountingWindowExchange {
+                exchange: exchange_id.as_str().to_string(),
+                field: "mixed_roles",
+            });
+        }
+        if role != WindowExchangeRole::InternalTransfer {
+            continue;
+        }
+        if group.len() != 2 {
+            return Err(CoupleError::MalformedAccountingWindowExchange {
+                exchange: exchange_id.as_str().to_string(),
+                field: "internal_cardinality",
+            });
+        }
+        let [first, second] = [group[0], group[1]];
+        if first.local_port_id != second.counterparty_id
+            || first.counterparty_id != second.local_port_id
+        {
+            return Err(CoupleError::MalformedAccountingWindowExchange {
+                exchange: exchange_id.as_str().to_string(),
+                field: "internal_reciprocity",
+            });
+        }
+        if first.port_kind != second.port_kind {
+            return Err(CoupleError::MalformedAccountingWindowExchange {
+                exchange: exchange_id.as_str().to_string(),
+                field: "internal_port_kind",
+            });
+        }
+        if first.timestamp != second.timestamp {
+            return Err(CoupleError::MalformedAccountingWindowExchange {
+                exchange: exchange_id.as_str().to_string(),
+                field: "internal_timestamp",
+            });
+        }
+        if first.boundary.is_some() || second.boundary.is_some() {
+            return Err(CoupleError::MalformedAccountingWindowExchange {
+                exchange: exchange_id.as_str().to_string(),
+                field: "internal_boundary",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_window_stream_contexts(manifest: &[WindowManifestEntry]) -> Result<(), CoupleError> {
+    let mut bindings = manifest
+        .iter()
+        .filter_map(|entry| entry.stream_binding.as_deref());
+    let Some(reference) = bindings.next() else {
+        return Ok(());
+    };
+    for binding in bindings {
+        let mismatch = if reference.state_schema != binding.state_schema {
+            Some("stream_state_schema")
+        } else if reference.constituent_basis != binding.constituent_basis {
+            Some("stream_constituent_basis")
+        } else if reference.constituent_axis != binding.constituent_axis {
+            Some("stream_constituent_axis")
+        } else if reference.chemical_reference_state != binding.chemical_reference_state {
+            Some("stream_chemical_reference_state")
+        } else if reference.coordinates != binding.coordinates {
+            Some("stream_coordinates")
+        } else if reference.timestamp.clock != binding.timestamp.clock {
+            Some("stream_clock")
+        } else if reference.gravity_datum != binding.gravity_datum {
+            Some("stream_gravity_datum")
+        } else if reference.stress_convention != binding.stress_convention {
+            Some("stream_stress_convention")
+        } else {
+            None
+        };
+        if let Some(field) = mismatch {
+            return Err(CoupleError::AccountingWindowContextMismatch { field });
+        }
+    }
+    Ok(())
+}
+
+fn require_window_interval(
+    expected: &AccountingWindowInterval,
+    actual: &AccountingWindowInterval,
+) -> Result<(), CoupleError> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(CoupleError::AccountingWindowContextMismatch { field: "interval" })
+    }
+}
+
+fn require_internal_stream_pair(
+    first: &StreamChartBinding,
+    second: &StreamChartBinding,
+) -> Result<(), CoupleError> {
+    if first.port_id == second.port_id {
+        return Err(CoupleError::DuplicateIdentity {
+            id: first.port_id.as_str().to_string(),
+        });
+    }
+    let mismatch = if first.state_schema != second.state_schema {
+        Some("state_schema")
+    } else if first.constituent_basis != second.constituent_basis {
+        Some("constituent_basis")
+    } else if first.constituent_axis != second.constituent_axis {
+        Some("constituent_axis")
+    } else if first.chemical_reference_state != second.chemical_reference_state {
+        Some("chemical_reference_state")
+    } else if first.coordinates != second.coordinates {
+        Some("coordinates")
+    } else if first.timestamp != second.timestamp {
+        Some("clock_timestamp")
+    } else if first.gravity_datum != second.gravity_datum {
+        Some("gravity_datum")
+    } else if first.stress_convention != second.stress_convention {
+        Some("stress_convention")
+    } else {
+        None
+    };
+    mismatch.map_or(Ok(()), |field| {
+        Err(CoupleError::IncompatibleStreamPorts {
+            a: first.port_id.as_str().to_string(),
+            b: second.port_id.as_str().to_string(),
+            field,
+        })
+    })
+}
+
+fn require_window_element_axis(
+    schema: &WindowElementSchema,
+    balance: &WindowBalance,
+    context: &'static str,
+) -> Result<(), CoupleError> {
+    let expected = schema.elements();
+    let actual: Vec<_> = balance
+        .element_amounts
+        .iter()
+        .map(|entry| &entry.element)
+        .collect();
+    if expected.iter().eq(actual.iter().copied()) {
+        Ok(())
+    } else {
+        Err(CoupleError::AccountingWindowElementAxisMismatch {
+            context,
+            expected: expected
+                .iter()
+                .map(|element| element.as_str().to_string())
+                .collect(),
+            actual: actual
+                .iter()
+                .map(|element| element.as_str().to_string())
+                .collect(),
+        })
+    }
+}
+
+fn require_window_charge_admission(
+    schema: &WindowChargeSchema,
+    balance: &WindowBalance,
+    context: &'static str,
+) -> Result<(), CoupleError> {
+    if matches!(schema, WindowChargeSchema::ProvenNeutral { .. })
+        && balance.charge.value().abs() > 0.0
+    {
+        Err(CoupleError::AccountingWindowChargeSchemaMismatch { context })
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_window_transfer_field(
+    entry: &WindowManifestEntry,
+    field: &'static str,
+    nonzero: bool,
+) -> Result<(), CoupleError> {
+    if nonzero {
+        Err(CoupleError::AccountingWindowPortTransferMismatch {
+            port: entry.local_port_id.as_str().to_string(),
+            field,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_window_transfer_shape(
+    entry: &WindowManifestEntry,
+    transfer: &IntegratedWindowTransfer,
+) -> Result<(), CoupleError> {
+    let WindowPortKind::Power(kind) = entry.port_kind else {
+        return Ok(());
+    };
+    reject_window_transfer_field(
+        entry,
+        "mass_on_power_port",
+        transfer.mass_into.value().abs() > 0.0,
+    )?;
+    if kind != PortKind::ChemicalPotentialAmountFlow {
+        reject_window_transfer_field(
+            entry,
+            "element_amount_on_nonchemical_power_port",
+            transfer
+                .element_amounts_into
+                .iter()
+                .any(|element| element.amount.value().abs() > 0.0),
+        )?;
+    }
+    if !matches!(
+        kind,
+        PortKind::ElectricalVoltageCurrent | PortKind::ChemicalPotentialAmountFlow
+    ) {
+        reject_window_transfer_field(
+            entry,
+            "charge_on_noncharge_power_port",
+            transfer.charge_into.value().abs() > 0.0,
+        )?;
+    }
+    if kind != PortKind::ThermalTemperatureEntropy {
+        return reject_window_transfer_field(
+            entry,
+            "entropy_on_nonthermal_power_port",
+            [
+                transfer.entropy_into.advected.value(),
+                transfer.entropy_into.diffusive_chemical.value(),
+                transfer.entropy_into.heat.value(),
+                transfer.entropy_into.radiation.value(),
+            ]
+            .into_iter()
+            .any(|value| value.abs() > 0.0),
+        );
+    }
+
+    reject_window_transfer_field(
+        entry,
+        "advected_entropy_on_thermal_power_port",
+        transfer.entropy_into.advected.value().abs() > 0.0,
+    )?;
+    reject_window_transfer_field(
+        entry,
+        "diffusive_entropy_on_thermal_power_port",
+        transfer.entropy_into.diffusive_chemical.value().abs() > 0.0,
+    )?;
+    match &transfer.entropy_into.temperature_reference {
+        BoundaryTemperatureReference::NotApplicable { .. } => reject_window_transfer_field(
+            entry,
+            "thermal_temperature_reference",
+            transfer.energy_into.value().abs() > 0.0
+                || transfer.entropy_into.heat.value().abs() > 0.0
+                || transfer.entropy_into.radiation.value().abs() > 0.0,
+        ),
+        BoundaryTemperatureReference::Constant { temperature, .. } => {
+            if transfer.entropy_into.radiation.value().abs() > 0.0 {
+                return Err(CoupleError::AccountingWindowPortTransferMismatch {
+                    port: entry.local_port_id.as_str().to_string(),
+                    field: "constant_temperature_radiation_requires_profile",
+                });
+            }
+            let expected_energy = temperature.value() * transfer.entropy_into.heat.value();
+            ensure_finite_window_value(
+                "constant_temperature_thermal_energy",
+                Some(entry.contribution_id.as_str()),
+                expected_energy,
+            )?;
+            if expected_energy.to_bits() == transfer.energy_into.value().to_bits() {
+                Ok(())
+            } else {
+                Err(CoupleError::AccountingWindowPortTransferMismatch {
+                    port: entry.local_port_id.as_str().to_string(),
+                    field: "constant_temperature_energy_entropy_identity",
+                })
+            }
+        }
+        BoundaryTemperatureReference::Profile { .. } => Ok(()),
+    }
+}
+
+fn require_window_snapshot(
+    spec: &AccountingWindowSpec,
+    snapshot: &WindowInventorySnapshot,
+    endpoint: WindowEndpoint,
+) -> Result<(), CoupleError> {
+    require_window_interval(&spec.interval, &snapshot.interval)?;
+    require_window_interval(&spec.interval, snapshot.state_evidence.interval())?;
+    if snapshot.energy_reference != spec.energy_reference {
+        return Err(CoupleError::AccountingWindowContextMismatch {
+            field: "snapshot_energy_reference",
+        });
+    }
+    if snapshot.element_schema != spec.element_schema {
+        return Err(CoupleError::AccountingWindowContextMismatch {
+            field: "snapshot_element_schema",
+        });
+    }
+    if snapshot.charge_schema != spec.charge_schema {
+        return Err(CoupleError::AccountingWindowContextMismatch {
+            field: "snapshot_charge_schema",
+        });
+    }
+    if snapshot.entropy_convention != spec.entropy_convention {
+        return Err(CoupleError::AccountingWindowContextMismatch {
+            field: "snapshot_entropy_convention",
+        });
+    }
+    require_window_evidence_role(
+        &snapshot.state_evidence,
+        &WindowEvidenceRole::Inventory {
+            endpoint,
+            energy_reference: spec.energy_reference.clone(),
+        },
+    )?;
+    if snapshot.endpoint != endpoint {
+        return Err(CoupleError::AccountingWindowEndpointMismatch {
+            expected: endpoint,
+            actual: snapshot.endpoint,
+        });
+    }
+    require_window_element_axis(
+        &spec.element_schema,
+        &snapshot.balance,
+        "inventory_element_axis",
+    )?;
+    require_window_charge_admission(&spec.charge_schema, &snapshot.balance, "inventory_charge")
+}
+
+fn require_complete_window_contributions(
+    spec: &AccountingWindowSpec,
+    contributions: &[WindowBoundaryContribution],
+) -> Result<(), CoupleError> {
+    let expected: Vec<_> = spec
+        .manifest
+        .iter()
+        .map(|entry| entry.contribution_id.clone())
+        .collect();
+    let actual: Vec<_> = contributions
+        .iter()
+        .map(|entry| entry.manifest_entry.contribution_id.clone())
+        .collect();
+    let missing: Vec<_> = expected
+        .iter()
+        .filter(|id| actual.binary_search(id).is_err())
+        .map(|id| id.as_str().to_string())
+        .collect();
+    let unexpected: Vec<_> = actual
+        .iter()
+        .filter(|id| expected.binary_search(id).is_err())
+        .map(|id| id.as_str().to_string())
+        .collect();
+    if !missing.is_empty() || !unexpected.is_empty() {
+        return Err(CoupleError::AccountingWindowContributionSetMismatch {
+            missing,
+            unexpected,
+        });
+    }
+    for (manifest, contribution) in spec.manifest.iter().zip(contributions) {
+        if manifest != &contribution.manifest_entry {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "manifest_entry",
+            });
+        }
+        if contribution.energy_reference != spec.energy_reference {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "contribution_energy_reference",
+            });
+        }
+        if contribution.element_schema != spec.element_schema {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "contribution_element_schema",
+            });
+        }
+        if contribution.charge_schema != spec.charge_schema {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "contribution_charge_schema",
+            });
+        }
+        require_window_interval(&spec.interval, contribution.integration_evidence.interval())?;
+        require_window_evidence_role(
+            &contribution.integration_evidence,
+            &WindowEvidenceRole::IntegratedTransfer {
+                contribution_id: manifest.contribution_id.clone(),
+                local_port_id: manifest.local_port_id.clone(),
+                energy_reference: spec.energy_reference.clone(),
+            },
+        )?;
+        if let Some(temperature_evidence) = contribution
+            .transfer
+            .entropy_into
+            .temperature_reference
+            .evidence()
+        {
+            require_window_interval(&spec.interval, temperature_evidence.interval())?;
+            require_window_evidence_role(
+                temperature_evidence,
+                &WindowEvidenceRole::BoundaryTemperature {
+                    contribution_id: manifest.contribution_id.clone(),
+                },
+            )?;
+        }
+        require_window_element_axis(
+            &spec.element_schema,
+            &contribution.transfer.as_balance(),
+            "transfer_element_axis",
+        )?;
+        require_window_charge_admission(
+            &spec.charge_schema,
+            &contribution.transfer.as_balance(),
+            "transfer_charge",
+        )?;
+        validate_window_transfer_shape(manifest, &contribution.transfer)?;
+        if contribution.transfer.entropy_convention != spec.entropy_convention {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "entropy_convention",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn fixed_order_window_sum(
+    field: &'static str,
+    values: impl IntoIterator<Item = f64>,
+) -> Result<f64, CoupleError> {
+    let mut sum = 0.0_f64;
+    let mut correction = 0.0_f64;
+    for value in values {
+        ensure_finite_window_value(field, None, value)?;
+        let next = sum + value;
+        ensure_finite_window_value(field, None, next)?;
+        let adjustment = if sum.abs() >= value.abs() {
+            (sum - next) + value
+        } else {
+            (value - next) + sum
+        };
+        correction += adjustment;
+        ensure_finite_window_value(field, None, correction)?;
+        sum = next;
+    }
+    let total = sum + correction;
+    ensure_finite_window_value(field, None, total)?;
+    Ok(total)
+}
+
+fn window_residual(
+    field: &'static str,
+    initial: f64,
+    final_value: f64,
+    inputs: impl IntoIterator<Item = f64>,
+) -> Result<f64, CoupleError> {
+    let change = final_value - initial;
+    ensure_finite_window_value(field, None, change)?;
+    let total_input = fixed_order_window_sum(field, inputs)?;
+    let residual = change - total_input;
+    ensure_finite_window_value(field, None, residual)?;
+    Ok(residual)
+}
+
+fn compute_window_residuals(
+    spec: &AccountingWindowSpec,
+    initial: &WindowInventorySnapshot,
+    final_snapshot: &WindowInventorySnapshot,
+    contributions: &[WindowBoundaryContribution],
+) -> Result<WindowResiduals, CoupleError> {
+    let first_law = window_residual(
+        "first_law_residual",
+        initial.balance.energy.value(),
+        final_snapshot.balance.energy.value(),
+        contributions
+            .iter()
+            .map(|entry| entry.transfer.energy_into.value()),
+    )?;
+    let mass = window_residual(
+        "mass_residual",
+        initial.balance.mass.value(),
+        final_snapshot.balance.mass.value(),
+        contributions
+            .iter()
+            .map(|entry| entry.transfer.mass_into.value()),
+    )?;
+    let charge = window_residual(
+        "charge_residual",
+        initial.balance.charge.value(),
+        final_snapshot.balance.charge.value(),
+        contributions
+            .iter()
+            .map(|entry| entry.transfer.charge_into.value()),
+    )?;
+    let entropy_generation = window_residual(
+        "entropy_generation",
+        initial.balance.entropy.value(),
+        final_snapshot.balance.entropy.value(),
+        contributions
+            .iter()
+            .map(|entry| entry.transfer.entropy_into.total().value()),
+    )?;
+    let mut elements = Vec::with_capacity(spec.element_schema.elements().len());
+    for (index, element) in spec.element_schema.elements().iter().enumerate() {
+        let residual = window_residual(
+            "element_residual",
+            initial.balance.element_amounts[index].amount.value(),
+            final_snapshot.balance.element_amounts[index].amount.value(),
+            contributions
+                .iter()
+                .map(|entry| entry.transfer.element_amounts_into[index].amount.value()),
+        )?;
+        elements.push(WindowElementAmount {
+            element: element.clone(),
+            amount: Amount::new(residual),
+        });
+    }
+    Ok(WindowResiduals {
+        first_law: Energy::new(first_law),
+        mass: Mass::new(mass),
+        elements,
+        charge: ElectricCharge::new(charge),
+        entropy_generation: Entropy::new(entropy_generation),
+    })
+}
+
+fn build_window_exchange_ledger(
+    contributions: &[WindowBoundaryContribution],
+) -> Result<Vec<WindowExchangeLedger>, CoupleError> {
+    let mut exchange_ids: Vec<_> = contributions
+        .iter()
+        .map(|entry| entry.manifest_entry.exchange_id.clone())
+        .collect();
+    exchange_ids.sort();
+    exchange_ids.dedup();
+    let mut ledgers = Vec::with_capacity(exchange_ids.len());
+    for exchange_id in exchange_ids {
+        let group: Vec<_> = contributions
+            .iter()
+            .filter(|entry| entry.manifest_entry.exchange_id == exchange_id)
+            .collect();
+        let energy_into = fixed_order_window_sum(
+            "exchange_energy_into",
+            group.iter().map(|entry| entry.transfer.energy_into.value()),
+        )?;
+        let mass_into = fixed_order_window_sum(
+            "exchange_mass_into",
+            group.iter().map(|entry| entry.transfer.mass_into.value()),
+        )?;
+        let charge_into = fixed_order_window_sum(
+            "exchange_charge_into",
+            group.iter().map(|entry| entry.transfer.charge_into.value()),
+        )?;
+        let entropy_into = fixed_order_window_sum(
+            "exchange_entropy_into",
+            group
+                .iter()
+                .map(|entry| entry.transfer.entropy_into.total().value()),
+        )?;
+        let mut element_amounts_into = Vec::new();
+        if let Some(first) = group.first() {
+            element_amounts_into.reserve(first.transfer.element_amounts_into.len());
+            for (index, element) in first.transfer.element_amounts_into.iter().enumerate() {
+                let amount = fixed_order_window_sum(
+                    "exchange_element_amount_into",
+                    group
+                        .iter()
+                        .map(|entry| entry.transfer.element_amounts_into[index].amount.value()),
+                )?;
+                element_amounts_into.push(WindowElementAmount {
+                    element: element.element.clone(),
+                    amount: Amount::new(amount),
+                });
+            }
+        }
+        let contribution_ids = group
+            .iter()
+            .map(|entry| entry.manifest_entry.contribution_id.clone())
+            .collect();
+        let mut port_ids: Vec<_> = group
+            .iter()
+            .map(|entry| entry.manifest_entry.local_port_id.clone())
+            .collect();
+        port_ids.sort();
+        port_ids.dedup();
+        ledgers.push(WindowExchangeLedger {
+            exchange_id,
+            role: group[0].manifest_entry.role,
+            contribution_ids,
+            port_ids,
+            energy_into: Energy::new(energy_into),
+            mass_into: Mass::new(mass_into),
+            element_amounts_into,
+            charge_into: ElectricCharge::new(charge_into),
+            entropy_into: Entropy::new(entropy_into),
+        });
+    }
+    Ok(ledgers)
+}
+
+fn transfer_value_for_law(transfer: &IntegratedWindowTransfer, law: &WindowBalanceLaw) -> f64 {
+    match law {
+        WindowBalanceLaw::FirstLaw | WindowBalanceLaw::InternalFirstLaw => {
+            transfer.energy_into.value()
+        }
+        WindowBalanceLaw::Mass | WindowBalanceLaw::InternalMass => transfer.mass_into.value(),
+        WindowBalanceLaw::Element(element) | WindowBalanceLaw::InternalElement(element) => transfer
+            .element_amounts_into
+            .iter()
+            .find(|entry| &entry.element == element)
+            .map_or(0.0, |entry| entry.amount.value()),
+        WindowBalanceLaw::Charge | WindowBalanceLaw::InternalCharge => transfer.charge_into.value(),
+        WindowBalanceLaw::EntropyGeneration | WindowBalanceLaw::InternalEntropyTransfer => {
+            transfer.entropy_into.total().value()
+        }
+    }
+}
+
+fn window_violation(
+    law: WindowBalanceLaw,
+    residual_si: f64,
+    tolerance_si: f64,
+    contributions: &[WindowBoundaryContribution],
+) -> WindowAuditViolation {
+    let involved: Vec<_> = contributions
+        .iter()
+        .filter(|entry| transfer_value_for_law(&entry.transfer, &law).abs() > 0.0)
+        .collect();
+    let contribution_ids = involved
+        .iter()
+        .map(|entry| entry.manifest_entry.contribution_id.clone())
+        .collect();
+    let mut port_ids: Vec<_> = involved
+        .iter()
+        .map(|entry| entry.manifest_entry.local_port_id.clone())
+        .collect();
+    port_ids.sort();
+    port_ids.dedup();
+    let mut exchange_ids: Vec<_> = involved
+        .iter()
+        .map(|entry| entry.manifest_entry.exchange_id.clone())
+        .collect();
+    exchange_ids.sort();
+    exchange_ids.dedup();
+    WindowAuditViolation {
+        law,
+        residual_si,
+        tolerance_si,
+        contribution_ids,
+        port_ids,
+        exchange_ids,
+    }
+}
+
+fn internal_exchange_violation(
+    law: WindowBalanceLaw,
+    residual_si: f64,
+    tolerance_si: f64,
+    exchange: &WindowExchangeLedger,
+) -> WindowAuditViolation {
+    WindowAuditViolation {
+        law,
+        residual_si,
+        tolerance_si,
+        contribution_ids: exchange.contribution_ids.clone(),
+        port_ids: exchange.port_ids.clone(),
+        exchange_ids: vec![exchange.exchange_id.clone()],
+    }
+}
+
+fn build_window_violations(
+    spec: &AccountingWindowSpec,
+    residuals: &WindowResiduals,
+    contributions: &[WindowBoundaryContribution],
+    exchanges: &[WindowExchangeLedger],
+) -> Vec<WindowAuditViolation> {
+    let mut violations = Vec::new();
+    for (law, residual, tolerance) in [
+        (
+            WindowBalanceLaw::FirstLaw,
+            residuals.first_law.value(),
+            spec.tolerances.energy.value(),
+        ),
+        (
+            WindowBalanceLaw::Mass,
+            residuals.mass.value(),
+            spec.tolerances.mass.value(),
+        ),
+        (
+            WindowBalanceLaw::Charge,
+            residuals.charge.value(),
+            spec.tolerances.charge.value(),
+        ),
+    ] {
+        if residual.abs() > tolerance {
+            violations.push(window_violation(law, residual, tolerance, contributions));
+        }
+    }
+    for element in &residuals.elements {
+        if element.amount.value().abs() > spec.tolerances.amount.value() {
+            violations.push(window_violation(
+                WindowBalanceLaw::Element(element.element.clone()),
+                element.amount.value(),
+                spec.tolerances.amount.value(),
+                contributions,
+            ));
+        }
+    }
+    if residuals.entropy_generation.value() < -spec.tolerances.entropy.value() {
+        violations.push(window_violation(
+            WindowBalanceLaw::EntropyGeneration,
+            residuals.entropy_generation.value(),
+            spec.tolerances.entropy.value(),
+            contributions,
+        ));
+    }
+    for exchange in exchanges
+        .iter()
+        .filter(|exchange| exchange.role == WindowExchangeRole::InternalTransfer)
+    {
+        for (law, residual, tolerance) in [
+            (
+                WindowBalanceLaw::InternalFirstLaw,
+                exchange.energy_into.value(),
+                spec.tolerances.energy.value(),
+            ),
+            (
+                WindowBalanceLaw::InternalMass,
+                exchange.mass_into.value(),
+                spec.tolerances.mass.value(),
+            ),
+            (
+                WindowBalanceLaw::InternalCharge,
+                exchange.charge_into.value(),
+                spec.tolerances.charge.value(),
+            ),
+            (
+                WindowBalanceLaw::InternalEntropyTransfer,
+                exchange.entropy_into.value(),
+                spec.tolerances.entropy.value(),
+            ),
+        ] {
+            if residual.abs() > tolerance {
+                violations.push(internal_exchange_violation(
+                    law, residual, tolerance, exchange,
+                ));
+            }
+        }
+        for element in &exchange.element_amounts_into {
+            if element.amount.value().abs() > spec.tolerances.amount.value() {
+                violations.push(internal_exchange_violation(
+                    WindowBalanceLaw::InternalElement(element.element.clone()),
+                    element.amount.value(),
+                    spec.tolerances.amount.value(),
+                    exchange,
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn reject_relation_port_alias(id: &StableId, port: &PortSchema) -> Result<(), CoupleError> {
     if id == &port.id {
         return Err(CoupleError::DuplicateIdentity {
@@ -2738,6 +5528,133 @@ pub enum CoupleError {
         accounted_bits: u64,
         /// Bit pattern declared by the stream bundle.
         declared_bits: u64,
+    },
+    /// Initial and final logical timestamps used different clocks or evidence
+    /// named a different complete window context.
+    AccountingWindowContextMismatch {
+        /// First mismatching context field.
+        field: &'static str,
+    },
+    /// An accounting window had no positive logical extent.
+    InvalidAccountingWindowInterval {
+        /// Initial logical tick.
+        start_tick: u64,
+        /// Final logical tick.
+        end_tick: u64,
+    },
+    /// A stored, integrated, derived, or tolerance value was not finite.
+    NonFiniteAccountingWindowValue {
+        /// Offending semantic field.
+        field: &'static str,
+        /// Optional element/contribution context.
+        context: Option<String>,
+    },
+    /// An elemental inventory/transfer axis repeated an identifier.
+    DuplicateAccountingWindowElement {
+        /// Repeated element identifier.
+        element: String,
+    },
+    /// An audited elemental schema omitted its axis.
+    EmptyAccountingWindowElementAxis,
+    /// A stream or chemical port was admitted without an elemental schema.
+    AccountingWindowElementSchemaRequired,
+    /// Retained evidence named the wrong semantic role or subject.
+    AccountingWindowEvidenceRoleMismatch {
+        /// Required evidence role.
+        expected: &'static str,
+        /// Supplied evidence role.
+        actual: &'static str,
+    },
+    /// An exchange group had mixed roles, incomplete topology, or bad reciprocity.
+    MalformedAccountingWindowExchange {
+        /// Exchange identifier.
+        exchange: String,
+        /// First malformed structural field.
+        field: &'static str,
+    },
+    /// A proven-neutral charge schema received a nonzero coulomb value.
+    AccountingWindowChargeSchemaMismatch {
+        /// Inventory or transfer context.
+        context: &'static str,
+    },
+    /// A power-port row carried a balance axis inconsistent with its port kind.
+    AccountingWindowPortTransferMismatch {
+        /// Local port identifier.
+        port: String,
+        /// Incompatible balance field or exact thermal identity.
+        field: &'static str,
+    },
+    /// A physical audit tolerance was negative.
+    NegativeAccountingWindowTolerance {
+        /// Offending tolerance field.
+        field: &'static str,
+    },
+    /// The optional exergy environment used a non-finite or non-positive `T0`.
+    NonPositiveExergyTemperature,
+    /// A constant boundary temperature was non-finite or non-positive.
+    NonPositiveBoundaryTemperature,
+    /// Heat/radiation entropy was supplied without boundary-temperature evidence.
+    AccountingWindowTemperatureReferenceRequired,
+    /// Two stream sides disagreed on a localized transfer-context field.
+    IncompatibleStreamPorts {
+        /// First stream-port ID.
+        a: String,
+        /// Second stream-port ID.
+        b: String,
+        /// First incompatible context field.
+        field: &'static str,
+    },
+    /// A window manifest assigned the wrong source/external treatment.
+    AccountingWindowBoundaryTreatmentMismatch {
+        /// Boundary identifier.
+        boundary: String,
+        /// Required treatment for the constructor.
+        expected: BoundaryTreatment,
+        /// Actual boundary treatment.
+        actual: BoundaryTreatment,
+    },
+    /// An external accounting boundary lacked the owner-outward convention.
+    AccountingWindowBoundaryRequiresOutward {
+        /// Boundary identifier.
+        boundary: String,
+    },
+    /// A manifest or filled ledger repeated one contribution ID.
+    DuplicateAccountingWindowContribution {
+        /// Repeated contribution identifier.
+        contribution: String,
+    },
+    /// A manifest assigned more than one row to the same local port.
+    DuplicateAccountingWindowPort {
+        /// Repeated local port identifier.
+        port: String,
+    },
+    /// A stored or transferred elemental axis differed from the declared axis.
+    AccountingWindowElementAxisMismatch {
+        /// Inventory or transfer context.
+        context: &'static str,
+        /// Declared canonical element axis.
+        expected: Vec<String>,
+        /// Actual canonical element axis.
+        actual: Vec<String>,
+    },
+    /// A stored mass or elemental amount was negative.
+    NegativeAccountingWindowInventory {
+        /// Offending stored field.
+        field: &'static str,
+    },
+    /// Filled contribution IDs did not exactly cover the declared manifest.
+    AccountingWindowContributionSetMismatch {
+        /// Declared rows without values.
+        missing: Vec<String>,
+        /// Supplied rows absent from the manifest.
+        unexpected: Vec<String>,
+    },
+    /// Initial/final inventory snapshots were supplied in the wrong slots.
+    AccountingWindowEndpointMismatch {
+        /// Required endpoint.
+        expected: WindowEndpoint,
+        /// Actual endpoint.
+        actual: WindowEndpoint,
     },
     /// Two port schemas disagree on a localized conjugacy field.
     IncompatiblePortSchemas {
