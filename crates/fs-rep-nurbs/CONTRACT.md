@@ -878,7 +878,21 @@ The ordinary-f64 outputs remain measured estimates rather than outward
 enclosures and grant no field regularity, certified Lipschitz, distance,
 sphere-tracing, or no-tunneling authority. The primitive does not consume a
 caller budget, migrate the report/refit pipeline, own drain/finalize, or promise
-wall-time preemption. The SDF shell rejects malformed
+wall-time preemption.
+`measure_refit_seam_g1_with_cx` composes the exact enforced work envelope for
+one admitted surface-partials request across all 46 nested evaluations before
+its first checkpoint. The same caller gate spans U=0 then U=1 partials at the
+23 fixed interior V parameters, stable tangent normalization, finite-angle and
+degeneracy reduction, and final tuple publication; nested partials retain their
+existing parameter, continuity, temporary-payload, allocation, and
+finite-arithmetic refusals. Evaluations are sequential, so their exact peak
+requested temporary payload is not multiplied. Cancellation exposes neither a
+running maximum nor a partial degenerate count. Positive infinity is an
+intentional complete no-claim result when a retained tangent direction is
+zero. The ordinary-f64 diagnostic excludes both V endpoints and grants no G1
+continuity, pole, topology, geometric-error, or certification authority; it
+does not consume a caller budget, own drain/finalize, or promise wall-time
+preemption. The SDF shell rejects malformed
 point/tolerance input before surface planning, admits each immutable surface
 once per distance query, reuses that admission through closest and Gauss-Newton
 polish, and carries the winning admission into gradient, orientation, and

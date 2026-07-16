@@ -224,7 +224,7 @@ fn preflight_partials_envelope(
     knot_count_v: usize,
     degree_u: usize,
     degree_v: usize,
-) -> Result<(), NurbsError> {
+) -> Result<(u128, u128), NurbsError> {
     let order_u = degree_u.checked_add(1).ok_or_else(|| NurbsError::Domain {
         what: "surface-partial u order overflows usize".to_string(),
     })?;
@@ -287,7 +287,8 @@ fn preflight_partials_envelope(
             what: "surface-partial v-stage retained-byte accounting overflows u128".to_string(),
         })?;
     let retained_bytes = u_peak.max(v_peak);
-    enforce_partials_envelope(work, retained_bytes)
+    enforce_partials_envelope(work, retained_bytes)?;
+    Ok((work, retained_bytes))
 }
 
 /// A rational tensor-product surface in 3D.
@@ -2464,6 +2465,23 @@ impl NurbsSurface<f64> {
 }
 
 impl AdmittedNurbsSurface<'_, f64> {
+    /// Return the exact work and peak requested temporary payload enforced by
+    /// one admitted first-partials evaluation, without scanning or allocating.
+    /// Compound measured primitives use this to admit repeated evaluations as
+    /// one aggregate request rather than multiplying an opaque per-call cap.
+    pub(crate) fn partials_envelope(&self) -> Result<(u128, u128), NurbsError> {
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        preflight_partials_envelope(
+            knots_u.control_count(),
+            knots_v.control_count(),
+            knots_u.knots().len(),
+            knots_v.knots().len(),
+            knots_u.degree(),
+            knots_v.degree(),
+        )
+    }
+
     fn preflight_partials_request(&self, u: f64, v: f64) -> Result<(), NurbsError> {
         let knots_u = self.knots_u();
         let knots_v = self.knots_v();
@@ -2473,14 +2491,7 @@ impl AdmittedNurbsSurface<'_, f64> {
         self.inner
             .knots_v
             .preflight_parameter(v, "surface v-partial")?;
-        preflight_partials_envelope(
-            knots_u.control_count(),
-            knots_v.control_count(),
-            knots_u.knots().len(),
-            knots_v.knots().len(),
-            knots_u.degree(),
-            knots_v.degree(),
-        )?;
+        let _ = self.partials_envelope()?;
         NurbsCurve::<f64, 3>::preflight_derivative_request(knots_u, u, 1)?;
         NurbsCurve::<f64, 3>::preflight_derivative_request(knots_v, v, 1)
     }

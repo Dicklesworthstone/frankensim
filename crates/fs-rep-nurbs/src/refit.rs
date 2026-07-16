@@ -30,7 +30,7 @@
 use crate::NurbsError;
 use crate::basis::{AdmittedKnotVector, BASIS_MAX_WORK_UNITS, BasisRun, KnotVector};
 use crate::closest::norm3;
-use crate::surface::{AdmittedNurbsSurface, NurbsSurface};
+use crate::surface::{AdmittedNurbsSurface, NurbsSurface, SurfacePartialsRun};
 use core::mem::size_of;
 use fs_exec::Cx;
 use fs_math::det;
@@ -79,6 +79,7 @@ const REFIT_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
 const REFIT_MAX_PROBE_POINTS: usize = 4 * 1024 * 1024;
 const REFIT_MAX_WORK_UNITS: u128 = 1_000_000_000;
 const REFIT_CANCELLATION_STRIDE: usize = 64;
+const REFIT_SEAM_G1_SAMPLE_COUNT: usize = 23;
 
 fn refit_structure_error(what: impl Into<String>) -> NurbsError {
     NurbsError::Structure { what: what.into() }
@@ -511,6 +512,25 @@ pub enum RefitLipschitzEstimateRun {
         v_estimate: f64,
     },
     /// Cancellation was observed before publication.
+    Cancelled,
+}
+
+/// Transactional outcome of the fixed paired-side G1 seam diagnostic.
+///
+/// Positive infinity is a complete measured no-claim result when one or more
+/// retained tangent pairs are degenerate; cancellation publishes no tuple.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RefitSeamG1DiagnosticRun {
+    /// All 23 interior parameter pairs were measured.
+    Complete {
+        /// Largest retained `1 - cos(angle)` deviation, or positive infinity
+        /// when a sampled tangent direction is undefined.
+        max_deviation: f64,
+        /// Number of retained parameter pairs with a zero tangent direction.
+        degenerate_samples: usize,
+    },
+    /// Cancellation was observed before tuple publication.
     Cancelled,
 }
 
@@ -2676,9 +2696,79 @@ fn seam_g1_diagnostic(surface: &NurbsSurface<f64>) -> Result<(f64, usize), Nurbs
     seam_g1_diagnostic_admitted(surface.admit()?)
 }
 
-fn seam_g1_diagnostic_admitted(
+fn preflight_refit_seam_g1_envelope(
+    partial_work: u128,
+    partial_retained_bytes: u128,
+) -> Result<(), NurbsError> {
+    let evaluation_count = checked_refit_work_product(
+        &[REFIT_SEAM_G1_SAMPLE_COUNT as u128, 2],
+        "seam G1 partial evaluations",
+    )?;
+    let partials_work = checked_refit_work_product(
+        &[evaluation_count, partial_work],
+        "seam G1 partial evaluations",
+    )?;
+    // Per sample: two nested preflight seams plus stable norms,
+    // normalization, dot product, clamp, degeneracy bookkeeping, and polling.
+    let diagnostic_work = checked_refit_work_product(
+        &[REFIT_SEAM_G1_SAMPLE_COUNT as u128, 48],
+        "seam G1 diagnostic",
+    )?;
+    let total_work =
+        checked_refit_work_sum(&[partials_work, diagnostic_work, 2], "seam G1 aggregate")?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit seam G1 diagnostic requests {total_work} work units above static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+    if partial_retained_bytes > REFIT_MAX_ALLOC_BYTES as u128 {
+        return Err(refit_structure_error(format!(
+            "refit seam G1 partials retain {partial_retained_bytes} requested bytes above static cap {REFIT_MAX_ALLOC_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
+fn preflight_refit_seam_g1(surface: AdmittedNurbsSurface<'_, f64>) -> Result<(), NurbsError> {
+    let (partial_work, partial_retained_bytes) = surface.partials_envelope()?;
+    preflight_refit_seam_g1_envelope(partial_work, partial_retained_bytes)
+}
+
+/// Measure the fitted surface's fixed interior paired-side G1 seam diagnostic.
+///
+/// The exact envelope for one admitted surface-partials evaluation is composed
+/// across all 46 nested evaluations before the first checkpoint. One caller
+/// gate then spans U=0/U=1 partials at 23 deterministic interior V parameters,
+/// stable tangent normalization, degeneracy accounting, and final tuple
+/// publication. Nested evaluators retain their own parameter, continuity,
+/// allocation, and finite-arithmetic refusals. Cancellation publishes neither
+/// the running maximum nor a partial degenerate count.
+///
+/// The primitive allocates no owned numerical output. Its ordinary-f64 result
+/// is a measured diagnostic that deliberately excludes V endpoints and grants
+/// no G1 continuity, pole, topology, geometric-error, or certification
+/// authority. It does not consume the `Cx` budget or own drain/finalize.
+///
+/// # Errors
+/// Returns the admitted partial evaluator's structured refusals or an aggregate
+/// checked work/retained-byte or finite seam-arithmetic refusal.
+pub fn measure_refit_seam_g1_with_cx(
     surface: AdmittedNurbsSurface<'_, f64>,
-) -> Result<(f64, usize), NurbsError> {
+    cx: &Cx<'_>,
+) -> Result<RefitSeamG1DiagnosticRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    measure_refit_seam_g1_with_poll(surface, &mut should_cancel)
+}
+
+fn measure_refit_seam_g1_with_poll(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitSeamG1DiagnosticRun, NurbsError> {
+    preflight_refit_seam_g1(surface)?;
+    if should_cancel() {
+        return Ok(RefitSeamG1DiagnosticRun::Cancelled);
+    }
+
     // Compare u-tangents across the exactly closed seam. Normalize each tangent
     // separately to avoid overflow/underflow in n0*n1, and clamp the rounded dot
     // product to the mathematical cosine range.
@@ -2688,10 +2778,17 @@ fn seam_g1_diagnostic_admitted(
     // radial/revolution fits commonly collapse them to poles where a tangent
     // direction is undefined. The report makes that exclusion machine-visible
     // pending a chart-aware pole audit.
-    for b in 1..24 {
-        let v = f64::from(b) / 24.0;
-        let (_, du0, _) = surface.partials(0.0, v)?;
-        let (_, du1, _) = surface.partials(1.0, v)?;
+    for b in 1..=REFIT_SEAM_G1_SAMPLE_COUNT {
+        #[allow(clippy::cast_precision_loss)]
+        let v = b as f64 / (REFIT_SEAM_G1_SAMPLE_COUNT + 1) as f64;
+        let (_, du0, _) = match surface.partials_with_poll(0.0, v, should_cancel)? {
+            SurfacePartialsRun::Complete { partials } => partials,
+            SurfacePartialsRun::Cancelled => return Ok(RefitSeamG1DiagnosticRun::Cancelled),
+        };
+        let (_, du1, _) = match surface.partials_with_poll(1.0, v, should_cancel)? {
+            SurfacePartialsRun::Complete { partials } => partials,
+            SurfacePartialsRun::Cancelled => return Ok(RefitSeamG1DiagnosticRun::Cancelled),
+        };
         let n0 = norm3(du0);
         let n1 = norm3(du1);
         if !n0.is_finite() || !n1.is_finite() {
@@ -2702,6 +2799,9 @@ fn seam_g1_diagnostic_admitted(
         if n0 == 0.0 || n1 == 0.0 {
             degenerate = degenerate.saturating_add(1);
             seam_g1 = f64::INFINITY;
+            if should_cancel() {
+                return Ok(RefitSeamG1DiagnosticRun::Cancelled);
+            }
             continue;
         }
         let unit0 = du0.map(|value| value / n0);
@@ -2714,8 +2814,32 @@ fn seam_g1_diagnostic_admitted(
             ));
         }
         seam_g1 = seam_g1.max(1.0 - cosang);
+        if should_cancel() {
+            return Ok(RefitSeamG1DiagnosticRun::Cancelled);
+        }
     }
-    Ok((seam_g1, degenerate))
+    if should_cancel() {
+        return Ok(RefitSeamG1DiagnosticRun::Cancelled);
+    }
+    Ok(RefitSeamG1DiagnosticRun::Complete {
+        max_deviation: seam_g1,
+        degenerate_samples: degenerate,
+    })
+}
+
+fn seam_g1_diagnostic_admitted(
+    surface: AdmittedNurbsSurface<'_, f64>,
+) -> Result<(f64, usize), NurbsError> {
+    let mut never_cancel = || false;
+    match measure_refit_seam_g1_with_poll(surface, &mut never_cancel)? {
+        RefitSeamG1DiagnosticRun::Complete {
+            max_deviation,
+            degenerate_samples,
+        } => Ok((max_deviation, degenerate_samples)),
+        RefitSeamG1DiagnosticRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit seam G1 diagnostic observed cancellation",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -4083,6 +4207,97 @@ mod tests {
         );
     }
 
+    // G0/G5: the compound Cx entry preserves the fixed 23-sample diagnostic
+    // and exact paired-side angle reduction.
+    #[test]
+    fn seam_g1_with_cx_matches_the_fixed_interior_diagnostic() {
+        let knots_u = open_uniform_knots(3, 2).expect("quadratic U knots");
+        let knots_v = open_uniform_knots(2, 1).expect("linear V knots");
+        let net = vec![
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        ];
+        let weights = vec![vec![1.0; 2]; 3];
+        let surface =
+            NurbsSurface::new(knots_u, knots_v, &net, &weights).expect("closed test surface");
+        let admitted = surface.admit().expect("admitted test surface");
+        let expected = seam_g1_diagnostic_admitted(admitted).expect("fixed seam diagnostic");
+        assert_eq!(expected, (2.0, 0));
+
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                measure_refit_seam_g1_with_cx(admitted, cx).expect("cancellable seam diagnostic"),
+                RefitSeamG1DiagnosticRun::Complete {
+                    max_deviation: expected.0,
+                    degenerate_samples: expected.1,
+                }
+            );
+        });
+    }
+
+    // G4/G5: all 46 nested partial evaluations, per-sample reductions, and
+    // final tuple publication share one replayable cancellation callback.
+    #[test]
+    fn seam_g1_polling_is_transactional_across_nested_partials() {
+        let knots = open_uniform_knots(9, 1).expect("linear knots");
+        let net: Vec<Vec<[f64; 3]>> = (0_u32..9)
+            .map(|i| {
+                (0_u32..9)
+                    .map(|j| [f64::from(i), f64::from(j), f64::from(i + j) * 0.125])
+                    .collect()
+            })
+            .collect();
+        let weights = vec![vec![1.0; 9]; 9];
+        let surface = NurbsSurface::new(knots.clone(), knots, &net, &weights).expect("surface");
+        let admitted = surface.admit().expect("admitted surface");
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let outcome = measure_refit_seam_g1_with_poll(admitted, &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("finite seam diagnostic");
+            (outcome, polls.get())
+        };
+
+        let (complete, healthy_polls) = run(None);
+        assert!(matches!(
+            complete,
+            RefitSeamG1DiagnosticRun::Complete { .. }
+        ));
+        assert!(healthy_polls > REFIT_SEAM_G1_SAMPLE_COUNT * 2);
+        for cancel_at in [1, healthy_polls / 2, healthy_polls] {
+            assert_eq!(
+                run(Some(cancel_at)),
+                (RefitSeamG1DiagnosticRun::Cancelled, cancel_at)
+            );
+        }
+        with_refit_cx(true, |cx| {
+            assert_eq!(
+                measure_refit_seam_g1_with_cx(admitted, cx).expect("pre-cancellation is terminal"),
+                RefitSeamG1DiagnosticRun::Cancelled
+            );
+        });
+    }
+
+    // G0/G4: aggregate repeated-partials work and peak temporary payload are
+    // rejected synchronously before the first nested evaluation or checkpoint.
+    #[test]
+    fn seam_g1_aggregate_envelope_refuses_hostile_requests() {
+        let work = preflight_refit_seam_g1_envelope(REFIT_MAX_WORK_UNITS, 0)
+            .expect_err("46 individually plausible calls must still be aggregate-bounded");
+        assert!(work.to_string().contains("work units"));
+
+        let work_overflow = preflight_refit_seam_g1_envelope(u128::MAX, 0)
+            .expect_err("aggregate repeated-partials multiplication must be checked");
+        assert!(work_overflow.to_string().contains("overflows u128"));
+
+        let retained = preflight_refit_seam_g1_envelope(0, REFIT_MAX_ALLOC_BYTES as u128 + 1)
+            .expect_err("peak nested temporary payload must honor the refit cap");
+        assert!(retained.to_string().contains("partials retain"));
+    }
+
     #[test]
     fn degenerate_seam_tangents_are_explicitly_no_claim() {
         let line = open_uniform_knots(2, 1).expect("linear knots");
@@ -4097,5 +4312,15 @@ mod tests {
         assert_eq!(admitted_result, (g1, degenerate));
         assert!(g1.is_infinite(), "undefined tangent direction is no-claim");
         assert_eq!(degenerate, 23, "every retained seam sample is named");
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                measure_refit_seam_g1_with_cx(admitted, cx)
+                    .expect("degenerate diagnostic is a complete no-claim"),
+                RefitSeamG1DiagnosticRun::Complete {
+                    max_deviation: f64::INFINITY,
+                    degenerate_samples: REFIT_SEAM_G1_SAMPLE_COUNT,
+                }
+            );
+        });
     }
 }
