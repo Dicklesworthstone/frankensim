@@ -87,10 +87,12 @@ quadrature.
 - `VerifierWorkPlan::for_inputs` is the constant-time public shape preflight.
   For mesh nodes `n`, cells `c=n-1`, and canonical coefficient counts `u`, `f`,
   and `a`, it charges validation `3+2n+c+3u+3f+2a`, tightness `c`,
-  equilibrated construction `c`, flux hashing `3+f+a`, finalization `1`, and
-  their checked `u128` sum. Public accessors and `identity_fields()` expose
-  those six counts in stable phase order. Plan version is
-  `VERIFIER_WORK_PLAN_VERSION = 1`.
+  equilibrated construction `c`, flux hashing `7+2n+f+a`, finalization `1`,
+  and their checked `u128` sum. Hashing binds the hash domain, flux-identity
+  version, optimized `c_star`, both mesh and candidate lengths and values, and
+  both polynomial lengths and coefficients; this is distinct work from validation.
+  Public accessors and `identity_fields()` expose those six counts in stable
+  phase order. Plan version is `VERIFIER_WORK_PLAN_VERSION = 2`.
 - `estimator::verify_with_checkpoint` is the generic cancellation/composition
   seam. Its callback receives immutable invocation-global `VerifierProgress`
   at every phase entry, each nonzero global multiple of 256 logical work units,

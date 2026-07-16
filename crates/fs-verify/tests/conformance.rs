@@ -138,7 +138,7 @@ fn g4_verifier_work_plan_sparse_trace_and_legacy_equivalence_are_exact() {
     );
     let candidate = [0.0, 0.0, 0.0];
     let plan = VerifierWorkPlan::for_inputs(&p, &candidate).expect("bounded verifier shape");
-    assert_eq!(plan.identity_fields(), [27, 2, 2, 6, 1, 38]);
+    assert_eq!(plan.identity_fields(), [27, 2, 2, 16, 1, 48]);
 
     let mut trace = Vec::new();
     let explicit = verify_with_checkpoint(&p, &candidate, 10.0, |progress| {
@@ -155,37 +155,37 @@ fn g4_verifier_work_plan_sparse_trace_and_legacy_equivalence_are_exact() {
                 kind: VerifierCheckpointKind::PhaseEntry,
                 phase: VerifierPhase::Validation,
                 completed_work_units: 0,
-                planned_work_units: 38,
+                planned_work_units: 48,
             },
             VerifierProgress {
                 kind: VerifierCheckpointKind::PhaseEntry,
                 phase: VerifierPhase::Tightness,
                 completed_work_units: 27,
-                planned_work_units: 38,
+                planned_work_units: 48,
             },
             VerifierProgress {
                 kind: VerifierCheckpointKind::PhaseEntry,
                 phase: VerifierPhase::Equilibrated,
                 completed_work_units: 29,
-                planned_work_units: 38,
+                planned_work_units: 48,
             },
             VerifierProgress {
                 kind: VerifierCheckpointKind::PhaseEntry,
                 phase: VerifierPhase::Hash,
                 completed_work_units: 31,
-                planned_work_units: 38,
+                planned_work_units: 48,
             },
             VerifierProgress {
                 kind: VerifierCheckpointKind::PhaseEntry,
                 phase: VerifierPhase::Finalization,
-                completed_work_units: 37,
-                planned_work_units: 38,
+                completed_work_units: 47,
+                planned_work_units: 48,
             },
             VerifierProgress {
                 kind: VerifierCheckpointKind::Publication,
                 phase: VerifierPhase::Finalization,
-                completed_work_units: 38,
-                planned_work_units: 38,
+                completed_work_units: 48,
+                planned_work_units: 48,
             },
         ]
     );
@@ -239,13 +239,13 @@ fn g4_verifier_refusals_report_exact_partial_work_and_callback_errors_win() {
                 kind: VerifierCheckpointKind::PhaseEntry,
                 phase: VerifierPhase::Validation,
                 completed_work_units: 0,
-                planned_work_units: 38,
+                planned_work_units: 48,
             },
             VerifierProgress {
                 kind: VerifierCheckpointKind::RefusalFlush,
                 phase: VerifierPhase::Validation,
                 completed_work_units: 3,
-                planned_work_units: 38,
+                planned_work_units: 48,
             },
         ]
     );
@@ -278,7 +278,7 @@ fn g4_verifier_refusals_report_exact_partial_work_and_callback_errors_win() {
             kind: VerifierCheckpointKind::RefusalFlush,
             phase: VerifierPhase::Validation,
             completed_work_units: 10,
-            planned_work_units: 38,
+            planned_work_units: 48,
         }
     );
 }
@@ -290,7 +290,7 @@ fn g4_verifier_work_boundaries_are_invocation_global_and_deterministic() {
     let p = problem("checkpoint-large", poly(vec![0.0]), mesh);
     let candidate = vec![0.0; 513];
     let plan = VerifierWorkPlan::for_inputs(&p, &candidate).expect("bounded verifier shape");
-    assert_eq!(plan.identity_fields(), [1549, 512, 512, 5, 1, 2579]);
+    assert_eq!(plan.identity_fields(), [1549, 512, 512, 1035, 1, 3609]);
 
     let mut trace = Vec::new();
     let report = verify_with_checkpoint(&p, &candidate, 1.0, |progress| {
@@ -371,14 +371,34 @@ fn g4_verifier_work_boundaries_are_invocation_global_and_deterministic() {
             2573,
         ),
         (
+            VerifierCheckpointKind::WorkBoundary,
+            VerifierPhase::Hash,
+            2816,
+        ),
+        (
+            VerifierCheckpointKind::WorkBoundary,
+            VerifierPhase::Hash,
+            3072,
+        ),
+        (
+            VerifierCheckpointKind::WorkBoundary,
+            VerifierPhase::Hash,
+            3328,
+        ),
+        (
+            VerifierCheckpointKind::WorkBoundary,
+            VerifierPhase::Hash,
+            3584,
+        ),
+        (
             VerifierCheckpointKind::PhaseEntry,
             VerifierPhase::Finalization,
-            2578,
+            3608,
         ),
         (
             VerifierCheckpointKind::Publication,
             VerifierPhase::Finalization,
-            2579,
+            3609,
         ),
     ];
     assert_eq!(trace.len(), expected.len());
@@ -386,7 +406,7 @@ fn g4_verifier_work_boundaries_are_invocation_global_and_deterministic() {
         assert_eq!(progress.kind, *kind);
         assert_eq!(progress.phase, *phase);
         assert_eq!(progress.completed_work_units, *completed_work_units);
-        assert_eq!(progress.planned_work_units, 2579);
+        assert_eq!(progress.planned_work_units, 3609);
     }
 
     let boundary = trace
@@ -407,15 +427,15 @@ fn g4_verifier_work_boundaries_are_invocation_global_and_deterministic() {
 #[test]
 fn g4_verifier_publication_is_distinct_when_final_work_hits_a_boundary() {
     #[allow(clippy::cast_precision_loss)]
-    let mesh: Vec<f64> = (0..149).map(|index| f64::from(index) / 148.0).collect();
+    let mesh: Vec<f64> = (0..179).map(|index| f64::from(index) / 178.0).collect();
     let p = problem(
         "checkpoint-publication-boundary",
         poly(vec![0.0, 1.0, -1.0]),
         mesh,
     );
-    let candidate = vec![0.0; 149];
+    let candidate = vec![0.0; 179];
     let plan = VerifierWorkPlan::for_inputs(&p, &candidate).expect("bounded verifier shape");
-    assert_eq!(plan.planned_work_units(), 768);
+    assert_eq!(plan.planned_work_units(), 1280);
 
     let mut trace = Vec::new();
     let report = verify_with_checkpoint(&p, &candidate, 10.0, |progress| {
@@ -424,12 +444,12 @@ fn g4_verifier_publication_is_distinct_when_final_work_hits_a_boundary() {
     })
     .expect("infallible callback");
     assert!(report.refusal.is_none());
-    assert_eq!(trace[trace.len() - 2].completed_work_units, 768);
+    assert_eq!(trace[trace.len() - 2].completed_work_units, 1280);
     assert_eq!(
         trace[trace.len() - 2].kind,
         VerifierCheckpointKind::WorkBoundary
     );
-    assert_eq!(trace[trace.len() - 1].completed_work_units, 768);
+    assert_eq!(trace[trace.len() - 1].completed_work_units, 1280);
     assert_eq!(
         trace[trace.len() - 1].kind,
         VerifierCheckpointKind::Publication

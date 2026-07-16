@@ -1273,7 +1273,7 @@ fn g5_bracket_identity_binds_execution_and_complete_nested_work_policy() {
         refined_bracket.evidence_identity(),
         "nested verifier work shape and exact problem inputs are semantic"
     );
-    assert_eq!(fs_verify::estimator::VERIFIER_WORK_PLAN_VERSION, 1);
+    assert_eq!(fs_verify::estimator::VERIFIER_WORK_PLAN_VERSION, 2);
     assert_eq!(fs_verify::estimator::VERIFIER_POLL_POLICY_VERSION, 1);
     assert_eq!(fs_verify::estimator::VERIFIER_POLL_STRIDE_WORK_UNITS, 256);
 }

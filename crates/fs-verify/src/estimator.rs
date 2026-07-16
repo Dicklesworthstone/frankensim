@@ -24,7 +24,7 @@ pub const MAX_VERIFIER_MESH_NODES: usize = MAX_FEM1D_MESH_NODES;
 /// Exactness envelope for the manufactured solution: degree at most five.
 pub const MAX_VERIFIER_POLY_COEFFICIENTS: usize = MAX_FEM1D_POLY_COEFFICIENTS;
 /// Semantic version of the verifier's complete bounded-work accounting.
-pub const VERIFIER_WORK_PLAN_VERSION: u32 = 1;
+pub const VERIFIER_WORK_PLAN_VERSION: u32 = 2;
 /// Semantic version of the verifier's callback/checkpoint schedule.
 pub const VERIFIER_POLL_POLICY_VERSION: u32 = 1;
 /// Maximum completed logical work between verifier work-boundary callbacks.
