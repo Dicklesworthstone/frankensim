@@ -5,7 +5,9 @@ The addendum's governance as machine-readable data: the design principles
 owning beads), the original Part V runtime risks (R1–R10), the distinct
 expansion-program risks (PR-001–PR-012) — each with a CI-gateable completeness
 surface — plus the EXECUTABLE one-bet-per-lane admission state machine
-(`lanes` module, bead rjoq.6).
+(`lanes` module, bead rjoq.6) and the generated requirement-to-evidence
+registry (`traceability` module, bead
+`frankensim-ext-traceability-ledger-ziso`).
 
 ## Purpose and layer
 
@@ -14,7 +16,9 @@ canonical content identities. Encodes the doctrine, proposals, original ten
 runtime risks, and twelve expansion-program risks, audits that nothing
 survives unmeasured (design principle P8 / Governance Rule 2), and enforces
 the one-active-unproven-mechanism-per-independently-falsifiable-proof-lane
-rule as an atomic, replayable admission ledger.
+rule as an atomic, replayable admission ledger. It also owns the pure typed
+source registry and fail-closed generator for the extension charter's B1–B14
+and RQ-* requirement-to-evidence catalog.
 
 ## Proof-lane admission (`lanes` module, bead rjoq.6)
 
@@ -84,6 +88,42 @@ rule as an atomic, replayable admission ledger.
   and a no-claim boundary (the AGENTS.md contract discipline made
   governance-legible); `crates_json()` emits the deterministic record. Actual
   `CONTRACT.md` file presence is enforced separately by `xtask check-contracts`.
+
+## Requirement-to-evidence traceability (`traceability` module)
+
+- `requirements()` is the closed canonical B1–B14 and sixteen-RQ source
+  registry derived from the extension charter seed. Every row carries the
+  exact generated-ledger columns: stable requirement id, capability/property,
+  concrete blocker, owner/artifact, prerequisite phase, milestone, forcing
+  flagship, benchmark/data evidence route, proof-obligation links, honest
+  claim boundary, and declarative status. Status is governance declaration,
+  not scientific proof and not a mirror of whether an owning Bead is closed;
+  tracker `closed` is deliberately not an accepted scientific lifecycle value.
+- `proof_obligations()` is the complete ordered PO-1 through PO-25 index. Each
+  entry links its executable summary to the full owner Bead ids. A row may
+  cite only entries in this closed index.
+- `audit_traceability(rows, obligations)` accumulates structured
+  `TraceabilityDiagnostic { requirement_id, field, reason }` refusals. An empty
+  scope, any missing or oversized field, missing owner, missing milestone gate,
+  missing benchmark/data evidence route, missing claim boundary, missing or
+  dangling PO link, duplicate requirement, noncanonical PO alias, incomplete
+  PO index, or duplicate PO owner is non-green. Diagnostics are sorted by
+  requirement, field, and reason, so source enumeration order cannot alter the
+  refusal artifact.
+- `generate_traceability_ledger(rows, obligations)` validates first and emits
+  no partial output on failure. Successful rows use the closed charter order,
+  PO links numerically, PO definitions numerically, and owner ids lexically;
+  `traceability_ledger_json()` applies it to the canonical code registry under
+  schema `frankensim-requirement-traceability-v1`. Every artifact explicitly
+  emits `authority: "declaration-only"` and `source_snapshot: null`; this API
+  refuses `verified` and `validated` because only a future source-bound
+  admission receipt may mint scientific promotion status.
+- Inputs are hard-bounded before rendering: at most 256 requirements, exactly
+  the closed 25-PO definition space, 25 PO links per requirement, 16 owners per
+  PO, and 16 KiB per scalar field. This pure UTIL module performs no filesystem
+  or database I/O. Tooling adapters own bounded reads from Beads, contracts,
+  manifests, and immutable artifact persistence; those sources must use this
+  validator instead of hand-maintaining a dashboard.
 
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
@@ -188,6 +228,10 @@ artifact checking are deployment policy. Calling a public hash an
 - Retained decisions, primary/conflict idempotency bindings, and their
   variable-size canonical payloads remain within fixed caps. Capacity reserved
   for active terminal transitions is unavailable to unrelated traffic.
+- The traceability registry contains exactly the thirty charter requirement
+  ids and the complete canonical PO-1..PO-25 index. Generation is deterministic
+  and cannot emit a partial ledger when any owner, gate, evidence route, proof
+  link, boundary, or status is absent.
 
 ## Error model
 
@@ -208,6 +252,11 @@ lane/mechanism mismatches, occupied lanes/classes, envelope/cap failures,
 invalid terminal receipts, idempotency conflicts, and exhausted retained-log
 capacity. Capacity exhaustion never evicts replay authority and never mutates
 governed admission state.
+
+Traceability generation returns a `TraceabilityAudit` rather than output when
+the source is empty, oversized, duplicated, incomplete, or contains a dangling
+reference. Diagnostics name the exact requirement and field; no missing-field
+case is collapsed into an unstructured string or silently defaulted.
 
 ## Determinism class
 
@@ -251,6 +300,15 @@ missing/duplicate/non-finite/unit/domain/sample handling; integer/fraction
 domain checks; input-order-independent assessment JSON; and deterministic
 numeric-threshold register serialization.
 
+`tests/traceability.rs` (G0): exact thirty-requirement and PO-1..PO-25 closed
+inventories; canonical completeness and link coverage; one named diagnostic
+for every required row field; deliberately orphaned owner detail; duplicate
+requirement and dangling/repeated PO refusals; missing/noncanonical/duplicate-
+owner PO index failures; success and complete failure-audit permutation
+invariance; empty-scope and exact/plus-one row, PO-link, owner, scalar, id,
+summary, and reference caps; declaration-only authority enforcement; and exact
+generated JSON column/index coverage.
+
 `tests/lanes_e2e.rs` (bead rjoq.6 slice 2): the cross-crate no-mock
 composition — fs-govern admission persisted into a FrankenSQLite-backed
 fs-ledger (events + content-addressed preregistration/refutation/
@@ -289,6 +347,12 @@ identity guard has a test that fails if the guard is removed.
   a contingency, or prove that the named Bead owner has reviewed the result.
 - Bead-id owners are string references; this crate does not read the beads
   database (that coupling is deliberately avoided).
+- The canonical traceability rows are governance declarations. They do not
+  attest that an owner exists in the current tracker snapshot, that a benchmark
+  ran, that a milestone closed, or that a scientific claim is verified. A
+  tooling adapter must join and bind the exact Beads/contracts/manifest/V&V
+  source snapshot before persisting an immutable generated artifact; a closed
+  Bead must never be translated directly into scientific proof status.
 - The lane ledger is the admission STATE MACHINE, not durable storage: the
   `FinalizationReceipt`'s `ledger_artifact` and the comparison's
   preregistration artifact are content references whose durable

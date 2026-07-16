@@ -26,13 +26,17 @@
 //! [`program_risks`]; it does not replace this crate root's R1--R10 register.
 //! The one-bet discipline itself is EXECUTABLE in [`lanes`]: an atomic,
 //! idempotent, replayable admission ledger enforcing one active unproven
-//! mechanism per independently falsifiable proof lane (bead rjoq.6).
+//! mechanism per independently falsifiable proof lane (bead rjoq.6). The
+//! extension charter's generated B1--B14/RQ-* requirement-to-evidence registry,
+//! complete PO-1..PO-25 index, and fail-closed renderer live in
+//! [`traceability`].
 
 pub mod crates;
 pub mod doctrine;
 pub mod lanes;
 pub mod program_risks;
 pub mod proposals;
+pub mod traceability;
 
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
@@ -44,6 +48,13 @@ pub use lanes::{
     PortfolioPolicy, ProofLaneId, ResourceEnvelope, TerminalKind,
 };
 pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
+pub use traceability::{
+    MAX_PROOF_OBLIGATION_OWNERS, MAX_REQUIREMENT_PO_LINKS, MAX_REQUIREMENT_ROWS,
+    MAX_TRACEABILITY_FIELD_BYTES, PROOF_OBLIGATION_COUNT, ProofObligation, REQUIREMENT_COUNT,
+    RequirementRow, TRACEABILITY_AUTHORITY, TRACEABILITY_SCHEMA, TraceabilityAudit,
+    TraceabilityDiagnostic, TraceabilityField, audit_traceability, generate_traceability_ledger,
+    proof_obligations, requirements, traceability_ledger_json,
+};
 
 /// The ten addendum risks (Part V).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
