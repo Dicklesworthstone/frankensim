@@ -15863,6 +15863,51 @@ mod tests {
                 })
             ));
 
+            let wrong_outer_right_leg = admit_strict(
+                endpoint(12),
+                endpoint(69),
+                70,
+                ColorRank::Validated,
+                ColorRank::Validated,
+                cx,
+            );
+            let wrong_outer_target_span = admit_derived_span_correspondence_v1(
+                span_ir(
+                    endpoint(10),
+                    endpoint(12),
+                    endpoint(69),
+                    &fixture.target_left_leg,
+                    &wrong_outer_right_leg,
+                    71,
+                ),
+                &fixture.target_left_leg,
+                &wrong_outer_right_leg,
+                cx,
+            )
+            .expect("valid replacement span with a different right foot");
+            let wrong_outer_target_ir = DerivedSpanMorphismCandidateIrV1 {
+                target_span: wrong_outer_target_span.id(),
+                ..fixture.ir
+            };
+            assert!(matches!(
+                admit_derived_span_morphism_candidate_v1(
+                    &wrong_outer_target_ir,
+                    &fixture.source_span,
+                    &wrong_outer_target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &wrong_outer_right_leg,
+                    &fixture.left_leg_comparison,
+                    &fixture.right_leg_comparison,
+                    cx,
+                ),
+                Err(DerivedSpanMorphismCandidateErrorV1::OuterEndpointMismatch {
+                    field: "outer-target-geometry",
+                })
+            ));
+
             assert!(matches!(
                 admit_derived_span_morphism_candidate_v1(
                     &fixture.ir,
@@ -15883,6 +15928,49 @@ mod tests {
                     }
                 )
             ));
+
+            for (field, source_left, source_right, target_left, target_right) in [
+                (
+                    "source-span-right-leg",
+                    &fixture.source_left_leg,
+                    &fixture.target_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.target_right_leg,
+                ),
+                (
+                    "target-span-left-leg",
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.source_left_leg,
+                    &fixture.target_right_leg,
+                ),
+                (
+                    "target-span-right-leg",
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.source_right_leg,
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_span_morphism_candidate_v1(
+                        &fixture.ir,
+                        &fixture.source_span,
+                        &fixture.target_span,
+                        &fixture.apex_morphism,
+                        source_left,
+                        source_right,
+                        target_left,
+                        target_right,
+                        &fixture.left_leg_comparison,
+                        &fixture.right_leg_comparison,
+                        cx,
+                    ),
+                    Err(DerivedSpanMorphismCandidateErrorV1::SpanLegIdentityMismatch {
+                        field: found,
+                    }) if found == field
+                ));
+            }
 
             let wrong_apex_source = admit_strict(
                 endpoint(59),
@@ -15997,6 +16085,54 @@ mod tests {
                 )
             );
 
+            let uncomposable_target_right_leg = admit_strict(
+                endpoint(12),
+                endpoint(13),
+                72,
+                ColorRank::Estimated,
+                ColorRank::Estimated,
+                cx,
+            );
+            let uncomposable_right_target_span = admit_derived_span_correspondence_v1(
+                span_ir(
+                    endpoint(10),
+                    endpoint(12),
+                    endpoint(13),
+                    &fixture.target_left_leg,
+                    &uncomposable_target_right_leg,
+                    73,
+                ),
+                &fixture.target_left_leg,
+                &uncomposable_target_right_leg,
+                cx,
+            )
+            .expect("valid span whose right leg has an incompatible evidence seam");
+            let uncomposable_right_ir = DerivedSpanMorphismCandidateIrV1 {
+                target_span: uncomposable_right_target_span.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_span_morphism_candidate_v1(
+                    &uncomposable_right_ir,
+                    &fixture.source_span,
+                    &uncomposable_right_target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &uncomposable_target_right_leg,
+                    &fixture.left_leg_comparison,
+                    &fixture.right_leg_comparison,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanMorphismCandidateErrorV1::TargetRouteCompositionRefused {
+                        field: "right-target-route-composition",
+                        cause: DerivedMorphismErrorV1::CompositionEvidenceMismatch,
+                    }
+                )
+            );
+
             let reversed_left_ir = DerivedParallelMorphismComparisonCandidateIrV1 {
                 schema_version: DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1,
                 left: fixture.left_target_route.id(),
@@ -16063,6 +16199,146 @@ mod tests {
                 Err(
                     DerivedSpanMorphismCandidateErrorV1::ComparisonRouteIdentityMismatch {
                         field: "right-comparison-target-route",
+                    }
+                )
+            ));
+
+            let wrong_left_target_endpoint = parallel_comparison_with_test_bindings(
+                &fixture.left_leg_comparison,
+                fixture.left_leg_comparison.source(),
+                geometry_id(74),
+                fixture.left_leg_comparison.left(),
+                fixture.left_leg_comparison.right(),
+            );
+            assert!(matches!(
+                admit_derived_span_morphism_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.target_right_leg,
+                    &wrong_left_target_endpoint,
+                    &fixture.right_leg_comparison,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanMorphismCandidateErrorV1::ComparisonEndpointMismatch {
+                        field: "left-comparison-outer-source",
+                    }
+                )
+            ));
+
+            let wrong_right_source_endpoint = parallel_comparison_with_test_bindings(
+                &fixture.right_leg_comparison,
+                geometry_id(75),
+                fixture.right_leg_comparison.target(),
+                fixture.right_leg_comparison.left(),
+                fixture.right_leg_comparison.right(),
+            );
+            assert!(matches!(
+                admit_derived_span_morphism_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.target_right_leg,
+                    &fixture.left_leg_comparison,
+                    &wrong_right_source_endpoint,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanMorphismCandidateErrorV1::ComparisonEndpointMismatch {
+                        field: "right-comparison-source-apex",
+                    }
+                )
+            ));
+
+            let wrong_right_target_endpoint = parallel_comparison_with_test_bindings(
+                &fixture.right_leg_comparison,
+                fixture.right_leg_comparison.source(),
+                geometry_id(76),
+                fixture.right_leg_comparison.left(),
+                fixture.right_leg_comparison.right(),
+            );
+            assert!(matches!(
+                admit_derived_span_morphism_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.target_right_leg,
+                    &fixture.left_leg_comparison,
+                    &wrong_right_target_endpoint,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanMorphismCandidateErrorV1::ComparisonEndpointMismatch {
+                        field: "right-comparison-outer-target",
+                    }
+                )
+            ));
+
+            let wrong_left_target_route = parallel_comparison_with_test_bindings(
+                &fixture.left_leg_comparison,
+                fixture.left_leg_comparison.source(),
+                fixture.left_leg_comparison.target(),
+                fixture.left_leg_comparison.left(),
+                fixture.right_target_route.id(),
+            );
+            assert!(matches!(
+                admit_derived_span_morphism_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.target_right_leg,
+                    &wrong_left_target_route,
+                    &fixture.right_leg_comparison,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanMorphismCandidateErrorV1::ComparisonRouteIdentityMismatch {
+                        field: "left-comparison-target-route",
+                    }
+                )
+            ));
+
+            let wrong_right_source_leg = parallel_comparison_with_test_bindings(
+                &fixture.right_leg_comparison,
+                fixture.right_leg_comparison.source(),
+                fixture.right_leg_comparison.target(),
+                fixture.source_left_leg.id(),
+                fixture.right_leg_comparison.right(),
+            );
+            assert!(matches!(
+                admit_derived_span_morphism_candidate_v1(
+                    &fixture.ir,
+                    &fixture.source_span,
+                    &fixture.target_span,
+                    &fixture.apex_morphism,
+                    &fixture.source_left_leg,
+                    &fixture.source_right_leg,
+                    &fixture.target_left_leg,
+                    &fixture.target_right_leg,
+                    &fixture.left_leg_comparison,
+                    &wrong_right_source_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanMorphismCandidateErrorV1::ComparisonRouteIdentityMismatch {
+                        field: "right-comparison-source-leg",
                     }
                 )
             ));
