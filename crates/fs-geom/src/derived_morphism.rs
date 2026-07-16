@@ -16,6 +16,9 @@
 //! Two such candidates can be retained as an ordered structural composition
 //! candidate only when both middle selectors match exactly; no direct composed
 //! refinement or transitivity authority is minted.
+//! A separate parallel-path packet can bind two exact structural morphisms with
+//! common geometry endpoints for later comparison without asserting equality,
+//! commutativity, homotopy, coherence, execution, or equivalence.
 //! A standalone token binds a fixed-resolution quasi-isomorphism
 //! *candidate* to an exact refinement path and exact local presentations,
 //! without granting theorem authority. Another candidate retains exhaustive
@@ -61,6 +64,8 @@ pub const DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1
 pub const DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone declared span-correspondence receipts.
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for parallel structural-morphism comparison candidates.
+pub const DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for direct chart-transition inverse-law candidate receipts.
 pub const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
@@ -84,6 +89,9 @@ const DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalL
 // Ten parent fields plus two complete 15-field refinement-child schema trees.
 const DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 40, 1 << 11, 4096);
+// Seven parent fields plus two six-field structural-morphism child schemas.
+const DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 19, 1 << 11, 4096);
 // Ten parent fields plus two six-field structural-morphism child schemas.
 const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 22, 1 << 11, 4096);
@@ -254,6 +262,29 @@ impl CanonicalSchema for DerivedSpanCorrespondenceIdentitySchemaV1 {
 pub type DerivedSpanCorrespondenceIdV1 = EvidenceNodeId<DerivedSpanCorrespondenceIdentitySchemaV1>;
 
 static DERIVED_MORPHISM_CHILD_V1: ChildSpec = ChildSpec::for_identity::<DerivedMorphismIdV1>();
+
+/// Domain-separated identity for one pair of parallel structural paths.
+pub enum DerivedParallelMorphismComparisonCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedParallelMorphismComparisonCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.parallel-morphism-comparison-candidate.v1";
+    const NAME: &'static str = "parallel-structural-morphism-comparison-candidate";
+    const VERSION: u32 = DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact common source and target geometries, ordered typed left and right structural-morphism children, one comparison scope, one nominal relation declaration, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::child_of("left-path", &DERIVED_MORPHISM_CHILD_V1),
+        FieldSpec::child_of("right-path", &DERIVED_MORPHISM_CHILD_V1),
+        FieldSpec::required("comparison-scope", WireType::Bytes),
+        FieldSpec::required("nominal-relation", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one parallel structural-path comparison candidate.
+pub type DerivedParallelMorphismComparisonCandidateIdV1 =
+    EvidenceNodeId<DerivedParallelMorphismComparisonCandidateIdentitySchemaV1>;
 
 /// Domain-separated identity for one structural direct chart-transition pair.
 pub enum DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 {}
@@ -599,6 +630,45 @@ impl DerivedStratificationRefinementCompositionDeclarationIdV1 {
     }
 }
 
+/// Nominal scope in which two parallel structural paths may later be compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedMorphismComparisonScopeIdV1([u8; 32]);
+
+impl DerivedMorphismComparisonScopeIdV1 {
+    /// Construct a nominal comparison-scope identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nominal declaration relating two parallel structural paths.
+///
+/// These bytes do not assert equality, commutativity, homotopy, naturality,
+/// coherence, equivalence, or agreement of executed maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedParallelMorphismRelationDeclarationIdV1([u8; 32]);
+
+impl DerivedParallelMorphismRelationDeclarationIdV1 {
+    /// Construct a nominal relation declaration from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Nominal artifact for one declared local-presentation relation edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DerivedLocalPresentationRelationIdV1([u8; 32]);
@@ -796,6 +866,27 @@ pub struct DerivedStratificationRefinementCompositionCandidateIrV1 {
     /// Nominal assertion that the ordered candidates compose.
     pub nominal_composition: DerivedStratificationRefinementCompositionDeclarationIdV1,
     /// Explicit denial of direct-map, transitivity, preservation, and theorem authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
+/// Versioned structural comparison request for two parallel morphism paths.
+///
+/// Source and target are derived from sealed children. Admission requires only
+/// exact endpoint equality and retains both paths in caller-significant order;
+/// it does not decide or execute their nominal relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedParallelMorphismComparisonCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact typed left structural path.
+    pub left: DerivedMorphismIdV1,
+    /// Exact typed right structural path.
+    pub right: DerivedMorphismIdV1,
+    /// Nominal scope for an independent comparison.
+    pub comparison_scope: DerivedMorphismComparisonScopeIdV1,
+    /// Nominal relation to be checked independently.
+    pub nominal_relation: DerivedParallelMorphismRelationDeclarationIdV1,
+    /// Explicit denial of equality, homotopy, coherence, and equivalence authority.
     pub no_authority: DerivedNoClaimIdV1,
 }
 
@@ -1721,6 +1812,57 @@ impl fmt::Display for DerivedStratificationRefinementCompositionCandidateErrorV1
 
 impl core::error::Error for DerivedStratificationRefinementCompositionCandidateErrorV1 {}
 
+/// Structured refusal from parallel structural-path comparison admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedParallelMorphismComparisonCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required child, scope, declaration, or no-authority ID is zero.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw path ID does not name the supplied sealed child.
+    ChildIdentityMismatch {
+        /// Stable left/right path field.
+        field: &'static str,
+    },
+    /// The sealed paths do not start at the same geometry.
+    SourceMismatch {
+        /// Left path source.
+        left: DerivedGeometryIdV1,
+        /// Right path source.
+        right: DerivedGeometryIdV1,
+    },
+    /// The sealed paths do not end at the same geometry.
+    TargetMismatch {
+        /// Left path target.
+        left: DerivedGeometryIdV1,
+        /// Right path target.
+        right: DerivedGeometryIdV1,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedParallelMorphismComparisonCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "parallel morphism comparison refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedParallelMorphismComparisonCandidateErrorV1 {}
+
 /// Structured refusal from standalone declared-span admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedSpanCorrespondenceErrorV1 {
@@ -2479,6 +2621,81 @@ impl AdmittedDerivedStratificationRefinementCompositionCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedStratificationRefinementCompositionCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed structural candidate retaining two parallel morphism paths.
+///
+/// The token proves exact typed child identity and equal geometry endpoints. It
+/// exposes no path equality, commuting-square, homotopy, naturality, coherence,
+/// execution, evidence-transport, inverse, or equivalence capability.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedParallelMorphismComparisonCandidateV1 {
+    source: DerivedGeometryIdV1,
+    target: DerivedGeometryIdV1,
+    left: DerivedMorphismIdV1,
+    right: DerivedMorphismIdV1,
+    comparison_scope: DerivedMorphismComparisonScopeIdV1,
+    nominal_relation: DerivedParallelMorphismRelationDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedParallelMorphismComparisonCandidateIdV1>,
+}
+
+impl AdmittedDerivedParallelMorphismComparisonCandidateV1 {
+    /// Exact common source geometry.
+    #[must_use]
+    pub const fn source(&self) -> DerivedGeometryIdV1 {
+        self.source
+    }
+
+    /// Exact common target geometry.
+    #[must_use]
+    pub const fn target(&self) -> DerivedGeometryIdV1 {
+        self.target
+    }
+
+    /// Exact typed left path.
+    #[must_use]
+    pub const fn left(&self) -> DerivedMorphismIdV1 {
+        self.left
+    }
+
+    /// Exact typed right path.
+    #[must_use]
+    pub const fn right(&self) -> DerivedMorphismIdV1 {
+        self.right
+    }
+
+    /// Nominal comparison scope; not authenticated here.
+    #[must_use]
+    pub const fn comparison_scope(&self) -> DerivedMorphismComparisonScopeIdV1 {
+        self.comparison_scope
+    }
+
+    /// Nominal relation declaration; not authenticated here.
+    #[must_use]
+    pub const fn nominal_relation(&self) -> DerivedParallelMorphismRelationDeclarationIdV1 {
+        self.nominal_relation
+    }
+
+    /// Explicit artifact denying comparison and equivalence authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed parallel-path comparison-candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedParallelMorphismComparisonCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedParallelMorphismComparisonCandidateIdV1> {
         self.receipt
     }
 }
@@ -5664,6 +5881,147 @@ pub fn admit_derived_stratification_refinement_composition_candidate_v1(
             receipt,
         },
     )
+}
+
+fn parallel_morphism_comparison_candidate_receipt(
+    ir: &DerivedParallelMorphismComparisonCandidateIrV1,
+    left: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedParallelMorphismComparisonCandidateIdV1>,
+    DerivedParallelMorphismComparisonCandidateErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedParallelMorphismComparisonCandidateErrorV1::Cancelled {
+                stage: "parallel-comparison-identity",
+            }
+        }
+        other => DerivedParallelMorphismComparisonCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedParallelMorphismComparisonCandidateIdV1, _>::new(
+        DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(Field::new(0, "source-geometry"), left.source().as_bytes())
+    .and_then(|encoder| encoder.bytes(Field::new(1, "target-geometry"), left.target().as_bytes()))
+    .and_then(|encoder| encoder.child(Field::new(2, "left-path"), ir.left))
+    .and_then(|encoder| encoder.child(Field::new(3, "right-path"), ir.right))
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(4, "comparison-scope"),
+            ir.comparison_scope.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(5, "nominal-relation"),
+            ir.nominal_relation.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(6, "no-authority"), ir.no_authority.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Admit two exact structural morphism paths as a parallel comparison candidate.
+///
+/// Both raw child IDs must bind their supplied sealed morphisms, and both paths
+/// must have exactly equal source and target geometry identities. Direct,
+/// composite, identity, and cyclic paths are otherwise retained without
+/// normalization, execution, or comparison.
+///
+/// Admission does not assert path equality, a commuting diagram, homotopy,
+/// naturality, coherence, inverse laws, evidence preservation, equivalence, or
+/// physical agreement. Independent checking must mint any stronger authority.
+///
+/// # Errors
+/// Returns a typed refusal for schema, zero identity, raw/sealed child mismatch,
+/// unequal source or target, cancellation, or canonical identity defects. No
+/// partial candidate escapes.
+#[must_use = "a parallel structural packet grants no path-comparison authority"]
+pub fn admit_derived_parallel_morphism_comparison_candidate_v1(
+    ir: &DerivedParallelMorphismComparisonCandidateIrV1,
+    left: &AdmittedDerivedMorphismV1,
+    right: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedParallelMorphismComparisonCandidateV1,
+    DerivedParallelMorphismComparisonCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedParallelMorphismComparisonCandidateErrorV1::Cancelled {
+                stage: "parallel-comparison-entry",
+            },
+        );
+    }
+    if ir.schema_version != DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedParallelMorphismComparisonCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.left.as_bytes(), "left-path"),
+        (ir.right.as_bytes(), "right-path"),
+        (ir.comparison_scope.as_bytes(), "comparison-scope"),
+        (ir.nominal_relation.as_bytes(), "nominal-relation"),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(
+                DerivedParallelMorphismComparisonCandidateErrorV1::MissingIdentity { field },
+            );
+        }
+    }
+    for (matches, field) in [
+        (ir.left == left.id(), "left-path"),
+        (ir.right == right.id(), "right-path"),
+    ] {
+        if !matches {
+            return Err(
+                DerivedParallelMorphismComparisonCandidateErrorV1::ChildIdentityMismatch { field },
+            );
+        }
+    }
+    if left.source() != right.source() {
+        return Err(
+            DerivedParallelMorphismComparisonCandidateErrorV1::SourceMismatch {
+                left: left.source(),
+                right: right.source(),
+            },
+        );
+    }
+    if left.target() != right.target() {
+        return Err(
+            DerivedParallelMorphismComparisonCandidateErrorV1::TargetMismatch {
+                left: left.target(),
+                right: right.target(),
+            },
+        );
+    }
+    let receipt = parallel_morphism_comparison_candidate_receipt(ir, left, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedParallelMorphismComparisonCandidateErrorV1::Cancelled {
+                stage: "parallel-comparison-publication",
+            },
+        );
+    }
+    Ok(AdmittedDerivedParallelMorphismComparisonCandidateV1 {
+        source: left.source(),
+        target: left.target(),
+        left: ir.left,
+        right: ir.right,
+        comparison_scope: ir.comparison_scope,
+        nominal_relation: ir.nominal_relation,
+        no_authority: ir.no_authority,
+        receipt,
+    })
 }
 
 fn span_correspondence_receipt(
@@ -9233,6 +9591,55 @@ mod tests {
         StratificationRefinementCompositionCandidateFixtureV1 { first, second, ir }
     }
 
+    struct ParallelMorphismComparisonCandidateFixtureV1 {
+        left: AdmittedDerivedMorphismV1,
+        right: AdmittedDerivedMorphismV1,
+        ir: DerivedParallelMorphismComparisonCandidateIrV1,
+    }
+
+    fn parallel_morphism_comparison_candidate_fixture(
+        cx: &Cx<'_>,
+    ) -> ParallelMorphismComparisonCandidateFixtureV1 {
+        let source = endpoint(160);
+        let middle = endpoint(161);
+        let target = endpoint(162);
+        let left = admit_strict(
+            source,
+            target,
+            163,
+            ColorRank::Verified,
+            ColorRank::Estimated,
+            cx,
+        );
+        let first = admit_strict(
+            source,
+            middle,
+            164,
+            ColorRank::Verified,
+            ColorRank::Validated,
+            cx,
+        );
+        let second = admit_strict(
+            middle,
+            target,
+            165,
+            ColorRank::Validated,
+            ColorRank::Estimated,
+            cx,
+        );
+        let right =
+            compose_derived_morphisms_v1(&first, &second, cx).expect("valid composite right path");
+        let ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+            schema_version: DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1,
+            left: left.id(),
+            right: right.id(),
+            comparison_scope: DerivedMorphismComparisonScopeIdV1::from_bytes([166; 32]),
+            nominal_relation: DerivedParallelMorphismRelationDeclarationIdV1::from_bytes([167; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([168; 32]),
+        };
+        ParallelMorphismComparisonCandidateFixtureV1 { left, right, ir }
+    }
+
     #[test]
     fn v1_class_bytes_keep_old_tags_and_domain_separate_new_paths() {
         assert_eq!(
@@ -11024,6 +11431,437 @@ mod tests {
                 Err(
                     DerivedStratificationRefinementCompositionCandidateErrorV1::Cancelled {
                         stage: "refinement-composition-entry",
+                    }
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn parallel_morphism_comparison_candidates_bind_direct_composite_and_cyclic_paths() {
+        assert_ne!(
+            <DerivedParallelMorphismComparisonCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedMorphismIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+        );
+        assert_eq!(
+            <DerivedParallelMorphismComparisonCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS
+                .len(),
+            7,
+        );
+        assert_eq!(
+            DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+            19,
+        );
+
+        with_cx(false, |cx| {
+            let fixture = parallel_morphism_comparison_candidate_fixture(cx);
+            let first = admit_derived_parallel_morphism_comparison_candidate_v1(
+                &fixture.ir,
+                &fixture.left,
+                &fixture.right,
+                cx,
+            )
+            .expect("valid direct-versus-composite comparison candidate");
+            let replay = admit_derived_parallel_morphism_comparison_candidate_v1(
+                &fixture.ir,
+                &fixture.left,
+                &fixture.right,
+                cx,
+            )
+            .expect("deterministic parallel-path replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.source(), fixture.left.source());
+            assert_eq!(first.target(), fixture.left.target());
+            assert_eq!(first.left(), fixture.left.id());
+            assert_eq!(first.right(), fixture.right.id());
+            assert_ne!(first.left(), first.right());
+            assert_eq!(fixture.left.primitive_path().len(), 1);
+            assert_eq!(fixture.right.primitive_path().len(), 2);
+            assert_eq!(first.comparison_scope(), fixture.ir.comparison_scope);
+            assert_eq!(first.nominal_relation(), fixture.ir.nominal_relation);
+            assert_eq!(first.no_authority(), fixture.ir.no_authority);
+            assert_eq!(first.id(), first.identity_receipt().id());
+
+            let object = endpoint(169);
+            let other = endpoint(170);
+            let identity = admit_identity(object, cx);
+            let outward = admit_strict(
+                object,
+                other,
+                171,
+                ColorRank::Estimated,
+                ColorRank::Estimated,
+                cx,
+            );
+            let inward = admit_strict(
+                other,
+                object,
+                172,
+                ColorRank::Estimated,
+                ColorRank::Estimated,
+                cx,
+            );
+            let cycle = compose_derived_morphisms_v1(&outward, &inward, cx)
+                .expect("valid nonidentity cycle");
+            let cycle_ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+                left: identity.id(),
+                right: cycle.id(),
+                comparison_scope: DerivedMorphismComparisonScopeIdV1::from_bytes([173; 32]),
+                nominal_relation: DerivedParallelMorphismRelationDeclarationIdV1::from_bytes(
+                    [174; 32],
+                ),
+                no_authority: DerivedNoClaimIdV1::from_bytes([175; 32]),
+                ..fixture.ir
+            };
+            let identity_cycle = admit_derived_parallel_morphism_comparison_candidate_v1(
+                &cycle_ir, &identity, &cycle, cx,
+            )
+            .expect("identity and nonidentity cycle are structurally parallel");
+            assert_eq!(identity_cycle.source(), object.id);
+            assert_eq!(identity_cycle.target(), object.id);
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Seven-field receipt plus both typed-child schemas.
+    fn parallel_morphism_comparison_receipt_binds_every_field_and_child_order() {
+        with_cx(false, |cx| {
+            let fixture = parallel_morphism_comparison_candidate_fixture(cx);
+            let baseline =
+                parallel_morphism_comparison_candidate_receipt(&fixture.ir, &fixture.left, cx)
+                    .expect("baseline parallel comparison receipt")
+                    .id();
+
+            macro_rules! assert_ir_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = fixture.ir;
+                    changed.$field = $value;
+                    let changed =
+                        parallel_morphism_comparison_candidate_receipt(&changed, &fixture.left, cx)
+                            .expect("changed parallel comparison receipt")
+                            .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_ir_field_moves_identity!(
+                left,
+                DerivedMorphismIdV1::parse_slice(&[176; 32]).expect("nonzero changed left path")
+            );
+            assert_ir_field_moves_identity!(
+                right,
+                DerivedMorphismIdV1::parse_slice(&[177; 32]).expect("nonzero changed right path")
+            );
+            assert_ir_field_moves_identity!(
+                comparison_scope,
+                DerivedMorphismComparisonScopeIdV1::from_bytes([178; 32])
+            );
+            assert_ir_field_moves_identity!(
+                nominal_relation,
+                DerivedParallelMorphismRelationDeclarationIdV1::from_bytes([179; 32])
+            );
+            assert_ir_field_moves_identity!(
+                no_authority,
+                DerivedNoClaimIdV1::from_bytes([180; 32])
+            );
+
+            let changed_source = admit_strict(
+                endpoint(181),
+                endpoint(162),
+                182,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let changed_source_id =
+                parallel_morphism_comparison_candidate_receipt(&fixture.ir, &changed_source, cx)
+                    .expect("changed source receipt")
+                    .id();
+            assert_ne!(baseline, changed_source_id, "source-geometry");
+
+            let changed_target = admit_strict(
+                endpoint(160),
+                endpoint(183),
+                184,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let changed_target_id =
+                parallel_morphism_comparison_candidate_receipt(&fixture.ir, &changed_target, cx)
+                    .expect("changed target receipt")
+                    .id();
+            assert_ne!(baseline, changed_target_id, "target-geometry");
+
+            for field in [2, 3] {
+                let spec =
+                    &DerivedParallelMorphismComparisonCandidateIdentitySchemaV1::FIELDS[field];
+                assert_eq!(spec.wire_type(), WireType::Child);
+                assert!(spec.child_spec().is_some());
+            }
+            let prefix_encoder = || {
+                CanonicalEncoder::<DerivedParallelMorphismComparisonCandidateIdV1, _>::new(
+                    DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_IDENTITY_LIMITS_V1,
+                    || cx.checkpoint().is_err(),
+                )
+                .expect("valid comparison encoder")
+                .bytes(
+                    Field::new(0, "source-geometry"),
+                    fixture.left.source().as_bytes(),
+                )
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(1, "target-geometry"),
+                        fixture.left.target().as_bytes(),
+                    )
+                })
+            };
+            let wrong_left_schema = prefix_encoder().and_then(|encoder| {
+                encoder.child(
+                    Field::new(2, "left-path"),
+                    DerivedSpanCorrespondenceIdV1::parse_slice(&[185; 32])
+                        .expect("nonzero wrong-schema left child"),
+                )
+            });
+            assert!(matches!(
+                wrong_left_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "left-path",
+                    what: "child schema domain",
+                })
+            ));
+            let wrong_right_schema = prefix_encoder()
+                .and_then(|encoder| encoder.child(Field::new(2, "left-path"), fixture.left.id()))
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(3, "right-path"),
+                        DerivedSpanCorrespondenceIdV1::parse_slice(&[186; 32])
+                            .expect("nonzero wrong-schema right child"),
+                    )
+                });
+            assert!(matches!(
+                wrong_right_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "right-path",
+                    what: "child schema domain",
+                })
+            ));
+
+            let swapped_ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+                left: fixture.right.id(),
+                right: fixture.left.id(),
+                ..fixture.ir
+            };
+            let swapped =
+                parallel_morphism_comparison_candidate_receipt(&swapped_ir, &fixture.left, cx)
+                    .expect("swapped ordered children remain encodable")
+                    .id();
+            assert_ne!(baseline, swapped, "left/right child order is semantic");
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Schema, zero-ID, child, endpoint, and cancellation matrix.
+    fn parallel_morphism_comparison_refuses_unbound_or_nonparallel_paths() {
+        let fixture = with_cx(false, parallel_morphism_comparison_candidate_fixture);
+        with_cx(false, |cx| {
+            let bad_schema = DerivedParallelMorphismComparisonCandidateIrV1 {
+                schema_version: 2,
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_parallel_morphism_comparison_candidate_v1(
+                    &bad_schema,
+                    &fixture.left,
+                    &fixture.right,
+                    cx,
+                ),
+                Err(
+                    DerivedParallelMorphismComparisonCandidateErrorV1::UnsupportedSchemaVersion {
+                        found: 2,
+                        supported: DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1,
+                    }
+                )
+            );
+
+            for (field, changed_ir) in [
+                (
+                    "left-path",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        left: DerivedMorphismIdV1::parse_slice(&[0; 32])
+                            .expect("zero left sentinel remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "right-path",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        right: DerivedMorphismIdV1::parse_slice(&[0; 32])
+                            .expect("zero right sentinel remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "comparison-scope",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        comparison_scope: DerivedMorphismComparisonScopeIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "nominal-relation",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        nominal_relation:
+                            DerivedParallelMorphismRelationDeclarationIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_parallel_morphism_comparison_candidate_v1(
+                        &changed_ir,
+                        &fixture.left,
+                        &fixture.right,
+                        cx,
+                    ),
+                    Err(DerivedParallelMorphismComparisonCandidateErrorV1::MissingIdentity {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            for (field, changed_ir) in [
+                (
+                    "left-path",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        left: DerivedMorphismIdV1::parse_slice(&[187; 32])
+                            .expect("nonzero wrong left path"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "right-path",
+                    DerivedParallelMorphismComparisonCandidateIrV1 {
+                        right: DerivedMorphismIdV1::parse_slice(&[188; 32])
+                            .expect("nonzero wrong right path"),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_parallel_morphism_comparison_candidate_v1(
+                        &changed_ir,
+                        &fixture.left,
+                        &fixture.right,
+                        cx,
+                    ),
+                    Err(DerivedParallelMorphismComparisonCandidateErrorV1::ChildIdentityMismatch {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            let wrong_source = admit_strict(
+                endpoint(189),
+                endpoint(162),
+                190,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let wrong_source_ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+                right: wrong_source.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_parallel_morphism_comparison_candidate_v1(
+                    &wrong_source_ir,
+                    &fixture.left,
+                    &wrong_source,
+                    cx,
+                ),
+                Err(
+                    DerivedParallelMorphismComparisonCandidateErrorV1::SourceMismatch {
+                        left: endpoint(160).id,
+                        right: endpoint(189).id,
+                    }
+                )
+            );
+
+            let wrong_target = admit_strict(
+                endpoint(160),
+                endpoint(191),
+                192,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let wrong_target_ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+                right: wrong_target.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_parallel_morphism_comparison_candidate_v1(
+                    &wrong_target_ir,
+                    &fixture.left,
+                    &wrong_target,
+                    cx,
+                ),
+                Err(
+                    DerivedParallelMorphismComparisonCandidateErrorV1::TargetMismatch {
+                        left: endpoint(162).id,
+                        right: endpoint(191).id,
+                    }
+                )
+            );
+
+            let wrong_both = admit_strict(
+                endpoint(193),
+                endpoint(194),
+                195,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let wrong_both_ir = DerivedParallelMorphismComparisonCandidateIrV1 {
+                right: wrong_both.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_parallel_morphism_comparison_candidate_v1(
+                    &wrong_both_ir,
+                    &fixture.left,
+                    &wrong_both,
+                    cx,
+                ),
+                Err(
+                    DerivedParallelMorphismComparisonCandidateErrorV1::SourceMismatch {
+                        left: endpoint(160).id,
+                        right: endpoint(193).id,
+                    }
+                )
+            );
+        });
+
+        with_cx(true, |cx| {
+            assert_eq!(
+                admit_derived_parallel_morphism_comparison_candidate_v1(
+                    &fixture.ir,
+                    &fixture.left,
+                    &fixture.right,
+                    cx,
+                ),
+                Err(
+                    DerivedParallelMorphismComparisonCandidateErrorV1::Cancelled {
+                        stage: "parallel-comparison-entry",
                     }
                 )
             );
