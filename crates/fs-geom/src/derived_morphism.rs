@@ -13,6 +13,9 @@
 //! A finite stratification-refinement candidate can bind that exhaustive child
 //! from refined to coarse after checking two-sided stratum coverage and
 //! dimension monotonicity, without granting containment or incidence authority.
+//! Two such candidates can be retained as an ordered structural composition
+//! candidate only when both middle selectors match exactly; no direct composed
+//! refinement or transitivity authority is minted.
 //! A standalone token binds a fixed-resolution quasi-isomorphism
 //! *candidate* to an exact refinement path and exact local presentations,
 //! without granting theorem authority. Another candidate retains exhaustive
@@ -54,6 +57,8 @@ pub const DERIVED_STRATUM_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
 pub const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for finite stratification-refinement candidates.
 pub const DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for ordered two-step stratification-refinement candidates.
+pub const DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone declared span-correspondence receipts.
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for direct chart-transition inverse-law candidate receipts.
@@ -73,18 +78,23 @@ const DERIVED_STRATUM_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 9, 1 << 11, 4096);
 const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
-// Recursive validation must admit the exhaustive-map child's eight fields.
+// Recursive validation counts this schema's seven fields plus its eight-field child.
 const DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
-    CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
+    CanonicalLimits::new(1 << 17, 1 << 16, 15, 1 << 11, 4096);
+// Ten parent fields plus two complete 15-field refinement-child schema trees.
+const DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 40, 1 << 11, 4096);
+// Ten parent fields plus two six-field structural-morphism child schemas.
 const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
-    CanonicalLimits::new(1 << 17, 1 << 16, 10, 1 << 11, 4096);
+    CanonicalLimits::new(1 << 17, 1 << 16, 22, 1 << 11, 4096);
 const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
 const DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 17, 10, 1 << 11, 4096);
-// Recursive validation must admit the 16-field quasi-isomorphism child schema.
+// Thirteen parent fields, three 16-field quasi-isomorphism children, and one
+// ten-field local-presentation child are all counted recursively.
 const DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_IDENTITY_LIMITS_V1:
-    CanonicalLimits = CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
+    CanonicalLimits = CanonicalLimits::new(1 << 17, 1 << 16, 71, 1 << 11, 4096);
 
 /// Domain-separated semantic identity for one admitted structural morphism.
 pub enum DerivedMorphismIdentitySchemaV1 {}
@@ -184,6 +194,42 @@ impl CanonicalSchema for DerivedStratificationRefinementCandidateIdentitySchemaV
 /// Typed identity of one finite stratification-refinement candidate.
 pub type DerivedStratificationRefinementCandidateIdV1 =
     EvidenceNodeId<DerivedStratificationRefinementCandidateIdentitySchemaV1>;
+
+static DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedStratificationRefinementCandidateIdV1>();
+
+/// Domain-separated identity for one ordered two-step refinement candidate.
+pub enum DerivedStratificationRefinementCompositionCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedStratificationRefinementCompositionCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str =
+        "org.frankensim.fs-geom.stratification-refinement-composition-candidate.v1";
+    const NAME: &'static str = "two-step-stratification-refinement-composition-candidate";
+    const VERSION: u32 = DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "derived fine/middle/coarse geometry and stratification selectors, ordered typed refinement-candidate children, exact middle seams, one nominal composition declaration, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("fine-geometry", WireType::Bytes),
+        FieldSpec::required("fine-stratification", WireType::Bytes),
+        FieldSpec::required("middle-geometry", WireType::Bytes),
+        FieldSpec::required("middle-stratification", WireType::Bytes),
+        FieldSpec::required("coarse-geometry", WireType::Bytes),
+        FieldSpec::required("coarse-stratification", WireType::Bytes),
+        FieldSpec::child_of(
+            "first-refinement",
+            &DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of(
+            "second-refinement",
+            &DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::required("nominal-composition-declaration", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one ordered two-step refinement candidate.
+pub type DerivedStratificationRefinementCompositionCandidateIdV1 =
+    EvidenceNodeId<DerivedStratificationRefinementCompositionCandidateIdentitySchemaV1>;
 
 /// Domain-separated semantic identity for one admitted declared span.
 pub enum DerivedSpanCorrespondenceIdentitySchemaV1 {}
@@ -532,6 +578,27 @@ impl DerivedStratificationRefinementDeclarationIdV1 {
     }
 }
 
+/// Nominal declaration that two retained refinement candidates compose.
+///
+/// The bytes are an input for independent checking. They do not prove a direct
+/// fine-to-coarse map, transitivity, preservation, or a refinement theorem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedStratificationRefinementCompositionDeclarationIdV1([u8; 32]);
+
+impl DerivedStratificationRefinementCompositionDeclarationIdV1 {
+    /// Construct a nominal composition declaration from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Nominal artifact for one declared local-presentation relation edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DerivedLocalPresentationRelationIdV1([u8; 32]);
@@ -710,6 +777,25 @@ pub struct DerivedStratificationRefinementCandidateIrV1 {
     /// Nominal aggregate refinement declaration for later independent checking.
     pub nominal_refinement: DerivedStratificationRefinementDeclarationIdV1,
     /// Explicit denial of containment, preservation, theorem, and equivalence authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
+/// Versioned ordered pair of structurally composable refinement candidates.
+///
+/// Fine, middle, and coarse selectors are derived from the sealed children,
+/// rather than repeated as caller-controlled input. Exact middle seams are the
+/// only composition law checked here; no direct refinement map is synthesized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedStratificationRefinementCompositionCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact first sealed fine-to-middle refinement candidate.
+    pub first: DerivedStratificationRefinementCandidateIdV1,
+    /// Exact second sealed middle-to-coarse refinement candidate.
+    pub second: DerivedStratificationRefinementCandidateIdV1,
+    /// Nominal assertion that the ordered candidates compose.
+    pub nominal_composition: DerivedStratificationRefinementCompositionDeclarationIdV1,
+    /// Explicit denial of direct-map, transitivity, preservation, and theorem authority.
     pub no_authority: DerivedNoClaimIdV1,
 }
 
@@ -1584,6 +1670,57 @@ impl fmt::Display for DerivedStratificationRefinementCandidateErrorV1 {
 
 impl core::error::Error for DerivedStratificationRefinementCandidateErrorV1 {}
 
+/// Structured refusal from two-step refinement-composition admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedStratificationRefinementCompositionCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required child, declaration, or no-authority ID is zero.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw refinement ID does not name the supplied sealed child.
+    ChildIdentityMismatch {
+        /// Stable first/second child field.
+        field: &'static str,
+    },
+    /// The first coarse geometry is not the second refined geometry.
+    MiddleGeometryMismatch {
+        /// First child's coarse geometry.
+        first_coarse: DerivedGeometryIdV1,
+        /// Second child's refined geometry.
+        second_refined: DerivedGeometryIdV1,
+    },
+    /// The first coarse stratification is not the second refined stratification.
+    MiddleStratificationMismatch {
+        /// First child's coarse stratification.
+        first_coarse: StratificationIdV1,
+        /// Second child's refined stratification.
+        second_refined: StratificationIdV1,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedStratificationRefinementCompositionCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "refinement-composition candidate refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedStratificationRefinementCompositionCandidateErrorV1 {}
+
 /// Structured refusal from standalone declared-span admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedSpanCorrespondenceErrorV1 {
@@ -2243,6 +2380,105 @@ impl AdmittedDerivedStratificationRefinementCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedStratificationRefinementCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed ordered two-step stratification-refinement candidate.
+///
+/// This token proves only that two exact structural candidates share the same
+/// middle geometry and stratification selectors. It does not synthesize a
+/// direct fine-to-coarse exhaustive map or grant transitivity, containment,
+/// incidence/link preservation, evidence transport, theorem, or equivalence.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedStratificationRefinementCompositionCandidateV1 {
+    fine_geometry: DerivedGeometryIdV1,
+    fine_stratification: StratificationIdV1,
+    middle_geometry: DerivedGeometryIdV1,
+    middle_stratification: StratificationIdV1,
+    coarse_geometry: DerivedGeometryIdV1,
+    coarse_stratification: StratificationIdV1,
+    first: DerivedStratificationRefinementCandidateIdV1,
+    second: DerivedStratificationRefinementCandidateIdV1,
+    nominal_composition: DerivedStratificationRefinementCompositionDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedStratificationRefinementCompositionCandidateIdV1>,
+}
+
+impl AdmittedDerivedStratificationRefinementCompositionCandidateV1 {
+    /// Exact fine/source geometry derived from the first child.
+    #[must_use]
+    pub const fn fine_geometry(&self) -> DerivedGeometryIdV1 {
+        self.fine_geometry
+    }
+
+    /// Exact fine/source stratification derived from the first child.
+    #[must_use]
+    pub const fn fine_stratification(&self) -> StratificationIdV1 {
+        self.fine_stratification
+    }
+
+    /// Exact shared middle geometry.
+    #[must_use]
+    pub const fn middle_geometry(&self) -> DerivedGeometryIdV1 {
+        self.middle_geometry
+    }
+
+    /// Exact shared middle stratification.
+    #[must_use]
+    pub const fn middle_stratification(&self) -> StratificationIdV1 {
+        self.middle_stratification
+    }
+
+    /// Exact coarse/target geometry derived from the second child.
+    #[must_use]
+    pub const fn coarse_geometry(&self) -> DerivedGeometryIdV1 {
+        self.coarse_geometry
+    }
+
+    /// Exact coarse/target stratification derived from the second child.
+    #[must_use]
+    pub const fn coarse_stratification(&self) -> StratificationIdV1 {
+        self.coarse_stratification
+    }
+
+    /// Exact first fine-to-middle child.
+    #[must_use]
+    pub const fn first(&self) -> DerivedStratificationRefinementCandidateIdV1 {
+        self.first
+    }
+
+    /// Exact second middle-to-coarse child.
+    #[must_use]
+    pub const fn second(&self) -> DerivedStratificationRefinementCandidateIdV1 {
+        self.second
+    }
+
+    /// Nominal composition declaration; not authenticated here.
+    #[must_use]
+    pub const fn nominal_composition(
+        &self,
+    ) -> DerivedStratificationRefinementCompositionDeclarationIdV1 {
+        self.nominal_composition
+    }
+
+    /// Explicit artifact denying direct-map and theorem authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed two-step composition-candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedStratificationRefinementCompositionCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedStratificationRefinementCompositionCandidateIdV1> {
         self.receipt
     }
 }
@@ -5246,6 +5482,188 @@ pub fn admit_derived_stratification_refinement_candidate_v1(
         no_authority: ir.no_authority,
         receipt,
     })
+}
+
+fn stratification_refinement_composition_candidate_receipt(
+    ir: &DerivedStratificationRefinementCompositionCandidateIrV1,
+    first: &AdmittedDerivedStratificationRefinementCandidateV1,
+    second: &AdmittedDerivedStratificationRefinementCandidateV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedStratificationRefinementCompositionCandidateIdV1>,
+    DerivedStratificationRefinementCompositionCandidateErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedStratificationRefinementCompositionCandidateErrorV1::Cancelled {
+                stage: "refinement-composition-identity",
+            }
+        }
+        other => DerivedStratificationRefinementCompositionCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedStratificationRefinementCompositionCandidateIdV1, _>::new(
+        DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "fine-geometry"),
+        first.refined_geometry().as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "fine-stratification"),
+            first.refined_stratification().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "middle-geometry"),
+            first.coarse_geometry().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "middle-stratification"),
+            first.coarse_stratification().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(4, "coarse-geometry"),
+            second.coarse_geometry().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(5, "coarse-stratification"),
+            second.coarse_stratification().as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.child(Field::new(6, "first-refinement"), ir.first))
+    .and_then(|encoder| encoder.child(Field::new(7, "second-refinement"), ir.second))
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(8, "nominal-composition-declaration"),
+            ir.nominal_composition.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(9, "no-authority"), ir.no_authority.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Admit an ordered two-step stratification-refinement composition candidate.
+///
+/// The first sealed child must end at exactly the geometry and stratification
+/// where the second sealed child begins. Fine, middle, and coarse selectors are
+/// derived from those children and bound into the receipt with their ordered
+/// typed identities. The nominal composition declaration remains unauthenticated.
+///
+/// This function does not synthesize a direct exhaustive fine-to-coarse child,
+/// execute components, transport evidence, or prove transitivity, containment,
+/// incidence/frontier/link preservation, a refinement theorem, or equivalence.
+///
+/// # Errors
+/// Returns a typed refusal for schema, zero identity, raw/sealed child mismatch,
+/// unequal middle geometry or stratification, cancellation, or canonical
+/// identity defects. No partial candidate escapes.
+#[must_use = "a two-step structural candidate grants no composed-map authority"]
+pub fn admit_derived_stratification_refinement_composition_candidate_v1(
+    ir: &DerivedStratificationRefinementCompositionCandidateIrV1,
+    first: &AdmittedDerivedStratificationRefinementCandidateV1,
+    second: &AdmittedDerivedStratificationRefinementCandidateV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedStratificationRefinementCompositionCandidateV1,
+    DerivedStratificationRefinementCompositionCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedStratificationRefinementCompositionCandidateErrorV1::Cancelled {
+                stage: "refinement-composition-entry",
+            },
+        );
+    }
+    if ir.schema_version
+        != DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1
+    {
+        return Err(
+            DerivedStratificationRefinementCompositionCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported:
+                    DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.first.as_bytes(), "first-refinement"),
+        (ir.second.as_bytes(), "second-refinement"),
+        (
+            ir.nominal_composition.as_bytes(),
+            "nominal-composition-declaration",
+        ),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(
+                DerivedStratificationRefinementCompositionCandidateErrorV1::MissingIdentity {
+                    field,
+                },
+            );
+        }
+    }
+    for (matches, field) in [
+        (ir.first == first.id(), "first-refinement"),
+        (ir.second == second.id(), "second-refinement"),
+    ] {
+        if !matches {
+            return Err(
+                DerivedStratificationRefinementCompositionCandidateErrorV1::ChildIdentityMismatch {
+                    field,
+                },
+            );
+        }
+    }
+    if first.coarse_geometry() != second.refined_geometry() {
+        return Err(
+            DerivedStratificationRefinementCompositionCandidateErrorV1::MiddleGeometryMismatch {
+                first_coarse: first.coarse_geometry(),
+                second_refined: second.refined_geometry(),
+            },
+        );
+    }
+    if first.coarse_stratification() != second.refined_stratification() {
+        return Err(
+            DerivedStratificationRefinementCompositionCandidateErrorV1::MiddleStratificationMismatch {
+                first_coarse: first.coarse_stratification(),
+                second_refined: second.refined_stratification(),
+            },
+        );
+    }
+    let receipt = stratification_refinement_composition_candidate_receipt(ir, first, second, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedStratificationRefinementCompositionCandidateErrorV1::Cancelled {
+                stage: "refinement-composition-publication",
+            },
+        );
+    }
+    Ok(
+        AdmittedDerivedStratificationRefinementCompositionCandidateV1 {
+            fine_geometry: first.refined_geometry(),
+            fine_stratification: first.refined_stratification(),
+            middle_geometry: first.coarse_geometry(),
+            middle_stratification: first.coarse_stratification(),
+            coarse_geometry: second.coarse_geometry(),
+            coarse_stratification: second.coarse_stratification(),
+            first: ir.first,
+            second: ir.second,
+            nominal_composition: ir.nominal_composition,
+            no_authority: ir.no_authority,
+            receipt,
+        },
+    )
 }
 
 fn span_correspondence_receipt(
@@ -8727,6 +9145,94 @@ mod tests {
         }
     }
 
+    fn admit_refinement_candidate_between(
+        refined: &AdmittedDerivedGeometryV1,
+        coarse: &AdmittedDerivedGeometryV1,
+        target_indices: &[usize],
+        seed: u8,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedStratificationRefinementCandidateV1 {
+        let exhaustive_map =
+            admit_exhaustive_map_for_targets(refined, coarse, target_indices, seed, cx);
+        let ir = DerivedStratificationRefinementCandidateIrV1 {
+            schema_version: DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1,
+            refined_geometry: refined.id(),
+            refined_stratification: refined.ir().stratification.id,
+            coarse_geometry: coarse.id(),
+            coarse_stratification: coarse.ir().stratification.id,
+            exhaustive_map: exhaustive_map.id(),
+            nominal_refinement: DerivedStratificationRefinementDeclarationIdV1::from_bytes(
+                [seed.wrapping_add(64); 32],
+            ),
+            no_authority: DerivedNoClaimIdV1::from_bytes([seed.wrapping_add(65); 32]),
+        };
+        admit_derived_stratification_refinement_candidate_v1(
+            &ir,
+            &exhaustive_map,
+            refined,
+            coarse,
+            cx,
+        )
+        .expect("valid sealed refinement candidate")
+    }
+
+    fn refinement_candidate_with_test_selectors(
+        candidate: &AdmittedDerivedStratificationRefinementCandidateV1,
+        refined_geometry: DerivedGeometryIdV1,
+        refined_stratification: StratificationIdV1,
+        coarse_geometry: DerivedGeometryIdV1,
+        coarse_stratification: StratificationIdV1,
+    ) -> AdmittedDerivedStratificationRefinementCandidateV1 {
+        AdmittedDerivedStratificationRefinementCandidateV1 {
+            refined_geometry,
+            refined_stratification,
+            coarse_geometry,
+            coarse_stratification,
+            exhaustive_map: candidate.exhaustive_map(),
+            nominal_refinement: candidate.nominal_refinement(),
+            no_authority: candidate.no_authority(),
+            receipt: candidate.identity_receipt(),
+        }
+    }
+
+    struct StratificationRefinementCompositionCandidateFixtureV1 {
+        first: AdmittedDerivedStratificationRefinementCandidateV1,
+        second: AdmittedDerivedStratificationRefinementCandidateV1,
+        ir: DerivedStratificationRefinementCompositionCandidateIrV1,
+    }
+
+    fn stratification_refinement_composition_candidate_fixture(
+        cx: &Cx<'_>,
+    ) -> StratificationRefinementCompositionCandidateFixtureV1 {
+        let mut fine_ir = fixed_resolution_geometry_ir(31, 41, 51, 2);
+        replace_strata(&mut fine_ir, 130, &[(131, 0), (132, 1), (133, 2)]);
+        let fine = admit_derived_geometry_v1(fine_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid fine geometry");
+
+        let mut middle_ir = fixed_resolution_geometry_ir(34, 44, 54, 2);
+        replace_strata(&mut middle_ir, 140, &[(141, 1), (142, 2)]);
+        let middle = admit_derived_geometry_v1(middle_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid middle geometry");
+
+        let mut coarse_ir = fixed_resolution_geometry_ir(37, 47, 57, 2);
+        replace_strata(&mut coarse_ir, 150, &[(151, 2)]);
+        let coarse = admit_derived_geometry_v1(coarse_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid coarse geometry");
+
+        let first = admit_refinement_candidate_between(&fine, &middle, &[0, 1, 1], 20, cx);
+        let second = admit_refinement_candidate_between(&middle, &coarse, &[0, 0], 60, cx);
+        let ir = DerivedStratificationRefinementCompositionCandidateIrV1 {
+            schema_version:
+                DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1,
+            first: first.id(),
+            second: second.id(),
+            nominal_composition:
+                DerivedStratificationRefinementCompositionDeclarationIdV1::from_bytes([220; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([221; 32]),
+        };
+        StratificationRefinementCompositionCandidateFixtureV1 { first, second, ir }
+    }
+
     #[test]
     fn v1_class_bytes_keep_old_tags_and_domain_separate_new_paths() {
         assert_eq!(
@@ -9555,7 +10061,7 @@ mod tests {
         );
         assert_eq!(
             DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
-            8,
+            15,
         );
 
         with_cx(false, |cx| {
@@ -10018,6 +10524,513 @@ mod tests {
     }
 
     #[test]
+    fn stratification_refinement_composition_candidates_replay_exact_middle_seams() {
+        assert_ne!(
+            <DerivedStratificationRefinementCompositionCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedStratificationRefinementCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+        );
+        assert_eq!(
+            <DerivedStratificationRefinementCompositionCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS.len(),
+            10,
+        );
+        assert_eq!(
+            DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+            40,
+        );
+
+        with_cx(false, |cx| {
+            let fixture = stratification_refinement_composition_candidate_fixture(cx);
+            let first = admit_derived_stratification_refinement_composition_candidate_v1(
+                &fixture.ir,
+                &fixture.first,
+                &fixture.second,
+                cx,
+            )
+            .expect("valid two-step refinement composition candidate");
+            let replay = admit_derived_stratification_refinement_composition_candidate_v1(
+                &fixture.ir,
+                &fixture.first,
+                &fixture.second,
+                cx,
+            )
+            .expect("deterministic two-step replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.fine_geometry(), fixture.first.refined_geometry());
+            assert_eq!(
+                first.fine_stratification(),
+                fixture.first.refined_stratification(),
+            );
+            assert_eq!(first.middle_geometry(), fixture.first.coarse_geometry());
+            assert_eq!(first.middle_geometry(), fixture.second.refined_geometry(),);
+            assert_eq!(
+                first.middle_stratification(),
+                fixture.first.coarse_stratification(),
+            );
+            assert_eq!(
+                first.middle_stratification(),
+                fixture.second.refined_stratification(),
+            );
+            assert_eq!(first.coarse_geometry(), fixture.second.coarse_geometry());
+            assert_eq!(
+                first.coarse_stratification(),
+                fixture.second.coarse_stratification(),
+            );
+            assert_eq!(first.first(), fixture.first.id());
+            assert_eq!(first.second(), fixture.second.id());
+            assert_eq!(first.nominal_composition(), fixture.ir.nominal_composition);
+            assert_eq!(first.no_authority(), fixture.ir.no_authority);
+            assert_eq!(first.id(), first.identity_receipt().id());
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Ten-field receipt, including six derived selectors.
+    fn stratification_refinement_composition_receipt_binds_ordered_children_and_selectors() {
+        with_cx(false, |cx| {
+            let fixture = stratification_refinement_composition_candidate_fixture(cx);
+            let baseline = stratification_refinement_composition_candidate_receipt(
+                &fixture.ir,
+                &fixture.first,
+                &fixture.second,
+                cx,
+            )
+            .expect("baseline composition receipt")
+            .id();
+
+            macro_rules! assert_ir_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = fixture.ir;
+                    changed.$field = $value;
+                    let changed = stratification_refinement_composition_candidate_receipt(
+                        &changed,
+                        &fixture.first,
+                        &fixture.second,
+                        cx,
+                    )
+                    .expect("changed raw composition receipt")
+                    .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_ir_field_moves_identity!(
+                first,
+                DerivedStratificationRefinementCandidateIdV1::parse_slice(&[222; 32])
+                    .expect("nonzero changed first child")
+            );
+            assert_ir_field_moves_identity!(
+                second,
+                DerivedStratificationRefinementCandidateIdV1::parse_slice(&[223; 32])
+                    .expect("nonzero changed second child")
+            );
+            assert_ir_field_moves_identity!(
+                nominal_composition,
+                DerivedStratificationRefinementCompositionDeclarationIdV1::from_bytes([224; 32])
+            );
+            assert_ir_field_moves_identity!(
+                no_authority,
+                DerivedNoClaimIdV1::from_bytes([225; 32])
+            );
+
+            macro_rules! assert_derived_selector_moves_identity {
+                ($label:literal, $first:expr, $second:expr) => {{
+                    let changed = stratification_refinement_composition_candidate_receipt(
+                        &fixture.ir,
+                        &$first,
+                        &$second,
+                        cx,
+                    )
+                    .expect("changed derived-selector receipt")
+                    .id();
+                    assert_ne!(baseline, changed, $label);
+                }};
+            }
+
+            assert_derived_selector_moves_identity!(
+                "fine-geometry",
+                refinement_candidate_with_test_selectors(
+                    &fixture.first,
+                    geometry_id(226),
+                    fixture.first.refined_stratification(),
+                    fixture.first.coarse_geometry(),
+                    fixture.first.coarse_stratification(),
+                ),
+                refinement_candidate_with_test_selectors(
+                    &fixture.second,
+                    fixture.second.refined_geometry(),
+                    fixture.second.refined_stratification(),
+                    fixture.second.coarse_geometry(),
+                    fixture.second.coarse_stratification(),
+                )
+            );
+            assert_derived_selector_moves_identity!(
+                "fine-stratification",
+                refinement_candidate_with_test_selectors(
+                    &fixture.first,
+                    fixture.first.refined_geometry(),
+                    stratification_id(227),
+                    fixture.first.coarse_geometry(),
+                    fixture.first.coarse_stratification(),
+                ),
+                refinement_candidate_with_test_selectors(
+                    &fixture.second,
+                    fixture.second.refined_geometry(),
+                    fixture.second.refined_stratification(),
+                    fixture.second.coarse_geometry(),
+                    fixture.second.coarse_stratification(),
+                )
+            );
+            assert_derived_selector_moves_identity!(
+                "middle-geometry",
+                refinement_candidate_with_test_selectors(
+                    &fixture.first,
+                    fixture.first.refined_geometry(),
+                    fixture.first.refined_stratification(),
+                    geometry_id(228),
+                    fixture.first.coarse_stratification(),
+                ),
+                refinement_candidate_with_test_selectors(
+                    &fixture.second,
+                    fixture.second.refined_geometry(),
+                    fixture.second.refined_stratification(),
+                    fixture.second.coarse_geometry(),
+                    fixture.second.coarse_stratification(),
+                )
+            );
+            assert_derived_selector_moves_identity!(
+                "middle-stratification",
+                refinement_candidate_with_test_selectors(
+                    &fixture.first,
+                    fixture.first.refined_geometry(),
+                    fixture.first.refined_stratification(),
+                    fixture.first.coarse_geometry(),
+                    stratification_id(229),
+                ),
+                refinement_candidate_with_test_selectors(
+                    &fixture.second,
+                    fixture.second.refined_geometry(),
+                    fixture.second.refined_stratification(),
+                    fixture.second.coarse_geometry(),
+                    fixture.second.coarse_stratification(),
+                )
+            );
+            assert_derived_selector_moves_identity!(
+                "coarse-geometry",
+                refinement_candidate_with_test_selectors(
+                    &fixture.first,
+                    fixture.first.refined_geometry(),
+                    fixture.first.refined_stratification(),
+                    fixture.first.coarse_geometry(),
+                    fixture.first.coarse_stratification(),
+                ),
+                refinement_candidate_with_test_selectors(
+                    &fixture.second,
+                    fixture.second.refined_geometry(),
+                    fixture.second.refined_stratification(),
+                    geometry_id(230),
+                    fixture.second.coarse_stratification(),
+                )
+            );
+            assert_derived_selector_moves_identity!(
+                "coarse-stratification",
+                refinement_candidate_with_test_selectors(
+                    &fixture.first,
+                    fixture.first.refined_geometry(),
+                    fixture.first.refined_stratification(),
+                    fixture.first.coarse_geometry(),
+                    fixture.first.coarse_stratification(),
+                ),
+                refinement_candidate_with_test_selectors(
+                    &fixture.second,
+                    fixture.second.refined_geometry(),
+                    fixture.second.refined_stratification(),
+                    fixture.second.coarse_geometry(),
+                    stratification_id(231),
+                )
+            );
+
+            for field in [6, 7] {
+                let spec =
+                    &DerivedStratificationRefinementCompositionCandidateIdentitySchemaV1::FIELDS
+                        [field];
+                assert_eq!(spec.wire_type(), WireType::Child);
+                assert!(spec.child_spec().is_some());
+            }
+
+            let prefix_encoder = || {
+                CanonicalEncoder::<DerivedStratificationRefinementCompositionCandidateIdV1, _>::new(
+                    DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1,
+                    || cx.checkpoint().is_err(),
+                )
+                .expect("valid composition encoder")
+                .bytes(
+                    Field::new(0, "fine-geometry"),
+                    fixture.first.refined_geometry().as_bytes(),
+                )
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(1, "fine-stratification"),
+                        fixture.first.refined_stratification().as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(2, "middle-geometry"),
+                        fixture.first.coarse_geometry().as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(3, "middle-stratification"),
+                        fixture.first.coarse_stratification().as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(4, "coarse-geometry"),
+                        fixture.second.coarse_geometry().as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(5, "coarse-stratification"),
+                        fixture.second.coarse_stratification().as_bytes(),
+                    )
+                })
+            };
+            let wrong_first_schema = prefix_encoder().and_then(|encoder| {
+                encoder.child(
+                    Field::new(6, "first-refinement"),
+                    DerivedMorphismIdV1::parse_slice(&[236; 32])
+                        .expect("nonzero wrong-schema first child"),
+                )
+            });
+            assert!(matches!(
+                wrong_first_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "first-refinement",
+                    what: "child schema domain",
+                })
+            ));
+            let wrong_second_schema = prefix_encoder()
+                .and_then(|encoder| {
+                    encoder.child(Field::new(6, "first-refinement"), fixture.first.id())
+                })
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(7, "second-refinement"),
+                        DerivedMorphismIdV1::parse_slice(&[237; 32])
+                            .expect("nonzero wrong-schema second child"),
+                    )
+                });
+            assert!(matches!(
+                wrong_second_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "second-refinement",
+                    what: "child schema domain",
+                })
+            ));
+
+            let swapped_ir = DerivedStratificationRefinementCompositionCandidateIrV1 {
+                first: fixture.second.id(),
+                second: fixture.first.id(),
+                ..fixture.ir
+            };
+            let swapped = stratification_refinement_composition_candidate_receipt(
+                &swapped_ir,
+                &fixture.first,
+                &fixture.second,
+                cx,
+            )
+            .expect("ordered children remain structurally encodable")
+            .id();
+            assert_ne!(baseline, swapped, "ordered children are not commutative");
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Schema, zero-ID, child, seam, and cancellation matrix.
+    fn stratification_refinement_composition_refuses_unbound_or_unseamed_children() {
+        let fixture = with_cx(
+            false,
+            stratification_refinement_composition_candidate_fixture,
+        );
+        with_cx(false, |cx| {
+            let bad_schema = DerivedStratificationRefinementCompositionCandidateIrV1 {
+                schema_version: 2,
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_composition_candidate_v1(
+                    &bad_schema,
+                    &fixture.first,
+                    &fixture.second,
+                    cx,
+                ),
+                Err(DerivedStratificationRefinementCompositionCandidateErrorV1::UnsupportedSchemaVersion {
+                    found: 2,
+                    supported: DERIVED_STRATIFICATION_REFINEMENT_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1,
+                })
+            );
+
+            for (field, changed_ir) in [
+                (
+                    "first-refinement",
+                    DerivedStratificationRefinementCompositionCandidateIrV1 {
+                        first: DerivedStratificationRefinementCandidateIdV1::parse_slice(&[0; 32])
+                            .expect("zero first-child sentinel remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "second-refinement",
+                    DerivedStratificationRefinementCompositionCandidateIrV1 {
+                        second: DerivedStratificationRefinementCandidateIdV1::parse_slice(&[0; 32])
+                            .expect("zero second-child sentinel remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "nominal-composition-declaration",
+                    DerivedStratificationRefinementCompositionCandidateIrV1 {
+                        nominal_composition:
+                            DerivedStratificationRefinementCompositionDeclarationIdV1::from_bytes(
+                                [0; 32],
+                            ),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedStratificationRefinementCompositionCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_stratification_refinement_composition_candidate_v1(
+                        &changed_ir,
+                        &fixture.first,
+                        &fixture.second,
+                        cx,
+                    ),
+                    Err(DerivedStratificationRefinementCompositionCandidateErrorV1::MissingIdentity {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            for (field, changed_ir) in [
+                (
+                    "first-refinement",
+                    DerivedStratificationRefinementCompositionCandidateIrV1 {
+                        first: DerivedStratificationRefinementCandidateIdV1::parse_slice(
+                            &[232; 32],
+                        )
+                        .expect("nonzero wrong first child"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "second-refinement",
+                    DerivedStratificationRefinementCompositionCandidateIrV1 {
+                        second: DerivedStratificationRefinementCandidateIdV1::parse_slice(
+                            &[233; 32],
+                        )
+                        .expect("nonzero wrong second child"),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_stratification_refinement_composition_candidate_v1(
+                        &changed_ir,
+                        &fixture.first,
+                        &fixture.second,
+                        cx,
+                    ),
+                    Err(DerivedStratificationRefinementCompositionCandidateErrorV1::ChildIdentityMismatch {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            let wrong_middle_geometry = refinement_candidate_with_test_selectors(
+                &fixture.second,
+                geometry_id(234),
+                fixture.second.refined_stratification(),
+                fixture.second.coarse_geometry(),
+                fixture.second.coarse_stratification(),
+            );
+            assert_eq!(
+                admit_derived_stratification_refinement_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.first,
+                    &wrong_middle_geometry,
+                    cx,
+                ),
+                Err(DerivedStratificationRefinementCompositionCandidateErrorV1::MiddleGeometryMismatch {
+                    first_coarse: fixture.first.coarse_geometry(),
+                    second_refined: geometry_id(234),
+                })
+            );
+
+            let wrong_middle_stratification = refinement_candidate_with_test_selectors(
+                &fixture.second,
+                fixture.second.refined_geometry(),
+                stratification_id(235),
+                fixture.second.coarse_geometry(),
+                fixture.second.coarse_stratification(),
+            );
+            assert_eq!(
+                admit_derived_stratification_refinement_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.first,
+                    &wrong_middle_stratification,
+                    cx,
+                ),
+                Err(DerivedStratificationRefinementCompositionCandidateErrorV1::MiddleStratificationMismatch {
+                    first_coarse: fixture.first.coarse_stratification(),
+                    second_refined: stratification_id(235),
+                })
+            );
+
+            let reversed_ir = DerivedStratificationRefinementCompositionCandidateIrV1 {
+                first: fixture.second.id(),
+                second: fixture.first.id(),
+                ..fixture.ir
+            };
+            assert!(matches!(
+                admit_derived_stratification_refinement_composition_candidate_v1(
+                    &reversed_ir,
+                    &fixture.second,
+                    &fixture.first,
+                    cx,
+                ),
+                Err(DerivedStratificationRefinementCompositionCandidateErrorV1::MiddleGeometryMismatch { .. })
+            ));
+        });
+
+        with_cx(true, |cx| {
+            assert_eq!(
+                admit_derived_stratification_refinement_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.first,
+                    &fixture.second,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCompositionCandidateErrorV1::Cancelled {
+                        stage: "refinement-composition-entry",
+                    }
+                )
+            );
+        });
+    }
+
+    #[test]
     fn refinement_truncation_order_is_fail_closed_at_untruncated_zero() {
         assert_eq!(truncation_refinement_progress(0, 0), Some(false));
         assert_eq!(truncation_refinement_progress(0, 1), None);
@@ -10271,7 +11284,7 @@ mod tests {
         );
         assert_eq!(
             DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
-            10
+            22
         );
 
         with_cx(false, |cx| {
@@ -14159,7 +15172,7 @@ mod tests {
         assert_eq!(
             DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_IDENTITY_LIMITS_V1
                 .max_fields(),
-            16,
+            71,
         );
 
         with_cx(false, |cx| {
