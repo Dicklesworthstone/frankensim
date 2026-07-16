@@ -479,10 +479,16 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   token. Absolute residual enclosures, normalized enclosures, interval replay
   vectors, exact admitted incidence and mismatch values, stopping reason,
   budget, and measured work remain attached. Its spectral field is explicitly
-  `Unknown`: it retains
-  the exact connected-component gauge roots of `delta0^T delta0`, covers no
-  eigenvalue range, and leaves every numerical mode unresolved until a bounded
-  `fs-spectral` coverage receipt is consumed. `Converged` therefore proves only
+  `Unknown`: for the admitted unweighted `delta0^T delta0` graph Laplacian it
+  records exact connected-component nullity bounds, one set-valued structural
+  `[0,0]` cluster with that multiplicity, deterministic component gauge
+  representatives (not eigenvectors), and the versioned positive
+  `max(1, 2 * maximum_degree)` Gershgorin scale. No eigensolver output is
+  consumed, so candidate clusters and the requested/covered ranges remain
+  empty and every numerical mode remains unresolved until a source-bound
+  `fs-spectral` coverage receipt is consumed. The exact-nullity statement does
+  not extend to weighted, signed, or quotiented operators. `Converged`
+  therefore proves only
   the named finite-dimensional residual obligations; it does not prove
   continuum coverage, chart realizability, topology, H1, non-exactness, repair
   feasibility, or merge/publication authority. Cancellation currently refuses

@@ -15,11 +15,11 @@ use fs_exec::{BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::router::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
 use fs_geom::sheaf::{Interface, SheafComplex};
 use fs_geom::sheaf_repair::{
-    AdmittedSheafSkeleton, COMPONENT_FLOOR, SHEAF_NUMERICS_NORMALIZATION_V1, SheafNumericsOutcome,
-    SheafNumericsStoppingReason, SheafRepairBudget, SheafRepairError, SheafRepairPlanBudget,
-    SheafSkeleton, SheafSkeletonError, SheafSpectrumScope, apply_gauge,
-    assess_hodge_decomposition_bounded, hodge_decompose, hodge_decompose_bounded, plan_repair,
-    plan_repair_bounded, try_apply_gauge,
+    AdmittedSheafSkeleton, COMPONENT_FLOOR, SHEAF_NUMERICS_NORMALIZATION_V1,
+    SHEAF_SPECTRUM_NORMALIZATION_V1, SheafNumericsOutcome, SheafNumericsStoppingReason,
+    SheafRepairBudget, SheafRepairError, SheafRepairPlanBudget, SheafSkeleton, SheafSkeletonError,
+    SheafSpectrumScope, apply_gauge, assess_hodge_decomposition_bounded, hodge_decompose,
+    hodge_decompose_bounded, plan_repair, plan_repair_bounded, try_apply_gauge,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -1586,15 +1586,19 @@ fn sr_014_numerics_converges_with_one_gauge_root_per_component() {
     assert_eq!(receipt.source.triangles(), &[]);
     assert_eq!(receipt.source.mismatch(), &[2.0, 4.0]);
     match &receipt.spectrum {
-        SheafSpectrumScope::Unknown {
-            covered_range,
-            unresolved_modes,
-            component_zero_mode_roots,
-            ..
-        } => {
-            assert_eq!(*covered_range, None);
-            assert_eq!(*unresolved_modes, 5);
-            assert_eq!(component_zero_mode_roots, &[0, 2, 4]);
+        SheafSpectrumScope::Unknown(report) => {
+            assert_eq!(report.normalization_id, SHEAF_SPECTRUM_NORMALIZATION_V1);
+            assert_eq!(report.normalization_scale, 2.0);
+            assert_eq!((report.nullspace.lower, report.nullspace.upper), (3, 3));
+            assert_eq!(report.nullspace.component_roots, &[0, 2, 4]);
+            assert_eq!(report.structural_zero_cluster.normalized_hull.lo(), 0.0);
+            assert_eq!(report.structural_zero_cluster.normalized_hull.hi(), 0.0);
+            assert_eq!(report.structural_zero_cluster.multiplicity_lower, 3);
+            assert_eq!(report.structural_zero_cluster.multiplicity_upper, 3);
+            assert!(report.candidate_clusters.is_empty());
+            assert_eq!(report.requested_range, None);
+            assert_eq!(report.covered_range, None);
+            assert_eq!(report.unresolved_modes, 5);
         }
     }
 
@@ -1772,13 +1776,56 @@ fn sr_016_numerics_tolerance_relabeling_and_scale_metamorphics() {
     assert_eq!(relabeled_outcome.exact(), &[-4.0, -2.0]);
     assert_eq!(relabeled_outcome.potential(), &[0.0, 0.0, 0.0, -4.0, -2.0]);
     match &relabeled_outcome.receipt().spectrum {
-        SheafSpectrumScope::Unknown {
-            component_zero_mode_roots,
-            ..
-        } => assert_eq!(component_zero_mode_roots, &[0, 1, 2]),
+        SheafSpectrumScope::Unknown(report) => {
+            assert_eq!(report.nullspace.component_roots, &[0, 1, 2]);
+        }
     }
     verdict(
         "sr-016",
         "inclusive tolerance gating, power-of-two unit scaling, and orientation-changing vertex relabeling preserve the bounded numerical authority boundary",
+    );
+}
+
+#[test]
+fn sr_017_edgeless_spectrum_has_one_set_valued_zero_cluster() {
+    let edgeless =
+        AdmittedSheafSkeleton::try_new(4, Vec::new(), Vec::new()).expect("isolates admit");
+    let outcome = with_cx(|cx| {
+        assess_hodge_decomposition_bounded(&edgeless, &[], 0.0, numerics_budget(1), cx)
+    });
+    let SheafNumericsOutcome::Converged(outcome) = outcome else {
+        panic!("the empty cochain on isolated patches must converge: {outcome:?}");
+    };
+    let SheafSpectrumScope::Unknown(report) = &outcome.receipt().spectrum;
+    assert_eq!(report.normalization_scale, 1.0);
+    assert_eq!((report.nullspace.lower, report.nullspace.upper), (4, 4));
+    assert_eq!(report.nullspace.component_roots, &[0, 1, 2, 3]);
+    assert_eq!(report.structural_zero_cluster.normalized_hull.lo(), 0.0);
+    assert_eq!(report.structural_zero_cluster.normalized_hull.hi(), 0.0);
+    assert_eq!(report.structural_zero_cluster.multiplicity_lower, 4);
+    assert_eq!(report.structural_zero_cluster.multiplicity_upper, 4);
+    assert!(report.candidate_clusters.is_empty());
+    assert_eq!(report.requested_range, None);
+    assert_eq!(report.covered_range, None);
+    assert_eq!(report.unresolved_modes, 4);
+
+    let star = AdmittedSheafSkeleton::try_new(4, vec![(0, 1), (0, 2), (0, 3)], Vec::new())
+        .expect("star admits");
+    let star = with_cx(|cx| {
+        assess_hodge_decomposition_bounded(&star, &[0.0; 3], 0.0, numerics_budget(1), cx)
+    });
+    let SheafNumericsOutcome::Converged(star) = star else {
+        panic!("the zero cochain on a star must converge: {star:?}");
+    };
+    let SheafSpectrumScope::Unknown(star_report) = &star.receipt().spectrum;
+    assert_eq!(star_report.normalization_scale, 6.0);
+    assert_eq!(
+        (star_report.nullspace.lower, star_report.nullspace.upper),
+        (1, 1)
+    );
+    assert_eq!(star_report.nullspace.component_roots, &[0]);
+    verdict(
+        "sr-017",
+        "edgeless and degree-three admitted graphs report exact structural nullity under the versioned Gershgorin scale while all numerical modes remain unresolved",
     );
 }

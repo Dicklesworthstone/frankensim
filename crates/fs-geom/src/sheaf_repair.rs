@@ -735,6 +735,13 @@ pub struct BoundedHodgeSplit {
 /// induced Euclidean norms on the admitted unweighted complex.
 pub const SHEAF_NUMERICS_NORMALIZATION_V1: &str = "fs-geom/sheaf-incidence-frobenius-l2/v1";
 
+/// Versioned scale for the admitted unweighted graph Laplacian spectrum.
+///
+/// The scale is `max(1, 2 * maximum_vertex_degree)`, a deterministic
+/// Gershgorin upper bound for `delta0^T delta0`.
+pub const SHEAF_SPECTRUM_NORMALIZATION_V1: &str =
+    "fs-geom/delta0-transpose-delta0/max-one-two-max-degree/v1";
+
 /// One absolute and dimensionless residual enclosure.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SheafResidualBounds {
@@ -767,25 +774,75 @@ pub enum SheafNumericsStoppingReason {
     SweepLimitReached,
 }
 
-/// Explicit spectral no-claim attached to the first numerics slice.
+/// Exact structural nullspace bounds for the admitted unweighted graph
+/// Laplacian. This theorem does not extend to weighted, signed, or quotiented
+/// operators without a new normalization and contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SheafNullspaceBounds {
+    /// Proven lower bound on nullity.
+    pub lower: usize,
+    /// Proven upper bound on nullity.
+    pub upper: usize,
+    /// Deterministic gauge representatives: the smallest patch index in every
+    /// connected component, including isolates. These are not eigenvectors.
+    pub component_roots: Vec<usize>,
+}
+
+/// One set-valued structural eigenvalue cluster.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheafStructuralEigenCluster {
+    /// Normalized eigenvalue hull.
+    pub normalized_hull: Interval,
+    /// Proven inclusive algebraic-multiplicity lower bound.
+    pub multiplicity_lower: usize,
+    /// Proven inclusive algebraic-multiplicity upper bound.
+    pub multiplicity_upper: usize,
+}
+
+/// Non-authoritative cluster of returned numerical estimates. The count is
+/// explicitly the number of Ritz estimates, never an eigenvalue multiplicity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheafCandidateEigenCluster {
+    /// Outward normalized hull of overlapping candidate intervals.
+    pub normalized_hull: Interval,
+    /// Number of returned Ritz estimates merged into this hull.
+    pub returned_ritz_count: usize,
+}
+
+/// Scale-aware spectrum report whose coverage remains explicitly unknown.
+/// Standalone construction is data only; promotion authority remains with the
+/// opaque containing assessment and any future admitted coverage receipt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheafSpectrumReportV1 {
+    /// Exact operator dialect.
+    pub operator_id: &'static str,
+    /// Exact normalization dialect.
+    pub normalization_id: &'static str,
+    /// Positive `max(1, 2 * maximum_vertex_degree)` scale.
+    pub normalization_scale: f64,
+    /// Exact structural nullity of the admitted unweighted graph Laplacian.
+    pub nullspace: SheafNullspaceBounds,
+    /// One set-valued zero cluster whose multiplicity equals the nullity.
+    pub structural_zero_cluster: SheafStructuralEigenCluster,
+    /// Numerical clusters returned by an eigensolver. Empty in this first
+    /// slice because no admitted spectral producer is consumed.
+    pub candidate_clusters: Vec<SheafCandidateEigenCluster>,
+    /// Requested ordered range, absent when no spectral solve was requested.
+    pub requested_range: Option<(usize, usize)>,
+    /// Covered ordered range. Candidate Ritz estimates cannot populate it.
+    pub covered_range: Option<(usize, usize)>,
+    /// Numerical modes for which no eigenvalue enclosure is claimed.
+    pub unresolved_modes: usize,
+    /// Stable no-claim reason.
+    pub reason: &'static str,
+}
+
+/// Explicit spectral no-claim attached to the first numerics slice.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SheafSpectrumScope {
-    /// No eigensolver result was consumed. Structural gauge roots are retained,
-    /// but every numerical mode remains unresolved.
-    Unknown {
-        /// Named operator whose structural zero modes were counted.
-        operator_id: &'static str,
-        /// No numerical eigenvalue index is covered by this report.
-        covered_range: Option<(usize, usize)>,
-        /// Total numerical modes for which no eigenvalue enclosure is claimed.
-        unresolved_modes: usize,
-        /// Smallest patch index in every connected component, including
-        /// isolated patches. These are the exact structural zero-mode gauges
-        /// of `delta0^T delta0`.
-        component_zero_mode_roots: Vec<usize>,
-        /// Stable no-claim reason.
-        reason: &'static str,
-    },
+    /// No admitted spectral truth was consumed. Exact structural graph facts
+    /// remain inspectable, but every numerical mode and range is unresolved.
+    Unknown(SheafSpectrumReportV1),
 }
 
 /// Exact finite-incidence source retained for independent residual replay.
@@ -2045,10 +2102,15 @@ fn bounded_component_root(
 /// Retain the smallest patch index in every connected component, including
 /// isolated patches. Union roots always move toward the smaller index, so the
 /// result is deterministic without a traversal-order tie break.
-fn bounded_component_roots(
+struct BoundedComponentPartition {
+    roots: Vec<usize>,
+    max_degree: usize,
+}
+
+fn bounded_component_partition(
     skeleton: &AdmittedSheafSkeleton,
     accountant: &mut RepairAccountant<'_, '_>,
-) -> Result<Vec<usize>, SheafRepairError> {
+) -> Result<BoundedComponentPartition, SheafRepairError> {
     accountant.checkpoint("component-partition")?;
     let mut parents = Vec::new();
     parents.try_reserve_exact(skeleton.n_patches).map_err(|_| {
@@ -2060,8 +2122,30 @@ fn bounded_component_roots(
         accountant.consume_item("component-parents")?;
         parents.push(vertex);
     }
+    let mut degrees = Vec::new();
+    degrees.try_reserve_exact(skeleton.n_patches).map_err(|_| {
+        SheafSkeletonError::ResourceExhausted {
+            stage: "component-degrees",
+        }
+    })?;
+    for _ in 0..skeleton.n_patches {
+        accountant.consume_item("component-degrees")?;
+        degrees.push(0usize);
+    }
     for &(u, v) in &skeleton.edges {
         accountant.consume_item("component-union")?;
+        degrees[u] =
+            degrees[u]
+                .checked_add(1)
+                .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+                    stage: "component-degree",
+                })?;
+        degrees[v] =
+            degrees[v]
+                .checked_add(1)
+                .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+                    stage: "component-degree",
+                })?;
         let left = bounded_component_root(&parents, u, accountant)?;
         let right = bounded_component_root(&parents, v, accountant)?;
         if left != right {
@@ -2080,14 +2164,16 @@ fn bounded_component_roots(
             stage: "component-roots",
         }
     })?;
+    let mut max_degree = 0usize;
     for vertex in 0..skeleton.n_patches {
         accountant.consume_item("component-roots")?;
+        max_degree = max_degree.max(degrees[vertex]);
         if bounded_component_root(&parents, vertex, accountant)? == vertex {
             roots.push(vertex);
         }
     }
     accountant.checkpoint("component-partition")?;
-    Ok(roots)
+    Ok(BoundedComponentPartition { roots, max_degree })
 }
 
 fn least_squares_bounded(
@@ -2252,12 +2338,12 @@ fn admit_numerics_budget(
         .ok_or(SheafRepairError::BudgetArithmeticOverflow {
             stage: "numerics-scalar-dimensions",
         })?;
-    // Source incidence/mismatch, component roots, and four interval residual
-    // witnesses add at most five scalar-equivalent slots per dimension beyond
-    // the legacy decomposition envelope.
+    // Source incidence/mismatch, component roots/degrees, and four interval
+    // residual witnesses add at most six scalar-equivalent slots per dimension
+    // beyond the legacy decomposition envelope.
     let extra_scalar_slots =
         dimensions
-            .checked_mul(5)
+            .checked_mul(6)
             .ok_or(SheafRepairError::BudgetArithmeticOverflow {
                 stage: "numerics-scalar-envelope",
             })?;
@@ -2594,11 +2680,11 @@ fn assess_hodge_decomposition_inner(
         "numerics-mismatch-validation",
         &mut accountant,
     )?;
-    let component_roots = bounded_component_roots(skeleton, &mut accountant)?;
+    let component_partition = bounded_component_partition(skeleton, &mut accountant)?;
     let split = hodge_decompose_accounted_with_roots(
         skeleton,
         mismatch,
-        &component_roots,
+        &component_partition.roots,
         &mut accountant,
     )?;
 
@@ -2725,6 +2811,14 @@ fn assess_hodge_decomposition_inner(
     let source = retain_numerics_source(skeleton, mismatch, &mut accountant)?;
     accountant.checkpoint("numerics-publication")?;
     let usage = accountant.usage(admission.scalar_slots, admission.work_items);
+    let nullity = component_partition.roots.len();
+    let normalization_scale = component_partition
+        .max_degree
+        .checked_mul(2)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "spectrum-normalization-scale",
+        })?
+        .max(1) as f64;
     let receipt = SheafNumericsReceipt {
         source,
         normalization_id: SHEAF_NUMERICS_NORMALIZATION_V1,
@@ -2737,13 +2831,26 @@ fn assess_hodge_decomposition_inner(
         triangle_remainder_orthogonality,
         reconstruction,
         stopping_reason,
-        spectrum: SheafSpectrumScope::Unknown {
+        spectrum: SheafSpectrumScope::Unknown(SheafSpectrumReportV1 {
             operator_id: "fs-geom/delta0-transpose-delta0/unweighted/v1",
+            normalization_id: SHEAF_SPECTRUM_NORMALIZATION_V1,
+            normalization_scale,
+            nullspace: SheafNullspaceBounds {
+                lower: nullity,
+                upper: nullity,
+                component_roots: component_partition.roots,
+            },
+            structural_zero_cluster: SheafStructuralEigenCluster {
+                normalized_hull: Interval::point(0.0),
+                multiplicity_lower: nullity,
+                multiplicity_upper: nullity,
+            },
+            candidate_clusters: Vec::new(),
+            requested_range: None,
             covered_range: None,
             unresolved_modes: skeleton.n_patches,
-            component_zero_mode_roots: component_roots,
             reason: "no fs-spectral coverage receipt was supplied",
-        },
+        }),
         primal_witness,
         dual_witness,
         remainder_exact_witness,
