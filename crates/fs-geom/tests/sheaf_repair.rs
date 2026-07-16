@@ -2204,3 +2204,62 @@ fn sr_020_exact_path_subdivision_preserves_endpoint_section_and_nullity() {
         "subdividing one exact path edge preserves its endpoint section and structural nullity while retaining mesh-specific candidates and unresolved-mode counts",
     );
 }
+
+#[test]
+fn sr_021_smallest_subnormal_exact_cochains_do_not_underflow_authority() {
+    let edge =
+        AdmittedSheafSkeleton::try_new(2, vec![(0, 1)], Vec::new()).expect("single edge admits");
+    let smallest_subnormal = f64::from_bits(1);
+    for mismatch in [smallest_subnormal, -smallest_subnormal] {
+        let outcome = with_cx(|cx| {
+            assess_hodge_decomposition_bounded(&edge, &[mismatch], 0.0, numerics_budget(4), cx)
+        });
+        let SheafNumericsOutcome::Converged(decomposition) = outcome else {
+            panic!("an exactly representable subnormal edge must converge: {outcome:?}");
+        };
+        assert_eq!(decomposition.exact()[0].to_bits(), mismatch.to_bits());
+        assert_eq!(decomposition.potential()[0].to_bits(), 0.0f64.to_bits());
+        assert_eq!(decomposition.potential()[1].to_bits(), mismatch.to_bits());
+        assert_eq!(decomposition.coexact(), &[0.0]);
+        assert_eq!(decomposition.harmonic(), &[0.0]);
+
+        let receipt = decomposition.receipt();
+        assert_eq!(receipt.source.mismatch()[0].to_bits(), mismatch.to_bits());
+        assert_eq!(
+            receipt.stopping_reason,
+            SheafNumericsStoppingReason::ResidualBoundsSatisfied
+        );
+        for (name, bounds) in [
+            (
+                "primal normal equation",
+                receipt.primal_normal_equation.normalized,
+            ),
+            (
+                "dual normal equation",
+                receipt.dual_normal_equation.normalized,
+            ),
+            (
+                "remainder/exact orthogonality",
+                receipt.remainder_exact_orthogonality.normalized,
+            ),
+            ("reconstruction", receipt.reconstruction.normalized),
+        ] {
+            assert_eq!(
+                (bounds.lo().to_bits(), bounds.hi().to_bits()),
+                (0.0f64.to_bits(), 0.0f64.to_bits()),
+                "{name} must remain an exact zero enclosure for {mismatch:e}"
+            );
+        }
+        assert_eq!(
+            decomposition
+                .clone()
+                .into_partial()
+                .candidate_energy_ratios(),
+            (1.0, 0.0, 0.0)
+        );
+    }
+    verdict(
+        "sr-021",
+        "positive and negative smallest-subnormal exact cochains retain their signed bits, scale-safe unit energy, and exact-zero residual authority",
+    );
+}
