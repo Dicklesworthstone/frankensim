@@ -352,3 +352,250 @@ fn hand_written_escape_hatch_retains_its_marker() {
         Err(AdaptError::TangentEvidenceRejected { .. })
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Slice 2: batched evaluation under Cx (request-drain-finalize).
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_opdsl::constitutive::{BatchPoint, BatchRun, evaluate_batch};
+
+fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    if cancelled {
+        gate.request();
+    }
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x1012,
+                kernel_id: 5,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn conduction_graph() -> fs_material::graph::ConstitutiveGraph {
+    let mut graph = fs_material::graph::ConstitutiveGraph::new();
+    graph
+        .add_node("fourier", Box::new(HonestFourier::new()))
+        .expect("admits");
+    graph
+}
+
+fn batch_of(n: usize) -> Vec<BatchPoint> {
+    let (version, empty_state) = {
+        let graph = conduction_graph();
+        let schema = graph.state_schema();
+        (schema.version(), vec![0.0f64; schema.total_slots()])
+    };
+    (0..n)
+        .map(|i| {
+            let mut external = BTreeMap::new();
+            external.insert(
+                ("fourier".to_string(), "gradient".to_string()),
+                0.1 * (i as f64 + 1.0),
+            );
+            BatchPoint {
+                state_version: version,
+                state: empty_state.clone(),
+                external,
+            }
+        })
+        .collect()
+}
+
+/// A healthy batch completes deterministically: every point evaluated
+/// in order, values exact, replay bitwise.
+#[test]
+fn batched_evaluation_completes_deterministically() {
+    let graph = conduction_graph();
+    let batch = batch_of(40);
+    let run = with_cx(false, |cx| evaluate_batch(&graph, &batch, cx)).expect("healthy batch");
+    let BatchRun::Complete {
+        outputs,
+        points_evaluated,
+    } = run
+    else {
+        panic!("uncancelled batch must complete");
+    };
+    assert_eq!(points_evaluated, 40);
+    for (i, point) in outputs.iter().enumerate() {
+        let expected = -2.5 * 0.1 * (i as f64 + 1.0);
+        let got = point.outputs[&("fourier".to_string(), "flux".to_string())];
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "point {i}: {got} vs {expected}"
+        );
+        assert!(point.total_dissipation >= 0.0);
+    }
+    let replay = with_cx(false, |cx| evaluate_batch(&graph, &batch, cx)).expect("replay");
+    let BatchRun::Complete {
+        outputs: replayed, ..
+    } = replay
+    else {
+        panic!("replay completes");
+    };
+    for (a, b) in outputs.iter().zip(&replayed) {
+        for (key, value) in &a.outputs {
+            assert_eq!(value.to_bits(), b.outputs[key].to_bits(), "bitwise replay");
+        }
+    }
+}
+
+/// A pre-cancelled context drains at the FIRST point boundary with an
+/// empty completed prefix and resume cursor 0; resuming the remainder
+/// under a healthy context is bitwise-equivalent to the uncancelled
+/// run (request-drain-finalize + deterministic resume).
+#[test]
+fn cancellation_drains_at_point_boundaries_and_resumes_bitwise() {
+    let graph = conduction_graph();
+    let batch = batch_of(40);
+
+    let cancelled = with_cx(true, |cx| evaluate_batch(&graph, &batch, cx)).expect("drains");
+    let BatchRun::Cancelled {
+        completed,
+        resume_from,
+    } = cancelled
+    else {
+        panic!("a pre-cancelled context must drain, not complete");
+    };
+    assert_eq!(resume_from, 0, "pre-cancel drains before the first point");
+    assert!(completed.is_empty());
+
+    // Resume: evaluate the remainder healthily and splice.
+    let resumed = with_cx(false, |cx| {
+        evaluate_batch(&graph, &batch[resume_from..], cx)
+    })
+    .expect("resume evaluates");
+    let BatchRun::Complete { outputs: tail, .. } = resumed else {
+        panic!("resume completes");
+    };
+    let full = with_cx(false, |cx| evaluate_batch(&graph, &batch, cx)).expect("oracle");
+    let BatchRun::Complete {
+        outputs: oracle, ..
+    } = full
+    else {
+        panic!("oracle completes");
+    };
+    assert_eq!(completed.len() + tail.len(), oracle.len());
+    for (spliced, reference) in completed.iter().chain(&tail).zip(&oracle) {
+        for (key, value) in &reference.outputs {
+            assert_eq!(
+                spliced.outputs[key].to_bits(),
+                value.to_bits(),
+                "resumed run must be bitwise-equivalent to the uncancelled run"
+            );
+        }
+    }
+}
+
+/// A defective point refuses the WHOLE batch typed (its index named);
+/// no partial result set is published past a refusal.
+#[test]
+fn defective_batch_points_refuse_typed_with_index() {
+    let graph = conduction_graph();
+    let mut batch = batch_of(3);
+    batch[1].external.clear(); // unfed port at point 1
+    let refused = with_cx(false, |cx| evaluate_batch(&graph, &batch, cx));
+    assert!(
+        matches!(&refused, Err(AdaptError::Evaluation { law, .. }) if law == "batch point 1"),
+        "the refusal must name the offending point: {refused:?}"
+    );
+}
+
+/// A law node that requests cancellation during its N-th evaluation —
+/// the deterministic mid-batch trip wire.
+struct TrippingFourier {
+    inner: HonestFourier,
+    evals: std::cell::Cell<usize>,
+    trip_at: usize,
+    gate: &'static CancelGate,
+}
+
+impl LawNode for TrippingFourier {
+    fn declaration(&self) -> &NodeDeclaration {
+        &self.inner.decl
+    }
+    fn evaluate(&self, state: &[f64], inputs: &[f64]) -> Result<NodeOutput, GraphError> {
+        let n = self.evals.get() + 1;
+        self.evals.set(n);
+        if n == self.trip_at {
+            self.gate.request();
+        }
+        self.inner.evaluate(state, inputs)
+    }
+    fn tangent(&self, state: &[f64], inputs: &[f64]) -> Option<Vec<f64>> {
+        self.inner.tangent(state, inputs)
+    }
+}
+
+/// Deterministic MID-BATCH drain: cancellation requested during point
+/// 20 is observed at the NEXT stride boundary (32) — the in-flight
+/// stride drains whole, exactly 32 points complete, the resume cursor
+/// lands on 32, and the completed prefix is bitwise-identical to the
+/// oracle's prefix. No partial point is ever published.
+#[test]
+fn mid_batch_cancellation_drains_at_the_next_stride_boundary() {
+    let gate: &'static CancelGate = Box::leak(Box::new(CancelGate::new()));
+    let mut graph = fs_material::graph::ConstitutiveGraph::new();
+    graph
+        .add_node(
+            "fourier",
+            Box::new(TrippingFourier {
+                inner: HonestFourier::new(),
+                evals: std::cell::Cell::new(0),
+                trip_at: 21, // fires while evaluating batch point index 20
+                gate,
+            }),
+        )
+        .expect("admits");
+    let batch = batch_of(40);
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let run = pool
+        .scope(|arena| {
+            let cx = Cx::new(
+                gate,
+                arena,
+                StreamKey {
+                    seed: 0x1012,
+                    kernel_id: 5,
+                    tile: 0,
+                    iteration: 1,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            evaluate_batch(&graph, &batch, &cx)
+        })
+        .expect("drains, not errors");
+    let BatchRun::Cancelled {
+        completed,
+        resume_from,
+    } = run
+    else {
+        panic!("mid-batch cancellation must drain at a stride boundary");
+    };
+    assert_eq!(resume_from, 32, "requested during point 20, observed at 32");
+    assert_eq!(completed.len(), 32);
+    let oracle_graph = conduction_graph();
+    let oracle = with_cx(false, |cx| evaluate_batch(&oracle_graph, &batch, cx)).expect("oracle");
+    let BatchRun::Complete { outputs, .. } = oracle else {
+        panic!("oracle completes");
+    };
+    for (done, reference) in completed.iter().zip(&outputs) {
+        for (key, value) in &reference.outputs {
+            assert_eq!(done.outputs[key].to_bits(), value.to_bits());
+        }
+    }
+}

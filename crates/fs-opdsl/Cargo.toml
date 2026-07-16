@@ -14,7 +14,7 @@ layer = "L3"
 # I01.2 (bead i94v.1.1.2, ambition [F]): canonical ConstitutiveGraph
 # adaptation stays default-off until it beats its declared baseline on
 # the preregistered deck.
-constitutive-graph = []
+constitutive-graph = ["dep:fs-exec"]
 
 [dependencies]
 fs-feec = { path = "../fs-feec" }
@@ -27,9 +27,12 @@ fs-couple = { path = "../fs-couple" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-sparse = { path = "../fs-sparse" }
 fs-tilelang = { path = "../fs-tilelang" }
+fs-exec = { path = "../fs-exec", optional = true }
 
 [dev-dependencies]
+asupersync = { path = "../../../asupersync" }
 fs-ad = { path = "../fs-ad" }
+fs-alloc = { path = "../fs-alloc" }
 fs-evidence = { path = "../fs-evidence" }
 fs-matdb = { path = "../fs-matdb" }
 fs-rand = { path = "../fs-rand" }

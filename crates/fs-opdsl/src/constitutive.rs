@@ -450,3 +450,100 @@ impl<'n> BoundConstitutiveNode<'n> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Slice 2: batched law evaluation under Cx — request-drain-finalize.
+// ---------------------------------------------------------------------------
+
+/// One material point in a batched evaluation: its own state buffer
+/// (under the graph's schema version) and external port feeds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchPoint {
+    /// Schema version the state buffer was encoded under.
+    pub state_version: u64,
+    /// Aggregate state buffer for this point.
+    pub state: Vec<f64>,
+    /// External inputs keyed `(node, port)`.
+    pub external: std::collections::BTreeMap<(String, String), f64>,
+}
+
+/// One completed point's result (compiler-owned mirror of the graph's
+/// single-pass output).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchPointOutput {
+    /// Every node output, keyed `(node, port)`.
+    pub outputs: std::collections::BTreeMap<(String, String), f64>,
+    /// Updated state buffer for this point.
+    pub next_state: Vec<f64>,
+    /// Total reported dissipation at this point.
+    pub total_dissipation: f64,
+}
+
+/// Poll cadence: one cancellation checkpoint per this many points.
+pub const BATCH_POLL_STRIDE: usize = 16;
+
+/// Terminal state of a batched evaluation (request-drain-finalize):
+/// cancellation is observed at bounded point boundaries, the point in
+/// flight DRAINS to completion (points are atomic), and the completed
+/// prefix is finalized with a deterministic resume cursor. Resuming at
+/// `resume_from` with the same batch is bitwise-equivalent to an
+/// uncancelled run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BatchRun {
+    /// Every point evaluated.
+    Complete {
+        /// Per-point results, in batch order.
+        outputs: Vec<BatchPointOutput>,
+        /// Points evaluated (== batch length).
+        points_evaluated: usize,
+    },
+    /// Cancellation drained at a point boundary.
+    Cancelled {
+        /// Results for the completed prefix, in batch order.
+        completed: Vec<BatchPointOutput>,
+        /// Index of the first UNevaluated point (the resume cursor).
+        resume_from: usize,
+    },
+}
+
+/// Evaluate a canonical [`fs_material::graph::ConstitutiveGraph`] over
+/// a batch of material points under an execution context: one
+/// deterministic single pass per point, a cancellation poll every
+/// [`BATCH_POLL_STRIDE`] points, and request-drain-finalize semantics
+/// — an observed cancellation never abandons a point mid-pass and
+/// never publishes a partial point.
+///
+/// # Errors
+/// [`AdaptError::Evaluation`] wrapping the graph's typed refusal for
+/// the offending point (its index is named); the completed prefix is
+/// NOT returned on a refusal — a defective batch is not a result.
+pub fn evaluate_batch(
+    graph: &fs_material::graph::ConstitutiveGraph,
+    batch: &[BatchPoint],
+    cx: &fs_exec::Cx<'_>,
+) -> Result<BatchRun, AdaptError> {
+    let mut outputs = Vec::with_capacity(batch.len());
+    for (index, point) in batch.iter().enumerate() {
+        if index % BATCH_POLL_STRIDE == 0 && cx.checkpoint().is_err() {
+            return Ok(BatchRun::Cancelled {
+                completed: outputs,
+                resume_from: index,
+            });
+        }
+        let result = graph
+            .execute(point.state_version, &point.state, &point.external)
+            .map_err(|e| AdaptError::Evaluation {
+                law: format!("batch point {index}"),
+                detail: graph_error_detail(&e),
+            })?;
+        outputs.push(BatchPointOutput {
+            outputs: result.outputs,
+            next_state: result.next_state,
+            total_dissipation: result.total_dissipation,
+        });
+    }
+    Ok(BatchRun::Complete {
+        points_evaluated: outputs.len(),
+        outputs,
+    })
+}
