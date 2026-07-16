@@ -75,20 +75,33 @@ None.
 
 ## Conformance tests
 
-`tests/voi.rs` (10 cases): ranking-flip probability vs separation; EVPI zero
-when robust / positive when close + posture; information on a decision-
-irrelevant design is worthless; STOP for a robust decision; VOI beats the
-uncertainty-proportional baseline (spends on the boundary, not the most
-uncertain); VOI escalates model fidelity when model uncertainty dominates;
-zero-cost decision-changing actions win the per-cost ranking; negative and
-non-finite cost actions are not recommended; non-finite means are excluded from
-the decision boundary; determinism.
+`tests/voi.rs` (20 cases): ranking-flip probability vs separation; full
+opportunity loss zero when robust / positive when close + posture; the
+high-variance third-alternative falsifier (surrogate ~0, full material, no
+robust STOP); two-design full-vs-closed-form agreement to quadrature
+resolution; full dominates the surrogate on every menu (incl. the three-way
+exact tie against the order-statistic constant); permutation invariance;
+dominated alternatives contribute nothing; a seeded deterministic Monte Carlo
+oracle within its confidence bound; near-√MAX uncertainty composition stays
+finite end to end; bitwise power-of-two scale equivariance across ~120 orders
+of magnitude; subnormal menus; information on a decision-irrelevant design is
+worthless; STOP for a robust decision; VOI beats the uncertainty-proportional
+baseline; model-fidelity escalation; zero-cost per-cost ranking; invalid-cost
+refusals; non-finite mean exclusion; determinism; semantics-version lock.
 
 ## No-claim boundaries
 
-- v1 measures decision-relevance via the TOP-TWO pairwise EVPI (the ranking is
-  dominated by the two lowest-mean designs); a full multi-design `E[min]` EVPI
-  is a refinement.
+- v2 (bead sj31i.5): [`expected_opportunity_loss`] includes EVERY alternative
+  via a survival-product quadrature (`E[min] = L + ∫ Π S_j`) at a fixed
+  [`EOL_QUADRATURE_PANELS`]-panel Simpson rule with `12σ` tail truncation. It
+  is an ESTIMATED value: quadrature resolution is `(U−L)/panels`-scale
+  curvature error, NOT a certified enclosure, and menus mixing deviation
+  scales wider than ~2 orders of magnitude inside one window are resolved at
+  the coarsest scale. The renamed [`top_two_evpi_surrogate`] survives only as
+  an action-ranking baseline and must never gate a global robustness claim.
+- Uncertainty composition and pairwise deviation sums are overflow-safe scaled
+  norms; power-of-two rescaling of a menu is bitwise-exact through the full
+  evaluator.
 - Objectives are treated as Gaussian; heavy-tailed / correlated estimates are a
   refinement.
 - Action cost models are SUPPLIED (fs-plan-models); this crate arbitrates value

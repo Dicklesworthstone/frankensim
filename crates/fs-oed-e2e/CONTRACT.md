@@ -180,7 +180,19 @@ semantics; and sealed-output identity movement.
   identity v7 the preimage additionally binds the admitted byte plan and the
   byte-accounting policy version; v6 artifacts remain valid only under their
   own version prefix.
-- Byte accounting (identity v7, byte policy v1): every bounded seam —
+- Full-menu decision algebra (bead sj31i.5, planning policy v4, byte policy
+  v2): the STOP gate, initial/final EVPI, and the trace are the FULL
+  multi-alternative `fs_voi::expected_opportunity_loss_by`; action valuation
+  uses the SAME evaluator through the override view (one algebra — an
+  action's value is exactly the full loss it removes). One logical work unit
+  is one record's participation in one bounded evaluation (the quadrature
+  depth is the fixed `fs_voi::EOL_QUADRATURE_PANELS`); byte charges scale
+  robustness-bearing and action-tile scans by `FULL_EOL_SCAN_SWEEPS`. The
+  demo campaign now EARNS global robustness: it spends late single
+  placements on the non-contender alternatives whose residual optimality
+  probability blocks the certificate, instead of declaring robustness while
+  ignoring them.
+- Byte accounting (identity v7, byte policy v2): every bounded seam —
   admission scan and one-time canonical sort, belief/estimate/menu builds and
   their window verifications, EVPI scans, action construction, each
   quadrature-view action evaluation (view construction reads plus per-node menu

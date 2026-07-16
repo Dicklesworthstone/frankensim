@@ -26,7 +26,10 @@
 
 use fs_evidence::{Color, NumericalCertificate, validate_color_payload, verified_from};
 use fs_tropical::{MAX_TASK_DAG_EDGES, MAX_TASK_DAG_NODES, TaskDag, TropicalError};
-use fs_voi::{Action, DesignEstimate, Recommendation, evpi, ranking_flip_probability, recommend};
+use fs_voi::{
+    Action, DesignEstimate, Recommendation, expected_opportunity_loss, ranking_flip_probability,
+    recommend,
+};
 use std::collections::BTreeSet;
 
 /// Maximum designs or actions admitted to one campaign decision.
@@ -400,7 +403,11 @@ pub fn run_campaign(
     .map_err(|_| ScheduleError::EvidenceRefused)?;
 
     // --- WHETHER: value of information over the candidate designs. ---
-    let current_evpi = evpi(designs);
+    // The robustness-bearing value is the FULL multi-alternative
+    // expected opportunity loss (bead sj31i.5): a worse-mean but
+    // high-variance design keeps the decision honest instead of being
+    // silently dropped by the retired top-two closed form.
+    let current_evpi = expected_opportunity_loss(designs);
     if !current_evpi.is_finite() || current_evpi < 0.0 {
         return Err(ScheduleError::InvalidDecisionResult { field: "EVPI" });
     }
@@ -446,7 +453,7 @@ pub fn run_campaign(
             ),
         };
     let recommendation_color = Color::Estimated {
-        estimator: "fs-voi-gaussian-recommendation-v1".to_string(),
+        estimator: "fs-voi-gaussian-recommendation-v2".to_string(),
         dispersion: current_evpi,
     };
     validate_color_payload(&recommendation_color).map_err(|_| ScheduleError::EvidenceRefused)?;

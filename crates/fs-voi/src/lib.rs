@@ -10,23 +10,48 @@
 //! [`Uncertainty`] with NUMERICAL, STATISTICAL, and MODEL-form components. The
 //! decision is "which design minimizes the objective". Over that:
 //! - [`ranking_flip_probability`] — `P(a runner-up is actually better)`;
-//! - [`evpi`] — the expected opportunity loss of the current decision (the
-//!   ceiling on what any information is worth);
+//! - [`expected_opportunity_loss`] — the FULL multi-alternative expected
+//!   opportunity loss of the current decision (the ceiling on what any
+//!   information is worth): EVERY alternative participates, so a
+//!   worse-mean/large-variance third design cannot be silently dropped;
+//! - [`top_two_evpi_surrogate`] — the cheap two-design closed form, kept ONLY
+//!   as an action-ranking surrogate; it must never gate a global robustness
+//!   claim;
 //! - [`action_value`] — how much a menu action (surrogate / simulate / sample /
-//!   test / refine) REDUCES that EVPI, per unit cost. An action on a
+//!   test / refine) REDUCES the surrogate EVPI, per unit cost. An action on a
 //!   decision-IRRELEVANT design is worth ~0;
 //! - [`recommend`] — the best action, or STOP when the decision is already
-//!   robust;
+//!   robust (the STOP gate is the FULL evaluator, never the surrogate);
 //! - [`heuristic_choice`] — the uncertainty-proportional baseline VOI must beat
 //!   ([M] discipline).
 //!
 //! Deterministic; no dependencies (Gaussian decision algebra with an in-house
 //! normal CDF).
 
-/// Semantic version of [`evpi`] and the Gaussian top-two decision algebra it
-/// depends on. Bump this whenever a change can alter EVPI result bits, top-two
-/// selection, uncertainty composition, or the Gaussian helper semantics.
-pub const EVPI_SEMANTICS_VERSION: u64 = 1;
+/// Semantic version of the decision algebra. Bump this whenever a change can
+/// alter opportunity-loss result bits, best/runner-up selection, uncertainty
+/// composition, or the Gaussian helper semantics.
+// v2 (bead sj31i.5): `evpi`/`evpi_by` became the renamed
+// `top_two_evpi_surrogate{,_by}` (mean ordering is not stochastic
+// dominance — the two lowest means do NOT bound the decision's true
+// opportunity loss); the robustness-bearing evaluator is the new full
+// multi-alternative `expected_opportunity_loss{,_by}`. Uncertainty
+// composition and pairwise deviation sums moved to overflow-safe
+// scaled norms, so finite near-`sqrt(MAX)` components no longer
+// overflow into false infinities (this moves result bits at extreme
+// scales; ordinary-scale bits move only through the scaled-norm
+// rounding order).
+pub const EVPI_SEMANTICS_VERSION: u64 = 2;
+
+/// Composite-Simpson panel count for one [`expected_opportunity_loss`]
+/// evaluation (even, fixed): the deterministic quadrature reads every
+/// design's survival function at `EOL_QUADRATURE_PANELS + 1` nodes.
+pub const EOL_QUADRATURE_PANELS: usize = 256;
+
+/// Half-width, in per-design standard deviations, of the integration
+/// window. Beyond `12σ` a Gaussian tail carries `< 2e-33` probability,
+/// far below the quadrature's own resolution.
+const EOL_TAIL_HALF_WIDTHS: f64 = 12.0;
 
 /// The three uncertainty components of an estimate (they compose in quadrature).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,13 +76,13 @@ pub enum Component {
 }
 
 impl Uncertainty {
-    /// The total standard deviation `√(num² + stat² + model²)`.
+    /// The total standard deviation `√(num² + stat² + model²)`, computed
+    /// as a SCALED norm: finite components near `√MAX` compose to their
+    /// representable total instead of overflowing the naive variance sum
+    /// into a false infinity (bead sj31i.5).
     #[must_use]
     pub fn total_std(&self) -> f64 {
-        (self.numerical * self.numerical
-            + self.statistical * self.statistical
-            + self.model * self.model)
-            .sqrt()
+        scaled_norm(&[self.numerical, self.statistical, self.model])
     }
 
     /// The dominant uncertainty component.
@@ -119,7 +144,7 @@ impl DesignEstimate {
 /// under Gaussian objectives (minimizing).
 #[must_use]
 pub fn ranking_flip_probability(chosen: &DesignEstimate, other: &DesignEstimate) -> f64 {
-    let sigma = (chosen.std().powi(2) + other.std().powi(2)).sqrt();
+    let sigma = scaled_norm(&[chosen.std(), other.std()]);
     if sigma <= 0.0 {
         return f64::from(u8::from(other.mean < chosen.mean));
     }
@@ -203,7 +228,7 @@ pub fn decision_posture(designs: &[DesignEstimate]) -> Option<DecisionPosture> {
 /// Pairwise expected opportunity loss `E[(obj_chosen − obj_other)⁺]` for the
 /// two closest designs — the expected regret of the current top-two decision.
 fn pairwise_evpi_scalar(chosen_mean: f64, chosen_std: f64, other_mean: f64, other_std: f64) -> f64 {
-    let sigma = (chosen_std.powi(2) + other_std.powi(2)).sqrt();
+    let sigma = scaled_norm(&[chosen_std, other_std]);
     let delta = chosen_mean - other_mean; // ≤ 0 when `chosen` is best
     if sigma <= 0.0 {
         return (-delta).max(0.0) * 0.0; // no uncertainty → no opportunity loss
@@ -212,31 +237,141 @@ fn pairwise_evpi_scalar(chosen_mean: f64, chosen_std: f64, other_mean: f64, othe
     sigma * normal_pdf(z) + delta * normal_cdf(z)
 }
 
-/// The expected value of PERFECT information for the current decision — the
-/// expected opportunity loss of choosing the current best over the runner-up.
-/// Near zero means the decision is already robust.
+/// The TOP-TWO closed-form opportunity-loss SURROGATE (bead sj31i.5:
+/// the renamed former `evpi`). It sees only the two lowest posterior
+/// means; a third alternative with a worse mean but a large uncertainty
+/// can hold material probability of being optimal while this value sits
+/// near zero — mean ordering is not stochastic dominance. It exists as
+/// a cheap ACTION-RANKING surrogate and MUST NOT gate a global
+/// robustness claim; robustness belongs to
+/// [`expected_opportunity_loss`], which includes every alternative.
 #[must_use]
-pub fn evpi(designs: &[DesignEstimate]) -> f64 {
-    evpi_by(designs.len(), &|idx| designs[idx].mean, &|idx| {
+pub fn top_two_evpi_surrogate(designs: &[DesignEstimate]) -> f64 {
+    top_two_evpi_surrogate_by(designs.len(), &|idx| designs[idx].mean, &|idx| {
         designs[idx].std()
     })
 }
 
-/// Allocation-free EVPI over indexed accessors — the same scan and
-/// pairwise opportunity-loss computation as [`evpi`] (one shared code
-/// path, so results are bitwise-identical), evaluated without cloning
-/// or sorting a `DesignEstimate` menu. `std_at` is consulted only for
-/// the final top-two pair. Callers own their index order: ties break
-/// toward the LOWER index, exactly as [`evpi`] breaks toward the
-/// earlier slice position.
+/// Allocation-free [`top_two_evpi_surrogate`] over indexed accessors —
+/// one shared code path, so results are bitwise-identical to the slice
+/// form. `std_at` is consulted only for the final top-two pair. Callers
+/// own their index order: ties break toward the LOWER index. The same
+/// surrogate caveat applies: never a global robustness gate.
 #[must_use]
-pub fn evpi_by(len: usize, mean_at: &dyn Fn(usize) -> f64, std_at: &dyn Fn(usize) -> f64) -> f64 {
+pub fn top_two_evpi_surrogate_by(
+    len: usize,
+    mean_at: &dyn Fn(usize) -> f64,
+    std_at: &dyn Fn(usize) -> f64,
+) -> f64 {
     match top_two_indices_by(len, mean_at) {
         Some((best, runner)) => {
             pairwise_evpi_scalar(mean_at(best), std_at(best), mean_at(runner), std_at(runner))
         }
         None => 0.0,
     }
+}
+
+/// The FULL expected value of perfect information for the current
+/// decision: `E[obj_best − min_j obj_j]` with EVERY alternative
+/// participating (independent Gaussian objectives, minimizing). Near
+/// zero means the decision is robust against the WHOLE menu — this is
+/// the only evaluator in this crate allowed to support a global
+/// robustness claim.
+#[must_use]
+pub fn expected_opportunity_loss(designs: &[DesignEstimate]) -> f64 {
+    expected_opportunity_loss_by(designs.len(), &|idx| designs[idx].mean, &|idx| {
+        designs[idx].std()
+    })
+}
+
+/// Allocation-free [`expected_opportunity_loss`] over indexed accessors
+/// (one shared code path — bitwise-identical to the slice form).
+///
+/// Method: with `S_j` the Gaussian survival functions,
+/// `E[min_j X_j] = L + ∫_L^U Π_j S_j(x) dx` where `L` truncates below
+/// every design's `12σ` lower tail and `U` is the smallest `12σ` upper
+/// edge (beyond `U` some survival factor is `< 2e-33`, so the product
+/// vanishes; below `L` it is `1` to the same tolerance). The integral
+/// is a fixed [`EOL_QUADRATURE_PANELS`]-panel composite Simpson rule —
+/// deterministic, allocation-free, and monotone in menu content. The
+/// result is an ESTIMATED value with quadrature/tail resolution around
+/// `(U−L)/panels` curvature error, not a certified enclosure.
+///
+/// Domain conventions match the surrogate scan: designs with
+/// non-finite means are excluded from the decision; fewer than two
+/// finite designs mean no decision and zero loss; a zero-`σ` design
+/// truncates the minimum exactly. A non-finite deviation on an
+/// included design poisons the result to NaN, exactly as it poisons
+/// the surrogate.
+#[must_use]
+pub fn expected_opportunity_loss_by(
+    len: usize,
+    mean_at: &dyn Fn(usize) -> f64,
+    std_at: &dyn Fn(usize) -> f64,
+) -> f64 {
+    let Some((best, _)) = top_two_indices_by(len, mean_at) else {
+        return 0.0;
+    };
+    let best_mean = mean_at(best);
+    // Integration window over the FINITE designs (the same inclusion
+    // rule as the scan), saturated so astronomically scaled menus keep
+    // a representable window instead of overflowing to ±inf.
+    let mut lower = f64::INFINITY;
+    let mut upper = f64::INFINITY;
+    for idx in 0..len {
+        let mean = mean_at(idx);
+        if !mean.is_finite() {
+            continue;
+        }
+        let std = std_at(idx);
+        if !(std.is_finite() && std >= 0.0) {
+            return f64::NAN;
+        }
+        let half = (EOL_TAIL_HALF_WIDTHS * std).clamp(0.0, f64::MAX);
+        lower = lower.min((mean - half).clamp(-f64::MAX, f64::MAX));
+        upper = upper.min((mean + half).clamp(-f64::MAX, f64::MAX));
+    }
+    if !(lower.is_finite() && upper.is_finite()) || upper <= lower {
+        // Degenerate window: every included design is exact (σ = 0) or
+        // one exact design caps the minimum below every tail — the
+        // minimum is deterministic at `lower`-side resolution.
+        return (best_mean - best_mean.min(upper)).max(0.0);
+    }
+    // Survival product Π_j S_j(x); zero-σ designs are exact step
+    // functions (their mean is ≥ `upper` by window construction, so
+    // they contribute 1 across the open window).
+    let survival_product = |x: f64| -> f64 {
+        let mut product = 1.0f64;
+        for idx in 0..len {
+            let mean = mean_at(idx);
+            if !mean.is_finite() {
+                continue;
+            }
+            let std = std_at(idx);
+            if std <= 0.0 {
+                if x >= mean {
+                    return 0.0;
+                }
+                continue;
+            }
+            product *= 1.0 - normal_cdf((x - mean) / std);
+            if product <= 0.0 {
+                return 0.0;
+            }
+        }
+        product
+    };
+    // Composite Simpson over the fixed panel count.
+    let panels = EOL_QUADRATURE_PANELS as f64;
+    let step = (upper - lower) / panels;
+    let mut integral = survival_product(lower) + survival_product(upper);
+    for node in 1..EOL_QUADRATURE_PANELS {
+        let weight = if node % 2 == 1 { 4.0 } else { 2.0 };
+        integral += weight * survival_product(step.mul_add(node as f64, lower));
+    }
+    integral *= step / 3.0;
+    let expected_min = lower + integral;
+    (best_mean - expected_min).max(0.0)
 }
 
 /// A menu action's kind (which uncertainty it reduces).
@@ -296,12 +431,16 @@ pub struct ActionValue {
     pub value_per_cost: f64,
 }
 
-/// The decision value of `action`: how much it reduces the top-two EVPI (per
-/// cost). An action on a design outside the decision boundary reduces the EVPI
-/// by ~0 — worthless however uncertain that design is.
+/// The decision value of `action`: how much it reduces the TOP-TWO
+/// SURROGATE EVPI (per cost) — a deliberate ranking heuristic, cheap
+/// enough to evaluate per action. An action on a design outside the
+/// decision boundary reduces it by ~0 — worthless however uncertain
+/// that design is. Surrogate caveat: this ranks actions; it never
+/// claims the decision is globally robust (that gate is
+/// [`expected_opportunity_loss`] inside [`recommend`]).
 #[must_use]
 pub fn action_value(designs: &[DesignEstimate], action: &Action) -> ActionValue {
-    let before = evpi(designs);
+    let before = top_two_evpi_surrogate(designs);
     let after_designs: Vec<DesignEstimate> = designs
         .iter()
         .map(|d| {
@@ -317,7 +456,7 @@ pub fn action_value(designs: &[DesignEstimate], action: &Action) -> ActionValue 
             }
         })
         .collect();
-    let after = evpi(&after_designs);
+    let after = top_two_evpi_surrogate(&after_designs);
     let value = (before - after).max(0.0);
     let value_per_cost = if action.cost.is_finite() && action.cost > 0.0 {
         value / action.cost
@@ -357,13 +496,19 @@ pub enum Recommendation {
 
 /// Recommend the highest decision-value-per-cost action, or STOP when the
 /// decision is already robust (current EVPI `<= stop_threshold`).
+///
+/// The STOP gate is the FULL multi-alternative
+/// [`expected_opportunity_loss`] (bead sj31i.5): a high-variance
+/// third alternative keeps the campaign alive even when the top-two
+/// surrogate reads zero. Action ranking below the gate remains
+/// surrogate-driven.
 #[must_use]
 pub fn recommend(
     designs: &[DesignEstimate],
     actions: &[Action],
     stop_threshold: f64,
 ) -> Recommendation {
-    let current = evpi(designs);
+    let current = expected_opportunity_loss(designs);
     if current <= stop_threshold {
         return Recommendation::Stop {
             reason: format!("decision robust: EVPI {current:.3e} <= {stop_threshold:.3e}"),
@@ -408,6 +553,33 @@ pub fn heuristic_choice<'a>(
 }
 
 // -- Gaussian helpers (in-house; no external special functions) -------------
+
+/// Overflow-safe Euclidean norm (bead sj31i.5): the largest finite
+/// magnitude is factored out before squaring, so finite components near
+/// `√MAX` compose to their representable norm instead of overflowing
+/// the naive square sum. Non-finite components propagate (`inf` wins
+/// over `NaN`, matching IEEE hypot semantics closely enough for
+/// deviation composition; a lone `NaN` poisons the result).
+fn scaled_norm(components: &[f64]) -> f64 {
+    let mut scale = 0.0f64;
+    for &component in components {
+        if component.is_infinite() {
+            return f64::INFINITY;
+        }
+        scale = scale.max(component.abs());
+    }
+    if scale == 0.0 {
+        // All zeros, or zeros mixed with NaN (`max` skips NaN): the
+        // fold below yields exact zero or the poisoning NaN.
+        return components.iter().fold(0.0f64, |acc, &c| acc + c * c);
+    }
+    let mut sum = 0.0f64;
+    for &component in components {
+        let scaled = component / scale;
+        sum += scaled * scaled;
+    }
+    scale * sum.sqrt()
+}
 
 fn normal_pdf(z: f64) -> f64 {
     (-0.5 * z * z).exp() / std::f64::consts::TAU.sqrt()

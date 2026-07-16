@@ -35,7 +35,8 @@ use fs_evidence::{Color, ColorRank, color_leaf_identity_reason};
 use fs_exec::Cx;
 use fs_toleralloc::{Feature, allocate};
 use fs_voi::{
-    Action, ActionKind, ActionValue, DesignEstimate, Recommendation, Uncertainty, evpi_by,
+    Action, ActionKind, ActionValue, DesignEstimate, Recommendation, Uncertainty,
+    expected_opportunity_loss_by,
 };
 
 /// Maximum accepted candidate-name length.
@@ -60,7 +61,13 @@ pub const MAX_CAMPAIGN_EVALUATIONS: usize = 10_500_000;
 pub const OED_REPORT_IDENTITY_VERSION: u64 = 7;
 
 const REPORT_ID_DOMAIN: &str = "org.frankensim.fs-oed-e2e.report.v5";
-const CAMPAIGN_PLANNING_POLICY_VERSION: u64 = 3;
+// v4 (bead sj31i.5): robustness-bearing EVPI evaluations are the full
+// multi-alternative opportunity loss (one work unit still means one
+// record's participation in one bounded evaluation — the quadrature
+// depth is a fixed constant); action ranking keeps the top-two
+// surrogate with its baseline scan folded into the action-construction
+// unit.
+const CAMPAIGN_PLANNING_POLICY_VERSION: u64 = 4;
 const CAMPAIGN_POLL_POLICY_VERSION: u64 = 2;
 const CAMPAIGN_RECORD_POLL_STRIDE: usize = 256;
 const CAMPAIGN_ACTION_POLL_STRIDE: usize = 1;
@@ -71,12 +78,19 @@ const CAMPAIGN_ACTION_POLL_STRIDE: usize = 1;
 // or retained at one bounded seam — charges are formula-based upper
 // bounds evaluated on the actual shape, never measured allocator
 // traffic, so ledgers replay bit-identically across hosts.
-const CAMPAIGN_BYTE_POLICY_VERSION: u64 = 1;
+// Byte policy v2 (bead sj31i.5): full-EOL evaluations charge one menu
+// sweep per quadrature node (FULL_EOL_SCAN_SWEEPS); the surrogate
+// baseline scan is charged at the action-value seam.
+const CAMPAIGN_BYTE_POLICY_VERSION: u64 = 2;
 // One retained candidate/estimate/posterior record's fixed scalar
 // payload (means, variances, uncertainty components), name excluded.
 const RECORD_SCALAR_BYTE_UNITS: u128 = 32;
 // One EVPI/summary scan reads a mean and a total deviation per record.
 const SCAN_READ_BYTE_UNITS: u128 = 16;
+// One FULL expected-opportunity-loss evaluation (bead sj31i.5) sweeps
+// the menu once per quadrature node plus the best-scan and window
+// passes.
+const FULL_EOL_SCAN_SWEEPS: u128 = fs_voi::EOL_QUADRATURE_PANELS as u128 + 3;
 // `measure-` / `sensor-` identity prefixes added to candidate names.
 const ACTION_PREFIX_BYTE_UNITS: u128 = 8;
 
@@ -933,6 +947,11 @@ impl ByteShape {
         self.n.saturating_mul(SCAN_READ_BYTE_UNITS)
     }
 
+    /// One FULL expected-opportunity-loss evaluation over the menu.
+    fn full_scan(self) -> u128 {
+        self.scan().saturating_mul(FULL_EOL_SCAN_SWEEPS)
+    }
+
     /// One canonical-menu rebuild including window verification.
     fn menu_build(self) -> u128 {
         menu_build_byte_units(self.n, self.sum_name, self.max_name).unwrap_or(u128::MAX)
@@ -947,10 +966,11 @@ impl ByteShape {
     }
 
     /// One action's quadrature-view evaluation: the view construction
-    /// reads three scalars, then every expectation node scans the menu.
+    /// reads three scalars, then every expectation node runs one FULL
+    /// opportunity-loss evaluation over the menu (bead sj31i.5).
     fn action_evaluation(self) -> u128 {
         (ACTION_EVALUATION_FACTOR as u128)
-            .saturating_mul(self.scan())
+            .saturating_mul(self.full_scan())
             .saturating_add(24)
     }
 
@@ -1028,7 +1048,10 @@ impl CampaignBytePlan {
             n.checked_mul(RECORD_SCALAR_BYTE_UNITS)?
                 .checked_add(n.checked_mul(8)?)?
                 .checked_add(menu_build_byte_units(n, sum_name, max_name)?)?
-                .checked_add(n.checked_mul(SCAN_READ_BYTE_UNITS)?)
+                .checked_add(
+                    n.checked_mul(SCAN_READ_BYTE_UNITS)?
+                        .checked_mul(FULL_EOL_SCAN_SWEEPS)?,
+                )
         })()
         .ok_or_else(|| overflow.clone())?;
 
@@ -1044,7 +1067,10 @@ impl CampaignBytePlan {
                 .checked_add(sum_name)?;
             let action_evaluation = n.checked_mul(
                 evaluation_factor
-                    .checked_mul(n.checked_mul(SCAN_READ_BYTE_UNITS)?)?
+                    .checked_mul(
+                        n.checked_mul(SCAN_READ_BYTE_UNITS)?
+                            .checked_mul(FULL_EOL_SCAN_SWEEPS)?,
+                    )?
                     .checked_add(24)?,
             )?;
             let chosen_lookup = n.checked_mul(max_name.checked_add(ACTION_PREFIX_BYTE_UNITS)?)?;
@@ -1061,7 +1087,10 @@ impl CampaignBytePlan {
                 .checked_add(observation)?
                 .checked_add(commit_retention)?
                 .checked_add(menu_build_byte_units(n, sum_name, max_name)?)?
-                .checked_add(n.checked_mul(SCAN_READ_BYTE_UNITS)?)
+                .checked_add(
+                    n.checked_mul(SCAN_READ_BYTE_UNITS)?
+                        .checked_mul(FULL_EOL_SCAN_SWEEPS)?,
+                )
         })()
         .ok_or_else(|| overflow.clone())?;
 
@@ -1071,7 +1100,10 @@ impl CampaignBytePlan {
         // identity strings, bounded at 128 each).
         let maximum_finalization_byte_units = (|| {
             let scans = menu_build_byte_units(n, sum_name, max_name)?
-                .checked_add(n.checked_mul(SCAN_READ_BYTE_UNITS)?)?
+                .checked_add(
+                    n.checked_mul(SCAN_READ_BYTE_UNITS)?
+                        .checked_mul(FULL_EOL_SCAN_SWEEPS)?,
+                )?
                 .checked_add(n.checked_mul(8)?)?
                 .checked_add(n.checked_mul(max_name.checked_add(8)?)?)?
                 .checked_add(max_name)?;
@@ -1306,10 +1338,14 @@ fn total_variance(beliefs: &[Belief]) -> Result<f64, OedError> {
 /// values refresh only through [`CanonicalDesignMenu::from_canonical`]
 /// on estimates that are already in canonical order (the campaign
 /// canonicalizes its candidates once at admission, so every derived
-/// estimate vector inherits the order for free). EVPI evaluation over
-/// the menu neither clones nor sorts: `fs_voi::evpi_by` runs the SAME
-/// top-two scan `fs_voi::evpi` runs, with canonical order supplying
-/// the equal-mean tie-break the old clone-and-sort imposed per call.
+/// estimate vector inherits the order for free). Evaluation over the
+/// menu neither clones nor sorts; canonical order supplies the
+/// equal-mean tie-break the old clone-and-sort imposed per call.
+/// Robustness-bearing values (initial/final EVPI, the STOP gate, the
+/// trace) come from the FULL multi-alternative
+/// [`fs_voi::expected_opportunity_loss_by`] (bead sj31i.5); action
+/// ranking keeps the cheap [`fs_voi::top_two_evpi_surrogate_by`]
+/// baseline (its upgrade is bead sj31i.4).
 #[derive(Debug)]
 struct CanonicalDesignMenu {
     estimates: Vec<DesignEstimate>,
@@ -1318,8 +1354,7 @@ struct CanonicalDesignMenu {
 impl CanonicalDesignMenu {
     /// Wrap estimates that are ALREADY in canonical order, verifying
     /// the representation invariant in one O(n) window scan (no sort,
-    /// no allocation). The full multi-alternative EVPI replacement
-    /// remains the separate scientific upgrade in sj31i.5.
+    /// no allocation).
     fn from_canonical(estimates: Vec<DesignEstimate>) -> Result<Self, OedError> {
         if let Some(position) = estimates
             .windows(2)
@@ -1348,10 +1383,12 @@ impl CanonicalDesignMenu {
             .ok()
     }
 
-    /// Allocation-free, sort-free EVPI with the campaign's finiteness
-    /// and sign contract.
-    fn evpi_checked(&self) -> Result<f64, OedError> {
-        let value = evpi_by(
+    /// Allocation-free, sort-free FULL multi-alternative expected
+    /// opportunity loss (bead sj31i.5) with the campaign's finiteness
+    /// and sign contract — the only value allowed to feed robustness
+    /// decisions, traces, and report science.
+    fn full_opportunity_loss_checked(&self) -> Result<f64, OedError> {
+        let value = expected_opportunity_loss_by(
             self.estimates.len(),
             &|idx| self.estimates[idx].mean,
             &|idx| self.estimates[idx].uncertainty.total_std(),
@@ -1417,10 +1454,13 @@ impl<'menu> MeanOverrideView<'menu> {
         })
     }
 
-    /// EVPI over the menu with this view's substitution — same scan,
-    /// same tie-break, zero allocation.
-    fn evpi_checked(&self) -> Result<f64, OedError> {
-        let value = evpi_by(
+    /// FULL expected opportunity loss over the menu with this view's
+    /// substitution — same evaluator, same tie-break, zero allocation
+    /// (bead sj31i.5: action valuation and the robustness gate share
+    /// ONE decision algebra, so an action's value is exactly the full
+    /// loss it removes).
+    fn opportunity_loss_checked(&self) -> Result<f64, OedError> {
+        let value = expected_opportunity_loss_by(
             self.menu.len(),
             &|idx| {
                 if idx == self.index {
@@ -1553,7 +1593,7 @@ fn expected_sensor_action_value(
             canonicalize_zero(posterior_mean),
             posterior_statistical,
         )?;
-        expected_remaining_evpi += probability_weight * view.evpi_checked()?;
+        expected_remaining_evpi += probability_weight * view.opportunity_loss_checked()?;
     }
     // Preserve the exact identity map after executing the declared fixed-shape
     // quadrature work. Summing nine identical weighted EVPI values can land a
@@ -2110,9 +2150,9 @@ fn execute_placements(
         progress.advance(candidates.len() as u128);
         progress.charge_bytes("posterior estimate refresh", shape.menu_build())?;
         progress.checkpoint(cx, plan, "posterior EVPI refresh")?;
-        current_evpi = menu.evpi_checked()?;
+        current_evpi = menu.full_opportunity_loss_checked()?;
         progress.advance(candidates.len() as u128);
-        progress.charge_bytes("posterior EVPI refresh", shape.scan())?;
+        progress.charge_bytes("posterior EVPI refresh", shape.full_scan())?;
         evpi_trace.push(current_evpi);
     }
 
@@ -2144,9 +2184,9 @@ fn finish_report(
     progress.advance(candidates.len() as u128);
     progress.charge_bytes("final estimate summary", shape.menu_build())?;
     progress.checkpoint(cx, plan, "final EVPI")?;
-    let final_evpi = menu.evpi_checked()?;
+    let final_evpi = menu.full_opportunity_loss_checked()?;
     progress.advance(candidates.len() as u128);
-    progress.charge_bytes("final EVPI", shape.scan())?;
+    progress.charge_bytes("final EVPI", shape.full_scan())?;
     progress.checkpoint(cx, plan, "final variance")?;
     let posterior_total_variance = total_variance(&state.beliefs)?;
     progress.advance(candidates.len() as u128);
@@ -2329,9 +2369,9 @@ pub fn run_campaign(
     progress.advance(candidates.len() as u128);
     progress.charge_bytes("initial estimates", shape.menu_build())?;
     progress.checkpoint(cx, plan, "initial EVPI")?;
-    let initial_evpi = menu.evpi_checked()?;
+    let initial_evpi = menu.full_opportunity_loss_checked()?;
     progress.advance(candidates.len() as u128);
-    progress.charge_bytes("initial EVPI", shape.scan())?;
+    progress.charge_bytes("initial EVPI", shape.full_scan())?;
     let state = execute_placements(
         candidates,
         threshold,
@@ -2582,10 +2622,12 @@ mod tests {
         // the admitted byte plan and the byte-accounting policy.
         assert_eq!(OED_REPORT_IDENTITY_VERSION, 7);
         assert_eq!(REPORT_ID_DOMAIN, "org.frankensim.fs-oed-e2e.report.v5");
-        assert_eq!(CAMPAIGN_PLANNING_POLICY_VERSION, 3);
+        // v4 (bead sj31i.5): full-EOL robustness evaluations.
+        assert_eq!(CAMPAIGN_PLANNING_POLICY_VERSION, 4);
         assert_eq!(CAMPAIGN_POLL_POLICY_VERSION, 2);
-        assert_eq!(super::CAMPAIGN_BYTE_POLICY_VERSION, 1);
-        assert_eq!(fs_voi::EVPI_SEMANTICS_VERSION, 1);
+        assert_eq!(super::CAMPAIGN_BYTE_POLICY_VERSION, 2);
+        // v2 (bead sj31i.5): full multi-alternative opportunity loss.
+        assert_eq!(fs_voi::EVPI_SEMANTICS_VERSION, 2);
 
         let plan = CampaignWorkPlan::checked(4, 12).expect("admitted work plan");
         assert_eq!(plan.maximum_finalization_work_units, 18 * 4 + 6 * 12 + 5);
@@ -2743,14 +2785,14 @@ mod tests {
         }
     }
 
-    /// The retired clone-and-sort EVPI path, retained verbatim as the
-    /// INDEPENDENT ORACLE for the canonical-menu evaluator (bead
-    /// sj31i.62 G3): same fs_voi::evpi, same name sort, same
-    /// finiteness/sign contract.
+    /// The retired clone-and-sort path, retained as the INDEPENDENT
+    /// ORACLE for the canonical-menu evaluator (bead sj31i.62 G3,
+    /// upgraded with sj31i.5 to the full multi-alternative loss): same
+    /// fs_voi evaluator, same name sort, same finiteness/sign contract.
     fn oracle_checked_evpi(estimates: &[super::DesignEstimate]) -> Result<f64, super::OedError> {
         let mut canonical = estimates.to_vec();
         canonical.sort_by(|left, right| left.name.cmp(&right.name));
-        let value = fs_voi::evpi(&canonical);
+        let value = fs_voi::expected_opportunity_loss(&canonical);
         if value.is_finite() && value >= 0.0 {
             Ok(super::canonicalize_zero(value))
         } else {
@@ -2813,11 +2855,21 @@ mod tests {
             Err(super::OedError::CanonicalOrderViolated { .. })
         ));
         let empty = super::CanonicalDesignMenu::from_canonical(Vec::new()).expect("empty menu");
-        assert_eq!(empty.evpi_checked().expect("empty EVPI"), 0.0);
+        assert_eq!(
+            empty
+                .full_opportunity_loss_checked()
+                .expect("empty full EOL"),
+            0.0
+        );
         let singleton =
             super::CanonicalDesignMenu::from_canonical(vec![fixture_estimates().remove(0)])
                 .expect("singleton menu");
-        assert_eq!(singleton.evpi_checked().expect("singleton EVPI"), 0.0);
+        assert_eq!(
+            singleton
+                .full_opportunity_loss_checked()
+                .expect("singleton full EOL"),
+            0.0
+        );
     }
 
     /// sj31i.62 G3: the no-sort canonical evaluator is BITWISE equal to
@@ -2841,7 +2893,9 @@ mod tests {
             let menu = super::CanonicalDesignMenu::from_canonical(canonical_sorted(permuted))
                 .expect("canonical menu");
             assert_eq!(
-                menu.evpi_checked().expect("menu EVPI").to_bits(),
+                menu.full_opportunity_loss_checked()
+                    .expect("menu EVPI")
+                    .to_bits(),
                 oracle.to_bits(),
                 "no-sort evaluator must match the oracle bitwise (rotation {rotation})"
             );
@@ -2879,7 +2933,9 @@ mod tests {
                 rebuilt[index].mean = mean;
                 rebuilt[index].uncertainty.statistical = statistical;
                 assert_eq!(
-                    view.evpi_checked().expect("view EVPI").to_bits(),
+                    view.opportunity_loss_checked()
+                        .expect("view EVPI")
+                        .to_bits(),
                     oracle_checked_evpi(&rebuilt)
                         .expect("oracle EVPI")
                         .to_bits(),

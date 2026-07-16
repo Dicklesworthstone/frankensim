@@ -186,13 +186,28 @@ fn assert_same_non_identity_report(left: &OedReport, right: &OedReport) {
 fn sensors_target_the_decision_and_the_campaign_knows_when_to_stop() {
     let candidates = demo_candidates().expect("compiled demo candidates are valid");
     let report = campaign(&candidates, 0.01, 12).expect("demo campaign succeeds");
-    // sensors WERE placed, and on the decision-relevant contenders (A and/or B),
-    // never on the clearly-dominated D.
+    // sensors WERE placed, prioritizing the decision-relevant
+    // contenders (A and/or B); every other alternative gets at most an
+    // exclusion-certifying measurement.
     assert!(report.sensors_placed() > 0, "no sensors placed");
     assert!(report.placements().iter().any(|n| n == "A" || n == "B"));
+    // Under the FULL opportunity-loss algebra (bead sj31i.5) the
+    // campaign certifies GLOBAL robustness: after resolving the
+    // contenders it spends single placements on C and finally D —
+    // exactly the alternatives whose residual optimality probability
+    // blocks the certificate — instead of declaring robustness while
+    // ignoring them (the retired top-two surrogate's laundering).
     assert!(
-        !report.placements().contains(&"D".to_string()),
-        "wasted a sensor on D"
+        report.placements()[..2]
+            .iter()
+            .all(|n| n == "A" || n == "B"),
+        "the first placements belong to the contenders: {:?}",
+        report.placements()
+    );
+    assert!(
+        report.placements().iter().filter(|n| *n == "D").count() <= 1,
+        "D needs at most one exclusion-certifying measurement: {:?}",
+        report.placements()
     );
     // measurement sharpened the beliefs; EVPI fell.
     assert!(report.variance_reduction() > 0.0);
@@ -874,9 +889,9 @@ fn byte_ledger_is_admitted_charged_and_retained_exactly() {
     let report = campaign(&candidates, 0.01, 12).expect("demo campaign succeeds");
     assert!(report.retained_byte_units() <= report.consumed_byte_units());
     assert!(report.consumed_byte_units() <= report.admitted_byte_units());
-    assert_eq!(report.admitted_byte_units(), 51_735);
-    assert_eq!(report.consumed_byte_units(), 33_221);
-    assert_eq!(report.retained_byte_units(), 615);
+    assert_eq!(report.admitted_byte_units(), 9_001_239);
+    assert_eq!(report.consumed_byte_units(), 7_504_065);
+    assert_eq!(report.retained_byte_units(), 697);
     let replay = campaign(&candidates, 0.01, 12).expect("replay succeeds");
     assert_eq!(replay.admitted_byte_units(), report.admitted_byte_units());
     assert_eq!(replay.consumed_byte_units(), report.consumed_byte_units());
