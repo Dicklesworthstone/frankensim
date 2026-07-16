@@ -339,6 +339,121 @@ fn foreign_receipt_canonicalizes_output_order_and_binds_output_and_standard() {
 }
 
 #[test]
+fn foreign_receipt_binds_nominal_coordinates_and_refuses_identity_rebinding() {
+    let graph = admitted_graph(0x38);
+    let workflow = workflow_draft(&graph, "identity-matrix")
+        .admit_against(&graph)
+        .expect("workflow admits");
+    let base_draft = foreign_draft(
+        &graph,
+        &workflow,
+        ColorRank::Estimated,
+        InterchangeStandardV1::Fmi302,
+        vec![output("position", terminal_target(), "position")],
+    );
+    let base = base_draft
+        .clone()
+        .admit_against(&workflow, &graph)
+        .expect("base receipt admits");
+    let base_id = base.identity();
+    let admit_id = |draft: ForeignExecutionDraftV1| {
+        draft
+            .admit_against(&workflow, &graph)
+            .expect("single-coordinate mutation remains structurally admissible")
+            .identity()
+    };
+
+    assert_eq!(base.model_description(), &base_draft.model_description);
+    assert_eq!(base.adapter(), &base_draft.adapter);
+    assert_eq!(base.isolation_receipt(), &base_draft.isolation_receipt);
+
+    let mut changed = base_draft.clone();
+    changed.model_description = artifact("external/model-description", "changed-model");
+    assert_ne!(base_id, admit_id(changed));
+
+    let mut changed = base_draft.clone();
+    changed.adapter = InteropArtifactRefV1::new(
+        "external/alternate-adapter",
+        changed.adapter.schema_version(),
+        changed.adapter.content_hash(),
+    )
+    .expect("alternate adapter coordinate is canonical");
+    assert_ne!(base_id, admit_id(changed));
+
+    let mut changed = base_draft.clone();
+    changed.isolation_receipt = InteropArtifactRefV1::new(
+        changed.isolation_receipt.namespace(),
+        nz(2),
+        changed.isolation_receipt.content_hash(),
+    )
+    .expect("alternate isolation schema version is valid");
+    assert_ne!(base_id, admit_id(changed));
+
+    let mut changed = base_draft.clone();
+    changed.outputs[0].name = "renamed-position".to_owned();
+    assert_ne!(base_id, admit_id(changed));
+
+    let mut changed = base_draft.clone();
+    changed.outputs[0].target = state_target();
+    assert_ne!(base_id, admit_id(changed));
+
+    let other_graph = admitted_graph(0x39);
+    let other_workflow = workflow_draft(&other_graph, "other-graph")
+        .admit_against(&other_graph)
+        .expect("other workflow admits");
+    let other = foreign_draft(
+        &other_graph,
+        &other_workflow,
+        ColorRank::Estimated,
+        InterchangeStandardV1::Fmi302,
+        vec![output("position", terminal_target(), "position")],
+    )
+    .admit_against(&other_workflow, &other_graph)
+    .expect("same foreign coordinates admit against another exact graph");
+    assert_ne!(base_id, other.identity());
+
+    assert_eq!(
+        foreign_draft(
+            &other_graph,
+            &other_workflow,
+            ColorRank::Estimated,
+            InterchangeStandardV1::Fmi302,
+            vec![output("position", terminal_target(), "position")],
+        )
+        .admit_against(&other_workflow, &graph),
+        Err(ForeignExecutionRefusalV1::WorkflowGraphMismatch)
+    );
+
+    let mut wrong_graph = base_draft.clone();
+    wrong_graph.machine_graph_id = other_graph.identity();
+    assert_eq!(
+        wrong_graph.admit_against(&workflow, &graph),
+        Err(ForeignExecutionRefusalV1::MachineGraphMismatch)
+    );
+
+    let alternate_workflow = workflow_draft(&graph, "alternate-workflow")
+        .admit_against(&graph)
+        .expect("alternate workflow admits against the same graph");
+    let alternate = foreign_draft(
+        &graph,
+        &alternate_workflow,
+        ColorRank::Estimated,
+        InterchangeStandardV1::Fmi302,
+        vec![output("position", terminal_target(), "position")],
+    )
+    .admit_against(&alternate_workflow, &graph)
+    .expect("same coordinates admit against the alternate exact workflow");
+    assert_ne!(base_id, alternate.identity());
+
+    let mut wrong_workflow = base_draft;
+    wrong_workflow.workflow_id = alternate_workflow.identity();
+    assert_eq!(
+        wrong_workflow.admit_against(&workflow, &graph),
+        Err(ForeignExecutionRefusalV1::WorkflowIdentityMismatch)
+    );
+}
+
+#[test]
 fn foreign_output_admission_refuses_ambiguous_unbounded_and_foreign_targets() {
     let graph = admitted_graph(0x41);
     let workflow = workflow_draft(&graph, "refusals")
