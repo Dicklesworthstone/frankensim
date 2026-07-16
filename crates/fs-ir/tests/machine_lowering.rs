@@ -13,7 +13,15 @@ use fs_ledger::{EdgeRole, FiveExplicits, Ledger, MAIN_BRANCH, OpOutcome};
 use fs_package::{
     Claim, EvidencePackage, MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES, Provenance, SemanticWitness,
 };
-use fs_scenario::{Environment, LoadCase, Scenario, ValidationBudget};
+use fs_qty::{Dims, QtyAny};
+use fs_scenario::payload::{
+    OrientationParity, Payload, PayloadId, PayloadMeta, QuantityContract, ReferenceSemantics,
+    SampleSource, VectorPayload,
+};
+use fs_scenario::{
+    BcKind, BcValue, BoundaryCondition, Environment, FrameId, LoadCase, Physics, Scenario,
+    ValidationBudget,
+};
 
 const EXPLICITS: FiveExplicits<'static> = FiveExplicits {
     seed: b"machine-domain-lowering-test-v1",
@@ -76,6 +84,40 @@ fn with_cancelled_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
 
 fn scenario(name: &str) -> Scenario {
     Scenario::new(name, 0x5eed, Environment::earth_lab())
+}
+
+fn typed_magnetic_scenario(name: &str, region: &str) -> Scenario {
+    const MAGNETIC_VECTOR_POTENTIAL: Dims = Dims([1, 1, -2, 0, -1, 0]);
+
+    let meta = PayloadMeta::new(
+        QuantityContract::Dimensions(MAGNETIC_VECTOR_POTENTIAL),
+        PayloadId::new("basis/world-cartesian").expect("canonical basis ID"),
+        FrameId(0),
+        OrientationParity::Even,
+        ReferenceSemantics::Continuous,
+    )
+    .expect("valid typed-payload metadata");
+    let payload = Payload::Vector(
+        VectorPayload::new(
+            meta,
+            SampleSource::fixed(vec![
+                QtyAny::new(1.0, MAGNETIC_VECTOR_POTENTIAL),
+                QtyAny::new(2.0, MAGNETIC_VECTOR_POTENTIAL),
+                QtyAny::new(3.0, MAGNETIC_VECTOR_POTENTIAL),
+            ]),
+        )
+        .expect("valid magnetic vector payload"),
+    );
+    let mut scenario = scenario(name);
+    scenario.base_bcs.push(BoundaryCondition {
+        region: region.to_string(),
+        physics: Physics::Magnetics,
+        kind: BcKind::MagneticVectorPotential,
+        value: Some(BcValue::Typed(payload)),
+        compatibility: None,
+        frame: 0,
+    });
+    scenario
 }
 
 fn artifact(hash_label: &str) -> MachineDomainArtifactRefV1 {
@@ -353,6 +395,84 @@ fn g0_complete_one_way_projection_replays_and_preserves_all_identity_domains() {
         .expect("compare divergent replay");
     assert!(!divergent.is_replay_clean());
     assert_eq!(divergent.deterministic_mismatches.len(), 1);
+}
+
+#[test]
+fn g0_typed_scenario_payload_is_bound_into_l6_artifact_and_crosswalk() {
+    const REGION: &str = "magnetic-interface";
+
+    let (graph, behavior, assurance) = machine_stack::admitted_machine_stack();
+    let sources = required_machine_lowering_sources_v1(&graph, &behavior, &assurance)
+        .expect("exact stack source inventory");
+    let expected_scenario = typed_magnetic_scenario("typed-machine", REGION);
+    let mut draft = complete_draft(
+        &sources,
+        expected_scenario.clone(),
+        "typed-artifact",
+        "typed-law",
+        "typed-policy",
+    );
+
+    let mapped_source = draft.crosswalks[0].source().clone();
+    let mapped_law = draft.crosswalks[0].law().clone();
+    let region_target =
+        MachineDomainTargetV1::Scenario(MachineScenarioLocatorV1::Region(REGION.into()));
+    let mut mapped_targets = draft.crosswalks[0].targets().to_vec();
+    mapped_targets.push(region_target.clone());
+    draft.crosswalks[0] =
+        MachineDomainCrosswalkEntryV1::new(mapped_source.clone(), mapped_targets, mapped_law)
+            .expect("typed scenario region is an explicit crosswalk target");
+
+    let admitted = with_cx(|cx| {
+        admit_machine_domain_lowering_v1(
+            &graph,
+            &behavior,
+            &assurance,
+            draft,
+            ValidationBudget::default(),
+            cx,
+        )
+    })
+    .expect("typed scenario projection admits");
+
+    assert_eq!(admitted.scenario(), &expected_scenario);
+    assert!(
+        admitted
+            .canonical_scenario_ir()
+            .contains("(typed :version 1 \"")
+    );
+    let mapped_row = admitted
+        .crosswalks()
+        .iter()
+        .find(|entry| entry.source() == &mapped_source)
+        .expect("mapped source row is retained");
+    assert!(mapped_row.targets().contains(&region_target));
+
+    let portable = parse_machine_domain_portable_payload_v1(admitted.portable_payload())
+        .expect("typed scenario portable payload decodes");
+    assert_eq!(portable.scenario_hash(), admitted.scenario_hash());
+    assert_eq!(
+        portable.canonical_scenario_ir(),
+        admitted.canonical_scenario_ir()
+    );
+    let decoded = fs_scenario::ir::parse_ir(portable.canonical_scenario_ir())
+        .expect("versioned typed scenario reparses");
+    assert_eq!(
+        decoded.source_version(),
+        fs_scenario::ir::SCENARIO_IR_VERSION
+    );
+    assert!(decoded.migration().is_none());
+    assert_eq!(decoded.scenario(), &expected_scenario);
+    assert!(matches!(
+        &decoded.scenario().base_bcs[0].value,
+        Some(BcValue::Typed(Payload::Vector(_)))
+    ));
+
+    let replay = admitted
+        .verify_replay()
+        .expect("typed artifact replays exactly");
+    assert_eq!(replay.lowering(), admitted.identity());
+    assert_eq!(replay.scenario_hash(), admitted.scenario_hash());
 }
 
 #[test]
