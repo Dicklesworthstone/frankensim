@@ -1,11 +1,32 @@
 //! G0/G3 accounting tests for goal-oriented mesh evolution.
 
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mesh::{
     AdaptivityAction, AdaptivityEffects, AdaptivityError, AdaptivityReceipt,
-    AdaptivityReceiptAuthority, AdaptivityTrigger, BalanceStatus, LineageRecordId, MeshStateId,
-    QoiBoundSnapshot, QoiBoundTrend, QoiEvidenceId, QoiId, RemapAccounting, RemapEvidenceId,
-    RemapInvariantId, TopologyLineage,
+    AdaptivityReceiptAuthority, AdaptivityTrigger, BalanceStatus, ConservativeRemapError,
+    LineageRecordId, MAX_REMAP_SOURCE_COVERAGE_TOLERANCE, MAX_REMAP_TARGET_CELLS, MeshStateId,
+    QoiBoundSnapshot, QoiBoundTrend, QoiEvidenceId, QoiId, RemapAccounting, RemapContribution,
+    RemapEvidenceId, RemapInvariantId, TopologyLineage, conservative_cell_remap,
 };
+
+fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            gate,
+            arena,
+            StreamKey {
+                seed: 0x5e_ed,
+                kernel_id: 7,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
 
 fn bytes(tag: u8) -> [u8; 32] {
     [tag; 32]
@@ -497,4 +518,266 @@ fn g0_action_discontinuity_and_domain_triggers_are_explicit() {
         .unwrap();
         assert_eq!(receipt.trigger(), trigger);
     }
+}
+
+#[test]
+fn g0_conservative_cell_remap_refines_extensive_values_and_feeds_accounting() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let contributions = [
+            RemapContribution::new(0, 0, 0.5),
+            RemapContribution::new(0, 1, 0.5),
+            RemapContribution::new(1, 1, 0.25),
+            RemapContribution::new(1, 2, 0.75),
+        ];
+        let first = conservative_cell_remap(&[2.0, 4.0], 3, &contributions, 0.0, 0.0, cx)
+            .expect("binary overlap fractions conserve exactly");
+        let replay = conservative_cell_remap(&[2.0, 4.0], 3, &contributions, 0.0, 0.0, cx)
+            .expect("deterministic replay");
+        assert_eq!(first, replay);
+        assert_eq!(first.target_values(), &[1.0, 2.0, 3.0]);
+        assert_eq!(first.report().source_cells(), 2);
+        assert_eq!(first.report().target_cells(), 3);
+        assert_eq!(first.report().contributions(), 4);
+        assert_eq!(first.report().source_total(), 6.0);
+        assert_eq!(first.report().target_total(), 6.0);
+        assert_eq!(first.report().balance_defect().to_bits(), 0.0f64.to_bits());
+        assert_eq!(first.report().maximum_source_coverage_defect(), 0.0);
+        assert!(first.report().preserves_nonnegative_inputs());
+
+        let accounting = first
+            .report()
+            .accounting(
+                RemapInvariantId::from_bytes(bytes(80)),
+                RemapEvidenceId::from_bytes(bytes(81)),
+                2.5e-4,
+            )
+            .expect("measured result feeds the declaration-only receipt seam");
+        assert_eq!(accounting.balance_defect(), 0.0);
+        assert_eq!(accounting.balance_tolerance(), 0.0);
+        assert_eq!(accounting.projection_error(), 2.5e-4);
+        assert_eq!(
+            accounting.balance_status(),
+            BalanceStatus::WithinDeclaredTolerance
+        );
+
+        let json = first.report().to_json();
+        assert!(json.contains("\"authority\":\"measured-f64\""));
+        assert!(json.contains("\"source_cells\":2"));
+        assert!(json.contains("\"target_cells\":3"));
+        assert!(json.contains("\"balance_defect\":0.00000000000000000e0"));
+        assert!(json.contains("caller-owned"));
+    });
+}
+
+#[test]
+fn g3_conservative_cell_remap_handles_signed_cancellation_without_false_positivity() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let contributions = [
+            RemapContribution::new(0, 0, 0.5),
+            RemapContribution::new(0, 1, 0.5),
+            RemapContribution::new(1, 0, 0.5),
+            RemapContribution::new(1, 1, 0.5),
+        ];
+        let outcome = conservative_cell_remap(&[-2.0, 2.0], 2, &contributions, 0.0, 0.0, cx)
+            .expect("signed extensive quantities may cancel deterministically");
+        assert_eq!(outcome.target_values(), &[0.0, 0.0]);
+        assert_eq!(outcome.report().source_total(), 0.0);
+        assert_eq!(outcome.report().target_total(), 0.0);
+        assert!(!outcome.report().preserves_nonnegative_inputs());
+    });
+}
+
+#[test]
+fn g0_conservative_cell_remap_refuses_noncanonical_and_incomplete_overlap_maps() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let duplicate = [
+            RemapContribution::new(0, 0, 0.5),
+            RemapContribution::new(0, 0, 0.5),
+        ];
+        assert!(matches!(
+            conservative_cell_remap(&[1.0], 1, &duplicate, 0.0, 0.0, cx),
+            Err(ConservativeRemapError::NonCanonicalContributions {
+                contribution: 1,
+                ..
+            })
+        ));
+
+        let reversed = [
+            RemapContribution::new(0, 1, 0.5),
+            RemapContribution::new(0, 0, 0.5),
+        ];
+        assert!(matches!(
+            conservative_cell_remap(&[1.0], 2, &reversed, 0.0, 0.0, cx),
+            Err(ConservativeRemapError::NonCanonicalContributions { .. })
+        ));
+
+        let missing_source = [
+            RemapContribution::new(0, 0, 1.0),
+            RemapContribution::new(2, 1, 1.0),
+        ];
+        assert_eq!(
+            conservative_cell_remap(&[1.0, 2.0, 3.0], 2, &missing_source, 0.0, 0.0, cx),
+            Err(ConservativeRemapError::MissingSourceCoverage { source: 1 })
+        );
+
+        let missing_target = [
+            RemapContribution::new(0, 0, 1.0),
+            RemapContribution::new(1, 0, 1.0),
+        ];
+        assert_eq!(
+            conservative_cell_remap(&[1.0, 2.0], 2, &missing_target, 0.0, 0.0, cx),
+            Err(ConservativeRemapError::MissingTargetCoverage { target: 1 })
+        );
+
+        let incomplete = [RemapContribution::new(0, 0, 0.9)];
+        assert!(matches!(
+            conservative_cell_remap(&[1.0], 1, &incomplete, 1.0e-12, 1.0, cx),
+            Err(ConservativeRemapError::SourceCoverageExceeded { source: 0, .. })
+        ));
+    });
+}
+
+#[test]
+fn g0_conservative_cell_remap_refuses_hostile_numbers_indices_and_tolerances() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let valid = [RemapContribution::new(0, 0, 1.0)];
+        assert!(matches!(
+            conservative_cell_remap(&[f64::NAN], 1, &valid, 0.0, 0.0, cx),
+            Err(ConservativeRemapError::NonFiniteSourceValue { source: 0, .. })
+        ));
+        for fraction in [f64::NAN, -0.0, 0.0, -0.25, 1.000_000_1] {
+            let invalid = [RemapContribution::new(0, 0, fraction)];
+            assert!(matches!(
+                conservative_cell_remap(&[1.0], 1, &invalid, 0.0, 0.0, cx),
+                Err(ConservativeRemapError::InvalidFraction {
+                    contribution: 0,
+                    ..
+                })
+            ));
+        }
+        assert!(matches!(
+            conservative_cell_remap(
+                &[1.0],
+                1,
+                &[RemapContribution::new(1, 0, 1.0)],
+                0.0,
+                0.0,
+                cx,
+            ),
+            Err(ConservativeRemapError::SourceOutOfRange { source: 1, .. })
+        ));
+        assert!(matches!(
+            conservative_cell_remap(
+                &[1.0],
+                1,
+                &[RemapContribution::new(0, 1, 1.0)],
+                0.0,
+                0.0,
+                cx,
+            ),
+            Err(ConservativeRemapError::TargetOutOfRange { target: 1, .. })
+        ));
+        for tolerance in [
+            f64::NAN,
+            -1.0,
+            MAX_REMAP_SOURCE_COVERAGE_TOLERANCE.next_up(),
+        ] {
+            assert!(matches!(
+                conservative_cell_remap(&[1.0], 1, &valid, tolerance, 0.0, cx),
+                Err(ConservativeRemapError::InvalidTolerance {
+                    field: "source_coverage_tolerance",
+                    ..
+                })
+            ));
+        }
+        assert!(matches!(
+            conservative_cell_remap(&[1.0], 1, &valid, 0.0, f64::INFINITY, cx),
+            Err(ConservativeRemapError::InvalidTolerance {
+                field: "balance_tolerance",
+                ..
+            })
+        ));
+    });
+}
+
+#[test]
+fn g0_conservative_cell_remap_separates_local_coverage_from_global_balance() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let fraction = 1.0 - 0.5 * MAX_REMAP_SOURCE_COVERAGE_TOLERANCE;
+        let contributions = [RemapContribution::new(0, 0, fraction)];
+        let error = conservative_cell_remap(
+            &[1.0e9],
+            1,
+            &contributions,
+            MAX_REMAP_SOURCE_COVERAGE_TOLERANCE,
+            1.0,
+            cx,
+        )
+        .expect_err("locally admitted coverage must not hide a large extensive imbalance");
+        assert!(matches!(
+            error,
+            ConservativeRemapError::BalanceExceeded { .. }
+        ));
+
+        assert!(matches!(
+            conservative_cell_remap(
+                &[f64::MAX, f64::MAX],
+                1,
+                &[
+                    RemapContribution::new(0, 0, 1.0),
+                    RemapContribution::new(1, 0, 1.0),
+                ],
+                0.0,
+                f64::MAX,
+                cx,
+            ),
+            Err(ConservativeRemapError::ArithmeticOverflow {
+                stage: "source-total",
+                ..
+            })
+        ));
+    });
+}
+
+#[test]
+fn g4_conservative_cell_remap_cancellation_and_static_caps_refuse_before_publication() {
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    with_cx(&cancelled, |cx| {
+        assert_eq!(
+            conservative_cell_remap(
+                &[1.0],
+                1,
+                &[RemapContribution::new(0, 0, 1.0)],
+                0.0,
+                0.0,
+                cx,
+            ),
+            Err(ConservativeRemapError::Cancelled)
+        );
+    });
+
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        assert_eq!(
+            conservative_cell_remap(
+                &[1.0],
+                MAX_REMAP_TARGET_CELLS + 1,
+                &[RemapContribution::new(0, 0, 1.0)],
+                0.0,
+                0.0,
+                cx,
+            ),
+            Err(ConservativeRemapError::TooMany {
+                field: "target_cells",
+                count: MAX_REMAP_TARGET_CELLS + 1,
+                cap: MAX_REMAP_TARGET_CELLS,
+            })
+        );
+    });
 }

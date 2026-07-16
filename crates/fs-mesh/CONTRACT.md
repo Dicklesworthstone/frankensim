@@ -76,6 +76,20 @@ half-edge round-trips, closed-manifold audits).
   authority is `DeclarationOnly`: `fs-mesh` validates complete accounting but
   cannot certify caller-supplied DWR, conversion, conservation, or lineage
   claims. Canonical JSON is available for an owning ledger to hash.
+- `conservative_cell_remap(source_values, target_count, contributions,
+  source_coverage_tolerance, balance_tolerance, cx)`: bounded sequential
+  piecewise-constant remap for one cellwise EXTENSIVE scalar. Contributions
+  are source-volume fractions and must arrive in strict `(source, target)`
+  order, with every source row partitioning unity and every target receiving
+  data. The kernel rejects duplicate/out-of-order pairs, gaps, invalid indices,
+  zero/negative/non-finite/>1 fractions, non-finite values, arithmetic
+  overflow, excessive local coverage defect, and excessive global
+  target-minus-source balance before publishing any target vector. It polls
+  cancellation through source, overlap, allocation-initialization, target
+  coverage, and publication scans; static cell/contribution and 256 MiB
+  auxiliary-storage ceilings precede work. The canonical report is explicitly
+  `measured-f64`; `report.accounting(...)` requires the caller's own invariant,
+  evidence, and projection-error declaration before feeding the receipt seam.
 
 - `hexdom` module (plan §7.5, bead wqd.18; [F], behind
   `frontier-hexmesh`, OFF the critical path): hex-dominant meshing via
@@ -144,6 +158,13 @@ half-edge round-trips, closed-manifold audits).
     Declared effects refuse physical-topology change without connectivity,
     cannot suppress the gradient-discontinuity flag without a future evidence
     path, and must match the fixed semantics of h, p, and untangle actions.
+13. A successful conservative cell remap has exactly one canonical overlap
+    entry per source/target pair, covers every source and target, retains every
+    source-row unity defect below the caller tolerance and the static `1e-6`
+    ceiling, and retains its measured global extensive defect below the caller
+    balance tolerance. Non-negative inputs plus admitted non-negative fractions
+    cannot publish a negative target value. Signed-zero outputs and report
+    totals canonicalize to positive zero.
 
 ## Error model
 
@@ -158,6 +179,10 @@ an unbacked continuous-gradient claim, non-finite or negative accounting, and
 non-finite bound composition before any receipt is published. Digest parsing
 deliberately adds no authority and accepts every 32-byte value, matching the
 upstream identity adapter boundary.
+`ConservativeRemapError` separately names empty/oversized requests, memory
+admission, invalid tolerances/values/fractions/indices/order, missing local
+coverage, excessive source-row or global balance defects, arithmetic overflow,
+allocation refusal, and cancellation. A refusal owns no partial target vector.
 
 ## Determinism class
 
@@ -213,7 +238,9 @@ stats, refinement stats, and scale/walk-locality stats. Any
 reimplementation must pass the suite unchanged.
 `tests/adaptivity.rs` adds G0/G3 admission, QoI-regression visibility,
 state/lineage/accounting retention, effect and trigger coverage, a byte-pinned
-schema-v1 JSON fixture, and exact replay tests for the adaptivity receipt seam.
+schema-v1 JSON fixture, exact replay tests for the adaptivity receipt seam, and
+piecewise-constant remap refinement/signed-cancellation, hostile overlap,
+coverage-vs-balance, arithmetic-overflow, cap, and cancellation fixtures.
 
 ### Addendum (bead uee3, partial): policy floor, hull-split evidence, exudation
 
@@ -290,13 +317,17 @@ schema-v1 JSON fixture, and exact replay tests for the adaptivity receipt seam.
   trades throughput for auditability until the perf lane says
   otherwise.
 - Adaptivity receipts are accounting artifacts, not DWR, conversion-error,
-  conservation, topology, or gradient certificates. They do not yet execute
-  marked-cell refinement, conservative field remap, mesh untangling, or
-  dependent invalidation; those algorithms must retain their own evidence and
-  feed this seam rather than infer authority from it. Effect booleans are
-  explicitly caller-declared and do not prove the named outcome. Opaque
-  32-byte IDs are one-way adapter boundaries for lower/higher-layer identity
-  types, not a new competing identity scheme.
+  topology, or gradient certificates. The remap kernel covers only one
+  piecewise-constant cellwise extensive scalar and MEASURES algebraic f64
+  balance; the caller still owns overlap geometry, units, geometric/projection
+  error, admissibility of internal variables, higher-order accuracy,
+  monotonicity beyond non-negative scalar input, vector/tensor frame semantics,
+  and continuum conservation evidence. Marked-cell refinement, mesh
+  untangling, and dependent invalidation remain unimplemented. Those algorithms
+  must retain their own evidence and feed this seam rather than infer authority
+  from it. Effect booleans are explicitly caller-declared and do not prove the
+  named outcome. Opaque 32-byte IDs are one-way adapter boundaries for
+  lower/higher-layer identity types, not a new competing identity scheme.
 - `orient3d_sos` is a projection cascade, not the full 3D
   Edelsbrunner–Mücke ladder (fs-ivl's documented no-claim); it is used
   only for walk routing here, never for conflict decisions.

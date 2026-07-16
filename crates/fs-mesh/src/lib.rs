@@ -39,8 +39,11 @@ mod remesh;
 pub use adaptivity::{
     ADAPTIVITY_RECEIPT_SCHEMA_V1, AdaptivityAction, AdaptivityEffects, AdaptivityError,
     AdaptivityReceipt, AdaptivityReceiptAuthority, AdaptivityTrigger, BalanceStatus,
-    LineageRecordId, MeshStateId, QoiBoundSnapshot, QoiBoundTrend, QoiEvidenceId, QoiId,
-    RemapAccounting, RemapEvidenceId, RemapInvariantId, TopologyLineage,
+    CONSERVATIVE_REMAP_REPORT_SCHEMA_V1, ConservativeRemapError, ConservativeRemapOutcome,
+    ConservativeRemapReport, LineageRecordId, MAX_REMAP_AUXILIARY_BYTES, MAX_REMAP_CONTRIBUTIONS,
+    MAX_REMAP_SOURCE_CELLS, MAX_REMAP_SOURCE_COVERAGE_TOLERANCE, MAX_REMAP_TARGET_CELLS,
+    MeshStateId, QoiBoundSnapshot, QoiBoundTrend, QoiEvidenceId, QoiId, RemapAccounting,
+    RemapContribution, RemapEvidenceId, RemapInvariantId, TopologyLineage, conservative_cell_remap,
 };
 pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
 pub use exude::{ExudeOptions, ExudeStats, exude};
