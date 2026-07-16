@@ -24,6 +24,11 @@ use crate::{ClaimId, ClaimSet, MatDbError, PropertyClaim, Provenance};
 
 /// Hash domain for constitutive-model-card canonical identity.
 const MODEL_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.constitutive-model-card.v1";
+/// Semantic version of the canonical constitutive parameter-block identity.
+pub const CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION: u32 = 1;
+/// BLAKE3 domain for the canonical constitutive parameter-block identity.
+pub const CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-matdb.canonical-parameter-block.v1";
 /// Hash domain for material-card canonical identity.
 const MATERIAL_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.material-card.v1";
 
@@ -111,6 +116,43 @@ impl ConstitutiveModelCard {
         Ok(())
     }
 
+    /// Canonical identity of only the ordered, dimensioned parameter block.
+    ///
+    /// The law id, law version, state schema, validity, sources, and
+    /// provenance deliberately do not enter this digest. Consumers must bind
+    /// this hash alongside those separate semantic fields rather than treating
+    /// a parameter block as a complete model identity.
+    ///
+    /// # Errors
+    /// Refuses to mint authority for a structurally invalid model card.
+    pub fn canonical_parameters_hash(&self) -> Result<ContentHash, MatDbError> {
+        self.validate()?;
+        Ok(self.canonical_parameters_hash_with_schema(
+            CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION,
+            CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
+        ))
+    }
+
+    fn canonical_parameters_hash_with_schema(&self, version: u32, domain: &str) -> ContentHash {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&version.to_le_bytes());
+        payload.extend_from_slice(
+            &u64::try_from(self.parameters.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        let mut push = |part: &[u8]| {
+            payload.extend_from_slice(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+            payload.extend_from_slice(part);
+        };
+        for (name, parameter) in &self.parameters {
+            push(name.as_bytes());
+            push(&parameter.value.to_bits().to_le_bytes());
+            push(&crate::dims_bytes(parameter.dims));
+        }
+        hash_domain(domain, &payload)
+    }
+
     /// Canonical content identity over every semantic field.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
@@ -145,6 +187,63 @@ impl ConstitutiveModelCard {
             push(&artifact.0);
         }
         hash_domain(MODEL_HASH_DOMAIN, &payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use fs_evidence::ValidityDomain;
+
+    use super::*;
+    use crate::Provenance;
+
+    fn model() -> ConstitutiveModelCard {
+        let mut parameters = BTreeMap::new();
+        parameters.insert(
+            "p".to_string(),
+            LawParameter {
+                value: 1.0,
+                dims: Dims([0; 6]),
+            },
+        );
+        ConstitutiveModelCard {
+            law: LawId("identity-test".to_string()),
+            law_version: 1,
+            parameters,
+            state_schema_version: 0,
+            initial_state: InitialStatePolicy::ZeroInternalState,
+            validity: ValidityDomain::unconstrained(),
+            sources: Vec::new(),
+            provenance: Provenance {
+                source: "identity unit test".to_string(),
+                license: "test-only".to_string(),
+                artifact: None,
+            },
+        }
+    }
+
+    #[test]
+    fn canonical_parameter_identity_schema_moves_version_and_domain() {
+        let model = model();
+        let canonical = model
+            .canonical_parameters_hash()
+            .expect("valid model mints parameter identity");
+        assert_ne!(
+            canonical,
+            model.canonical_parameters_hash_with_schema(
+                CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION + 1,
+                CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
+            )
+        );
+        assert_ne!(
+            canonical,
+            model.canonical_parameters_hash_with_schema(
+                CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION,
+                "org.frankensim.fs-matdb.canonical-parameter-block.foreign",
+            )
+        );
     }
 }
 

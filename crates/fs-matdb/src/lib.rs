@@ -36,6 +36,7 @@ mod pack;
 mod query;
 
 pub use cards::{
+    CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN, CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION,
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, MATDB_SCHEMA_VERSION,
     MaterialCard, MaterialStateId,
 };

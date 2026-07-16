@@ -108,6 +108,13 @@ persistence.
   load-bearing provenance. Content-addressed
   (`org.frankensim.fs-matdb.constitutive-model-card.v1`). DATA ONLY:
   the executable law-node protocol is L3 fs-material (bead kagp).
+  `canonical_parameters_hash` separately addresses only the sorted parameter
+  names, exact value bits, and six-base dimensions under
+  `org.frankensim.fs-matdb.canonical-parameter-block.v1`; it is never a model
+  identity by itself and must travel with law/version/state-schema and
+  implementation-contract identities. Minting first runs the ordinary card
+  admission gates, so empty or non-finite parameter blocks cannot acquire an
+  authoritative canonical hash.
 - `MaterialStateId` / `MaterialCard` (PR-2) — a NAMED MATERIAL STATE
   (chemistry + phase + temper/process + revision) carrying its claim
   set, its model cards, the by-key and by-law indexes, and explicit

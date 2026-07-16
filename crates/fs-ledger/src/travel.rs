@@ -929,10 +929,10 @@ impl Ledger {
     // -- garbage collection ---------------------------------------------------
 
     /// Artifacts with neither a lineage edge on ANY branch, an immutable
-    /// solver-checkpoint receipt, nor either side of an immutable quantity
-    /// dimension crosswalk are unreachable from every supported root and safe
-    /// to reclaim. Referenced artifacts are immortal (Decalogue P9). Dry runs
-    /// only report.
+    /// solver-checkpoint receipt, either side of an immutable quantity
+    /// dimension crosswalk, nor an immutable semantic state-checkpoint receipt
+    /// are unreachable from every supported root and safe to reclaim.
+    /// Referenced artifacts are immortal (Decalogue P9). Dry runs only report.
     ///
     /// # Errors
     /// Engine errors; on failure during deletion the transaction rolls back.
@@ -948,10 +948,13 @@ impl Ledger {
                     ON a.hash = q_old.old_hash \
                  LEFT JOIN qty_dimension_crosswalks q_new \
                     ON a.hash = q_new.new_hash \
+                 LEFT JOIN semantic_state_checkpoint_receipts s \
+                    ON a.hash = s.runtime_state_artifact \
                  WHERE e.artifact IS NULL \
                    AND c.solver_state_artifact IS NULL \
                    AND q_old.old_hash IS NULL \
                    AND q_new.new_hash IS NULL \
+                   AND s.runtime_state_artifact IS NULL \
                  ORDER BY a.hash",
             )
             .map_err(|e| sql_err("gc scan", &e))?;

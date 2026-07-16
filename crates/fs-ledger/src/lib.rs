@@ -22,6 +22,7 @@ pub mod crosswalk;
 pub mod hash;
 pub mod schema;
 pub mod session_registry;
+pub mod state_checkpoint;
 pub mod tombstone;
 pub mod travel;
 pub mod vcs;
@@ -38,6 +39,12 @@ pub use colors::{
 pub use crosswalk::{MAX_QTY_CROSSWALK_JSON_BYTES, QtyDimensionCrosswalkWrite};
 pub use hash::{Blake3, ContentHash, hash_bytes};
 pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
+pub use state_checkpoint::{
+    KnownStateSemantics, MAX_RUNTIME_STATE_CHECKPOINT_BYTES, MAX_STATE_CHECKPOINT_LAW_ID_BYTES,
+    RUNTIME_STATE_ARTIFACT_KIND, STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,
+    STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION, StateCheckpointClaim, StateCheckpointDecodeError,
+    StateCheckpointReceipt, StateSlotId, VerifiedStateCheckpoint,
+};
 pub use travel::{
     BranchDiff, BranchInfo, ExecMode, ExplainNode, ExplainOp, GcReport, MAIN_BRANCH,
     ReplayMismatch, ReplayVerdict, ViewSnapshot,
@@ -1804,6 +1811,34 @@ pub enum LedgerError {
         /// What is wrong and how to fix it.
         problem: String,
     },
+    /// A retained state checkpoint names law semantics that differ from the
+    /// exact tuple supplied by the replayer. State bytes are withheld.
+    UnknownStateSemantics {
+        /// Durable state-slot digest rendered as lowercase hex.
+        state_slot_hex: String,
+        /// Law id stored with the checkpoint.
+        stored_law: String,
+        /// Stored law version.
+        stored_law_version: u32,
+        /// Stored state-schema version.
+        stored_state_schema_version: u32,
+        /// Law id the caller knows how to replay.
+        expected_law: String,
+        /// Expected law version.
+        expected_law_version: u32,
+        /// Expected state-schema version.
+        expected_state_schema_version: u32,
+        /// Stored L1 canonical parameter-block hash.
+        stored_parameters_hash: String,
+        /// Expected L1 canonical parameter-block hash.
+        expected_parameters_hash: String,
+        /// Stored L3 contract plus implementation hash.
+        stored_contract_and_code_hash: String,
+        /// Expected L3 contract plus implementation hash.
+        expected_contract_and_code_hash: String,
+        /// Closed semantic fields that disagreed.
+        differences: Vec<&'static str>,
+    },
     /// Stored bytes no longer match their recorded content hash.
     Corrupt {
         /// Hex hash of the first corrupted artifact.
@@ -1926,6 +1961,7 @@ impl LedgerError {
             LedgerError::Busy { .. } => "LedgerBusy",
             LedgerError::MissingExplicit { .. } => "LedgerMissingExplicit",
             LedgerError::Invalid { .. } => "LedgerInvalid",
+            LedgerError::UnknownStateSemantics { .. } => "LedgerUnknownStateSemantics",
             LedgerError::Corrupt { .. } => "LedgerCorruption",
             LedgerError::ArtifactReadLimit { .. } => "LedgerArtifactReadLimit",
             LedgerError::OpCorrupt { .. } => "LedgerOpCorruption",
@@ -1971,6 +2007,31 @@ impl std::fmt::Display for LedgerError {
             LedgerError::Invalid { field, problem } => {
                 write!(f, "LedgerInvalid: field '{field}' rejected: {problem}")
             }
+            LedgerError::UnknownStateSemantics {
+                state_slot_hex,
+                stored_law,
+                stored_law_version,
+                stored_state_schema_version,
+                expected_law,
+                expected_law_version,
+                expected_state_schema_version,
+                stored_parameters_hash,
+                expected_parameters_hash,
+                stored_contract_and_code_hash,
+                expected_contract_and_code_hash,
+                differences,
+            } => write!(
+                f,
+                "LedgerUnknownStateSemantics: state slot {state_slot_hex} stores \
+                 law={stored_law:?} law_version={stored_law_version} \
+                 state_schema_version={stored_state_schema_version} \
+                 parameters={stored_parameters_hash} implementation={stored_contract_and_code_hash}, \
+                 but replay supplied law={expected_law:?} law_version={expected_law_version} \
+                 state_schema_version={expected_state_schema_version} \
+                 parameters={expected_parameters_hash} implementation={expected_contract_and_code_hash}; \
+                 mismatched fields: {} — state bytes were withheld",
+                differences.join(", ")
+            ),
             LedgerError::Corrupt { hash_hex, detail } => write!(
                 f,
                 "LedgerCorruption: artifact {hash_hex}: {detail} — refuse to trust or replay \
@@ -2371,6 +2432,10 @@ pub struct LintReport {
     /// Quantity crosswalk rows violating their fixed storage/version/rule
     /// envelope.
     pub malformed_qty_crosswalks: u64,
+    /// Semantic state-checkpoint rows whose runtime-state artifact is absent.
+    pub orphan_state_checkpoint_artifacts: u64,
+    /// Semantic state-checkpoint rows violating their bounded storage envelope.
+    pub malformed_state_checkpoints: u64,
 }
 
 impl LintReport {
@@ -5955,6 +6020,33 @@ impl Ledger {
                  typeof(rule) != 'text' OR rule != 'append-mole-zero' OR \
                  typeof(created_at) != 'integer'",
                 "lint malformed_qty_crosswalks",
+            )?,
+            orphan_state_checkpoint_artifacts: count(
+                "SELECT COUNT(*) FROM semantic_state_checkpoint_receipts c \
+                 LEFT JOIN artifacts a ON c.runtime_state_artifact = a.hash \
+                 WHERE a.hash IS NULL",
+                "lint orphan_state_checkpoint_artifacts",
+            )?,
+            malformed_state_checkpoints: count(
+                "SELECT COUNT(*) FROM semantic_state_checkpoint_receipts WHERE \
+                 typeof(receipt_hash) != 'blob' OR length(receipt_hash) != 32 OR \
+                 typeof(state_slot) != 'blob' OR length(state_slot) != 32 OR \
+                 state_slot = X'0000000000000000000000000000000000000000000000000000000000000000' OR \
+                 typeof(law_id) != 'blob' OR length(law_id) NOT BETWEEN 1 AND 256 OR \
+                 typeof(law_version) != 'integer' OR \
+                    law_version NOT BETWEEN 0 AND 4294967295 OR \
+                 typeof(state_schema_version) != 'integer' OR \
+                    state_schema_version NOT BETWEEN 0 AND 4294967295 OR \
+                 typeof(runtime_state_artifact) != 'blob' OR \
+                    length(runtime_state_artifact) != 32 OR \
+                 typeof(canonical_parameters_hash) != 'blob' OR \
+                    length(canonical_parameters_hash) != 32 OR \
+                 canonical_parameters_hash = X'0000000000000000000000000000000000000000000000000000000000000000' OR \
+                 typeof(contract_and_code_hash) != 'blob' OR \
+                    length(contract_and_code_hash) != 32 OR \
+                 contract_and_code_hash = X'0000000000000000000000000000000000000000000000000000000000000000' OR \
+                 typeof(created_at) != 'integer'",
+                "lint malformed_state_checkpoints",
             )?,
         })
     }

@@ -29,10 +29,12 @@
 //! authority to an existing solver-state artifact and executor-originated
 //! drain/finalize report. Schema v11 adds immutable five-to-six quantity
 //! crosswalk rows whose source and target hashes both reference retained
-//! artifacts.
+//! artifacts. Schema v12 adds portable semantic state-checkpoint receipts that
+//! bind runtime bytes to exact law, parameter, schema, and implementation
+//! identities.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -41,7 +43,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -877,7 +879,58 @@ pub const V11: &[&str] = &[
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 through v11 additions); the
+/// v12: portable semantic state-checkpoint receipts. The runtime-state bytes
+/// are retained as an artifact; every other field is an immutable semantic
+/// identity that a replayer must know exactly before decoding those bytes.
+/// Migration infers no rows from generic solver snapshots because they do not
+/// carry this complete binding.
+pub const V12: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS semantic_state_checkpoint_receipts(
+        receipt_hash BLOB NOT NULL PRIMARY KEY CHECK(length(receipt_hash) = 32),
+        state_slot BLOB NOT NULL
+            CHECK(length(state_slot) = 32 AND state_slot != X'0000000000000000000000000000000000000000000000000000000000000000'),
+        law_id BLOB NOT NULL CHECK(length(law_id) BETWEEN 1 AND 256),
+        law_version INTEGER NOT NULL CHECK(law_version BETWEEN 0 AND 4294967295),
+        state_schema_version INTEGER NOT NULL
+            CHECK(state_schema_version BETWEEN 0 AND 4294967295),
+        runtime_state_artifact BLOB NOT NULL CHECK(length(runtime_state_artifact) = 32)
+            REFERENCES artifacts(hash),
+        canonical_parameters_hash BLOB NOT NULL
+            CHECK(length(canonical_parameters_hash) = 32
+                AND canonical_parameters_hash != X'0000000000000000000000000000000000000000000000000000000000000000'),
+        contract_and_code_hash BLOB NOT NULL
+            CHECK(length(contract_and_code_hash) = 32
+                AND contract_and_code_hash != X'0000000000000000000000000000000000000000000000000000000000000000'),
+        created_at INTEGER NOT NULL
+    ) STRICT",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_state_checkpoint_runtime_artifact
+     ON semantic_state_checkpoint_receipts(runtime_state_artifact)",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_state_checkpoint_slot
+     ON semantic_state_checkpoint_receipts(state_slot)",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_state_checkpoint_law
+     ON semantic_state_checkpoint_receipts(law_id, law_version, state_schema_version)",
+    "CREATE TRIGGER IF NOT EXISTS trg_semantic_state_checkpoint_immutable_update
+     BEFORE UPDATE ON semantic_state_checkpoint_receipts
+     BEGIN
+       SELECT RAISE(ABORT, 'semantic state checkpoint receipt is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_semantic_state_checkpoint_immutable_delete
+     BEFORE DELETE ON semantic_state_checkpoint_receipts
+     BEGIN
+       SELECT RAISE(ABORT, 'semantic state checkpoint receipt is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_semantic_state_checkpoint_immutable_receipt_reinsert
+     BEFORE INSERT ON semantic_state_checkpoint_receipts
+     WHEN EXISTS(
+         SELECT 1 FROM semantic_state_checkpoint_receipts
+         WHERE receipt_hash = NEW.receipt_hash
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'semantic state checkpoint receipt is immutable');
+     END",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 through v12 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -908,4 +961,5 @@ pub const ALL_TABLES: &[&str] = &[
     "op_artifact_edge_seals",
     "session_checkpoint_receipts",
     "qty_dimension_crosswalks",
+    "semantic_state_checkpoint_receipts",
 ];

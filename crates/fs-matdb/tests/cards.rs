@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use fs_blake3::hash_bytes;
+use fs_blake3::{ContentHash, hash_bytes};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
@@ -81,6 +81,11 @@ fn j2_card() -> ConstitutiveModelCard {
         sources: vec![hash_bytes(b"tensile calibration v1")],
         provenance: provenance(),
     }
+}
+
+fn parameter_hash(card: &ConstitutiveModelCard) -> ContentHash {
+    card.canonical_parameters_hash()
+        .expect("valid card mints canonical parameter identity")
 }
 
 #[test]
@@ -210,6 +215,73 @@ fn model_card_content_identity_is_field_sensitive() {
         "{{\"suite\":\"fs-matdb\",\"case\":\"model-identity\",\"verdict\":\"pass\",\
          \"detail\":\"model-card hash stable on equal content, moves on every semantic field\"}}"
     );
+}
+
+#[test]
+fn canonical_parameter_block_hash_is_ordered_and_narrowly_scoped() {
+    let base = j2_card();
+    assert_eq!(
+        parameter_hash(&base).to_hex(),
+        "bea281f14bd420545be1cdacee1b0fdc4b63b29197d97639a4a734b3b05432ef"
+    );
+    assert_eq!(parameter_hash(&base), parameter_hash(&j2_card()));
+    let mut reordered = base.clone();
+    reordered.parameters = base
+        .parameters
+        .iter()
+        .rev()
+        .map(|(name, parameter)| (name.clone(), parameter.clone()))
+        .collect();
+    assert_eq!(
+        parameter_hash(&base),
+        parameter_hash(&reordered),
+        "BTreeMap insertion history cannot move the canonical order"
+    );
+
+    let mut moved_value = j2_card();
+    moved_value
+        .parameters
+        .get_mut("yield_stress")
+        .expect("parameter exists")
+        .value = 276.0e6 + 1.0;
+    assert_ne!(parameter_hash(&base), parameter_hash(&moved_value));
+
+    let mut moved_dims = j2_card();
+    moved_dims
+        .parameters
+        .get_mut("yield_stress")
+        .expect("parameter exists")
+        .dims = Dims([0, 0, 0, 0, 0, 0]);
+    assert_ne!(parameter_hash(&base), parameter_hash(&moved_dims));
+
+    let mut renamed = j2_card();
+    let yield_stress = renamed
+        .parameters
+        .remove("yield_stress")
+        .expect("parameter exists");
+    renamed
+        .parameters
+        .insert("yield_strength".to_string(), yield_stress);
+    assert_ne!(parameter_hash(&base), parameter_hash(&renamed));
+
+    let mut other_semantics = j2_card();
+    other_semantics.law = LawId("different-law".to_string());
+    other_semantics.law_version = 9;
+    other_semantics.state_schema_version = 7;
+    other_semantics.validity = ValidityDomain::unconstrained().with("T", 1.0, 2.0);
+    other_semantics.sources = vec![hash_bytes(b"different source")];
+    assert_eq!(
+        parameter_hash(&base),
+        parameter_hash(&other_semantics),
+        "law and state semantics are separate checkpoint bindings"
+    );
+
+    let mut invalid = j2_card();
+    invalid.parameters.clear();
+    assert!(matches!(
+        invalid.canonical_parameters_hash(),
+        Err(MatDbError::EmptyParameterBlock { .. })
+    ));
 }
 
 #[test]

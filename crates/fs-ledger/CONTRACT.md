@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v11). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v12). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -208,14 +208,27 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   fs-qty replay before returning evidence, so row presence alone is never a
   migration claim. Migration from v10 creates an empty table and infers no
   historical rows.
+- Semantic state checkpoints (`state_checkpoint`, schema v12):
+  `record_state_checkpoint` mints one portable private-field receipt over a
+  typed state-slot identity, fs-matdb law/version/state-schema metadata, the
+  L1-minted canonical parameter-block hash, one retained
+  `constitutive-runtime-state` artifact, and an injected L3 contract/code
+  identity. Exact retry dedupes by receipt hash; one stable slot may accumulate
+  successive immutable checkpoints. `load_state_checkpoint` accepts the
+  receipt hash plus caller-known law/parameter/code semantics, compares the
+  complete semantic tuple before materializing state bytes, and returns a
+  structured `LedgerUnknownStateSemantics` refusal naming the stored and expected law,
+  versions, parameter hash, and code hash on disagreement. Runtime-state reads
+  are integrity checked under a 64 MiB cap. Migration infers no semantic
+  receipts from generic solver snapshots.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
   `unsafe_capsules`.
 - Hygiene: `lint()` (orphan edges/metrics/chunks/crosswalk artifacts; artifact,
-  op, tune, and crosswalk storage bounds; storage-shape and length invariants;
-  half-finished ops; dangling branch references) — all-zero on any healthy or
-  crash-recovered ledger.
+  op, tune, crosswalk, and semantic-checkpoint storage bounds; storage-shape
+  and length invariants; half-finished ops; dangling branch references) —
+  all-zero on any healthy or crash-recovered ledger.
 - Time travel (`travel` module, schema v2): `fork`/`branches`/`branch_diff`
   (a fork is a new op-log branch sharing every artifact by hash; visibility
   = own ops + ancestors' up to each fork point), `begin_op_on` (branch +
@@ -231,8 +244,9 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   reproduce output hashes exactly; fast hash divergences are reported without
   failing; row/branch/session/time envelopes are excluded),
   `gc_unreferenced_artifacts` (artifacts with neither a lineage edge, a
-  solver-checkpoint receipt, nor either side of a quantity dimension
-  crosswalk; every supported root makes an artifact immortal).
+  solver-checkpoint receipt, either side of a quantity dimension crosswalk,
+  nor a semantic state-checkpoint receipt; every supported root makes an
+  artifact immortal).
 
 Schema divergences from plan Appendix D, all deliberate: `JSON` columns are
 STRICT-legal `TEXT` with `json_valid()` CHECKs (Appendix D as written is not
@@ -260,6 +274,11 @@ Schema v11 adds immutable `qty_dimension_crosswalks` rows with source and
 target artifact foreign keys, fixed v1-to-v2 `AppendMoleZero` semantics, a
 target lookup index, and update/delete/reinsert guards. Migration deliberately
 does not infer semantic evidence from old artifact pairs.
+Schema v12 adds portable immutable `semantic_state_checkpoint_receipts`,
+bounded UTF-8 law-id bytes, exact u32 law/state-schema versions, a runtime-state
+artifact foreign key, parameter and contract/code hashes, indexes by stable
+slot/law/artifact, and update/delete/reinsert guards. State slots are indexed
+but not unique so successive immutable snapshots do not overwrite history.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -456,6 +475,12 @@ refusal, or verifier panic).
     JSON through fs-qty reproduces the same typed receipt and exact canonical
     six-base bytes. The two byte identities remain distinct even when multiple
     historical spellings converge on one canonical target.
+14. Semantic runtime-state bytes are replayable only when their immutable
+    receipt identity and row agree, the retained artifact re-hashes under the
+    explicit read cap, and the caller supplies the exact stored law id, law
+    version, state-schema version, canonical parameter-block hash, and
+    contract/code hash. Any disagreement withholds the state bytes as unknown
+    semantics rather than attempting a stale decode.
 
 ## Error model
 
@@ -770,6 +795,13 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   either quantity artifact; it neither mints nor preserves a `SemanticType`
   or quantity-kind identity and cannot authorize dimensionally equal
   substitutions.
+- A semantic state-checkpoint receipt proves exact persistence and equality of
+  an injected semantic tuple. fs-ledger does not mint or inspect the L3
+  contract/code identity, interpret the runtime-state codec, prove that the
+  bytes are a sufficient restart snapshot, or prove cancel/resume/bit-replay.
+  Those authorities remain with the executable L3 law and the E0d machine
+  lifecycle. A generic v10 solver checkpoint is not silently upgraded into
+  this stronger claim.
 - Safe std-only identity generation is implemented through `/dev/urandom` on
   Unix. Fresh identity creation on non-Unix targets is explicitly refused;
   existing v4+ ledgers remain readable when their persisted identity and
