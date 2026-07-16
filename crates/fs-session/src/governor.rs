@@ -8076,6 +8076,16 @@ mod tests {
             }
         }
 
+        fn new_durable(
+            ledger: &fs_ledger::Ledger,
+            nonce: DurableGovernorNonce,
+        ) -> Result<Self, SessionError> {
+            Ok(Self {
+                governor: super::Governor::new_durable(ledger, nonce)?,
+                next_mutation: AtomicU64::new(1),
+            })
+        }
+
         fn next_key(&self, kind: &str, session: SessionId) -> String {
             let ordinal = self.next_mutation.fetch_add(1, Ordering::Relaxed);
             format!("legacy-test-{kind}-{}-{ordinal}", session.0)
@@ -9213,7 +9223,9 @@ mod tests {
 
     #[test]
     fn rotating_dirty_lanes_prevent_meter_starvation() {
-        let governor = Governor::new();
+        let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+        let governor = Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0x92; 32]))
+            .expect("durable fixture governor");
         let mut permit = None;
         for session in 0..MAX_SESSIONS_PER_SCOPE {
             let opened = governor
@@ -9224,12 +9236,22 @@ mod tests {
                 .expect("fixture session");
             permit.get_or_insert(opened);
         }
+        let permit = permit.expect("at least one fixture session");
+        let first = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("open-receipt chunk");
+        assert_eq!(first.appended_rows, MAX_FLUSH_ROWS);
+        assert!(!first.remaining_dirty);
+
+        let submission_id = governor
+            .submission_request_id(SessionId(0), "terminal", "terminal")
+            .expect("terminal submission authority");
         governor
-            .submit_once(SessionId(0), "terminal", || Charge {
+            .submit_once_durable(&ledger, submission_id, "terminal", || Charge {
                 core_s: 1.0,
                 ..Charge::default()
             })
-            .expect("terminal fixture");
+            .expect("durably claimed terminal fixture");
         governor
             .apply_memory_pressure(SessionId(0), 1)
             .expect("event fixture");
@@ -9243,13 +9265,6 @@ mod tests {
             );
             assert!(scope.dirty_submission_failures.is_empty());
         }
-        let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
-        let permit = permit.expect("at least one fixture session");
-        let first = governor
-            .flush_scope_to_ledger(&permit, &ledger)
-            .expect("open-receipt chunk");
-        assert_eq!(first.appended_rows, MAX_FLUSH_ROWS);
-        assert!(first.remaining_dirty);
 
         // Add one later standalone causal report per session. The unified
         // causal lane must emit the submission terminal before any report
