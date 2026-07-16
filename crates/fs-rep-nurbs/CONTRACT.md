@@ -170,9 +170,14 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   expanded by one ULP. Cartesian division, evaluation and norm
   arithmetic are ordinary f64, so dense-oracle containment is measured
   evidence rather than a rigorous enclosure.
-  An admitted curve or surface also exposes `closest_point_with_cx`, whose
-  `ClosestPointRun` publishes either that complete estimate or `Cancelled`;
-  cancellation never publishes a partial frontier-derived bracket.
+  Owning `closest_point_curve_with_cx` and
+  `closest_point_surface_with_cx` carry one `Cx` through bounded source
+  admission and the admitted measured search while retaining the aggregate
+  source-work charge. An admitted curve or surface also exposes repeatable
+  `closest_point_with_cx` without repeating structural validation or adding
+  source-admission work to the request. `ClosestPointRun` publishes
+  either a complete estimate or `Cancelled`; cancellation never publishes
+  admitted authority or a partial frontier-derived bracket.
 - `boolean(op, policy)` — THE BOOLEAN POSITION: always a structured
   `BooleanRefusal` in v0. Default policy routes through SDF (convert →
   implicit CSG → re-fit); `DirectCertificateGated` refuses pending a
@@ -625,14 +630,19 @@ converted-curve plus queue/frontier/scratch, and post-release derivative-polish
 phases; the converted curve and queue are dropped before polish. The owning
 wrapper rejects malformed requests before scanning the source, while an
 `AdmittedNurbsCurve` can repeat closest-point calls without rescanning source
-structure. Its admitted-only `closest_point_with_cx` path keeps
-malformed-request and count-only pre-scan work refusals ahead of cancellation,
-then uses the same `Cx` through Bezier planning/conversion, seed copies and
-hulls, heap traversal, de Casteljau splits, Newton polish, final evaluation,
-and publication. Linear and triangular logical work polls at most every 64
-operations, with explicit gates around owned allocations and bounded heap
-operations. `Cancelled` publishes no partial estimate; cancellation inside
-optional derivative/evaluation kernels is not downgraded to a polish miss.
+structure. Owning `closest_point_curve_with_cx` preserves malformed-request
+then count-derived source-work refusal order before carrying one `Cx` through
+bounded structural admission and the admitted search; its aggregate preflight
+includes that source-admission charge. The admitted-only
+`closest_point_with_cx` path keeps malformed-request and count-only pre-scan
+work refusals ahead of cancellation while using zero source-admission charge
+for its already validated reusable snapshot. Both continue the same `Cx`
+through Bezier planning/conversion, seed copies and hulls, heap traversal, de
+Casteljau splits, Newton polish, final evaluation, and publication. Linear and
+triangular logical work polls at most every 64 operations, with explicit gates
+around owned allocations and bounded heap operations. `Cancelled` publishes no
+admitted view or partial estimate; cancellation inside optional
+derivative/evaluation kernels is not downgraded to a polish miss.
 Individual allocator, heap, scalar, and destructor calls remain
 non-preemptible. This measured primitive does not consume the caller budget,
 own request-drain-finalize, promise wall-time preemption, or provide resumable
@@ -655,13 +665,18 @@ frontier, and that retained search state plus final basis-evaluation workspace.
 The conversion bound covers surface row tables and the exact overlap of the
 largest old/new direct tensor insertion generations; it does not claim
 allocator metadata, rounding, or pre-existing spare source capacity.
-The admitted surface `closest_point_with_cx` path keeps request and count-only
-pre-scan refusals ahead of cancellation, then polls the ordered U/V planning
-scans, fallible source clone, alternating exact U-then-V conversion, U-major
-and V-minor seed copies/hulls, both patch-split axes, heap traversal, optional
-center evaluation, cleanup, and final publication. Fixed-stride loops observe
-the gate at most every 64 logical operations; `Cancelled` never carries a
-partial frontier or bracket, and cancellation from optional evaluation is not
+Owning `closest_point_surface_with_cx` preserves malformed-request then
+count-derived source-work refusal order before carrying one `Cx` through
+bounded structural admission and the admitted search; its aggregate preflight
+includes that source-admission charge. The admitted surface
+`closest_point_with_cx` path keeps request and count-only pre-scan refusals
+ahead of cancellation while using zero source-admission charge for its already
+validated reusable snapshot. Both poll the ordered U/V planning scans, fallible
+source clone, alternating exact U-then-V conversion, U-major and V-minor seed
+copies/hulls, both patch-split axes, heap traversal, optional center evaluation,
+cleanup, and final publication. Fixed-stride loops observe the gate at most
+every 64 logical operations; `Cancelled` never carries an admitted view,
+partial frontier, or bracket, and cancellation from optional evaluation is not
 treated as an ordinary evaluation miss. Converted storage and the frontier
 remain live through final evaluation as admitted by the aggregate envelope.
 Individual allocations, heap calls, scalar operations, and nested-`Vec`

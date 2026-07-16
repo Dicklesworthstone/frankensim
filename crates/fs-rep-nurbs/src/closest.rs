@@ -12,10 +12,12 @@
 use crate::NurbsError;
 use crate::basis::AdmittedKnotVector;
 use crate::curve::{
-    AdmittedNurbsCurve, BezierConversionPlan, CurveBezierRun, CurveDerivativesRun,
-    CurveEvaluationRun, NurbsCurve,
+    AdmittedNurbsCurve, BezierConversionPlan, CurveAdmissionRun, CurveBezierRun,
+    CurveDerivativesRun, CurveEvaluationRun, NurbsCurve,
 };
-use crate::surface::{AdmittedNurbsSurface, NurbsSurface, SurfaceEvaluationRun};
+use crate::surface::{
+    AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun,
+};
 use fs_exec::Cx;
 use fs_math::{det, next_down, next_up};
 use std::cmp::Ordering;
@@ -1379,6 +1381,36 @@ pub fn closest_point_curve(
     closest_point_curve_after_request(curve.admit()?, q, tol, max_splits, source_admission_work)
 }
 
+/// Measured closest-point search on an owning curve with bounded cancellation
+/// polling and transactional estimate publication.
+///
+/// Request shape and count-derived source-work refusals retain their
+/// synchronous precedence. The same `Cx` then spans structural admission and
+/// the admitted measured search, while the aggregate preflight includes the
+/// source-admission charge. Cancellation publishes neither admitted authority
+/// nor a partial frontier-derived estimate.
+///
+/// # Errors
+/// Returns the synchronous owning search's request, work, retained-memory,
+/// allocation, structure, and finite-arithmetic refusals when they win before
+/// an observed cancellation.
+pub fn closest_point_curve_with_cx(
+    curve: &NurbsCurve<f64, 3>,
+    q: [f64; 3],
+    tol: f64,
+    max_splits: u32,
+    cx: &Cx<'_>,
+) -> Result<ClosestPointRun, NurbsError> {
+    validate_closest_request(q, tol, max_splits)?;
+    let source_admission_work = curve_source_admission_work(curve)?;
+    enforce_base_work(source_admission_work, "curve source admission")?;
+    let admitted = match curve.admit_with_cx(cx)? {
+        CurveAdmissionRun::Complete { admitted } => admitted,
+        CurveAdmissionRun::Cancelled => return Ok(ClosestPointRun::Cancelled),
+    };
+    admitted.closest_point_with_cx_after_request(q, tol, max_splits, source_admission_work, cx)
+}
+
 impl AdmittedNurbsCurve<'_, f64, 3> {
     /// Measured closest-point estimate while reusing this admitted immutable
     /// source snapshot across planning, exact conversion, and Newton polish.
@@ -1418,12 +1450,27 @@ impl AdmittedNurbsCurve<'_, f64, 3> {
         cx: &Cx<'_>,
     ) -> Result<ClosestPointRun, NurbsError> {
         validate_closest_request(q, tol, max_splits)?;
+        self.closest_point_with_cx_after_request(q, tol, max_splits, 0, cx)
+    }
+
+    fn closest_point_with_cx_after_request(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        max_splits: u32,
+        source_admission_work: u128,
+        cx: &Cx<'_>,
+    ) -> Result<ClosestPointRun, NurbsError> {
         let mut should_cancel = || cx.checkpoint().is_err();
-        let plan =
-            match preflight_curve_closest_with_poll(*self, max_splits, 0, &mut should_cancel)? {
-                ClosestWorkRun::Complete(plan) => plan,
-                ClosestWorkRun::Cancelled => return Ok(ClosestPointRun::Cancelled),
-            };
+        let plan = match preflight_curve_closest_with_poll(
+            *self,
+            max_splits,
+            source_admission_work,
+            &mut should_cancel,
+        )? {
+            ClosestWorkRun::Complete(plan) => plan,
+            ClosestWorkRun::Cancelled => return Ok(ClosestPointRun::Cancelled),
+        };
         let mut kernels = CurveClosestKernels {
             conversion: || match self.to_bezier_form_with_cx(cx)? {
                 CurveBezierRun::Complete { curve } => Ok(ClosestWorkRun::Complete(curve)),
@@ -2175,6 +2222,36 @@ pub fn closest_point_surface(
     closest_point_surface_after_request(surface.admit()?, q, tol, max_splits, source_admission_work)
 }
 
+/// Measured closest-point search on an owning surface with bounded
+/// cancellation polling and transactional estimate publication.
+///
+/// Request shape and count-derived source-work refusals retain their
+/// synchronous precedence. The same `Cx` then spans structural admission and
+/// the admitted measured search, while the aggregate preflight includes the
+/// source-admission charge. Cancellation publishes neither admitted authority
+/// nor a partial frontier-derived estimate.
+///
+/// # Errors
+/// Returns the synchronous owning search's request, work, retained-memory,
+/// allocation, structure, and finite-arithmetic refusals when they win before
+/// an observed cancellation.
+pub fn closest_point_surface_with_cx(
+    surface: &NurbsSurface<f64>,
+    q: [f64; 3],
+    tol: f64,
+    max_splits: u32,
+    cx: &Cx<'_>,
+) -> Result<ClosestPointRun, NurbsError> {
+    validate_closest_request(q, tol, max_splits)?;
+    let source_admission_work = surface_source_admission_work(surface)?;
+    enforce_base_work(source_admission_work, "surface source admission")?;
+    let admitted = match surface.admit_with_cx(cx)? {
+        SurfaceAdmissionRun::Complete { admitted } => admitted,
+        SurfaceAdmissionRun::Cancelled => return Ok(ClosestPointRun::Cancelled),
+    };
+    admitted.closest_point_with_cx_after_request(q, tol, max_splits, source_admission_work, cx)
+}
+
 impl AdmittedNurbsSurface<'_, f64> {
     /// Measured closest-point estimate while reusing this admitted immutable
     /// source through conversion planning and final evaluation.
@@ -2213,12 +2290,27 @@ impl AdmittedNurbsSurface<'_, f64> {
         cx: &Cx<'_>,
     ) -> Result<ClosestPointRun, NurbsError> {
         validate_closest_request(q, tol, max_splits)?;
+        self.closest_point_with_cx_after_request(q, tol, max_splits, 0, cx)
+    }
+
+    fn closest_point_with_cx_after_request(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        max_splits: u32,
+        source_admission_work: u128,
+        cx: &Cx<'_>,
+    ) -> Result<ClosestPointRun, NurbsError> {
         let mut should_cancel = || cx.checkpoint().is_err();
-        let plan =
-            match preflight_surface_closest_with_poll(*self, max_splits, 0, &mut should_cancel)? {
-                ClosestWorkRun::Complete(plan) => plan,
-                ClosestWorkRun::Cancelled => return Ok(ClosestPointRun::Cancelled),
-            };
+        let plan = match preflight_surface_closest_with_poll(
+            *self,
+            max_splits,
+            source_admission_work,
+            &mut should_cancel,
+        )? {
+            ClosestWorkRun::Complete(plan) => plan,
+            ClosestWorkRun::Cancelled => return Ok(ClosestPointRun::Cancelled),
+        };
         let mut kernels = SurfaceClosestKernels {
             conversion: || {
                 let mut conversion_cancel = || cx.checkpoint().is_err();
@@ -2572,8 +2664,9 @@ mod tests {
     use super::{
         BinaryHeap, CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_RETAINED_BYTES, CLOSEST_MAX_SPLITS,
         ClosestPointRun, ClosestWorkRun, CurveClosestKernels, MinEntry, SurfaceClosestKernels,
-        closest_point_curve, closest_point_curve_after_plan_with_poll, closest_point_surface,
-        closest_point_surface_after_plan_with_poll, curve_subdivision_work_per_split,
+        closest_point_curve, closest_point_curve_after_plan_with_poll, closest_point_curve_with_cx,
+        closest_point_surface, closest_point_surface_after_plan_with_poll,
+        closest_point_surface_with_cx, curve_subdivision_work_per_split,
         enforce_curve_retained_envelope, enforce_surface_retained_envelope,
         hull_lower_bound_with_poll, preflight_curve_closest, preflight_curve_closest_with_poll,
         preflight_surface_closest, preflight_surface_closest_with_poll,
@@ -2732,6 +2825,16 @@ mod tests {
             .expect("repeated admitted closest");
         assert_eq!(first, owning);
         assert_eq!(repeated, first);
+        for _ in 0..2 {
+            let owning_cancellable = with_closest_cx(false, |cx| {
+                closest_point_curve_with_cx(&curve, query, 1e-9, 8, cx)
+                    .expect("active cancellable owning closest")
+            });
+            assert_eq!(
+                owning_cancellable,
+                ClosestPointRun::Complete { estimate: first }
+            );
+        }
         let cancellable = with_closest_cx(false, |cx| {
             admitted
                 .closest_point_with_cx(query, 1e-9, 8, cx)
@@ -2760,6 +2863,11 @@ mod tests {
 
         with_closest_cx(true, |cx| {
             assert_eq!(
+                closest_point_curve_with_cx(&curve, [1.0, 0.25, 0.0], 1e-9, 8, cx)
+                    .expect("valid pre-cancelled owning request"),
+                ClosestPointRun::Cancelled
+            );
+            assert_eq!(
                 admitted
                     .closest_point_with_cx([1.0, 0.25, 0.0], 1e-9, 8, cx)
                     .expect("valid pre-cancelled request"),
@@ -2774,11 +2882,39 @@ mod tests {
                 let synchronous = admitted
                     .closest_point(query, tolerance, splits)
                     .expect_err("malformed synchronous request");
+                let owning_synchronous = closest_point_curve(&curve, query, tolerance, splits)
+                    .expect_err("malformed synchronous owning request");
                 let cancellable = admitted
                     .closest_point_with_cx(query, tolerance, splits, cx)
                     .expect_err("request refusal must precede cancellation");
                 assert_eq!(cancellable, synchronous);
+                let owning_cancellable =
+                    closest_point_curve_with_cx(&curve, query, tolerance, splits, cx)
+                        .expect_err("owning request refusal must precede cancellation");
+                assert_eq!(owning_cancellable, owning_synchronous);
             }
+        });
+    }
+
+    #[test]
+    fn owning_curve_closest_forwards_source_work_before_polling() {
+        let curve = quadratic_curve();
+        let admitted = curve.admit().expect("admitted curve");
+        let expected = preflight_curve_closest(admitted, 0, CLOSEST_MAX_BASE_WORK_UNITS)
+            .expect_err("source plus plan work must exceed the base ceiling");
+        with_closest_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .closest_point_with_cx_after_request(
+                        [1.0, 0.25, 0.0],
+                        1e-9,
+                        0,
+                        CLOSEST_MAX_BASE_WORK_UNITS,
+                        cx,
+                    )
+                    .expect_err("aggregate source-work refusal must precede cancellation"),
+                expected
+            );
         });
     }
 
@@ -2980,6 +3116,16 @@ mod tests {
             .expect("repeated admitted surface closest");
         assert_eq!(first, owning);
         assert_eq!(repeated, first);
+        for _ in 0..2 {
+            let owning_cancellable = with_closest_cx(false, |cx| {
+                closest_point_surface_with_cx(&surface, query, 1e-9, 8, cx)
+                    .expect("active cancellable owning surface closest")
+            });
+            assert_eq!(
+                owning_cancellable,
+                ClosestPointRun::Complete { estimate: first }
+            );
+        }
         let cancellable = with_closest_cx(false, |cx| {
             admitted
                 .closest_point_with_cx(query, 1e-9, 8, cx)
@@ -3008,6 +3154,11 @@ mod tests {
 
         with_closest_cx(true, |cx| {
             assert_eq!(
+                closest_point_surface_with_cx(&surface, [0.25, 0.75, 0.5], 1e-9, 8, cx)
+                    .expect("valid pre-cancelled owning surface request"),
+                ClosestPointRun::Cancelled
+            );
+            assert_eq!(
                 admitted
                     .closest_point_with_cx([0.25, 0.75, 0.5], 1e-9, 8, cx)
                     .expect("valid pre-cancelled surface request"),
@@ -3022,11 +3173,39 @@ mod tests {
                 let synchronous = admitted
                     .closest_point(query, tolerance, splits)
                     .expect_err("malformed synchronous surface request");
+                let owning_synchronous = closest_point_surface(&surface, query, tolerance, splits)
+                    .expect_err("malformed synchronous owning surface request");
                 let cancellable = admitted
                     .closest_point_with_cx(query, tolerance, splits, cx)
                     .expect_err("surface request refusal must precede cancellation");
                 assert_eq!(cancellable, synchronous);
+                let owning_cancellable =
+                    closest_point_surface_with_cx(&surface, query, tolerance, splits, cx)
+                        .expect_err("owning surface request refusal must precede cancellation");
+                assert_eq!(owning_cancellable, owning_synchronous);
             }
+        });
+    }
+
+    #[test]
+    fn owning_surface_closest_forwards_source_work_before_polling() {
+        let surface = multispan_quadratic_surface();
+        let admitted = surface.admit().expect("admitted surface");
+        let expected = preflight_surface_closest(admitted, 0, CLOSEST_MAX_BASE_WORK_UNITS)
+            .expect_err("surface source plus plan work must exceed the base ceiling");
+        with_closest_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .closest_point_with_cx_after_request(
+                        [0.25, 0.75, 0.5],
+                        1e-9,
+                        0,
+                        CLOSEST_MAX_BASE_WORK_UNITS,
+                        cx,
+                    )
+                    .expect_err("surface aggregate work refusal must precede cancellation"),
+                expected
+            );
         });
     }
 

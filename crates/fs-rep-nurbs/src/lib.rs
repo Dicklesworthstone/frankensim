@@ -29,7 +29,8 @@ pub use basis::{
 };
 pub use boolean::{BooleanOp, BooleanPolicy, BooleanRefusal, boolean};
 pub use closest::{
-    ClosestPointRun, DistanceBracketEstimate, closest_point_curve, closest_point_surface,
+    ClosestPointRun, DistanceBracketEstimate, closest_point_curve, closest_point_curve_with_cx,
+    closest_point_surface, closest_point_surface_with_cx,
 };
 pub use curve::{
     AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveCloneRun, CurveConstructionRun,
