@@ -5375,7 +5375,16 @@ mod tests {
         );
     }
 
+    /// The exact-cap boundary proof: 4096 canonical terminal inserts plus one
+    /// simple-generation probe per fence row are quadratic through fsqlite's
+    /// linear column-resolution join path, so the default suite carries the
+    /// small-scale smoke variant below instead and deep cap lanes run this one
+    /// with `--ignored` (bead i3m4i).
     #[test]
+    #[ignore = "90+ wall minutes (bead i3m4i): MAX_SESSION_PAUSE_FENCE_SUBMISSIONS canonical \
+                inserts and per-row six-way-join probes are quadratic under fsqlite's linear \
+                column resolution; behavior smoke coverage lives in \
+                pause_fence_smoke_reports_pending_and_skips_terminalized_submissions"]
     fn pause_fence_accepts_exact_submission_cap_and_rejects_limit_plus_one() {
         let ledger = Ledger::open(":memory:").expect("pause-fence-cap ledger");
         ledger.begin().expect("bulk fixture transaction");
@@ -5435,6 +5444,69 @@ mod tests {
                     "draining generation contains more than the {MAX_SESSION_PAUSE_FENCE_SUBMISSIONS}-submission fence limit"
                 ),
             })
+        );
+    }
+
+    /// Default-suite smoke for the pause fence (bead i3m4i): the fence
+    /// discipline of the ignored exact-cap test at a scale the interpreted
+    /// join path handles instantly — terminalized submissions are invisible
+    /// and spend no typed reads; a never-terminalized submission in the
+    /// draining generation is reported as the exact pending predecessor.
+    /// Cap and pagination boundaries stay in the `--ignored` test.
+    #[test]
+    fn pause_fence_smoke_reports_pending_and_skips_terminalized_submissions() {
+        let ledger = Ledger::open(":memory:").expect("pause-fence-smoke ledger");
+        ledger.begin().expect("bulk fixture transaction");
+        for index in 0..8u64 {
+            let claim = SessionMutationClaim {
+                kind: PRECLAIM_REQUIRED_SUBMISSION_KIND,
+                causal_ordinal: Some(index + 1),
+                ..fixture_claim(&ledger, authority(220_000 + index), b"")
+            };
+            insert_canonical_submission_terminal_fixture(&ledger, claim);
+        }
+        ledger.commit().expect("terminalized fixture commit");
+
+        let pause = SessionMutationClaim {
+            authority: authority(230_000),
+            kind: PAUSE_ACKNOWLEDGEMENT_KIND,
+            generation: 3,
+            causal_ordinal: Some(1),
+            payload: b"pause",
+            ..fixture_claim(&ledger, authority(230_000), b"pause")
+        };
+        let reads_before = ledger.read_queries();
+        assert!(
+            ledger
+                .pending_submission_predecessors(pause)
+                .expect("terminalized pause fence")
+                .is_empty(),
+            "terminalized submissions are not pending predecessors"
+        );
+        assert_eq!(
+            ledger.read_queries() - reads_before,
+            0,
+            "the terminalized pause fence must not recurse through per-claim typed readers"
+        );
+
+        let pending = SessionMutationClaim {
+            kind: PRECLAIM_REQUIRED_SUBMISSION_KIND,
+            causal_ordinal: Some(9),
+            ..fixture_claim(&ledger, authority(220_008), b"")
+        };
+        assert!(matches!(
+            ledger
+                .claim_session_mutation(&pending)
+                .expect("pending fixture claim"),
+            SessionMutationClaimResult::Claimed { .. }
+        ));
+        let fence = ledger
+            .pending_submission_predecessors(pause)
+            .expect("pending pause fence");
+        assert_eq!(
+            fence.into_iter().collect::<Vec<_>>(),
+            vec![pending.authority],
+            "the never-terminalized submission is the exact pending predecessor"
         );
     }
 
