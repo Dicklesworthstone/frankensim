@@ -1319,12 +1319,89 @@ impl<S: Scalar> NurbsSurface<S> {
         self.admit()?.eval_homogeneous(u, v)
     }
 
+    /// Validate this owning surface and evaluate its homogeneous point with
+    /// one cancellation gate.
+    ///
+    /// Checked structural-validation work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission and the same
+    /// admitted evaluation pipeline as
+    /// [`AdmittedNurbsSurface::eval_homogeneous_with_cx`]. No partial admitted
+    /// authority or homogeneous representation is published. This primitive
+    /// does not consume the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning evaluator's structure, parameter, work,
+    /// allocation, and finite-arithmetic refusals when they win before an
+    /// observed cancellation.
+    pub fn eval_homogeneous_with_cx(
+        &self,
+        u: S,
+        v: S,
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceHomogeneousEvaluationRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.eval_homogeneous_with_poll(u, v, &mut should_cancel)
+    }
+
+    fn eval_homogeneous_with_poll(
+        &self,
+        u: S,
+        v: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceHomogeneousEvaluationRun<S>, NurbsError> {
+        match self.validate_live_structure_with_poll(should_cancel)? {
+            SurfaceValidationOutcome::Complete => self
+                .admitted_after_validation()
+                .eval_homogeneous_with_poll(u, v, should_cancel),
+            SurfaceValidationOutcome::Cancelled => Ok(SurfaceHomogeneousEvaluationRun::Cancelled),
+        }
+    }
+
     /// Cartesian evaluation.
     ///
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn eval(&self, u: S, v: S) -> Result<[S; 3], NurbsError> {
         self.admit()?.eval(u, v)
+    }
+
+    /// Validate this owning surface and evaluate its Cartesian point with one
+    /// cancellation gate.
+    ///
+    /// Checked structural-validation work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission and the same
+    /// admitted evaluation pipeline as [`AdmittedNurbsSurface::eval_with_cx`].
+    /// No partial admitted authority or Cartesian point is published. This
+    /// primitive does not consume the `Cx` budget or finalize its executor
+    /// scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning evaluator's structure, parameter, work,
+    /// allocation, weight, and finite-arithmetic refusals when they win before
+    /// an observed cancellation.
+    pub fn eval_with_cx(
+        &self,
+        u: S,
+        v: S,
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.eval_with_poll(u, v, &mut should_cancel)
+    }
+
+    fn eval_with_poll(
+        &self,
+        u: S,
+        v: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceEvaluationRun<S>, NurbsError> {
+        match self.validate_live_structure_with_poll(should_cancel)? {
+            SurfaceValidationOutcome::Complete => {
+                self.admitted_after_validation()
+                    .eval_with_poll(u, v, should_cancel)
+            }
+            SurfaceValidationOutcome::Cancelled => Ok(SurfaceEvaluationRun::Cancelled),
+        }
     }
 
     fn assemble_inserted_control_net_with_poll(
@@ -3450,6 +3527,12 @@ mod tests {
         let admitted = surface.admit().expect("admitted plane");
         with_surface_cx(true, |cx| {
             assert!(matches!(
+                surface
+                    .eval_with_cx(0.25, 0.75, cx)
+                    .expect("valid owning request"),
+                SurfaceEvaluationRun::Cancelled
+            ));
+            assert!(matches!(
                 admitted
                     .eval_with_cx(0.25, 0.75, cx)
                     .expect("valid request"),
@@ -3462,6 +3545,14 @@ mod tests {
         });
         with_surface_cx(false, |cx| {
             assert_eq!(
+                surface
+                    .eval_with_cx(0.25, 0.75, cx)
+                    .expect("active owning context"),
+                SurfaceEvaluationRun::Complete {
+                    point: surface.eval(0.25, 0.75).expect("legacy owning evaluation"),
+                }
+            );
+            assert_eq!(
                 admitted
                     .eval_with_cx(0.25, 0.75, cx)
                     .expect("active context"),
@@ -3469,6 +3560,43 @@ mod tests {
                     point: admitted.eval(0.25, 0.75).expect("legacy evaluation"),
                 }
             );
+        });
+
+        let mut admission_polls = 0usize;
+        let mut observe_admission = || {
+            admission_polls += 1;
+            false
+        };
+        assert!(matches!(
+            surface
+                .validate_live_structure_with_poll(&mut observe_admission)
+                .expect("healthy source admission"),
+            SurfaceValidationOutcome::Complete
+        ));
+        let mut owning_polls = 0usize;
+        let mut cancel_at_first_evaluation_poll = || {
+            owning_polls += 1;
+            owning_polls == admission_polls + 1
+        };
+        assert_eq!(
+            surface
+                .eval_with_poll(0.25, 0.75, &mut cancel_at_first_evaluation_poll)
+                .expect("owning evaluation cancellation"),
+            SurfaceEvaluationRun::Cancelled
+        );
+        assert_eq!(owning_polls, admission_polls + 1);
+
+        let mut invalid_u = bilinear_surface();
+        invalid_u.knots_u.knots.clear();
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                invalid_u.eval_with_cx(0.25, 0.75, cx),
+                Err(NurbsError::Structure { .. })
+            ));
+            assert!(matches!(
+                invalid_u.eval_homogeneous_with_cx(0.25, 0.75, cx),
+                Err(NurbsError::Structure { .. })
+            ));
         });
 
         let degree = 32usize;
@@ -3511,6 +3639,16 @@ mod tests {
         let quarter = Rat::new(1, 4);
         with_surface_cx(false, |cx| {
             assert_eq!(
+                exact_surface
+                    .eval_with_cx(quarter, quarter, cx)
+                    .expect("exact owning active context"),
+                SurfaceEvaluationRun::Complete {
+                    point: exact_surface
+                        .eval(quarter, quarter)
+                        .expect("exact owning legacy evaluation"),
+                }
+            );
+            assert_eq!(
                 admitted_exact
                     .eval_with_cx(quarter, quarter, cx)
                     .expect("exact active context"),
@@ -3529,6 +3667,12 @@ mod tests {
         let admitted = surface.admit().expect("admitted surface");
         with_surface_cx(true, |cx| {
             assert_eq!(
+                surface
+                    .eval_homogeneous_with_cx(0.25, 0.75, cx)
+                    .expect("valid owning homogeneous request"),
+                SurfaceHomogeneousEvaluationRun::Cancelled
+            );
+            assert_eq!(
                 admitted
                     .eval_homogeneous_with_cx(0.25, 0.75, cx)
                     .expect("valid homogeneous request"),
@@ -3541,6 +3685,16 @@ mod tests {
         });
         with_surface_cx(false, |cx| {
             assert_eq!(
+                surface
+                    .eval_homogeneous_with_cx(0.25, 0.75, cx)
+                    .expect("active owning homogeneous context"),
+                SurfaceHomogeneousEvaluationRun::Complete {
+                    homogeneous: surface
+                        .eval_homogeneous(0.25, 0.75)
+                        .expect("legacy owning homogeneous evaluation"),
+                }
+            );
+            assert_eq!(
                 admitted
                     .eval_homogeneous_with_cx(0.25, 0.75, cx)
                     .expect("active homogeneous context"),
@@ -3552,11 +3706,45 @@ mod tests {
             );
         });
 
+        let mut admission_polls = 0usize;
+        let mut observe_admission = || {
+            admission_polls += 1;
+            false
+        };
+        assert!(matches!(
+            surface
+                .validate_live_structure_with_poll(&mut observe_admission)
+                .expect("healthy source admission"),
+            SurfaceValidationOutcome::Complete
+        ));
+        let mut owning_polls = 0usize;
+        let mut cancel_at_first_evaluation_poll = || {
+            owning_polls += 1;
+            owning_polls == admission_polls + 1
+        };
+        assert_eq!(
+            surface
+                .eval_homogeneous_with_poll(0.25, 0.75, &mut cancel_at_first_evaluation_poll)
+                .expect("owning homogeneous evaluation cancellation"),
+            SurfaceHomogeneousEvaluationRun::Cancelled
+        );
+        assert_eq!(owning_polls, admission_polls + 1);
+
         let exact = exact_asymmetric_surface();
         let exact_admitted = exact.admit().expect("admitted exact surface");
         let quarter = Rat::new(1, 4);
         let three_quarters = Rat::new(3, 4);
         with_surface_cx(false, |cx| {
+            assert_eq!(
+                exact
+                    .eval_homogeneous_with_cx(quarter, three_quarters, cx)
+                    .expect("active exact owning homogeneous context"),
+                SurfaceHomogeneousEvaluationRun::Complete {
+                    homogeneous: exact
+                        .eval_homogeneous(quarter, three_quarters)
+                        .expect("legacy exact owning homogeneous evaluation"),
+                }
+            );
             assert_eq!(
                 exact_admitted
                     .eval_homogeneous_with_cx(quarter, three_quarters, cx)

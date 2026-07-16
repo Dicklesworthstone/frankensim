@@ -125,11 +125,14 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   first partials, and per-span control boxes. Owning `admit_with_cx` returns
   `SurfaceAdmissionRun` and gates the
   lifetime-bound structural authority after U-knot, V-knot, and row-major
-  control-net validation. Its admitted-only `eval_homogeneous_with_cx` returns
-  transactional `SurfaceHomogeneousEvaluationRun` state and never publishes a
-  partial finite homogeneous representation. Its admitted-only `eval_with_cx`
-  returns transactional `SurfaceEvaluationRun` state and never publishes a
-  partial Cartesian point;
+  control-net validation. Its owning and admitted
+  `eval_homogeneous_with_cx` entry points return transactional
+  `SurfaceHomogeneousEvaluationRun` state and never publish a partial finite
+  homogeneous representation. Its owning and admitted `eval_with_cx` entry
+  points return transactional `SurfaceEvaluationRun` state and never publish a
+  partial Cartesian point. Owning evaluation carries one gate through source
+  admission and the admitted evaluation; admitted evaluation avoids repeating
+  structural validation;
   its f64-only owning `partials_with_cx` carries one gate through structural
   admission and the admitted partials pipeline. The admitted-only
   `partials_with_cx` avoids that source rescan. Both return transactional
@@ -465,24 +468,28 @@ destructors remain non-preemptible. The primitive does not claim owning source
 admission, wall-time bounds, exact caller-budget consumption, executor
 drain/finalize, or resumability. Synchronous owning and admitted elevation share
 the same non-cancelling core.
-`AdmittedNurbsSurface::eval_homogeneous_with_cx` evaluates the U basis and then
-the V basis under one cancellation gate, preserving the synchronous
-U-major/V-minor tensor arithmetic order. It polls the pair product and four
-homogeneous lane updates after at most 64 logical operations, checks all four
-accumulated components for finiteness, and gates final homogeneous publication.
+Owning `NurbsSurface::eval_homogeneous_with_cx` carries one gate through bounded
+source validation and the admitted homogeneous pipeline; the admitted entry
+point avoids repeating structural validation. Both evaluate the U basis and
+then the V basis under that gate, preserve the synchronous U-major/V-minor
+tensor arithmetic order, poll the pair product and four homogeneous lane
+updates after at most 64 logical operations, check all four accumulated
+components for finiteness, and gate final homogeneous publication.
 `SurfaceHomogeneousEvaluationRun::Cancelled` carries no partial representation
 and drops any allocated basis workspaces. This path does not require an
 admissible weight or divide into Cartesian coordinates, so it claims no
 normalization, Cartesian-finiteness, regularity, topology, or geometric
 certificate.
-`AdmittedNurbsSurface::eval_with_cx` consumes the same internal tensor
-accumulation directly, preserves the lane-three denominator-refusal-before-poll
-ordering, continues the fixed-stride remainder through Cartesian checks, and
-retains its existing final publication gate without adding the homogeneous
-publication checkpoint. `SurfaceEvaluationRun::Cancelled` carries no partial
-accumulator or point and drops any allocated basis workspaces. Generic scalar
-operations remain non-preemptible, and neither primitive claims exact
-caller-budget consumption, executor drain/finalize, or resumability.
+Owning `NurbsSurface::eval_with_cx` likewise spans source validation and the
+admitted Cartesian pipeline; the admitted entry point consumes the same
+internal tensor accumulation directly. Both preserve the lane-three
+denominator-refusal-before-poll ordering, continue the fixed-stride remainder
+through Cartesian checks, and retain the existing final publication gate
+without adding the homogeneous publication checkpoint.
+`SurfaceEvaluationRun::Cancelled` carries no partial accumulator or point and
+drops any allocated basis workspaces. Generic scalar operations remain
+non-preemptible, and neither primitive claims exact caller-budget consumption,
+executor drain/finalize, or resumability.
 `NurbsSurface::new_with_cx` preserves checked aggregate construction-work and
 64 MiB derived row-table plus homogeneous-control payload refusal precedence
 before cancellation. Its work envelope composes U/V knot validation,
