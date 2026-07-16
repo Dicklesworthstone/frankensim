@@ -23,7 +23,7 @@ use fs_rep_nurbs::{NurbsError, NurbsSurface};
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
-pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 7;
+pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 8;
 
 /// A ray with a finite, nonzero direction. The marcher converts certified
 /// physical step radii into this ray's parameter space; unit directions remain
@@ -972,8 +972,10 @@ fn validate_trace_sample(
 /// looking for a rigorous sign witness in a SHORT forward segment. The probe
 /// is evidence only: it is never adopted as march state. Opposite strict signs
 /// (or a rigorous zero at the probe) establish a real boundary in the segment;
-/// an evaluated midpoint is returned only when its outward-rounded distance to
-/// both endpoints is at most `eps`.
+/// bounded evaluated refinement preserves the original root-free prefix and
+/// pulls back only an opposite-sign (or zero) far endpoint until a returned
+/// point's outward-rounded distance to both retained endpoints is at most
+/// `eps`.
 #[allow(clippy::too_many_arguments)]
 fn certify_short_implicit_bracket(
     chart: &dyn Chart,
@@ -1057,56 +1059,78 @@ fn certify_short_implicit_bracket(
     ) else {
         return ShortBracketOutcome::InvalidSample;
     };
-    if probe_validated.certified_sign != CertifiedSign::Zero
-        && !current_sign.is_opposite(probe_validated.certified_sign)
-    {
+    let probe_sign = probe_validated.certified_sign;
+    if probe_sign != CertifiedSign::Zero && !current_sign.is_opposite(probe_sign) {
         return ShortBracketOutcome::NoWitness;
     }
 
-    let midpoint_t = f64::midpoint(current_caller_t, probe_caller_t);
-    if !midpoint_t.is_finite() || midpoint_t <= current_caller_t || midpoint_t >= probe_caller_t {
-        return ShortBracketOutcome::NoWitness;
-    }
-    let midpoint = ray.at(midpoint_t);
-    if !midpoint.x.is_finite() || !midpoint.y.is_finite() || !midpoint.z.is_finite() {
-        return ShortBracketOutcome::InvalidSample;
-    }
-    let from_current = point_distance_upper(midpoint, current_point);
-    let from_probe = point_distance_upper(midpoint, probe_point);
-    if !from_current.is_finite()
-        || !from_probe.is_finite()
-        || from_current > eps
-        || from_probe > eps
-    {
-        return ShortBracketOutcome::NoWitness;
+    let lo_t = current_caller_t;
+    let lo_point = current_point;
+    let lo_sign = current_sign;
+    let mut hi_t = probe_caller_t;
+    let mut hi_point = probe_point;
+
+    // The mathematical midpoint of a segment no longer than 2*eps is within
+    // eps of both endpoints, but evaluating Ray::at in binary64 can round that
+    // distance just above eps. Keep the original prefix endpoint: continuity
+    // alone does not let a same-sign midpoint exclude an earlier even pair of
+    // roots. Only an opposite-sign or zero midpoint may pull the far endpoint
+    // back. This neither extends nor adopts the speculative witness. A fixed
+    // cap keeps a pathological chart from turning residual classification into
+    // unbounded work, and every uncertain/no-progress case still fails closed.
+    const MAX_BISECTION_STEPS: usize = 8;
+    for _ in 0..MAX_BISECTION_STEPS {
+        let midpoint_t = f64::midpoint(lo_t, hi_t);
+        if !midpoint_t.is_finite() || midpoint_t <= lo_t || midpoint_t >= hi_t {
+            return ShortBracketOutcome::NoWitness;
+        }
+        let midpoint = ray.at(midpoint_t);
+        if !midpoint.x.is_finite() || !midpoint.y.is_finite() || !midpoint.z.is_finite() {
+            return ShortBracketOutcome::InvalidSample;
+        }
+        let from_lo = point_distance_upper(midpoint, lo_point);
+        let from_hi = point_distance_upper(midpoint, hi_point);
+        if !from_lo.is_finite() || !from_hi.is_finite() {
+            return ShortBracketOutcome::NoWitness;
+        }
+
+        if cx.checkpoint().is_err() {
+            return ShortBracketOutcome::Cancelled;
+        }
+        let midpoint_sample = chart.eval(midpoint, cx);
+        if cx.checkpoint().is_err() {
+            return ShortBracketOutcome::Cancelled;
+        }
+        let midpoint_trace = chart.trace_value_enclosure(midpoint, &midpoint_sample, cx);
+        if cx.checkpoint().is_err() {
+            return ShortBracketOutcome::Cancelled;
+        }
+        let Some(midpoint_validated) = validate_trace_sample(
+            &midpoint_sample,
+            TraceStepClaim::LipschitzImplicit,
+            midpoint_trace,
+        ) else {
+            return ShortBracketOutcome::InvalidSample;
+        };
+
+        if from_lo <= eps && from_hi <= eps {
+            return ShortBracketOutcome::Hit {
+                caller_t: midpoint_t,
+                point: midpoint,
+                sample: midpoint_sample,
+            };
+        }
+
+        let midpoint_sign = midpoint_validated.certified_sign;
+        if midpoint_sign == CertifiedSign::Zero || lo_sign.is_opposite(midpoint_sign) {
+            hi_t = midpoint_t;
+            hi_point = midpoint;
+        } else {
+            return ShortBracketOutcome::NoWitness;
+        }
     }
 
-    if cx.checkpoint().is_err() {
-        return ShortBracketOutcome::Cancelled;
-    }
-    let midpoint_sample = chart.eval(midpoint, cx);
-    if cx.checkpoint().is_err() {
-        return ShortBracketOutcome::Cancelled;
-    }
-    let midpoint_trace = chart.trace_value_enclosure(midpoint, &midpoint_sample, cx);
-    if cx.checkpoint().is_err() {
-        return ShortBracketOutcome::Cancelled;
-    }
-    if validate_trace_sample(
-        &midpoint_sample,
-        TraceStepClaim::LipschitzImplicit,
-        midpoint_trace,
-    )
-    .is_none()
-    {
-        return ShortBracketOutcome::InvalidSample;
-    }
-
-    ShortBracketOutcome::Hit {
-        caller_t: midpoint_t,
-        point: midpoint,
-        sample: midpoint_sample,
-    }
+    ShortBracketOutcome::NoWitness
 }
 
 fn conservative_quotient_lower(numerator_lower: f64, denominator: f64) -> f64 {
