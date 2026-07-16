@@ -1560,3 +1560,264 @@ pub fn growth_rates_budgeted(
     }
     Ok(eigs)
 }
+
+// --- Algebra / calculus twins (bead i7mo8) ----------------------------------
+
+/// Worst-case preflight for the coefficient-wise sum of two functions:
+/// one output coefficient per retained input position, one pass.
+///
+/// # Errors
+/// [`ChebError::CapExceeded`] / [`ChebError::Overflow`].
+pub fn admit_pointwise_sum(
+    left_len: usize,
+    right_len: usize,
+    budget: &ChebBudget,
+) -> Result<ChebAdmission, ChebError> {
+    let out_len = left_len.max(right_len).max(1);
+    cap_check(
+        "sum coefficients",
+        out_len as u128,
+        budget.max_coefficients as u128,
+    )?;
+    let ops = out_len as u128;
+    cap_check("sum work ops", ops, u128::from(budget.max_work_ops))?;
+    let temp_bytes = checked_mul("sum temp bytes", out_len as u128, 8)?;
+    cap_check(
+        "sum temp bytes",
+        temp_bytes,
+        u128::from(budget.max_temp_bytes),
+    )?;
+    Ok(ChebAdmission {
+        schema_version: CHEB_BUDGET_SCHEMA_VERSION,
+        samples_admitted: 0,
+        coefficients_admitted: out_len,
+        ops_admitted: admitted_u64("sum work ops", ops)?,
+        temp_bytes_admitted: admitted_u64("sum temp bytes", temp_bytes)?,
+    })
+}
+
+/// Worst-case preflight for the resampled product: `n` first-kind
+/// samples (each one Clenshaw evaluation of BOTH factors), one DCT,
+/// and the plateau truncation scan, where
+/// `n = next_power_of_two(left + right).max(16)`.
+///
+/// # Errors
+/// [`ChebError::CapExceeded`] / [`ChebError::Overflow`].
+pub fn admit_product(
+    left_len: usize,
+    right_len: usize,
+    budget: &ChebBudget,
+) -> Result<ChebAdmission, ChebError> {
+    let combined = checked_add("product grid", left_len as u128, right_len as u128)?;
+    let grid = combined
+        .checked_next_power_of_two()
+        .ok_or(ChebError::Overflow {
+            what: "product grid",
+        })?
+        .max(16);
+    cap_check("product samples", grid, budget.max_samples as u128)?;
+    cap_check(
+        "product coefficients",
+        grid,
+        budget.max_coefficients as u128,
+    )?;
+    // Clenshaw is one pass per factor coefficient; the DCT is n·log2(n);
+    // scaling and the truncation scan are one pass each.
+    let log2_grid = u128::from(128 - grid.leading_zeros());
+    let ops = checked_sum(
+        "product work ops",
+        &[
+            checked_mul("product work ops", grid, combined)?,
+            checked_mul("product work ops", grid, log2_grid)?,
+            checked_mul("product work ops", grid, 2)?,
+        ],
+    )?;
+    cap_check("product work ops", ops, u128::from(budget.max_work_ops))?;
+    // Samples plus the transform output live at once.
+    let temp_bytes = checked_mul("product temp bytes", grid, 16)?;
+    cap_check(
+        "product temp bytes",
+        temp_bytes,
+        u128::from(budget.max_temp_bytes),
+    )?;
+    let grid_usize = usize::try_from(grid).map_err(|_| ChebError::Overflow {
+        what: "product grid",
+    })?;
+    Ok(ChebAdmission {
+        schema_version: CHEB_BUDGET_SCHEMA_VERSION,
+        samples_admitted: grid_usize,
+        coefficients_admitted: grid_usize,
+        ops_admitted: admitted_u64("product work ops", ops)?,
+        temp_bytes_admitted: admitted_u64("product temp bytes", temp_bytes)?,
+    })
+}
+
+/// Worst-case preflight for the derivative recurrence or the definite
+/// integral accumulation over one coefficient vector (single passes
+/// with a bounded rescale fallback).
+///
+/// # Errors
+/// [`ChebError::CapExceeded`] / [`ChebError::Overflow`].
+pub fn admit_calculus(coeff_len: usize, budget: &ChebBudget) -> Result<ChebAdmission, ChebError> {
+    let len = coeff_len.max(1);
+    cap_check(
+        "calculus coefficients",
+        len as u128,
+        budget.max_coefficients as u128,
+    )?;
+    // Derivative: one backward recurrence pass. Integral: the direct
+    // expansion pass plus the exact power-of-two rescale fallback —
+    // bounded by four passes end to end.
+    let ops = checked_mul("calculus work ops", len as u128, 4)?;
+    cap_check("calculus work ops", ops, u128::from(budget.max_work_ops))?;
+    let temp_bytes = checked_mul("calculus temp bytes", len as u128, 16)?;
+    cap_check(
+        "calculus temp bytes",
+        temp_bytes,
+        u128::from(budget.max_temp_bytes),
+    )?;
+    Ok(ChebAdmission {
+        schema_version: CHEB_BUDGET_SCHEMA_VERSION,
+        samples_admitted: 0,
+        coefficients_admitted: len,
+        ops_admitted: admitted_u64("calculus work ops", ops)?,
+        temp_bytes_admitted: admitted_u64("calculus temp bytes", temp_bytes)?,
+    })
+}
+
+fn same_domain(left: &Cheb1, right: &Cheb1) -> Result<(), ChebError> {
+    let (la, lb) = left.domain();
+    let (ra, rb) = right.domain();
+    if la == ra && lb == rb {
+        Ok(())
+    } else {
+        Err(ChebError::Shape {
+            what: "algebra operands live on different domains",
+        })
+    }
+}
+
+impl Cheb1 {
+    /// Budgeted, cancellable coefficient-wise sum — the bitwise mirror
+    /// of [`Cheb1::add`] with typed refusals where the classic API
+    /// panics (domain mismatch, non-finite sum coefficient) and one
+    /// cancellation poll per 64 output coefficients.
+    ///
+    /// # Errors
+    /// [`ChebError`] — cap/overflow refusals before allocation;
+    /// [`ChebError::Shape`] on a domain mismatch;
+    /// [`ChebError::NonFinite`] on an unrepresentable coefficient;
+    /// [`ChebError::Cancelled`] on a drained cancellation.
+    pub fn add_budgeted(
+        &self,
+        other: &Cheb1,
+        budget: &ChebBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Cheb1, ChebError> {
+        let left = self.coeffs();
+        let right = other.coeffs();
+        admit_pointwise_sum(left.len(), right.len(), budget)?;
+        same_domain(self, other)?;
+        checkpoint(cx)?;
+        let out_len = left.len().max(right.len());
+        let mut coeffs = vec![0.0f64; out_len];
+        for (index, coefficient) in coeffs.iter_mut().enumerate() {
+            if index % 64 == 0 {
+                checkpoint(cx)?;
+            }
+            *coefficient =
+                left.get(index).copied().unwrap_or(0.0) + right.get(index).copied().unwrap_or(0.0);
+            if !coefficient.is_finite() {
+                return Err(ChebError::NonFinite {
+                    what: "Chebyshev sum coefficient",
+                });
+            }
+        }
+        checkpoint(cx)?;
+        let (a, b) = self.domain();
+        Ok(Cheb1::from_coeffs(a, b, coeffs))
+    }
+
+    /// Budgeted, cancellable product — the bitwise mirror of
+    /// [`Cheb1::mul`]: the same resampling grid, the same DCT and
+    /// plateau truncation, with admission preflighting samples, ops,
+    /// and temporaries, one poll per 64 sample evaluations inside the
+    /// shared checked sampler, and typed refusals for non-finite
+    /// samples or transform coefficients.
+    ///
+    /// # Errors
+    /// [`ChebError`] — cap/overflow refusals before evaluation;
+    /// [`ChebError::Shape`] on a domain mismatch;
+    /// [`ChebError::NonFinite`] / [`ChebError::Cancelled`] from the
+    /// sampled transform.
+    pub fn mul_budgeted(
+        &self,
+        other: &Cheb1,
+        budget: &ChebBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Cheb1, ChebError> {
+        let admission = admit_product(self.coeffs().len(), other.coeffs().len(), budget)?;
+        same_domain(self, other)?;
+        checkpoint(cx)?;
+        let (a, b) = self.domain();
+        let f = |x: f64| self.eval(x) * other.eval(x);
+        let mut samples_spent = 0usize;
+        let coeffs = coeffs_at_checked(
+            &f,
+            a,
+            b,
+            admission.samples_admitted(),
+            cx,
+            &mut samples_spent,
+        )?;
+        checkpoint(cx)?;
+        let maxc = coeffs
+            .iter()
+            .fold(0.0f64, |m, &c| m.max(c.abs()))
+            .max(f64::MIN_POSITIVE);
+        let keep = coeffs
+            .iter()
+            .rposition(|&c| c.abs() > PLATEAU_REL * maxc)
+            .map_or(1, |p| p + 1);
+        checkpoint(cx)?;
+        Ok(Cheb1::from_coeffs(a, b, coeffs[..keep].to_vec()))
+    }
+
+    /// Budgeted, cancellable derivative — the bitwise mirror of
+    /// [`Cheb1::differentiate`] (identical recurrence and scaled
+    /// fallback), with admission preflighting the pass and polls at
+    /// the operation boundaries (the recurrence itself is one bounded
+    /// admitted tile).
+    ///
+    /// # Errors
+    /// [`ChebError`] — cap/overflow refusals before allocation;
+    /// [`ChebError::Cancelled`] on a drained cancellation.
+    pub fn differentiate_budgeted(
+        &self,
+        budget: &ChebBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Cheb1, ChebError> {
+        admit_calculus(self.coeffs().len(), budget)?;
+        checkpoint(cx)?;
+        let derivative = self.differentiate();
+        checkpoint(cx)?;
+        Ok(derivative)
+    }
+
+    /// Budgeted, cancellable definite integral — the bitwise mirror of
+    /// [`Cheb1::integral`] (identical direct accumulation and
+    /// normalized fallback), with admission preflighting the passes
+    /// and polls at the operation boundaries (the accumulation is one
+    /// bounded admitted tile).
+    ///
+    /// # Errors
+    /// [`ChebError`] — cap/overflow refusals before allocation;
+    /// [`ChebError::Cancelled`] on a drained cancellation.
+    pub fn integral_budgeted(&self, budget: &ChebBudget, cx: &Cx<'_>) -> Result<f64, ChebError> {
+        admit_calculus(self.coeffs().len(), budget)?;
+        checkpoint(cx)?;
+        let integral = self.integral();
+        checkpoint(cx)?;
+        Ok(integral)
+    }
+}

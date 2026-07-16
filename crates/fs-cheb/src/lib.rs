@@ -25,10 +25,11 @@ pub mod orr_sommerfeld;
 
 pub use budget::{
     BuildRun, CHEB_BUDGET_SCHEMA_VERSION, ChebAdmission, ChebBudget, ChebError, EigsRun,
-    WorkReceipt, admit_adaptive_build, admit_cheb2_build, admit_colleague_roots,
-    admit_dirichlet_eigs, admit_fourier_build, admit_growth_rates, admit_root_scan,
-    cheb2_build_budgeted, colleague_roots_budgeted, dirichlet_laplace_eigs_budgeted,
-    fourier_build_budgeted, growth_rates_budgeted, try_build_budgeted,
+    WorkReceipt, admit_adaptive_build, admit_calculus, admit_cheb2_build, admit_colleague_roots,
+    admit_dirichlet_eigs, admit_fourier_build, admit_growth_rates, admit_pointwise_sum,
+    admit_product, admit_root_scan, cheb2_build_budgeted, colleague_roots_budgeted,
+    dirichlet_laplace_eigs_budgeted, fourier_build_budgeted, growth_rates_budgeted,
+    try_build_budgeted,
 };
 
 use fs_fft::{dct2, dct3};

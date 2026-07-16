@@ -643,3 +643,114 @@ fn cb_009_budgeted_builder_twins() {
         Err(ChebError::Cancelled)
     ));
 }
+
+/// cb-010 (bead i7mo8): algebra/calculus budgeted twins — admission
+/// boundaries refuse before work, results mirror the classic APIs
+/// bitwise, the classic panics become typed refusals, and cancellation
+/// drains without a partial claim.
+#[test]
+fn cb_010_algebra_calculus_budgeted_twins() {
+    use fs_cheb::{admit_calculus, admit_pointwise_sum, admit_product};
+
+    let budget = ChebBudget::default();
+    // Admission boundaries: usize::MAX shapes refuse BEFORE allocation.
+    assert!(matches!(
+        admit_pointwise_sum(usize::MAX, 1, &budget),
+        Err(ChebError::CapExceeded { .. })
+    ));
+    assert!(matches!(
+        admit_product(usize::MAX, usize::MAX, &budget),
+        Err(ChebError::Overflow { .. }) | Err(ChebError::CapExceeded { .. })
+    ));
+    assert!(matches!(
+        admit_calculus(usize::MAX, &budget),
+        Err(ChebError::CapExceeded { .. })
+    ));
+    // Exact-cap shapes admit; one past the coefficient cap refuses.
+    assert!(admit_pointwise_sum(budget.max_coefficients, 1, &budget).is_ok());
+    assert!(matches!(
+        admit_pointwise_sum(budget.max_coefficients + 1, 1, &budget),
+        Err(ChebError::CapExceeded { .. })
+    ));
+    assert!(admit_calculus(budget.max_coefficients, &budget).is_ok());
+
+    // Bitwise parity with the classic paths on live functions.
+    let left = Cheb1::build(&|x: f64| (2.0 * x).sin() + 0.25 * x, -1.5, 2.0, 128);
+    let right = Cheb1::build(&|x: f64| (0.5 * x).cos(), -1.5, 2.0, 128);
+    with_cx(false, |cx| {
+        let sum = left
+            .add_budgeted(&right, &budget, cx)
+            .expect("admitted sum");
+        let classic_sum = left.add(&right);
+        assert_eq!(sum.coeffs().len(), classic_sum.coeffs().len());
+        for (budgeted, classic) in sum.coeffs().iter().zip(classic_sum.coeffs()) {
+            assert_eq!(budgeted.to_bits(), classic.to_bits());
+        }
+
+        let product = left
+            .mul_budgeted(&right, &budget, cx)
+            .expect("admitted product");
+        let classic_product = left.mul(&right);
+        assert_eq!(product.domain(), classic_product.domain());
+        assert_eq!(product.coeffs().len(), classic_product.coeffs().len());
+        for (budgeted, classic) in product.coeffs().iter().zip(classic_product.coeffs()) {
+            assert_eq!(budgeted.to_bits(), classic.to_bits());
+        }
+
+        let derivative = left
+            .differentiate_budgeted(&budget, cx)
+            .expect("admitted derivative");
+        let classic_derivative = left.differentiate();
+        assert_eq!(derivative.coeffs().len(), classic_derivative.coeffs().len());
+        for (budgeted, classic) in derivative.coeffs().iter().zip(classic_derivative.coeffs()) {
+            assert_eq!(budgeted.to_bits(), classic.to_bits());
+        }
+
+        let integral = left
+            .integral_budgeted(&budget, cx)
+            .expect("admitted integral");
+        assert_eq!(integral.to_bits(), left.integral().to_bits());
+    });
+
+    // The classic domain-mismatch panic is a typed Shape refusal.
+    let elsewhere = Cheb1::from_coeffs(0.0, 1.0, vec![1.0]);
+    with_cx(false, |cx| {
+        assert!(matches!(
+            left.add_budgeted(&elsewhere, &budget, cx),
+            Err(ChebError::Shape { .. })
+        ));
+        assert!(matches!(
+            left.mul_budgeted(&elsewhere, &budget, cx),
+            Err(ChebError::Shape { .. })
+        ));
+    });
+
+    // The classic non-finite-sum panic is a typed NonFinite refusal.
+    let huge = Cheb1::from_coeffs(-1.0, 1.0, vec![f64::MAX]);
+    with_cx(false, |cx| {
+        assert!(matches!(
+            huge.add_budgeted(&huge, &budget, cx),
+            Err(ChebError::NonFinite { .. })
+        ));
+    });
+
+    // A pre-cancelled context drains every twin without a partial claim.
+    with_cx(true, |cx| {
+        assert!(matches!(
+            left.add_budgeted(&right, &budget, cx),
+            Err(ChebError::Cancelled)
+        ));
+        assert!(matches!(
+            left.mul_budgeted(&right, &budget, cx),
+            Err(ChebError::Cancelled)
+        ));
+        assert!(matches!(
+            left.differentiate_budgeted(&budget, cx),
+            Err(ChebError::Cancelled)
+        ));
+        assert!(matches!(
+            left.integral_budgeted(&budget, cx),
+            Err(ChebError::Cancelled)
+        ));
+    });
+}
