@@ -21,7 +21,9 @@
 //! commutativity, homotopy, coherence, execution, or equivalence.
 //! That packet can in turn bind the two middle routes of a proposed pullback
 //! square over two exact spans and projections, while categorical pullback and
-//! composed-correspondence authority remain absent.
+//! composed-correspondence authority remain absent. A further structural packet
+//! can bind one proposed outer span only after recomposing and matching both
+//! outer legs exactly; it still grants no categorical span-composition authority.
 //! A standalone token binds a fixed-resolution quasi-isomorphism
 //! *candidate* to an exact refinement path and exact local presentations,
 //! without granting theorem authority. Another candidate retains exhaustive
@@ -71,6 +73,8 @@ pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 pub const DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for structural pullback-square candidates between declared spans.
 pub const DERIVED_SPAN_PULLBACK_SQUARE_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for structural composed-span candidates.
+pub const DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for direct chart-transition inverse-law candidate receipts.
 pub const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
@@ -101,6 +105,10 @@ const DERIVED_PARALLEL_MORPHISM_COMPARISON_CANDIDATE_IDENTITY_LIMITS_V1: Canonic
 // one complete 19-field parallel-comparison child schema tree.
 const DERIVED_SPAN_PULLBACK_SQUARE_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 56, 1 << 11, 4096);
+// Ten parent fields, one complete 56-field pullback-square child, one six-field
+// outer-span child, and two six-field derived outer-route children.
+const DERIVED_SPAN_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 84, 1 << 11, 4096);
 // Ten parent fields plus two six-field structural-morphism child schemas.
 const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 22, 1 << 11, 4096);
@@ -331,6 +339,38 @@ impl CanonicalSchema for DerivedSpanPullbackSquareCandidateIdentitySchemaV1 {
 /// Typed identity of one structural span pullback-square candidate.
 pub type DerivedSpanPullbackSquareCandidateIdV1 =
     EvidenceNodeId<DerivedSpanPullbackSquareCandidateIdentitySchemaV1>;
+
+static DERIVED_SPAN_PULLBACK_SQUARE_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedSpanPullbackSquareCandidateIdV1>();
+
+/// Domain-separated identity for one structural composed-span candidate.
+pub enum DerivedSpanCompositionCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedSpanCompositionCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.span-composition-candidate.v1";
+    const NAME: &'static str = "structural-span-composition-candidate";
+    const VERSION: u32 = DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "derived source, middle, target, and proposed composite-apex selectors, one exact typed pullback-square child, one exact typed proposed outer-span child, two exact typed recomposed outer-route children, one nominal composition declaration, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("middle-geometry", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::required("composite-apex-geometry", WireType::Bytes),
+        FieldSpec::child_of(
+            "pullback-square",
+            &DERIVED_SPAN_PULLBACK_SQUARE_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of("proposed-outer-span", &DERIVED_SPAN_CORRESPONDENCE_CHILD_V1),
+        FieldSpec::child_of("left-outer-route", &DERIVED_MORPHISM_CHILD_V1),
+        FieldSpec::child_of("right-outer-route", &DERIVED_MORPHISM_CHILD_V1),
+        FieldSpec::required("nominal-composition-declaration", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one structural composed-span candidate.
+pub type DerivedSpanCompositionCandidateIdV1 =
+    EvidenceNodeId<DerivedSpanCompositionCandidateIdentitySchemaV1>;
 
 /// Domain-separated identity for one structural direct chart-transition pair.
 pub enum DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 {}
@@ -736,6 +776,28 @@ impl DerivedSpanPullbackDeclarationIdV1 {
     }
 }
 
+/// Nominal declaration that one pullback-square packet yields an outer span.
+///
+/// The bytes do not prove square commutativity, categorical pullback authority,
+/// bicategorical composition, unitors, associativity, coherence, base change,
+/// or any executed correspondence semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedSpanCompositionDeclarationIdV1([u8; 32]);
+
+impl DerivedSpanCompositionDeclarationIdV1 {
+    /// Construct a nominal span-composition declaration from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Nominal artifact for one declared local-presentation relation edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DerivedLocalPresentationRelationIdV1([u8; 32]);
@@ -979,6 +1041,25 @@ pub struct DerivedSpanPullbackSquareCandidateIrV1 {
     /// Nominal categorical pullback declaration for later independent checking.
     pub nominal_pullback: DerivedSpanPullbackDeclarationIdV1,
     /// Explicit denial of commutativity, pullback, composition, and equivalence authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
+/// Versioned structural request binding one proposed composite outer span.
+///
+/// All geometry selectors and both outer routes are derived from sealed
+/// children. The separately admitted outer span must retain exactly those
+/// recomposed route IDs. This packet is not an authority-bearing composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedSpanCompositionCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact structural pullback-square candidate for the two parent spans.
+    pub pullback_square: DerivedSpanPullbackSquareCandidateIdV1,
+    /// Exact proposed outer span `source <- pullback_apex -> target`.
+    pub proposed_outer_span: DerivedSpanCorrespondenceIdV1,
+    /// Nominal declaration of correspondence composition for independent checking.
+    pub nominal_composition: DerivedSpanCompositionDeclarationIdV1,
+    /// Explicit denial of pullback, composition, coherence, and semantic authority.
     pub no_authority: DerivedNoClaimIdV1,
 }
 
@@ -2026,6 +2107,70 @@ impl fmt::Display for DerivedSpanPullbackSquareCandidateErrorV1 {
 
 impl core::error::Error for DerivedSpanPullbackSquareCandidateErrorV1 {}
 
+/// Structured refusal from structural span-composition admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedSpanCompositionCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required child, declaration, or no-authority ID is zero.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw direct-child ID does not name the supplied sealed child.
+    ChildIdentityMismatch {
+        /// Stable pullback-square/outer-span field.
+        field: &'static str,
+    },
+    /// A supplied parent span or projection is not the child retained by the square.
+    SquareBindingMismatch {
+        /// Stable transitive child field.
+        field: &'static str,
+    },
+    /// A supplied parent outer leg is not the exact leg retained by its span.
+    ParentOuterLegIdentityMismatch {
+        /// Stable left/right outer-leg field.
+        field: &'static str,
+    },
+    /// The proposed outer span does not have the square's exact outer endpoints/apex.
+    OuterSpanEndpointMismatch {
+        /// Stable source/apex/target field.
+        field: &'static str,
+    },
+    /// One projection-to-outer-endpoint route could not compose.
+    OuterRouteCompositionRefused {
+        /// Stable left/right outer route.
+        field: &'static str,
+        /// Underlying structural morphism refusal.
+        cause: DerivedMorphismErrorV1,
+    },
+    /// One proposed outer-span leg is not the exact recomposed route.
+    OuterSpanLegIdentityMismatch {
+        /// Stable left/right proposed leg field.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedSpanCompositionCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "span composition candidate refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedSpanCompositionCandidateErrorV1 {}
+
 /// Structured refusal from standalone declared-span admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedSpanCorrespondenceErrorV1 {
@@ -3058,6 +3203,103 @@ impl AdmittedDerivedSpanPullbackSquareCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedSpanPullbackSquareCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed structural candidate binding one proposed composite outer span.
+///
+/// The token retains one exact pullback-square packet and one exact outer span,
+/// plus both structural outer routes recomposed from the square's projections
+/// and parent-span outer legs. Exact matching proves only deterministic child
+/// wiring. It grants no square commutativity, pullback, categorical/bicategorical
+/// composition, unit, associativity, coherence, base-change, pull-push,
+/// evidence, functionality, physical-correspondence, or equivalence authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedSpanCompositionCandidateV1 {
+    source: DerivedGeometryIdV1,
+    middle: DerivedGeometryIdV1,
+    target: DerivedGeometryIdV1,
+    composite_apex: DerivedGeometryIdV1,
+    pullback_square: DerivedSpanPullbackSquareCandidateIdV1,
+    proposed_outer_span: DerivedSpanCorrespondenceIdV1,
+    left_outer_route: DerivedMorphismIdV1,
+    right_outer_route: DerivedMorphismIdV1,
+    nominal_composition: DerivedSpanCompositionDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedSpanCompositionCandidateIdV1>,
+}
+
+impl AdmittedDerivedSpanCompositionCandidateV1 {
+    /// Exact outer source geometry.
+    #[must_use]
+    pub const fn source(&self) -> DerivedGeometryIdV1 {
+        self.source
+    }
+
+    /// Exact middle geometry shared by the parent spans.
+    #[must_use]
+    pub const fn middle(&self) -> DerivedGeometryIdV1 {
+        self.middle
+    }
+
+    /// Exact outer target geometry.
+    #[must_use]
+    pub const fn target(&self) -> DerivedGeometryIdV1 {
+        self.target
+    }
+
+    /// Exact proposed composite apex.
+    #[must_use]
+    pub const fn composite_apex(&self) -> DerivedGeometryIdV1 {
+        self.composite_apex
+    }
+
+    /// Exact typed pullback-square child.
+    #[must_use]
+    pub const fn pullback_square(&self) -> DerivedSpanPullbackSquareCandidateIdV1 {
+        self.pullback_square
+    }
+
+    /// Exact typed proposed outer-span child.
+    #[must_use]
+    pub const fn proposed_outer_span(&self) -> DerivedSpanCorrespondenceIdV1 {
+        self.proposed_outer_span
+    }
+
+    /// Exact recomposed route from the proposed apex to the outer source.
+    #[must_use]
+    pub const fn left_outer_route(&self) -> DerivedMorphismIdV1 {
+        self.left_outer_route
+    }
+
+    /// Exact recomposed route from the proposed apex to the outer target.
+    #[must_use]
+    pub const fn right_outer_route(&self) -> DerivedMorphismIdV1 {
+        self.right_outer_route
+    }
+
+    /// Nominal span-composition declaration; not authenticated here.
+    #[must_use]
+    pub const fn nominal_composition(&self) -> DerivedSpanCompositionDeclarationIdV1 {
+        self.nominal_composition
+    }
+
+    /// Explicit artifact denying pullback and span-composition authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed structural span-composition candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedSpanCompositionCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedSpanCompositionCandidateIdV1> {
         self.receipt
     }
 }
@@ -6357,8 +6599,9 @@ fn span_correspondence_receipt(
 /// `apex -> target`. It does not create a direct source-to-target map or
 /// evidence transport, authenticate leg payloads beyond their sealed structural
 /// receipts, or prove functionality, pullback, equivalence, or physical
-/// correspondence. Span composition requires separately admitted pullback data
-/// and is intentionally absent from v1.
+/// correspondence. A separate v1 packet can bind proposed pullback and outer-
+/// span data structurally, but it does not promote this span into an
+/// authority-bearing correspondence composition.
 ///
 /// # Errors
 /// Returns a typed refusal for schema, no-claim identity, raw-leg binding,
@@ -6710,6 +6953,261 @@ pub fn admit_derived_span_pullback_square_candidate_v1(
         left_middle_route: left_middle_route.id(),
         right_middle_route: right_middle_route.id(),
         nominal_pullback: ir.nominal_pullback,
+        no_authority: ir.no_authority,
+        receipt,
+    })
+}
+
+fn span_composition_candidate_receipt(
+    ir: &DerivedSpanCompositionCandidateIrV1,
+    pullback_square: &AdmittedDerivedSpanPullbackSquareCandidateV1,
+    left_outer_route: &AdmittedDerivedMorphismV1,
+    right_outer_route: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedSpanCompositionCandidateIdV1>,
+    DerivedSpanCompositionCandidateErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => DerivedSpanCompositionCandidateErrorV1::Cancelled {
+            stage: "span-composition-identity",
+        },
+        other => DerivedSpanCompositionCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedSpanCompositionCandidateIdV1, _>::new(
+        DERIVED_SPAN_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "source-geometry"),
+        pullback_square.source().as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "middle-geometry"),
+            pullback_square.middle().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "target-geometry"),
+            pullback_square.target().as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "composite-apex-geometry"),
+            pullback_square.pullback_apex().as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.child(Field::new(4, "pullback-square"), ir.pullback_square))
+    .and_then(|encoder| encoder.child(Field::new(5, "proposed-outer-span"), ir.proposed_outer_span))
+    .and_then(|encoder| encoder.child(Field::new(6, "left-outer-route"), left_outer_route.id()))
+    .and_then(|encoder| encoder.child(Field::new(7, "right-outer-route"), right_outer_route.id()))
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(8, "nominal-composition-declaration"),
+            ir.nominal_composition.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(9, "no-authority"), ir.no_authority.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Admit one structural candidate for the outer span of two composed spans.
+///
+/// The pullback-square child must retain the exact supplied parent spans and
+/// projections. Each supplied parent outer leg must be the exact leg retained
+/// by its parent span. Admission recomposes `P -> left_apex -> source` and
+/// `P -> right_apex -> target`, then requires the separately sealed proposed
+/// outer span to have the square's exact selectors and those exact route IDs.
+///
+/// This exact wiring does not prove that the middle square commutes, that the
+/// proposed apex is a pullback, or that the outer span is a categorical or
+/// bicategorical composite. It grants no unit, associativity, coherence,
+/// base-change, Beck-Chevalley, projection-formula, pull-push, evidence,
+/// functionality, physical-correspondence, or equivalence authority.
+///
+/// # Errors
+/// Returns a typed refusal for schema, zero identity, raw/sealed direct-child
+/// mismatch, transitive square binding, parent outer-leg binding, outer-span
+/// selectors, outer-route composition, proposed leg identity, cancellation,
+/// or canonical identity defects. No partial token escapes.
+#[must_use = "a structural outer-span packet grants no composition authority"]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One bounded transitive child audit.
+pub fn admit_derived_span_composition_candidate_v1(
+    ir: &DerivedSpanCompositionCandidateIrV1,
+    pullback_square: &AdmittedDerivedSpanPullbackSquareCandidateV1,
+    proposed_outer_span: &AdmittedDerivedSpanCorrespondenceV1,
+    left_span: &AdmittedDerivedSpanCorrespondenceV1,
+    right_span: &AdmittedDerivedSpanCorrespondenceV1,
+    left_projection: &AdmittedDerivedMorphismV1,
+    right_projection: &AdmittedDerivedMorphismV1,
+    left_outer_leg: &AdmittedDerivedMorphismV1,
+    right_outer_leg: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<AdmittedDerivedSpanCompositionCandidateV1, DerivedSpanCompositionCandidateErrorV1> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanCompositionCandidateErrorV1::Cancelled {
+            stage: "span-composition-entry",
+        });
+    }
+    if ir.schema_version != DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedSpanCompositionCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.pullback_square.as_bytes(), "pullback-square"),
+        (ir.proposed_outer_span.as_bytes(), "proposed-outer-span"),
+        (
+            ir.nominal_composition.as_bytes(),
+            "nominal-composition-declaration",
+        ),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(DerivedSpanCompositionCandidateErrorV1::MissingIdentity { field });
+        }
+    }
+    for (matches, field) in [
+        (
+            ir.pullback_square == pullback_square.id(),
+            "pullback-square",
+        ),
+        (
+            ir.proposed_outer_span == proposed_outer_span.id(),
+            "proposed-outer-span",
+        ),
+    ] {
+        if !matches {
+            return Err(DerivedSpanCompositionCandidateErrorV1::ChildIdentityMismatch { field });
+        }
+    }
+    for (matches, field) in [
+        (pullback_square.left_span() == left_span.id(), "left-span"),
+        (
+            pullback_square.right_span() == right_span.id(),
+            "right-span",
+        ),
+        (
+            pullback_square.left_projection() == left_projection.id(),
+            "left-projection",
+        ),
+        (
+            pullback_square.right_projection() == right_projection.id(),
+            "right-projection",
+        ),
+    ] {
+        if !matches {
+            return Err(DerivedSpanCompositionCandidateErrorV1::SquareBindingMismatch { field });
+        }
+    }
+    for (matches, field) in [
+        (
+            left_span.left_leg() == left_outer_leg.id(),
+            "left-parent-outer-leg",
+        ),
+        (
+            right_span.right_leg() == right_outer_leg.id(),
+            "right-parent-outer-leg",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedSpanCompositionCandidateErrorV1::ParentOuterLegIdentityMismatch { field },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            proposed_outer_span.source() == pullback_square.source(),
+            "outer-span-source",
+        ),
+        (
+            proposed_outer_span.apex() == pullback_square.pullback_apex(),
+            "outer-span-apex",
+        ),
+        (
+            proposed_outer_span.target() == pullback_square.target(),
+            "outer-span-target",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedSpanCompositionCandidateErrorV1::OuterSpanEndpointMismatch { field },
+            );
+        }
+    }
+
+    let compose_outer_route =
+        |field: &'static str,
+         projection: &AdmittedDerivedMorphismV1,
+         outer_leg: &AdmittedDerivedMorphismV1|
+         -> Result<AdmittedDerivedMorphismV1, DerivedSpanCompositionCandidateErrorV1> {
+            compose_derived_morphisms_v1(projection, outer_leg, cx).map_err(|cause| match cause {
+                DerivedMorphismErrorV1::Cancelled { .. } => {
+                    DerivedSpanCompositionCandidateErrorV1::Cancelled { stage: field }
+                }
+                other => DerivedSpanCompositionCandidateErrorV1::OuterRouteCompositionRefused {
+                    field,
+                    cause: other,
+                },
+            })
+        };
+    let left_outer_route = compose_outer_route(
+        "left-outer-route-composition",
+        left_projection,
+        left_outer_leg,
+    )?;
+    let right_outer_route = compose_outer_route(
+        "right-outer-route-composition",
+        right_projection,
+        right_outer_leg,
+    )?;
+    for (matches, field) in [
+        (
+            proposed_outer_span.left_leg() == left_outer_route.id(),
+            "outer-span-left-leg",
+        ),
+        (
+            proposed_outer_span.right_leg() == right_outer_route.id(),
+            "outer-span-right-leg",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedSpanCompositionCandidateErrorV1::OuterSpanLegIdentityMismatch { field },
+            );
+        }
+    }
+    let receipt = span_composition_candidate_receipt(
+        ir,
+        pullback_square,
+        &left_outer_route,
+        &right_outer_route,
+        cx,
+    )?;
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanCompositionCandidateErrorV1::Cancelled {
+            stage: "span-composition-publication",
+        });
+    }
+    Ok(AdmittedDerivedSpanCompositionCandidateV1 {
+        source: pullback_square.source(),
+        middle: pullback_square.middle(),
+        target: pullback_square.target(),
+        composite_apex: pullback_square.pullback_apex(),
+        pullback_square: ir.pullback_square,
+        proposed_outer_span: ir.proposed_outer_span,
+        left_outer_route: left_outer_route.id(),
+        right_outer_route: right_outer_route.id(),
+        nominal_composition: ir.nominal_composition,
         no_authority: ir.no_authority,
         receipt,
     })
@@ -10235,6 +10733,8 @@ mod tests {
         right_span: AdmittedDerivedSpanCorrespondenceV1,
         left_projection: AdmittedDerivedMorphismV1,
         right_projection: AdmittedDerivedMorphismV1,
+        left_outer_leg: AdmittedDerivedMorphismV1,
+        right_outer_leg: AdmittedDerivedMorphismV1,
         left_middle_leg: AdmittedDerivedMorphismV1,
         right_middle_leg: AdmittedDerivedMorphismV1,
         middle_route_comparison: AdmittedDerivedParallelMorphismComparisonCandidateV1,
@@ -10253,6 +10753,22 @@ mod tests {
             target,
             left_leg: span.left_leg(),
             right_leg: span.right_leg(),
+            no_claim: span.no_claim(),
+            receipt: span.identity_receipt(),
+        }
+    }
+
+    fn span_with_test_legs(
+        span: &AdmittedDerivedSpanCorrespondenceV1,
+        left_leg: DerivedMorphismIdV1,
+        right_leg: DerivedMorphismIdV1,
+    ) -> AdmittedDerivedSpanCorrespondenceV1 {
+        AdmittedDerivedSpanCorrespondenceV1 {
+            source: span.source(),
+            apex: span.apex(),
+            target: span.target(),
+            left_leg,
+            right_leg,
             no_claim: span.no_claim(),
             receipt: span.identity_receipt(),
         }
@@ -10401,6 +10917,8 @@ mod tests {
             right_span,
             left_projection,
             right_projection,
+            left_outer_leg,
+            right_outer_leg,
             left_middle_leg,
             right_middle_leg,
             middle_route_comparison,
@@ -10425,6 +10943,112 @@ mod tests {
             &fixture.left_middle_leg,
             &fixture.right_middle_leg,
             &fixture.middle_route_comparison,
+            cx,
+        )
+    }
+
+    struct SpanCompositionCandidateFixtureV1 {
+        square_fixture: SpanPullbackSquareCandidateFixtureV1,
+        pullback_square: AdmittedDerivedSpanPullbackSquareCandidateV1,
+        proposed_outer_span: AdmittedDerivedSpanCorrespondenceV1,
+        left_outer_route: AdmittedDerivedMorphismV1,
+        right_outer_route: AdmittedDerivedMorphismV1,
+        ir: DerivedSpanCompositionCandidateIrV1,
+    }
+
+    fn pullback_square_with_test_selectors(
+        square: &AdmittedDerivedSpanPullbackSquareCandidateV1,
+        source: DerivedGeometryIdV1,
+        middle: DerivedGeometryIdV1,
+        target: DerivedGeometryIdV1,
+        composite_apex: DerivedGeometryIdV1,
+    ) -> AdmittedDerivedSpanPullbackSquareCandidateV1 {
+        AdmittedDerivedSpanPullbackSquareCandidateV1 {
+            source,
+            middle,
+            target,
+            left_apex: square.left_apex(),
+            right_apex: square.right_apex(),
+            pullback_apex: composite_apex,
+            left_span: square.left_span(),
+            right_span: square.right_span(),
+            left_projection: square.left_projection(),
+            right_projection: square.right_projection(),
+            middle_route_comparison: square.middle_route_comparison(),
+            left_middle_route: square.left_middle_route(),
+            right_middle_route: square.right_middle_route(),
+            nominal_pullback: square.nominal_pullback(),
+            no_authority: square.no_authority(),
+            receipt: square.identity_receipt(),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // Builds the square, derived outer routes, and sealed span.
+    fn span_composition_candidate_fixture(cx: &Cx<'_>) -> SpanCompositionCandidateFixtureV1 {
+        let square_fixture = span_pullback_square_candidate_fixture(cx);
+        let pullback_square =
+            admit_span_pullback_square_with_ir(&square_fixture, &square_fixture.ir, cx)
+                .expect("valid structural pullback-square candidate");
+        let left_outer_route = compose_derived_morphisms_v1(
+            &square_fixture.left_projection,
+            &square_fixture.left_outer_leg,
+            cx,
+        )
+        .expect("valid proposed-apex-to-source route");
+        let right_outer_route = compose_derived_morphisms_v1(
+            &square_fixture.right_projection,
+            &square_fixture.right_outer_leg,
+            cx,
+        )
+        .expect("valid proposed-apex-to-target route");
+        let outer_span_ir = span_ir(
+            endpoint(200),
+            endpoint(205),
+            endpoint(204),
+            &left_outer_route,
+            &right_outer_route,
+            219,
+        );
+        let proposed_outer_span = admit_derived_span_correspondence_v1(
+            outer_span_ir,
+            &left_outer_route,
+            &right_outer_route,
+            cx,
+        )
+        .expect("valid proposed outer span");
+        let ir = DerivedSpanCompositionCandidateIrV1 {
+            schema_version: DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1,
+            pullback_square: pullback_square.id(),
+            proposed_outer_span: proposed_outer_span.id(),
+            nominal_composition: DerivedSpanCompositionDeclarationIdV1::from_bytes([220; 32]),
+            no_authority: DerivedNoClaimIdV1::from_bytes([221; 32]),
+        };
+        SpanCompositionCandidateFixtureV1 {
+            square_fixture,
+            pullback_square,
+            proposed_outer_span,
+            left_outer_route,
+            right_outer_route,
+            ir,
+        }
+    }
+
+    fn admit_span_composition_with_ir(
+        fixture: &SpanCompositionCandidateFixtureV1,
+        ir: &DerivedSpanCompositionCandidateIrV1,
+        cx: &Cx<'_>,
+    ) -> Result<AdmittedDerivedSpanCompositionCandidateV1, DerivedSpanCompositionCandidateErrorV1>
+    {
+        admit_derived_span_composition_candidate_v1(
+            ir,
+            &fixture.pullback_square,
+            &fixture.proposed_outer_span,
+            &fixture.square_fixture.left_span,
+            &fixture.square_fixture.right_span,
+            &fixture.square_fixture.left_projection,
+            &fixture.square_fixture.right_projection,
+            &fixture.square_fixture.left_outer_leg,
+            &fixture.square_fixture.right_outer_leg,
             cx,
         )
     }
@@ -13627,6 +14251,859 @@ mod tests {
                 Err(DerivedSpanPullbackSquareCandidateErrorV1::Cancelled {
                     stage: "span-pullback-square-entry",
                 })
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Full direct/transitive child, route, and precedence matrix.
+    fn span_composition_refuses_unbound_or_incoherent_outer_span_data() {
+        let fixture = with_cx(false, span_composition_candidate_fixture);
+        with_cx(false, |cx| {
+            let bad_schema = DerivedSpanCompositionCandidateIrV1 {
+                schema_version: 2,
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_span_composition_with_ir(&fixture, &bad_schema, cx),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::UnsupportedSchemaVersion {
+                        found: 2,
+                        supported: DERIVED_SPAN_COMPOSITION_CANDIDATE_SCHEMA_VERSION_V1,
+                    }
+                )
+            );
+
+            for (field, changed_ir) in [
+                (
+                    "pullback-square",
+                    DerivedSpanCompositionCandidateIrV1 {
+                        pullback_square: DerivedSpanPullbackSquareCandidateIdV1::parse_slice(
+                            &[0; 32],
+                        )
+                        .expect("zero square sentinel"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "proposed-outer-span",
+                    DerivedSpanCompositionCandidateIrV1 {
+                        proposed_outer_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[0; 32])
+                            .expect("zero outer-span sentinel"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "nominal-composition-declaration",
+                    DerivedSpanCompositionCandidateIrV1 {
+                        nominal_composition: DerivedSpanCompositionDeclarationIdV1::from_bytes(
+                            [0; 32],
+                        ),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedSpanCompositionCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_span_composition_with_ir(&fixture, &changed_ir, cx),
+                    Err(DerivedSpanCompositionCandidateErrorV1::MissingIdentity {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            for (field, changed_ir) in [
+                (
+                    "pullback-square",
+                    DerivedSpanCompositionCandidateIrV1 {
+                        pullback_square: DerivedSpanPullbackSquareCandidateIdV1::parse_slice(
+                            &[232; 32],
+                        )
+                        .expect("nonzero wrong square"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "proposed-outer-span",
+                    DerivedSpanCompositionCandidateIrV1 {
+                        proposed_outer_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[233; 32])
+                            .expect("nonzero wrong outer span"),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_span_composition_with_ir(&fixture, &changed_ir, cx),
+                    Err(
+                        DerivedSpanCompositionCandidateErrorV1::ChildIdentityMismatch {
+                            field: found,
+                        }
+                    ) if found == field
+                ));
+            }
+
+            let both_direct_children_wrong = DerivedSpanCompositionCandidateIrV1 {
+                pullback_square: DerivedSpanPullbackSquareCandidateIdV1::parse_slice(&[241; 32])
+                    .expect("nonzero wrong square"),
+                proposed_outer_span: DerivedSpanCorrespondenceIdV1::parse_slice(&[242; 32])
+                    .expect("nonzero wrong outer span"),
+                ..fixture.ir
+            };
+            assert!(matches!(
+                admit_span_composition_with_ir(&fixture, &both_direct_children_wrong, cx),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::ChildIdentityMismatch {
+                        field: "pullback-square",
+                    }
+                )
+            ));
+
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::SquareBindingMismatch {
+                        field: "left-span",
+                    }
+                )
+            ));
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::SquareBindingMismatch {
+                        field: "right-span",
+                    }
+                )
+            ));
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::SquareBindingMismatch {
+                        field: "left-projection",
+                    }
+                )
+            ));
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::SquareBindingMismatch {
+                        field: "right-projection",
+                    }
+                )
+            ));
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::SquareBindingMismatch {
+                        field: "left-span",
+                    }
+                )
+            ));
+
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_middle_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::ParentOuterLegIdentityMismatch {
+                        field: "left-parent-outer-leg",
+                    }
+                )
+            ));
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_middle_leg,
+                    &fixture.square_fixture.right_middle_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::ParentOuterLegIdentityMismatch {
+                        field: "left-parent-outer-leg",
+                    }
+                )
+            ));
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_middle_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::ParentOuterLegIdentityMismatch {
+                        field: "right-parent-outer-leg",
+                    }
+                )
+            ));
+            let malformed_apex_and_target = span_with_test_selectors(
+                &fixture.proposed_outer_span,
+                fixture.proposed_outer_span.source(),
+                geometry_id(241),
+                geometry_id(242),
+            );
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &malformed_apex_and_target,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterSpanEndpointMismatch {
+                        field: "outer-span-apex",
+                    }
+                )
+            ));
+
+            for (field, malformed_outer_span) in [
+                (
+                    "outer-span-source",
+                    span_with_test_selectors(
+                        &fixture.proposed_outer_span,
+                        geometry_id(234),
+                        fixture.proposed_outer_span.apex(),
+                        fixture.proposed_outer_span.target(),
+                    ),
+                ),
+                (
+                    "outer-span-apex",
+                    span_with_test_selectors(
+                        &fixture.proposed_outer_span,
+                        fixture.proposed_outer_span.source(),
+                        geometry_id(235),
+                        fixture.proposed_outer_span.target(),
+                    ),
+                ),
+                (
+                    "outer-span-target",
+                    span_with_test_selectors(
+                        &fixture.proposed_outer_span,
+                        fixture.proposed_outer_span.source(),
+                        fixture.proposed_outer_span.apex(),
+                        geometry_id(236),
+                    ),
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_span_composition_candidate_v1(
+                        &fixture.ir,
+                        &fixture.pullback_square,
+                        &malformed_outer_span,
+                        &fixture.square_fixture.left_span,
+                        &fixture.square_fixture.right_span,
+                        &fixture.square_fixture.left_projection,
+                        &fixture.square_fixture.right_projection,
+                        &fixture.square_fixture.left_outer_leg,
+                        &fixture.square_fixture.right_outer_leg,
+                        cx,
+                    ),
+                    Err(
+                        DerivedSpanCompositionCandidateErrorV1::OuterSpanEndpointMismatch {
+                            field: found,
+                        }
+                    ) if found == field
+                ));
+            }
+            let malformed_source_and_apex = span_with_test_selectors(
+                &fixture.proposed_outer_span,
+                geometry_id(237),
+                geometry_id(238),
+                fixture.proposed_outer_span.target(),
+            );
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &malformed_source_and_apex,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterSpanEndpointMismatch {
+                        field: "outer-span-source",
+                    }
+                )
+            ));
+
+            let uncomposable_left_outer_leg = admit_strict(
+                endpoint(201),
+                endpoint(200),
+                239,
+                ColorRank::Estimated,
+                ColorRank::Estimated,
+                cx,
+            );
+            let left_span_with_uncomposable_outer_leg = span_with_test_legs(
+                &fixture.square_fixture.left_span,
+                uncomposable_left_outer_leg.id(),
+                fixture.square_fixture.left_span.right_leg(),
+            );
+            assert_eq!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &left_span_with_uncomposable_outer_leg,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &uncomposable_left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterRouteCompositionRefused {
+                        field: "left-outer-route-composition",
+                        cause: DerivedMorphismErrorV1::CompositionEvidenceMismatch,
+                    }
+                )
+            );
+
+            let uncomposable_right_outer_leg = admit_strict(
+                endpoint(203),
+                endpoint(204),
+                240,
+                ColorRank::Estimated,
+                ColorRank::Estimated,
+                cx,
+            );
+            let right_span_with_uncomposable_outer_leg = span_with_test_legs(
+                &fixture.square_fixture.right_span,
+                fixture.square_fixture.right_span.left_leg(),
+                uncomposable_right_outer_leg.id(),
+            );
+            assert_eq!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &fixture.square_fixture.left_span,
+                    &right_span_with_uncomposable_outer_leg,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &uncomposable_right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterRouteCompositionRefused {
+                        field: "right-outer-route-composition",
+                        cause: DerivedMorphismErrorV1::CompositionEvidenceMismatch,
+                    }
+                )
+            );
+            assert_eq!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &fixture.proposed_outer_span,
+                    &left_span_with_uncomposable_outer_leg,
+                    &right_span_with_uncomposable_outer_leg,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &uncomposable_left_outer_leg,
+                    &uncomposable_right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterRouteCompositionRefused {
+                        field: "left-outer-route-composition",
+                        cause: DerivedMorphismErrorV1::CompositionEvidenceMismatch,
+                    }
+                )
+            );
+
+            let wrong_left_outer_route = span_with_test_legs(
+                &fixture.proposed_outer_span,
+                fixture.right_outer_route.id(),
+                fixture.proposed_outer_span.right_leg(),
+            );
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &wrong_left_outer_route,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterSpanLegIdentityMismatch {
+                        field: "outer-span-left-leg",
+                    }
+                )
+            ));
+            let wrong_right_outer_route = span_with_test_legs(
+                &fixture.proposed_outer_span,
+                fixture.proposed_outer_span.left_leg(),
+                fixture.left_outer_route.id(),
+            );
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &wrong_right_outer_route,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterSpanLegIdentityMismatch {
+                        field: "outer-span-right-leg",
+                    }
+                )
+            ));
+            let wrong_both_outer_routes = span_with_test_legs(
+                &fixture.proposed_outer_span,
+                fixture.right_outer_route.id(),
+                fixture.left_outer_route.id(),
+            );
+            assert!(matches!(
+                admit_derived_span_composition_candidate_v1(
+                    &fixture.ir,
+                    &fixture.pullback_square,
+                    &wrong_both_outer_routes,
+                    &fixture.square_fixture.left_span,
+                    &fixture.square_fixture.right_span,
+                    &fixture.square_fixture.left_projection,
+                    &fixture.square_fixture.right_projection,
+                    &fixture.square_fixture.left_outer_leg,
+                    &fixture.square_fixture.right_outer_leg,
+                    cx,
+                ),
+                Err(
+                    DerivedSpanCompositionCandidateErrorV1::OuterSpanLegIdentityMismatch {
+                        field: "outer-span-left-leg",
+                    }
+                )
+            ));
+        });
+
+        with_cx(true, |cx| {
+            assert_eq!(
+                admit_span_composition_with_ir(&fixture, &fixture.ir, cx),
+                Err(DerivedSpanCompositionCandidateErrorV1::Cancelled {
+                    stage: "span-composition-entry",
+                })
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Ten-field recursive receipt and four child domains.
+    fn span_composition_receipt_binds_every_selector_and_typed_child() {
+        with_cx(false, |cx| {
+            let fixture = span_composition_candidate_fixture(cx);
+            let baseline = span_composition_candidate_receipt(
+                &fixture.ir,
+                &fixture.pullback_square,
+                &fixture.left_outer_route,
+                &fixture.right_outer_route,
+                cx,
+            )
+            .expect("baseline span-composition receipt")
+            .id();
+
+            macro_rules! assert_ir_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = fixture.ir;
+                    changed.$field = $value;
+                    let changed = span_composition_candidate_receipt(
+                        &changed,
+                        &fixture.pullback_square,
+                        &fixture.left_outer_route,
+                        &fixture.right_outer_route,
+                        cx,
+                    )
+                    .expect("changed span-composition receipt")
+                    .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_ir_field_moves_identity!(
+                pullback_square,
+                DerivedSpanPullbackSquareCandidateIdV1::parse_slice(&[222; 32])
+                    .expect("nonzero changed square")
+            );
+            assert_ir_field_moves_identity!(
+                proposed_outer_span,
+                DerivedSpanCorrespondenceIdV1::parse_slice(&[223; 32])
+                    .expect("nonzero changed outer span")
+            );
+            assert_ir_field_moves_identity!(
+                nominal_composition,
+                DerivedSpanCompositionDeclarationIdV1::from_bytes([224; 32])
+            );
+            assert_ir_field_moves_identity!(
+                no_authority,
+                DerivedNoClaimIdV1::from_bytes([225; 32])
+            );
+
+            for (label, changed_square) in [
+                (
+                    "source-geometry",
+                    pullback_square_with_test_selectors(
+                        &fixture.pullback_square,
+                        geometry_id(226),
+                        fixture.pullback_square.middle(),
+                        fixture.pullback_square.target(),
+                        fixture.pullback_square.pullback_apex(),
+                    ),
+                ),
+                (
+                    "middle-geometry",
+                    pullback_square_with_test_selectors(
+                        &fixture.pullback_square,
+                        fixture.pullback_square.source(),
+                        geometry_id(227),
+                        fixture.pullback_square.target(),
+                        fixture.pullback_square.pullback_apex(),
+                    ),
+                ),
+                (
+                    "target-geometry",
+                    pullback_square_with_test_selectors(
+                        &fixture.pullback_square,
+                        fixture.pullback_square.source(),
+                        fixture.pullback_square.middle(),
+                        geometry_id(228),
+                        fixture.pullback_square.pullback_apex(),
+                    ),
+                ),
+                (
+                    "composite-apex-geometry",
+                    pullback_square_with_test_selectors(
+                        &fixture.pullback_square,
+                        fixture.pullback_square.source(),
+                        fixture.pullback_square.middle(),
+                        fixture.pullback_square.target(),
+                        geometry_id(229),
+                    ),
+                ),
+            ] {
+                let changed = span_composition_candidate_receipt(
+                    &fixture.ir,
+                    &changed_square,
+                    &fixture.left_outer_route,
+                    &fixture.right_outer_route,
+                    cx,
+                )
+                .unwrap_or_else(|error| panic!("changed {label} remains encodable: {error}"))
+                .id();
+                assert_ne!(baseline, changed, "{label}");
+            }
+
+            let changed_left_route = admit_strict(
+                endpoint(205),
+                endpoint(200),
+                230,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let changed_left = span_composition_candidate_receipt(
+                &fixture.ir,
+                &fixture.pullback_square,
+                &changed_left_route,
+                &fixture.right_outer_route,
+                cx,
+            )
+            .expect("changed left route remains encodable")
+            .id();
+            assert_ne!(baseline, changed_left, "left-outer-route");
+
+            let changed_right_route = admit_strict(
+                endpoint(205),
+                endpoint(204),
+                231,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let changed_right = span_composition_candidate_receipt(
+                &fixture.ir,
+                &fixture.pullback_square,
+                &fixture.left_outer_route,
+                &changed_right_route,
+                cx,
+            )
+            .expect("changed right route remains encodable")
+            .id();
+            assert_ne!(baseline, changed_right, "right-outer-route");
+
+            let swapped_routes = span_composition_candidate_receipt(
+                &fixture.ir,
+                &fixture.pullback_square,
+                &fixture.right_outer_route,
+                &fixture.left_outer_route,
+                cx,
+            )
+            .expect("swapped ordered routes remain structurally encodable")
+            .id();
+            assert_ne!(baseline, swapped_routes, "outer-route order is semantic");
+
+            for field in 4..=7 {
+                let spec = &DerivedSpanCompositionCandidateIdentitySchemaV1::FIELDS[field];
+                assert_eq!(spec.wire_type(), WireType::Child);
+                assert!(spec.child_spec().is_some());
+            }
+
+            let prefix_encoder = || {
+                CanonicalEncoder::<DerivedSpanCompositionCandidateIdV1, _>::new(
+                    DERIVED_SPAN_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1,
+                    || cx.checkpoint().is_err(),
+                )
+                .expect("valid span-composition encoder")
+                .bytes(
+                    Field::new(0, "source-geometry"),
+                    fixture.pullback_square.source().as_bytes(),
+                )
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(1, "middle-geometry"),
+                        fixture.pullback_square.middle().as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(2, "target-geometry"),
+                        fixture.pullback_square.target().as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(3, "composite-apex-geometry"),
+                        fixture.pullback_square.pullback_apex().as_bytes(),
+                    )
+                })
+            };
+            let through_direct_children = || {
+                prefix_encoder()
+                    .and_then(|encoder| {
+                        encoder.child(
+                            Field::new(4, "pullback-square"),
+                            fixture.pullback_square.id(),
+                        )
+                    })
+                    .and_then(|encoder| {
+                        encoder.child(
+                            Field::new(5, "proposed-outer-span"),
+                            fixture.proposed_outer_span.id(),
+                        )
+                    })
+            };
+
+            let wrong_square_schema = prefix_encoder().and_then(|encoder| {
+                encoder.child(
+                    Field::new(4, "pullback-square"),
+                    fixture.proposed_outer_span.id(),
+                )
+            });
+            assert!(matches!(
+                wrong_square_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "pullback-square",
+                    what: "child schema domain",
+                })
+            ));
+            let wrong_outer_span_schema = prefix_encoder()
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(4, "pullback-square"),
+                        fixture.pullback_square.id(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(5, "proposed-outer-span"),
+                        fixture.pullback_square.id(),
+                    )
+                });
+            assert!(matches!(
+                wrong_outer_span_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "proposed-outer-span",
+                    what: "child schema domain",
+                })
+            ));
+            let wrong_left_route_schema = through_direct_children().and_then(|encoder| {
+                encoder.child(
+                    Field::new(6, "left-outer-route"),
+                    fixture.proposed_outer_span.id(),
+                )
+            });
+            assert!(matches!(
+                wrong_left_route_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "left-outer-route",
+                    what: "child schema domain",
+                })
+            ));
+            let wrong_right_route_schema = through_direct_children()
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(6, "left-outer-route"),
+                        fixture.left_outer_route.id(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(7, "right-outer-route"),
+                        fixture.proposed_outer_span.id(),
+                    )
+                });
+            assert!(matches!(
+                wrong_right_route_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "right-outer-route",
+                    what: "child schema domain",
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn span_composition_candidate_replays_and_exposes_only_structural_bindings() {
+        with_cx(false, |cx| {
+            let fixture = span_composition_candidate_fixture(cx);
+            let first = admit_span_composition_with_ir(&fixture, &fixture.ir, cx)
+                .expect("valid structural span-composition candidate");
+            let replay = admit_span_composition_with_ir(&fixture, &fixture.ir, cx)
+                .expect("deterministic span-composition replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.source(), endpoint(200).id);
+            assert_eq!(first.middle(), endpoint(202).id);
+            assert_eq!(first.target(), endpoint(204).id);
+            assert_eq!(first.composite_apex(), endpoint(205).id);
+            assert_eq!(first.pullback_square(), fixture.pullback_square.id());
+            assert_eq!(
+                first.proposed_outer_span(),
+                fixture.proposed_outer_span.id()
+            );
+            assert_eq!(first.left_outer_route(), fixture.left_outer_route.id());
+            assert_eq!(first.right_outer_route(), fixture.right_outer_route.id());
+            assert_eq!(first.nominal_composition(), fixture.ir.nominal_composition);
+            assert_eq!(first.no_authority(), fixture.ir.no_authority);
+            assert_eq!(first.id(), first.identity_receipt().id());
+
+            assert_ne!(
+                <DerivedSpanCompositionCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+                <DerivedSpanPullbackSquareCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            );
+            assert_ne!(
+                <DerivedSpanCompositionCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+                <DerivedSpanCorrespondenceIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            );
+            assert_eq!(
+                <DerivedSpanCompositionCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS.len(),
+                10
+            );
+            assert_eq!(
+                DERIVED_SPAN_COMPOSITION_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+                84
             );
         });
     }
