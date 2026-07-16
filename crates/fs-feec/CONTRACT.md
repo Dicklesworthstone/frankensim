@@ -437,7 +437,11 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   fresh map ID/artifact checks, with invalid twins for each boundary. A fully
   relative interval fixture pins empty quotient-basis algebra and zero winding
   replay, while schema-version, canonical-preimage, relative-support, port-time,
-  and presented MachineGraph-version mutations pin the identity boundary.
+  and presented MachineGraph-version mutations pin the identity boundary. A
+  two-dimensional square-CW surrogate exercises full-dimensional component
+  closure, opposite codimension-one terminal patches, multi-degree exact
+  boundary/coboundary pairing, and terminal/insulation overlap refusal. It is
+  cellular schema evidence, not a torus, linking, manifold, or embedding claim.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 

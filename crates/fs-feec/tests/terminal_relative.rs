@@ -239,6 +239,193 @@ fn interval_pair(
     .expect("terminal-relative pair")
 }
 
+fn square_terminal_patch(
+    ambient: &FiniteCellComplex,
+    edge: u32,
+    vertices: [u32; 2],
+    id: &str,
+    role: TerminalRole,
+    orientation: TerminalOrientation,
+    sign: OrientationMapSign,
+) -> PhysicalTerminal {
+    let port = electrical_port(&format!("port/{id}"), 109);
+    PhysicalTerminal::new(
+        PhysicalTerminalId::new(format!("terminal/{id}")).expect("terminal id"),
+        subcomplex(
+            ambient,
+            &format!("support/{id}"),
+            [
+                CellRef::new(0, vertices[0]),
+                CellRef::new(0, vertices[1]),
+                CellRef::new(1, edge),
+            ],
+        ),
+        ConductorComponentId::new("component/square").expect("component id"),
+        PhaseId::new("phase/square").expect("phase id"),
+        role,
+        orientation,
+        TerminalPortCoordinate::Flow,
+        port.clone(),
+        PresentedMachinePortRef::try_new(
+            stable(PRESENTED_MACHINE_GRAPH_DOMAIN),
+            PRESENTED_MACHINE_GRAPH_SCHEMA_VERSION,
+            [0x6d; 32],
+            stable("machine-owner/square-terminal-patch"),
+            port.id().clone(),
+            stable(&format!("machine-terminal/{id}-voltage")),
+            stable(&format!("machine-terminal/{id}-current")),
+        )
+        .expect("presented Machine-IR port"),
+        TerminalPortTrivialization::new(
+            TrivializationId::new(format!("trivialization/{id}")).expect("trivialization id"),
+            port.id().clone(),
+            sign,
+            stable("voltage-reference/square-common"),
+            stable("current-reference/square-common"),
+        ),
+    )
+    .expect("square terminal patch")
+}
+
+fn square_terminal_patch_pair(
+    reverse_declarations: bool,
+    insulate_driven_patch: bool,
+) -> Result<TerminalRelativePair, TerminalRelativeError> {
+    let mut incidences = vec![
+        BoundaryIncidence::new(
+            CellRef::new(0, 0),
+            CellRef::new(1, 0),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 1),
+            CellRef::new(1, 0),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 1),
+            CellRef::new(1, 1),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 2),
+            CellRef::new(1, 1),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 2),
+            CellRef::new(1, 2),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 3),
+            CellRef::new(1, 2),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 3),
+            CellRef::new(1, 3),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 0),
+            CellRef::new(1, 3),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(1, 0),
+            CellRef::new(2, 0),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(1, 1),
+            CellRef::new(2, 0),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(1, 2),
+            CellRef::new(2, 0),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(1, 3),
+            CellRef::new(2, 0),
+            IncidenceSign::Positive,
+        ),
+    ];
+    if reverse_declarations {
+        incidences.reverse();
+    }
+    let complex = FiniteCellComplex::try_new(2, vec![4, 4, 1], incidences)
+        .expect("oriented square cellular complex");
+    let all_cells = [
+        CellRef::new(0, 0),
+        CellRef::new(0, 1),
+        CellRef::new(0, 2),
+        CellRef::new(0, 3),
+        CellRef::new(1, 0),
+        CellRef::new(1, 1),
+        CellRef::new(1, 2),
+        CellRef::new(1, 3),
+        CellRef::new(2, 0),
+    ];
+    let conductor = subcomplex(&complex, "support/square-conductor", all_cells);
+    let relative_cells = [
+        CellRef::new(0, 0),
+        CellRef::new(0, 1),
+        CellRef::new(0, 2),
+        CellRef::new(0, 3),
+        CellRef::new(1, 0),
+        CellRef::new(1, 2),
+    ];
+    let relative = subcomplex(&complex, "support/square-relative", relative_cells);
+    let insulation = if insulate_driven_patch {
+        subcomplex(
+            &complex,
+            "support/square-insulation-driven-patch",
+            [CellRef::new(0, 0), CellRef::new(0, 1), CellRef::new(1, 0)],
+        )
+    } else {
+        subcomplex(&complex, "support/square-insulation-empty", [])
+    };
+    let component = ConductorComponent::new(
+        ConductorComponentId::new("component/square").unwrap(),
+        subcomplex(&complex, "support/component-square", all_cells),
+    )
+    .expect("full-dimensional square component");
+    let driven = square_terminal_patch(
+        &complex,
+        0,
+        [0, 1],
+        "square-driven",
+        TerminalRole::Driven,
+        TerminalOrientation::OutOfConductor,
+        OrientationMapSign::Preserve,
+    );
+    let return_reference = square_terminal_patch(
+        &complex,
+        2,
+        [2, 3],
+        "square-return",
+        TerminalRole::ReturnReference,
+        TerminalOrientation::IntoConductor,
+        OrientationMapSign::Reverse,
+    );
+    let terminals = if reverse_declarations {
+        vec![return_reference, driven]
+    } else {
+        vec![driven, return_reference]
+    };
+    TerminalRelativePair::try_new(
+        complex,
+        conductor,
+        relative,
+        insulation,
+        vec![component],
+        terminals,
+    )
+}
+
 fn terminal_cut_loop_pair() -> TerminalRelativePair {
     terminal_cut_loop_pair_with_terminals(0, 3)
 }
@@ -4167,6 +4354,134 @@ fn i13_2a_035_canonical_preimage_and_schema_versions_kill_semantic_mutations() {
             expected_version: PRESENTED_MACHINE_GRAPH_SCHEMA_VERSION,
             actual_domain: PRESENTED_MACHINE_GRAPH_DOMAIN.to_owned(),
             actual_version: wrong_version,
+        })
+    );
+}
+
+#[test]
+fn i13_2a_036_square_cellular_terminal_patches_have_exact_relative_algebra() {
+    let pair = square_terminal_patch_pair(false, false).expect("square terminal-patch pair");
+    let replay = square_terminal_patch_pair(true, false).expect("declaration-order square replay");
+    let phase = PhaseId::new("phase/square").unwrap();
+
+    assert_eq!(pair.complex().dimension(), 2);
+    assert_eq!(pair.identity(), replay.identity());
+    assert_eq!(pair.components().len(), 1);
+    assert_eq!(
+        pair.components()[0].support().cells(),
+        pair.conductor().cells()
+    );
+    assert_eq!(pair.components()[0].support().cells().len(), 9);
+    assert_eq!(
+        pair.relative().cells().iter().copied().collect::<Vec<_>>(),
+        vec![
+            CellRef::new(0, 0),
+            CellRef::new(0, 1),
+            CellRef::new(0, 2),
+            CellRef::new(0, 3),
+            CellRef::new(1, 0),
+            CellRef::new(1, 2),
+        ]
+    );
+
+    let driven = pair
+        .terminals()
+        .iter()
+        .find(|terminal| terminal.role() == TerminalRole::Driven)
+        .expect("square driven terminal");
+    let return_reference = pair
+        .terminals()
+        .iter()
+        .find(|terminal| terminal.role() == TerminalRole::ReturnReference)
+        .expect("square return terminal");
+    assert_eq!(
+        driven.support().cells().iter().copied().collect::<Vec<_>>(),
+        vec![CellRef::new(0, 0), CellRef::new(0, 1), CellRef::new(1, 0),]
+    );
+    assert_eq!(
+        return_reference
+            .support()
+            .cells()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![CellRef::new(0, 2), CellRef::new(0, 3), CellRef::new(1, 2),]
+    );
+    assert!(
+        driven
+            .support()
+            .cells()
+            .iter()
+            .all(|cell| cell.degree() <= 1)
+    );
+    assert!(
+        return_reference
+            .support()
+            .cells()
+            .iter()
+            .all(|cell| cell.degree() <= 1)
+    );
+
+    assert_eq!(pair.relative_basis(0), Vec::<CellRef>::new());
+    assert_eq!(
+        pair.relative_basis(1),
+        vec![CellRef::new(1, 1), CellRef::new(1, 3)]
+    );
+    assert_eq!(pair.relative_basis(2), vec![CellRef::new(2, 0)]);
+    assert_eq!(pair.phase_relative_basis(&phase, 0), Ok(Vec::new()));
+    assert_eq!(
+        pair.phase_relative_basis(&phase, 1),
+        Ok(vec![CellRef::new(1, 1), CellRef::new(1, 3)])
+    );
+    assert_eq!(
+        pair.phase_relative_basis(&phase, 2),
+        Ok(vec![CellRef::new(2, 0)])
+    );
+
+    let face = IntegralRelativeChain::try_new(&pair, phase.clone(), 2, vec![7])
+        .expect("square face chain");
+    let face_boundary = pair.boundary(&face).expect("projected square boundary");
+    assert_eq!(face_boundary.degree(), 1);
+    assert_eq!(face_boundary.coefficients(), &[7, 7]);
+
+    let alpha = IntegralRelativeCochain::try_new(&pair, phase.clone(), 1, vec![2, 3])
+        .expect("square edge cochain");
+    let delta_alpha = pair
+        .integral_coboundary(&alpha)
+        .expect("exact square integral coboundary");
+    assert_eq!(delta_alpha.degree(), 2);
+    assert_eq!(delta_alpha.coefficients(), &[5]);
+    assert_eq!(pair.integral_pairing(&delta_alpha, &face), Ok(35));
+    assert_eq!(pair.integral_pairing(&alpha, &face_boundary), Ok(35));
+
+    let real_alpha =
+        RealRelativeCochain::try_new(&pair, phase.clone(), 1, Current::DIMS, vec![2.5, -1.0])
+            .expect("square real edge cochain");
+    let real_delta = pair
+        .coboundary(&real_alpha)
+        .expect("square real coboundary");
+    assert_eq!(real_delta.degree(), 2);
+    assert_eq!(real_delta.units(), Current::DIMS);
+    assert_eq!(real_delta.values()[0].to_bits(), 1.5_f64.to_bits());
+
+    let winding = IntegralWindingRepresentative::try_new(&pair, phase.clone(), vec![4, -4])
+        .expect("square relative-cycle representative");
+    let replay_winding = IntegralWindingRepresentative::try_new(&replay, phase, vec![4, -4])
+        .expect("square representative replay");
+    assert_eq!(winding.chain().coefficients(), &[4, -4]);
+    assert!(
+        pair.boundary(winding.chain())
+            .expect("square winding boundary")
+            .coefficients()
+            .is_empty()
+    );
+    assert_eq!(winding.identity(), replay_winding.identity());
+
+    assert_eq!(
+        square_terminal_patch_pair(false, true),
+        Err(TerminalRelativeError::TerminalInsulationOverlap {
+            terminal: "terminal/square-driven".to_owned(),
+            cell: CellRef::new(0, 0),
         })
     );
 }
