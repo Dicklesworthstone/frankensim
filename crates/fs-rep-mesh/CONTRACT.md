@@ -175,13 +175,16 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
     rmesh-008.
 11. The 2-D complex battery (rmesh-011) refuses face-less payloads rather than
     labeling a lower-dimensional object as topological dimension 2, checks
-    d1∘d0 = 0 exactly over seeded admissible fans, refuses a flipped shared-edge
-    orientation, matches hand-computed whole-boundary and selected-face traces,
-    preserves vertex and surviving boundary-edge typed IDs across append-only
-    refinement, and reproduces the closed-form full-turn axisymmetric triangle
-    measure. Compile-fail seals and detached-copy mutations prove safe callers
-    cannot desynchronize admitted tables from cached incidence, identities,
-    measures, or traces.
+    d1∘d0 = 0 exactly over seeded admissible fans, and pins the complete square
+    incidence tables. It refuses a one-face flip while a coherent global
+    reversal negates d1 and boundary orientation, and matches hand-computed
+    whole-boundary and selected-face trace tables. It preserves all typed IDs
+    across cyclic/global orientation changes, and preserves existing vertex plus
+    surviving boundary-edge IDs across append-only refinement. It reproduces
+    planar and full-turn axisymmetric face/edge closed forms including a
+    legitimate zero-measure axis edge. Compile-fail seals and detached-copy
+    mutations prove safe callers cannot desynchronize admitted tables from
+    cached incidence, identities, measures, or traces.
 
 ## Error model
 Structured teaching errors (`MeshBuildError`, `TriComplex2Error`,

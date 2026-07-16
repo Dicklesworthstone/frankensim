@@ -16,7 +16,6 @@ use fs_rep_mesh::{
     bracket_certificate, dual_contour, dual_contour_clipped, point_triangle_distance,
     ray_triangle_watertight, repair, shapes, tri_complex2_lineage_id, winding_exact,
 };
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
@@ -667,6 +666,22 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
     assert_eq!(square.vertex_keys(), square_keys.as_slice());
     assert_eq!(square.faces(), &[[0, 1, 2], [0, 2, 3]]);
     assert_eq!(square.edges(), &[[0, 1], [0, 2], [0, 3], [1, 2], [2, 3]]);
+    assert_eq!(square.d0().cols, 4);
+    assert_eq!(
+        square.d0().rows,
+        vec![
+            vec![(0, -1), (1, 1)],
+            vec![(0, -1), (2, 1)],
+            vec![(0, -1), (3, 1)],
+            vec![(1, -1), (2, 1)],
+            vec![(2, -1), (3, 1)],
+        ]
+    );
+    assert_eq!(
+        square.d1().rows,
+        vec![vec![(0, 1), (3, 1), (1, -1)], vec![(1, 1), (4, 1), (2, -1)],]
+    );
+    assert_eq!(square.d1().cols, 5);
 
     // The admitted tables are exposed only as shared slices. Detached caller
     // edits cannot desynchronize the complex's cached incidence, identities,
@@ -685,13 +700,31 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
     // Hand-computed CCW outer trace; the selected-face trace also retains the
     // diagonal as an interface edge.
     let boundary = square.boundary_trace().expect("whole-complex trace");
-    let oriented: BTreeSet<[u32; 2]> = boundary
+    let boundary_signature: Vec<(usize, usize, [u32; 2])> = boundary
         .edges
         .iter()
-        .map(|edge| edge.oriented_vertices)
+        .map(|edge| (edge.global_edge, edge.source_face, edge.oriented_vertices))
         .collect();
-    assert_eq!(oriented, BTreeSet::from([[0, 1], [1, 2], [2, 3], [3, 0]]));
+    assert_eq!(
+        boundary_signature,
+        vec![
+            (0, 0, [0, 1]),
+            (2, 1, [3, 0]),
+            (3, 0, [1, 2]),
+            (4, 1, [2, 3])
+        ]
+    );
     assert_eq!(boundary.vertices, vec![0, 1, 2, 3]);
+    assert_eq!(boundary.d0.cols, 4);
+    assert_eq!(
+        boundary.d0.rows,
+        vec![
+            vec![(0, -1), (1, 1)],
+            vec![(3, -1), (0, 1)],
+            vec![(1, -1), (2, 1)],
+            vec![(2, -1), (3, 1)],
+        ]
+    );
     assert!(
         boundary
             .d0
@@ -699,11 +732,33 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
             .iter()
             .all(|&value| value == 0)
     );
+    assert_eq!(
+        square
+            .trace_for_faces([1, 0])
+            .expect("permuted whole-complex trace"),
+        boundary,
+        "trace selection order must not affect the canonical result"
+    );
     let selected = square.trace_for_faces([0]).expect("selected-face trace");
-    assert_eq!(selected.edges.len(), 3);
-    assert!(selected.edges.iter().any(|edge| {
-        square.edges()[edge.global_edge] == [0, 2] && edge.oriented_vertices == [2, 0]
-    }));
+    let selected_signature: Vec<(usize, usize, [u32; 2])> = selected
+        .edges
+        .iter()
+        .map(|edge| (edge.global_edge, edge.source_face, edge.oriented_vertices))
+        .collect();
+    assert_eq!(
+        selected_signature,
+        vec![(0, 0, [0, 1]), (1, 0, [2, 0]), (3, 0, [1, 2])]
+    );
+    assert_eq!(selected.vertices, vec![0, 1, 2]);
+    assert_eq!(selected.d0.cols, 3);
+    assert_eq!(
+        selected.d0.rows,
+        vec![
+            vec![(0, -1), (1, 1)],
+            vec![(2, -1), (0, 1)],
+            vec![(1, -1), (2, 1)],
+        ]
+    );
 
     let flipped = TriComplex2::from_triangles(
         lineage,
@@ -720,6 +775,63 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
             second_face: 1,
         })
     ));
+
+    // G3: reversing every face is coherent and negates the exact boundary
+    // coefficients without changing unoriented topology, feature identity, or
+    // metric measure. Cyclic face permutations retain the same orientation and
+    // therefore the same identity as well.
+    let reversed = TriComplex2::from_triangles(
+        lineage,
+        square_vertices.clone(),
+        square_keys.clone(),
+        vec![[0, 2, 1], [0, 3, 2]],
+        planar,
+    )
+    .expect("coherent globally reversed square");
+    assert_eq!(reversed.edges(), square.edges());
+    assert_eq!(reversed.d0(), square.d0());
+    assert_eq!(reversed.vertex_ids(), square.vertex_ids());
+    assert_eq!(reversed.edge_ids(), square.edge_ids());
+    assert_eq!(reversed.face_ids(), square.face_ids());
+    assert_eq!(reversed.face_measure(0), square.face_measure(0));
+    assert_eq!(reversed.face_measure(1), square.face_measure(1));
+    let normalize_row = |row: &[(usize, i8)]| {
+        let mut normalized = row.to_vec();
+        normalized.sort_unstable_by_key(|&(edge, _)| edge);
+        normalized
+    };
+    for (face, (forward, backward)) in square.d1().rows.iter().zip(&reversed.d1().rows).enumerate()
+    {
+        let negated: Vec<(usize, i8)> = normalize_row(forward)
+            .into_iter()
+            .map(|(edge, sign)| (edge, -sign))
+            .collect();
+        assert_eq!(
+            normalize_row(backward),
+            negated,
+            "globally reversed face {face} did not negate its incidence row"
+        );
+    }
+    let reversed_boundary = reversed
+        .boundary_trace()
+        .expect("globally reversed boundary trace");
+    assert_eq!(
+        reversed_boundary
+            .edges
+            .iter()
+            .map(|edge| edge.oriented_vertices)
+            .collect::<Vec<_>>(),
+        vec![[1, 0], [0, 3], [2, 1], [3, 2]]
+    );
+    let cyclic = TriComplex2::from_triangles(
+        lineage,
+        square_vertices.clone(),
+        square_keys.clone(),
+        vec![[1, 2, 0], [2, 3, 0]],
+        planar,
+    )
+    .expect("coherent cyclic face permutations");
+    assert_eq!(cyclic.face_ids(), square.face_ids());
 
     // Refinement appends one stable key. Existing vertex IDs and boundary-edge
     // IDs remain unchanged even though the face table is replaced.
@@ -742,6 +854,24 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
         );
     }
 
+    let planar_scaled = TriComplex2::from_triangles(
+        lineage,
+        vec![[0.0, 0.0], [3.0, 0.0], [0.0, 4.0]],
+        vec![201, 202, 203],
+        vec![[0, 1, 2]],
+        Metric2::planar(2.0).expect("positive planar thickness"),
+    )
+    .expect("3-4-5 planar metric fixture");
+    assert_eq!(planar_scaled.face_measure(0), Some(12.0));
+    assert_eq!(
+        (0..planar_scaled.edges().len())
+            .map(|edge| planar_scaled
+                .edge_measure(edge)
+                .expect("admitted edge measure"))
+            .collect::<Vec<_>>(),
+        vec![6.0, 8.0, 10.0]
+    );
+
     // Exact linear-radius quadrature over the meridian triangle:
     // area=1/2, mean radius=4/3, full sweep=2π, hence volume=4π/3.
     let axisymmetric = TriComplex2::from_triangles(
@@ -758,6 +888,42 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
         (measured - expected).abs() <= 8.0 * f64::EPSILON * expected,
         "axisymmetric measure mismatch: measured={measured:.17e}, expected={expected:.17e}"
     );
+    for (edge, expected_edge) in [
+        3.0 * core::f64::consts::PI,
+        2.0 * core::f64::consts::PI,
+        3.0 * core::f64::consts::PI * 2.0_f64.sqrt(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let measured_edge = axisymmetric
+            .edge_measure(edge)
+            .expect("axisymmetric edge measure");
+        assert!(
+            (measured_edge - expected_edge).abs() <= 8.0 * f64::EPSILON * expected_edge,
+            "axisymmetric edge {edge} mismatch: measured={measured_edge:.17e}, expected={expected_edge:.17e}"
+        );
+    }
+    let axis_touching = TriComplex2::from_triangles(
+        lineage,
+        vec![[0.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
+        vec![301, 302, 303],
+        vec![[0, 1, 2]],
+        Metric2::axisymmetric(core::f64::consts::TAU).expect("full axisymmetric turn"),
+    )
+    .expect("axis-touching meridian fixture");
+    let axis_edge = axis_touching
+        .edge_index(0, 1)
+        .expect("axis edge is present");
+    assert_eq!(axis_touching.edge_measure(axis_edge), Some(0.0));
+    let axis_face = axis_touching
+        .face_measure(0)
+        .expect("axis-touching face measure");
+    let expected_axis_face = core::f64::consts::PI / 3.0;
+    assert!(
+        (axis_face - expected_axis_face).abs() <= 8.0 * f64::EPSILON * expected_axis_face,
+        "axis-touching face mismatch: measured={axis_face:.17e}, expected={expected_axis_face:.17e}"
+    );
 
     verdict(
         "rmesh-011",
@@ -765,9 +931,12 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
         &format!(
             "face-less pseudo-2D payload refused; {fan_count} seeded admissible fans satisfy \
              d1*d0=0 exactly (seed {SEED:#x}); \
-             flipped adjacency refused; whole/subcomplex traces match hand orientation; \
-             vertex and boundary-edge EntityIds survive append-only refinement; \
-             full-turn axisymmetric triangle measure={measured:.17e}"
+             flipped adjacency refused while coherent global reversal negates d1; \
+             whole/subcomplex traces match exact hand incidence; \
+             all feature EntityIds survive orientation changes, while existing vertex and \
+             surviving boundary-edge IDs survive append-only refinement; \
+             planar and axisymmetric face/edge measures match closed forms \
+             (full-turn triangle={measured:.17e}, axis-touching={axis_face:.17e})"
         ),
     );
 }
