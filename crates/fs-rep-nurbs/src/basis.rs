@@ -753,6 +753,43 @@ impl<S: Scalar> KnotVector<S> {
         self.admitted_after_validation().span_after_preflight(t)
     }
 
+    /// Validate this owning knot vector and resolve one span with a shared
+    /// cancellation gate.
+    ///
+    /// Aggregate validation-plus-search work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission and the
+    /// admitted directional search. No partial admitted authority or span
+    /// index is published. This primitive does not consume the `Cx` budget or
+    /// finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning lookup's work, structure, or parameter
+    /// refusal when it wins before an observed cancellation.
+    pub fn span_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<KnotSpanRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_with_poll(t, &mut should_cancel)
+    }
+
+    fn span_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<KnotSpanRun, NurbsError> {
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.span_search_work())
+            .ok_or_else(|| NurbsError::Domain {
+                what: "knot-span work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "knot-span evaluation")?;
+        match self.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => self
+                .admitted_after_validation()
+                .span_with_poll(t, should_cancel),
+            KnotValidationOutcome::Cancelled => Ok(KnotSpanRun::Cancelled),
+        }
+    }
+
     /// All nonzero basis-function values at `t` (Cox–de Boor triangle,
     /// Piegl–Tiller A2.2): `N_{span-p..=span, p}(t)`.
     ///
@@ -770,6 +807,45 @@ impl<S: Scalar> KnotVector<S> {
         Self::enforce_work(total_work, "basis evaluation")?;
         self.validate_live()?;
         self.admitted_after_validation().basis_after_preflight(t)
+    }
+
+    /// Validate this owning knot vector and evaluate one complete nonzero
+    /// basis row with a shared cancellation gate.
+    ///
+    /// Aggregate validation-plus-basis work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission, span search,
+    /// fallible scratch allocation, the Cox-de Boor triangle, finite checks,
+    /// and final publication. No partial admitted authority or basis row is
+    /// published. This primitive does not consume the `Cx` budget or finalize
+    /// its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning evaluation's work, structure, parameter,
+    /// allocation, or finite-arithmetic refusal when it wins before an
+    /// observed cancellation.
+    pub fn basis_with_cx(&self, t: S, cx: &Cx<'_>) -> Result<BasisRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.basis_with_poll(t, &mut should_cancel)
+    }
+
+    fn basis_with_poll(
+        &self,
+        t: S,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<BasisRun<S>, NurbsError> {
+        let total_work = self
+            .validation_work()?
+            .checked_add(self.basis_operation_work()?)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "basis total-work accounting overflows u128".to_string(),
+            })?;
+        Self::enforce_work(total_work, "basis evaluation")?;
+        match self.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => self
+                .admitted_after_validation()
+                .basis_with_poll(t, should_cancel),
+            KnotValidationOutcome::Cancelled => Ok(BasisRun::Cancelled),
+        }
     }
 }
 
@@ -865,14 +941,14 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
 
     /// Evaluate all nonzero basis values with bounded cancellation polling.
     ///
-    /// This method is deliberately available only on an admitted immutable
-    /// snapshot: it does not imply that the owning [`KnotVector::admit`]
-    /// structural scan is cancellation-aware. Cancellation is checked after
-    /// cheap request/work admission, at fixed work strides, before each
-    /// allocation, and immediately before publication. [`BasisRun::Cancelled`]
-    /// carries no partial basis row. The caller remains responsible for
-    /// draining and finalizing any surrounding executor scope; `Cx` budgets are
-    /// not consumed by this measured primitive.
+    /// This admitted path reuses an immutable snapshot without structural
+    /// rescanning; [`KnotVector::basis_with_cx`] provides the owning
+    /// validation-plus-evaluation peer. Cancellation is checked after cheap
+    /// request/work admission, at fixed work strides, before each allocation,
+    /// and immediately before publication. [`BasisRun::Cancelled`] carries no
+    /// partial basis row. The caller remains responsible for draining and
+    /// finalizing any surrounding executor scope; `Cx` budgets are not consumed
+    /// by this measured primitive.
     ///
     /// # Errors
     /// Returns a structured refusal for domain, work, allocation, or finite
@@ -1287,6 +1363,18 @@ mod tests {
         let admitted = knots.admit().expect("admitted fixture");
         with_basis_cx(true, |cx| {
             assert_eq!(
+                knots
+                    .basis_with_cx(0.5, cx)
+                    .expect("valid owning request reaches cancellation"),
+                BasisRun::Cancelled
+            );
+            assert_eq!(
+                knots
+                    .basis_with_cx(f64::NAN, cx)
+                    .expect("owning validation cancellation precedes parameter refusal"),
+                BasisRun::Cancelled
+            );
+            assert_eq!(
                 admitted
                     .basis_with_cx(0.5, cx)
                     .expect("valid request reaches cancellation"),
@@ -1310,6 +1398,18 @@ mod tests {
             .span(f64::NAN)
             .expect_err("non-finite legacy parameter");
         with_basis_cx(true, |cx| {
+            assert_eq!(
+                knots
+                    .span_with_cx(0.5, cx)
+                    .expect("valid owning request reaches cancellation"),
+                KnotSpanRun::Cancelled
+            );
+            assert_eq!(
+                knots
+                    .span_with_cx(f64::NAN, cx)
+                    .expect("owning validation cancellation precedes parameter refusal"),
+                KnotSpanRun::Cancelled
+            );
             assert_eq!(
                 admitted
                     .span_with_cx(0.5, cx)
@@ -1350,6 +1450,14 @@ mod tests {
         with_basis_cx(false, |cx| {
             for parameter in [0.6, 1.0] {
                 assert_eq!(
+                    knots
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable owning float span"),
+                    KnotSpanRun::Complete {
+                        span: knots.span(parameter).expect("legacy owning float span"),
+                    }
+                );
+                assert_eq!(
                     admitted
                         .span_with_cx(parameter, cx)
                         .expect("cancellable float span"),
@@ -1359,6 +1467,16 @@ mod tests {
                 );
             }
             for parameter in [Rat::new(3, 5), Rat::int(1)] {
+                assert_eq!(
+                    exact_knots
+                        .span_with_cx(parameter, cx)
+                        .expect("cancellable owning exact span"),
+                    KnotSpanRun::Complete {
+                        span: exact_knots
+                            .span(parameter)
+                            .expect("legacy owning exact span"),
+                    }
+                );
                 assert_eq!(
                     exact_admitted
                         .span_with_cx(parameter, cx)
@@ -1418,6 +1536,54 @@ mod tests {
     }
 
     #[test]
+    fn owning_span_and_basis_share_the_source_validation_gate() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let mut validation_polls = 0usize;
+        assert_eq!(
+            knots
+                .validate_live_with_poll(|| {
+                    validation_polls += 1;
+                    false
+                })
+                .expect("healthy source validation"),
+            KnotValidationOutcome::Complete
+        );
+
+        let mut span_polls = 0usize;
+        let span = knots
+            .span_with_poll(0.5, &mut || {
+                span_polls += 1;
+                span_polls == validation_polls + 1
+            })
+            .expect("owning span seam cancellation");
+        assert_eq!(span, KnotSpanRun::Cancelled);
+        assert_eq!(span_polls, validation_polls + 1);
+
+        let mut basis_polls = 0usize;
+        let basis = knots
+            .basis_with_poll(0.5, &mut || {
+                basis_polls += 1;
+                basis_polls == validation_polls + 1
+            })
+            .expect("owning basis seam cancellation");
+        assert_eq!(basis, BasisRun::Cancelled);
+        assert_eq!(basis_polls, validation_polls + 1);
+
+        let mut malformed = knots.clone();
+        malformed.knots.clear();
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                malformed.span_with_cx(0.5, cx),
+                Err(NurbsError::Structure { .. })
+            ));
+            assert!(matches!(
+                malformed.basis_with_cx(0.5, cx),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+    }
+
+    #[test]
     fn admitted_basis_cancellation_replays_at_a_fixed_poll_ordinal() {
         let knots = cancellation_fixture();
         let admitted = knots.admit().expect("admitted fixture");
@@ -1438,18 +1604,66 @@ mod tests {
     }
 
     #[test]
-    fn admitted_basis_with_cx_matches_legacy_exactly() {
+    fn owning_and_admitted_basis_with_cx_match_legacy_exactly() {
         let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.25, 0.75, 1.0, 1.0, 1.0], 2)
             .expect("quadratic multispan knots");
         let admitted = knots.admit().expect("admitted fixture");
-        let legacy = admitted.basis(0.6).expect("legacy basis");
+        let legacy = knots.basis(0.6).expect("legacy owning basis");
+
+        let exact_knots = KnotVector::new(
+            vec![
+                Rat::int(0),
+                Rat::int(0),
+                Rat::int(0),
+                Rat::new(1, 4),
+                Rat::new(3, 4),
+                Rat::int(1),
+                Rat::int(1),
+                Rat::int(1),
+            ],
+            2,
+        )
+        .expect("exact quadratic multispan knots");
+        let exact_admitted = exact_knots.admit().expect("admitted exact fixture");
+        let exact_legacy = exact_knots
+            .basis(Rat::new(3, 5))
+            .expect("legacy owning exact basis");
+
         with_basis_cx(false, |cx| {
-            let run = admitted.basis_with_cx(0.6, cx).expect("cancellable basis");
             assert_eq!(
-                run,
+                knots
+                    .basis_with_cx(0.6, cx)
+                    .expect("cancellable owning basis"),
+                BasisRun::Complete {
+                    span: legacy.0,
+                    values: legacy.1.clone(),
+                }
+            );
+            assert_eq!(
+                admitted
+                    .basis_with_cx(0.6, cx)
+                    .expect("cancellable admitted basis"),
                 BasisRun::Complete {
                     span: legacy.0,
                     values: legacy.1,
+                }
+            );
+            assert_eq!(
+                exact_knots
+                    .basis_with_cx(Rat::new(3, 5), cx)
+                    .expect("cancellable owning exact basis"),
+                BasisRun::Complete {
+                    span: exact_legacy.0,
+                    values: exact_legacy.1.clone(),
+                }
+            );
+            assert_eq!(
+                exact_admitted
+                    .basis_with_cx(Rat::new(3, 5), cx)
+                    .expect("cancellable admitted exact basis"),
+                BasisRun::Complete {
+                    span: exact_legacy.0,
+                    values: exact_legacy.1,
                 }
             );
         });
@@ -1603,6 +1817,15 @@ mod tests {
             high_degree.basis(0.5).is_err(),
             "quadratic Cox-de Boor work must be refused before entering billions of iterations"
         );
+        with_basis_cx(true, |cx| {
+            assert!(
+                matches!(
+                    high_degree.basis_with_cx(0.5, cx),
+                    Err(NurbsError::Domain { .. })
+                ),
+                "aggregate owning basis work refusal must precede cancellation"
+            );
+        });
 
         let interior_count = 1_000_000usize;
         let mut many_knots = Vec::with_capacity(interior_count + 4);
@@ -1624,5 +1847,15 @@ mod tests {
             low_degree_many_spans.span(0.5).is_err(),
             "the public span search must share the defensive scan ceiling"
         );
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                low_degree_many_spans.basis_with_cx(0.5, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+            assert!(matches!(
+                low_degree_many_spans.span_with_cx(0.5, cx),
+                Err(NurbsError::Domain { .. })
+            ));
+        });
     }
 }

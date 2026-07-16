@@ -46,10 +46,13 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   `KnotVector::admit_with_cx` returns `KnotAdmissionRun` and publishes the
   lifetime-bound admitted authority only after every validation pass and its
   final checkpoint complete.
-  `AdmittedKnotVector::span_with_cx` returns transactional `KnotSpanRun` state:
+  Owning and admitted `span_with_cx` return transactional `KnotSpanRun` state:
   the complete scalar span index or cancellation with no published index.
-  `AdmittedKnotVector::basis_with_cx` returns transactional `BasisRun` state:
-  complete span/values or cancellation with no partial row.
+  Owning and admitted `basis_with_cx` return transactional `BasisRun` state:
+  complete span/values or cancellation with no partial row. Owning entry points
+  carry one gate through structural admission and the admitted operation while
+  preserving aggregate validation-plus-operation work admission; admitted
+  entry points reuse immutable source authority without rescanning it.
 - `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation in dimensions 0–3;
   construction rejects non-finite homogeneous products rather than accepting
   finite source values whose multiplication overflowed. f64 derivatives
@@ -319,17 +322,22 @@ limits. Direct `KnotVector` domain/span/basis admission charges live-knot
 validation, worst-case span search, and Cox–de Boor triangular degree work
 before allocating or iterating. Borrowed admitted knot, curve, and surface
 views make repeated source validation unnecessary for basis, evaluation,
-partials, and span boxes. The admitted-only `span_with_cx` path preserves
-checked work-refusal then parameter-refusal precedence, polls the directional
-linear search after at most 64 span steps, and gates final index publication.
-It allocates no payload and does not claim owning admission, wall-time
+partials, and span boxes. Owning `span_with_cx` preserves aggregate
+validation-plus-span work refusal before one gate spans fixed-stride source
+validation and the admitted search. Cancellation observed during source
+validation can precede the later parameter refusal. After source admission,
+the admitted path preserves checked span-work then parameter-refusal
+precedence, polls the directional linear search after at most 64 span steps,
+and gates final index publication. It allocates no payload. Owning
+`basis_with_cx` similarly preserves aggregate validation-plus-basis work
+refusal before carrying the gate through source validation and the admitted
+basis pipeline; the admitted path preserves checked basis-work then parameter
+refusal precedence, polls before allocation and publication plus every 64
+logical span/initialization/triangle/finite-check operations, and drops all
+scratch on `BasisRun::Cancelled`. Source validation and each operation retain
+independent defensive ceilings. These primitives do not claim wall-time
 preemption, caller-budget consumption, or executor drain/finalize authority;
-individual generic-scalar comparisons remain non-preemptible. The admitted-only
-`basis_with_cx` path preserves
-constant-time parameter/work-refusal precedence, polls before allocation and
-publication plus every 64 logical span/initialization/triangle/finite-check
-operations, and drops all scratch on `BasisRun::Cancelled`. It deliberately
-does not claim caller-budget consumption or executor drain/finalize authority.
+individual generic-scalar comparisons remain non-preemptible.
 `KnotVector::try_clone_with_cx` preserves count-derived work and 64 MiB
 retained-output refusal precedence, then polls before and after allocation,
 every 64 ordered scalar copies, and immediately before publication.
