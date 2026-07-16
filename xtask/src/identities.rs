@@ -9,12 +9,17 @@ use std::process::{Command, ExitCode};
 
 const DECLARATION_MARKER: &str = concat!("frankensim-identity-", "schema-v1");
 const REGISTRY_FILE: &str = "identity-schemas.json";
+const REGISTRY_SCHEMA_V1: &str = "frankensim-identity-schemas-v1";
+const REGISTRY_SCHEMA_V2: &str = "frankensim-identity-schemas-v2";
 const AUTHORITY_FILE: &str = "identity-authorities.json";
 const AUTHORITY_SCHEMA: &str = "frankensim-identity-authorities-v1";
 const GOLDEN_COUPLING_SCHEMA: &str = "frankensim-golden-couplings-v1";
 const SCHEMA_FINGERPRINT_DOMAIN: &str =
     "org.frankensim.xtask.semantic-identity-schema-fingerprint.v1";
 const SCHEMA_FINGERPRINT_ALGORITHM: &str = "blake3-256-domain-separated-v1";
+const BYTE_SCHEMA_FINGERPRINT_DOMAIN: &str =
+    "org.frankensim.xtask.semantic-identity-byte-schema-fingerprint.v1";
+const BYTE_SCHEMA_FINGERPRINT_ALGORITHM: &str = "blake3-256-domain-separated-v1";
 const GATE_IMPLEMENTATION_PATH: &str = "xtask/src/identities.rs";
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DECLARATIONS: usize = 4_096;
@@ -223,6 +228,8 @@ struct IdentityDecl {
     coupling_surface: String,
     schema_base_hash: Option<[u8; 32]>,
     schema_fingerprint: String,
+    byte_schema_base_hash: Option<[u8; 32]>,
+    byte_schema_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -953,6 +960,8 @@ fn parse_declaration(owner: &str, raw: BTreeMap<String, String>) -> Result<Ident
         coupling_surface,
         schema_base_hash: None,
         schema_fingerprint: String::new(),
+        byte_schema_base_hash: None,
+        byte_schema_fingerprint: String::new(),
     })
 }
 
@@ -3140,6 +3149,10 @@ fn schema_fingerprint_digest(payload: &[u8]) -> [u8; 32] {
     *fs_blake3::hash_domain(SCHEMA_FINGERPRINT_DOMAIN, payload).as_bytes()
 }
 
+fn byte_schema_fingerprint_digest(payload: &[u8]) -> [u8; 32] {
+    *fs_blake3::hash_domain(BYTE_SCHEMA_FINGERPRINT_DOMAIN, payload).as_bytes()
+}
+
 fn schema_fingerprint_hex(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
 
@@ -3158,6 +3171,128 @@ fn canonical_schema_fingerprint(value: &str, version: u32, digest_bytes: usize) 
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn identity_byte_schema_base_hash_with_references(
+    root: &Path,
+    decl: &IdentityDecl,
+    text: &str,
+    index: &RustSourceIndex<'_>,
+    references: &IdentityReferenceCache,
+    exemptions: &[IdentityExemption],
+) -> Result<[u8; 32], String> {
+    let mut payload = Vec::new();
+    for (label, value) in [
+        ("identity-id", decl.id.as_bytes()),
+        ("domain", decl.domain.as_bytes()),
+        ("digest", decl.digest.as_bytes()),
+        ("encoding", decl.encoding.as_bytes()),
+    ] {
+        fingerprint_part(&mut payload, label.as_bytes());
+        fingerprint_part(&mut payload, value);
+    }
+    fingerprint_part(&mut payload, b"version");
+    fingerprint_part(&mut payload, &decl.version.to_le_bytes());
+    let domain_const = decl.domain_const.as_deref().ok_or_else(|| {
+        format!(
+            "identity {}: domain_const is required for byte-schema fingerprinting",
+            decl.id
+        )
+    })?;
+    let domain_constant = parse_schema_constant_reference(domain_const).map_err(|detail| {
+        format!(
+            "identity {}: domain_const {domain_const:?} is invalid: {detail}",
+            decl.id
+        )
+    })?;
+    fingerprint_part(&mut payload, b"domain-const-authority");
+    fingerprint_part(&mut payload, domain_constant.canonical().as_bytes());
+
+    for field in &decl.semantic_fields {
+        fingerprint_part(&mut payload, b"semantic-field");
+        fingerprint_part(&mut payload, field.as_bytes());
+    }
+    for field in &decl.external_semantic_fields {
+        fingerprint_part(&mut payload, b"external-semantic-field");
+        fingerprint_part(&mut payload, field.as_bytes());
+    }
+    for field in &decl.source_fields {
+        fingerprint_part(&mut payload, b"source-field");
+        fingerprint_part(&mut payload, field.qualified.as_bytes());
+        fingerprint_part(&mut payload, field.class.name().as_bytes());
+    }
+    for binding in &decl.source_bindings {
+        fingerprint_part(&mut payload, b"source-binding");
+        fingerprint_part(&mut payload, binding.source_field.as_bytes());
+        for semantic in &binding.semantic_fields {
+            fingerprint_part(&mut payload, semantic.as_bytes());
+        }
+    }
+    for (field, _) in &decl.excluded_fields {
+        fingerprint_part(&mut payload, b"excluded-field");
+        fingerprint_part(&mut payload, field.as_bytes());
+    }
+
+    for source in &decl.sources {
+        let structs = braced_declaration_fragments(text, &format!("struct {source}"))
+            .into_iter()
+            .filter(|fragment| {
+                let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
+                rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+            })
+            .collect::<Vec<_>>();
+        let enums = braced_declaration_fragments(text, &format!("enum {source}"))
+            .into_iter()
+            .filter(|fragment| {
+                let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
+                rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+            })
+            .collect::<Vec<_>>();
+        let declaration = match (structs.as_slice(), enums.as_slice()) {
+            ([declaration], []) | ([], [declaration]) => *declaration,
+            _ => {
+                return Err(format!(
+                    "identity {}: source {source:?} must resolve to exactly one struct or enum declaration",
+                    decl.id
+                ));
+            }
+        };
+        fingerprint_part(&mut payload, b"source-declaration");
+        fingerprint_part(&mut payload, source.as_bytes());
+        fingerprint_part(&mut payload, &normalized_rust_fragment(declaration));
+    }
+
+    let mut constant_declarations = Vec::new();
+    for constant in &decl.schema_constants {
+        let path = constant.path.as_deref().unwrap_or(&decl.owner);
+        let reference = references.constant(path, &constant.symbol)?;
+        constant_declarations.push((constant.canonical(), reference.declaration.clone()));
+    }
+    constant_declarations.sort_by(|left, right| left.0.cmp(&right.0));
+    for (constant, declaration) in constant_declarations {
+        fingerprint_part(&mut payload, b"schema-constant");
+        fingerprint_part(&mut payload, constant.as_bytes());
+        fingerprint_part(&mut payload, &declaration);
+    }
+
+    // Covered helpers are allowed to sit outside the declared encoder closure,
+    // so retain their exact bodies in the byte ratchet until exemptions gain an
+    // explicit implementation-only effect classification.
+    for exemption in exemptions
+        .iter()
+        .filter(|exemption| exemption.covered_by == decl.id)
+    {
+        fingerprint_part(&mut payload, b"covered-byte-helper");
+        fingerprint_part(&mut payload, exemption.path.as_bytes());
+        fingerprint_part(&mut payload, exemption.symbol.as_bytes());
+        fingerprint_part(&mut payload, exemption.covered_by.as_bytes());
+        fingerprint_part(
+            &mut payload,
+            &external_exemption_schema_bytes(root, exemption)?,
+        );
+    }
+
+    Ok(byte_schema_fingerprint_digest(&payload))
 }
 
 fn identity_schema_base_hash_with_index(
@@ -3354,13 +3489,63 @@ fn identity_schema_base_hash(
     identity_schema_base_hash_with_index(root, decl, text, &index, &references, exemptions)
 }
 
-fn resolve_schema_fingerprint(
+#[cfg(test)]
+fn identity_byte_schema_base_hash(
+    root: &Path,
+    decl: &IdentityDecl,
+    text: &str,
+    exemptions: &[IdentityExemption],
+) -> Result<[u8; 32], String> {
+    let index = RustSourceIndex::new(text);
+    let inline_sources = BTreeMap::from([(decl.owner.clone(), text)]);
+    let references = IdentityReferenceCache::build(root, std::iter::once(decl), &inline_sources);
+    identity_byte_schema_base_hash_with_references(
+        root,
+        decl,
+        text,
+        &index,
+        &references,
+        exemptions,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FingerprintProjection {
+    Implementation,
+    ByteSchema,
+}
+
+impl FingerprintProjection {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Implementation => "implementation",
+            Self::ByteSchema => "byte-schema",
+        }
+    }
+
+    fn base_hash(self, declaration: &IdentityDecl) -> Option<[u8; 32]> {
+        match self {
+            Self::Implementation => declaration.schema_base_hash,
+            Self::ByteSchema => declaration.byte_schema_base_hash,
+        }
+    }
+
+    fn digest(self, payload: &[u8]) -> [u8; 32] {
+        match self {
+            Self::Implementation => schema_fingerprint_digest(payload),
+            Self::ByteSchema => byte_schema_fingerprint_digest(payload),
+        }
+    }
+}
+
+fn resolve_identity_fingerprint(
     index: usize,
     declarations: &[IdentityDecl],
     indices: &BTreeMap<String, usize>,
     states: &mut [u8],
     resolved: &mut [Option<[u8; 32]>],
     stack: &mut Vec<usize>,
+    projection: FingerprintProjection,
 ) -> Result<[u8; 32], String> {
     if states[index] == 2 {
         return resolved[index].ok_or_else(|| {
@@ -3389,14 +3574,21 @@ fn resolve_schema_fingerprint(
     states[index] = 1;
     stack.push(index);
     let declaration = &declarations[index];
-    let base_hash = declaration.schema_base_hash.ok_or_else(|| {
+    let base_hash = projection.base_hash(declaration).ok_or_else(|| {
         format!(
-            "identity {}: schema fingerprint base is unavailable",
-            declaration.id
+            "identity {}: {} fingerprint base is unavailable",
+            declaration.id,
+            projection.name()
         )
     })?;
     let mut payload = Vec::new();
-    fingerprint_part(&mut payload, b"owner-schema-base");
+    fingerprint_part(
+        &mut payload,
+        match projection {
+            FingerprintProjection::Implementation => b"owner-schema-base".as_slice(),
+            FingerprintProjection::ByteSchema => b"owner-byte-schema-base".as_slice(),
+        },
+    );
     fingerprint_part(&mut payload, &base_hash);
     let mut dependencies = declaration.schema_dependencies.clone();
     dependencies.sort();
@@ -3413,13 +3605,14 @@ fn resolve_schema_fingerprint(
                 declaration.id
             ));
         }
-        let dependency_hash = resolve_schema_fingerprint(
+        let dependency_hash = resolve_identity_fingerprint(
             dependency_index,
             declarations,
             indices,
             states,
             resolved,
             stack,
+            projection,
         )?;
         fingerprint_part(&mut payload, dependency.as_bytes());
         fingerprint_part(
@@ -3428,7 +3621,7 @@ fn resolve_schema_fingerprint(
         );
         fingerprint_part(&mut payload, &dependency_hash);
     }
-    let hash = schema_fingerprint_digest(&payload);
+    let hash = projection.digest(&payload);
     let popped = stack.pop();
     debug_assert_eq!(popped, Some(index));
     states[index] = 2;
@@ -3436,9 +3629,35 @@ fn resolve_schema_fingerprint(
     Ok(hash)
 }
 
+fn resolve_fingerprint_projection(
+    declarations: &[IdentityDecl],
+    indices: &BTreeMap<String, usize>,
+    projection: FingerprintProjection,
+) -> Result<Vec<[u8; 32]>, String> {
+    let mut states = vec![0; declarations.len()];
+    let mut resolved = vec![None; declarations.len()];
+    let mut stack = Vec::new();
+    for index in indices.values().copied() {
+        resolve_identity_fingerprint(
+            index,
+            declarations,
+            indices,
+            &mut states,
+            &mut resolved,
+            &mut stack,
+            projection,
+        )?;
+    }
+    Ok(resolved
+        .into_iter()
+        .map(|hash| hash.expect("each declaration was resolved by the complete DFS pass"))
+        .collect())
+}
+
 fn resolve_schema_fingerprints(declarations: &mut [IdentityDecl]) -> Vec<Violation> {
     for declaration in declarations.iter_mut() {
         declaration.schema_fingerprint.clear();
+        declaration.byte_schema_fingerprint.clear();
     }
     let mut indices = BTreeMap::new();
     for (index, declaration) in declarations.iter().enumerate() {
@@ -3460,6 +3679,15 @@ fn resolve_schema_fingerprints(declarations: &mut [IdentityDecl]) -> Vec<Violati
                 &declaration.owner,
                 format!(
                     "identity {}: schema fingerprint base is unavailable",
+                    declaration.id
+                ),
+            ));
+        }
+        if declaration.byte_schema_base_hash.is_none() {
+            preflight.push(identity_violation(
+                &declaration.owner,
+                format!(
+                    "identity {}: byte-schema fingerprint base is unavailable",
                     declaration.id
                 ),
             ));
@@ -3488,25 +3716,35 @@ fn resolve_schema_fingerprints(declarations: &mut [IdentityDecl]) -> Vec<Violati
         return preflight;
     }
 
-    let mut states = vec![0; declarations.len()];
-    let mut resolved = vec![None; declarations.len()];
-    let mut stack = Vec::new();
-    for index in indices.values().copied() {
-        if let Err(detail) = resolve_schema_fingerprint(
-            index,
-            declarations,
-            &indices,
-            &mut states,
-            &mut resolved,
-            &mut stack,
-        ) {
-            return vec![identity_violation("<repo>", detail)];
-        }
-    }
-    for (declaration, hash) in declarations.iter_mut().zip(resolved) {
-        let hash = hash.expect("each declaration was resolved by the complete DFS pass");
-        declaration.schema_fingerprint =
-            format!("v{}-{}", declaration.version, schema_fingerprint_hex(&hash));
+    let implementation = match resolve_fingerprint_projection(
+        declarations,
+        &indices,
+        FingerprintProjection::Implementation,
+    ) {
+        Ok(resolved) => resolved,
+        Err(detail) => return vec![identity_violation("<repo>", detail)],
+    };
+    let byte_schema = match resolve_fingerprint_projection(
+        declarations,
+        &indices,
+        FingerprintProjection::ByteSchema,
+    ) {
+        Ok(resolved) => resolved,
+        Err(detail) => return vec![identity_violation("<repo>", detail)],
+    };
+    for ((declaration, implementation_hash), byte_schema_hash) in
+        declarations.iter_mut().zip(implementation).zip(byte_schema)
+    {
+        declaration.schema_fingerprint = format!(
+            "v{}-{}",
+            declaration.version,
+            schema_fingerprint_hex(&implementation_hash)
+        );
+        declaration.byte_schema_fingerprint = format!(
+            "v{}-{}",
+            declaration.version,
+            schema_fingerprint_hex(&byte_schema_hash)
+        );
     }
     Vec::new()
 }
@@ -4811,6 +5049,32 @@ fn external_owner_schema_fingerprint(
         owner.version,
         schema_fingerprint_hex(&schema_fingerprint_digest(&payload))
     ))
+}
+
+fn external_owner_byte_schema_fingerprint(
+    owner: &ExternalOwner,
+    implementation_fingerprint: &str,
+) -> String {
+    let mut payload = Vec::new();
+    for (label, value) in [
+        ("identity-id", owner.id.as_bytes()),
+        ("domain", owner.domain.as_bytes()),
+    ] {
+        fingerprint_part(&mut payload, label.as_bytes());
+        fingerprint_part(&mut payload, value);
+    }
+    fingerprint_part(&mut payload, b"version");
+    fingerprint_part(&mut payload, &owner.version.to_le_bytes());
+    // External authorities do not yet declare a complete byte grammar. Keep
+    // their exact producer closure in the ratchet until such a descriptor can
+    // prove that a body-only change preserves emitted identity bytes.
+    fingerprint_part(&mut payload, b"producer-closure");
+    fingerprint_part(&mut payload, implementation_fingerprint.as_bytes());
+    format!(
+        "v{}-{}",
+        owner.version,
+        schema_fingerprint_hex(&byte_schema_fingerprint_digest(&payload))
+    )
 }
 
 fn external_owner_covers_exemption(
@@ -7764,6 +8028,21 @@ fn load_declarations(root: &Path) -> (Vec<IdentityDecl>, Vec<Violation>) {
     for mut source in pending {
         let source_index = RustSourceIndex::new(&source.text);
         for declaration in &mut source.declarations {
+            match identity_byte_schema_base_hash_with_references(
+                root,
+                declaration,
+                &source.text,
+                &source_index,
+                &references,
+                &exemptions,
+            ) {
+                Ok(hash) => declaration.byte_schema_base_hash = Some(hash),
+                Err(detail) => {
+                    source
+                        .violations
+                        .push(identity_violation(&source.owner, detail));
+                }
+            }
             match identity_schema_base_hash_with_index(
                 root,
                 declaration,
@@ -7853,7 +8132,7 @@ fn render_registry(
     exemptions: &[IdentityExemption],
 ) -> Result<String, String> {
     let mut out = format!(
-        "{{\n\"schema\": \"frankensim-identity-schemas-v1\",\n\"schema_fingerprint_algorithm\": \"{SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"identities\": [\n"
+        "{{\n\"schema\": \"{REGISTRY_SCHEMA_V2}\",\n\"implementation_fingerprint_algorithm\": \"{SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"byte_schema_fingerprint_algorithm\": \"{BYTE_SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"identities\": [\n"
     );
     for (index, declaration) in declarations.iter().enumerate() {
         if index > 0 {
@@ -7861,7 +8140,7 @@ fn render_registry(
         }
         let _ = write!(
             out,
-            "{{\"id\":\"{}\",\"owner\":\"{}\",\"version_const\":\"{}\",\"version\":{},\"domain\":\"{}\",\"encoder\":\"{}\",\"digest\":\"{}\",\"encoding\":\"{}\",\"schema_fingerprint\":\"{}\",\"coupling_surface\":\"{}\",\"sources\":",
+            "{{\"id\":\"{}\",\"owner\":\"{}\",\"version_const\":\"{}\",\"version\":{},\"domain\":\"{}\",\"encoder\":\"{}\",\"digest\":\"{}\",\"encoding\":\"{}\",\"implementation_fingerprint\":\"{}\",\"byte_schema_fingerprint\":\"{}\",\"coupling_surface\":\"{}\",\"sources\":",
             json_escape(&declaration.id),
             json_escape(&declaration.owner),
             json_escape(&declaration.version_const),
@@ -7871,6 +8150,7 @@ fn render_registry(
             json_escape(&declaration.digest),
             json_escape(&declaration.encoding),
             json_escape(&declaration.schema_fingerprint),
+            json_escape(&declaration.byte_schema_fingerprint),
             json_escape(&declaration.coupling_surface),
         );
         render_string_array(&mut out, declaration.sources.clone());
@@ -7965,15 +8245,17 @@ fn render_registry(
             out.push_str(",\n");
         }
         let fingerprint = external_owner_schema_fingerprint(root, owner, exemptions)?;
+        let byte_schema_fingerprint = external_owner_byte_schema_fingerprint(owner, &fingerprint);
         let _ = write!(
             out,
-            "{{\"id\":\"{}\",\"owner\":\"{}\",\"symbol\":\"{}\",\"version\":{},\"domain\":\"{}\",\"schema_fingerprint\":\"{}\",\"schema_children\":",
+            "{{\"id\":\"{}\",\"owner\":\"{}\",\"symbol\":\"{}\",\"version\":{},\"domain\":\"{}\",\"implementation_fingerprint\":\"{}\",\"byte_schema_fingerprint\":\"{}\",\"schema_children\":",
             json_escape(&owner.id),
             json_escape(&owner.path),
             json_escape(&owner.symbol),
             owner.version,
             json_escape(&owner.domain),
             json_escape(&fingerprint),
+            json_escape(&byte_schema_fingerprint),
         );
         render_string_array(
             &mut out,
@@ -8008,7 +8290,7 @@ fn render_registry(
         let fingerprint = exemption_schema_fingerprint(root, exemption)?;
         let _ = write!(
             out,
-            "{{\"path\":\"{}\",\"symbol\":\"{}\",\"reason\":\"{}\",\"covered_by\":\"{}\",\"schema_fingerprint\":\"{}\"}}",
+            "{{\"path\":\"{}\",\"symbol\":\"{}\",\"reason\":\"{}\",\"covered_by\":\"{}\",\"implementation_fingerprint\":\"{}\"}}",
             json_escape(&exemption.path),
             json_escape(&exemption.symbol),
             json_escape(&exemption.reason),
@@ -8020,7 +8302,25 @@ fn render_registry(
     Ok(out)
 }
 
-fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<String>>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryFingerprints {
+    implementation: Option<String>,
+    byte_schema: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryEpoch {
+    V1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistrySnapshot {
+    epoch: RegistryEpoch,
+    fingerprints: BTreeMap<(String, u32), RegistryFingerprints>,
+}
+
+fn registry_fingerprints(text: &str) -> Result<RegistrySnapshot, String> {
     let parsed = JsonParser::new(text)
         .finish()
         .map_err(|detail| format!("identity registry is not strict JSON: {detail}"))?;
@@ -8032,7 +8332,7 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
     let legacy = ["schema", "identities", "external_authorities"]
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let current = [
+    let v1_current = [
         "schema",
         "schema_fingerprint_algorithm",
         "identities",
@@ -8041,28 +8341,90 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
-    if keys != minimal_legacy && keys != legacy && keys != current {
-        return Err(format!(
-            "identity registry has noncanonical top-level keys {keys:?}"
-        ));
-    }
+    let v2_current = [
+        "schema",
+        "implementation_fingerprint_algorithm",
+        "byte_schema_fingerprint_algorithm",
+        "identities",
+        "external_authorities",
+        "exemptions",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let schema = strict_json_field(object, "schema", "identity registry")
         .and_then(|value| strict_json_string(value, "identity registry schema"))?;
-    if schema != "frankensim-identity-schemas-v1" {
-        return Err(format!(
-            "identity registry schema {schema:?} is not supported"
-        ));
-    }
-    let current_algorithm = if let Some(value) = object.get("schema_fingerprint_algorithm") {
-        let algorithm = strict_json_string(value, "identity registry fingerprint algorithm")?;
-        if algorithm != SCHEMA_FINGERPRINT_ALGORITHM {
+    let (epoch, implementation_field, implementation_required, byte_schema_required) = match schema
+    {
+        REGISTRY_SCHEMA_V1 => {
+            if keys != minimal_legacy && keys != legacy && keys != v1_current {
+                return Err(format!(
+                    "v1 identity registry has noncanonical top-level keys {keys:?}"
+                ));
+            }
+            let current_algorithm = if let Some(value) = object.get("schema_fingerprint_algorithm")
+            {
+                let algorithm = strict_json_string(
+                    value,
+                    "identity registry implementation fingerprint algorithm",
+                )?;
+                if algorithm != SCHEMA_FINGERPRINT_ALGORITHM {
+                    return Err(format!(
+                        "identity registry implementation fingerprint algorithm {algorithm:?} is not supported"
+                    ));
+                }
+                true
+            } else {
+                false
+            };
+            (
+                RegistryEpoch::V1,
+                "schema_fingerprint",
+                current_algorithm,
+                false,
+            )
+        }
+        REGISTRY_SCHEMA_V2 => {
+            if keys != v2_current {
+                return Err(format!(
+                    "v2 identity registry has noncanonical top-level keys {keys:?}"
+                ));
+            }
+            let implementation_algorithm = strict_json_field(
+                object,
+                "implementation_fingerprint_algorithm",
+                "identity registry",
+            )
+            .and_then(|value| {
+                strict_json_string(
+                    value,
+                    "identity registry implementation fingerprint algorithm",
+                )
+            })?;
+            if implementation_algorithm != SCHEMA_FINGERPRINT_ALGORITHM {
+                return Err(format!(
+                    "identity registry implementation fingerprint algorithm {implementation_algorithm:?} is not supported"
+                ));
+            }
+            let byte_schema_algorithm = strict_json_field(
+                object,
+                "byte_schema_fingerprint_algorithm",
+                "identity registry",
+            )
+            .and_then(|value| {
+                strict_json_string(value, "identity registry byte-schema fingerprint algorithm")
+            })?;
+            if byte_schema_algorithm != BYTE_SCHEMA_FINGERPRINT_ALGORITHM {
+                return Err(format!(
+                    "identity registry byte-schema fingerprint algorithm {byte_schema_algorithm:?} is not supported"
+                ));
+            }
+            (RegistryEpoch::V2, "implementation_fingerprint", true, true)
+        }
+        _ => {
             return Err(format!(
-                "identity registry fingerprint algorithm {algorithm:?} is not supported"
+                "identity registry schema {schema:?} is not supported"
             ));
         }
-        true
-    } else {
-        false
     };
     let identities = strict_json_field(object, "identities", "identity registry")
         .and_then(|value| strict_json_array(value, "identity registry identities"))?;
@@ -8085,20 +8447,45 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
                 .and_then(|value| strict_json_string(value, &format!("{context} id")))?;
             let version = strict_json_field(row, "version", &context)
                 .and_then(|value| strict_json_u32(value, &format!("{context} version")))?;
-            let fingerprint = row
-                .get("schema_fingerprint")
-                .map(|value| strict_json_string(value, &format!("{context} schema_fingerprint")))
+            let implementation = row
+                .get(implementation_field)
+                .map(|value| {
+                    strict_json_string(value, &format!("{context} {implementation_field}"))
+                })
                 .transpose()?;
-            if current_algorithm && fingerprint.is_none() {
+            let byte_schema = row
+                .get("byte_schema_fingerprint")
+                .map(|value| {
+                    strict_json_string(value, &format!("{context} byte_schema_fingerprint"))
+                })
+                .transpose()?;
+            if schema == REGISTRY_SCHEMA_V1
+                && (row.contains_key("implementation_fingerprint") || byte_schema.is_some())
+            {
                 return Err(format!(
-                    "{context} is missing schema_fingerprint under {SCHEMA_FINGERPRINT_ALGORITHM}"
+                    "{context} mixes v2 fingerprints into a v1 registry"
+                ));
+            }
+            if schema == REGISTRY_SCHEMA_V2 && row.contains_key("schema_fingerprint") {
+                return Err(format!(
+                    "{context} carries legacy schema_fingerprint in a v2 registry"
+                ));
+            }
+            if implementation_required && implementation.is_none() {
+                return Err(format!(
+                    "{context} is missing {implementation_field} under {SCHEMA_FINGERPRINT_ALGORITHM}"
+                ));
+            }
+            if byte_schema_required && byte_schema.is_none() {
+                return Err(format!(
+                    "{context} is missing byte_schema_fingerprint under {BYTE_SCHEMA_FINGERPRINT_ALGORITHM}"
                 ));
             }
             if !id.contains(':') || id.chars().any(char::is_whitespace) {
                 return Err(format!("{context} id {id:?} is not canonical"));
             }
-            if let Some(fingerprint) = fingerprint {
-                let canonical = if current_algorithm {
+            if let Some(fingerprint) = implementation {
+                let canonical = if implementation_required {
                     canonical_schema_fingerprint(fingerprint, version, 32)
                 } else {
                     canonical_schema_fingerprint(fingerprint, version, 8)
@@ -8106,15 +8493,28 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
                 };
                 if !canonical {
                     return Err(format!(
-                        "{context} schema_fingerprint is not canonical for version {version}"
+                        "{context} {implementation_field} is not canonical for version {version}"
                     ));
                 }
+            }
+            if let Some(fingerprint) = byte_schema
+                && !canonical_schema_fingerprint(fingerprint, version, 32)
+            {
+                return Err(format!(
+                    "{context} byte_schema_fingerprint is not canonical for version {version}"
+                ));
             }
             if !ids.insert(id.to_string()) {
                 return Err(format!("identity registry duplicates id {id:?}"));
             }
             if fingerprints
-                .insert((id.to_string(), version), fingerprint.map(str::to_string))
+                .insert(
+                    (id.to_string(), version),
+                    RegistryFingerprints {
+                        implementation: implementation.map(str::to_string),
+                        byte_schema: byte_schema.map(str::to_string),
+                    },
+                )
                 .is_some()
             {
                 return Err(format!(
@@ -8129,15 +8529,14 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
         for (index, value) in rows.iter().enumerate() {
             let context = format!("identity registry exemptions row {}", index + 1);
             let row = strict_json_object(value, &context)?;
+            let fingerprint_field = if schema == REGISTRY_SCHEMA_V2 {
+                "implementation_fingerprint"
+            } else {
+                "schema_fingerprint"
+            };
             strict_json_keys(
                 row,
-                &[
-                    "path",
-                    "symbol",
-                    "reason",
-                    "covered_by",
-                    "schema_fingerprint",
-                ],
+                &["path", "symbol", "reason", "covered_by", fingerprint_field],
                 &context,
             )?;
             let string = |key: &str| {
@@ -8148,7 +8547,7 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
             let symbol = string("symbol")?;
             string("reason")?;
             string("covered_by")?;
-            let fingerprint = string("schema_fingerprint")?;
+            let fingerprint = string(fingerprint_field)?;
             if !safe_relative(path) || !authority_symbol_is_canonical(symbol) {
                 return Err(format!(
                     "{context} target {path}#{symbol} is unsafe/noncanonical"
@@ -8156,7 +8555,7 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
             }
             if !canonical_schema_fingerprint(fingerprint, 1, 32) {
                 return Err(format!(
-                    "{context} schema_fingerprint is not a canonical BLAKE3-256 digest"
+                    "{context} {fingerprint_field} is not a canonical BLAKE3-256 digest"
                 ));
             }
             if !targets.insert((path, symbol)) {
@@ -8166,7 +8565,10 @@ fn registry_fingerprints(text: &str) -> Result<BTreeMap<(String, u32), Option<St
             }
         }
     }
-    Ok(fingerprints)
+    Ok(RegistrySnapshot {
+        epoch,
+        fingerprints,
+    })
 }
 
 fn git_registry(root: &Path, revision: &str) -> Result<String, String> {
@@ -8256,17 +8658,25 @@ fn schema_history_against(expected_registry: &str, baseline: &str) -> Vec<Violat
             )];
         }
     };
+    if previous.epoch == RegistryEpoch::V2 && current.epoch != RegistryEpoch::V2 {
+        return vec![identity_violation(
+            "<repo>",
+            "identity registry schema regressed from v2 to v1; byte-schema fingerprints cannot be downgraded away",
+        )];
+    }
     let previous_by_id = previous
+        .fingerprints
         .iter()
-        .map(|((id, version), fingerprint)| (id, (*version, fingerprint)))
+        .map(|((id, version), fingerprints)| (id, (*version, fingerprints)))
         .collect::<BTreeMap<_, _>>();
     let current_by_id = current
+        .fingerprints
         .iter()
-        .map(|((id, version), fingerprint)| (id, (*version, fingerprint)))
+        .map(|((id, version), fingerprints)| (id, (*version, fingerprints)))
         .collect::<BTreeMap<_, _>>();
     let mut violations = Vec::new();
-    for (id, (previous_version, previous_fingerprint)) in previous_by_id {
-        let Some((version, fingerprint)) = current_by_id.get(id) else {
+    for (id, (previous_version, previous_fingerprints)) in previous_by_id {
+        let Some((version, fingerprints)) = current_by_id.get(id) else {
             violations.push(identity_violation(
                 "<repo>",
                 format!(
@@ -8283,14 +8693,14 @@ fn schema_history_against(expected_registry: &str, baseline: &str) -> Vec<Violat
                 ),
             ));
         } else if *version == previous_version
-            && let Some(previous_fingerprint) = previous_fingerprint
-            && fingerprint.as_ref() != Some(previous_fingerprint)
+            && let Some(previous_fingerprint) = &previous_fingerprints.byte_schema
+            && fingerprints.byte_schema.as_ref() != Some(previous_fingerprint)
         {
             violations.push(identity_violation(
                 "<repo>",
                 format!(
-                    "identity {id} changed schema fingerprint at retained version {version} ({previous_fingerprint} -> {}); bump the schema/domain/coupling version before regeneration",
-                    fingerprint.as_deref().unwrap_or("<missing>")
+                    "identity {id} changed byte-schema fingerprint at retained version {version} ({previous_fingerprint} -> {}); bump the schema/domain/coupling version before regeneration",
+                    fingerprints.byte_schema.as_deref().unwrap_or("<missing>")
                 ),
             ));
         }
@@ -8525,6 +8935,10 @@ fn version_refuses() {{ assert_eq!(MINI_VERSION, 1); }}
             identity_schema_base_hash(&root, &declarations[0], source, &[])
                 .expect("fixture encoder, transport, and constants are fingerprintable"),
         );
+        declarations[0].byte_schema_base_hash = Some(
+            identity_byte_schema_base_hash(&root, &declarations[0], source, &[])
+                .expect("fixture byte schema is fingerprintable"),
+        );
         let resolution_violations = resolve_schema_fingerprints(&mut declarations);
         assert!(
             resolution_violations.is_empty(),
@@ -8592,6 +9006,10 @@ fn version_refuses() {{ assert_eq!(MINI_VERSION, 1); }}
         declaration.schema_base_hash = Some(
             identity_schema_base_hash(root, &declaration, source, &[])
                 .expect("fixture schema base is fingerprintable"),
+        );
+        declaration.byte_schema_base_hash = Some(
+            identity_byte_schema_base_hash(root, &declaration, source, &[])
+                .expect("fixture byte-schema base is fingerprintable"),
         );
         declaration
     }
@@ -8756,18 +9174,21 @@ impl Verifier for DenyAll {
 
     #[test]
     fn compact_registry_fields_drive_history_checks() {
-        let baseline = concat!(
+        let legacy = concat!(
             "{\n\"schema\":\"frankensim-identity-schemas-v1\",\n\"identities\":[\n",
             "{\"id\":\"mini:identity\",\"version\":1,\"schema_fingerprint\":\"v1-deadbeefdeadbeef\"}\n",
             "]\n}\n",
         );
+        let parsed = registry_fingerprints(legacy).expect("strict legacy registry");
+        let fingerprints = parsed
+            .fingerprints
+            .get(&("mini:identity".to_string(), 1))
+            .expect("legacy identity row");
         assert_eq!(
-            registry_fingerprints(baseline)
-                .expect("strict baseline registry")
-                .get(&("mini:identity".to_string(), 1))
-                .and_then(Option::as_deref),
+            fingerprints.implementation.as_deref(),
             Some("v1-deadbeefdeadbeef")
         );
+        assert_eq!(fingerprints.byte_schema, None);
         let fingerprintless_legacy = concat!(
             "{\n\"schema\":\"frankensim-identity-schemas-v1\",\n\"identities\":[\n",
             "{\"id\":\"mini:identity\",\"version\":1}\n",
@@ -8776,18 +9197,35 @@ impl Verifier for DenyAll {
         assert_eq!(
             registry_fingerprints(fingerprintless_legacy)
                 .expect("pre-fingerprint legacy registry")
-                .get(&("mini:identity".to_string(), 1)),
-            Some(&None)
+                .fingerprints
+                .get(&("mini:identity".to_string(), 1))
+                .expect("fingerprintless identity row"),
+            &RegistryFingerprints {
+                implementation: None,
+                byte_schema: None,
+            }
+        );
+
+        let v2_registry = |version: u32, implementation: &str, byte_schema: &str| {
+            format!(
+                "{{\n\"schema\":\"{REGISTRY_SCHEMA_V2}\",\n\"implementation_fingerprint_algorithm\":\"{SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"byte_schema_fingerprint_algorithm\":\"{BYTE_SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"identities\":[\n{{\"id\":\"mini:identity\",\"version\":{version},\"implementation_fingerprint\":\"v{version}-{implementation}\",\"byte_schema_fingerprint\":\"v{version}-{byte_schema}\"}}\n],\n\"external_authorities\":[],\n\"exemptions\":[]\n}}\n"
+            )
+        };
+        let implementation_v1 = "11".repeat(32);
+        let byte_schema_v1 = "22".repeat(32);
+        let baseline = v2_registry(1, &implementation_v1, &byte_schema_v1);
+        assert!(
+            schema_history_against(&baseline, legacy).is_empty(),
+            "the first v2 byte-schema fingerprint bootstraps from reviewed v1 implementation evidence"
         );
         assert!(
-            schema_history_against(baseline, fingerprintless_legacy).is_empty(),
-            "a legacy row without an invented fingerprint bootstraps the first fingerprinted epoch"
+            schema_history_against(&baseline, fingerprintless_legacy).is_empty(),
+            "a pre-fingerprint legacy row also bootstraps the first v2 epoch"
         );
-        let current = concat!(
-            "{\n\"schema\":\"frankensim-identity-schemas-v1\",\n\"identities\":[\n",
-            "],\n\"external_authorities\":[\n]\n}\n",
+        let current = format!(
+            "{{\n\"schema\":\"{REGISTRY_SCHEMA_V2}\",\n\"implementation_fingerprint_algorithm\":\"{SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"byte_schema_fingerprint_algorithm\":\"{BYTE_SCHEMA_FINGERPRINT_ALGORITHM}\",\n\"identities\":[],\n\"external_authorities\":[],\n\"exemptions\":[]\n}}\n",
         );
-        let violations = schema_history_against(current, baseline);
+        let violations = schema_history_against(&current, &baseline);
         assert!(
             violations
                 .iter()
@@ -8795,30 +9233,30 @@ impl Verifier for DenyAll {
             "{violations:?}"
         );
 
-        let advanced = concat!(
-            "{\n\"schema\":\"frankensim-identity-schemas-v1\",\n\"identities\":[\n",
-            "{\"id\":\"mini:identity\",\"version\":2,\"schema_fingerprint\":\"v2-feedfacefeedface\"}\n",
-            "]\n}\n",
-        );
-        let violations = schema_history_against(advanced, baseline);
+        let advanced = v2_registry(2, &"33".repeat(32), &"44".repeat(32));
+        let violations = schema_history_against(&advanced, &baseline);
         assert!(
             violations.is_empty(),
             "a higher version is a deliberate schema migration: {violations:?}"
         );
 
-        let drifted = baseline.replace("deadbeefdeadbeef", "feedfacefeedface");
-        let violations = schema_history_against(&drifted, baseline);
+        let implementation_only = v2_registry(1, &"33".repeat(32), &byte_schema_v1);
+        assert!(
+            schema_history_against(&implementation_only, &baseline).is_empty(),
+            "implementation/evidence closure repairs are tracked but do not force a wire version bump"
+        );
+
+        let byte_drift = v2_registry(1, &implementation_v1, &"44".repeat(32));
+        let violations = schema_history_against(&byte_drift, &baseline);
         assert!(
             violations.iter().any(|violation| violation
                 .detail
-                .contains("changed schema fingerprint at retained version 1")),
+                .contains("changed byte-schema fingerprint at retained version 1")),
             "{violations:?}"
         );
 
-        let regressed = baseline
-            .replace("\"version\":1", "\"version\":0")
-            .replace("v1-deadbeefdeadbeef", "v0-deadbeefdeadbeef");
-        let violations = schema_history_against(&regressed, baseline);
+        let regressed = v2_registry(0, &implementation_v1, &byte_schema_v1);
+        let violations = schema_history_against(&regressed, &baseline);
         assert!(
             violations
                 .iter()
@@ -8831,15 +9269,28 @@ impl Verifier for DenyAll {
             "],\n\"external_authorities\":[\n]\n}\n",
         );
         assert!(
-            schema_history_against(baseline, empty_baseline).is_empty(),
+            schema_history_against(&baseline, empty_baseline).is_empty(),
             "the first retained registry epoch must bootstrap from empty history"
         );
+
+        let downgrade = schema_history_against(legacy, &baseline);
+        assert!(
+            downgrade
+                .iter()
+                .any(|violation| violation.detail.contains("schema regressed from v2 to v1")),
+            "a retained v2 byte-schema fingerprint cannot be downgraded away: {downgrade:?}"
+        );
+        let missing_byte = baseline.replace(
+            &format!(",\"byte_schema_fingerprint\":\"v1-{byte_schema_v1}\""),
+            "",
+        );
+        assert!(registry_fingerprints(&missing_byte).is_err());
 
         let duplicate = baseline.replace(
             "\"id\":\"mini:identity\"",
             "\"id\":\"mini:identity\",\"id\":\"hidden:identity\"",
         );
-        let violations = schema_history_against(current, &duplicate);
+        let violations = schema_history_against(&current, &duplicate);
         assert!(
             violations.iter().any(|violation| violation
                 .detail
@@ -8939,7 +9390,7 @@ impl Verifier for DenyAll {
         assert!(
             violations.iter().any(|violation| violation
                 .detail
-                .contains("changed schema fingerprint at retained version 1")),
+                .contains("changed byte-schema fingerprint at retained version 1")),
             "{violations:?}"
         );
     }
@@ -10011,7 +10462,7 @@ impl Verifier for DenyAll {
         assert!(
             violations.iter().any(|violation| violation
                 .detail
-                .contains("changed schema fingerprint at retained version 1")),
+                .contains("changed byte-schema fingerprint at retained version 1")),
             "{violations:?}"
         );
     }
@@ -10226,7 +10677,7 @@ impl Verifier for DenyAll {
         assert!(
             violations.iter().any(|violation| violation
                 .detail
-                .contains("changed schema fingerprint at retained version 1")),
+                .contains("changed byte-schema fingerprint at retained version 1")),
             "{violations:?}"
         );
 
@@ -10274,6 +10725,13 @@ impl Verifier for DenyAll {
             std::slice::from_ref(&exemption),
         )
         .expect("baseline parent schema");
+        let baseline_byte_schema = identity_byte_schema_base_hash(
+            &root,
+            &baseline_declarations[0],
+            &baseline_source,
+            std::slice::from_ref(&exemption),
+        )
+        .expect("baseline parent byte schema");
 
         let moved_source = baseline_source.replace(
             "fn child_digest() -> u64 { 1 }",
@@ -10283,10 +10741,25 @@ impl Verifier for DenyAll {
         let (moved_declarations, violations) =
             declaration_blocks("crates/mini/src/lib.rs", &moved_source);
         assert!(violations.is_empty(), "{violations:?}");
-        let moved =
-            identity_schema_base_hash(&root, &moved_declarations[0], &moved_source, &[exemption])
-                .expect("moved parent schema");
+        let moved = identity_schema_base_hash(
+            &root,
+            &moved_declarations[0],
+            &moved_source,
+            std::slice::from_ref(&exemption),
+        )
+        .expect("moved parent schema");
+        let moved_byte_schema = identity_byte_schema_base_hash(
+            &root,
+            &moved_declarations[0],
+            &moved_source,
+            std::slice::from_ref(&exemption),
+        )
+        .expect("moved parent byte schema");
         assert_ne!(baseline, moved);
+        assert_ne!(
+            baseline_byte_schema, moved_byte_schema,
+            "covered child helpers remain byte-ratcheted until exemptions classify their effect"
+        );
     }
 
     #[test]
@@ -10528,7 +11001,7 @@ fn persist_receipt(ledger: &mut Ledger, payload: &[u8]) {
         assert!(
             history.iter().any(|violation| violation
                 .detail
-                .contains("changed schema fingerprint at retained version 1")),
+                .contains("changed byte-schema fingerprint at retained version 1")),
             "same-valued qualified domain authority swaps require a version bump: {history:?}"
         );
     }
@@ -10691,6 +11164,56 @@ const ID_VERSION: u32 = 8;
             baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
             "same-version cross-file helper movement must change the fingerprint"
         );
+        assert_eq!(
+            baseline[0].byte_schema_fingerprint, moved[0].byte_schema_fingerprint,
+            "helper implementation repairs must not invent a byte-schema migration"
+        );
+    }
+
+    #[test]
+    fn implementation_only_dependency_movement_does_not_ratchet_byte_schema() {
+        let root = fixture_root("implementation-only-dependency-movement");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let base = identity_source_with_schema_functions(
+            "mini:base",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        let dependent = identity_source("mini:dependent", "mini:base", 1);
+        std::fs::write(&helper_path, "pub fn semantic_tag() -> u64 { 1 }\n")
+            .expect("baseline helper");
+        let baseline = resolved_fixture(
+            &root,
+            [
+                ("crates/base/src/lib.rs", base.clone()),
+                ("crates/dependent/src/lib.rs", dependent.clone()),
+            ],
+        );
+        std::fs::write(&helper_path, "pub fn semantic_tag() -> u64 { 2 }\n")
+            .expect("repaired helper");
+        let moved = resolved_fixture(
+            &root,
+            [
+                ("crates/base/src/lib.rs", base),
+                ("crates/dependent/src/lib.rs", dependent),
+            ],
+        );
+        for id in ["mini:base", "mini:dependent"] {
+            let baseline = baseline
+                .iter()
+                .find(|declaration| declaration.id == id)
+                .expect("baseline identity");
+            let moved = moved
+                .iter()
+                .find(|declaration| declaration.id == id)
+                .expect("moved identity");
+            assert_ne!(baseline.schema_fingerprint, moved.schema_fingerprint);
+            assert_eq!(
+                baseline.byte_schema_fingerprint, moved.byte_schema_fingerprint,
+                "implementation-only dependency churn must not cascade through {id}"
+            );
+        }
     }
 
     #[test]
@@ -10795,13 +11318,9 @@ const ID_VERSION: u32 = 8;
     #[test]
     fn same_version_schema_constant_movement_changes_fingerprint() {
         let root = fixture_root("constant-movement");
-        let baseline = resolved_fixture(
-            &root,
-            [(
-                "crates/mini/src/lib.rs",
-                identity_source("mini:constant", "none", 1),
-            )],
-        );
+        let baseline_source = identity_source("mini:constant", "none", 1);
+        let baseline =
+            resolved_fixture(&root, [("crates/mini/src/lib.rs", baseline_source.clone())]);
         let moved = resolved_fixture(
             &root,
             [(
@@ -10813,6 +11332,21 @@ const ID_VERSION: u32 = 8;
         assert_ne!(
             baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
             "same-version schema constant movement must change the final fingerprint"
+        );
+        assert_ne!(
+            baseline[0].byte_schema_fingerprint, moved[0].byte_schema_fingerprint,
+            "wire-relevant constant values are version-ratcheted"
+        );
+        let moved_type = resolved_fixture(
+            &root,
+            [(
+                "crates/mini/src/lib.rs",
+                baseline_source.replace("MINI_TAG: u8 = 1", "MINI_TAG: u16 = 1"),
+            )],
+        );
+        assert_ne!(
+            baseline[0].byte_schema_fingerprint, moved_type[0].byte_schema_fingerprint,
+            "wire-relevant constant types are version-ratcheted even when the RHS is unchanged"
         );
     }
 
@@ -10831,6 +11365,10 @@ const ID_VERSION: u32 = 8;
             baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
             "mutation evidence is part of the retained schema proof"
         );
+        assert_eq!(
+            baseline[0].byte_schema_fingerprint, moved[0].byte_schema_fingerprint,
+            "evidence-test repairs are tracked without changing the byte schema"
+        );
     }
 
     #[test]
@@ -10843,6 +11381,10 @@ const ID_VERSION: u32 = 8;
         assert_ne!(
             baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
             "source field type movement must not retain an identity fingerprint"
+        );
+        assert_ne!(
+            baseline[0].byte_schema_fingerprint, moved[0].byte_schema_fingerprint,
+            "source field type movement changes the declared byte-schema surface"
         );
     }
 
@@ -10901,6 +11443,10 @@ const ID_VERSION: u32 = 8;
         assert_ne!(
             baseline_dependent.schema_fingerprint, moved_dependent.schema_fingerprint,
             "dependency movement must propagate into the dependent final fingerprint"
+        );
+        assert_ne!(
+            baseline_dependent.byte_schema_fingerprint, moved_dependent.byte_schema_fingerprint,
+            "dependency byte-schema movement must propagate transitively"
         );
     }
 
