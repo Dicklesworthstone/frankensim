@@ -984,7 +984,20 @@ fn as_physics(a: &str) -> Result<Physics, ScenarioError> {
     }
 }
 
+fn reserved_machine_role(a: &str) -> Option<&'static str> {
+    match a {
+        "joint" => Some("joint"),
+        "terminal" => Some("terminal"),
+        "controller" => Some("controller"),
+        "reset" => Some("reset"),
+        _ => None,
+    }
+}
+
 fn as_kind(a: &str) -> Result<BcKind, ScenarioError> {
+    if let Some(role) = reserved_machine_role(a) {
+        return Err(ScenarioError::ReservedBoundaryRole { role });
+    }
     match a {
         "dirichlet" => Ok(BcKind::Dirichlet),
         "neumann" => Ok(BcKind::Neumann),
@@ -1262,7 +1275,9 @@ fn scenario_wire_header(root_items: &[Sx]) -> Result<(u32, DimensionWire, &[Sx])
 /// unversioned form use five and append `mol = 0`.
 ///
 /// # Errors
-/// [`ScenarioError::Parse`] for malformed, non-finite, or over-budget input.
+/// [`ScenarioError::Parse`] for malformed, non-finite, or over-budget input,
+/// or [`ScenarioError::ReservedBoundaryRole`] when Machine-IR graph semantics
+/// are presented in a boundary-kind slot.
 pub fn parse_ir(text: &str) -> Result<DecodedScenario, ScenarioError> {
     parse_ir_with_budget(text, IrParseBudget::default())
 }
@@ -1275,7 +1290,9 @@ pub fn parse_ir(text: &str) -> Result<DecodedScenario, ScenarioError> {
 /// admission.
 ///
 /// # Errors
-/// [`ScenarioError::Parse`] for malformed, non-finite, or over-budget input.
+/// [`ScenarioError::Parse`] for malformed, non-finite, or over-budget input,
+/// or [`ScenarioError::ReservedBoundaryRole`] when Machine-IR graph semantics
+/// are presented in a boundary-kind slot.
 pub fn parse_ir_with_budget(
     text: &str,
     budget: IrParseBudget,

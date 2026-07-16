@@ -193,7 +193,9 @@ flagships.
 ## Error model
 
 `ScenarioError`: `Dimensions { context, expected, got }`, `Frame`,
-`Evaluate`, `Parse { at, what }`. Parse/evaluation errors include deterministic
+`Evaluate`, `Parse { at, what }`, and `ReservedBoundaryRole { role }` for an
+attempt to encode a Machine-IR joint, terminal, controller, or reset as a BC
+kind. Parse/evaluation errors include deterministic
 budget refusals and allocation-refusal context. `ValidationError` distinguishes
 named limit refusal, work-plan overflow, total-work refusal, scratch-allocation
 refusal, and cancellation with phase/completed/planned work. Admitted validation produces

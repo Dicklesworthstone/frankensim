@@ -66,6 +66,11 @@ pub enum ScenarioError {
         /// Diagnosis.
         what: String,
     },
+    /// A Machine-IR graph role was presented in a boundary-kind slot.
+    ReservedBoundaryRole {
+        /// Exact reserved wire role that was refused.
+        role: &'static str,
+    },
 }
 
 impl fmt::Display for ScenarioError {
@@ -82,6 +87,10 @@ impl fmt::Display for ScenarioError {
             ScenarioError::Frame { what } => write!(f, "frame error: {what}"),
             ScenarioError::Evaluate { what } => write!(f, "evaluation error: {what}"),
             ScenarioError::Parse { at, what } => write!(f, "IR parse error at byte {at}: {what}"),
+            ScenarioError::ReservedBoundaryRole { role } => write!(
+                f,
+                "reserved machine-graph role {role:?} cannot be encoded as a boundary-condition kind; declare it as a typed fs-ir machine relation"
+            ),
         }
     }
 }
