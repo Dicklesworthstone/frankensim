@@ -5,11 +5,12 @@
 //! These first slices deliberately reuse `fs-qty`'s exact chemistry artifacts
 //! instead of creating a second species or conservation system. They add a
 //! provenance-bound NASA-9 standard-state evaluator and a bounded,
-//! frozen-composition ideal-gas mixture evaluator. Derived identities remain
-//! scoped to explicit ideal-gas conventions. This crate owns no transport
-//! solver, evolving state, phase-equilibrium solve, kinetics integrator, or L3
-//! protocol.
+//! frozen-composition ideal-gas mixture evaluator, plus the positive-state
+//! mechanical ideal-gas `p`-`rho`-`T` closure. Derived identities remain scoped
+//! to explicit ideal-gas conventions. This crate owns no transport solver,
+//! evolving state, phase-equilibrium solve, kinetics integrator, or L3 protocol.
 
+pub mod eos;
 pub mod mixture;
 
 use core::fmt;
@@ -44,6 +45,8 @@ pub const UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K: f64 = 8.314_462_618_153_24;
 pub type MolarEnergyQuantityV1 = Qty<2, 1, -2, 0, 0, -1>;
 /// Coherent-SI molar thermal quantity, J/(mol K).
 pub type MolarThermalQuantityV1 = Qty<2, 1, -2, -1, 0, -1>;
+/// Coherent-SI mass-specific thermal quantity, J/(kg K).
+pub type MassSpecificThermalQuantityV1 = Qty<2, 0, -2, -1, 0, 0>;
 
 macro_rules! molar_quantity {
     ($(#[$meta:meta])* $name:ident, $quantity:ty) => {
@@ -96,6 +99,29 @@ molar_quantity!(
     MolarGibbsEnergyV1,
     MolarEnergyQuantityV1
 );
+
+/// Canonical mass-specific gas constant `R / M` shared by mixtures and EOS
+/// closures.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct MassSpecificGasConstantV1(MassSpecificThermalQuantityV1);
+
+impl MassSpecificGasConstantV1 {
+    pub(crate) const fn new(value: f64) -> Self {
+        Self(MassSpecificThermalQuantityV1::new(value))
+    }
+
+    /// Raw coherent-SI scalar.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensioned coherent-SI quantity.
+    #[must_use]
+    pub const fn quantity(self) -> MassSpecificThermalQuantityV1 {
+        self.0
+    }
+}
 
 /// Explicit standard-state phase supported by the first evaluator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

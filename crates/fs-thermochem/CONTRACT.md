@@ -2,9 +2,9 @@
 
 > Status: ACTIVE, CODE-FIRST SLICES. This contract covers typed,
 > provenance-bound NASA-9 ideal-gas standard-state evaluation and bounded
-> frozen-composition ideal-gas mixture evaluation. Central batch compilation
-> and test execution are pending; the parent thermochemistry bead remains in
-> progress.
+> frozen-composition ideal-gas mixture evaluation, plus a positive-state
+> mechanical ideal-gas EOS rung. Central batch compilation and test execution
+> are pending; the parent thermochemistry bead remains in progress.
 
 ## Purpose and layer
 
@@ -17,7 +17,9 @@ The first slice admits immutable NASA-9 coefficient cards from `fs-matdb`,
 evaluates typed molar `cp`, `h`, and `s`, and derives `u` and `g` only under an
 explicit gas/ideal-gas/reference-pressure/elemental-reference convention. The
 second combines up to 128 strictly positive, canonically ordered components
-into frozen ideal-gas molar and mass-specific properties.
+into frozen ideal-gas molar and mass-specific properties. The third supplies
+the typed mechanical closure from positive finite temperature, pressure, and
+molar mass to density, molar volume, specific gas constant, and `Z = 1`.
 
 Direct runtime dependencies are L1 or lower: `fs-qty`, `fs-matdb`, and
 `fs-math`. The direct `fs-evidence` edge is development-only so conformance
@@ -70,6 +72,14 @@ behavior.
   composition bases, exact sums and `sum(x ln x)`, common conventions,
   evaluator/math/quantity versions, `T`, `p`, `p0`, mixture molar mass, and
   every nested species standard-state receipt.
+- `IdealGasEosV1` retains one positive finite caller-declared molar mass.
+  `evaluate_pt` returns semantic wrappers for positive finite mass density,
+  molar volume, the same canonical `MassSpecificGasConstantV1` used by frozen
+  mixtures, and compressibility factor. Its `IdealGasEosReceiptV1` binds the
+  evaluator/quantity versions, dedicated
+  `MechanicalEquationOfStateV1::IdealGas` rung, gas-constant bits, all input
+  bits, and all output bits. The receipt does not authenticate species, phase,
+  molar mass, or material identity.
 
 ## NASA-9 operation tree
 
@@ -147,6 +157,23 @@ Cantera's ideal-gas implementation is a development cross-reference for the
 mixing and pressure terms, not a runtime dependency:
 <https://www.cantera.org/3.0/doxygen/html/d7/dd4/IdealGasPhase_8cpp_source.html>.
 
+## Mechanical ideal-gas EOS operation tree
+
+For positive finite molar mass `M`, absolute temperature `T`, and pressure `p`,
+version 1 uses ordinary binary64 arithmetic in this fixed order:
+
+```text
+R_specific = R / M
+RT         = R * T
+V_m        = RT / p
+rho        = M / V_m
+Z          = 1
+```
+
+Every exposed derived scalar must be strictly positive and finite. A zero or
+non-finite intermediate/result refuses without a partial evaluation. This is a
+mechanical ideal-gas model-domain check, not a physical phase-stability test.
+
 ## Invariants
 
 - ONE CHEMISTRY AUTHORITY: exact bookkeeping and conservation come from
@@ -184,6 +211,9 @@ mixing and pressure terms, not a runtime dependency:
 - MIXTURE RECEIPTS ARE PROVENANCE, NOT CERTIFICATES: nested card identities and
   exact arithmetic inputs permit replay but do not establish coefficient
   accuracy, stability, or evidence color.
+- POSITIVE IDEAL EOS DOMAIN: `M`, `T`, and `p`, plus every exposed mechanical
+  EOS output, are strictly positive and finite. `Z` is exactly one by model
+  definition; this does not prove a real fluid is stable or ideal.
 
 ## Error model
 
@@ -200,6 +230,10 @@ refusals, mass-to-mole underflow, typed expected/found cross-component
 convention mismatch, invalid pressure or derived mixture molar mass, contextual
 species-evaluation failure, and non-finite mixture fields.
 
+`IdealGasEosErrorV1` separately names invalid molar mass, temperature, pressure,
+and the first zero, negative, or non-finite EOS output/intermediate in fixed
+operation-tree order. Float-bearing refusals retain exact IEEE-754 bits.
+
 ## Determinism class
 
 Version 1 is fixed-order deterministic for identical inputs under the same
@@ -214,9 +248,13 @@ fixed-order sum. The 128-component cap and nested 16-region cap make this
 operation tree bounded. Declared-input permutation is expected to produce the
 same model, properties, and exact-field receipt.
 
+The mechanical EOS is one fixed allocation-free scalar tree. Repeated
+same-target evaluation is expected to return bit-identical outputs and receipt.
+
 Cross-ISA bit identity is not claimed until the central Gauntlet runs retain
-evidence for both reference ISA families. The receipt deliberately records the
-evaluator and `fs-math` versions so version drift is visible.
+evidence for both reference ISA families. NASA/mixture receipts record their
+evaluator and `fs-math` versions; the allocation-free EOS receipt records its
+evaluator and `fs-qty` versions because that tree calls no elementary math.
 
 ## Cancellation behavior
 
@@ -236,6 +274,10 @@ one canonical pass whose nested species work is bounded by 16 regions each;
 there is no useful `Cx` tile boundary. Future equilibrium, kinetics, or
 database operations require explicit work budgets and cancellation/drain
 semantics before landing.
+
+Mechanical ideal-gas construction and evaluation are fixed-size scalar work
+with no useful cancellation tile. They neither consume a `Cx` budget nor own
+request-drain-finalize behavior.
 
 ## Unsafe boundary
 
@@ -279,6 +321,15 @@ Inline tests in `src/mixture.rs` add:
   controlled mutations for version, convention, state, composition, and nested
   component receipt fields.
 
+Inline tests in `src/eos.rs` add:
+
+- G0 typed `p V_m = R T`, `p = rho R_specific T`, `rho V_m = M`, and exact
+  `Z = 1` identities;
+- G3 pressure/temperature rescaling plus zero, negative, NaN, infinity,
+  intermediate/output overflow, and output underflow refusals;
+- G5 bit-identical replay, exact assertions for every receipt field, and
+  controlled state/output mutation coverage.
+
 These tests are code-first and batch-verification pending. A sourced external
 NASA/Cantera numerical oracle battery, adversarial source-card mutation battery,
 and retained cross-ISA evidence are required follow-ups; the synthetic
@@ -297,8 +348,9 @@ This slice does **not** claim:
 - an external numerical-oracle match or any evidence-color promotion;
 - reacting/equilibrium composition derivatives, chemical potentials,
   activities beyond the aggregate ideal-mixture law, fugacity, departure
-  functions, real-gas or multiphase EOS behavior;
-- phase stability, flash calculations, chemical equilibrium, reaction rates,
+  functions, cubic/tabular real-gas or multiphase EOS behavior;
+- a physical phase-stability verdict from the positive ideal-gas model-domain
+  check, flash calculations, chemical equilibrium, reaction rates,
   kinetics integration, transport coefficients, or transport solves;
 - uncertainty propagation, interval enclosure, rounding-error certification,
   or validity outside the exact admitted temperature regions;

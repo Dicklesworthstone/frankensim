@@ -8,7 +8,9 @@
 
 use core::fmt;
 
-use fs_qty::{MolarMass, Pressure, Qty, Temperature};
+use fs_qty::{MolarMass, Pressure, Temperature};
+
+pub use crate::{MassSpecificGasConstantV1, MassSpecificThermalQuantityV1};
 
 use crate::{
     Composition, CompositionBasis, ElementalReferenceIdV1, MolarEnthalpyV1, MolarEntropyV1,
@@ -21,9 +23,6 @@ use crate::{
 pub const FROZEN_IDEAL_GAS_MIXTURE_EVALUATOR_VERSION_V1: u32 = 1;
 /// Hard resource bound checked before any declared component is otherwise admitted.
 pub const MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1: usize = 128;
-
-/// Coherent-SI mass-specific thermal quantity, J/(kg K).
-pub type MassSpecificThermalQuantityV1 = Qty<2, 0, -2, -1, 0, 0>;
 
 macro_rules! thermal_quantity {
     ($(#[$meta:meta])* $name:ident, $quantity:ty) => {
@@ -66,12 +65,6 @@ thermal_quantity!(
     MassSpecificIsochoricHeatCapacityV1,
     MassSpecificThermalQuantityV1
 );
-thermal_quantity!(
-    /// Mixture-specific ideal-gas constant `R / M_mix`.
-    MassSpecificGasConstantV1,
-    MassSpecificThermalQuantityV1
-);
-
 /// Convention field named by a cross-component mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FrozenMixtureConventionFieldV1 {
