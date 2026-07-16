@@ -199,6 +199,16 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   lineage. There is no conversion to `AdmittedDerivedMorphismV1`, heterogeneous
   whole-object composition, or geometry-wide evidence transport. One component
   deliberately says nothing about unlisted strata or a whole stratified map.
+  `DerivedExhaustiveStratifiedMapCandidateIrV1` is a standalone finite assembly
+  candidate over those sealed components. In canonical source-stratum order it
+  requires exactly one direct component binding for every source stratum, with
+  exact source and target geometry/stratification selectors and explicit raw-to-
+  sealed receipt identity. Target strata may repeat and need not be exhaustive.
+  The token retains nominal whole-family and global-constructibility declaration
+  IDs plus a no-authority artifact. It proves finite source-selector coverage,
+  not that the components execute or glue into a continuous, constructible, or
+  incidence-preserving whole map. It has no conversion, composition, evidence-
+  transport, inverse, or equivalence API.
   `DerivedSpanCorrespondenceIrV1` is deliberately separate from the directed
   morphism-kind algebra. It declares `source <- apex -> target` by binding exact
   source/apex/target geometry IDs and two already-admitted morphism receipts
@@ -238,11 +248,11 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   establish payload preservation or validity-domain inclusion, prove theorem
   truth, or establish physical equivalence. Invertible chart transitions,
   geometric/stratified refinements, authenticated subobject inclusions,
-  exhaustive constructible/stratified maps, composable or authenticated
-  correspondences, and L6 Machine-IR crosswalks remain typed RD.1b follow-ups
-  rather than being represented as strict maps. Authoritative quasi-isomorphism
-  receipts require RD.1c independent checking of the structural candidate and
-  its retained artifacts.
+  authoritative constructible/stratified maps, composable or authenticated
+  correspondences, and L6 Machine-IR crosswalks remain typed follow-ups rather
+  than being represented as strict maps. Authoritative quasi-isomorphism and
+  global stratified-map receipts require RD.1c independent checking of their
+  structural candidates and retained artifacts.
 
 - `exit_path` module (RD.X1, `[M]`, behind `derived-geometry`) admits a bounded,
   executable statement language for maximal exit/entrance-path approximation
@@ -576,12 +586,18 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    middle triple and flattens ordered primitive and no-authority lineage. These
    tokens cannot enter whole-geometry heterogeneous composition or carry
    geometry-wide evidence transport.
-10. Standalone declared spans bind exact `source <- apex -> target` geometry
+10. Exhaustive stratified-map assembly candidates bind exact endpoint geometry
+   and stratification IDs, exactly one direct sealed component per source
+   stratum in canonical source order, explicit source/target stratum selectors,
+   nominal assembly/global-constructibility IDs, and a nonzero no-authority
+   artifact. Repeated target strata are allowed; target coverage and every
+   global map theorem remain unclaimed.
+11. Standalone declared spans bind exact `source <- apex -> target` geometry
    identities, exact ordered admitted leg-morphism IDs, the common-apex/outer-
    endpoint orientation of both sealed legs, and one nonzero no-authority
    artifact. They do not enter directed-morphism composition or expose a direct
    evidence transport.
-11. Fixed-resolution quasi-isomorphism candidates bind an exact nonempty
+12. Fixed-resolution quasi-isomorphism candidates bind an exact nonempty
    homogeneous refinement path; exact endpoint geometry, local-model, role,
    complex, and resolution selectors; each endpoint's exact fixed-resolution
    scope witness; nominal theorem/checker/check-receipt IDs; and an explicit
@@ -622,6 +638,13 @@ ownership, model-version and convention compatibility, nominal identity and
 authority laundering, exact middle-object seams, bounded lineage, allocation,
 cancellation, and canonical identity failures. Refusal publishes no stratum
 morphism and cannot affect a whole-geometry morphism.
+Exhaustive finite assembly admission uses
+`DerivedExhaustiveStratifiedMapCandidateErrorV1` for exact endpoint and
+stratification binding, missing nominal identities, full canonical source-
+stratum coverage, raw/sealed component identity and endpoint seams, direct-
+component shape, bounded retention, allocation, cancellation, and canonical
+identity failures. Refusal publishes no assembly candidate and grants no global
+map authority.
 Standalone span admission uses `DerivedSpanCorrespondenceErrorV1` for schema,
 zero no-authority identity, raw-leg/sealed-leg mismatch, leg orientation,
 cancellation, and canonical-identity defects. Refusal publishes no span token.
@@ -666,6 +689,12 @@ primitive/composite class tag, ordered no-authority artifacts, and flattened
 primitive receipt IDs. Primitive class bytes bind the nominal component-map and
 constructibility IDs. Equal ordered paths replay independently of
 parenthesization; moving any selector or reversing factors changes identity.
+Exhaustive assembly-candidate receipts use another separate schema/domain and
+encode exact endpoint geometry/stratification IDs, canonically source-ordered
+sealed component IDs (which transitively bind each explicit stratum selector),
+nominal assembly/global-constructibility IDs, and the no-authority artifact.
+Replaying the same full coverage is stable; moving any retained field changes
+identity without authenticating components or nominal payloads.
 Standalone span receipts use a separate schema/domain and encode exact
 source/apex/target geometry IDs, left then right admitted-leg IDs, and the
 no-authority artifact. Replaying the same ordered legs is stable; swapping valid
@@ -707,6 +736,10 @@ finite stratum selectors, before and inside canonical identity construction,
 and immediately before publication. Composition additionally polls while
 validating and copying bounded scoped primitive/factor/no-authority lineage.
 Cancellation exposes no partial stratum morphism.
+Exhaustive assembly-candidate admission polls at entry, at a fixed stride while
+checking and retaining exact component coverage, before and inside canonical
+identity construction, and immediately before publication. Cancellation exposes
+no partial assembly candidate.
 Standalone span admission polls at entry, before and inside identity encoding,
 and immediately before publication. Cancellation exposes no partial span token.
 Fixed-resolution quasi-isomorphism candidate admission additionally polls while
@@ -788,6 +821,11 @@ The standalone stratum suite covers domain-separated class encoding, exact
 geometry/stratification/stratum ownership, identity neutrality, associative
 flattening, exact middle-triple refusal, nominal-field identity movement,
 authority-laundering refusal, deterministic replay, and entry cancellation.
+The exhaustive assembly-candidate suite covers separate schema identity,
+replay/accessors, nominal-field identity movement, exact full source coverage,
+canonical order, raw/sealed ID binding, repeated target acceptance, identity-
+component acceptance, composite-path refusal, missing authority fields, the
+component cap, and entry cancellation.
 It also covers declared chart-map ownership, missing IDs, dimension/frame/unit/
 quantity/scale mutations, typed-ID-bound receipt replay and public primitive
 retention, homogeneous associativity, exact chart seams, identity neutrality,
@@ -940,6 +978,18 @@ claim those stronger G4/G5 results.
   correspondence are all outside this token. Composition retains exact adjacent
   triples and nominal factor declarations only, and no API promotes the path to
   a whole-geometry morphism.
+- `AdmittedDerivedExhaustiveStratifiedMapCandidateV1` proves only that every
+  exact source stratum has one canonically ordered direct sealed component into
+  the exact target stratification. It does not prove target coverage or
+  uniqueness; map/component execution; image landing; component gluing;
+  continuity, smoothness, properness, or totality; incidence/frontier,
+  local-link, Whitney, or Thom compatibility; global constructibility;
+  sheaf/cosheaf functoriality, naturality, base change, or evidence transport;
+  inverse, equivalence, theorem truth, or physical correspondence. Its assembly
+  and global-constructibility IDs remain nominal. RD.1c must resolve and execute
+  every component, check the selected global policy and retained falsifiers,
+  and mint a new authority receipt rather than upgrading this candidate in
+  place.
 - `AdmittedDerivedSpanCorrespondenceV1` proves only that two exact sealed legs
   share the declared apex and land at the declared outer endpoints. It proves no
   totality, single-valuedness, functionality, injectivity, surjectivity,

@@ -6,13 +6,15 @@
 //! and composes ordered typed primitive paths with content-addressed lineage. A
 //! separate stratum-scoped category admits component declarations only between
 //! exact `(geometry, stratification, stratum)` objects and deliberately exposes
-//! no whole-geometry evidence transport. Another standalone token seals declared
-//! spans from two admitted legs without folding correspondences into directed-map
-//! composition. A final standalone token binds a fixed-resolution
-//! quasi-isomorphism *candidate* to an exact refinement path and exact local
-//! presentations, without granting theorem authority. This module deliberately
-//! cannot mint a non-identity equivalence: a witness digest is data, not a proof
-//! of an inverse, quasi-isomorphism, refinement theorem, or physical crosswalk.
+//! no whole-geometry evidence transport. A finite assembly candidate can bind
+//! exactly one direct sealed component for every source stratum without granting
+//! global-map authority. Another standalone token seals declared spans from two
+//! admitted legs without folding correspondences into directed-map composition.
+//! A final standalone token binds a fixed-resolution quasi-isomorphism
+//! *candidate* to an exact refinement path and exact local presentations,
+//! without granting theorem authority. This module deliberately cannot mint a
+//! non-identity equivalence: a witness digest is data, not a proof of an inverse,
+//! quasi-isomorphism, refinement theorem, or physical crosswalk.
 
 use core::fmt;
 
@@ -36,6 +38,8 @@ use crate::derived::{
 pub const DERIVED_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone stratum-scoped morphism receipts.
 pub const DERIVED_STRATUM_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for exhaustive finite stratified-map assembly candidates.
+pub const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone declared span-correspondence receipts.
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
@@ -47,6 +51,8 @@ const DERIVED_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
 const DERIVED_STRATUM_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 9, 1 << 11, 4096);
+const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
 const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
 
@@ -95,6 +101,30 @@ impl CanonicalSchema for DerivedStratumMorphismIdentitySchemaV1 {
 
 /// Typed identity of one admitted stratum-scoped morphism.
 pub type DerivedStratumMorphismIdV1 = EvidenceNodeId<DerivedStratumMorphismIdentitySchemaV1>;
+
+/// Domain-separated identity for one exhaustive finite component assembly.
+pub enum DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.exhaustive-stratified-map-candidate.v1";
+    const NAME: &'static str = "exhaustive-finite-stratified-map-assembly-candidate";
+    const VERSION: u32 = DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact endpoint geometries and stratifications, one explicit direct sealed component binding per source stratum in canonical order, nominal assembly and global constructibility declarations, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("source-stratification", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::required("target-stratification", WireType::Bytes),
+        FieldSpec::required("components", WireType::OrderedBytes),
+        FieldSpec::required("nominal-assembly", WireType::Bytes),
+        FieldSpec::required("nominal-constructibility", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one exhaustive finite stratified-map assembly candidate.
+pub type DerivedExhaustiveStratifiedMapCandidateIdV1 =
+    EvidenceNodeId<DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1>;
 
 /// Domain-separated semantic identity for one admitted declared span.
 pub enum DerivedSpanCorrespondenceIdentitySchemaV1 {}
@@ -260,6 +290,42 @@ impl DerivedConstructibilityDeclarationIdV1 {
     }
 }
 
+/// Nominal whole-family artifact for one finite stratified-map assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedStratifiedMapAssemblyIdV1([u8; 32]);
+
+impl DerivedStratifiedMapAssemblyIdV1 {
+    /// Construct a nominal assembly identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nominal declaration of global constructibility for one component family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedGlobalConstructibilityDeclarationIdV1([u8; 32]);
+
+impl DerivedGlobalConstructibilityDeclarationIdV1 {
+    /// Construct a nominal global declaration identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// One exact object in the standalone stratum-scoped category.
 ///
 /// The geometry alone is not the object: both the finite stratification and
@@ -338,6 +404,44 @@ pub struct DeclaredStratumMapPrimitiveV1 {
     pub map: DerivedStratumMapIdV1,
     /// Nominal constructibility declaration; not authenticated here.
     pub constructibility: DerivedConstructibilityDeclarationIdV1,
+}
+
+/// One explicit source/target selector binding in a finite map assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedStratifiedMapComponentBindingV1 {
+    /// Source stratum covered by this exact component.
+    pub source_stratum: StratumIdV1,
+    /// Target stratum selected by this exact component.
+    pub target_stratum: StratumIdV1,
+    /// Exact sealed direct component receipt.
+    pub component: DerivedStratumMorphismIdV1,
+}
+
+/// Versioned exhaustive finite stratified-map assembly candidate.
+///
+/// `components` must follow the source geometry's canonical stratum order.
+/// Each ID names one separately sealed direct stratum component. The candidate
+/// establishes finite source coverage only; it is not a whole-geometry map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedExhaustiveStratifiedMapCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact admitted source geometry.
+    pub source_geometry: DerivedGeometryIdV1,
+    /// Exact finite source stratification.
+    pub source_stratification: StratificationIdV1,
+    /// Exact admitted target geometry.
+    pub target_geometry: DerivedGeometryIdV1,
+    /// Exact finite target stratification.
+    pub target_stratification: StratificationIdV1,
+    /// One direct sealed component binding per source stratum, in canonical order.
+    pub components: Vec<DerivedStratifiedMapComponentBindingV1>,
+    /// Nominal whole-family/assembly artifact; not resolved by RD.1b.
+    pub nominal_assembly: DerivedStratifiedMapAssemblyIdV1,
+    /// Nominal global constructibility declaration; not authenticated by RD.1b.
+    pub nominal_constructibility: DerivedGlobalConstructibilityDeclarationIdV1,
+    /// Explicit denial of global map, gluing, and theorem authority.
+    pub no_authority: DerivedNoClaimIdV1,
 }
 
 /// Caller-supplied primitive map class.
@@ -899,6 +1003,88 @@ impl fmt::Display for DerivedStratumMorphismErrorV1 {
 
 impl core::error::Error for DerivedStratumMorphismErrorV1 {}
 
+/// Structured refusal from exhaustive finite stratified-map assembly admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedExhaustiveStratifiedMapCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A raw geometry selector did not name the exact supplied admitted endpoint.
+    EndpointMismatch {
+        /// Stable source/target geometry field.
+        field: &'static str,
+    },
+    /// A required nominal identity used the all-zero sentinel.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw stratification selector is not owned by its exact geometry.
+    StratificationMismatch {
+        /// Stable source/target stratification field.
+        field: &'static str,
+    },
+    /// Raw or supplied component count differs from exact source-stratum coverage.
+    ComponentCountMismatch {
+        /// Stable raw/supplied component collection.
+        field: &'static str,
+        /// Required entries.
+        expected: usize,
+        /// Supplied entries.
+        found: usize,
+    },
+    /// A raw component ID does not name the supplied sealed component.
+    ComponentIdentityMismatch {
+        /// Canonical source-stratum index.
+        index: usize,
+    },
+    /// A raw binding or sealed component contradicts an exact endpoint selector.
+    ComponentEndpointMismatch {
+        /// Canonical source-stratum index.
+        index: usize,
+        /// Stable failed endpoint relation.
+        field: &'static str,
+    },
+    /// A supplied component is a composite path rather than one direct declaration.
+    CompositeComponent {
+        /// Canonical source-stratum index.
+        index: usize,
+    },
+    /// Component retention exceeded the hard ceiling.
+    ResourceLimit {
+        /// Stable retained collection.
+        field: &'static str,
+        /// Requested entries.
+        requested: usize,
+        /// Hard limit.
+        limit: usize,
+    },
+    /// A fallible component allocation was refused.
+    AllocationRefused {
+        /// Stable retained collection.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedExhaustiveStratifiedMapCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "exhaustive stratified-map candidate refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedExhaustiveStratifiedMapCandidateErrorV1 {}
+
 /// Structured refusal from standalone declared-span admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedSpanCorrespondenceErrorV1 {
@@ -1173,6 +1359,89 @@ impl AdmittedDerivedStratumMorphismV1 {
     /// Canonical receipt and construction limits.
     #[must_use]
     pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedStratumMorphismIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed exhaustive finite source-stratum coverage candidate.
+///
+/// This token binds one direct sealed component to every source stratum in
+/// canonical order. It does not admit a whole-geometry map, authenticate the
+/// nominal assembly or constructibility declarations, or expose composition,
+/// inversion, evidence transport, continuity, or incidence authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
+    source_geometry: DerivedGeometryIdV1,
+    source_stratification: StratificationIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    target_stratification: StratificationIdV1,
+    components: Vec<DerivedStratifiedMapComponentBindingV1>,
+    nominal_assembly: DerivedStratifiedMapAssemblyIdV1,
+    nominal_constructibility: DerivedGlobalConstructibilityDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedExhaustiveStratifiedMapCandidateIdV1>,
+}
+
+impl AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
+    /// Exact source geometry.
+    #[must_use]
+    pub const fn source_geometry(&self) -> DerivedGeometryIdV1 {
+        self.source_geometry
+    }
+
+    /// Exact source stratification.
+    #[must_use]
+    pub const fn source_stratification(&self) -> StratificationIdV1 {
+        self.source_stratification
+    }
+
+    /// Exact target geometry.
+    #[must_use]
+    pub const fn target_geometry(&self) -> DerivedGeometryIdV1 {
+        self.target_geometry
+    }
+
+    /// Exact target stratification.
+    #[must_use]
+    pub const fn target_stratification(&self) -> StratificationIdV1 {
+        self.target_stratification
+    }
+
+    /// Canonically source-ordered direct component bindings.
+    #[must_use]
+    pub fn components(&self) -> &[DerivedStratifiedMapComponentBindingV1] {
+        &self.components
+    }
+
+    /// Nominal whole-family artifact; not authenticated by this token.
+    #[must_use]
+    pub const fn nominal_assembly(&self) -> DerivedStratifiedMapAssemblyIdV1 {
+        self.nominal_assembly
+    }
+
+    /// Nominal global constructibility declaration; not authenticated here.
+    #[must_use]
+    pub const fn nominal_constructibility(&self) -> DerivedGlobalConstructibilityDeclarationIdV1 {
+        self.nominal_constructibility
+    }
+
+    /// Explicit artifact denying global map and theorem authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed exhaustive assembly-candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedExhaustiveStratifiedMapCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedExhaustiveStratifiedMapCandidateIdV1> {
         self.receipt
     }
 }
@@ -1743,6 +2012,80 @@ fn stratum_morphism_receipt(
             factors.iter().map(|factor| &factor.as_bytes()[..]),
         )
     })
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+fn exhaustive_stratified_map_candidate_receipt(
+    ir: &DerivedExhaustiveStratifiedMapCandidateIrV1,
+    components: &[DerivedStratifiedMapComponentBindingV1],
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedExhaustiveStratifiedMapCandidateIdV1>,
+    DerivedExhaustiveStratifiedMapCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+            stage: "stratified-assembly-identity-entry",
+        });
+    }
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+                stage: "stratified-assembly-identity",
+            }
+        }
+        other => DerivedExhaustiveStratifiedMapCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedExhaustiveStratifiedMapCandidateIdV1, _>::new(
+        DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "source-geometry"),
+        ir.source_geometry.as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "source-stratification"),
+            ir.source_stratification.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "target-geometry"),
+            ir.target_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "target-stratification"),
+            ir.target_stratification.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.ordered_bytes(
+            Field::new(4, "components"),
+            components.len() as u64,
+            components
+                .iter()
+                .map(|binding| &binding.component.as_bytes()[..]),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(5, "nominal-assembly"),
+            ir.nominal_assembly.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(6, "nominal-constructibility"),
+            ir.nominal_constructibility.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(7, "no-authority"), ir.no_authority.as_bytes()))
     .and_then(|encoder| encoder.finish())
     .map_err(map_identity_error)
 }
@@ -3291,6 +3634,212 @@ pub fn compose_derived_stratum_morphisms_v1(
     })
 }
 
+/// Admit exhaustive finite source-stratum coverage by direct sealed components.
+///
+/// Raw bindings and supplied tokens must follow the admitted source
+/// stratification's canonical stratum order. Exactly one direct component is
+/// required for each source stratum; target strata may repeat and need not be
+/// exhaustive. An exact stratum identity is direct; a declared path is direct
+/// only when it retains exactly one primitive. The nominal assembly and global
+/// constructibility identities are retained but not resolved or authenticated.
+/// Success creates a standalone candidate with no whole-geometry map, evidence
+/// transport, composition, continuity, incidence/frontier, gluing,
+/// constructibility, or equivalence authority.
+///
+/// # Errors
+/// Returns a typed refusal for schema, endpoint/stratification binding, missing
+/// nominal IDs, incomplete or misordered source coverage, raw/sealed component
+/// mismatch, composite components, resource/allocation limits, cancellation, or
+/// canonical identity defects.
+#[must_use = "an exhaustive component packet has no global map authority"]
+#[allow(clippy::too_many_lines)] // One bounded exhaustive coverage admission scan.
+pub fn admit_derived_exhaustive_stratified_map_candidate_v1(
+    ir: &DerivedExhaustiveStratifiedMapCandidateIrV1,
+    source: &AdmittedDerivedGeometryV1,
+    target: &AdmittedDerivedGeometryV1,
+    components: &[AdmittedDerivedStratumMorphismV1],
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedExhaustiveStratifiedMapCandidateV1,
+    DerivedExhaustiveStratifiedMapCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+            stage: "stratified-assembly-admission-entry",
+        });
+    }
+    if ir.schema_version != DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedExhaustiveStratifiedMapCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (matches, field) in [
+        (ir.source_geometry == source.id(), "source-geometry"),
+        (ir.target_geometry == target.id(), "target-geometry"),
+    ] {
+        if !matches {
+            return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::EndpointMismatch { field });
+        }
+    }
+    for (bytes, field) in [
+        (ir.source_stratification.as_bytes(), "source-stratification"),
+        (ir.target_stratification.as_bytes(), "target-stratification"),
+        (ir.nominal_assembly.as_bytes(), "nominal-assembly"),
+        (
+            ir.nominal_constructibility.as_bytes(),
+            "nominal-global-constructibility",
+        ),
+        (ir.no_authority.as_bytes(), "no-global-map-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::MissingIdentity { field });
+        }
+    }
+    for (matches, field) in [
+        (
+            ir.source_stratification == source.ir().stratification.id,
+            "source-stratification",
+        ),
+        (
+            ir.target_stratification == target.ir().stratification.id,
+            "target-stratification",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedExhaustiveStratifiedMapCandidateErrorV1::StratificationMismatch { field },
+            );
+        }
+    }
+
+    let expected = source.ir().stratification.strata.len();
+    for (field, found) in [
+        ("component-bindings", ir.components.len()),
+        ("sealed-components", components.len()),
+    ] {
+        if found > DERIVED_MORPHISM_MAX_FACTORS_V1 {
+            return Err(
+                DerivedExhaustiveStratifiedMapCandidateErrorV1::ResourceLimit {
+                    field,
+                    requested: found,
+                    limit: DERIVED_MORPHISM_MAX_FACTORS_V1,
+                },
+            );
+        }
+        if found != expected {
+            return Err(
+                DerivedExhaustiveStratifiedMapCandidateErrorV1::ComponentCountMismatch {
+                    field,
+                    expected,
+                    found,
+                },
+            );
+        }
+    }
+    let mut retained = Vec::new();
+    retained.try_reserve_exact(expected).map_err(|_| {
+        DerivedExhaustiveStratifiedMapCandidateErrorV1::AllocationRefused {
+            field: "component-bindings",
+        }
+    })?;
+    for (index, ((source_stratum, binding), component)) in source
+        .ir()
+        .stratification
+        .strata
+        .iter()
+        .zip(&ir.components)
+        .zip(components)
+        .enumerate()
+    {
+        if index.is_multiple_of(DERIVED_MORPHISM_CANCELLATION_STRIDE_V1) && cx.checkpoint().is_err()
+        {
+            return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+                stage: "stratified-assembly-components",
+            });
+        }
+        if binding.component != component.id() {
+            return Err(
+                DerivedExhaustiveStratifiedMapCandidateErrorV1::ComponentIdentityMismatch { index },
+            );
+        }
+        for (matches, field) in [
+            (
+                binding.source_stratum == source_stratum.id,
+                "binding-source-stratum-order",
+            ),
+            (
+                component.source().geometry == ir.source_geometry,
+                "component-source-geometry",
+            ),
+            (
+                component.source().stratification == ir.source_stratification,
+                "component-source-stratification",
+            ),
+            (
+                component.source().stratum == binding.source_stratum,
+                "component-source-stratum",
+            ),
+            (
+                component.target().geometry == ir.target_geometry,
+                "component-target-geometry",
+            ),
+            (
+                component.target().stratification == ir.target_stratification,
+                "component-target-stratification",
+            ),
+            (
+                component.target().stratum == binding.target_stratum,
+                "component-target-stratum",
+            ),
+        ] {
+            if !matches {
+                return Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::ComponentEndpointMismatch {
+                        index,
+                        field,
+                    },
+                );
+            }
+        }
+        match component.class() {
+            AdmittedDerivedStratumMorphismClassV1::Identity => {}
+            AdmittedDerivedStratumMorphismClassV1::DeclaredPath
+                if component.primitive_path().len() == 1 => {}
+            AdmittedDerivedStratumMorphismClassV1::DeclaredPath => {
+                return Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::CompositeComponent { index },
+                );
+            }
+        }
+        retained.push(*binding);
+    }
+    if cx.checkpoint().is_err() {
+        return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+            stage: "stratified-assembly-admission",
+        });
+    }
+    let receipt = exhaustive_stratified_map_candidate_receipt(ir, &retained, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+            stage: "stratified-assembly-publication",
+        });
+    }
+    Ok(AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
+        source_geometry: ir.source_geometry,
+        source_stratification: ir.source_stratification,
+        target_geometry: ir.target_geometry,
+        target_stratification: ir.target_stratification,
+        components: retained,
+        nominal_assembly: ir.nominal_assembly,
+        nominal_constructibility: ir.nominal_constructibility,
+        no_authority: ir.no_authority,
+        receipt,
+    })
+}
+
 fn span_correspondence_receipt(
     ir: DerivedSpanCorrespondenceIrV1,
     cx: &Cx<'_>,
@@ -4650,17 +5199,59 @@ mod tests {
         seed: u8,
         cx: &Cx<'_>,
     ) -> AdmittedDerivedStratumMorphismV1 {
+        admit_stratum_component_between(
+            source,
+            target,
+            sole_stratum_object(source),
+            sole_stratum_object(target),
+            seed,
+            cx,
+        )
+    }
+
+    fn admit_stratum_component_between(
+        source: &AdmittedDerivedGeometryV1,
+        target: &AdmittedDerivedGeometryV1,
+        source_object: DerivedStratumObjectV1,
+        target_object: DerivedStratumObjectV1,
+        seed: u8,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedStratumMorphismV1 {
         admit_derived_stratum_morphism_v1(
-            &stratum_component_ir(
-                sole_stratum_object(source),
-                sole_stratum_object(target),
-                seed,
-            ),
+            &stratum_component_ir(source_object, target_object, seed),
             source,
             target,
             cx,
         )
         .expect("valid declared stratum component")
+    }
+
+    fn exhaustive_stratified_map_candidate_ir(
+        source: &AdmittedDerivedGeometryV1,
+        target: &AdmittedDerivedGeometryV1,
+        components: &[AdmittedDerivedStratumMorphismV1],
+        seed: u8,
+    ) -> DerivedExhaustiveStratifiedMapCandidateIrV1 {
+        DerivedExhaustiveStratifiedMapCandidateIrV1 {
+            schema_version: DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1,
+            source_geometry: source.id(),
+            source_stratification: source.ir().stratification.id,
+            target_geometry: target.id(),
+            target_stratification: target.ir().stratification.id,
+            components: components
+                .iter()
+                .map(|component| DerivedStratifiedMapComponentBindingV1 {
+                    source_stratum: component.source().stratum,
+                    target_stratum: component.target().stratum,
+                    component: component.id(),
+                })
+                .collect(),
+            nominal_assembly: DerivedStratifiedMapAssemblyIdV1::from_bytes([seed; 32]),
+            nominal_constructibility: DerivedGlobalConstructibilityDeclarationIdV1::from_bytes(
+                [seed.wrapping_add(1); 32],
+            ),
+            no_authority: DerivedNoClaimIdV1::from_bytes([seed.wrapping_add(2); 32]),
+        }
     }
 
     #[test]
@@ -5115,6 +5706,364 @@ mod tests {
                 compose_derived_stratum_morphisms_v1(&admitted, &admitted, cx),
                 Err(DerivedStratumMorphismErrorV1::Cancelled {
                     stage: "stratum-composition-entry"
+                })
+            ));
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Replay plus independent retained-field identity movement.
+    fn exhaustive_stratified_map_candidate_is_domain_separate_and_replays() {
+        with_cx(false, |cx| {
+            assert_ne!(
+                <DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+                <DerivedStratumMorphismIdentitySchemaV1 as CanonicalSchema>::DOMAIN
+            );
+            assert_eq!(
+                <DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS
+                    .len(),
+                8
+            );
+            assert_eq!(
+                DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+                8
+            );
+
+            let source = admitted_fixed_resolution_geometry(70, 80, 90, 1, cx);
+            let target = admitted_fixed_resolution_geometry(73, 83, 93, 2, cx);
+            let components = vec![admit_stratum_component(&source, &target, 180, cx)];
+            let ir = exhaustive_stratified_map_candidate_ir(&source, &target, &components, 183);
+            let first = admit_derived_exhaustive_stratified_map_candidate_v1(
+                &ir,
+                &source,
+                &target,
+                &components,
+                cx,
+            )
+            .expect("valid exhaustive assembly candidate");
+            let replay = admit_derived_exhaustive_stratified_map_candidate_v1(
+                &ir,
+                &source,
+                &target,
+                &components,
+                cx,
+            )
+            .expect("deterministic assembly replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.source_geometry(), source.id());
+            assert_eq!(first.source_stratification(), source.ir().stratification.id);
+            assert_eq!(first.target_geometry(), target.id());
+            assert_eq!(first.target_stratification(), target.ir().stratification.id);
+            assert_eq!(first.components(), ir.components.as_slice());
+            assert_eq!(first.nominal_assembly(), ir.nominal_assembly);
+            assert_eq!(
+                first.nominal_constructibility(),
+                ir.nominal_constructibility
+            );
+            assert_eq!(first.no_authority(), ir.no_authority);
+
+            let alternate_components = vec![admit_stratum_component(&source, &target, 193, cx)];
+            let alternate_ir = exhaustive_stratified_map_candidate_ir(
+                &source,
+                &target,
+                &alternate_components,
+                183,
+            );
+            let alternate = admit_derived_exhaustive_stratified_map_candidate_v1(
+                &alternate_ir,
+                &source,
+                &target,
+                &alternate_components,
+                cx,
+            )
+            .expect("alternate component remains a structural candidate");
+            assert_ne!(first.id(), alternate.id());
+
+            for (field, changed_ir) in [
+                (
+                    "assembly",
+                    DerivedExhaustiveStratifiedMapCandidateIrV1 {
+                        nominal_assembly: DerivedStratifiedMapAssemblyIdV1::from_bytes([190; 32]),
+                        ..ir.clone()
+                    },
+                ),
+                (
+                    "constructibility",
+                    DerivedExhaustiveStratifiedMapCandidateIrV1 {
+                        nominal_constructibility:
+                            DerivedGlobalConstructibilityDeclarationIdV1::from_bytes([191; 32]),
+                        ..ir.clone()
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedExhaustiveStratifiedMapCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([192; 32]),
+                        ..ir.clone()
+                    },
+                ),
+            ] {
+                let changed = admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &changed_ir,
+                    &source,
+                    &target,
+                    &components,
+                    cx,
+                )
+                .unwrap_or_else(|error| panic!("changed {field} remains structural: {error}"));
+                assert_ne!(first.id(), changed.id(), "{field} must move identity");
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Full canonical coverage and binding-refusal fixture.
+    fn exhaustive_candidate_checks_full_canonical_source_coverage() {
+        with_cx(false, |cx| {
+            let mut source_ir = fixed_resolution_geometry_ir(70, 80, 90, 1);
+            let first_source_stratum = source_ir.stratification.strata[0].id;
+            let second_source_stratum = stratum_id(150);
+            let mut second = source_ir.stratification.strata[0].clone();
+            second.id = second_source_stratum;
+            source_ir.stratification.strata.push(second);
+            let source =
+                admit_derived_geometry_v1(source_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid two-stratum source");
+            let target = admitted_fixed_resolution_geometry(73, 83, 93, 2, cx);
+            let source_object = |stratum| DerivedStratumObjectV1 {
+                geometry: source.id(),
+                stratification: source.ir().stratification.id,
+                stratum,
+            };
+            let target_object = sole_stratum_object(&target);
+            let components = vec![
+                admit_stratum_component_between(
+                    &source,
+                    &target,
+                    source_object(first_source_stratum),
+                    target_object,
+                    193,
+                    cx,
+                ),
+                admit_stratum_component_between(
+                    &source,
+                    &target,
+                    source_object(second_source_stratum),
+                    target_object,
+                    196,
+                    cx,
+                ),
+            ];
+            let ir = exhaustive_stratified_map_candidate_ir(&source, &target, &components, 199);
+            let admitted = admit_derived_exhaustive_stratified_map_candidate_v1(
+                &ir,
+                &source,
+                &target,
+                &components,
+                cx,
+            )
+            .expect("complete canonical source coverage");
+            assert_eq!(admitted.components().len(), 2);
+            assert_eq!(
+                admitted.components()[0].source_stratum,
+                first_source_stratum
+            );
+            assert_eq!(
+                admitted.components()[1].source_stratum,
+                second_source_stratum
+            );
+            assert_eq!(
+                admitted.components()[0].target_stratum,
+                admitted.components()[1].target_stratum,
+                "target coverage and uniqueness are intentionally not required"
+            );
+
+            let mut missing = ir.clone();
+            missing.components.pop();
+            assert!(matches!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &missing,
+                    &source,
+                    &target,
+                    &components[..1],
+                    cx
+                ),
+                Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::ComponentCountMismatch {
+                        field: "component-bindings",
+                        expected: 2,
+                        found: 1
+                    }
+                )
+            ));
+
+            let mut wrong_order = ir.clone();
+            wrong_order.components[0].source_stratum = second_source_stratum;
+            assert!(matches!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &wrong_order,
+                    &source,
+                    &target,
+                    &components,
+                    cx
+                ),
+                Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::ComponentEndpointMismatch {
+                        index: 0,
+                        field: "binding-source-stratum-order"
+                    }
+                )
+            ));
+
+            let mut wrong_id = ir.clone();
+            wrong_id.components[0].component = components[1].id();
+            assert_eq!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &wrong_id,
+                    &source,
+                    &target,
+                    &components,
+                    cx
+                ),
+                Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::ComponentIdentityMismatch {
+                        index: 0
+                    }
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn exhaustive_candidate_accepts_identity_components_but_not_composite_paths() {
+        with_cx(false, |cx| {
+            let geometry = admitted_fixed_resolution_geometry(70, 80, 90, 1, cx);
+            let identity = identity_derived_stratum_morphism_v1(
+                &geometry,
+                sole_stratum_object(&geometry).stratum,
+                cx,
+            )
+            .expect("valid stratum identity");
+            let identities = vec![identity];
+            let identity_ir =
+                exhaustive_stratified_map_candidate_ir(&geometry, &geometry, &identities, 202);
+            assert!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &identity_ir,
+                    &geometry,
+                    &geometry,
+                    &identities,
+                    cx,
+                )
+                .is_ok()
+            );
+
+            let source = admitted_fixed_resolution_geometry(73, 83, 93, 2, cx);
+            let middle = admitted_fixed_resolution_geometry(76, 86, 96, 3, cx);
+            let target = admitted_fixed_resolution_geometry(79, 89, 99, 4, cx);
+            let first = admit_stratum_component(&source, &middle, 205, cx);
+            let second = admit_stratum_component(&middle, &target, 208, cx);
+            let composite =
+                compose_derived_stratum_morphisms_v1(&first, &second, cx).expect("sealed path");
+            let composites = vec![composite];
+            let composite_ir =
+                exhaustive_stratified_map_candidate_ir(&source, &target, &composites, 211);
+            assert_eq!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &composite_ir,
+                    &source,
+                    &target,
+                    &composites,
+                    cx,
+                ),
+                Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::CompositeComponent { index: 0 }
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn exhaustive_candidate_refuses_missing_authority_fields_caps_and_cancellation() {
+        let (source, target, components, ir) = with_cx(false, |cx| {
+            let source = admitted_fixed_resolution_geometry(70, 80, 90, 1, cx);
+            let target = admitted_fixed_resolution_geometry(73, 83, 93, 2, cx);
+            let components = vec![admit_stratum_component(&source, &target, 214, cx)];
+            let ir = exhaustive_stratified_map_candidate_ir(&source, &target, &components, 217);
+            (source, target, components, ir)
+        });
+        with_cx(false, |cx| {
+            for (field, changed_ir) in [
+                (
+                    "nominal-assembly",
+                    DerivedExhaustiveStratifiedMapCandidateIrV1 {
+                        nominal_assembly: DerivedStratifiedMapAssemblyIdV1::from_bytes([0; 32]),
+                        ..ir.clone()
+                    },
+                ),
+                (
+                    "nominal-global-constructibility",
+                    DerivedExhaustiveStratifiedMapCandidateIrV1 {
+                        nominal_constructibility:
+                            DerivedGlobalConstructibilityDeclarationIdV1::from_bytes([0; 32]),
+                        ..ir.clone()
+                    },
+                ),
+                (
+                    "no-global-map-authority",
+                    DerivedExhaustiveStratifiedMapCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..ir.clone()
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_exhaustive_stratified_map_candidate_v1(
+                        &changed_ir,
+                        &source,
+                        &target,
+                        &components,
+                        cx
+                    ),
+                    Err(
+                        DerivedExhaustiveStratifiedMapCandidateErrorV1::MissingIdentity {
+                            field: found
+                        }
+                    ) if found == field
+                ));
+            }
+
+            let mut oversized = ir.clone();
+            oversized.components = vec![ir.components[0]; DERIVED_MORPHISM_MAX_FACTORS_V1 + 1];
+            assert!(matches!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &oversized,
+                    &source,
+                    &target,
+                    &components,
+                    cx
+                ),
+                Err(
+                    DerivedExhaustiveStratifiedMapCandidateErrorV1::ResourceLimit {
+                        field: "component-bindings",
+                        requested,
+                        limit: DERIVED_MORPHISM_MAX_FACTORS_V1
+                    }
+                ) if requested == DERIVED_MORPHISM_MAX_FACTORS_V1 + 1
+            ));
+        });
+        with_cx(true, |cx| {
+            assert!(matches!(
+                admit_derived_exhaustive_stratified_map_candidate_v1(
+                    &ir,
+                    &source,
+                    &target,
+                    &components,
+                    cx
+                ),
+                Err(DerivedExhaustiveStratifiedMapCandidateErrorV1::Cancelled {
+                    stage: "stratified-assembly-admission-entry"
                 })
             ));
         });
