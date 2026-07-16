@@ -27,7 +27,11 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   `core2::MomentumExchange2`, `stream_from_with_wall_momentum`, and
   `step_with_wall_momentum` add an opt-in raw lattice-impulse receipt for an
   explicitly selected subset of stationary wall cells without changing the
-  legacy step path. `core2::VelocityPressureX2` plus the paired Grid step
+  legacy step path. `core2::MovingWallMomentumExchange2` plus the paired
+  moving-wall stream/step methods apply per-wall-cell halfway-bounce velocity
+  corrections and return boundary-relative impulse, torque, work, resolved
+  population momentum, and moving-mass transfer terms for an explicitly
+  selected wall subset. `core2::VelocityPressureX2` plus the paired Grid step
   methods provide a low-Mach regularized velocity inlet at x-min and density
   outlet at x-max with periodic y closure; density/velocity and non-equilibrium
   stress are extrapolated from the respective first-interior columns.
@@ -122,6 +126,16 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   order for selected stationary halfway-bounce-back links. Gas and exterior
   bounces are excluded; an isolated wall in equilibrium fluid has zero net
   impulse, and selecting one obstacle cannot silently include another.
+- D2Q9 moving-wall streaming adds
+  `2 w_q rho_post (c_q dot u_wall) / c_s^2` to each incoming wall link. Its
+  selected-wall impulse uses the boundary-relative Wen-style exchange
+  `(c_out - u_wall) f_out - (c_in - u_wall) f_in`. The receipt independently
+  retains the resolved fluid-population impulse and `u_wall (f_in - f_out)`;
+  their linkwise balance closes in fixed row-major/direction order. Torque uses
+  destination-local halfway-link midpoints about the caller's finite origin.
+  The force convention is from Wen et al., *Galilean Invariant Fluid-Solid
+  Interfacial Dynamics in Lattice Boltzmann Simulations* (2014,
+  <https://arxiv.org/abs/1303.0625>).
 - D2Q9 regularized x faces impose the declared inlet velocity and outlet
   density to roundoff while copying the complementary moment and independently
   measured non-equilibrium stress from the first interior column. The measured
@@ -160,6 +174,12 @@ Rayleigh height, or non-positive Reynolds/length in the scaling assistant.
 D2Q9 momentum measurement additionally requires a full-grid boolean mask whose
 selected entries are all `Cell::Wall`; this is checked before a measured step
 can mutate populations.
+D2Q9 moving-wall calls additionally require one finite velocity per grid cell,
+zero velocity on every non-wall cell, speed squared below 0.03, and a finite
+moment origin. Every moving wall adjacent to fluid requires positive finite
+post-collision density, and every outgoing wall-link population must be finite.
+Request fields and post-collision state are admitted before streaming mutates
+the grid.
 D2Q9 regularized x flow requires at least three columns, non-periodic x,
 periodic y, fluid face/first-interior columns, zero gravity/external forcing,
 a positive finite outlet density, and a finite inlet speed squared below 0.03.
@@ -214,9 +234,13 @@ Poiseuille flow matches the analytic parabola (symmetric, centered); the
 scaling assistant derives τ + flags stability + colors the plan; it rejects a
 high-Mach plan and nonsense inputs; determinism; exact one-link wall-impulse
 sign/magnitude, obstacle selection, equilibrium cancellation, replay
-determinism, and pre-step mask refusal for D2Q9 momentum exchange; regularized
-x-face moment/stress reconstruction, measured-path bit equivalence, and
-pre-step topology/forcing refusal.
+determinism, and pre-step mask refusal for D2Q9 momentum exchange; an
+independently enumerable moving-wall link that pins bounce correction,
+boundary-relative force, torque, work, and moving-mass balance; exact
+zero-velocity compatibility with the stationary API; moving-step bit replay;
+and fail-closed moving-field admission. It also covers regularized x-face
+moment/stress reconstruction, measured-path bit equivalence, and pre-step
+topology/forcing refusal.
 
 `tests/extensions.rs` covers the current extension scaffolding: power-law and
 Newtonian-limit channel profiles, Carreau plateaus, Rayleigh-Bénard onset
@@ -311,10 +335,15 @@ redistributed.
   halfway wall, not a second-order certificate against the original continuous
   curved SDF. Interpolated Bouzidi-type curved boundaries remain staged.
 - D2Q9 `MomentumExchange2` is a raw stationary-wall lattice impulse over the
-  caller's exact cell mask. It does not apply physical-unit conversion,
-  reference-area normalization, moving-wall correction, curved-boundary
-  interpolation, blockage correction, averaging, or shedding-frequency
-  estimation; therefore it is not yet the Re=100 cylinder Cd/St validation.
+  caller's exact cell mask. `MovingWallMomentumExchange2` adds a static-topology
+  halfway-wall velocity correction and boundary-relative force evaluation, but
+  it does not move cell topology or initialize newly uncovered fluid. Neither
+  receipt applies physical-unit conversion, reference-area normalization,
+  curved-boundary interpolation, blockage correction, averaging, or
+  shedding-frequency estimation; therefore this is not yet the Re=100 cylinder
+  Cd/St validation. Boundary-relative exchange improves the force receipt's
+  frame behavior; it is not by itself a proof that the full bounce-back solver
+  is Galilean invariant.
 - The separate `lbm-109` release fixture encodes the intended normalization,
   warm-up, detrended FFT, raw/split-window guards, primary-source envelopes,
   and empirical two-width Cd sensitivity treatment. Maskell's closed-tunnel

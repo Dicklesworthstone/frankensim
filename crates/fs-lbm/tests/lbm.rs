@@ -5,7 +5,7 @@
 
 use fs_lbm::core2::VelocityPressureX2;
 use fs_lbm::{
-    Cell, Color, Grid, Lbm, MACH_LIMIT, Q, equilibrium, plan_scaling, poiseuille_analytic,
+    CS2, Cell, Color, Grid, Lbm, MACH_LIMIT, Q, equilibrium, plan_scaling, poiseuille_analytic,
 };
 
 fn d2q9_nonequilibrium_stress(
@@ -212,6 +212,216 @@ fn d2q9_wall_momentum_is_zero_at_rest_and_replays_bitwise() {
         assert_eq!(first_cell.map(f64::to_bits), second_cell.map(f64::to_bits));
         assert_eq!(first_cell.map(f64::to_bits), legacy_cell.map(f64::to_bits));
     }
+}
+
+#[test]
+fn d2q9_moving_wall_exchange_pins_relative_force_torque_work_and_balance() {
+    // G0/G3: one independently enumerable link pins direction conventions,
+    // the moving bounce correction, relative-velocity force, and the complete
+    // moving-mass momentum balance.
+    let mut grid = Grid::uniform(3, 3, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.flags.fill(Cell::Gas);
+    let fluid = grid.idx(1, 1);
+    let wall = grid.idx(2, 1);
+    grid.flags[fluid] = Cell::Fluid;
+    grid.flags[wall] = Cell::Wall;
+
+    let mut post = vec![[0.0; Q]; grid.nx * grid.ny];
+    let outgoing = 0.25;
+    post[fluid][1] = outgoing;
+    let mut measured = vec![false; grid.nx * grid.ny];
+    measured[wall] = true;
+    let mut wall_velocities = vec![[0.0; 2]; grid.nx * grid.ny];
+    let wall_velocity = [0.03, 0.02];
+    wall_velocities[wall] = wall_velocity;
+    let origin = [0.5, 0.25];
+
+    let receipt =
+        grid.stream_from_with_moving_wall_momentum(&post, &measured, &wall_velocities, origin);
+
+    // Pull direction q=3 points west from this right-hand wall into fluid.
+    // Its D2Q9 weight is 1/9 and the post-collision density is 0.25.
+    let incoming = outgoing + 2.0 * (1.0 / 9.0) * outgoing * -wall_velocity[0] / CS2;
+    let expected_wall = [
+        (1.0 - wall_velocity[0]) * outgoing - (-1.0 - wall_velocity[0]) * incoming,
+        (0.0 - wall_velocity[1]) * outgoing - (0.0 - wall_velocity[1]) * incoming,
+    ];
+    let expected_fluid = [-(incoming + outgoing), 0.0];
+    let expected_mass_change = incoming - outgoing;
+    let expected_mass_impulse = [
+        wall_velocity[0] * expected_mass_change,
+        wall_velocity[1] * expected_mass_change,
+    ];
+    let link_offset = [1.5 - origin[0], 1.0 - origin[1]];
+    let expected_wall_torque =
+        link_offset[0] * expected_wall[1] - link_offset[1] * expected_wall[0];
+    let expected_work = expected_wall[0] * wall_velocity[0] + expected_wall[1] * wall_velocity[1];
+
+    assert_eq!(receipt.measured_links, 1);
+    assert!((grid.f[fluid][3] - incoming).abs() < 1e-15);
+    for axis in 0..2 {
+        assert!((receipt.wall_impulse[axis] - expected_wall[axis]).abs() < 1e-15);
+        assert!((receipt.fluid_population_impulse[axis] - expected_fluid[axis]).abs() < 1e-15);
+        assert!(
+            (receipt.wall_velocity_mass_impulse[axis] - expected_mass_impulse[axis]).abs() < 1e-15
+        );
+        assert!(
+            (receipt.wall_impulse[axis] + receipt.fluid_population_impulse[axis]
+                - receipt.wall_velocity_mass_impulse[axis])
+                .abs()
+                < 1e-15
+        );
+    }
+    assert!((receipt.fluid_mass_change - expected_mass_change).abs() < 1e-15);
+    assert!((receipt.wall_angular_impulse - expected_wall_torque).abs() < 1e-15);
+    assert!(
+        (receipt.wall_angular_impulse + receipt.fluid_population_angular_impulse
+            - receipt.wall_velocity_mass_angular_impulse)
+            .abs()
+            < 1e-15
+    );
+    assert!((receipt.wall_work - expected_work).abs() < 1e-15);
+
+    let shifted_origin = [1.0, -0.5];
+    let shifted = grid.stream_from_with_moving_wall_momentum(
+        &post,
+        &measured,
+        &wall_velocities,
+        shifted_origin,
+    );
+    let origin_shift = [shifted_origin[0] - origin[0], shifted_origin[1] - origin[1]];
+    let translated_torque = receipt.wall_angular_impulse
+        - origin_shift[0] * receipt.wall_impulse[1]
+        + origin_shift[1] * receipt.wall_impulse[0];
+    assert!((shifted.wall_angular_impulse - translated_torque).abs() < 1e-15);
+}
+
+#[test]
+fn d2q9_zero_velocity_moving_api_matches_stationary_api_and_replays() {
+    // G5: zero velocity is an exact compatibility boundary, and a nonzero
+    // moving-wall step replays bit-for-bit in fixed cell/link order.
+    let mut legacy = Grid::uniform(5, 5, 0.8);
+    let wall = legacy.idx(2, 2);
+    let upstream = legacy.idx(1, 2);
+    legacy.flags[wall] = Cell::Wall;
+    legacy.f[upstream] = equilibrium(1.0, 0.03, -0.01);
+    let post = legacy.f.clone();
+    let mut moving = legacy.clone();
+    let mut measured = vec![false; legacy.nx * legacy.ny];
+    measured[wall] = true;
+    let stationary_velocities = vec![[0.0; 2]; legacy.nx * legacy.ny];
+
+    let stationary = legacy.stream_from_with_wall_momentum(&post, &measured);
+    let through_moving = moving.stream_from_with_moving_wall_momentum(
+        &post,
+        &measured,
+        &stationary_velocities,
+        [0.0; 2],
+    );
+    assert_eq!(
+        stationary.wall_impulse.map(f64::to_bits),
+        through_moving.wall_impulse.map(f64::to_bits)
+    );
+    for (legacy_cell, moving_cell) in legacy.f.iter().zip(&moving.f) {
+        assert_eq!(legacy_cell.map(f64::to_bits), moving_cell.map(f64::to_bits));
+    }
+    assert_eq!(through_moving.fluid_mass_change.to_bits(), 0.0f64.to_bits());
+    assert_eq!(
+        through_moving.wall_velocity_mass_impulse.map(f64::to_bits),
+        [0, 0]
+    );
+
+    let mut first = Grid::uniform(7, 7, 0.8);
+    let moving_wall = first.idx(3, 3);
+    first.flags[moving_wall] = Cell::Wall;
+    let mut second = first.clone();
+    let mut moving_velocities = vec![[0.0; 2]; first.nx * first.ny];
+    moving_velocities[moving_wall] = [0.01, -0.02];
+    let mut moving_mask = vec![false; first.nx * first.ny];
+    moving_mask[moving_wall] = true;
+    let (mut first_scratch, mut second_scratch) = (Vec::new(), Vec::new());
+    for _ in 0..8 {
+        let first_receipt = first.step_with_moving_wall_momentum(
+            &mut first_scratch,
+            &moving_mask,
+            &moving_velocities,
+            [3.0, 3.0],
+        );
+        let second_receipt = second.step_with_moving_wall_momentum(
+            &mut second_scratch,
+            &moving_mask,
+            &moving_velocities,
+            [3.0, 3.0],
+        );
+        assert_eq!(first_receipt, second_receipt);
+        for (first_cell, second_cell) in first.f.iter().zip(&second.f) {
+            assert_eq!(first_cell.map(f64::to_bits), second_cell.map(f64::to_bits));
+        }
+    }
+}
+
+#[test]
+fn d2q9_moving_wall_refuses_bad_fields_before_advancing() {
+    let mut grid = Grid::uniform(3, 3, 0.8);
+    let wall = grid.idx(1, 1);
+    grid.flags[wall] = Cell::Wall;
+    let original = grid.f.clone();
+    let measured = vec![false; grid.nx * grid.ny];
+    let mut scratch = Vec::new();
+
+    let mut non_wall_motion = vec![[0.0; 2]; grid.nx * grid.ny];
+    non_wall_motion[grid.idx(0, 0)] = [0.01, 0.0];
+    let non_wall_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = grid.step_with_moving_wall_momentum(
+            &mut scratch,
+            &measured,
+            &non_wall_motion,
+            [0.0; 2],
+        );
+    }));
+    assert!(non_wall_refusal.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
+
+    let mut too_fast = vec![[0.0; 2]; grid.nx * grid.ny];
+    too_fast[wall] = [0.2, 0.0];
+    let speed_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = grid.step_with_moving_wall_momentum(&mut scratch, &measured, &too_fast, [0.0; 2]);
+    }));
+    assert!(speed_refusal.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
+
+    let valid_motion = {
+        let mut velocities = vec![[0.0; 2]; grid.nx * grid.ny];
+        velocities[wall] = [0.01, 0.0];
+        velocities
+    };
+    let bad_origin = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = grid.step_with_moving_wall_momentum(
+            &mut scratch,
+            &measured,
+            &valid_motion,
+            [f64::NAN, 0.0],
+        );
+    }));
+    assert!(bad_origin.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
+
+    let zero_post = vec![[0.0; Q]; grid.nx * grid.ny];
+    let density_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = grid.stream_from_with_moving_wall_momentum(
+            &zero_post,
+            &measured,
+            &valid_motion,
+            [0.0; 2],
+        );
+    }));
+    assert!(density_refusal.is_err());
+    assert_eq!(grid.f, original);
 }
 
 #[test]

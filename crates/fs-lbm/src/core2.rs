@@ -70,6 +70,42 @@ pub struct MomentumExchange2 {
     pub measured_links: usize,
 }
 
+/// Momentum, torque, and work delivered to selected moving D2Q9 walls.
+///
+/// `wall_impulse` uses the boundary-relative momentum-exchange expression
+/// `(c_out - u_wall) f_out - (c_in - u_wall) f_in`. The separate population
+/// and wall-velocity mass terms retain the discrete balance
+///
+/// `wall_impulse + fluid_population_impulse = wall_velocity_mass_impulse`
+///
+/// up to floating-point roundoff. All values are raw lattice quantities for
+/// one stream step; no physical-unit or reference-area normalization is
+/// applied. The relative-velocity force convention follows Wen et al.,
+/// *Galilean Invariant Fluid-Solid Interfacial Dynamics in Lattice Boltzmann
+/// Simulations* (2014; <https://arxiv.org/abs/1303.0625>).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[must_use]
+pub struct MovingWallMomentumExchange2 {
+    /// Boundary-relative hydrodynamic impulse delivered to selected walls.
+    pub wall_impulse: [f64; 2],
+    /// Change in resolved fluid-population momentum across selected links.
+    pub fluid_population_impulse: [f64; 2],
+    /// Net incoming-minus-outgoing population mass across selected links.
+    pub fluid_mass_change: f64,
+    /// Sum of `u_wall * (f_in - f_out)` across selected links.
+    pub wall_velocity_mass_impulse: [f64; 2],
+    /// Scalar 2-D wall angular impulse about the requested origin.
+    pub wall_angular_impulse: f64,
+    /// Scalar angular impulse of the resolved fluid-population change.
+    pub fluid_population_angular_impulse: f64,
+    /// Scalar angular impulse of `wall_velocity_mass_impulse`.
+    pub wall_velocity_mass_angular_impulse: f64,
+    /// Work delivered to selected walls, `sum(wall_impulse_link dot u_wall)`.
+    pub wall_work: f64,
+    /// Number of selected fluid-wall links included in the receipt.
+    pub measured_links: usize,
+}
+
 /// Low-Mach regularized velocity inlet at `x = 0` and isothermal
 /// pressure/density outlet at `x = nx - 1`.
 ///
@@ -298,6 +334,66 @@ impl Grid {
         }
     }
 
+    fn validate_moving_wall_fields(&self, wall_velocities: &[[f64; 2]], moment_origin: [f64; 2]) {
+        assert_eq!(
+            wall_velocities.len(),
+            self.nx * self.ny,
+            "moving-wall velocity field length must match the grid"
+        );
+        assert!(
+            moment_origin.into_iter().all(f64::is_finite),
+            "moving-wall moment origin must be finite"
+        );
+        for (index, (&velocity, &flag)) in wall_velocities.iter().zip(&self.flags).enumerate() {
+            assert!(
+                velocity.into_iter().all(f64::is_finite),
+                "moving-wall velocity at cell {index} must be finite"
+            );
+            let speed_sq = velocity[0].mul_add(velocity[0], velocity[1] * velocity[1]);
+            assert!(
+                speed_sq < MAX_REGULARIZED_BOUNDARY_SPEED_SQ,
+                "moving-wall velocity at cell {index} exceeds the low-Mach admission envelope"
+            );
+            assert!(
+                flag == Cell::Wall || velocity == [0.0; 2],
+                "moving-wall velocity field assigns motion to non-wall cell {index}"
+            );
+        }
+    }
+
+    fn validate_moving_wall_post(&self, post: &[[f64; Q]], wall_velocities: &[[f64; 2]]) {
+        self.validate_stream_input(post);
+        for y in 0..self.ny {
+            for x in 0..self.nx {
+                let i = self.idx(x, y);
+                if !matches!(self.flags[i], Cell::Fluid | Cell::Interface) {
+                    continue;
+                }
+                let mut needs_density = false;
+                for q in 0..Q {
+                    let Some(source) = self.source(x, y, q) else {
+                        continue;
+                    };
+                    if self.flags[source] != Cell::Wall {
+                        continue;
+                    }
+                    assert!(
+                        post[i][OPP[q]].is_finite(),
+                        "moving-wall outgoing population must be finite"
+                    );
+                    needs_density |= wall_velocities[source] != [0.0; 2];
+                }
+                if needs_density {
+                    let rho_post = post[i].iter().sum::<f64>();
+                    assert!(
+                        rho_post.is_finite() && rho_post > 0.0,
+                        "moving-wall bounce-back requires positive finite post-collision density"
+                    );
+                }
+            }
+        }
+    }
+
     fn validate_velocity_pressure_x(&self) {
         assert!(
             self.nx >= 3,
@@ -397,6 +493,95 @@ impl Grid {
         receipt
     }
 
+    fn stream_from_moving_wall_inner(
+        &mut self,
+        post: &[[f64; Q]],
+        measured_walls: &[bool],
+        wall_velocities: &[[f64; 2]],
+        moment_origin: [f64; 2],
+    ) -> MovingWallMomentumExchange2 {
+        let mut receipt = MovingWallMomentumExchange2::default();
+        for y in 0..self.ny {
+            for x in 0..self.nx {
+                let i = self.idx(x, y);
+                if !matches!(self.flags[i], Cell::Fluid | Cell::Interface) {
+                    continue;
+                }
+                let mut rho_post = None;
+                for q in 0..Q {
+                    let pulled = match self.source(x, y, q) {
+                        Some(source) if self.flags[source] == Cell::Wall => {
+                            let outgoing = post[i][OPP[q]];
+                            let wall_velocity = wall_velocities[source];
+                            let incoming = if wall_velocity == [0.0; 2] {
+                                outgoing
+                            } else {
+                                let rho =
+                                    *rho_post.get_or_insert_with(|| post[i].iter().sum::<f64>());
+                                let e = [f64::from(E[q].0), f64::from(E[q].1)];
+                                let e_dot_wall =
+                                    e[0].mul_add(wall_velocity[0], e[1] * wall_velocity[1]);
+                                outgoing + 2.0 * W[q] * rho * e_dot_wall / CS2
+                            };
+
+                            if measured_walls[source] {
+                                let e = [f64::from(E[q].0), f64::from(E[q].1)];
+                                let wall_impulse = if wall_velocity == [0.0; 2] {
+                                    [-2.0 * outgoing * e[0], -2.0 * outgoing * e[1]]
+                                } else {
+                                    [
+                                        (-e[0] - wall_velocity[0]) * outgoing
+                                            - (e[0] - wall_velocity[0]) * incoming,
+                                        (-e[1] - wall_velocity[1]) * outgoing
+                                            - (e[1] - wall_velocity[1]) * incoming,
+                                    ]
+                                };
+                                let fluid_population_impulse =
+                                    [e[0] * (incoming + outgoing), e[1] * (incoming + outgoing)];
+                                let fluid_mass_change = incoming - outgoing;
+                                let wall_velocity_mass_impulse = [
+                                    wall_velocity[0] * fluid_mass_change,
+                                    wall_velocity[1] * fluid_mass_change,
+                                ];
+                                let link_offset = [
+                                    (x as f64 - 0.5 * e[0]) - moment_origin[0],
+                                    (y as f64 - 0.5 * e[1]) - moment_origin[1],
+                                ];
+
+                                receipt.wall_impulse[0] += wall_impulse[0];
+                                receipt.wall_impulse[1] += wall_impulse[1];
+                                receipt.fluid_population_impulse[0] += fluid_population_impulse[0];
+                                receipt.fluid_population_impulse[1] += fluid_population_impulse[1];
+                                receipt.fluid_mass_change += fluid_mass_change;
+                                receipt.wall_velocity_mass_impulse[0] +=
+                                    wall_velocity_mass_impulse[0];
+                                receipt.wall_velocity_mass_impulse[1] +=
+                                    wall_velocity_mass_impulse[1];
+                                receipt.wall_angular_impulse += link_offset[0] * wall_impulse[1]
+                                    - link_offset[1] * wall_impulse[0];
+                                receipt.fluid_population_angular_impulse += link_offset[0]
+                                    * fluid_population_impulse[1]
+                                    - link_offset[1] * fluid_population_impulse[0];
+                                receipt.wall_velocity_mass_angular_impulse += link_offset[0]
+                                    * wall_velocity_mass_impulse[1]
+                                    - link_offset[1] * wall_velocity_mass_impulse[0];
+                                receipt.wall_work += wall_impulse[0]
+                                    .mul_add(wall_velocity[0], wall_impulse[1] * wall_velocity[1]);
+                                receipt.measured_links += 1;
+                            }
+                            incoming
+                        }
+                        Some(source) if self.flags[source] == Cell::Gas => post[i][OPP[q]],
+                        Some(source) => post[source][q],
+                        None => post[i][OPP[q]],
+                    };
+                    self.f[i][q] = pulled;
+                }
+            }
+        }
+        receipt
+    }
+
     /// Stream `post` into `self.f` (fluid pull; wall and out-of-domain
     /// pulls bounce back).
     pub fn stream_from(&mut self, post: &[[f64; Q]]) {
@@ -417,6 +602,26 @@ impl Grid {
         self.validate_stream_input(post);
         self.validate_measured_walls(measured_walls);
         self.stream_from_inner(post, Some(measured_walls))
+    }
+
+    /// Stream with per-wall-cell velocities and a moving-wall exchange receipt.
+    ///
+    /// Moving halfway bounce-back is applied to every wall cell according to
+    /// `wall_velocities`; `measured_walls` only selects which links contribute
+    /// to the returned receipt. Torque uses each destination-local halfway-link
+    /// midpoint about `moment_origin`. All request and post-collision inputs are
+    /// validated before populations are mutated.
+    pub fn stream_from_with_moving_wall_momentum(
+        &mut self,
+        post: &[[f64; Q]],
+        measured_walls: &[bool],
+        wall_velocities: &[[f64; 2]],
+        moment_origin: [f64; 2],
+    ) -> MovingWallMomentumExchange2 {
+        self.validate_measured_walls(measured_walls);
+        self.validate_moving_wall_fields(wall_velocities, moment_origin);
+        self.validate_moving_wall_post(post, wall_velocities);
+        self.stream_from_moving_wall_inner(post, measured_walls, wall_velocities, moment_origin)
     }
 
     /// One plain step (no free-surface bookkeeping).
@@ -440,6 +645,32 @@ impl Grid {
         self.collide_into(scratch);
         let post = std::mem::take(scratch);
         let receipt = self.stream_from_inner(&post, Some(measured_walls));
+        *scratch = post;
+        receipt
+    }
+
+    /// One collide-stream step with moving walls and a selected-wall receipt.
+    ///
+    /// The velocity field, measurement mask, moment origin, and post-collision
+    /// state are all admitted before streaming can mutate `self.f`.
+    pub fn step_with_moving_wall_momentum(
+        &mut self,
+        scratch: &mut Vec<[f64; Q]>,
+        measured_walls: &[bool],
+        wall_velocities: &[[f64; 2]],
+        moment_origin: [f64; 2],
+    ) -> MovingWallMomentumExchange2 {
+        self.validate_measured_walls(measured_walls);
+        self.validate_moving_wall_fields(wall_velocities, moment_origin);
+        self.collide_into(scratch);
+        self.validate_moving_wall_post(scratch, wall_velocities);
+        let post = std::mem::take(scratch);
+        let receipt = self.stream_from_moving_wall_inner(
+            &post,
+            measured_walls,
+            wall_velocities,
+            moment_origin,
+        );
         *scratch = post;
         receipt
     }
