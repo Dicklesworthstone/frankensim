@@ -16,8 +16,9 @@ use asupersync::time::TimeSource;
 use asupersync::types::{Budget, Time};
 use fs_exec::{BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::sheaf_merge::{
-    BoundedMergeOutcome, BranchState, CandidateRateError, Confidence, MergeOutcome,
-    SheafMergeBudget, SheafMergeError, candidate_remainder_conflict_rate, spectral_gap,
+    BoundedCandidateRate, BoundedMergeOutcome, BranchState, CandidateRateBudget,
+    CandidateRateError, Confidence, MergeOutcome, SheafMergeBudget, SheafMergeError,
+    candidate_remainder_conflict_rate, candidate_remainder_conflict_rate_bounded, spectral_gap,
     three_way_merge, three_way_merge_bounded, type_conflicts,
 };
 use fs_geom::sheaf_repair::{
@@ -144,6 +145,21 @@ fn bounded_budget(sweeps: usize) -> SheafMergeBudget {
         max_output_bytes: 16_384,
         max_conflict_cells: 64,
         max_provenance_bytes: 512,
+    }
+}
+
+fn candidate_budget(trials: usize, sweeps: usize) -> CandidateRateBudget {
+    let merge = bounded_budget(sweeps);
+    CandidateRateBudget {
+        merge,
+        max_trials: trials,
+        max_operator_evaluations: 1_000_000,
+        max_work_items: 1_000_000_000,
+        max_scalar_slots: 100_000,
+        max_total_output_bytes: merge
+            .max_output_bytes
+            .checked_mul(trials)
+            .expect("small fixture output envelope"),
     }
 }
 
@@ -1590,5 +1606,355 @@ fn sm_010_bounded_merge_cancellation_and_ambient_refusal_publish_nothing() {
     verdict(
         "sm-010",
         "pre-cancel, deterministic mid-run cancellation, true final-publication cancellation, ambient cost admission, and final poll exhaustion return no outcome; fresh retries reproduce both baselines",
+    );
+}
+
+#[test]
+fn sm_011_bounded_candidate_rate_matches_raw_seeded_parity_and_replays() {
+    const TRIALS: usize = 3;
+    const SCALE: f64 = 0.1;
+    let (triangle_raw, triangle_admitted) = canonical_triangle();
+    let (ring_raw, ring_admitted) = canonical_ring();
+
+    for (raw, admitted, seed) in [
+        (triangle_raw, triangle_admitted, 0xfeed),
+        (ring_raw, ring_admitted, 0xdecafbad),
+    ] {
+        let legacy = candidate_remainder_conflict_rate(&raw, TRIALS, SCALE, seed)
+            .expect("canonical raw seeded diagnostic");
+        let budget = candidate_budget(TRIALS, 400);
+        let bounded: BoundedCandidateRate = with_cx(|cx| {
+            candidate_remainder_conflict_rate_bounded(&admitted, TRIALS, SCALE, seed, budget, cx)
+                .expect("bounded seeded diagnostic")
+        });
+        assert_eq!(bounded.rate.to_bits(), legacy.to_bits());
+        assert_eq!(bounded.seed, seed);
+        assert_eq!(bounded.usage.trials_completed, TRIALS);
+        assert!(bounded.usage.conflicts <= TRIALS);
+        #[allow(clippy::cast_precision_loss)]
+        let measured = bounded.usage.conflicts as f64 / TRIALS as f64;
+        assert_eq!(bounded.rate.to_bits(), measured.to_bits());
+        assert!(bounded.usage.requested_output_bytes <= bounded.usage.admitted_output_bytes);
+
+        let replay = with_cx(|cx| {
+            candidate_remainder_conflict_rate_bounded(&admitted, TRIALS, SCALE, seed, budget, cx)
+                .expect("fresh deterministic seeded retry")
+        });
+        assert_eq!(replay, bounded);
+    }
+
+    verdict(
+        "sm-011",
+        "one-accountant bounded seeded diagnostics match canonical raw rate bits and replay the complete aggregate report",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exact aggregate relations and cap-minus-one refusal table.
+fn sm_012_bounded_candidate_rate_aggregate_caps_are_exact() {
+    const TRIALS: usize = 3;
+    const SCALE: f64 = 0.1;
+    const SEED: u64 = 0x5eed_cafe;
+    let (_, skeleton) = canonical_triangle();
+    let single_budget = candidate_budget(1, 8);
+    let single = with_cx(|cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, 1, SCALE, SEED, single_budget, cx)
+            .expect("single-trial aggregate baseline")
+    });
+    let generous = candidate_budget(TRIALS, 8);
+    with_cx(|cx| {
+        assert_eq!(
+            candidate_remainder_conflict_rate_bounded(&skeleton, 0, SCALE, SEED, generous, cx,),
+            Err(CandidateRateError::ZeroTrials)
+        );
+        assert_eq!(
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton,
+                TRIALS,
+                f64::NAN,
+                SEED,
+                generous,
+                cx,
+            ),
+            Err(CandidateRateError::InvalidEditScale)
+        );
+    });
+    let multi = with_cx(|cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, generous, cx)
+            .expect("multi-trial aggregate baseline")
+    });
+
+    assert_eq!(
+        multi.usage.admitted_operator_evaluations,
+        single.usage.admitted_operator_evaluations * TRIALS
+    );
+    assert_eq!(
+        multi.usage.execution.operator_evaluations,
+        single.usage.execution.operator_evaluations * TRIALS
+    );
+    let base_work = skeleton.edges().len();
+    assert_eq!(
+        multi.usage.execution.admitted_work_items,
+        base_work + (single.usage.execution.admitted_work_items - base_work) * TRIALS
+    );
+    assert_eq!(
+        multi.usage.execution.admitted_scalar_slots,
+        single.usage.execution.admitted_scalar_slots
+    );
+    assert_eq!(
+        multi.usage.admitted_output_bytes,
+        single.usage.admitted_output_bytes * TRIALS
+    );
+    assert_eq!(
+        multi.usage.spectral_sweeps_completed,
+        single.usage.spectral_sweeps_completed * TRIALS
+    );
+    assert!(multi.usage.requested_output_bytes > 0);
+    assert!(multi.usage.requested_output_bytes <= multi.usage.admitted_output_bytes);
+
+    let required_operators = multi.usage.admitted_operator_evaluations;
+    let required_work = multi.usage.execution.admitted_work_items;
+    let required_scalars = multi.usage.execution.admitted_scalar_slots;
+    let required_output = multi.usage.admitted_output_bytes;
+    let exact = CandidateRateBudget {
+        max_trials: TRIALS,
+        max_operator_evaluations: required_operators,
+        max_work_items: required_work,
+        max_scalar_slots: required_scalars,
+        max_total_output_bytes: required_output,
+        ..generous
+    };
+    let exact_outcome = with_cx(|cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, exact, cx)
+            .expect("every exact aggregate boundary succeeds")
+    });
+    assert_eq!(exact_outcome.rate.to_bits(), multi.rate.to_bits());
+    assert_eq!(exact_outcome.usage, multi.usage);
+
+    with_cx(|cx| {
+        assert_eq!(
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton,
+                TRIALS,
+                SCALE,
+                SEED,
+                CandidateRateBudget {
+                    max_trials: TRIALS - 1,
+                    ..generous
+                },
+                cx,
+            ),
+            Err(CandidateRateError::TrialBudgetExceeded {
+                requested: TRIALS,
+                cap: TRIALS - 1,
+            })
+        );
+    });
+    with_cx(|cx| {
+        assert!(matches!(
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton,
+                TRIALS,
+                SCALE,
+                SEED,
+                CandidateRateBudget {
+                    max_operator_evaluations: required_operators - 1,
+                    ..generous
+                },
+                cx,
+            ),
+            Err(CandidateRateError::Bounded(SheafMergeError::Repair(
+                SheafRepairError::WorkBudgetExceeded { required, cap }
+            ))) if required == required_operators as u128 && cap == required_operators - 1
+        ));
+    });
+    with_cx(|cx| {
+        assert!(matches!(
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton,
+                TRIALS,
+                SCALE,
+                SEED,
+                CandidateRateBudget {
+                    max_work_items: required_work - 1,
+                    ..generous
+                },
+                cx,
+            ),
+            Err(CandidateRateError::Bounded(SheafMergeError::Repair(
+                SheafRepairError::WorkItemBudgetExceeded {
+                    stage: "candidate-rate-work-preflight",
+                    required,
+                    cap,
+                }
+            ))) if required == required_work as u128 && cap == required_work - 1
+        ));
+    });
+    with_cx(|cx| {
+        assert_eq!(
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton,
+                TRIALS,
+                SCALE,
+                SEED,
+                CandidateRateBudget {
+                    max_scalar_slots: required_scalars - 1,
+                    ..generous
+                },
+                cx,
+            ),
+            Err(CandidateRateError::Bounded(
+                SheafMergeError::MemoryBudgetExceeded {
+                    required: required_scalars as u128,
+                    cap: required_scalars - 1,
+                }
+            ))
+        );
+    });
+    with_cx(|cx| {
+        assert_eq!(
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton,
+                TRIALS,
+                SCALE,
+                SEED,
+                CandidateRateBudget {
+                    max_total_output_bytes: required_output - 1,
+                    ..generous
+                },
+                cx,
+            ),
+            Err(CandidateRateError::Bounded(
+                SheafMergeError::OutputBudgetExceeded {
+                    resource: "candidate-rate-output-bytes",
+                    required: required_output as u128,
+                    cap: required_output - 1,
+                }
+            ))
+        );
+    });
+
+    let planned_cost = multi.usage.execution.ambient_budget.planned_cost;
+    let cost_exact = Budget {
+        deadline: None,
+        poll_quota: 1_000_000,
+        cost_quota: Some(planned_cost),
+        priority: 0,
+    };
+    with_budget_cx(cost_exact, |cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, exact, cx)
+            .expect("exact ambient aggregate cost succeeds");
+    });
+    let cost_refusal = Budget {
+        cost_quota: Some(planned_cost - 1),
+        ..cost_exact
+    };
+    assert!(matches!(
+        with_budget_cx(cost_refusal, |cx| {
+            candidate_remainder_conflict_rate_bounded(
+                &skeleton, TRIALS, SCALE, SEED, exact, cx,
+            )
+        }),
+        Err(CandidateRateError::Bounded(SheafMergeError::Repair(
+            SheafRepairError::AmbientBudgetRefused {
+                refusal: BudgetRefusal::CostPlanExceedsQuota { planned, quota },
+                completed_sweeps: 0,
+                operator_evaluations: 0,
+                work_items: 0,
+            }
+        ))) if planned == planned_cost && quota == planned_cost - 1
+    ));
+
+    verdict(
+        "sm-012",
+        "aggregate operator, work, scalar-peak, total-output, trial, and ambient-cost boundaries succeed exactly and refuse at cap minus one before partial publication",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Pre/mid/final cancellation and fresh deterministic retry.
+fn sm_013_bounded_candidate_rate_cancellation_is_atomic_and_retryable() {
+    const TRIALS: usize = 3;
+    const SCALE: f64 = 0.1;
+    const SEED: u64 = 0xcafe_f00d;
+    let (_, skeleton) = canonical_triangle();
+    let budget = candidate_budget(TRIALS, 8);
+
+    let gate = CancelGate::new();
+    gate.request();
+    with_gate_cx(&gate, |cx| {
+        assert_eq!(
+            candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, budget, cx,),
+            Err(CandidateRateError::Bounded(SheafMergeError::Repair(
+                SheafRepairError::Cancelled {
+                    stage: "candidate-rate-admission",
+                    completed_sweeps: 0,
+                    operator_evaluations: 0,
+                    work_items: 0,
+                }
+            )))
+        );
+    });
+
+    let timed_budget = Budget {
+        deadline: Some(Time::MAX),
+        poll_quota: 1_000_000,
+        cost_quota: None,
+        priority: 0,
+    };
+    let healthy_gate = CancelGate::new();
+    let healthy_clock = RequestingClock::new(&healthy_gate, usize::MAX);
+    let baseline = with_clock_cx(&healthy_gate, timed_budget, &healthy_clock, |cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, budget, cx)
+            .expect("timed seeded diagnostic baseline")
+    });
+    let polls = baseline.usage.execution.ambient_budget.polls_used as usize;
+    assert!(polls > 2);
+    assert_eq!(healthy_clock.reads(), polls + 1);
+
+    let mid_gate = CancelGate::new();
+    let mid_request_on = (polls / 2).max(2).min(polls - 1);
+    let mid_clock = RequestingClock::new(&mid_gate, mid_request_on);
+    let mid_refusal = with_clock_cx(&mid_gate, timed_budget, &mid_clock, |cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, budget, cx)
+    });
+    assert!(matches!(
+        mid_refusal,
+        Err(CandidateRateError::Bounded(SheafMergeError::Repair(
+            SheafRepairError::Cancelled { work_items, .. }
+        ))) if work_items > 0 && work_items < baseline.usage.execution.work_items
+    ));
+
+    let publication_gate = CancelGate::new();
+    let publication_clock = RequestingClock::new(&publication_gate, polls);
+    let publication_refusal =
+        with_clock_cx(&publication_gate, timed_budget, &publication_clock, |cx| {
+            candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, budget, cx)
+        });
+    assert!(matches!(
+        publication_refusal,
+        Err(CandidateRateError::Bounded(SheafMergeError::Repair(
+            SheafRepairError::Cancelled {
+                stage: "candidate-rate-publication",
+                operator_evaluations,
+                work_items,
+                ..
+            }
+        ))) if operator_evaluations == baseline.usage.execution.operator_evaluations
+            && work_items == baseline.usage.execution.work_items
+    ));
+    assert_eq!(publication_clock.reads(), polls);
+
+    let retry_gate = CancelGate::new();
+    let retry_clock = RequestingClock::new(&retry_gate, usize::MAX);
+    let retry = with_clock_cx(&retry_gate, timed_budget, &retry_clock, |cx| {
+        candidate_remainder_conflict_rate_bounded(&skeleton, TRIALS, SCALE, SEED, budget, cx)
+            .expect("healthy retry after deterministic candidate cancellation")
+    });
+    assert_eq!(retry, baseline);
+
+    verdict(
+        "sm-013",
+        "one-accountant seeded diagnostics publish no rate on pre, mid, or true final cancellation and a fresh retry reproduces the complete report",
     );
 }

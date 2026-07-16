@@ -23,7 +23,7 @@
 use crate::sheaf_repair::{
     AdmittedSheafSkeleton, RepairAccountant, RepairAdmission, SheafRepairBudget, SheafRepairError,
     SheafRepairUsage, SheafSkeleton, SheafSkeletonError, admit_repair_budget, apply_gauge,
-    hodge_decompose, hodge_decompose_accounted, planned_cost, validate_bounded_cochain,
+    bounded_d0, hodge_decompose, hodge_decompose_accounted, planned_cost, validate_bounded_cochain,
     zeroed_output_bounded,
 };
 use fs_exec::Cx;
@@ -214,6 +214,66 @@ pub struct BoundedMergeOutcome {
     pub usage: SheafMergeUsage,
 }
 
+/// Aggregate resource envelope for one seeded candidate-remainder diagnostic.
+///
+/// `merge` bounds each individual adjudication. The remaining fields bound the
+/// complete trial set under one [`Cx`] and one accountant; in particular,
+/// discarded per-trial verdict payloads are charged cumulatively rather than
+/// being treated as free temporary allocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateRateBudget {
+    /// Per-trial numerical, spectral, and retained-verdict envelope.
+    pub merge: SheafMergeBudget,
+    /// Maximum number of seeded trials in this diagnostic transaction.
+    pub max_trials: usize,
+    /// Maximum edit-incidence and Hodge operator evaluations across every
+    /// trial.
+    pub max_operator_evaluations: usize,
+    /// Maximum scalar work items across edit generation and every merge.
+    pub max_work_items: usize,
+    /// Maximum conservative simultaneously live scalar-slot envelope,
+    /// including the base, both generated branches, and one merge.
+    pub max_scalar_slots: usize,
+    /// Maximum cumulative logical bytes requested by discarded per-trial
+    /// verdict payloads. Allocator-internal spare capacity is excluded.
+    pub max_total_output_bytes: usize,
+}
+
+/// Enforced and measured consumption for one bounded seeded diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateRateUsage {
+    /// Aggregate Hodge/operator/work/ambient accounting for the full trial set.
+    pub execution: SheafRepairUsage,
+    /// Exact aggregate operator schedule admitted before edit generation.
+    pub admitted_operator_evaluations: usize,
+    /// Total Jacobi sweeps completed across all per-trial spectral proxies.
+    pub spectral_sweeps_completed: usize,
+    /// Trials completely adjudicated before final aggregate publication.
+    pub trials_completed: usize,
+    /// Completed trials classified with a non-empty candidate remainder.
+    pub conflicts: usize,
+    /// Conservative cumulative logical verdict-byte envelope admitted before
+    /// edit allocation or numerical work began.
+    pub admitted_output_bytes: usize,
+    /// Actual cumulative logical verdict bytes requested across discarded
+    /// per-trial outcomes.
+    pub requested_output_bytes: usize,
+}
+
+/// A seeded conflict-rate observation published only after every trial and the
+/// final cancellation checkpoint complete.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundedCandidateRate {
+    /// Candidate-remainder conflicts divided by completed trials.
+    pub rate: f64,
+    /// Seed that deterministically generated both edit streams.
+    pub seed: u64,
+    /// Exact caller-admitted aggregate envelope.
+    pub budget: CandidateRateBudget,
+    /// Enforced and measured aggregate consumption.
+    pub usage: CandidateRateUsage,
+}
+
 /// Structured refusal from the admitted, cancellation-aware merge path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SheafMergeError {
@@ -341,11 +401,32 @@ pub enum CandidateRateError {
     InvalidEditScale,
     /// The supplied skeleton cannot support the incidence operators.
     MalformedSkeleton,
+    /// The requested trial count exceeds the aggregate admitted ceiling.
+    TrialBudgetExceeded {
+        /// Requested seeded trials.
+        requested: usize,
+        /// Admitted trial ceiling.
+        cap: usize,
+    },
     /// A generated merge refused rather than producing an adjudication.
     TrialRefused {
         /// Stable refusal reason from [`three_way_merge`].
         reason: &'static str,
     },
+    /// Structured refusal from the bounded aggregate path.
+    Bounded(SheafMergeError),
+}
+
+impl From<SheafMergeError> for CandidateRateError {
+    fn from(source: SheafMergeError) -> Self {
+        Self::Bounded(source)
+    }
+}
+
+impl From<SheafRepairError> for CandidateRateError {
+    fn from(source: SheafRepairError) -> Self {
+        Self::Bounded(source.into())
+    }
 }
 
 fn norm_inf(v: &[f64]) -> f64 {
@@ -1156,32 +1237,25 @@ fn accounted_parent(
     Ok(output)
 }
 
-fn publish_bounded_merge(
+struct AccountedMergeOutcome {
     outcome: MergeOutcome,
-    budget: SheafMergeBudget,
-    admission: MergeAdmission,
     spectral_sweeps_completed: usize,
     conflict_cells: usize,
     provenance_bytes: usize,
-    accountant: &mut RepairAccountant<'_, '_>,
-) -> Result<BoundedMergeOutcome, SheafMergeError> {
-    accountant.checkpoint("merge-publication")?;
-    let usage = SheafMergeUsage {
-        execution: accountant.usage(
-            admission.execution.scalar_slots,
-            admission.execution.work_items,
-        ),
+}
+
+fn finish_accounted_merge(
+    outcome: MergeOutcome,
+    spectral_sweeps_completed: usize,
+    conflict_cells: usize,
+    provenance_bytes: usize,
+) -> AccountedMergeOutcome {
+    AccountedMergeOutcome {
+        outcome,
         spectral_sweeps_completed,
-        admitted_output_bytes: admission.output_bytes,
-        reserved_output_bytes: accountant.reserved_plan_bytes(),
         conflict_cells,
         provenance_bytes,
-    };
-    Ok(BoundedMergeOutcome {
-        outcome,
-        budget,
-        usage,
-    })
+    }
 }
 
 /// Run a three-way numerical merge over sealed incidence under one explicit
@@ -1237,6 +1311,49 @@ pub fn three_way_merge_bounded(
         budget.max_output_bytes,
         0,
     )?;
+    let accounted = three_way_merge_accounted(
+        skeleton,
+        base,
+        x,
+        y,
+        weights,
+        tol,
+        gap_threshold,
+        budget,
+        &mut accountant,
+    )?;
+    accountant.checkpoint("merge-publication")?;
+    let usage = SheafMergeUsage {
+        execution: accountant.usage(
+            admission.execution.scalar_slots,
+            admission.execution.work_items,
+        ),
+        spectral_sweeps_completed: accounted.spectral_sweeps_completed,
+        admitted_output_bytes: admission.output_bytes,
+        reserved_output_bytes: accountant.reserved_plan_bytes(),
+        conflict_cells: accounted.conflict_cells,
+        provenance_bytes: accounted.provenance_bytes,
+    };
+    Ok(BoundedMergeOutcome {
+        outcome: accounted.outcome,
+        budget,
+        usage,
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn three_way_merge_accounted(
+    skeleton: &AdmittedSheafSkeleton,
+    base: &[f64],
+    x: &BranchState,
+    y: &BranchState,
+    weights: Option<&[f64]>,
+    tol: f64,
+    gap_threshold: f64,
+    budget: SheafMergeBudget,
+    mut accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<AccountedMergeOutcome, SheafMergeError> {
+    let edge_count = skeleton.edges().len();
     accountant.checkpoint("merge-admission")?;
     validate_bounded_cochain(
         base,
@@ -1283,48 +1400,39 @@ pub fn three_way_merge_bounded(
             "merge-trivial-identical-output",
             &mut accountant,
         )?;
-        return publish_bounded_merge(
+        return Ok(finish_accounted_merge(
             MergeOutcome::Trivial {
                 reason: "branches identical",
                 merged,
             },
-            budget,
-            admission,
             0,
             0,
             0,
-            &mut accountant,
-        );
+        ));
     }
     if accounted_same_bits(&x.mismatch, base, &mut accountant)? {
         let merged = accounted_output_copy(&y.mismatch, "merge-trivial-x-output", &mut accountant)?;
-        return publish_bounded_merge(
+        return Ok(finish_accounted_merge(
             MergeOutcome::Trivial {
                 reason: "X unchanged from base",
                 merged,
             },
-            budget,
-            admission,
             0,
             0,
             0,
-            &mut accountant,
-        );
+        ));
     }
     if accounted_same_bits(&y.mismatch, base, &mut accountant)? {
         let merged = accounted_output_copy(&x.mismatch, "merge-trivial-y-output", &mut accountant)?;
-        return publish_bounded_merge(
+        return Ok(finish_accounted_merge(
             MergeOutcome::Trivial {
                 reason: "Y unchanged from base",
                 merged,
             },
-            budget,
-            admission,
             0,
             0,
             0,
-            &mut accountant,
-        );
+        ));
     }
 
     let (gap, spectral_sweeps_completed) =
@@ -1352,20 +1460,17 @@ pub fn three_way_merge_bounded(
             "merge-resolved-gauge-output",
             &mut accountant,
         )?;
-        return publish_bounded_merge(
+        return Ok(finish_accounted_merge(
             MergeOutcome::Resolved {
                 merged,
                 gauge: split.potential,
                 residual_receipt: MergeResidualReceipt { post_norm, tol },
                 confidence,
             },
-            budget,
-            admission,
             spectral_sweeps_completed,
             0,
             0,
-            &mut accountant,
-        );
+        ));
     }
 
     let harmonic_norm =
@@ -1436,35 +1541,29 @@ pub fn three_way_merge_bounded(
             cells,
             parents: (parent_x, parent_y),
         });
-        return publish_bounded_merge(
+        return Ok(finish_accounted_merge(
             MergeOutcome::Conflicted {
                 candidate_remainders,
                 type_conflicts: Vec::new(),
                 confidence,
             },
-            budget,
-            admission,
             spectral_sweeps_completed,
             required_cells,
             provenance_bytes,
-            &mut accountant,
-        );
+        ));
     }
 
-    publish_bounded_merge(
+    Ok(finish_accounted_merge(
         MergeOutcome::EscalatedUnresolved {
             post_norm,
             tol,
             fractions: split.fractions,
             confidence,
         },
-        budget,
-        admission,
         spectral_sweeps_completed,
         0,
         0,
-        &mut accountant,
-    )
+    ))
 }
 
 /// Run seeded random three-way merges and measure the candidate-remainder
@@ -1548,4 +1647,335 @@ pub fn candidate_remainder_conflict_rate(
     {
         Ok(conflicts as f64 / trials as f64)
     }
+}
+
+#[derive(Clone, Copy)]
+struct CandidateRateAdmission {
+    execution: RepairAdmission,
+    output_bytes: usize,
+}
+
+fn candidate_rate_usize(value: u128, stage: &'static str) -> Result<usize, SheafMergeError> {
+    usize::try_from(value).map_err(|_| SheafMergeError::BudgetArithmeticOverflow { stage })
+}
+
+fn admit_candidate_rate_budget(
+    skeleton: &AdmittedSheafSkeleton,
+    trials: usize,
+    budget: CandidateRateBudget,
+) -> Result<CandidateRateAdmission, CandidateRateError> {
+    if trials > budget.max_trials {
+        return Err(CandidateRateError::TrialBudgetExceeded {
+            requested: trials,
+            cap: budget.max_trials,
+        });
+    }
+    let per_trial = admit_merge_budget(skeleton, budget.merge, false)?;
+    let trial_count = trials as u128;
+    let patches = skeleton.n_patches() as u128;
+    let edges = skeleton.edges().len() as u128;
+
+    let per_trial_operators = merge_add(
+        per_trial.execution.operator_evaluations as u128,
+        2,
+        "candidate-rate-edit-operators",
+    )?;
+    let operator_evaluations = merge_mul(
+        per_trial_operators,
+        trial_count,
+        "candidate-rate-operator-envelope",
+    )?;
+    if operator_evaluations > budget.max_operator_evaluations as u128 {
+        return Err(SheafRepairError::WorkBudgetExceeded {
+            required: operator_evaluations,
+            cap: budget.max_operator_evaluations,
+        }
+        .into());
+    }
+
+    // Each generated branch zero-initializes and fills P offsets (2P), applies
+    // one bounded d0 (2E), then adds E noise values. Two branches therefore
+    // consume 4P+6E work items and two real operator evaluations. One
+    // additional item records the completed trial classification; the base is
+    // initialized once for the whole transaction.
+    let generated_offsets = merge_mul(patches, 4, "candidate-rate-offset-work")?;
+    let generated_edges = merge_mul(edges, 6, "candidate-rate-edge-work")?;
+    let generated_edits = merge_add(
+        generated_offsets,
+        generated_edges,
+        "candidate-rate-edit-work",
+    )?;
+    let per_trial_work = merge_add(
+        merge_add(
+            per_trial.execution.work_items as u128,
+            generated_edits,
+            "candidate-rate-trial-work",
+        )?,
+        1,
+        "candidate-rate-classification-work",
+    )?;
+    let work_items = merge_add(
+        edges,
+        merge_mul(
+            per_trial_work,
+            trial_count,
+            "candidate-rate-total-trial-work",
+        )?,
+        "candidate-rate-work-envelope",
+    )?;
+    if work_items > budget.max_work_items as u128 {
+        return Err(SheafRepairError::WorkItemBudgetExceeded {
+            stage: "candidate-rate-work-preflight",
+            required: work_items,
+            cap: budget.max_work_items,
+        }
+        .into());
+    }
+
+    // The base and both completed branches remain live while one merge runs.
+    // During Y generation its P offsets are additionally live, so take the
+    // larger of that span and the admitted per-merge scalar envelope.
+    let scalar_slots = merge_add(
+        merge_mul(edges, 3, "candidate-rate-live-branches")?,
+        patches.max(per_trial.execution.scalar_slots as u128),
+        "candidate-rate-scalar-envelope",
+    )?;
+    if scalar_slots > budget.max_scalar_slots as u128 {
+        return Err(SheafMergeError::MemoryBudgetExceeded {
+            required: scalar_slots,
+            cap: budget.max_scalar_slots,
+        }
+        .into());
+    }
+
+    // Trial verdicts are discarded after classification, but their requested
+    // logical bytes remain cumulatively charged to bound allocation volume.
+    let output_bytes = merge_mul(
+        per_trial.output_bytes as u128,
+        trial_count,
+        "candidate-rate-output-envelope",
+    )?;
+    if output_bytes > budget.max_total_output_bytes as u128 {
+        return Err(SheafMergeError::OutputBudgetExceeded {
+            resource: "candidate-rate-output-bytes",
+            required: output_bytes,
+            cap: budget.max_total_output_bytes,
+        }
+        .into());
+    }
+
+    Ok(CandidateRateAdmission {
+        execution: RepairAdmission {
+            scalar_slots: candidate_rate_usize(scalar_slots, "candidate-rate-scalar-publication")?,
+            operator_evaluations: candidate_rate_usize(
+                operator_evaluations,
+                "candidate-rate-operator-publication",
+            )?,
+            work_items: candidate_rate_usize(work_items, "candidate-rate-work-publication")?,
+        },
+        output_bytes: candidate_rate_usize(output_bytes, "candidate-rate-output-publication")?,
+    })
+}
+
+fn candidate_rate_lcg(state: &mut u64) -> f64 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    ((*state >> 11) as f64) / (1u64 << 53) as f64 - 0.5
+}
+
+fn bounded_candidate_edit(
+    skeleton: &AdmittedSheafSkeleton,
+    scale: f64,
+    state: &mut u64,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafMergeError> {
+    let mut offsets = zeroed_output_bounded(
+        skeleton.n_patches(),
+        "candidate-offset-allocation",
+        accountant,
+    )?;
+    for offset in &mut offsets {
+        accountant.consume_item("candidate-offset-generation")?;
+        *offset = scale * candidate_rate_lcg(state);
+        if !offset.is_finite() {
+            return Err(SheafMergeError::NumericalOverflow {
+                stage: "candidate-offset-generation",
+            });
+        }
+    }
+    accountant.checkpoint("candidate-offset-generation")?;
+
+    let mut mismatch = bounded_d0(skeleton, &offsets, "candidate-edit-d0", accountant)?;
+    for value in &mut mismatch {
+        accountant.consume_item("candidate-mismatch-generation")?;
+        *value += 0.01 * scale * candidate_rate_lcg(state);
+        if !value.is_finite() {
+            return Err(SheafMergeError::NumericalOverflow {
+                stage: "candidate-mismatch-generation",
+            });
+        }
+    }
+    accountant.checkpoint("candidate-mismatch-generation")?;
+    Ok(mismatch)
+}
+
+/// Run the seeded candidate-remainder diagnostic over sealed incidence under
+/// one aggregate work, memory, output, deadline, and cancellation transaction.
+///
+/// This preserves [`candidate_remainder_conflict_rate`]'s deterministic edit
+/// stream and diagnostic-only numerator. Every trial shares one accountant;
+/// no independently admitted per-trial `Cx` can reset aggregate authority.
+/// Discarded verdict payloads remain cumulatively charged, and no rate or
+/// partial histogram is published before the final cancellation checkpoint.
+///
+/// # Errors
+/// Returns [`CandidateRateError`] for an empty or oversized trial set, invalid
+/// edit scale, insufficient aggregate or per-merge resources, cancellation,
+/// deadline/ambient refusal, allocation refusal, or finite arithmetic overflow.
+#[allow(clippy::too_many_lines)]
+pub fn candidate_remainder_conflict_rate_bounded(
+    skeleton: &AdmittedSheafSkeleton,
+    trials: usize,
+    edit_scale: f64,
+    seed: u64,
+    budget: CandidateRateBudget,
+    cx: &Cx<'_>,
+) -> Result<BoundedCandidateRate, CandidateRateError> {
+    if trials == 0 {
+        return Err(CandidateRateError::ZeroTrials);
+    }
+    if !edit_scale.is_finite() || edit_scale < 0.0 {
+        return Err(CandidateRateError::InvalidEditScale);
+    }
+    let admission = admit_candidate_rate_budget(skeleton, trials, budget)?;
+    let execution_budget = SheafRepairBudget {
+        sweeps: budget.merge.repair.sweeps,
+        max_operator_evaluations: budget.max_operator_evaluations,
+        max_work_items: budget.max_work_items,
+        max_scalar_slots: budget.max_scalar_slots,
+        poll_stride: budget.merge.repair.poll_stride,
+    };
+    let mut accountant = RepairAccountant::new(
+        cx,
+        execution_budget,
+        planned_cost(admission.execution)?,
+        budget.merge.max_output_bytes,
+        0,
+    )?;
+    accountant.checkpoint("candidate-rate-admission")?;
+
+    let base = zeroed_output_bounded(
+        skeleton.edges().len(),
+        "candidate-base-allocation",
+        &mut accountant,
+    )?;
+    let mut state = seed;
+    let mut conflicts = 0usize;
+    let mut trials_completed = 0usize;
+    let mut spectral_sweeps_completed = 0usize;
+    let mut requested_output_bytes = 0usize;
+    for _ in 0..trials {
+        let output_bytes_before = accountant.reserved_plan_bytes();
+        let x = BranchState {
+            // Parent labels cannot affect the numerical classification and no
+            // per-trial verdict escapes this aggregate diagnostic.
+            provenance: String::new(),
+            mismatch: bounded_candidate_edit(skeleton, edit_scale, &mut state, &mut accountant)?,
+            assignments: BTreeMap::new(),
+        };
+        let y = BranchState {
+            provenance: String::new(),
+            mismatch: bounded_candidate_edit(skeleton, edit_scale, &mut state, &mut accountant)?,
+            assignments: BTreeMap::new(),
+        };
+        let trial = three_way_merge_accounted(
+            skeleton,
+            &base,
+            &x,
+            &y,
+            None,
+            0.05 * edit_scale,
+            1e-6,
+            budget.merge,
+            &mut accountant,
+        )?;
+        spectral_sweeps_completed = spectral_sweeps_completed
+            .checked_add(trial.spectral_sweeps_completed)
+            .ok_or(SheafMergeError::BudgetArithmeticOverflow {
+                stage: "candidate-rate-spectral-sweeps",
+            })?;
+        accountant.consume_item("candidate-rate-classification")?;
+        let is_conflict = matches!(
+            &trial.outcome,
+            MergeOutcome::Conflicted {
+                candidate_remainders,
+                ..
+            } if !candidate_remainders.is_empty()
+        );
+        let output_bytes_after = accountant.reserved_plan_bytes();
+        let trial_output_bytes = output_bytes_after.checked_sub(output_bytes_before).ok_or(
+            SheafMergeError::BudgetArithmeticOverflow {
+                stage: "candidate-rate-trial-output-delta",
+            },
+        )?;
+        requested_output_bytes = requested_output_bytes
+            .checked_add(trial_output_bytes)
+            .ok_or(SheafMergeError::BudgetArithmeticOverflow {
+                stage: "candidate-rate-requested-output",
+            })?;
+        if requested_output_bytes > budget.max_total_output_bytes {
+            return Err(SheafMergeError::OutputBudgetExceeded {
+                resource: "candidate-rate-output-bytes",
+                required: requested_output_bytes as u128,
+                cap: budget.max_total_output_bytes,
+            }
+            .into());
+        }
+        drop(trial);
+        accountant.release_plan_bytes("candidate-trial-output-release", trial_output_bytes)?;
+        if accountant.reserved_plan_bytes() != output_bytes_before {
+            return Err(SheafMergeError::BudgetArithmeticOverflow {
+                stage: "candidate-rate-output-release",
+            }
+            .into());
+        }
+        if is_conflict {
+            conflicts =
+                conflicts
+                    .checked_add(1)
+                    .ok_or(SheafMergeError::BudgetArithmeticOverflow {
+                        stage: "candidate-rate-conflicts",
+                    })?;
+        }
+        trials_completed =
+            trials_completed
+                .checked_add(1)
+                .ok_or(SheafMergeError::BudgetArithmeticOverflow {
+                    stage: "candidate-rate-trials-completed",
+                })?;
+        accountant.checkpoint("candidate-trial-complete")?;
+    }
+    accountant.checkpoint("candidate-rate-publication")?;
+
+    #[allow(clippy::cast_precision_loss)]
+    let rate = conflicts as f64 / trials as f64;
+    let usage = CandidateRateUsage {
+        execution: accountant.usage(
+            admission.execution.scalar_slots,
+            admission.execution.work_items,
+        ),
+        admitted_operator_evaluations: admission.execution.operator_evaluations,
+        spectral_sweeps_completed,
+        trials_completed,
+        conflicts,
+        admitted_output_bytes: admission.output_bytes,
+        requested_output_bytes,
+    };
+    Ok(BoundedCandidateRate {
+        rate,
+        seed,
+        budget,
+        usage,
+    })
 }

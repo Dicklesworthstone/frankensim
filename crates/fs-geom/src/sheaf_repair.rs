@@ -1080,6 +1080,21 @@ impl<'a, 'cx> RepairAccountant<'a, 'cx> {
         Ok(())
     }
 
+    pub(super) fn release_plan_bytes(
+        &mut self,
+        stage: &'static str,
+        bytes: usize,
+    ) -> Result<(), SheafRepairError> {
+        let remaining = self.reserved_plan_bytes.checked_sub(bytes).ok_or(
+            SheafRepairError::BudgetArithmeticOverflow {
+                stage: "plan-released-bytes",
+            },
+        )?;
+        self.checkpoint(stage)?;
+        self.reserved_plan_bytes = remaining;
+        Ok(())
+    }
+
     fn retain_action_bytes(
         &mut self,
         stage: &'static str,
@@ -1379,7 +1394,7 @@ fn validate_cochain_length(
     Ok(())
 }
 
-fn bounded_d0(
+pub(super) fn bounded_d0(
     skeleton: &AdmittedSheafSkeleton,
     values: &[f64],
     stage: &'static str,
