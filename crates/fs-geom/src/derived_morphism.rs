@@ -10,6 +10,9 @@
 //! exactly one direct sealed component for every source stratum without granting
 //! global-map authority. Another standalone token seals declared spans from two
 //! admitted legs without folding correspondences into directed-map composition.
+//! A finite stratification-refinement candidate can bind that exhaustive child
+//! from refined to coarse after checking two-sided stratum coverage and
+//! dimension monotonicity, without granting containment or incidence authority.
 //! A standalone token binds a fixed-resolution quasi-isomorphism
 //! *candidate* to an exact refinement path and exact local presentations,
 //! without granting theorem authority. Another candidate retains exhaustive
@@ -49,6 +52,8 @@ pub const DERIVED_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
 pub const DERIVED_STRATUM_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for exhaustive finite stratified-map assembly candidates.
 pub const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for finite stratification-refinement candidates.
+pub const DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone declared span-correspondence receipts.
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for direct chart-transition inverse-law candidate receipts.
@@ -67,6 +72,9 @@ const DERIVED_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
 const DERIVED_STRATUM_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 9, 1 << 11, 4096);
 const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
+// Recursive validation must admit the exhaustive-map child's eight fields.
+const DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
 const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 10, 1 << 11, 4096);
@@ -147,6 +155,35 @@ impl CanonicalSchema for DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1
 /// Typed identity of one exhaustive finite stratified-map assembly candidate.
 pub type DerivedExhaustiveStratifiedMapCandidateIdV1 =
     EvidenceNodeId<DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1>;
+
+static DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedExhaustiveStratifiedMapCandidateIdV1>();
+
+/// Domain-separated identity for one finite stratification-refinement candidate.
+pub enum DerivedStratificationRefinementCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedStratificationRefinementCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.stratification-refinement-candidate.v1";
+    const NAME: &'static str = "finite-stratification-refinement-candidate";
+    const VERSION: u32 = DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact refined/coarse geometries and stratifications, one typed exhaustive fine-to-coarse component-map child, finite coarse coverage, dimension-monotone component targets, one nominal refinement declaration, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("refined-geometry", WireType::Bytes),
+        FieldSpec::required("refined-stratification", WireType::Bytes),
+        FieldSpec::required("coarse-geometry", WireType::Bytes),
+        FieldSpec::required("coarse-stratification", WireType::Bytes),
+        FieldSpec::child_of(
+            "exhaustive-fine-to-coarse-map",
+            &DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::required("nominal-refinement-declaration", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one finite stratification-refinement candidate.
+pub type DerivedStratificationRefinementCandidateIdV1 =
+    EvidenceNodeId<DerivedStratificationRefinementCandidateIdentitySchemaV1>;
 
 /// Domain-separated semantic identity for one admitted declared span.
 pub enum DerivedSpanCorrespondenceIdentitySchemaV1 {}
@@ -474,6 +511,27 @@ impl DerivedGlobalConstructibilityDeclarationIdV1 {
     }
 }
 
+/// Nominal declaration that one exhaustive fine-to-coarse family is a refinement.
+///
+/// RD.1b retains this identity for independent checking; the bytes do not prove
+/// containment, incidence preservation, local-link compatibility, or a theorem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedStratificationRefinementDeclarationIdV1([u8; 32]);
+
+impl DerivedStratificationRefinementDeclarationIdV1 {
+    /// Construct a nominal refinement declaration identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Nominal artifact for one declared local-presentation relation edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DerivedLocalPresentationRelationIdV1([u8; 32]);
@@ -625,6 +683,33 @@ pub struct DerivedExhaustiveStratifiedMapCandidateIrV1 {
     /// Nominal global constructibility declaration; not authenticated by RD.1b.
     pub nominal_constructibility: DerivedGlobalConstructibilityDeclarationIdV1,
     /// Explicit denial of global map, gluing, and theorem authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
+/// Versioned finite stratification-refinement candidate.
+///
+/// The exact sealed child must already cover every refined/source stratum by
+/// one direct component. This packet additionally requires every coarse/target
+/// stratum to have a preimage and each selected coarse stratum to have dimension
+/// at least that of its refined source. Those finite checks do not prove
+/// containment or preservation of incidence, frontiers, links, or theorem class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedStratificationRefinementCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact admitted refined/source geometry.
+    pub refined_geometry: DerivedGeometryIdV1,
+    /// Exact refined/source finite stratification.
+    pub refined_stratification: StratificationIdV1,
+    /// Exact admitted coarse/target geometry.
+    pub coarse_geometry: DerivedGeometryIdV1,
+    /// Exact coarse/target finite stratification.
+    pub coarse_stratification: StratificationIdV1,
+    /// Exact sealed exhaustive fine-to-coarse component-map candidate.
+    pub exhaustive_map: DerivedExhaustiveStratifiedMapCandidateIdV1,
+    /// Nominal aggregate refinement declaration for later independent checking.
+    pub nominal_refinement: DerivedStratificationRefinementDeclarationIdV1,
+    /// Explicit denial of containment, preservation, theorem, and equivalence authority.
     pub no_authority: DerivedNoClaimIdV1,
 }
 
@@ -1410,6 +1495,95 @@ impl fmt::Display for DerivedExhaustiveStratifiedMapCandidateErrorV1 {
 
 impl core::error::Error for DerivedExhaustiveStratifiedMapCandidateErrorV1 {}
 
+/// Structured refusal from finite stratification-refinement admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedStratificationRefinementCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required child, selector, declaration, or no-authority ID is zero.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw endpoint does not name the exact supplied admitted geometry.
+    EndpointMismatch {
+        /// Stable refined/coarse endpoint field.
+        field: &'static str,
+    },
+    /// A raw stratification selector is not owned by its exact geometry.
+    StratificationMismatch {
+        /// Stable refined/coarse stratification field.
+        field: &'static str,
+    },
+    /// The raw exhaustive-map ID does not name the supplied sealed child.
+    ExhaustiveMapIdentityMismatch,
+    /// The sealed exhaustive-map child has the wrong orientation or selectors.
+    ExhaustiveMapEndpointMismatch {
+        /// Stable failed child relation.
+        field: &'static str,
+    },
+    /// The sealed child no longer has exact refined/source coverage.
+    RefinedCoverageMismatch {
+        /// Required refined strata.
+        expected: usize,
+        /// Retained component bindings.
+        found: usize,
+    },
+    /// A child binding names no admitted coarse stratum.
+    MissingCoarseStratum {
+        /// Canonical refined/source component index.
+        index: usize,
+    },
+    /// A refined stratum exceeds the dimension of its selected coarse stratum.
+    DimensionIncrease {
+        /// Canonical refined/source component index.
+        index: usize,
+        /// Refined/source stratum dimension.
+        refined: u32,
+        /// Selected coarse/target stratum dimension.
+        coarse: u32,
+    },
+    /// One coarse stratum has no refined preimage.
+    MissingCoarseCoverage {
+        /// Exact uncovered coarse stratum.
+        coarse_stratum: StratumIdV1,
+    },
+    /// Finite coverage bookkeeping exceeded the hard ceiling.
+    ResourceLimit {
+        /// Stable retained collection.
+        field: &'static str,
+        /// Requested entries.
+        requested: usize,
+        /// Hard limit.
+        limit: usize,
+    },
+    /// A fallible coverage allocation was refused.
+    AllocationRefused {
+        /// Stable retained collection.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedStratificationRefinementCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "stratification-refinement candidate refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedStratificationRefinementCandidateErrorV1 {}
+
 /// Structured refusal from standalone declared-span admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedSpanCorrespondenceErrorV1 {
@@ -1993,6 +2167,82 @@ impl AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedExhaustiveStratifiedMapCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed finite stratification-refinement candidate.
+///
+/// The token binds a typed exhaustive fine-to-coarse child after finite
+/// two-sided stratum coverage and dimension-monotonicity checks. It exposes no
+/// subset containment, incidence/frontier preservation, local-link refinement,
+/// Whitney/Thom preservation, execution, evidence transport, or equivalence.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedStratificationRefinementCandidateV1 {
+    refined_geometry: DerivedGeometryIdV1,
+    refined_stratification: StratificationIdV1,
+    coarse_geometry: DerivedGeometryIdV1,
+    coarse_stratification: StratificationIdV1,
+    exhaustive_map: DerivedExhaustiveStratifiedMapCandidateIdV1,
+    nominal_refinement: DerivedStratificationRefinementDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedStratificationRefinementCandidateIdV1>,
+}
+
+impl AdmittedDerivedStratificationRefinementCandidateV1 {
+    /// Exact refined/source geometry.
+    #[must_use]
+    pub const fn refined_geometry(&self) -> DerivedGeometryIdV1 {
+        self.refined_geometry
+    }
+
+    /// Exact refined/source stratification.
+    #[must_use]
+    pub const fn refined_stratification(&self) -> StratificationIdV1 {
+        self.refined_stratification
+    }
+
+    /// Exact coarse/target geometry.
+    #[must_use]
+    pub const fn coarse_geometry(&self) -> DerivedGeometryIdV1 {
+        self.coarse_geometry
+    }
+
+    /// Exact coarse/target stratification.
+    #[must_use]
+    pub const fn coarse_stratification(&self) -> StratificationIdV1 {
+        self.coarse_stratification
+    }
+
+    /// Exact sealed exhaustive fine-to-coarse child.
+    #[must_use]
+    pub const fn exhaustive_map(&self) -> DerivedExhaustiveStratifiedMapCandidateIdV1 {
+        self.exhaustive_map
+    }
+
+    /// Nominal aggregate refinement declaration.
+    #[must_use]
+    pub const fn nominal_refinement(&self) -> DerivedStratificationRefinementDeclarationIdV1 {
+        self.nominal_refinement
+    }
+
+    /// Explicit no-authority artifact.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed structural refinement-candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedStratificationRefinementCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedStratificationRefinementCandidateIdV1> {
         self.receipt
     }
 }
@@ -4718,6 +4968,281 @@ pub fn admit_derived_exhaustive_stratified_map_candidate_v1(
         components: retained,
         nominal_assembly: ir.nominal_assembly,
         nominal_constructibility: ir.nominal_constructibility,
+        no_authority: ir.no_authority,
+        receipt,
+    })
+}
+
+fn stratification_refinement_candidate_receipt(
+    ir: &DerivedStratificationRefinementCandidateIrV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedStratificationRefinementCandidateIdV1>,
+    DerivedStratificationRefinementCandidateErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedStratificationRefinementCandidateErrorV1::Cancelled {
+                stage: "stratification-refinement-identity",
+            }
+        }
+        other => DerivedStratificationRefinementCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedStratificationRefinementCandidateIdV1, _>::new(
+        DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "refined-geometry"),
+        ir.refined_geometry.as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "refined-stratification"),
+            ir.refined_stratification.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "coarse-geometry"),
+            ir.coarse_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "coarse-stratification"),
+            ir.coarse_stratification.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(4, "exhaustive-fine-to-coarse-map"),
+            ir.exhaustive_map,
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(5, "nominal-refinement-declaration"),
+            ir.nominal_refinement.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(6, "no-authority"), ir.no_authority.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Admit one finite fine-to-coarse stratification-refinement candidate.
+///
+/// The supplied child must be the exact sealed exhaustive component map from
+/// `refined` to `coarse`. Admission checks exact selectors, canonical refined
+/// coverage already retained by the child, at least one refined preimage for
+/// every coarse stratum, and `refined_dimension <= coarse_dimension` for every
+/// selected target. Repeated coarse targets are intentional.
+///
+/// These checks establish only a finite structural candidate. They do not prove
+/// subset containment, component execution, incidence/frontier preservation,
+/// local-link refinement, Whitney/Thom preservation, evidence transport,
+/// invertibility, or equivalence. Independent checking must mint any stronger
+/// authority under a separate schema.
+///
+/// # Errors
+/// Returns a typed refusal for schema, zero identity, raw/sealed child or
+/// endpoint mismatch, incomplete fine/coarse coverage, missing coarse targets,
+/// dimension increase, resource/allocation limits, cancellation, or canonical
+/// identity defects. No partial token escapes.
+#[must_use = "a structural refinement candidate has no containment or theorem authority"]
+#[allow(clippy::too_many_lines)] // One bounded two-sided finite coverage scan.
+pub fn admit_derived_stratification_refinement_candidate_v1(
+    ir: &DerivedStratificationRefinementCandidateIrV1,
+    exhaustive_map: &AdmittedDerivedExhaustiveStratifiedMapCandidateV1,
+    refined: &AdmittedDerivedGeometryV1,
+    coarse: &AdmittedDerivedGeometryV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedStratificationRefinementCandidateV1,
+    DerivedStratificationRefinementCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedStratificationRefinementCandidateErrorV1::Cancelled {
+            stage: "stratification-refinement-entry",
+        });
+    }
+    if ir.schema_version != DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedStratificationRefinementCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.refined_geometry.as_bytes(), "refined-geometry"),
+        (
+            ir.refined_stratification.as_bytes(),
+            "refined-stratification",
+        ),
+        (ir.coarse_geometry.as_bytes(), "coarse-geometry"),
+        (ir.coarse_stratification.as_bytes(), "coarse-stratification"),
+        (
+            ir.exhaustive_map.as_bytes(),
+            "exhaustive-fine-to-coarse-map",
+        ),
+        (
+            ir.nominal_refinement.as_bytes(),
+            "nominal-refinement-declaration",
+        ),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(DerivedStratificationRefinementCandidateErrorV1::MissingIdentity { field });
+        }
+    }
+    for (matches, field) in [
+        (ir.refined_geometry == refined.id(), "refined-geometry"),
+        (ir.coarse_geometry == coarse.id(), "coarse-geometry"),
+    ] {
+        if !matches {
+            return Err(
+                DerivedStratificationRefinementCandidateErrorV1::EndpointMismatch { field },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            ir.refined_stratification == refined.ir().stratification.id,
+            "refined-stratification",
+        ),
+        (
+            ir.coarse_stratification == coarse.ir().stratification.id,
+            "coarse-stratification",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedStratificationRefinementCandidateErrorV1::StratificationMismatch { field },
+            );
+        }
+    }
+    if ir.exhaustive_map != exhaustive_map.id() {
+        return Err(DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapIdentityMismatch);
+    }
+    for (matches, field) in [
+        (
+            exhaustive_map.source_geometry() == ir.refined_geometry,
+            "child-refined-geometry",
+        ),
+        (
+            exhaustive_map.source_stratification() == ir.refined_stratification,
+            "child-refined-stratification",
+        ),
+        (
+            exhaustive_map.target_geometry() == ir.coarse_geometry,
+            "child-coarse-geometry",
+        ),
+        (
+            exhaustive_map.target_stratification() == ir.coarse_stratification,
+            "child-coarse-stratification",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapEndpointMismatch {
+                    field,
+                },
+            );
+        }
+    }
+
+    let refined_strata = &refined.ir().stratification.strata;
+    let coarse_strata = &coarse.ir().stratification.strata;
+    let components = exhaustive_map.components();
+    if components.len() != refined_strata.len() {
+        return Err(
+            DerivedStratificationRefinementCandidateErrorV1::RefinedCoverageMismatch {
+                expected: refined_strata.len(),
+                found: components.len(),
+            },
+        );
+    }
+    if coarse_strata.len() > DERIVED_MORPHISM_MAX_FACTORS_V1 {
+        return Err(
+            DerivedStratificationRefinementCandidateErrorV1::ResourceLimit {
+                field: "coarse-coverage",
+                requested: coarse_strata.len(),
+                limit: DERIVED_MORPHISM_MAX_FACTORS_V1,
+            },
+        );
+    }
+    let mut coarse_covered = Vec::new();
+    coarse_covered
+        .try_reserve_exact(coarse_strata.len())
+        .map_err(
+            |_| DerivedStratificationRefinementCandidateErrorV1::AllocationRefused {
+                field: "coarse-coverage",
+            },
+        )?;
+    coarse_covered.resize(coarse_strata.len(), false);
+
+    for (index, (refined_stratum, binding)) in refined_strata.iter().zip(components).enumerate() {
+        if index.is_multiple_of(DERIVED_MORPHISM_CANCELLATION_STRIDE_V1) && cx.checkpoint().is_err()
+        {
+            return Err(DerivedStratificationRefinementCandidateErrorV1::Cancelled {
+                stage: "stratification-refinement-coverage",
+            });
+        }
+        if refined_stratum.id != binding.source_stratum {
+            return Err(
+                DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapEndpointMismatch {
+                    field: "child-refined-stratum-order",
+                },
+            );
+        }
+        let coarse_index =
+            coarse_strata.partition_point(|stratum| stratum.id < binding.target_stratum);
+        let Some(coarse_stratum) = coarse_strata
+            .get(coarse_index)
+            .filter(|stratum| stratum.id == binding.target_stratum)
+        else {
+            return Err(
+                DerivedStratificationRefinementCandidateErrorV1::MissingCoarseStratum { index },
+            );
+        };
+        if refined_stratum.dimension > coarse_stratum.dimension {
+            return Err(
+                DerivedStratificationRefinementCandidateErrorV1::DimensionIncrease {
+                    index,
+                    refined: refined_stratum.dimension,
+                    coarse: coarse_stratum.dimension,
+                },
+            );
+        }
+        coarse_covered[coarse_index] = true;
+    }
+    if let Some((index, _)) = coarse_covered
+        .iter()
+        .enumerate()
+        .find(|(_, covered)| !**covered)
+    {
+        return Err(
+            DerivedStratificationRefinementCandidateErrorV1::MissingCoarseCoverage {
+                coarse_stratum: coarse_strata[index].id,
+            },
+        );
+    }
+    let receipt = stratification_refinement_candidate_receipt(ir, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(DerivedStratificationRefinementCandidateErrorV1::Cancelled {
+            stage: "stratification-refinement-publication",
+        });
+    }
+    Ok(AdmittedDerivedStratificationRefinementCandidateV1 {
+        refined_geometry: ir.refined_geometry,
+        refined_stratification: ir.refined_stratification,
+        coarse_geometry: ir.coarse_geometry,
+        coarse_stratification: ir.coarse_stratification,
+        exhaustive_map: ir.exhaustive_map,
+        nominal_refinement: ir.nominal_refinement,
         no_authority: ir.no_authority,
         receipt,
     })
@@ -8074,6 +8599,114 @@ mod tests {
         }
     }
 
+    fn replace_strata(ir: &mut DerivedGeometryIrV1, stratification_seed: u8, strata: &[(u8, u32)]) {
+        let prototype = ir.stratification.strata[0].clone();
+        ir.stratification = StratificationV1 {
+            id: stratification_id(stratification_seed),
+            class: StratificationClassV1::FiniteIncidence,
+            strata: strata
+                .iter()
+                .map(|(seed, dimension)| StratumSpecV1 {
+                    id: stratum_id(*seed),
+                    dimension: *dimension,
+                    ..prototype.clone()
+                })
+                .collect(),
+            incidences: Vec::new(),
+            local_links: Vec::new(),
+        };
+    }
+
+    fn admit_exhaustive_map_for_targets(
+        refined: &AdmittedDerivedGeometryV1,
+        coarse: &AdmittedDerivedGeometryV1,
+        target_indices: &[usize],
+        seed: u8,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
+        assert_eq!(
+            target_indices.len(),
+            refined.ir().stratification.strata.len(),
+            "one target selector per refined stratum",
+        );
+        let mut components = Vec::new();
+        for (index, (source_stratum, target_index)) in refined
+            .ir()
+            .stratification
+            .strata
+            .iter()
+            .zip(target_indices)
+            .enumerate()
+        {
+            let target_stratum = &coarse.ir().stratification.strata[*target_index];
+            components.push(admit_stratum_component_between(
+                refined,
+                coarse,
+                DerivedStratumObjectV1 {
+                    geometry: refined.id(),
+                    stratification: refined.ir().stratification.id,
+                    stratum: source_stratum.id,
+                },
+                DerivedStratumObjectV1 {
+                    geometry: coarse.id(),
+                    stratification: coarse.ir().stratification.id,
+                    stratum: target_stratum.id,
+                },
+                seed.wrapping_add(u8::try_from(index).expect("fixture index fits u8")),
+                cx,
+            ));
+        }
+        let ir = exhaustive_stratified_map_candidate_ir(
+            refined,
+            coarse,
+            &components,
+            seed.wrapping_add(32),
+        );
+        admit_derived_exhaustive_stratified_map_candidate_v1(&ir, refined, coarse, &components, cx)
+            .expect("valid exhaustive fine-to-coarse component map")
+    }
+
+    struct StratificationRefinementCandidateFixtureV1 {
+        refined: AdmittedDerivedGeometryV1,
+        coarse: AdmittedDerivedGeometryV1,
+        exhaustive_map: AdmittedDerivedExhaustiveStratifiedMapCandidateV1,
+        ir: DerivedStratificationRefinementCandidateIrV1,
+    }
+
+    fn stratification_refinement_candidate_fixture(
+        cx: &Cx<'_>,
+    ) -> StratificationRefinementCandidateFixtureV1 {
+        let mut refined_ir = fixed_resolution_geometry_ir(70, 80, 90, 2);
+        replace_strata(&mut refined_ir, 120, &[(100, 0), (101, 1), (102, 2)]);
+        let refined = admit_derived_geometry_v1(refined_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid three-stratum refined geometry");
+
+        let mut coarse_ir = fixed_resolution_geometry_ir(73, 83, 93, 2);
+        replace_strata(&mut coarse_ir, 121, &[(110, 1), (111, 2)]);
+        let coarse = admit_derived_geometry_v1(coarse_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid two-stratum coarse geometry");
+        let exhaustive_map =
+            admit_exhaustive_map_for_targets(&refined, &coarse, &[0, 1, 1], 160, cx);
+        let ir = DerivedStratificationRefinementCandidateIrV1 {
+            schema_version: DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1,
+            refined_geometry: refined.id(),
+            refined_stratification: refined.ir().stratification.id,
+            coarse_geometry: coarse.id(),
+            coarse_stratification: coarse.ir().stratification.id,
+            exhaustive_map: exhaustive_map.id(),
+            nominal_refinement: DerivedStratificationRefinementDeclarationIdV1::from_bytes(
+                [180; 32],
+            ),
+            no_authority: DerivedNoClaimIdV1::from_bytes([181; 32]),
+        };
+        StratificationRefinementCandidateFixtureV1 {
+            refined,
+            coarse,
+            exhaustive_map,
+            ir,
+        }
+    }
+
     #[test]
     fn v1_class_bytes_keep_old_tags_and_domain_separate_new_paths() {
         assert_eq!(
@@ -8886,6 +9519,399 @@ mod tests {
                     stage: "stratified-assembly-admission-entry"
                 })
             ));
+        });
+    }
+
+    #[test]
+    fn stratification_refinement_candidates_replay_with_two_sided_coverage() {
+        assert_ne!(
+            <DerivedStratificationRefinementCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedExhaustiveStratifiedMapCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+        );
+        assert_eq!(
+            <DerivedStratificationRefinementCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS
+                .len(),
+            7,
+        );
+        assert_eq!(
+            DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+            8,
+        );
+
+        with_cx(false, |cx| {
+            let fixture = stratification_refinement_candidate_fixture(cx);
+            let first = admit_derived_stratification_refinement_candidate_v1(
+                &fixture.ir,
+                &fixture.exhaustive_map,
+                &fixture.refined,
+                &fixture.coarse,
+                cx,
+            )
+            .expect("valid finite stratification refinement candidate");
+            let replay = admit_derived_stratification_refinement_candidate_v1(
+                &fixture.ir,
+                &fixture.exhaustive_map,
+                &fixture.refined,
+                &fixture.coarse,
+                cx,
+            )
+            .expect("deterministic refinement candidate replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.refined_geometry(), fixture.refined.id());
+            assert_eq!(
+                first.refined_stratification(),
+                fixture.refined.ir().stratification.id,
+            );
+            assert_eq!(first.coarse_geometry(), fixture.coarse.id());
+            assert_eq!(
+                first.coarse_stratification(),
+                fixture.coarse.ir().stratification.id,
+            );
+            assert_eq!(first.exhaustive_map(), fixture.exhaustive_map.id());
+            assert_eq!(first.nominal_refinement(), fixture.ir.nominal_refinement);
+            assert_eq!(first.no_authority(), fixture.ir.no_authority);
+            assert_eq!(first.id(), first.identity_receipt().id());
+            assert_eq!(fixture.exhaustive_map.components().len(), 3);
+            assert_eq!(
+                fixture.exhaustive_map.components()[1].target_stratum,
+                fixture.exhaustive_map.components()[2].target_stratum,
+                "multiple refined strata may select one coarse stratum",
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Seven-field receipt and recursive child-schema contract.
+    fn stratification_refinement_receipt_binds_every_typed_field() {
+        with_cx(false, |cx| {
+            let fixture = stratification_refinement_candidate_fixture(cx);
+            let baseline = stratification_refinement_candidate_receipt(&fixture.ir, cx)
+                .expect("baseline refinement receipt")
+                .id();
+
+            macro_rules! assert_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = fixture.ir;
+                    changed.$field = $value;
+                    let changed = stratification_refinement_candidate_receipt(&changed, cx)
+                        .expect("mutated refinement receipt")
+                        .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_field_moves_identity!(refined_geometry, geometry_id(182));
+            assert_field_moves_identity!(refined_stratification, stratification_id(183));
+            assert_field_moves_identity!(coarse_geometry, geometry_id(184));
+            assert_field_moves_identity!(coarse_stratification, stratification_id(185));
+            assert_field_moves_identity!(
+                exhaustive_map,
+                DerivedExhaustiveStratifiedMapCandidateIdV1::parse_slice(&[186; 32])
+                    .expect("nonzero exhaustive child identity")
+            );
+            assert_field_moves_identity!(
+                nominal_refinement,
+                DerivedStratificationRefinementDeclarationIdV1::from_bytes([187; 32])
+            );
+            assert_field_moves_identity!(no_authority, DerivedNoClaimIdV1::from_bytes([188; 32]));
+
+            let child_field = &DerivedStratificationRefinementCandidateIdentitySchemaV1::FIELDS[4];
+            assert_eq!(child_field.wire_type(), WireType::Child);
+            assert!(child_field.child_spec().is_some());
+            let wrong_child_schema =
+                CanonicalEncoder::<DerivedStratificationRefinementCandidateIdV1, _>::new(
+                    DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_IDENTITY_LIMITS_V1,
+                    || cx.checkpoint().is_err(),
+                )
+                .expect("valid refinement encoder")
+                .bytes(
+                    Field::new(0, "refined-geometry"),
+                    fixture.ir.refined_geometry.as_bytes(),
+                )
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(1, "refined-stratification"),
+                        fixture.ir.refined_stratification.as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(2, "coarse-geometry"),
+                        fixture.ir.coarse_geometry.as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.bytes(
+                        Field::new(3, "coarse-stratification"),
+                        fixture.ir.coarse_stratification.as_bytes(),
+                    )
+                })
+                .and_then(|encoder| {
+                    encoder.child(
+                        Field::new(4, "exhaustive-fine-to-coarse-map"),
+                        DerivedMorphismIdV1::parse_slice(&[189; 32])
+                            .expect("nonzero wrong-schema child"),
+                    )
+                });
+            assert!(matches!(
+                wrong_child_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "exhaustive-fine-to-coarse-map",
+                    what: "child schema domain",
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn stratification_refinement_refuses_missing_coarse_coverage_and_dimension_increase() {
+        with_cx(false, |cx| {
+            let fixture = stratification_refinement_candidate_fixture(cx);
+            let missing_coverage = admit_exhaustive_map_for_targets(
+                &fixture.refined,
+                &fixture.coarse,
+                &[1, 1, 1],
+                190,
+                cx,
+            );
+            let missing_ir = DerivedStratificationRefinementCandidateIrV1 {
+                exhaustive_map: missing_coverage.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &missing_ir,
+                    &missing_coverage,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCandidateErrorV1::MissingCoarseCoverage {
+                        coarse_stratum: fixture.coarse.ir().stratification.strata[0].id,
+                    }
+                )
+            );
+
+            let dimension_increase = admit_exhaustive_map_for_targets(
+                &fixture.refined,
+                &fixture.coarse,
+                &[0, 1, 0],
+                194,
+                cx,
+            );
+            let dimension_ir = DerivedStratificationRefinementCandidateIrV1 {
+                exhaustive_map: dimension_increase.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &dimension_ir,
+                    &dimension_increase,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCandidateErrorV1::DimensionIncrease {
+                        index: 2,
+                        refined: 2,
+                        coarse: 1,
+                    }
+                )
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Schema, binding, zero-identity, and cancellation matrix.
+    fn stratification_refinement_refuses_unbound_children_and_selectors() {
+        let fixture = with_cx(false, stratification_refinement_candidate_fixture);
+        with_cx(false, |cx| {
+            let mut bad_schema = fixture.ir;
+            bad_schema.schema_version = 2;
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &bad_schema,
+                    &fixture.exhaustive_map,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCandidateErrorV1::UnsupportedSchemaVersion {
+                        found: 2,
+                        supported: DERIVED_STRATIFICATION_REFINEMENT_CANDIDATE_SCHEMA_VERSION_V1,
+                    }
+                )
+            );
+
+            for (field, changed_ir) in [
+                (
+                    "refined-geometry",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        refined_geometry: geometry_id(0),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "refined-stratification",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        refined_stratification: stratification_id(0),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "coarse-geometry",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        coarse_geometry: geometry_id(0),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "coarse-stratification",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        coarse_stratification: stratification_id(0),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "exhaustive-fine-to-coarse-map",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        exhaustive_map: DerivedExhaustiveStratifiedMapCandidateIdV1::parse_slice(
+                            &[0; 32],
+                        )
+                        .expect("zero child sentinel remains representable"),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "nominal-refinement-declaration",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        nominal_refinement:
+                            DerivedStratificationRefinementDeclarationIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_stratification_refinement_candidate_v1(
+                        &changed_ir,
+                        &fixture.exhaustive_map,
+                        &fixture.refined,
+                        &fixture.coarse,
+                        cx,
+                    ),
+                    Err(DerivedStratificationRefinementCandidateErrorV1::MissingIdentity {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            let wrong_child_ir = DerivedStratificationRefinementCandidateIrV1 {
+                exhaustive_map: DerivedExhaustiveStratifiedMapCandidateIdV1::parse_slice(
+                    &[200; 32],
+                )
+                .expect("nonzero wrong child identity"),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &wrong_child_ir,
+                    &fixture.exhaustive_map,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapIdentityMismatch)
+            );
+
+            let wrong_endpoint_ir = DerivedStratificationRefinementCandidateIrV1 {
+                refined_geometry: geometry_id(201),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &wrong_endpoint_ir,
+                    &fixture.exhaustive_map,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCandidateErrorV1::EndpointMismatch {
+                        field: "refined-geometry",
+                    }
+                )
+            );
+
+            let wrong_stratification_ir = DerivedStratificationRefinementCandidateIrV1 {
+                refined_stratification: stratification_id(202),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &wrong_stratification_ir,
+                    &fixture.exhaustive_map,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCandidateErrorV1::StratificationMismatch {
+                        field: "refined-stratification",
+                    }
+                )
+            );
+
+            let reversed_map = admit_exhaustive_map_for_targets(
+                &fixture.coarse,
+                &fixture.refined,
+                &[0, 1],
+                203,
+                cx,
+            );
+            let reversed_ir = DerivedStratificationRefinementCandidateIrV1 {
+                exhaustive_map: reversed_map.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &reversed_ir,
+                    &reversed_map,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(
+                    DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapEndpointMismatch {
+                        field: "child-refined-geometry",
+                    }
+                )
+            );
+        });
+
+        with_cx(true, |cx| {
+            assert_eq!(
+                admit_derived_stratification_refinement_candidate_v1(
+                    &fixture.ir,
+                    &fixture.exhaustive_map,
+                    &fixture.refined,
+                    &fixture.coarse,
+                    cx,
+                ),
+                Err(DerivedStratificationRefinementCandidateErrorV1::Cancelled {
+                    stage: "stratification-refinement-entry",
+                })
+            );
         });
     }
 
