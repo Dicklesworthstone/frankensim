@@ -2923,6 +2923,95 @@ impl TerminalRelativePhysicalRelabel {
         .map_err(Into::into)
     }
 
+    /// Re-declare one cross-sector physical-map record on explicitly supplied
+    /// target endpoint objects.
+    ///
+    /// This validates endpoint pair/phase transport, preserves the exact map
+    /// family, and requires a new map identity and artifact reference. It does
+    /// not execute the source map or prove that the target objects are its
+    /// mathematical images; callers obtain those objects through the
+    /// sector-specific transport/redeclaration APIs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn redeclare_physical_map(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        source_map: &DeclaredPhysicalMap,
+        target_id: ConversionMapId,
+        target_source_object: PhysicalObjectRef,
+        target_target_object: PhysicalObjectRef,
+        target_map_artifact: StableId,
+    ) -> Result<DeclaredPhysicalMap, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        for (source_role, target_role, source_endpoint, target_endpoint) in [
+            (
+                "source physical-map source endpoint",
+                "target physical-map source endpoint",
+                source_map.source(),
+                &target_source_object,
+            ),
+            (
+                "source physical-map target endpoint",
+                "target physical-map target endpoint",
+                source_map.target(),
+                &target_target_object,
+            ),
+        ] {
+            self.verify_value_pair(source_role, source_endpoint.pair)?;
+            if target_endpoint.pair != self.target_pair {
+                return Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+                    role: target_role,
+                    expected: self.target_pair,
+                    actual: target_endpoint.pair,
+                });
+            }
+            let (expected_target_phase, _) = self.required_phase_image(&source_endpoint.phase)?;
+            if &target_endpoint.phase != expected_target_phase {
+                return Err(
+                    TerminalRelativePhysicalRelabelError::PhysicalMapEndpointPhaseMismatch {
+                        role: target_role,
+                        source_phase: source_endpoint.phase.as_str().to_owned(),
+                        expected_target_phase: expected_target_phase.as_str().to_owned(),
+                        actual_target_phase: target_endpoint.phase.as_str().to_owned(),
+                    },
+                );
+            }
+            if target_endpoint.kind != source_endpoint.kind {
+                return Err(
+                    TerminalRelativePhysicalRelabelError::PhysicalMapEndpointKindMismatch {
+                        role: target_role,
+                        expected: source_endpoint.kind,
+                        actual: target_endpoint.kind,
+                    },
+                );
+            }
+        }
+
+        if &target_id == source_map.id() {
+            return Err(
+                TerminalRelativePhysicalRelabelError::PhysicalMapIdentityNotFresh {
+                    id: target_id.as_str().to_owned(),
+                },
+            );
+        }
+        if &target_map_artifact == source_map.map_artifact() {
+            return Err(
+                TerminalRelativePhysicalRelabelError::PhysicalMapArtifactNotFresh {
+                    artifact: target_map_artifact.as_str().to_owned(),
+                },
+            );
+        }
+
+        DeclaredPhysicalMap::try_new(
+            target_id,
+            source_map.kind(),
+            target_source_object,
+            target_target_object,
+            target_map_artifact,
+        )
+        .map_err(Into::into)
+    }
+
     /// Admit the exact inverse physical relabeling.
     pub fn inverse(
         &self,
@@ -5868,6 +5957,36 @@ pub enum TerminalRelativePhysicalRelabelError {
         /// Target artifact role being supplied.
         role: &'static str,
         /// Reused source artifact identity.
+        artifact: String,
+    },
+    /// A supplied target map endpoint is not on the mapped target phase.
+    PhysicalMapEndpointPhaseMismatch {
+        /// Target endpoint role.
+        role: &'static str,
+        /// Phase carried by the source declaration endpoint.
+        source_phase: String,
+        /// Phase required by the relabel's phase map.
+        expected_target_phase: String,
+        /// Phase carried by the supplied target object.
+        actual_target_phase: String,
+    },
+    /// A target map endpoint changed the source declaration's object sector.
+    PhysicalMapEndpointKindMismatch {
+        /// Target endpoint role.
+        role: &'static str,
+        /// Object sector carried by the corresponding source endpoint.
+        expected: PhysicalObjectKind,
+        /// Object sector carried by the supplied target endpoint.
+        actual: PhysicalObjectKind,
+    },
+    /// A target physical-map declaration reused the source map identity.
+    PhysicalMapIdentityNotFresh {
+        /// Reused conversion-map identity.
+        id: String,
+    },
+    /// A target physical-map declaration reused the source map artifact.
+    PhysicalMapArtifactNotFresh {
+        /// Reused map-artifact identity.
         artifact: String,
     },
     /// A pair or transported value was not bound to the expected endpoint.

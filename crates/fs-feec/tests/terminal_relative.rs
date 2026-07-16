@@ -16,13 +16,14 @@ use fs_feec::terminal_relative::{
     DistributedCurrent, FiniteCellComplex, GeometricCoil, IncidenceSign, IntegralRelativeChain,
     IntegralRelativeCochain, IntegralWindingRepresentative, MachineBindingStatus,
     OrientationMapSign, PhaseCurrentSign, PhaseId, PhaseRelabelEntry, PhysicalObjectId,
-    PhysicalObjectIdentity, PhysicalTerminal, PhysicalTerminalId, PresentedMachinePortRef,
-    RealCurrentAmplitude, RealRelativeCochain, SignedCellRelabelEntry, TerminalOrientation,
-    TerminalPortCoordinate, TerminalPortTrivialization, TerminalRelabelEntry,
-    TerminalRelativeCoefficientDomain, TerminalRelativeError, TerminalRelativePair,
-    TerminalRelativePhysicalRelabel, TerminalRelativePhysicalRelabelError,
-    TerminalRelativeSemanticPermutation, TerminalRelativeSignedRelabel,
-    TerminalRelativeSignedRelabelError, TerminalRole, TrivializationId,
+    PhysicalObjectIdentity, PhysicalObjectKind, PhysicalObjectRef, PhysicalTerminal,
+    PhysicalTerminalId, PresentedMachinePortRef, RealCurrentAmplitude, RealRelativeCochain,
+    SignedCellRelabelEntry, TerminalOrientation, TerminalPortCoordinate,
+    TerminalPortTrivialization, TerminalRelabelEntry, TerminalRelativeCoefficientDomain,
+    TerminalRelativeError, TerminalRelativePair, TerminalRelativePhysicalRelabel,
+    TerminalRelativePhysicalRelabelError, TerminalRelativeSemanticPermutation,
+    TerminalRelativeSignedRelabel, TerminalRelativeSignedRelabelError, TerminalRole,
+    TrivializationId,
 };
 use fs_qty::{Current, Dims};
 
@@ -783,6 +784,39 @@ fn redeclare_two_phase_geometric_coil(
         target.manufacturing_artifact(),
         &target_manufacturing_artifact
     );
+    target
+}
+
+fn redeclare_two_phase_physical_map(
+    relabel: &TerminalRelativePhysicalRelabel,
+    pair: &TerminalRelativePair,
+    source_map: &DeclaredPhysicalMap,
+    target_id: &str,
+    target_source: PhysicalObjectRef,
+    target_target: PhysicalObjectRef,
+    target_map_artifact: &str,
+) -> DeclaredPhysicalMap {
+    let target_id = ConversionMapId::new(target_id).unwrap();
+    let target_map_artifact = stable(target_map_artifact);
+    let expected_kind = source_map.kind();
+    let expected_source = target_source.clone();
+    let expected_target = target_target.clone();
+    let target = relabel
+        .redeclare_physical_map(
+            pair,
+            pair,
+            source_map,
+            target_id.clone(),
+            target_source,
+            target_target,
+            target_map_artifact.clone(),
+        )
+        .expect("redeclare two-phase physical map");
+    assert_eq!(target.id(), &target_id);
+    assert_eq!(target.kind(), expected_kind);
+    assert_eq!(target.source(), &expected_source);
+    assert_eq!(target.target(), &expected_target);
+    assert_eq!(target.map_artifact(), &target_map_artifact);
     target
 }
 
@@ -3337,5 +3371,645 @@ fn i13_2a_029_geometric_coil_redeclaration_refuses_stale_or_aliased_artifacts() 
             expected: pair.identity(),
             actual: wrong_pair.identity(),
         })
+    );
+}
+
+#[test]
+fn i13_2a_030_current_realization_map_redeclaration_commutes_with_composition() {
+    let pair = disconnected_two_phase_pair();
+    let phase_swap = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_preserve_swap_cell_entries(),
+        two_phase_preserve_swap_semantics(),
+    )
+    .expect("phase swap");
+    let terminal_reversal = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_terminal_reverse_cell_entries(),
+        two_phase_terminal_reverse_semantics(),
+    )
+    .expect("terminal/current reversal");
+    let composed = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_composed_cell_entries(),
+        two_phase_composed_semantics(),
+    )
+    .expect("direct composed action");
+
+    let source_amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/map-redeclare/current/source-amplitude-a").unwrap(),
+        &pair,
+        PhaseId::new("phase/a").unwrap(),
+        Current::new(3.0),
+    )
+    .expect("source phase-a amplitude");
+    let source_current = two_phase_distributed_current(
+        &pair,
+        "phase/a",
+        3.0,
+        "object/map-redeclare/current/source-distributed-a",
+        "receipt/map-redeclare/current/source-divergence",
+        "receipt/map-redeclare/current/source-terminal",
+    );
+    let source_map = DeclaredPhysicalMap::try_new(
+        ConversionMapId::new("map/redeclare/current/source-a").unwrap(),
+        DeclaredPhysicalMapKind::CurrentRealization,
+        source_amplitude.object_ref(),
+        source_current.object_ref(),
+        stable("artifact/map-redeclare/current/source-a"),
+    )
+    .expect("source current-realization map");
+    assert_eq!(source_map.source().pair_id(), pair.identity());
+    assert_eq!(source_map.target().pair_id(), pair.identity());
+    assert_eq!(source_map.source().phase().as_str(), "phase/a");
+    assert_eq!(source_map.target().phase().as_str(), "phase/a");
+    assert_eq!(
+        source_map.source().kind(),
+        PhysicalObjectKind::RealCurrentAmplitude
+    );
+    assert_eq!(
+        source_map.target().kind(),
+        PhysicalObjectKind::DistributedCurrent
+    );
+
+    let intermediate_amplitude = phase_swap
+        .transport_current_amplitude(
+            &pair,
+            &pair,
+            &source_amplitude,
+            PhysicalObjectId::new("object/map-redeclare/current/intermediate-amplitude-b").unwrap(),
+        )
+        .expect("transport intermediate amplitude");
+    let intermediate_current = transport_two_phase_distributed_current(
+        &phase_swap,
+        &pair,
+        &source_current,
+        "object/map-redeclare/current/intermediate-distributed-b",
+        "receipt/map-redeclare/current/intermediate-divergence",
+        "receipt/map-redeclare/current/intermediate-terminal",
+    );
+    let intermediate_map = redeclare_two_phase_physical_map(
+        &phase_swap,
+        &pair,
+        &source_map,
+        "map/redeclare/current/intermediate-b",
+        intermediate_amplitude.object_ref(),
+        intermediate_current.object_ref(),
+        "artifact/map-redeclare/current/intermediate-b",
+    );
+
+    let final_amplitude_id =
+        PhysicalObjectId::new("object/map-redeclare/current/final-amplitude-b").unwrap();
+    let sequential_amplitude = terminal_reversal
+        .transport_current_amplitude(
+            &pair,
+            &pair,
+            &intermediate_amplitude,
+            final_amplitude_id.clone(),
+        )
+        .expect("transport sequential final amplitude");
+    let sequential_current = transport_two_phase_distributed_current(
+        &terminal_reversal,
+        &pair,
+        &intermediate_current,
+        "object/map-redeclare/current/final-distributed-b",
+        "receipt/map-redeclare/current/final-divergence",
+        "receipt/map-redeclare/current/final-terminal",
+    );
+    let sequential_map = redeclare_two_phase_physical_map(
+        &terminal_reversal,
+        &pair,
+        &intermediate_map,
+        "map/redeclare/current/final-b",
+        sequential_amplitude.object_ref(),
+        sequential_current.object_ref(),
+        "artifact/map-redeclare/current/final-b",
+    );
+
+    let direct_amplitude = composed
+        .transport_current_amplitude(&pair, &pair, &source_amplitude, final_amplitude_id)
+        .expect("transport direct final amplitude");
+    let direct_current = transport_two_phase_distributed_current(
+        &composed,
+        &pair,
+        &source_current,
+        "object/map-redeclare/current/final-distributed-b",
+        "receipt/map-redeclare/current/final-divergence",
+        "receipt/map-redeclare/current/final-terminal",
+    );
+    let direct_map = redeclare_two_phase_physical_map(
+        &composed,
+        &pair,
+        &source_map,
+        "map/redeclare/current/final-b",
+        direct_amplitude.object_ref(),
+        direct_current.object_ref(),
+        "artifact/map-redeclare/current/final-b",
+    );
+
+    assert_eq!(sequential_amplitude, direct_amplitude);
+    assert_eq!(sequential_current, direct_current);
+    assert_eq!(sequential_map, direct_map);
+    assert_ne!(intermediate_map.id(), sequential_map.id());
+    assert_ne!(
+        intermediate_map.map_artifact(),
+        sequential_map.map_artifact()
+    );
+    assert_eq!(sequential_map.kind(), source_map.kind());
+    assert_eq!(sequential_map.source(), &sequential_amplitude.object_ref());
+    assert_eq!(sequential_map.target(), &sequential_current.object_ref());
+    assert_eq!(sequential_map.source().pair_id(), pair.identity());
+    assert_eq!(sequential_map.target().pair_id(), pair.identity());
+    assert_eq!(sequential_map.source().phase().as_str(), "phase/b");
+    assert_eq!(sequential_map.target().phase().as_str(), "phase/b");
+    assert_eq!(
+        sequential_map.source().kind(),
+        PhysicalObjectKind::RealCurrentAmplitude
+    );
+    assert_eq!(
+        sequential_map.target().kind(),
+        PhysicalObjectKind::DistributedCurrent
+    );
+}
+
+#[test]
+fn i13_2a_031_winding_realization_map_redeclaration_commutes_with_composition() {
+    let pair = disconnected_two_phase_pair();
+    let phase_swap = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_preserve_swap_cell_entries(),
+        two_phase_preserve_swap_semantics(),
+    )
+    .expect("phase swap");
+    let terminal_reversal = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_terminal_reverse_cell_entries(),
+        two_phase_terminal_reverse_semantics(),
+    )
+    .expect("terminal/current reversal");
+    let composed = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_composed_cell_entries(),
+        two_phase_composed_semantics(),
+    )
+    .expect("direct composed action");
+
+    let source_winding =
+        IntegralWindingRepresentative::try_new(&pair, PhaseId::new("phase/a").unwrap(), vec![3])
+            .expect("source phase-a winding");
+    let source_coil = geometric_coil_fixture(
+        &pair,
+        "phase/a",
+        "component/a",
+        "object/map-redeclare/winding/source-coil-a",
+        "artifact/map-redeclare/winding/source-connectivity",
+        "artifact/map-redeclare/winding/source-manufacturing",
+    );
+    let source_map = DeclaredPhysicalMap::try_new(
+        ConversionMapId::new("map/redeclare/winding/source-a").unwrap(),
+        DeclaredPhysicalMapKind::WindingRealization,
+        source_winding.object_ref(),
+        source_coil.object_ref(),
+        stable("artifact/map-redeclare/winding/source-a"),
+    )
+    .expect("source winding-realization map");
+    assert_eq!(source_map.source().pair_id(), pair.identity());
+    assert_eq!(source_map.target().pair_id(), pair.identity());
+    assert_eq!(source_map.source().phase().as_str(), "phase/a");
+    assert_eq!(source_map.target().phase().as_str(), "phase/a");
+    assert_eq!(
+        source_map.source().kind(),
+        PhysicalObjectKind::IntegralWindingRepresentative
+    );
+    assert_eq!(
+        source_map.target().kind(),
+        PhysicalObjectKind::GeometricCoil
+    );
+
+    let intermediate_winding = phase_swap
+        .transport_winding_representative(&pair, &pair, &source_winding)
+        .expect("transport intermediate winding");
+    let intermediate_coil = redeclare_two_phase_geometric_coil(
+        &phase_swap,
+        &pair,
+        &source_coil,
+        "object/map-redeclare/winding/intermediate-coil-b",
+        "artifact/map-redeclare/winding/intermediate-connectivity",
+        "artifact/map-redeclare/winding/intermediate-manufacturing",
+    );
+    let intermediate_map = redeclare_two_phase_physical_map(
+        &phase_swap,
+        &pair,
+        &source_map,
+        "map/redeclare/winding/intermediate-b",
+        intermediate_winding.object_ref(),
+        intermediate_coil.object_ref(),
+        "artifact/map-redeclare/winding/intermediate-b",
+    );
+
+    let sequential_winding = terminal_reversal
+        .transport_winding_representative(&pair, &pair, &intermediate_winding)
+        .expect("transport sequential final winding");
+    let sequential_coil = redeclare_two_phase_geometric_coil(
+        &terminal_reversal,
+        &pair,
+        &intermediate_coil,
+        "object/map-redeclare/winding/final-coil-b",
+        "artifact/map-redeclare/winding/final-connectivity",
+        "artifact/map-redeclare/winding/final-manufacturing",
+    );
+    let sequential_map = redeclare_two_phase_physical_map(
+        &terminal_reversal,
+        &pair,
+        &intermediate_map,
+        "map/redeclare/winding/final-b",
+        sequential_winding.object_ref(),
+        sequential_coil.object_ref(),
+        "artifact/map-redeclare/winding/final-b",
+    );
+
+    let direct_winding = composed
+        .transport_winding_representative(&pair, &pair, &source_winding)
+        .expect("transport direct final winding");
+    let direct_coil = redeclare_two_phase_geometric_coil(
+        &composed,
+        &pair,
+        &source_coil,
+        "object/map-redeclare/winding/final-coil-b",
+        "artifact/map-redeclare/winding/final-connectivity",
+        "artifact/map-redeclare/winding/final-manufacturing",
+    );
+    let direct_map = redeclare_two_phase_physical_map(
+        &composed,
+        &pair,
+        &source_map,
+        "map/redeclare/winding/final-b",
+        direct_winding.object_ref(),
+        direct_coil.object_ref(),
+        "artifact/map-redeclare/winding/final-b",
+    );
+
+    assert_eq!(sequential_winding, direct_winding);
+    assert_eq!(sequential_coil, direct_coil);
+    assert_eq!(sequential_map, direct_map);
+    assert_ne!(intermediate_map.id(), sequential_map.id());
+    assert_ne!(
+        intermediate_map.map_artifact(),
+        sequential_map.map_artifact()
+    );
+    assert_eq!(sequential_map.kind(), source_map.kind());
+    assert_eq!(sequential_map.source(), &sequential_winding.object_ref());
+    assert_eq!(sequential_map.target(), &sequential_coil.object_ref());
+    assert_eq!(sequential_map.source().pair_id(), pair.identity());
+    assert_eq!(sequential_map.target().pair_id(), pair.identity());
+    assert_eq!(sequential_map.source().phase().as_str(), "phase/b");
+    assert_eq!(sequential_map.target().phase().as_str(), "phase/b");
+    assert_eq!(
+        sequential_map.source().kind(),
+        PhysicalObjectKind::IntegralWindingRepresentative
+    );
+    assert_eq!(
+        sequential_map.target().kind(),
+        PhysicalObjectKind::GeometricCoil
+    );
+}
+
+#[test]
+fn i13_2a_032_physical_map_redeclaration_fails_closed_in_structural_order() {
+    let wrong_pair = pair(89, false);
+    let pair = disconnected_two_phase_pair();
+    let composed = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_composed_cell_entries(),
+        two_phase_composed_semantics(),
+    )
+    .expect("direct composed action");
+
+    let source_amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/map-refusal/source-amplitude-a").unwrap(),
+        &pair,
+        PhaseId::new("phase/a").unwrap(),
+        Current::new(2.0),
+    )
+    .expect("source phase-a amplitude");
+    let source_current = two_phase_distributed_current(
+        &pair,
+        "phase/a",
+        2.0,
+        "object/map-refusal/source-distributed-a",
+        "receipt/map-refusal/source-divergence",
+        "receipt/map-refusal/source-terminal",
+    );
+    let source_map = DeclaredPhysicalMap::try_new(
+        ConversionMapId::new("map/refusal/source-current-a").unwrap(),
+        DeclaredPhysicalMapKind::CurrentRealization,
+        source_amplitude.object_ref(),
+        source_current.object_ref(),
+        stable("artifact/map-refusal/source-current-a"),
+    )
+    .expect("source current-realization map");
+    let target_amplitude = composed
+        .transport_current_amplitude(
+            &pair,
+            &pair,
+            &source_amplitude,
+            PhysicalObjectId::new("object/map-refusal/target-amplitude-b").unwrap(),
+        )
+        .expect("target phase-b amplitude");
+    let target_current = transport_two_phase_distributed_current(
+        &composed,
+        &pair,
+        &source_current,
+        "object/map-refusal/target-distributed-b",
+        "receipt/map-refusal/target-divergence",
+        "receipt/map-refusal/target-terminal",
+    );
+
+    let wrong_pair_amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/map-refusal/wrong-pair-amplitude").unwrap(),
+        &wrong_pair,
+        PhaseId::new("phase/a").unwrap(),
+        Current::new(2.0),
+    )
+    .expect("wrong-pair amplitude fixture");
+    let wrong_pair_current = two_phase_distributed_current(
+        &wrong_pair,
+        "phase/a",
+        2.0,
+        "object/map-refusal/wrong-pair-distributed",
+        "receipt/map-refusal/wrong-pair-divergence",
+        "receipt/map-refusal/wrong-pair-terminal",
+    );
+    let wrong_pair_map = DeclaredPhysicalMap::try_new(
+        ConversionMapId::new("map/refusal/wrong-pair-current").unwrap(),
+        DeclaredPhysicalMapKind::CurrentRealization,
+        wrong_pair_amplitude.object_ref(),
+        wrong_pair_current.object_ref(),
+        stable("artifact/map-refusal/wrong-pair-current"),
+    )
+    .expect("wrong-pair current-realization map");
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &wrong_pair_map,
+            wrong_pair_map.id().clone(),
+            target_amplitude.object_ref(),
+            target_current.object_ref(),
+            wrong_pair_map.map_artifact().clone(),
+        ),
+        Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+            role: "source physical-map source endpoint",
+            expected: pair.identity(),
+            actual: wrong_pair.identity(),
+        })
+    );
+
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            wrong_pair_amplitude.object_ref(),
+            target_current.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+            role: "target physical-map source endpoint",
+            expected: pair.identity(),
+            actual: wrong_pair.identity(),
+        })
+    );
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            target_amplitude.object_ref(),
+            wrong_pair_current.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+            role: "target physical-map target endpoint",
+            expected: pair.identity(),
+            actual: wrong_pair.identity(),
+        })
+    );
+
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            source_current.object_ref(),
+            target_amplitude.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhysicalMapEndpointPhaseMismatch {
+                role: "target physical-map source endpoint",
+                source_phase: "phase/a".to_owned(),
+                expected_target_phase: "phase/b".to_owned(),
+                actual_target_phase: "phase/a".to_owned(),
+            }
+        )
+    );
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            target_current.object_ref(),
+            target_amplitude.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhysicalMapEndpointKindMismatch {
+                role: "target physical-map source endpoint",
+                expected: PhysicalObjectKind::RealCurrentAmplitude,
+                actual: PhysicalObjectKind::DistributedCurrent,
+            }
+        )
+    );
+
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            target_amplitude.object_ref(),
+            source_amplitude.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhysicalMapEndpointPhaseMismatch {
+                role: "target physical-map target endpoint",
+                source_phase: "phase/a".to_owned(),
+                expected_target_phase: "phase/b".to_owned(),
+                actual_target_phase: "phase/a".to_owned(),
+            }
+        )
+    );
+    let source_coil = geometric_coil_fixture(
+        &pair,
+        "phase/a",
+        "component/a",
+        "object/map-refusal/source-coil-a",
+        "artifact/map-refusal/source-coil-connectivity",
+        "artifact/map-refusal/source-coil-manufacturing",
+    );
+    let target_coil = redeclare_two_phase_geometric_coil(
+        &composed,
+        &pair,
+        &source_coil,
+        "object/map-refusal/target-coil-b",
+        "artifact/map-refusal/target-coil-connectivity",
+        "artifact/map-refusal/target-coil-manufacturing",
+    );
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            target_amplitude.object_ref(),
+            target_coil.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhysicalMapEndpointKindMismatch {
+                role: "target physical-map target endpoint",
+                expected: PhysicalObjectKind::DistributedCurrent,
+                actual: PhysicalObjectKind::GeometricCoil,
+            }
+        )
+    );
+
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            source_map.id().clone(),
+            target_amplitude.object_ref(),
+            target_current.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhysicalMapIdentityNotFresh {
+                id: source_map.id().as_str().to_owned(),
+            }
+        )
+    );
+    assert_eq!(
+        composed.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            ConversionMapId::new("map/refusal/fresh-id-stale-artifact").unwrap(),
+            target_amplitude.object_ref(),
+            target_current.object_ref(),
+            source_map.map_artifact().clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhysicalMapArtifactNotFresh {
+                artifact: source_map.map_artifact().as_str().to_owned(),
+            }
+        )
+    );
+}
+
+#[test]
+fn i13_2a_033_physical_map_redeclaration_allows_corresponding_identity_reuse_but_not_endpoint_aliasing()
+ {
+    let pair = disconnected_two_phase_pair();
+    let identity = TerminalRelativePhysicalRelabel::identity_on(&pair).expect("physical identity");
+    let source_amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/map-identity/source-amplitude-a").unwrap(),
+        &pair,
+        PhaseId::new("phase/a").unwrap(),
+        Current::new(5.0),
+    )
+    .expect("source identity amplitude");
+    let source_current = two_phase_distributed_current(
+        &pair,
+        "phase/a",
+        5.0,
+        "object/map-identity/source-distributed-a",
+        "receipt/map-identity/source-divergence",
+        "receipt/map-identity/source-terminal",
+    );
+    let source_map = DeclaredPhysicalMap::try_new(
+        ConversionMapId::new("map/identity/source-current-a").unwrap(),
+        DeclaredPhysicalMapKind::CurrentRealization,
+        source_amplitude.object_ref(),
+        source_current.object_ref(),
+        stable("artifact/map-identity/source-current-a"),
+    )
+    .expect("source identity current-realization map");
+
+    let redeclared = redeclare_two_phase_physical_map(
+        &identity,
+        &pair,
+        &source_map,
+        "map/identity/redeclared-current-a",
+        source_amplitude.object_ref(),
+        source_current.object_ref(),
+        "artifact/map-identity/redeclared-current-a",
+    );
+    assert_eq!(redeclared.source(), source_map.source());
+    assert_eq!(redeclared.target(), source_map.target());
+    assert_ne!(redeclared.id(), source_map.id());
+    assert_ne!(redeclared.map_artifact(), source_map.map_artifact());
+
+    let aliased_object_id =
+        PhysicalObjectId::new("object/map-identity/aliased-conversion-endpoint").unwrap();
+    let aliased_amplitude = RealCurrentAmplitude::try_new(
+        aliased_object_id,
+        &pair,
+        PhaseId::new("phase/a").unwrap(),
+        Current::new(5.0),
+    )
+    .expect("aliased target amplitude");
+    let aliased_current = two_phase_distributed_current(
+        &pair,
+        "phase/a",
+        5.0,
+        "object/map-identity/aliased-conversion-endpoint",
+        "receipt/map-identity/aliased-divergence",
+        "receipt/map-identity/aliased-terminal",
+    );
+    let aliased_source_ref = aliased_amplitude.object_ref();
+    let aliased_target_ref = aliased_current.object_ref();
+    assert_eq!(aliased_source_ref.identity(), aliased_target_ref.identity());
+    let expected_debug = format!("{:?}", aliased_source_ref.identity());
+    assert_eq!(
+        identity.redeclare_physical_map(
+            &pair,
+            &pair,
+            &source_map,
+            ConversionMapId::new("map/identity/rejected-aliased-endpoints").unwrap(),
+            aliased_source_ref,
+            aliased_target_ref,
+            stable("artifact/map-identity/rejected-aliased-endpoints"),
+        ),
+        Err(TerminalRelativePhysicalRelabelError::TerminalRelative(
+            TerminalRelativeError::DuplicateIdentity {
+                role: "conversion endpoint",
+                id: expected_debug,
+            }
+        ))
     );
 }

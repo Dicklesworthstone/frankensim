@@ -236,7 +236,12 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   a separate explicit declaration. A `GeometricCoil` is only re-declared on
   the explicitly mapped phase/component with caller-supplied connectivity and
   manufacturing artifact IDs that reuse neither source artifact; no geometry
-  is transported, and a target winding-realization map remains separate.
+  is transported, and a target winding-realization map remains separate. A
+  physical-map redeclaration accepts only caller-supplied target endpoints on
+  the exact mapped pair and phases, preserves each endpoint's nominal sector
+  and the source map family, and requires a fresh map ID and artifact. It does
+  not synthesize target objects; those come from the sector-specific transport
+  and redeclaration APIs above.
   Checked combination occurs before coefficient application so two reversals
   cancel exactly without a spurious intermediate `i64` overflow.
 - Vector families (vecfam battery): dimension counts r = 1..4 match
@@ -422,7 +427,10 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   transport separation, current-times-winding invariance, cell-natural
   distributed-current transport with fresh nominal constraint receipts,
   geometric-coil redeclaration with fresh nominal realization artifacts, and
-  invalid twins.
+  declaration-only target physical-map rebuilding for both realization
+  families. Sequential-versus-direct map redeclarations use separately
+  transported/redeclared target objects and pin pair/phase/sector checks before
+  fresh map ID/artifact checks, with invalid twins for each boundary.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -565,9 +573,14 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
 - An admitted physical relabel covers only its enumerated bijections. It does
   not authenticate a MachineGraph or netlist equivalence, authenticate fresh
   distributed-current constraint receipts or geometric-coil artifacts,
-  transport arbitrary real fields, geometric data, or conversion maps, infer
-  phase sequence or polarity, or establish
+  transport arbitrary real fields or geometric data, infer phase sequence or
+  polarity, or establish
   refinement/remesh/cut/topology-event naturality.
+- A re-declared conversion map is a nominal target-side declaration, not map
+  execution or a naturality certificate. The relabel does not prove that its
+  caller-supplied endpoints are mathematical images of the source endpoints,
+  authenticate either map artifact, use the cell sign or current-coordinate
+  sign to execute a physical law, or prove a realization-square commutes.
 - No field transfer, current-density solve, electromagnetic force, material,
   thermal, manufacturability, geometric embedding, cancellation-latency,
   performance, or authority-receipt claim follows from these types.
