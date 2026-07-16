@@ -1640,7 +1640,7 @@ fn normalization_target_dims(
                         .cmp(&(*observation, block_id.as_str()))
                 })
                 .map(|index| &blocks[index])
-                .ok_or_else(|| {
+                .map_err(|_| {
                     invalid(
                         "normalization.target",
                         format!(
