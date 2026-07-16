@@ -2859,6 +2859,40 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         self.admit()?.elevate_degree()
     }
 
+    /// Validate this owning generation and elevate it exactly by one degree
+    /// with one cancellation gate.
+    ///
+    /// Dimension and checked structural-validation work refusals precede the
+    /// first checkpoint. Cancellation then spans structural admission and the
+    /// same admitted elevation pipeline as
+    /// [`AdmittedNurbsCurve::elevate_degree_with_cx`]. No partial admitted
+    /// authority or derived generation is published. This primitive does not
+    /// consume the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning elevation's structure, conversion and
+    /// elevation work, retained-memory, allocation, and finite-arithmetic
+    /// refusals when they win before an observed cancellation.
+    pub fn elevate_degree_with_cx(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<CurveElevationRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.elevate_degree_with_poll(&mut should_cancel)
+    }
+
+    fn elevate_degree_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveElevationRun<S, DIM>, NurbsError> {
+        match self.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => self
+                .admitted_after_validation()
+                .elevate_degree_with_poll(should_cancel),
+            CurveWorkRun::Cancelled => Ok(CurveElevationRun::Cancelled),
+        }
+    }
+
     fn elevate_degree_after_validation_with_poll(
         &self,
         should_cancel: &mut impl FnMut() -> bool,
@@ -5921,6 +5955,12 @@ mod tests {
 
         with_curve_cx(true, |cx| {
             assert_eq!(
+                curve
+                    .elevate_degree_with_cx(cx)
+                    .expect("pre-cancelled owning elevation"),
+                CurveElevationRun::Cancelled
+            );
+            assert_eq!(
                 admitted
                     .elevate_degree_with_cx(cx)
                     .expect("pre-cancelled elevation"),
@@ -5929,6 +5969,16 @@ mod tests {
         });
         with_curve_cx(false, |cx| {
             assert_eq!(
+                curve
+                    .elevate_degree_with_cx(cx)
+                    .expect("active owning elevation"),
+                CurveElevationRun::Complete {
+                    curve: expected
+                        .try_clone()
+                        .expect("expected owning elevation copy"),
+                }
+            );
+            assert_eq!(
                 admitted
                     .elevate_degree_with_cx(cx)
                     .expect("active elevation"),
@@ -5936,6 +5986,41 @@ mod tests {
                     curve: expected.try_clone().expect("expected elevation copy"),
                 }
             );
+        });
+
+        let mut admission_polls = 0usize;
+        let mut observe_admission = || {
+            admission_polls += 1;
+            false
+        };
+        assert!(matches!(
+            curve
+                .validate_live_structure_with_poll(&mut observe_admission)
+                .expect("healthy source admission"),
+            CurveWorkRun::Complete(())
+        ));
+        let mut owning_polls = 0usize;
+        let mut cancel_at_first_elevation_poll = || {
+            owning_polls += 1;
+            owning_polls == admission_polls + 1
+        };
+        assert_eq!(
+            curve
+                .elevate_degree_with_poll(&mut cancel_at_first_elevation_poll)
+                .expect("owning elevation cancellation"),
+            CurveElevationRun::Cancelled
+        );
+        assert_eq!(owning_polls, admission_polls + 1);
+
+        let invalid_dimension = NurbsCurve::<f64, 4> {
+            knots: KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+            cpw: vec![[0.0, 0.0, 0.0, 1.0]; 2],
+        };
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                invalid_dimension.elevate_degree_with_cx(cx),
+                Err(NurbsError::Structure { .. })
+            ));
         });
 
         let zero = Rat::int(0);
@@ -5952,6 +6037,16 @@ mod tests {
             .elevate_degree()
             .expect("exact synchronous elevation");
         with_curve_cx(false, |cx| {
+            assert_eq!(
+                exact
+                    .elevate_degree_with_cx(cx)
+                    .expect("active exact owning elevation"),
+                CurveElevationRun::Complete {
+                    curve: exact_expected
+                        .try_clone()
+                        .expect("exact owning elevation copy"),
+                }
+            );
             assert_eq!(
                 exact_admitted
                     .elevate_degree_with_cx(cx)
