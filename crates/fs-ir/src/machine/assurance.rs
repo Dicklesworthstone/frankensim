@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::ContentHash;
 use fs_blake3::identity::{
     CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, EntityId, Field, FieldSpec,
-    IdentityReceipt, NeverCancel, ProblemSemanticId, WireType,
+    IdentityReceipt, NeverCancel, ProblemSemanticId, StrongIdentity, WireType,
 };
 use fs_evidence::vv::{
     AdmittedVvCase, ArtifactHeader, ArtifactId, ArtifactKind, ArtifactRef, AssumptionId,
