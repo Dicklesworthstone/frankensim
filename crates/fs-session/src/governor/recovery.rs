@@ -956,6 +956,7 @@ pub(super) fn encode_pause_ack_terminal_receipt(acknowledgement: &PauseAcknowled
 fn decode_pause_ack_terminal_receipt(
     bytes: &[u8],
     request_id: PauseRequestId,
+    checkpoint: &fs_ledger::session_registry::SolverCheckpointReceipt,
     resume_gate: Arc<CancelGate>,
 ) -> Result<PauseAcknowledgement, SessionError> {
     let authority = pause_ack_authority(request_id);
@@ -969,12 +970,21 @@ fn decode_pause_ack_terminal_receipt(
     let content_hash = decoder.hash()?;
     decoder.finish()?;
     let expected_resume_generation = request_id.gate_generation.checked_add(1);
-    let expected_attribution = event.checkpoint.as_ref().map(|evidence| {
+    // Writer/verifier symmetry (e61t6 repair): the acknowledgement
+    // writer moved to ledger-checkpoint attribution when pause
+    // checkpoints became attested solver checkpoints (68vo); the
+    // recovery derivation must mirror that exact format. The checkpoint
+    // receipt is ledger-verified and authority-bound by the caller
+    // before this derivation runs.
+    let expected_attribution = event.checkpoint.as_ref().map(|_| {
         format!(
-            "pause complete: checkpoint evidence ({} bytes, digest {}) acknowledges \
-             the request at ordinal {} and rotates gate generation {} to {resume_generation}",
-            evidence.byte_len,
-            evidence.digest,
+            "pause complete: ledger checkpoint {} binds solver-state artifact {}, run {}, \
+             and executor drain report {}; it acknowledges the request at ordinal {} and \
+             rotates gate generation {} to {resume_generation}",
+            checkpoint.content_hash(),
+            checkpoint.solver_state_artifact(),
+            checkpoint.run().0,
+            checkpoint.drain_report_hash(),
             request_id.requested_ordinal,
             request_id.gate_generation,
         )
@@ -2389,6 +2399,7 @@ impl Governor {
         let acknowledgement = decode_pause_ack_terminal_receipt(
             &terminal.receipt,
             request_id,
+            checkpoint,
             Arc::clone(&resume_gate),
         )?;
         if acknowledgement.event.checkpoint.as_ref() != Some(&evidence) {

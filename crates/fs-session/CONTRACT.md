@@ -238,7 +238,19 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   standalone causal meter receipts, action-bound degradation, and terminal
   submission receipts for sessions whose immutable token grants that exact
   scope, persisted as immutable typed terminal groups in the same transaction
-  as their owned `session.*` audit events. Foreign permits fail closed. Every payload carries
+  as their owned `session.*` audit events.
+  TWO-TIER SUBMISSION MODEL (bead e61t6): only DURABLE submissions
+  (`submit_once_durable`, whose pre-execution claim and positive permit
+  already live in the recovery ledger) produce flushable submission
+  terminals — the ledger's preclaim doctrine refuses the rest, and
+  flush-time claim fabrication is laundering, refused by design. Plain
+  `submit_once` receipts are in-memory evidence that never flushes; a
+  scope carrying one cannot flush at all. A durable governor also binds
+  EVERY scope's sink to its recovery ledger at construction, so scope
+  isolation is a per-scope-cursor property over one shared sink
+  (foreign sinks refuse `LedgerScopeSinkMismatch`), and the session-open
+  terminal must flush before the scope's first durable submission
+  (`RecoveryRequired` otherwise). Foreign permits fail closed. Every payload carries
   the exact JSON-escaped `ledger_scope`; schemas are open v1, meter-report v1,
   idempotency v5, and degradation v5. Open rows carry the canonical grant and
   operator preimage needed to verify their token digest. Successful submission

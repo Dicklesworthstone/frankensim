@@ -278,6 +278,7 @@ fn ss_001_token_bridges_into_static_admission() {
     // The bridge feeds fs-ir admission directly.
     let node = fs_ir::sexpr::parse(SPOUT).expect("parses");
     let cx = fs_ir::admission::AdmissionContext {
+        cost_freshness: None,
         router: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
@@ -1989,13 +1990,21 @@ fn ss_003g_sink_binding_uses_move_stable_ledger_identity() {
 
 #[test]
 fn ss_003h_bounded_flush_drains_multiple_atomic_chunks_without_duplicates() {
-    let gov = Governor::new();
+    // Durable protocol (e61t6 fork (a)): the open terminal flushes as
+    // a prerequisite, so a trailing degradation event restores the
+    // one-row overflow that proves the multi-chunk drain semantics.
+    let path = durable_ledger_path("chunk-drain");
+    let ledger = fs_ledger::Ledger::open(&path).expect("chunk fixture ledger");
+    let gov = Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0xA7; 32]));
     let permit = gov
         .open_session(token(50, 1e9, 1e9))
         .expect("chunk fixture session");
+    gov.flush_scope_to_ledger(&permit, &ledger)
+        .expect("open prerequisite terminal");
     for index in 0..MAX_FLUSH_ROWS {
         assert!(matches!(
-            gov.submit_once(
+            gov.submit_once_durable(
+                &ledger,
                 SessionId(50),
                 &format!("chunk-key-{index:04}"),
                 Charge::default
@@ -2004,13 +2013,14 @@ fn ss_003h_bounded_flush_drains_multiple_atomic_chunks_without_duplicates() {
             SubmitOutcome::Executed { .. }
         ));
     }
-    let ledger = fs_ledger::Ledger::open(":memory:").expect("chunk fixture ledger");
+    gov.apply_memory_pressure(SessionId(50), 1)
+        .expect("overflow-row degradation event");
     let first = gov
         .flush_scope_to_ledger(&permit, &ledger)
         .expect("first bounded chunk");
     assert_eq!(first.appended_rows, MAX_FLUSH_ROWS);
     assert!(first.encoded_bytes <= MAX_FLUSH_ENCODED_BYTES);
-    assert!(first.remaining_dirty, "one terminal row remains dirty");
+    assert!(first.remaining_dirty, "one overflow row remains dirty");
 
     let second = gov
         .flush_scope_to_ledger(&permit, &ledger)
@@ -2019,7 +2029,8 @@ fn ss_003h_bounded_flush_drains_multiple_atomic_chunks_without_duplicates() {
     assert!(!second.remaining_dirty);
     assert_eq!(
         ledger.table_count("events").unwrap(),
-        u64::try_from(MAX_FLUSH_ROWS + 1).expect("fixture count fits")
+        u64::try_from(MAX_FLUSH_ROWS + 2).expect("fixture count fits"),
+        "open + every submission terminal + the degradation event"
     );
 
     let no_op = gov
@@ -2029,7 +2040,7 @@ fn ss_003h_bounded_flush_drains_multiple_atomic_chunks_without_duplicates() {
     assert!(!no_op.remaining_dirty);
     assert_eq!(
         ledger.table_count("events").unwrap(),
-        u64::try_from(MAX_FLUSH_ROWS + 1).expect("fixture count fits"),
+        u64::try_from(MAX_FLUSH_ROWS + 2).expect("fixture count fits"),
         "cursor commit prevents duplicate rows"
     );
 }
@@ -2682,6 +2693,7 @@ fn ss_006_budget_infeasible_surfaces_as_ranked_guidance() {
     let mut cost_models = BTreeMap::new();
     cost_models.insert("xform.level-set-velocity".to_string(), lbm_cost_model());
     let cx = fs_ir::admission::AdmissionContext {
+        cost_freshness: None,
         router: None,
         chart_requirements: Vec::new(),
         cost_models,
@@ -2695,11 +2707,14 @@ fn ss_006_budget_infeasible_surfaces_as_ranked_guidance() {
     };
     let report = fs_ir::admission::admit(&node, &cx);
     assert!(!report.admitted);
+    // The sealed cost-model doctrine (2pmb) adds a provisional-evidence
+    // WARN under the same "budget" check before the rejection, so the
+    // guidance fixture must select the REJECT finding specifically.
     let finding = report
         .findings
         .iter()
-        .find(|f| f.check == "budget")
-        .expect("budget finding");
+        .find(|f| f.check == "budget" && f.severity == fs_ir::admission::Severity::Reject)
+        .expect("budget rejection finding");
     let guidance = Guidance::from_finding(finding);
     assert_eq!(guidance.code, "budget-rejection");
     assert!(guidance.diagnosis.contains("BudgetInfeasible"));
