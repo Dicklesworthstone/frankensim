@@ -36,6 +36,7 @@ use crate::sheaf::{
     SHEAF_MAX_TRIPLE_CANDIDATES, SheafComplex,
 };
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
+use fs_ivl::Interval;
 use std::fmt::Write as _;
 
 /// The complex skeleton the decomposition runs over (extractable from a
@@ -727,6 +728,265 @@ pub struct BoundedHodgeSplit {
     pub usage: SheafRepairUsage,
 }
 
+/// Versioned normalization used by the bounded numerical assessment.
+///
+/// Residual vectors use the Euclidean norm. Incidence operators are scaled by
+/// their Frobenius norms, which are deterministic upper bounds for their
+/// induced Euclidean norms on the admitted unweighted complex.
+pub const SHEAF_NUMERICS_NORMALIZATION_V1: &str = "fs-geom/sheaf-incidence-frobenius-l2/v1";
+
+/// One absolute and dimensionless residual enclosure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheafResidualBounds {
+    /// Outward enclosure of the absolute Euclidean residual norm.
+    pub absolute: Interval,
+    /// Outward enclosure after division by the named operator and input
+    /// scales. `Interval::WHOLE` means the normalization was unavailable.
+    pub normalized: Interval,
+}
+
+/// Outward-enclosed pairwise orthogonality diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheafOrthogonalityBounds {
+    /// Absolute inner product, outward enclosed. It may be unbounded when the
+    /// mathematical magnitude is not representable as one `f64`.
+    pub absolute_inner_product: Interval,
+    /// Absolute cosine of the angle between the two candidates. Zero vectors
+    /// produce the exact interval `[0, 0]` rather than a vacuous division.
+    pub normalized: Interval,
+}
+
+/// Why the deterministic numerical assessment stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheafNumericsStoppingReason {
+    /// Every required normalized residual upper bound met the declared
+    /// tolerance when the admitted sweep schedule completed.
+    ResidualBoundsSatisfied,
+    /// The admitted sweep schedule completed, but at least one required
+    /// residual remained unresolved or above tolerance.
+    SweepLimitReached,
+}
+
+/// Explicit spectral no-claim attached to the first numerics slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SheafSpectrumScope {
+    /// No eigensolver result was consumed. Structural gauge roots are retained,
+    /// but every numerical mode remains unresolved.
+    Unknown {
+        /// Named operator whose structural zero modes were counted.
+        operator_id: &'static str,
+        /// No numerical eigenvalue index is covered by this report.
+        covered_range: Option<(usize, usize)>,
+        /// Total numerical modes for which no eigenvalue enclosure is claimed.
+        unresolved_modes: usize,
+        /// Smallest patch index in every connected component, including
+        /// isolated patches. These are the exact structural zero-mode gauges
+        /// of `delta0^T delta0`.
+        component_zero_mode_roots: Vec<usize>,
+        /// Stable no-claim reason.
+        reason: &'static str,
+    },
+}
+
+/// Exact finite-incidence source retained for independent residual replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheafNumericsSource {
+    n_patches: usize,
+    edges: Vec<(usize, usize)>,
+    triangles: Vec<(usize, usize, usize)>,
+    mismatch: Vec<f64>,
+}
+
+impl SheafNumericsSource {
+    /// Exact admitted patch count.
+    #[must_use]
+    pub const fn n_patches(&self) -> usize {
+        self.n_patches
+    }
+
+    /// Canonical admitted edge incidence.
+    #[must_use]
+    pub fn edges(&self) -> &[(usize, usize)] {
+        &self.edges
+    }
+
+    /// Canonical admitted triangle incidence.
+    #[must_use]
+    pub fn triangles(&self) -> &[(usize, usize, usize)] {
+        &self.triangles
+    }
+
+    /// Original finite mismatch values; their `to_bits()` values are the
+    /// exact replay payload.
+    #[must_use]
+    pub fn mismatch(&self) -> &[f64] {
+        &self.mismatch
+    }
+}
+
+/// Residual enclosures and replay witnesses for one completed sweep schedule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheafNumericsReceipt {
+    /// Exact admitted incidence and mismatch to which this receipt applies.
+    pub source: SheafNumericsSource,
+    /// Versioned operator/metric normalization identity.
+    pub normalization_id: &'static str,
+    /// Caller-declared upper bound for every normalized residual enclosure.
+    pub relative_tolerance: f64,
+    /// Exact-projection normal-equation residual `delta0^T(m - delta0 c)`.
+    pub primal_normal_equation: SheafResidualBounds,
+    /// Coexact-projection normal-equation residual `delta1 h`.
+    pub dual_normal_equation: SheafResidualBounds,
+    /// Remainder orthogonality residual `delta0^T h`.
+    pub remainder_exact_orthogonality: SheafResidualBounds,
+    /// Pairwise coboundary/triangle-adjoint orthogonality.
+    pub coboundary_triangle_orthogonality: SheafOrthogonalityBounds,
+    /// Pairwise coboundary/remainder orthogonality.
+    pub coboundary_remainder_orthogonality: SheafOrthogonalityBounds,
+    /// Pairwise triangle-adjoint/remainder orthogonality.
+    pub triangle_remainder_orthogonality: SheafOrthogonalityBounds,
+    /// Reconstruction residual `m - delta0 c - delta1^T w - h`.
+    pub reconstruction: SheafResidualBounds,
+    /// Why this completed schedule did or did not meet the tolerance.
+    pub stopping_reason: SheafNumericsStoppingReason,
+    /// Explicit spectrum coverage/no-claim state.
+    pub spectrum: SheafSpectrumScope,
+    /// Outward primal normal-equation residual vector.
+    pub primal_witness: Vec<Interval>,
+    /// Outward dual normal-equation residual vector.
+    pub dual_witness: Vec<Interval>,
+    /// Outward `delta0^T h` residual vector.
+    pub remainder_exact_witness: Vec<Interval>,
+    /// Outward reconstruction residual vector.
+    pub reconstruction_witness: Vec<Interval>,
+}
+
+/// Completed candidate decomposition whose residual bounds did not all pass.
+///
+/// Candidate names are deliberate: this type grants no exact/coexact/harmonic
+/// or topological interpretation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialSheafNumericsReport {
+    coboundary_candidate: Vec<f64>,
+    patch_potential_candidate: Vec<f64>,
+    triangle_adjoint_candidate: Vec<f64>,
+    remainder_candidate: Vec<f64>,
+    candidate_energy_ratios: (f64, f64, f64),
+    receipt: SheafNumericsReceipt,
+    budget: SheafRepairBudget,
+    usage: SheafRepairUsage,
+}
+
+impl PartialSheafNumericsReport {
+    /// Candidate in the image of `delta0`.
+    #[must_use]
+    pub fn coboundary_candidate(&self) -> &[f64] {
+        &self.coboundary_candidate
+    }
+
+    /// Candidate patch potential, pinned once per connected component.
+    #[must_use]
+    pub fn patch_potential_candidate(&self) -> &[f64] {
+        &self.patch_potential_candidate
+    }
+
+    /// Candidate in the image of `delta1^T`.
+    #[must_use]
+    pub fn triangle_adjoint_candidate(&self) -> &[f64] {
+        &self.triangle_adjoint_candidate
+    }
+
+    /// Candidate remainder after both projections.
+    #[must_use]
+    pub fn remainder_candidate(&self) -> &[f64] {
+        &self.remainder_candidate
+    }
+
+    /// Diagnostic energy ratios over the original mismatch norm.
+    #[must_use]
+    pub const fn candidate_energy_ratios(&self) -> (f64, f64, f64) {
+        self.candidate_energy_ratios
+    }
+
+    /// Residual receipt and replay witnesses.
+    #[must_use]
+    pub const fn receipt(&self) -> &SheafNumericsReceipt {
+        &self.receipt
+    }
+
+    /// Exact resource envelope used for the completed schedule.
+    #[must_use]
+    pub const fn budget(&self) -> SheafRepairBudget {
+        self.budget
+    }
+
+    /// Measured and admitted resource consumption.
+    #[must_use]
+    pub const fn usage(&self) -> SheafRepairUsage {
+        self.usage
+    }
+}
+
+/// Opaque tolerance-qualified view of a completed candidate decomposition.
+///
+/// This token proves only the named finite-dimensional residual obligations;
+/// it does not prove continuum coverage, topology, H1, or repair feasibility.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConvergedSheafDecomposition {
+    report: PartialSheafNumericsReport,
+}
+
+impl ConvergedSheafDecomposition {
+    /// Tolerance-qualified coboundary component.
+    #[must_use]
+    pub fn exact(&self) -> &[f64] {
+        self.report.coboundary_candidate()
+    }
+
+    /// Tolerance-qualified patch potential.
+    #[must_use]
+    pub fn potential(&self) -> &[f64] {
+        self.report.patch_potential_candidate()
+    }
+
+    /// Tolerance-qualified triangle-adjoint component.
+    #[must_use]
+    pub fn coexact(&self) -> &[f64] {
+        self.report.triangle_adjoint_candidate()
+    }
+
+    /// Tolerance-qualified numerical remainder. This name alone is not an H1
+    /// or topology claim.
+    #[must_use]
+    pub fn harmonic(&self) -> &[f64] {
+        self.report.remainder_candidate()
+    }
+
+    /// Full residual receipt and replay witnesses.
+    #[must_use]
+    pub const fn receipt(&self) -> &SheafNumericsReceipt {
+        self.report.receipt()
+    }
+
+    /// Downgrade to the non-authoritative candidate report.
+    #[must_use]
+    pub fn into_partial(self) -> PartialSheafNumericsReport {
+        self.report
+    }
+}
+
+/// Total result of the bounded sheaf-numerics assessment.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SheafNumericsOutcome {
+    /// Every required outward residual upper bound met the declared tolerance.
+    Converged(ConvergedSheafDecomposition),
+    /// A complete candidate report exists, but it grants no promoted
+    /// decomposition interpretation.
+    Indeterminate(PartialSheafNumericsReport),
+    /// Admission, resource, cancellation, or arithmetic refused publication.
+    Refused(SheafRepairError),
+}
+
 /// Additional output-allocation limits for bounded repair planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SheafRepairPlanBudget {
@@ -783,6 +1043,11 @@ pub enum SheafRepairError {
     /// A budget field that must be positive was zero.
     InvalidBudget {
         /// Stable budget field name.
+        field: &'static str,
+    },
+    /// A numerical tolerance is non-finite or negative.
+    InvalidTolerance {
+        /// Stable tolerance field name.
         field: &'static str,
     },
     /// The deterministic operator schedule exceeds the admitted work cap.
@@ -870,6 +1135,10 @@ impl core::fmt::Display for SheafRepairError {
             Self::InvalidBudget { field } => {
                 write!(f, "sheaf repair budget field {field} must be positive")
             }
+            Self::InvalidTolerance { field } => write!(
+                f,
+                "sheaf numerics tolerance {field} must be finite and non-negative"
+            ),
             Self::WorkBudgetExceeded { required, cap } => write!(
                 f,
                 "sheaf repair operator envelope requires {required} evaluations above cap {cap}"
@@ -1152,6 +1421,227 @@ fn checked_norm2(
         }
     }
     Ok(total)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScaledL2 {
+    scale: f64,
+    nominal_scaled_squares: f64,
+    scaled_squares: Interval,
+}
+
+fn nonnegative_enclosure(bounds: Interval) -> Interval {
+    let lo = if bounds.lo() == f64::INFINITY {
+        f64::MAX
+    } else {
+        bounds.lo().max(0.0)
+    };
+    Interval::new(lo, bounds.hi().max(0.0))
+}
+
+fn interval_is_exact_zero(value: Interval) -> bool {
+    value.lo() == 0.0 && value.hi() == 0.0
+}
+
+fn canonicalize_finite_add_sub_result(bounds: Interval) -> Interval {
+    if bounds.lo() == f64::INFINITY && bounds.hi() == f64::INFINITY {
+        Interval::new(f64::MAX, f64::INFINITY)
+    } else if bounds.lo() == f64::NEG_INFINITY && bounds.hi() == f64::NEG_INFINITY {
+        Interval::new(f64::NEG_INFINITY, -f64::MAX)
+    } else {
+        bounds
+    }
+}
+
+fn interval_add_outward(left: Interval, right: Interval) -> Interval {
+    let result = if interval_is_exact_zero(left) {
+        right
+    } else if interval_is_exact_zero(right) {
+        left
+    } else {
+        left + right
+    };
+    canonicalize_finite_add_sub_result(result)
+}
+
+fn interval_sub_outward(left: Interval, right: Interval) -> Interval {
+    let result = if interval_is_exact_zero(right) {
+        left
+    } else if left.lo() == left.hi() && right.lo() == right.hi() && left.lo() == right.lo() {
+        Interval::point(0.0)
+    } else {
+        left - right
+    };
+    canonicalize_finite_add_sub_result(result)
+}
+
+impl ScaledL2 {
+    fn zero() -> Self {
+        Self {
+            scale: 0.0,
+            nominal_scaled_squares: 0.0,
+            scaled_squares: Interval::point(0.0),
+        }
+    }
+
+    fn nominal_ratio(self, denominator: Self) -> f64 {
+        if self.scale == 0.0 {
+            return 0.0;
+        }
+        if denominator.scale == 0.0 {
+            return f64::INFINITY;
+        }
+        (self.scale / denominator.scale)
+            * (self.nominal_scaled_squares / denominator.nominal_scaled_squares).sqrt()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IntervalScaledL2 {
+    scale: f64,
+    scaled_squares: Interval,
+    unbounded: bool,
+}
+
+impl IntervalScaledL2 {
+    fn zero() -> Self {
+        Self {
+            scale: 0.0,
+            scaled_squares: Interval::point(0.0),
+            unbounded: false,
+        }
+    }
+
+    fn unbounded() -> Self {
+        Self {
+            scale: f64::INFINITY,
+            scaled_squares: Interval::new(0.0, f64::INFINITY),
+            unbounded: true,
+        }
+    }
+
+    fn absolute_bounds(self) -> Interval {
+        if self.unbounded {
+            Interval::new(0.0, f64::INFINITY)
+        } else if self.scale == 0.0 {
+            Interval::point(0.0)
+        } else {
+            nonnegative_enclosure(Interval::point(self.scale) * self.scaled_squares.sqrt())
+        }
+    }
+
+    fn ratio_bounds(self, denominator: Self) -> Interval {
+        if self.scale == 0.0 && !self.unbounded {
+            return Interval::point(0.0);
+        }
+        if self.unbounded || denominator.unbounded || denominator.scale == 0.0 {
+            return Interval::new(0.0, f64::INFINITY);
+        }
+        let scale_ratio =
+            nonnegative_enclosure(Interval::point(self.scale) / Interval::point(denominator.scale));
+        let shape_ratio = (self.scaled_squares / denominator.scaled_squares).sqrt();
+        nonnegative_enclosure(scale_ratio * shape_ratio)
+    }
+}
+
+fn checked_scaled_l2(
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<ScaledL2, SheafRepairError> {
+    let mut scale = 0.0f64;
+    for value in values {
+        accountant.consume_item(stage)?;
+        if !value.is_finite() {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+        scale = scale.max(value.abs());
+    }
+    if scale == 0.0 {
+        return Ok(ScaledL2::zero());
+    }
+
+    let mut nominal_scaled_squares = 0.0f64;
+    let mut compensation = 0.0f64;
+    let mut scaled_squares = Interval::point(0.0);
+    let scale_interval = Interval::point(scale);
+    for value in values {
+        accountant.consume_item(stage)?;
+        let normalized = *value / scale;
+        let square = normalized * normalized;
+        let corrected = square - compensation;
+        let next = nominal_scaled_squares + corrected;
+        compensation = (next - nominal_scaled_squares) - corrected;
+        nominal_scaled_squares = next;
+
+        let normalized_interval = if *value == 0.0 {
+            Interval::point(0.0)
+        } else {
+            Interval::point(*value) / scale_interval
+        };
+        scaled_squares =
+            interval_add_outward(scaled_squares, normalized_interval * normalized_interval);
+    }
+    if !nominal_scaled_squares.is_finite() || nominal_scaled_squares <= 0.0 {
+        return Err(SheafRepairError::NumericalOverflow { stage });
+    }
+    Ok(ScaledL2 {
+        scale,
+        nominal_scaled_squares,
+        scaled_squares,
+    })
+}
+
+fn checked_interval_scaled_l2(
+    values: &[Interval],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<IntervalScaledL2, SheafRepairError> {
+    let mut scale = 0.0f64;
+    for value in values {
+        accountant.consume_item(stage)?;
+        let magnitude = value.abs().hi();
+        if !magnitude.is_finite() {
+            return Ok(IntervalScaledL2::unbounded());
+        }
+        scale = scale.max(magnitude);
+    }
+    if scale == 0.0 {
+        return Ok(IntervalScaledL2::zero());
+    }
+
+    let scale_interval = Interval::point(scale);
+    let mut scaled_squares = Interval::point(0.0);
+    for value in values {
+        accountant.consume_item(stage)?;
+        if interval_is_exact_zero(*value) {
+            continue;
+        }
+        let normalized = *value / scale_interval;
+        let magnitude = normalized.abs();
+        let square = nonnegative_enclosure(magnitude * magnitude);
+        scaled_squares = nonnegative_enclosure(interval_add_outward(scaled_squares, square));
+    }
+    Ok(IntervalScaledL2 {
+        scale,
+        scaled_squares,
+        unbounded: false,
+    })
+}
+
+fn checked_energy_ratio(
+    numerator: &[f64],
+    denominator: ScaledL2,
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<f64, SheafRepairError> {
+    let ratio = checked_scaled_l2(numerator, stage, accountant)?.nominal_ratio(denominator);
+    let squared = ratio * ratio;
+    if squared.is_finite() {
+        Ok(squared)
+    } else {
+        Err(SheafRepairError::NumericalOverflow { stage })
+    }
 }
 
 pub(super) fn zeroed_output_bounded(
@@ -1537,12 +2027,75 @@ fn apply_projection_transpose(
     }
 }
 
+fn bounded_component_root(
+    parents: &[usize],
+    mut vertex: usize,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<usize, SheafRepairError> {
+    loop {
+        accountant.consume_item("component-root")?;
+        let parent = parents[vertex];
+        if parent == vertex {
+            return Ok(vertex);
+        }
+        vertex = parent;
+    }
+}
+
+/// Retain the smallest patch index in every connected component, including
+/// isolated patches. Union roots always move toward the smaller index, so the
+/// result is deterministic without a traversal-order tie break.
+fn bounded_component_roots(
+    skeleton: &AdmittedSheafSkeleton,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<usize>, SheafRepairError> {
+    accountant.checkpoint("component-partition")?;
+    let mut parents = Vec::new();
+    parents.try_reserve_exact(skeleton.n_patches).map_err(|_| {
+        SheafSkeletonError::ResourceExhausted {
+            stage: "component-parents",
+        }
+    })?;
+    for vertex in 0..skeleton.n_patches {
+        accountant.consume_item("component-parents")?;
+        parents.push(vertex);
+    }
+    for &(u, v) in &skeleton.edges {
+        accountant.consume_item("component-union")?;
+        let left = bounded_component_root(&parents, u, accountant)?;
+        let right = bounded_component_root(&parents, v, accountant)?;
+        if left != right {
+            let (root, child) = if left < right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            parents[child] = root;
+        }
+    }
+
+    let mut roots = Vec::new();
+    roots.try_reserve_exact(skeleton.n_patches).map_err(|_| {
+        SheafSkeletonError::ResourceExhausted {
+            stage: "component-roots",
+        }
+    })?;
+    for vertex in 0..skeleton.n_patches {
+        accountant.consume_item("component-roots")?;
+        if bounded_component_root(&parents, vertex, accountant)? == vertex {
+            roots.push(vertex);
+        }
+    }
+    accountant.checkpoint("component-partition")?;
+    Ok(roots)
+}
+
 fn least_squares_bounded(
     skeleton: &AdmittedSheafSkeleton,
     m: &[f64],
     n_unknowns: usize,
     kind: ProjectionKind,
-    pin_first: bool,
+    pinned_indices: &[usize],
     stage: &'static str,
     accountant: &mut RepairAccountant<'_, '_>,
 ) -> Result<Vec<f64>, SheafRepairError> {
@@ -1557,7 +2110,7 @@ fn least_squares_bounded(
     }
     for _ in 0..accountant.budget.sweeps {
         for i in 0..n_unknowns {
-            if (pin_first && i == 0) || diag[i] <= 0.0 {
+            if pinned_indices.binary_search(&i).is_ok() || diag[i] <= 0.0 {
                 continue;
             }
             accountant.consume_item(stage)?;
@@ -1577,9 +2130,10 @@ fn least_squares_bounded(
     Ok(x)
 }
 
-pub(super) fn hodge_decompose_accounted(
+fn hodge_decompose_accounted_with_roots(
     skeleton: &AdmittedSheafSkeleton,
     mismatch: &[f64],
+    component_roots: &[usize],
     accountant: &mut RepairAccountant<'_, '_>,
 ) -> Result<HodgeSplit, SheafRepairError> {
     validate_bounded_cochain(
@@ -1595,7 +2149,7 @@ pub(super) fn hodge_decompose_accounted(
         mismatch,
         skeleton.n_patches,
         ProjectionKind::Exact,
-        true,
+        component_roots,
         "exact-projection",
         accountant,
     )?;
@@ -1610,7 +2164,7 @@ pub(super) fn hodge_decompose_accounted(
             &first_residual,
             skeleton.triangles.len(),
             ProjectionKind::Coexact,
-            false,
+            &[],
             "coexact-projection",
             accountant,
         )?;
@@ -1622,12 +2176,16 @@ pub(super) fn hodge_decompose_accounted(
         )?
     };
     let harmonic = checked_difference(&first_residual, &coexact, "harmonic-residual", accountant)?;
-    let total = checked_norm2(mismatch, "input-norm", accountant)?.max(f64::MIN_POSITIVE);
-    let fractions = (
-        checked_norm2(&exact, "exact-norm", accountant)? / total,
-        checked_norm2(&coexact, "coexact-norm", accountant)? / total,
-        checked_norm2(&harmonic, "harmonic-norm", accountant)? / total,
-    );
+    let total = checked_scaled_l2(mismatch, "input-norm", accountant)?;
+    let fractions = if total.scale == 0.0 {
+        (0.0, 0.0, 0.0)
+    } else {
+        (
+            checked_energy_ratio(&exact, total, "exact-norm", accountant)?,
+            checked_energy_ratio(&coexact, total, "coexact-norm", accountant)?,
+            checked_energy_ratio(&harmonic, total, "harmonic-norm", accountant)?,
+        )
+    };
     if [fractions.0, fractions.1, fractions.2]
         .into_iter()
         .any(|fraction| !fraction.is_finite())
@@ -1643,6 +2201,17 @@ pub(super) fn hodge_decompose_accounted(
         harmonic,
         fractions,
     })
+}
+
+pub(super) fn hodge_decompose_accounted(
+    skeleton: &AdmittedSheafSkeleton,
+    mismatch: &[f64],
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<HodgeSplit, SheafRepairError> {
+    // Preserve the legacy fixed-sweep diagnostic exactly. The parallel
+    // numerical-assessment API below owns per-component gauge pinning and is
+    // the only path allowed to promote a tolerance-qualified view.
+    hodge_decompose_accounted_with_roots(skeleton, mismatch, &[0], accountant)
 }
 
 /// Run the fixed-iteration Hodge-inspired diagnostic over sealed incidence
@@ -1670,6 +2239,551 @@ pub fn hodge_decompose_bounded(
         budget,
         usage,
     })
+}
+
+fn admit_numerics_budget(
+    skeleton: &AdmittedSheafSkeleton,
+    budget: SheafRepairBudget,
+) -> Result<RepairAdmission, SheafRepairError> {
+    let base = admit_repair_budget(skeleton, budget)?;
+    let dimensions = (skeleton.n_patches as u128)
+        .checked_add(skeleton.edges.len() as u128)
+        .and_then(|value| value.checked_add(skeleton.triangles.len() as u128))
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "numerics-scalar-dimensions",
+        })?;
+    // Source incidence/mismatch, component roots, and four interval residual
+    // witnesses add at most five scalar-equivalent slots per dimension beyond
+    // the legacy decomposition envelope.
+    let extra_scalar_slots =
+        dimensions
+            .checked_mul(5)
+            .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+                stage: "numerics-scalar-envelope",
+            })?;
+    let scalar_slots = (base.scalar_slots as u128)
+        .checked_add(extra_scalar_slots)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "numerics-scalar-envelope",
+        })?;
+    if scalar_slots > budget.max_scalar_slots as u128 {
+        return Err(SheafRepairError::MemoryBudgetExceeded {
+            required: scalar_slots,
+            cap: budget.max_scalar_slots,
+        });
+    }
+    // The assessment additionally applies delta0^T twice and delta1 once.
+    let operator_evaluations = base.operator_evaluations.checked_add(3).ok_or(
+        SheafRepairError::BudgetArithmeticOverflow {
+            stage: "numerics-operator-envelope",
+        },
+    )?;
+    if operator_evaluations > budget.max_operator_evaluations {
+        return Err(SheafRepairError::WorkBudgetExceeded {
+            required: operator_evaluations as u128,
+            cap: budget.max_operator_evaluations,
+        });
+    }
+    let mut work_items = checked_hodge_work_envelope(skeleton, operator_evaluations as u128)?;
+    let span = (skeleton.n_patches as u128)
+        .checked_add(skeleton.edges.len() as u128)
+        .and_then(|value| value.checked_add(skeleton.triangles.len() as u128))
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "numerics-report-span",
+        })?;
+    let report_work = span
+        .checked_mul(32)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "numerics-report-work",
+        })?;
+    work_items =
+        work_items
+            .checked_add(report_work)
+            .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+                stage: "numerics-work-envelope",
+            })?;
+    if work_items > budget.max_work_items as u128 {
+        return Err(SheafRepairError::WorkItemBudgetExceeded {
+            stage: "numerics-work-preflight",
+            required: work_items,
+            cap: budget.max_work_items,
+        });
+    }
+    Ok(RepairAdmission {
+        scalar_slots: usize::try_from(scalar_slots).map_err(|_| {
+            SheafRepairError::BudgetArithmeticOverflow {
+                stage: "numerics-scalar-publication",
+            }
+        })?,
+        operator_evaluations,
+        work_items: usize::try_from(work_items).map_err(|_| {
+            SheafRepairError::BudgetArithmeticOverflow {
+                stage: "numerics-work-publication",
+            }
+        })?,
+    })
+}
+
+fn interval_output_bounded(
+    len: usize,
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<Interval>, SheafRepairError> {
+    accountant.checkpoint(stage)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| SheafSkeletonError::ResourceExhausted { stage })?;
+    for _ in 0..len {
+        accountant.consume_item(stage)?;
+        output.push(Interval::point(0.0));
+    }
+    accountant.checkpoint(stage)?;
+    Ok(output)
+}
+
+fn point_interval_vector(
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<Interval>, SheafRepairError> {
+    let mut output = interval_output_bounded(values.len(), stage, accountant)?;
+    for (target, value) in output.iter_mut().zip(values) {
+        accountant.consume_item(stage)?;
+        *target = Interval::point(*value);
+    }
+    Ok(output)
+}
+
+fn interval_difference(
+    left: &[f64],
+    right: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<Interval>, SheafRepairError> {
+    if left.len() != right.len() {
+        return Err(SheafSkeletonError::CochainLength {
+            role: stage,
+            expected: left.len(),
+            actual: right.len(),
+        }
+        .into());
+    }
+    let mut output = interval_output_bounded(left.len(), stage, accountant)?;
+    for ((target, left_value), right_value) in output.iter_mut().zip(left).zip(right) {
+        accountant.consume_item(stage)?;
+        *target = interval_sub_outward(Interval::point(*left_value), Interval::point(*right_value));
+    }
+    Ok(output)
+}
+
+fn bounded_interval_d0t(
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[Interval],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<Interval>, SheafRepairError> {
+    if values.len() != skeleton.edges.len() {
+        return Err(SheafSkeletonError::CochainLength {
+            role: stage,
+            expected: skeleton.edges.len(),
+            actual: values.len(),
+        }
+        .into());
+    }
+    accountant.begin_operator(stage)?;
+    let mut output = interval_output_bounded(skeleton.n_patches, stage, accountant)?;
+    for (edge, &(u, v)) in skeleton.edges.iter().enumerate() {
+        accountant.consume_item(stage)?;
+        output[u] = interval_sub_outward(output[u], values[edge]);
+        output[v] = interval_add_outward(output[v], values[edge]);
+    }
+    accountant.finish_operator(stage)?;
+    Ok(output)
+}
+
+fn bounded_interval_d1(
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[Interval],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<Interval>, SheafRepairError> {
+    if values.len() != skeleton.edges.len() {
+        return Err(SheafSkeletonError::CochainLength {
+            role: stage,
+            expected: skeleton.edges.len(),
+            actual: values.len(),
+        }
+        .into());
+    }
+    accountant.begin_operator(stage)?;
+    let mut output = interval_output_bounded(skeleton.triangles.len(), stage, accountant)?;
+    for (triangle, (target, &(a, b, c))) in output.iter_mut().zip(&skeleton.triangles).enumerate() {
+        accountant.consume_item(stage)?;
+        let eab = bounded_edge_index(skeleton, (a, b), triangle, stage, accountant)?;
+        let ebc = bounded_edge_index(skeleton, (b, c), triangle, stage, accountant)?;
+        let eac = bounded_edge_index(skeleton, (a, c), triangle, stage, accountant)?;
+        *target = interval_sub_outward(interval_add_outward(values[eab], values[ebc]), values[eac]);
+    }
+    accountant.finish_operator(stage)?;
+    Ok(output)
+}
+
+fn interval_reconstruction_witness(
+    mismatch: &[f64],
+    split: &HodgeSplit,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<Interval>, SheafRepairError> {
+    let mut output = interval_output_bounded(
+        mismatch.len(),
+        "numerics-reconstruction-witness",
+        accountant,
+    )?;
+    for (index, target) in output.iter_mut().enumerate() {
+        accountant.consume_item("numerics-reconstruction-witness")?;
+        *target = interval_sub_outward(
+            interval_sub_outward(
+                interval_sub_outward(
+                    Interval::point(mismatch[index]),
+                    Interval::point(split.exact[index]),
+                ),
+                Interval::point(split.coexact[index]),
+            ),
+            Interval::point(split.harmonic[index]),
+        );
+    }
+    Ok(output)
+}
+
+fn retain_numerics_source(
+    skeleton: &AdmittedSheafSkeleton,
+    mismatch: &[f64],
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<SheafNumericsSource, SheafRepairError> {
+    accountant.checkpoint("numerics-source-binding")?;
+    let mut edges = Vec::new();
+    edges.try_reserve_exact(skeleton.edges.len()).map_err(|_| {
+        SheafSkeletonError::ResourceExhausted {
+            stage: "numerics-source-edges",
+        }
+    })?;
+    for edge in &skeleton.edges {
+        accountant.consume_item("numerics-source-edges")?;
+        edges.push(*edge);
+    }
+    let mut triangles = Vec::new();
+    triangles
+        .try_reserve_exact(skeleton.triangles.len())
+        .map_err(|_| SheafSkeletonError::ResourceExhausted {
+            stage: "numerics-source-triangles",
+        })?;
+    for triangle in &skeleton.triangles {
+        accountant.consume_item("numerics-source-triangles")?;
+        triangles.push(*triangle);
+    }
+    let mut retained_mismatch = Vec::new();
+    retained_mismatch
+        .try_reserve_exact(mismatch.len())
+        .map_err(|_| SheafSkeletonError::ResourceExhausted {
+            stage: "numerics-source-mismatch",
+        })?;
+    for value in mismatch {
+        accountant.consume_item("numerics-source-mismatch")?;
+        retained_mismatch.push(*value);
+    }
+    accountant.checkpoint("numerics-source-binding")?;
+    Ok(SheafNumericsSource {
+        n_patches: skeleton.n_patches,
+        edges,
+        triangles,
+        mismatch: retained_mismatch,
+    })
+}
+
+fn residual_bounds(
+    residual: &[Interval],
+    operator_scale: Interval,
+    reference: IntervalScaledL2,
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<SheafResidualBounds, SheafRepairError> {
+    let residual_norm = checked_interval_scaled_l2(residual, stage, accountant)?;
+    let normalized = if residual_norm.scale == 0.0 && !residual_norm.unbounded {
+        Interval::point(0.0)
+    } else if operator_scale.contains_zero() || (reference.scale == 0.0 && !reference.unbounded) {
+        Interval::new(0.0, f64::INFINITY)
+    } else {
+        nonnegative_enclosure(residual_norm.ratio_bounds(reference) / operator_scale)
+    };
+    Ok(SheafResidualBounds {
+        absolute: residual_norm.absolute_bounds(),
+        normalized,
+    })
+}
+
+fn orthogonality_bounds(
+    left: &[f64],
+    right: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<SheafOrthogonalityBounds, SheafRepairError> {
+    if left.len() != right.len() {
+        return Err(SheafSkeletonError::CochainLength {
+            role: stage,
+            expected: left.len(),
+            actual: right.len(),
+        }
+        .into());
+    }
+    let left_norm = checked_scaled_l2(left, stage, accountant)?;
+    let right_norm = checked_scaled_l2(right, stage, accountant)?;
+    if left_norm.scale == 0.0 || right_norm.scale == 0.0 {
+        return Ok(SheafOrthogonalityBounds {
+            absolute_inner_product: Interval::point(0.0),
+            normalized: Interval::point(0.0),
+        });
+    }
+
+    let left_scale = Interval::point(left_norm.scale);
+    let right_scale = Interval::point(right_norm.scale);
+    let mut scaled_dot = Interval::point(0.0);
+    for (left_value, right_value) in left.iter().zip(right) {
+        accountant.consume_item(stage)?;
+        if *left_value == 0.0 || *right_value == 0.0 {
+            continue;
+        }
+        let left_scaled = Interval::point(*left_value) / left_scale;
+        let right_scaled = Interval::point(*right_value) / right_scale;
+        scaled_dot = interval_add_outward(scaled_dot, left_scaled * right_scaled);
+    }
+    let scaled_magnitude = scaled_dot.abs();
+    let shape_scale = (left_norm.scaled_squares * right_norm.scaled_squares).sqrt();
+    Ok(SheafOrthogonalityBounds {
+        absolute_inner_product: nonnegative_enclosure(
+            nonnegative_enclosure(scaled_magnitude * left_scale) * right_scale,
+        ),
+        normalized: nonnegative_enclosure(scaled_magnitude / shape_scale),
+    })
+}
+
+fn interval_meets_tolerance(bounds: Interval, tolerance: f64) -> bool {
+    bounds.hi().is_finite() && bounds.hi() <= tolerance
+}
+
+fn assess_hodge_decomposition_inner(
+    skeleton: &AdmittedSheafSkeleton,
+    mismatch: &[f64],
+    relative_tolerance: f64,
+    budget: SheafRepairBudget,
+    cx: &Cx<'_>,
+) -> Result<(bool, PartialSheafNumericsReport), SheafRepairError> {
+    validate_cochain_length(mismatch, skeleton.edges.len(), "edge")?;
+    if !relative_tolerance.is_finite() || relative_tolerance < 0.0 {
+        return Err(SheafRepairError::InvalidTolerance {
+            field: "relative_tolerance",
+        });
+    }
+    let admission = admit_numerics_budget(skeleton, budget)?;
+    let mut accountant = RepairAccountant::new(cx, budget, planned_cost(admission)?, 0, 0)?;
+    accountant.checkpoint("numerics-admission")?;
+    validate_bounded_cochain(
+        mismatch,
+        skeleton.edges.len(),
+        "edge",
+        "numerics-mismatch-validation",
+        &mut accountant,
+    )?;
+    let component_roots = bounded_component_roots(skeleton, &mut accountant)?;
+    let split = hodge_decompose_accounted_with_roots(
+        skeleton,
+        mismatch,
+        &component_roots,
+        &mut accountant,
+    )?;
+
+    let mismatch_intervals =
+        point_interval_vector(mismatch, "numerics-mismatch-intervals", &mut accountant)?;
+    let first_residual = interval_difference(
+        mismatch,
+        &split.exact,
+        "numerics-first-residual",
+        &mut accountant,
+    )?;
+    let remainder_intervals = point_interval_vector(
+        &split.harmonic,
+        "numerics-remainder-intervals",
+        &mut accountant,
+    )?;
+    let primal_witness = bounded_interval_d0t(
+        skeleton,
+        &first_residual,
+        "numerics-primal-normal",
+        &mut accountant,
+    )?;
+    let dual_witness = bounded_interval_d1(
+        skeleton,
+        &remainder_intervals,
+        "numerics-dual-normal",
+        &mut accountant,
+    )?;
+    let remainder_exact_witness = bounded_interval_d0t(
+        skeleton,
+        &remainder_intervals,
+        "numerics-remainder-d0t",
+        &mut accountant,
+    )?;
+    let reconstruction_witness =
+        interval_reconstruction_witness(mismatch, &split, &mut accountant)?;
+
+    let mismatch_norm = checked_interval_scaled_l2(
+        &mismatch_intervals,
+        "numerics-mismatch-scale",
+        &mut accountant,
+    )?;
+    let first_residual_norm = checked_interval_scaled_l2(
+        &first_residual,
+        "numerics-first-residual-scale",
+        &mut accountant,
+    )?;
+    let remainder_norm = checked_interval_scaled_l2(
+        &remainder_intervals,
+        "numerics-remainder-scale",
+        &mut accountant,
+    )?;
+    // The three interval input/reference vectors are no longer needed once
+    // their scale-safe norms are retained. Releasing them before source
+    // retention keeps the admitted scalar envelope conservative.
+    drop(mismatch_intervals);
+    drop(first_residual);
+    drop(remainder_intervals);
+    let d0_frobenius = Interval::point(2.0 * skeleton.edges.len() as f64).sqrt();
+    let d1_frobenius = Interval::point(3.0 * skeleton.triangles.len() as f64).sqrt();
+    let primal_normal_equation = residual_bounds(
+        &primal_witness,
+        d0_frobenius,
+        mismatch_norm,
+        "numerics-primal-bounds",
+        &mut accountant,
+    )?;
+    let dual_normal_equation = residual_bounds(
+        &dual_witness,
+        d1_frobenius,
+        first_residual_norm,
+        "numerics-dual-bounds",
+        &mut accountant,
+    )?;
+    let remainder_exact_orthogonality = residual_bounds(
+        &remainder_exact_witness,
+        d0_frobenius,
+        remainder_norm,
+        "numerics-remainder-d0t-bounds",
+        &mut accountant,
+    )?;
+    let reconstruction = residual_bounds(
+        &reconstruction_witness,
+        Interval::point(1.0),
+        mismatch_norm,
+        "numerics-reconstruction-bounds",
+        &mut accountant,
+    )?;
+    let coboundary_triangle_orthogonality = orthogonality_bounds(
+        &split.exact,
+        &split.coexact,
+        "numerics-exact-coexact-dot",
+        &mut accountant,
+    )?;
+    let coboundary_remainder_orthogonality = orthogonality_bounds(
+        &split.exact,
+        &split.harmonic,
+        "numerics-exact-remainder-dot",
+        &mut accountant,
+    )?;
+    let triangle_remainder_orthogonality = orthogonality_bounds(
+        &split.coexact,
+        &split.harmonic,
+        "numerics-coexact-remainder-dot",
+        &mut accountant,
+    )?;
+
+    let converged = [
+        primal_normal_equation.normalized,
+        dual_normal_equation.normalized,
+        remainder_exact_orthogonality.normalized,
+        reconstruction.normalized,
+        coboundary_triangle_orthogonality.normalized,
+        coboundary_remainder_orthogonality.normalized,
+        triangle_remainder_orthogonality.normalized,
+    ]
+    .into_iter()
+    .all(|bounds| interval_meets_tolerance(bounds, relative_tolerance));
+    let stopping_reason = if converged {
+        SheafNumericsStoppingReason::ResidualBoundsSatisfied
+    } else {
+        SheafNumericsStoppingReason::SweepLimitReached
+    };
+    let source = retain_numerics_source(skeleton, mismatch, &mut accountant)?;
+    accountant.checkpoint("numerics-publication")?;
+    let usage = accountant.usage(admission.scalar_slots, admission.work_items);
+    let receipt = SheafNumericsReceipt {
+        source,
+        normalization_id: SHEAF_NUMERICS_NORMALIZATION_V1,
+        relative_tolerance,
+        primal_normal_equation,
+        dual_normal_equation,
+        remainder_exact_orthogonality,
+        coboundary_triangle_orthogonality,
+        coboundary_remainder_orthogonality,
+        triangle_remainder_orthogonality,
+        reconstruction,
+        stopping_reason,
+        spectrum: SheafSpectrumScope::Unknown {
+            operator_id: "fs-geom/delta0-transpose-delta0/unweighted/v1",
+            covered_range: None,
+            unresolved_modes: skeleton.n_patches,
+            component_zero_mode_roots: component_roots,
+            reason: "no fs-spectral coverage receipt was supplied",
+        },
+        primal_witness,
+        dual_witness,
+        remainder_exact_witness,
+        reconstruction_witness,
+    };
+    let report = PartialSheafNumericsReport {
+        coboundary_candidate: split.exact,
+        patch_potential_candidate: split.potential,
+        triangle_adjoint_candidate: split.coexact,
+        remainder_candidate: split.harmonic,
+        candidate_energy_ratios: split.fractions,
+        receipt,
+        budget,
+        usage,
+    };
+    Ok((converged, report))
+}
+
+/// Assess one admitted constant-scalar decomposition under explicit numerical
+/// and resource bounds.
+///
+/// `Converged` means only that every named outward residual enclosure met the
+/// caller's tolerance for this finite incidence problem and normalization.
+/// Spectrum coverage remains explicitly unknown, and this API grants no
+/// continuum, topology, chart-realizability, repair, or merge authority.
+#[must_use]
+pub fn assess_hodge_decomposition_bounded(
+    skeleton: &AdmittedSheafSkeleton,
+    mismatch: &[f64],
+    relative_tolerance: f64,
+    budget: SheafRepairBudget,
+    cx: &Cx<'_>,
+) -> SheafNumericsOutcome {
+    match assess_hodge_decomposition_inner(skeleton, mismatch, relative_tolerance, budget, cx) {
+        Ok((true, report)) => {
+            SheafNumericsOutcome::Converged(ConvergedSheafDecomposition { report })
+        }
+        Ok((false, report)) => SheafNumericsOutcome::Indeterminate(report),
+        Err(error) => SheafNumericsOutcome::Refused(error),
+    }
 }
 
 fn apply_raw_projection(
@@ -3010,4 +4124,23 @@ pub fn apply_gauge(
     gauge: &[f64],
 ) -> Result<Vec<f64>, SheafRepairError> {
     try_apply_gauge(skeleton, mismatch, gauge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{interval_add_outward, interval_sub_outward};
+    use fs_ivl::Interval;
+
+    #[test]
+    fn finite_add_sub_overflow_keeps_an_outward_interval() {
+        let positive_sum =
+            interval_add_outward(Interval::point(f64::MAX), Interval::point(f64::MAX));
+        assert_eq!(positive_sum.lo(), f64::MAX);
+        assert_eq!(positive_sum.hi(), f64::INFINITY);
+
+        let negative_difference =
+            interval_sub_outward(Interval::point(-f64::MAX), Interval::point(f64::MAX));
+        assert_eq!(negative_difference.lo(), f64::NEG_INFINITY);
+        assert_eq!(negative_difference.hi(), -f64::MAX);
+    }
 }

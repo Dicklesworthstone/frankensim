@@ -466,6 +466,29 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   orthogonal Hodge decomposition. `hodge_decompose_bounded` runs that diagnostic
   over an opaque admitted skeleton with explicit sweep/operator/memory/poll
   budgets and `Cx` cancellation, returning retained usage or a typed refusal.
+  The parallel `assess_hodge_decomposition_bounded` path is the first
+  numerical-authority slice: it pins the smallest patch in every connected
+  component (including isolates), retains candidate-named projection vectors,
+  and returns exactly `Converged`, `Indeterminate`, or `Refused`. Promotion to
+  the opaque converged view requires every outward `fs-ivl` enclosure for the
+  two normal equations, `delta0^T` remainder, pairwise orthogonality, and
+  reconstruction to meet the caller's finite non-negative relative tolerance
+  under the versioned Frobenius/L2 normalization. The operators and
+  reconstruction are interval-evaluated from exact point intervals around the
+  retained candidates; a norm of an already-rounded residual cannot mint the
+  token. Absolute residual enclosures, normalized enclosures, interval replay
+  vectors, exact admitted incidence and mismatch values, stopping reason,
+  budget, and measured work remain attached. Its spectral field is explicitly
+  `Unknown`: it retains
+  the exact connected-component gauge roots of `delta0^T delta0`, covers no
+  eigenvalue range, and leaves every numerical mode unresolved until a bounded
+  `fs-spectral` coverage receipt is consumed. `Converged` therefore proves only
+  the named finite-dimensional residual obligations; it does not prove
+  continuum coverage, chart realizability, topology, H1, non-exactness, repair
+  feasibility, or merge/publication authority. Cancellation currently refuses
+  this transactional assessment without publishing an in-flight candidate;
+  retained last-complete-sweep continuation is still required before the full
+  43.2 Gauntlet closes.
   Its INTERPRETATION CONTRACT is: fitted exact
   component → a sampled-mismatch 0-cochain correction candidate
   ONLY when every per-patch offset fits that chart's declared error

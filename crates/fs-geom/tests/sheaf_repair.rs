@@ -15,9 +15,11 @@ use fs_exec::{BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::router::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
 use fs_geom::sheaf::{Interface, SheafComplex};
 use fs_geom::sheaf_repair::{
-    AdmittedSheafSkeleton, COMPONENT_FLOOR, SheafRepairBudget, SheafRepairError,
-    SheafRepairPlanBudget, SheafSkeleton, SheafSkeletonError, apply_gauge, hodge_decompose,
-    hodge_decompose_bounded, plan_repair, plan_repair_bounded, try_apply_gauge,
+    AdmittedSheafSkeleton, COMPONENT_FLOOR, SHEAF_NUMERICS_NORMALIZATION_V1, SheafNumericsOutcome,
+    SheafNumericsStoppingReason, SheafRepairBudget, SheafRepairError, SheafRepairPlanBudget,
+    SheafSkeleton, SheafSkeletonError, SheafSpectrumScope, apply_gauge,
+    assess_hodge_decomposition_bounded, hodge_decompose, hodge_decompose_bounded, plan_repair,
+    plan_repair_bounded, try_apply_gauge,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -107,6 +109,16 @@ fn bounded_plan_budget(sweeps: usize) -> SheafRepairPlanBudget {
         max_action_bytes: 4_096,
         max_proposals: 4,
         max_harmonic_support: 3,
+    }
+}
+
+fn numerics_budget(sweeps: usize) -> SheafRepairBudget {
+    SheafRepairBudget {
+        sweeps,
+        max_operator_evaluations: 256,
+        max_work_items: 32_768,
+        max_scalar_slots: 128,
+        poll_stride: 8,
     }
 }
 
@@ -1543,5 +1555,146 @@ fn sr_013_bounded_plan_accounts_mixed_components_and_route() {
     verdict(
         "sr-013",
         "comparison-heavy incidence lookup, coexact localization, harmonic support, route formatting, output caps, and stable proposal ranking share one bounded accountant",
+    );
+}
+
+#[test]
+fn sr_014_numerics_converges_with_one_gauge_root_per_component() {
+    let skeleton = AdmittedSheafSkeleton::try_new(5, vec![(0, 1), (2, 3)], Vec::new())
+        .expect("two edges plus one isolated patch admit");
+    let budget = numerics_budget(4);
+    let outcome =
+        with_cx(|cx| assess_hodge_decomposition_bounded(&skeleton, &[2.0, 4.0], 1e-12, budget, cx));
+    let SheafNumericsOutcome::Converged(converged) = outcome else {
+        panic!("independent exact components must converge: {outcome:?}");
+    };
+    assert_eq!(converged.exact(), &[2.0, 4.0]);
+    assert_eq!(converged.potential(), &[0.0, 2.0, 0.0, 4.0, 0.0]);
+    assert!(converged.coexact().iter().all(|value| *value == 0.0));
+    assert!(converged.harmonic().iter().all(|value| *value == 0.0));
+    let receipt = converged.receipt();
+    assert_eq!(receipt.normalization_id, SHEAF_NUMERICS_NORMALIZATION_V1);
+    assert_eq!(
+        receipt.stopping_reason,
+        SheafNumericsStoppingReason::ResidualBoundsSatisfied
+    );
+    assert!(receipt.primal_normal_equation.normalized.hi() <= 1e-12);
+    assert!(receipt.dual_normal_equation.normalized.hi() <= 1e-12);
+    assert!(receipt.reconstruction.normalized.hi() <= 1e-12);
+    assert_eq!(receipt.source.n_patches(), 5);
+    assert_eq!(receipt.source.edges(), &[(0, 1), (2, 3)]);
+    assert_eq!(receipt.source.triangles(), &[]);
+    assert_eq!(receipt.source.mismatch(), &[2.0, 4.0]);
+    match &receipt.spectrum {
+        SheafSpectrumScope::Unknown {
+            covered_range,
+            unresolved_modes,
+            component_zero_mode_roots,
+            ..
+        } => {
+            assert_eq!(*covered_range, None);
+            assert_eq!(*unresolved_modes, 5);
+            assert_eq!(component_zero_mode_roots, &[0, 2, 4]);
+        }
+    }
+
+    let near_max = f64::MAX / 8.0;
+    let one_edge =
+        AdmittedSheafSkeleton::try_new(2, vec![(0, 1)], Vec::new()).expect("edge admits");
+    let scaled =
+        with_cx(|cx| assess_hodge_decomposition_bounded(&one_edge, &[near_max], 1e-12, budget, cx));
+    let SheafNumericsOutcome::Converged(scaled) = scaled else {
+        panic!("scale-safe exact edge must converge near f64::MAX: {scaled:?}");
+    };
+    assert_eq!(scaled.exact(), &[near_max]);
+    assert!(
+        scaled
+            .receipt()
+            .primal_normal_equation
+            .absolute
+            .hi()
+            .is_finite()
+    );
+    assert!(scaled.receipt().primal_normal_equation.normalized.hi() <= 1e-12);
+
+    let relabeled_source =
+        with_cx(|cx| assess_hodge_decomposition_bounded(&skeleton, &[2.0, 5.0], 1e-12, budget, cx));
+    let SheafNumericsOutcome::Converged(relabeled_source) = relabeled_source else {
+        panic!("independent source-binding fixture must converge: {relabeled_source:?}");
+    };
+    assert_ne!(
+        &receipt.source,
+        &relabeled_source.receipt().source,
+        "same-shape mismatch values cannot share a convergence source binding"
+    );
+    verdict(
+        "sr-014",
+        "the converged token retains isolated-component gauge roots, explicit spectral Unknown, replay residuals, and scale-safe near-MAX arithmetic",
+    );
+}
+
+#[test]
+fn sr_015_numerics_keeps_false_convergence_indeterminate_or_refused() {
+    let path =
+        AdmittedSheafSkeleton::try_new(3, vec![(0, 1), (1, 2)], Vec::new()).expect("path admits");
+    let budget = numerics_budget(1);
+    let outcome =
+        with_cx(|cx| assess_hodge_decomposition_bounded(&path, &[1.0, 1.0], 1e-12, budget, cx));
+    let SheafNumericsOutcome::Indeterminate(report) = outcome else {
+        panic!("one sweep must not launder a partial fit: {outcome:?}");
+    };
+    assert_eq!(
+        report.receipt().stopping_reason,
+        SheafNumericsStoppingReason::SweepLimitReached
+    );
+    assert!(
+        report.receipt().primal_normal_equation.normalized.hi() > 1e-12,
+        "the outward residual upper bound exposes the unfinished normal equation"
+    );
+    assert_eq!(report.coboundary_candidate(), &[0.0, 1.0]);
+    assert_eq!(report.remainder_candidate(), &[1.0, 0.0]);
+
+    let invalid =
+        with_cx(|cx| assess_hodge_decomposition_bounded(&path, &[1.0, 1.0], f64::NAN, budget, cx));
+    assert_eq!(
+        invalid,
+        SheafNumericsOutcome::Refused(SheafRepairError::InvalidTolerance {
+            field: "relative_tolerance",
+        })
+    );
+    let underfunded = with_cx(|cx| {
+        assess_hodge_decomposition_bounded(
+            &path,
+            &[1.0, 1.0],
+            1e-12,
+            SheafRepairBudget {
+                max_operator_evaluations: 1,
+                ..budget
+            },
+            cx,
+        )
+    });
+    assert!(matches!(
+        underfunded,
+        SheafNumericsOutcome::Refused(SheafRepairError::WorkBudgetExceeded { .. })
+    ));
+
+    let gate = CancelGate::new();
+    gate.request();
+    let cancelled = with_gate_cx(&gate, |cx| {
+        assess_hodge_decomposition_bounded(&path, &[1.0, 1.0], 1e-12, budget, cx)
+    });
+    assert!(matches!(
+        cancelled,
+        SheafNumericsOutcome::Refused(SheafRepairError::Cancelled {
+            stage: "numerics-admission",
+            completed_sweeps: 0,
+            operator_evaluations: 0,
+            work_items: 0,
+        })
+    ));
+    verdict(
+        "sr-015",
+        "a fixed-sweep false convergence publishes only candidate-named Indeterminate evidence, while invalid tolerance, preflight work caps, and pre-cancellation refuse",
     );
 }
