@@ -87,13 +87,20 @@ fn value_dims_follow_the_functional() {
         field: "vm".into(),
         region: "r".into(),
     };
-    assert_eq!(m.value_dims(PA), PA);
+    assert_eq!(m.value_dims(PA), Some(PA));
     // integral multiplies by volume;
     let i = Qoi::Integral {
         field: "temperature".into(),
         region: "r".into(),
     };
-    assert_eq!(i.value_dims(KELVIN), KELVIN.plus(VOLUME));
+    assert_eq!(i.value_dims(KELVIN), KELVIN.checked_plus(VOLUME),);
+    // An integral over a field already at the exponent ceiling refuses
+    // typed instead of clamping (bead sj31i.11).
+    let ceiling = Qoi::Integral {
+        field: "hostile".into(),
+        region: "r".into(),
+    };
+    assert_eq!(ceiling.value_dims(Dims([127, 0, 0, 0, 0, 0])), None);
     // exceedance is a dimensionless probability.
     let e = Qoi::Exceedance {
         field: "vm".into(),
@@ -102,7 +109,7 @@ fn value_dims_follow_the_functional() {
         threshold_dims: PA,
         environment: "h".into(),
     };
-    assert_eq!(e.value_dims(PA), Dims::NONE);
+    assert_eq!(e.value_dims(PA), Some(Dims::NONE));
 }
 
 #[test]
@@ -273,7 +280,7 @@ fn integral_tolerance_must_carry_volume_dims() {
         },
         Target::Tolerance {
             value: 1.0,
-            dims: KELVIN.plus(VOLUME),
+            dims: KELVIN.checked_plus(VOLUME).expect("in-range exponents"),
         },
         50.0,
         30.0,

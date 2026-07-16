@@ -1321,3 +1321,47 @@ fn ad_010_provisional_cost_models_warn_but_admit() {
         "provisional cost evidence admits with a named once-per-verb warning",
     );
 }
+
+/// Bead sj31i.11: dimension composition inside admission uses the
+/// CHECKED authoritative algebra — a product whose exponents leave the
+/// i8 domain REJECTS with a typed dimensional finding instead of
+/// saturating into a vector that later cancellation could alias back
+/// to plausible physics.
+#[test]
+fn ad_016_dimension_overflow_refuses_typed_instead_of_clamping() {
+    // 70 pressure factors drive the s-exponent to -140 < -128.
+    let product = format!("(* {})", vec!["101kPa"; 70].join(" "));
+    let src = SPOUT.replace(
+        "(min (perturbation-growth pour :at lip :modes (1 .. 8)))",
+        &product,
+    );
+    let regime = spout_regime();
+    let cx = full_context(&regime);
+    let report = admit_src(&src, &cx);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.check == "dimensional" && f.what.contains("overflow"))
+        .expect("dimension overflow must surface as a typed dimensional finding");
+    assert_eq!(finding.severity, Severity::Reject);
+    assert!(
+        finding.what.contains("i8"),
+        "diagnosis names the exponent domain: {}",
+        finding.what
+    );
+    // A deep-but-in-range product stays legal: the refusal is the
+    // overflow, not the depth.
+    let legal = format!("(* {})", vec!["101kPa"; 40].join(" "));
+    let ok_src = SPOUT.replace(
+        "(min (perturbation-growth pour :at lip :modes (1 .. 8)))",
+        &legal,
+    );
+    let ok_report = admit_src(&ok_src, &cx);
+    assert!(
+        ok_report
+            .findings
+            .iter()
+            .all(|f| !(f.check == "dimensional" && f.what.contains("overflow"))),
+        "40 pressure factors stay within i8 exponents"
+    );
+}

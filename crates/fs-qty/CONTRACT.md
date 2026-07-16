@@ -27,12 +27,22 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   ohms, siemens, farads, teslas, hertz, liters, liters_per_second,
   meters_per_second, newtons_per_meter, radians, degrees).
 - `Dims([i8; 6])` — runtime dimension vector `[m, kg, s, K, A, mol]` with
-  SATURATING `plus/minus/times` (agent-facing paths must not panic on
-  adversarial exponent chains; consumers reject long before saturation).
+  AUTHORITATIVE `checked_plus/checked_minus/checked_times -> Option<Dims>`
+  (bead sj31i.11: `None` on any i8 exponent overflow — saturation could
+  cancel back into the valid range carrying wrong physics, so overflow
+  surfaces typed at the operation). The renamed
+  `saturating_plus/saturating_minus/saturating_times` survive ONLY as
+  explicitly non-authoritative diagnostics (display/logging/pre-admission
+  estimates that a checked chokepoint re-derives); nothing a semantic
+  contract consumes may use them. The const-generic `Qty` product/quotient
+  path refuses exponent overflow at COMPILE TIME (const-eval error;
+  compile-fail doctest pinned).
 - `QtyAny { value, dims }` — checked `try_add/try_sub` (returning
-  `DimensionMismatch`), checked `powi` (returning `DimensionOverflow`
-  before metadata can saturate), `Mul/Div`, and `to_typed::<...>()`
-  downcasts.
+  `DimensionMismatch`), checked `try_mul/try_div/powi` (returning
+  `DimensionOverflow`, which now also carries the right-hand operand for
+  binary composition), `Mul/Div` operator conveniences that PANIC on
+  exponent overflow (developer contract; agent-facing paths use the
+  `try_*` forms), and `to_typed::<...>()` downcasts.
 - `parse::parse_qty_with_budget(&str, ParseBudget) -> Result<QtyAny,
   ParseError>` — the explicitly bounded FrankenScript literal grammar;
   `parse_qty` is the compatibility entry point and always applies the public

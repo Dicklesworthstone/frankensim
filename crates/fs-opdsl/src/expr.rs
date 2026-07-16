@@ -47,6 +47,14 @@ pub enum TypeError {
         /// The offending index.
         id: usize,
     },
+    /// A law's dimension scaling left the supported i8 exponent domain
+    /// (bead sj31i.11): refused typed instead of clamped.
+    DimensionOverflow {
+        /// The law's display name.
+        law: String,
+        /// The input dimensions whose scaling overflowed.
+        in_dims: fs_qty::Dims,
+    },
 }
 
 impl std::fmt::Display for TypeError {
@@ -67,6 +75,11 @@ impl std::fmt::Display for TypeError {
                 left.degree, left.n, left.dims, right.degree, right.n, right.dims
             ),
             TypeError::UnknownId { what, id } => write!(f, "unknown {what} id {id}"),
+            TypeError::DimensionOverflow { law, in_dims } => write!(
+                f,
+                "law `{law}` dimension scaling of {in_dims:?} leaves the supported i8 \
+                 exponent domain"
+            ),
         }
     }
 }
@@ -153,10 +166,11 @@ impl OperatorDef {
                     id: id.0,
                 })?;
                 let s = self.space_of(x)?;
-                Ok(Space {
-                    dims: law.out_dims(s.dims),
-                    ..s
-                })
+                let dims = law.out_dims(s.dims).ok_or(TypeError::DimensionOverflow {
+                    law: law.name().to_string(),
+                    in_dims: s.dims,
+                })?;
+                Ok(Space { dims, ..s })
             }
         }
     }

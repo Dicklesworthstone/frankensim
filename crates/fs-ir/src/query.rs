@@ -161,13 +161,16 @@ impl Qoi {
 
     /// The dimensions of the QoI's VALUE, given the interrogated field's
     /// dimensions: `max` inherits the field's dims; `integral` multiplies by
-    /// volume; `exceedance` is a dimensionless probability.
+    /// volume; `exceedance` is a dimensionless probability. `None` when the
+    /// integral's volume factor overflows the i8 exponent domain (bead
+    /// sj31i.11: a clamped exponent could alias false physics, so the
+    /// admission below rejects instead).
     #[must_use]
-    pub fn value_dims(&self, field_dims: Dims) -> Dims {
+    pub fn value_dims(&self, field_dims: Dims) -> Option<Dims> {
         match self {
-            Qoi::MaxOverRegion { .. } => field_dims,
-            Qoi::Integral { .. } => field_dims.plus(VOLUME_DIMS),
-            Qoi::Exceedance { .. } => Dims::NONE,
+            Qoi::MaxOverRegion { .. } => Some(field_dims),
+            Qoi::Integral { .. } => field_dims.checked_plus(VOLUME_DIMS),
+            Qoi::Exceedance { .. } => Some(Dims::NONE),
         }
     }
 }
@@ -340,7 +343,7 @@ impl Query {
         let admitted = !findings.iter().any(|f| f.severity == Severity::Reject);
         QueryAdmission {
             qoi_kind: self.qoi.kind_name(),
-            value_dims: field_dims.map(|fd| self.qoi.value_dims(fd)),
+            value_dims: field_dims.and_then(|fd| self.qoi.value_dims(fd)),
             admitted,
             findings,
         }
@@ -469,7 +472,24 @@ impl Query {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let value_dims = self.qoi.value_dims(fd);
+        let Some(value_dims) = self.qoi.value_dims(fd) else {
+            return vec![
+                self.reject(
+                    "query.dimensions",
+                    format!(
+                        "the {} of field '{}' (dims {:?}) overflows the supported i8 exponent \
+                     domain",
+                        self.qoi.kind_name(),
+                        self.qoi.field(),
+                        fd.0
+                    ),
+                    "interrogate a field whose dimensions stay within the i8 exponent domain \
+                 after the QoI's volume factor"
+                        .to_string(),
+                    "dimension overflow; the QoI value cannot carry admissible physics",
+                ),
+            ];
+        };
         if let Some((_, tol_dims)) = self.target.tolerance()
             && tol_dims != value_dims
         {

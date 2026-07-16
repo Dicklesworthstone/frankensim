@@ -1073,7 +1073,12 @@ mod tests {
     fn compound_chains_apply_strict_left_to_right() {
         // kg/m/s == kg·m⁻¹·s⁻¹ under strict left-to-right division.
         let q = parse_qty("1kg/m/s").expect("parses");
-        assert_eq!(q.dims, Pressure::DIMS.plus(Dims([0, 0, 1, 0, 0, 0])));
+        assert_eq!(
+            q.dims,
+            Pressure::DIMS
+                .checked_plus(Dims([0, 0, 1, 0, 0, 0]))
+                .expect("in-range exponents")
+        );
         // density: kg/m3
         let d = parse_qty("1000kg/m3").expect("parses");
         assert_eq!(d.dims, Dims([-3, 1, 0, 0, 0, 0]));

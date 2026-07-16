@@ -538,11 +538,45 @@ fn infer_dims(
                 for (i, a) in args.iter().enumerate() {
                     match infer_dims(a, env, out) {
                         Some(d) => {
-                            acc = if head == Some("/") && i > 0 {
-                                acc.minus(d)
+                            // AUTHORITATIVE checked composition (bead
+                            // sj31i.11): a saturated exponent could
+                            // cancel back into range as false physics,
+                            // so overflow REJECTS instead of clamping.
+                            let composed = if head == Some("/") && i > 0 {
+                                acc.checked_minus(d)
                             } else {
-                                acc.plus(d)
+                                acc.checked_plus(d)
                             };
+                            match composed {
+                                Some(next) => acc = next,
+                                None => {
+                                    out.push(Finding {
+                                        check: "dimensional",
+                                        severity: Severity::Reject,
+                                        span: a.span,
+                                        what: format!(
+                                            "({} …): operand dims {:?} overflow the supported \
+                                             i8 exponent domain when composed with {:?}",
+                                            head.unwrap_or_default(),
+                                            d.0,
+                                            acc.0
+                                        ),
+                                        fixes: vec![RankedFix {
+                                            action: format!(
+                                                "reduce the exponent magnitude of the operands \
+                                                 of ({} …); admitted exponents must stay within \
+                                                 i8",
+                                                head.unwrap_or_default()
+                                            ),
+                                            predicted_wall_s: None,
+                                            qoi_impact: "dimension overflow; the expression \
+                                                         cannot carry admissible physics"
+                                                .to_string(),
+                                        }],
+                                    });
+                                    return None;
+                                }
+                            }
                         }
                         None => all_known = false,
                     }

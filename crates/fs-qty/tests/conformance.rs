@@ -509,6 +509,9 @@ fn to_dims(v: &[i64]) -> fs_qty::Dims {
 
 #[test]
 fn g0_dims_plus_commutes_and_minus_inverts() {
+    // The algebra laws hold EXACTLY on the checked authoritative ops
+    // (bead sj31i.11) — saturation broke plus/minus inversion, which
+    // is precisely how a clamped exponent aliased false physics.
     fs_propcheck::check(
         "dims-plus-commutes",
         0x971_0001,
@@ -516,7 +519,7 @@ fn g0_dims_plus_commutes_and_minus_inverts() {
         |s| (gen_dims(s), gen_dims(s)),
         |(a, b)| {
             let (da, db) = (to_dims(a), to_dims(b));
-            da.plus(db) == db.plus(da)
+            da.checked_plus(db) == db.checked_plus(da)
         },
     );
     fs_propcheck::check(
@@ -526,7 +529,8 @@ fn g0_dims_plus_commutes_and_minus_inverts() {
         |s| (gen_dims(s), gen_dims(s)),
         |(a, b)| {
             let (da, db) = (to_dims(a), to_dims(b));
-            da.plus(db).minus(db) == da
+            da.checked_plus(db)
+                .is_none_or(|sum| sum.checked_minus(db) == Some(da))
         },
     );
     println!(
@@ -544,10 +548,85 @@ fn g0_dims_times_distributes_over_plus() {
         |args| {
             let ((a, b), n) = ((&args.0, &args.1), args.2 as i8);
             let (da, db) = (to_dims(a), to_dims(b));
-            da.plus(db).times(n) == da.times(n).plus(db.times(n))
+            let lhs = da.checked_plus(db).and_then(|sum| sum.checked_times(n));
+            let rhs = da
+                .checked_times(n)
+                .zip(db.checked_times(n))
+                .and_then(|(x, y)| x.checked_plus(y));
+            match (lhs, rhs) {
+                (Some(x), Some(y)) => x == y,
+                _ => true, // distributivity is claimed only where both sides are defined
+            }
         },
     );
     println!(
         "{{\"suite\":\"fs-qty\",\"case\":\"g0-times-distributes\",\"verdict\":\"pass\",\"detail\":\"400 generated cases\"}}"
     );
+}
+
+/// Bead sj31i.11 boundary battery: every i8 edge refuses typed on the
+/// authoritative ops, saturate-then-cancel aliasing is impossible, the
+/// diagnostic ops keep their explicitly non-authoritative clamping, and
+/// runtime refusal matches the compile-time const-eval refusal class.
+#[test]
+fn g0_checked_dimension_authority_refuses_every_i8_boundary() {
+    use fs_qty::{Dims, QtyAny};
+
+    let hi = Dims([127, 0, 0, 0, 0, 0]);
+    let lo = Dims([-128, 0, 0, 0, 0, 0]);
+    let one = Dims([1, 0, 0, 0, 0, 0]);
+
+    // +127 + 1 and -128 - 1 refuse on every component position.
+    for position in 0..6 {
+        let mut top = [0i8; 6];
+        top[position] = 127;
+        let mut bottom = [0i8; 6];
+        bottom[position] = -128;
+        let mut unit = [0i8; 6];
+        unit[position] = 1;
+        assert_eq!(Dims(top).checked_plus(Dims(unit)), None);
+        assert_eq!(Dims(bottom).checked_minus(Dims(unit)), None);
+        assert_eq!(Dims(bottom).checked_times(-1), None); // -128 * -1
+        assert_eq!(Dims(top).checked_times(2), None);
+    }
+    // Exact boundaries ADMIT.
+    assert_eq!(hi.checked_plus(Dims::NONE), Some(hi));
+    assert_eq!(lo.checked_minus(Dims::NONE), Some(lo));
+    assert_eq!(lo.checked_times(1), Some(lo));
+
+    // THE ALIASING KILL: saturate-then-cancel re-enters the valid range
+    // with wrong physics; the checked chain refuses at the overflow
+    // instead of laundering 97 for the true 120.
+    let a = Dims([100, 0, 0, 0, 0, 0]);
+    let b = Dims([50, 0, 0, 0, 0, 0]);
+    let c = Dims([30, 0, 0, 0, 0, 0]);
+    let laundered = a.saturating_plus(b).saturating_minus(c);
+    assert_eq!(laundered, Dims([97, 0, 0, 0, 0, 0]));
+    assert_ne!(laundered.0[0] as i32, 100 + 50 - 30);
+    assert_eq!(a.checked_plus(b), None);
+    assert_eq!(a.checked_plus(b).and_then(|s| s.checked_minus(c)), None);
+
+    // Long multiply/divide trees through QtyAny: overflow refuses typed
+    // mid-chain; a dividing tail cannot resurrect the expression.
+    let big = QtyAny::new(2.0, Dims([100, 0, 0, 0, 0, 0]));
+    let boost = QtyAny::new(3.0, Dims([40, 0, 0, 0, 0, 0]));
+    let refusal = big.try_mul(boost).expect_err("140 exceeds i8");
+    assert_eq!(refusal.op, "mul");
+    assert_eq!(refusal.rhs, Some(Dims([40, 0, 0, 0, 0, 0])));
+    let chain = big
+        .try_mul(QtyAny::new(1.0, Dims([27, 0, 0, 0, 0, 0])))
+        .expect("127 is the exact ceiling")
+        .try_mul(QtyAny::new(1.0, one))
+        .expect_err("128 leaves i8");
+    assert_eq!(chain.op, "mul");
+    let divides = QtyAny::new(1.0, lo)
+        .try_div(QtyAny::new(1.0, one))
+        .expect_err("-129 leaves i8");
+    assert_eq!(divides.op, "div");
+
+    // Runtime/const parity: the same ceiling that refuses here refuses
+    // at COMPILE TIME on the const-generic path (`Qty<{127}, …> *
+    // Qty<{1}, …>` is a const-eval overflow error — see the
+    // compile-fail coverage in the crate doctests).
+    assert_eq!(hi.checked_plus(one), None);
 }

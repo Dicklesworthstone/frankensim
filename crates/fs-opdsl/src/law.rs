@@ -20,8 +20,11 @@ pub trait PointwiseLaw {
     fn value(&self, u: f64) -> f64;
     /// dN/du at one dof.
     fn derivative(&self, u: f64) -> f64;
-    /// Output dimensions given input dimensions.
-    fn out_dims(&self, in_dims: Dims) -> Dims;
+    /// Output dimensions given input dimensions; `None` when the law's
+    /// exponent scaling overflows the i8 domain (bead sj31i.11 — a
+    /// clamped exponent could alias false physics, so the type checker
+    /// refuses instead).
+    fn out_dims(&self, in_dims: Dims) -> Option<Dims>;
 }
 
 /// The reference nonlinearity: N(u) = α·u³ (a reaction term), with
@@ -44,7 +47,7 @@ impl PointwiseLaw for CubicReaction {
         3.0 * self.alpha * u * u
     }
 
-    fn out_dims(&self, in_dims: Dims) -> Dims {
-        in_dims.plus(in_dims).plus(in_dims)
+    fn out_dims(&self, in_dims: Dims) -> Option<Dims> {
+        in_dims.checked_times(3)
     }
 }

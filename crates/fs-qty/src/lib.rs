@@ -47,14 +47,72 @@ impl Dims {
     /// The dimensionless vector.
     pub const NONE: Dims = Dims([0; DIMENSION_COUNT]);
 
-    /// Component-wise sum (dimension of a product). SATURATING at the `i8`
-    /// bounds: this type flows through agent-facing paths (parser, IR), so
-    /// overflow must not panic. Physically meaningful exponents are |e| ≤ ~12;
-    /// consumers that care (the parser) reject long before saturation, and
-    /// a saturated dimension can never silently equal a legitimate one that a
-    /// well-formed pipeline produces.
+    /// AUTHORITATIVE component-wise sum (dimension of a product):
+    /// `None` when any exponent leaves `i8` (bead sj31i.11). Saturation
+    /// is NOT admissible for anything a semantic contract consumes —
+    /// a saturate-then-cancel chain re-enters the valid exponent range
+    /// carrying wrong physics (e.g. `(100 + 50) − 30` saturates to `97`
+    /// instead of the true `120`), so overflow must surface typed at
+    /// the operation, not be clamped.
     #[must_use]
-    pub const fn plus(self, other: Dims) -> Dims {
+    pub const fn checked_plus(self, other: Dims) -> Option<Dims> {
+        let a = self.0;
+        let b = other.0;
+        let mut out = [0i8; DIMENSION_COUNT];
+        let mut i = 0;
+        while i < DIMENSION_COUNT {
+            match a[i].checked_add(b[i]) {
+                Some(e) => out[i] = e,
+                None => return None,
+            }
+            i += 1;
+        }
+        Some(Dims(out))
+    }
+
+    /// AUTHORITATIVE component-wise difference (dimension of a
+    /// quotient); `None` on `i8` overflow. See [`Dims::checked_plus`].
+    #[must_use]
+    pub const fn checked_minus(self, other: Dims) -> Option<Dims> {
+        let a = self.0;
+        let b = other.0;
+        let mut out = [0i8; DIMENSION_COUNT];
+        let mut i = 0;
+        while i < DIMENSION_COUNT {
+            match a[i].checked_sub(b[i]) {
+                Some(e) => out[i] = e,
+                None => return None,
+            }
+            i += 1;
+        }
+        Some(Dims(out))
+    }
+
+    /// AUTHORITATIVE exponent scaling (dimension of an integer power);
+    /// `None` on `i8` overflow (including `-128 * -1`). See
+    /// [`Dims::checked_plus`].
+    #[must_use]
+    pub const fn checked_times(self, n: i8) -> Option<Dims> {
+        let a = self.0;
+        let mut out = [0i8; DIMENSION_COUNT];
+        let mut i = 0;
+        while i < DIMENSION_COUNT {
+            match a[i].checked_mul(n) {
+                Some(e) => out[i] = e,
+                None => return None,
+            }
+            i += 1;
+        }
+        Some(Dims(out))
+    }
+
+    /// Non-authoritative DIAGNOSTIC sum, saturating at the `i8` bounds
+    /// (bead sj31i.11: the renamed former `plus`). Only for display,
+    /// logging, or pre-admission estimates that a checked chokepoint
+    /// re-derives — a saturated vector can alias valid physics after
+    /// later cancellation and MUST NOT feed a semantic contract.
+    #[must_use]
+    pub const fn saturating_plus(self, other: Dims) -> Dims {
         let a = self.0;
         let b = other.0;
         Dims([
@@ -67,10 +125,10 @@ impl Dims {
         ])
     }
 
-    /// Component-wise difference (dimension of a quotient). Saturating; see
-    /// [`Dims::plus`].
+    /// Non-authoritative DIAGNOSTIC difference; see
+    /// [`Dims::saturating_plus`].
     #[must_use]
-    pub const fn minus(self, other: Dims) -> Dims {
+    pub const fn saturating_minus(self, other: Dims) -> Dims {
         let a = self.0;
         let b = other.0;
         Dims([
@@ -83,10 +141,10 @@ impl Dims {
         ])
     }
 
-    /// Scale every exponent (dimension of an integer power). Saturating; see
-    /// [`Dims::plus`].
+    /// Non-authoritative DIAGNOSTIC scaling; see
+    /// [`Dims::saturating_plus`].
     #[must_use]
-    pub const fn times(self, n: i8) -> Dims {
+    pub const fn saturating_times(self, n: i8) -> Dims {
         let a = self.0;
         Dims([
             a[0].saturating_mul(n),
@@ -166,6 +224,16 @@ impl fmt::Debug for Dims {
 /// ```compile_fail
 /// use fs_qty::{Length, Volume};
 /// let _: Volume = Length::new(2.0) * Length::new(3.0); // ERROR: Area, not Volume
+/// ```
+///
+/// Exponent overflow on the const-generic path refuses at COMPILE TIME
+/// (bead sj31i.11 — const/runtime parity with [`Dims::checked_plus`]):
+///
+/// ```compile_fail
+/// use fs_qty::Qty;
+/// let ceiling: Qty<127, 0, 0, 0, 0, 0> = Qty(1.0);
+/// let meter: Qty<1, 0, 0, 0, 0, 0> = Qty(1.0);
+/// let _ = ceiling * meter; // ERROR: const-eval `127 + 1` overflows i8
 /// ```
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default)]
 pub struct Qty<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8, const MOL: i8>(
@@ -640,21 +708,35 @@ impl core::error::Error for DimensionMismatch {}
 pub struct DimensionOverflow {
     /// Operation that failed.
     pub op: &'static str,
-    /// Dimensions before the attempted scaling.
+    /// Dimensions of the left/base operand.
     pub dims: Dims,
-    /// Requested scale factor.
+    /// Dimensions of the right operand for binary composition
+    /// (`None` for exponent scaling).
+    pub rhs: Option<Dims>,
+    /// Requested scale factor (`0` for binary composition).
     pub factor: i32,
 }
 
 impl fmt::Display for DimensionOverflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "dimension overflow in {}: [{}] scaled by {} leaves the supported i8 exponent domain",
-            self.op,
-            self.dims.unit_string(),
-            self.factor
-        )
+        match self.rhs {
+            Some(rhs) => write!(
+                f,
+                "dimension overflow in {}: [{}] composed with [{}] leaves the supported i8 \
+                 exponent domain",
+                self.op,
+                self.dims.unit_string(),
+                rhs.unit_string()
+            ),
+            None => write!(
+                f,
+                "dimension overflow in {}: [{}] scaled by {} leaves the supported i8 exponent \
+                 domain",
+                self.op,
+                self.dims.unit_string(),
+                self.factor
+            ),
+        }
     }
 }
 
@@ -730,17 +812,51 @@ impl QtyAny {
     /// # Errors
     /// [`DimensionOverflow`] when any scaled exponent would leave `i8`.
     pub fn powi(self, n: i8) -> Result<QtyAny, DimensionOverflow> {
-        let mut scaled = [0i8; DIMENSION_COUNT];
-        for (out, &e) in scaled.iter_mut().zip(&self.dims.0) {
-            *out = e.checked_mul(n).ok_or(DimensionOverflow {
-                op: "powi",
-                dims: self.dims,
-                factor: i32::from(n),
-            })?;
-        }
+        let scaled = self.dims.checked_times(n).ok_or(DimensionOverflow {
+            op: "powi",
+            dims: self.dims,
+            rhs: None,
+            factor: i32::from(n),
+        })?;
         Ok(QtyAny {
             value: powi_pinned(self.value, i32::from(n)),
-            dims: Dims(scaled),
+            dims: scaled,
+        })
+    }
+
+    /// AUTHORITATIVE multiplication (bead sj31i.11): dimensions add
+    /// with checked exponent arithmetic.
+    ///
+    /// # Errors
+    /// [`DimensionOverflow`] when any summed exponent leaves `i8`.
+    pub fn try_mul(self, rhs: QtyAny) -> Result<QtyAny, DimensionOverflow> {
+        let dims = self.dims.checked_plus(rhs.dims).ok_or(DimensionOverflow {
+            op: "mul",
+            dims: self.dims,
+            rhs: Some(rhs.dims),
+            factor: 0,
+        })?;
+        Ok(QtyAny {
+            value: self.value * rhs.value,
+            dims,
+        })
+    }
+
+    /// AUTHORITATIVE division (bead sj31i.11): dimensions subtract with
+    /// checked exponent arithmetic.
+    ///
+    /// # Errors
+    /// [`DimensionOverflow`] when any subtracted exponent leaves `i8`.
+    pub fn try_div(self, rhs: QtyAny) -> Result<QtyAny, DimensionOverflow> {
+        let dims = self.dims.checked_minus(rhs.dims).ok_or(DimensionOverflow {
+            op: "div",
+            dims: self.dims,
+            rhs: Some(rhs.dims),
+            factor: 0,
+        })?;
+        Ok(QtyAny {
+            value: self.value / rhs.value,
+            dims,
         })
     }
 
@@ -772,25 +888,27 @@ impl QtyAny {
     }
 }
 
-/// Multiplication: dimensions add (never fails, unlike addition).
+/// Multiplication: dimensions add with CHECKED exponent arithmetic
+/// (bead sj31i.11). The operator form is a developer convenience that
+/// PANICS on exponent overflow — agent-facing paths (parser, IR,
+/// admission) must use [`QtyAny::try_mul`] for the typed refusal.
+/// Silent saturation is gone: it could alias wrong physics back into
+/// the valid exponent range after cancellation.
 impl Mul for QtyAny {
     type Output = QtyAny;
     fn mul(self, rhs: QtyAny) -> QtyAny {
-        QtyAny {
-            value: self.value * rhs.value,
-            dims: self.dims.plus(rhs.dims),
-        }
+        self.try_mul(rhs)
+            .expect("QtyAny `*` overflowed the i8 exponent domain; use try_mul for typed refusal")
     }
 }
 
-/// Division: dimensions subtract (never fails, unlike subtraction).
+/// Division: dimensions subtract with CHECKED exponent arithmetic; the
+/// operator form panics on overflow — see [`QtyAny::try_div`].
 impl Div for QtyAny {
     type Output = QtyAny;
     fn div(self, rhs: QtyAny) -> QtyAny {
-        QtyAny {
-            value: self.value / rhs.value,
-            dims: self.dims.minus(rhs.dims),
-        }
+        self.try_div(rhs)
+            .expect("QtyAny `/` overflowed the i8 exponent domain; use try_div for typed refusal")
     }
 }
 
