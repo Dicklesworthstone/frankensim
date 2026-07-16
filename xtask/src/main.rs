@@ -1098,7 +1098,7 @@ const COLOR_AUTHORITY_CRATES: &[&str] = &["fs-evidence", "fs-ledger"];
 /// `VerifiedPackage::claim_admission_receipt`,
 /// `LoopReport::admitted_headline`) or carries a
 /// `// declared-color-ok: <reason>` annotation.
-const COLOR_DECLARED_CRATES: &[&str] = &["fs-adjoint", "fs-verify"];
+const COLOR_DECLARED_CRATES: &[&str] = &["fs-adjoint"];
 
 /// check-color-admission (bead 6pf9, stage S4 lint, check-powi/check-libm
 /// precedent): a direct positive `Color::Verified`/`Color::Validated`

@@ -1195,6 +1195,7 @@ impl VerifierReceipt {
             return Err(VerifierReceiptError::Protocol("report fields"));
         }
         match (&report.color, report.accept) {
+            // declared-color-ok: guarded multi-line pattern read validates report shape and constructs no positive evidence (6pf9)
             (Some(Color::Verified { lo, hi }), true)
                 if lo.to_bits() == 0.0_f64.to_bits()
                     && hi.to_bits() == report.bound.hi.to_bits() => {}
@@ -1707,6 +1708,7 @@ impl<'a> AdmittedVerifierReceipt<'a> {
     /// its exact tested tolerance.
     #[must_use]
     pub fn color(&self) -> Option<Color> {
+        // declared-color-ok: exact independent replay matched the presented receipt before this opaque admitted wrapper reconstructs its certified bound (6pf9)
         self.accepted().then(|| Color::Verified {
             lo: self.bound_lo(),
             hi: self.bound_hi(),
@@ -2276,6 +2278,7 @@ where
 
     let accept = bound.hi <= tolerance;
     let color = if accept {
+        // declared-color-ok: the rigorous equilibrated-flux accept declares a fresh report; retained authority requires exact receipt replay (6pf9)
         Some(Color::Verified {
             lo: 0.0,
             hi: bound.hi,
