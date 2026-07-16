@@ -245,6 +245,17 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   oriented `apex -> source` and `apex -> target`, plus an explicit no-authority
   artifact. The sealed span exposes no direct source-to-target evidence
   transport and has no composition method.
+  `DerivedSpanEvidenceTransportCandidateIrV1` separately binds one exact sealed
+  span to one exact left-leg restriction-polarity child and one exact right-leg
+  balance-corestriction-polarity child. The restriction child must wrap the
+  span's `apex -> source` leg, the corestriction child must wrap its
+  `apex -> target` leg, and admission requires exact evidence-artifact, rank,
+  and polarity equality where the two declared lanes meet at the apex. The
+  token derives its three geometry selectors and all outer/apex evidence fields
+  from the sealed children. It retains one nominal aggregate declaration and a
+  mandatory no-authority artifact but exposes no executable transport, direct
+  source-to-target map, functionality, pull-push, base-change, preservation,
+  theorem, inverse, equivalence, or physical authority.
   `DerivedSpanMorphismCandidateIrV1` binds two fixed-foot spans, one exact apex
   morphism, and exact ordered comparison children between each source leg and
   the recomposed apex-map-then-target-leg route. It binds the exact structural
@@ -331,8 +342,8 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   truth, or establish physical equivalence. RD.1b now provides separate
   structural no-authority candidates for direct chart-transition inverse laws,
   ordered exhaustive-map composition, finite stratification refinement and its
-  ordered composition, evidence polarity, parallel paths, fixed-foot span
-  morphisms,
+  ordered composition, evidence polarity, span restriction/corestriction
+  routes, parallel paths, fixed-foot span morphisms,
   pullback/composition-shaped spans, generic inverse laws, and span equivalence;
   none is represented as a strict map or authority-bearing equivalence. The L6
   Machine-IR crosswalk likewise lives at the `fs-ir` feature seam rather than in
@@ -778,6 +789,14 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    nominal declaration and mandatory no-authority artifact grant no canonical
    classification, payload authenticity, preservation theorem, inverse,
    equivalence, or physical authority.
+22. Span evidence-transport candidates bind one exact recursively typed span,
+   one exact recursively typed left restriction-polarity child, and one exact
+   recursively typed right balance-corestriction-polarity child. Admission
+   rechecks both span-leg morphism IDs, all four leg endpoints, both required
+   variances, and exact evidence-artifact/rank/polarity continuity at the apex.
+   The nominal aggregate declaration and mandatory no-authority artifact do not
+   make the span functional or grant executable pull-push, base-change,
+   preservation, theorem, inverse, equivalence, or physical authority.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -840,6 +859,13 @@ candidate or direct refinement.
 Standalone span admission uses `DerivedSpanCorrespondenceErrorV1` for schema,
 zero no-authority identity, raw-leg/sealed-leg mismatch, leg orientation,
 cancellation, and canonical-identity defects. Refusal publishes no span token.
+Span evidence-transport admission uses
+`DerivedSpanEvidenceTransportCandidateErrorV1` for unsupported schema, zero
+child/declaration/no-authority identities, raw/sealed child drift, exact
+span-leg binding, all four endpoint relations, required left restriction and
+right balance-corestriction variance, exact apex evidence/rank/polarity seams,
+cancellation, and canonical-identity defects. Refusal publishes no partial
+route and cannot upgrade the span or either polarity child.
 Parallel-path, span-morphism, pullback-square, and span-composition admission use
 `DerivedParallelMorphismComparisonCandidateErrorV1`,
 `DerivedSpanMorphismCandidateErrorV1`,
@@ -931,13 +957,22 @@ Standalone span receipts use a separate schema/domain and encode exact
 source/apex/target geometry IDs, left then right admitted-leg IDs, and the
 no-authority artifact. Replaying the same ordered legs is stable; swapping valid
 distinct equal-endpoint legs changes identity.
+Span evidence-transport receipts use another separate schema/domain. Their 17
+parent fields encode the derived source/apex/target selectors, outer/apex
+evidence artifacts, ranks and polarities, the typed span child, typed left then
+right polarity children, nominal aggregate declaration, and no-authority
+artifact. Complete recursive validation of the six-field span child and both
+18-field polarity-child trees yields the exact 59-field limit. Replay is stable;
+moving any retained field, child, child domain, or child order changes or
+refuses the receipt without authenticating the declared route.
 Recent structural-candidate receipts each use a separate schema/domain and
 recursively bind complete typed child descriptors. Their exact parent/recursive
 field counts are: ordered exhaustive-map composition 10/26, stratification
 refinement 7/15, ordered refinement composition 10/40, direct chart-transition
 inverse law 10/22, parallel-path comparison 7/19,
-span morphism 11/67, pullback square 13/56, span composition 10/84, generic
-inverse law 8/58, and span equivalence 11/215. Each receipt encodes selectors
+span evidence transport 17/59, span morphism 11/67, pullback square 13/56,
+span composition 10/84, generic inverse law 8/58, and span equivalence 11/215.
+Each receipt encodes selectors
 derived from or exact-validated against sealed children and admitted endpoints,
 plus ordered direct child IDs and nominal/no-authority fields; changing
 child order, a derived selector, or any retained declaration changes identity.
@@ -1003,6 +1038,9 @@ encoding, and immediately before publication. It scans and allocates no child
 collection, and cancellation exposes no partial composition candidate.
 Standalone span admission polls at entry, before and inside identity encoding,
 and immediately before publication. Cancellation exposes no partial span token.
+Span evidence-transport admission polls at entry, inside its bounded canonical
+encoder, and immediately before publication. It scans and allocates no child
+collection, and cancellation exposes no partial route candidate.
 Finite-refinement admission additionally polls at a fixed stride while scanning
 canonical two-sided stratum coverage and uses fallible bounded coarse-coverage
 storage; ordered refinement composition polls at entry, inside identity
@@ -1159,6 +1197,14 @@ identity movement, left/right order sensitivity, raw-leg ID mismatch, all four
 apex/outer-endpoint orientation refusals, identity-left graph shape, and already-
 requested entry cancellation. No test claims that a graph-shaped span is
 functional or that arbitrary spans compose.
+Span evidence-transport coverage adds its separate 17-parent/59-recursive-field
+contract, exact typed-child domains and order, deterministic replay and every
+accessor, identity movement for every retained and derived field, all three
+polarity classes, zero-ID and raw/sealed child drift, both span-leg bindings,
+all four endpoint relations, both reversed variances, exact apex evidence/rank/
+polarity seams, and already-requested entry cancellation. These tests bind only
+the structural restriction-to-corestriction route; they neither execute nor
+authenticate an outer evidence transport.
 Finite stratification-refinement coverage adds exact recursive child schemas,
 two-sided coverage, repeated coarse targets, dimension monotonicity, every raw
 and sealed selector seam, reversed orientation, deterministic replay, and entry
@@ -1411,6 +1457,16 @@ claim those stronger G4/G5 results.
   equivalence. No pullback, base-change, pull-push, Beck-Chevalley, projection-
   formula, or composition authority is available. Even an identity-left
   graph-shaped span remains only a structural declaration.
+- `AdmittedDerivedSpanEvidenceTransportCandidateV1` proves only that one exact
+  sealed span is cross-bound to the exact typed polarity packets wrapping its
+  left restriction and right balance-corestriction legs, with exact artifact,
+  rank, and polarity continuity at their apex seam. It does not authenticate a
+  proposition or evidence payload; execute or construct a direct outer
+  transport; make the correspondence total, single-valued, or functional; or
+  prove functoriality, naturality, preservation, pull-push, base-change,
+  Beck-Chevalley, projection-formula, theorem, inverse, equivalence, or physical
+  authority. It exposes no conversion to an authority-bearing evidence receipt,
+  `AdmittedDerivedMorphismV1`, or `DerivedEquivalenceBoundaryV1`.
 - `AdmittedDerivedSpanMorphismCandidateV1` proves only exact fixed-foot/apex-map
   wiring and exact ordered comparison routes. Neither nominal comparison proves
   a commuting triangle or any path equality/homotopy, so the token is not a
