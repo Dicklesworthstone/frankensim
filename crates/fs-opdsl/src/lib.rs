@@ -44,10 +44,13 @@ pub use mms::{MmsReport, mms_poisson_study};
 pub use plan::{LoweredOperator, PlanReport, dwr_indicators};
 #[cfg(feature = "port-equations")]
 pub use ports::{
-    AccountingTermKind, CompiledPortEquation, LossOwnershipId, OwnershipDisposition,
+    AccountingTermKind, CompiledInterfaceEquation, CompiledPortEquation, CompiledStreamEquation,
+    InterfaceEquationBatch, InterfaceEquationSpec, LossOwnershipId, OwnershipDisposition,
     PORT_EQUATION_RECEIPT_SCHEMA_V1, PortDiscretization, PortEquationBatch, PortEquationError,
-    PortEquationReceipt, PortEquationSense, PortEquationSpec, compile_port_equation,
-    compile_port_equations,
+    PortEquationReceipt, PortEquationSense, PortEquationSpec, STREAM_EQUATION_RECEIPT_SCHEMA_V1,
+    StreamEnergyChartKind, StreamEnergyOwnership, StreamEquationReceipt, StreamEquationSpec,
+    compile_interface_equations, compile_port_equation, compile_port_equations,
+    compile_stream_equation,
 };
 pub use system::{
     AdmittedSystem, AtomSignature, BlockEquation, ClockTransferSignature, ConventionRef,

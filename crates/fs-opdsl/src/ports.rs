@@ -1,5 +1,6 @@
-//! Feature-gated I01.3 lowering from neutral [`fs_couple::PortSchema`]
-//! declarations into the multi-field [`crate::system`] IR.
+//! Feature-gated I01.3 lowering from neutral [`fs_couple::PortSchema`] and
+//! [`fs_couple::StreamPort`] declarations into the multi-field
+//! [`crate::system`] IR.
 //!
 //! This module is intentionally a type-and-accounting compiler, not a numeric
 //! interface solver. It re-derives the power dimensions, binds the complete
@@ -13,7 +14,8 @@ use std::num::NonZeroUsize;
 
 use fs_couple::{
     ConservationRole, FieldMeasureSide, PORT_SCHEMA_VERSION, PortKind, PortOrientation, PortSchema,
-    PortValueShape, PowerPairing, StableId,
+    PortValueShape, PowerPairing, STREAM_PORT_VERSION, StableId, StreamConstituentId,
+    StreamEnergyChart, StreamPort, StreamStressWorkConvention,
 };
 use fs_iface::SpaceType;
 use fs_qty::Dims;
@@ -28,12 +30,20 @@ use crate::system::{
 /// Canonical schema label for [`PortEquationReceipt::to_json`].
 pub const PORT_EQUATION_RECEIPT_SCHEMA_V1: &str = "fs-opdsl-port-equation-receipt-v1";
 
+/// Canonical schema label for [`StreamEquationReceipt::to_json`].
+pub const STREAM_EQUATION_RECEIPT_SCHEMA_V1: &str = "fs-opdsl-stream-equation-receipt-v1";
+
 /// Maximum port equations admitted in one deterministic batch.
 pub const MAX_PORT_EQUATIONS: usize = 4_096;
 
 const RAW_VECTOR_DEGREE: u8 = 255;
 const POWER_DIMS: Dims = Dims([2, 1, -3, 0, 0, 0]);
+const MASS_FLOW_DIMS: Dims = Dims([0, 1, -1, 0, 0, 0]);
+const AMOUNT_FLOW_DIMS: Dims = Dims([0, 0, -1, 0, 0, 1]);
+const MOMENTUM_FLOW_DIMS: Dims = Dims([1, 1, -2, 0, 0, 0]);
+const ENTROPY_FLOW_DIMS: Dims = Dims([2, 1, -3, -1, 0, 0]);
 const PORT_EXTENSION_VERSION: u32 = 1;
+const STREAM_EXTENSION_VERSION: u32 = 1;
 const LOSS_OWNERSHIP_DOMAIN_V1: &str = "org.frankensim.fs-opdsl.loss-ownership.v1";
 
 /// Nominal content identity for one concretely owned dissipative term.
@@ -234,6 +244,145 @@ impl PortEquationSpec {
     }
 }
 
+/// Exactly-once ownership of the energy coordinate carried by a stream.
+///
+/// Unlike [`OwnershipDisposition`], this type has no `NotApplicable` state:
+/// every admitted [`StreamPort`] carries energy, so its compiler request must
+/// either name one owner or retain an explicit durable reason why ownership is
+/// outside the compiled model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEnergyOwnership {
+    /// Exactly one stable component/operator owns the stream-energy term.
+    Owned(StableId),
+    /// Ownership is outside the compiled model under a retained rationale ID.
+    ExplicitlyUnowned {
+        /// Durable reason, policy, or scope-exclusion identifier.
+        rationale: StableId,
+    },
+}
+
+impl StreamEnergyOwnership {
+    /// Borrow the unique owner when one exists.
+    #[must_use]
+    pub fn owner(&self) -> Option<&StableId> {
+        match self {
+            Self::Owned(owner) => Some(owner),
+            Self::ExplicitlyUnowned { .. } => None,
+        }
+    }
+
+    fn diagnostic(&self) -> String {
+        match self {
+            Self::Owned(owner) => format!("owned:{}", owner.as_str()),
+            Self::ExplicitlyUnowned { rationale } => {
+                format!("explicitly-unowned:{}", rationale.as_str())
+            }
+        }
+    }
+}
+
+/// Publicly observable selected chart family of one admitted stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnergyChartKind {
+    /// Canonical moving-stream enthalpy chart.
+    MovingStreamEnthalpy,
+    /// Internal energy with exact pressure/deviatoric Cauchy-work crosswalk.
+    InternalEnergyCauchyWork,
+    /// Exact Euler/Legendre conjugate-potential chart.
+    ConjugatePotential,
+}
+
+impl StreamEnergyChartKind {
+    fn from_chart(chart: &StreamEnergyChart) -> Self {
+        match chart {
+            StreamEnergyChart::MovingStreamEnthalpy(_) => Self::MovingStreamEnthalpy,
+            StreamEnergyChart::InternalEnergyCauchyWork(_) => Self::InternalEnergyCauchyWork,
+            StreamEnergyChart::ConjugatePotential(_) => Self::ConjugatePotential,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MovingStreamEnthalpy => "moving-stream-enthalpy",
+            Self::InternalEnergyCauchyWork => "internal-energy-cauchy-work",
+            Self::ConjugatePotential => "conjugate-potential",
+        }
+    }
+}
+
+/// Complete request to lower one already-admitted neutral stream bundle.
+///
+/// `source_receipt` is the caller's durable identity for the upstream chart
+/// admission. The compiler additionally binds every public context/rate field
+/// into its own [`SystemId`], but does not claim to re-run or authenticate the
+/// upstream thermodynamic evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamEquationSpec {
+    stream: StreamPort,
+    source_receipt: StableId,
+    energy_ownership: StreamEnergyOwnership,
+}
+
+impl StreamEquationSpec {
+    /// Bind an admitted stream to its upstream receipt and exactly-once energy
+    /// ownership declaration.
+    #[must_use]
+    pub fn new(
+        stream: StreamPort,
+        source_receipt: StableId,
+        energy_ownership: StreamEnergyOwnership,
+    ) -> Self {
+        Self {
+            stream,
+            source_receipt,
+            energy_ownership,
+        }
+    }
+
+    /// Borrow the admitted neutral stream bundle.
+    #[must_use]
+    pub const fn stream(&self) -> &StreamPort {
+        &self.stream
+    }
+
+    /// Borrow the upstream stream-admission receipt identity.
+    #[must_use]
+    pub const fn source_receipt(&self) -> &StableId {
+        &self.source_receipt
+    }
+
+    /// Borrow the exactly-once stream-energy ownership declaration.
+    #[must_use]
+    pub const fn energy_ownership(&self) -> &StreamEnergyOwnership {
+        &self.energy_ownership
+    }
+}
+
+/// One declaration admitted by the cross-kind interface compiler.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterfaceEquationSpec {
+    /// Power-conjugate effort/flow declaration.
+    Port(PortEquationSpec),
+    /// Multi-conserved-flux stream declaration.
+    Stream(StreamEquationSpec),
+}
+
+impl InterfaceEquationSpec {
+    fn port_id(&self) -> &StableId {
+        match self {
+            Self::Port(spec) => spec.schema.id(),
+            Self::Stream(spec) => spec.stream.binding().port_id(),
+        }
+    }
+
+    fn owner(&self) -> Option<&StableId> {
+        match self {
+            Self::Port(spec) => spec.ownership.owner(),
+            Self::Stream(spec) => spec.energy_ownership.owner(),
+        }
+    }
+}
+
 /// Structured refusal from port-equation lowering.
 #[derive(Debug, PartialEq)]
 pub enum PortEquationError {
@@ -249,6 +398,12 @@ pub enum PortEquationError {
     /// Two source declarations used the same port identity.
     DuplicatePortId {
         /// Duplicated stable port identity.
+        port: String,
+    },
+    /// One stable interface identity requested both an effort/flow energy term
+    /// and a stream-carried energy term.
+    DuplicateEnergyCarrier {
+        /// Stable boundary identity carrying energy twice.
         port: String,
     },
     /// One owner was assigned to two independently generated terms.
@@ -290,6 +445,13 @@ pub enum PortEquationError {
         /// Received schema version.
         actual: u16,
     },
+    /// The upstream stream version is not the version this compiler binds.
+    StreamSchemaVersionMismatch {
+        /// Supported stream version.
+        expected: u16,
+        /// Received stream version.
+        actual: u16,
+    },
     /// A future/upstream schema no longer re-derived exact power dimensions.
     SchemaPowerDrift {
         /// Effort dimensions.
@@ -329,6 +491,10 @@ impl core::fmt::Display for PortEquationError {
             Self::DuplicatePortId { port } => {
                 write!(f, "port identity {port} appears more than once")
             }
+            Self::DuplicateEnergyCarrier { port } => write!(
+                f,
+                "interface {port} carries energy through both an effort/flow term and a stream bundle"
+            ),
             Self::DuplicateOwnership {
                 owner,
                 first_port,
@@ -358,6 +524,10 @@ impl core::fmt::Display for PortEquationError {
             Self::PortSchemaVersionMismatch { expected, actual } => write!(
                 f,
                 "port schema version {actual} is unsupported; expected {expected}"
+            ),
+            Self::StreamSchemaVersionMismatch { expected, actual } => write!(
+                f,
+                "stream schema version {actual} is unsupported; expected {expected}"
             ),
             Self::SchemaPowerDrift {
                 effort,
@@ -542,6 +712,95 @@ impl PortEquationReceipt {
     }
 }
 
+/// Structural receipt for one admitted stream-bundle lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamEquationReceipt {
+    port_id: String,
+    stream_schema_version: u16,
+    source_receipt: String,
+    system_identity: SystemId,
+    chart_kind: StreamEnergyChartKind,
+    constituent_count: usize,
+    energy_flow_bits: u64,
+    energy_ownership: StreamEnergyOwnership,
+}
+
+impl StreamEquationReceipt {
+    /// Stable source stream identity.
+    #[must_use]
+    pub fn port_id(&self) -> &str {
+        &self.port_id
+    }
+
+    /// Neutral source stream version bound by this compiler.
+    #[must_use]
+    pub const fn stream_schema_version(&self) -> u16 {
+        self.stream_schema_version
+    }
+
+    /// Upstream chart-admission receipt supplied by the caller.
+    #[must_use]
+    pub fn source_receipt(&self) -> &str {
+        &self.source_receipt
+    }
+
+    /// Identity of the generated, fully admitted multi-field fragment.
+    #[must_use]
+    pub const fn system_identity(&self) -> SystemId {
+        self.system_identity
+    }
+
+    /// Selected upstream stream-energy chart family.
+    #[must_use]
+    pub const fn chart_kind(&self) -> StreamEnergyChartKind {
+        self.chart_kind
+    }
+
+    /// Number of canonical constituent amount-flow coordinates.
+    #[must_use]
+    pub const fn constituent_count(&self) -> usize {
+        self.constituent_count
+    }
+
+    /// Exact IEEE-754 bits of the admitted signed stream energy rate.
+    #[must_use]
+    pub const fn energy_flow_bits(&self) -> u64 {
+        self.energy_flow_bits
+    }
+
+    /// Exactly-once stream-energy ownership declaration.
+    #[must_use]
+    pub const fn energy_ownership(&self) -> &StreamEnergyOwnership {
+        &self.energy_ownership
+    }
+
+    /// Deterministic diagnostic transport. The upstream receipt remains an
+    /// asserted provenance reference, not authenticated evidence.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"schema\":\"{}\",\"port_id\":\"{}\",\
+             \"compiler_version\":\"{}\",\"feature\":\"port-equations\",\
+             \"stream_schema_version\":{},\"source_receipt\":\"{}\",\
+             \"system_id\":\"{}\",\"chart_kind\":\"{}\",\
+             \"constituent_count\":{},\"energy_flow_bits\":\"{:016x}\",\
+             \"energy_ownership\":\"{}\",\
+             \"authority\":\"structural-generated\",\
+             \"no_claim\":\"upstream chart evidence, numeric boundary application, and closed-window conservation remain external\"}}",
+            STREAM_EQUATION_RECEIPT_SCHEMA_V1,
+            self.port_id,
+            crate::VERSION,
+            self.stream_schema_version,
+            self.source_receipt,
+            self.system_identity,
+            self.chart_kind.as_str(),
+            self.constituent_count,
+            self.energy_flow_bits,
+            self.energy_ownership.diagnostic(),
+        )
+    }
+}
+
 /// One generated and fully admitted system fragment plus its receipt.
 #[derive(Debug)]
 pub struct CompiledPortEquation {
@@ -569,10 +828,77 @@ impl CompiledPortEquation {
     }
 }
 
+/// One generated stream field bundle plus its structural receipt.
+#[derive(Debug)]
+pub struct CompiledStreamEquation {
+    system: AdmittedSystem,
+    receipt: StreamEquationReceipt,
+}
+
+impl CompiledStreamEquation {
+    /// Borrow the admitted multi-field fragment.
+    #[must_use]
+    pub const fn system(&self) -> &AdmittedSystem {
+        &self.system
+    }
+
+    /// Borrow the structural lowering receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &StreamEquationReceipt {
+        &self.receipt
+    }
+
+    /// Consume the wrapper and return the admitted system fragment.
+    #[must_use]
+    pub fn into_system(self) -> AdmittedSystem {
+        self.system
+    }
+}
+
+/// One cross-kind interface compilation result.
+#[derive(Debug)]
+pub enum CompiledInterfaceEquation {
+    /// Generated effort/flow power equation.
+    Port(CompiledPortEquation),
+    /// Generated external stream field bundle.
+    Stream(CompiledStreamEquation),
+}
+
+impl CompiledInterfaceEquation {
+    /// Stable source interface identity.
+    #[must_use]
+    pub fn port_id(&self) -> &str {
+        match self {
+            Self::Port(compiled) => compiled.receipt.port_id(),
+            Self::Stream(compiled) => compiled.receipt.port_id(),
+        }
+    }
+}
+
 /// Canonically port-ID-ordered result of a transactional compile batch.
 #[derive(Debug)]
 pub struct PortEquationBatch {
     equations: Vec<CompiledPortEquation>,
+}
+
+/// Canonically port-ID-ordered result of a transactional cross-kind batch.
+#[derive(Debug)]
+pub struct InterfaceEquationBatch {
+    equations: Vec<CompiledInterfaceEquation>,
+}
+
+impl InterfaceEquationBatch {
+    /// Generated declarations in canonical stable-port order.
+    #[must_use]
+    pub fn equations(&self) -> &[CompiledInterfaceEquation] {
+        &self.equations
+    }
+
+    /// Consume the batch.
+    #[must_use]
+    pub fn into_equations(self) -> Vec<CompiledInterfaceEquation> {
+        self.equations
+    }
 }
 
 impl PortEquationBatch {
@@ -598,6 +924,100 @@ pub fn compile_port_equation(
 ) -> Result<CompiledPortEquation, PortEquationError> {
     validate_ownership(spec.term_kind, &spec.ownership)?;
     compile_one(spec)
+}
+
+/// Lower one already-admitted neutral stream into five typed external field
+/// blocks: mass, constituent amount, momentum, energy, and entropy flow.
+///
+/// Use [`compile_interface_equations`] when effort/flow declarations may share
+/// the same accounting boundary; that cross-kind entry point additionally
+/// enforces stream-energy exclusivity.
+///
+/// # Errors
+/// Any stream version, metadata, resource, or system-IR refusal.
+pub fn compile_stream_equation(
+    spec: StreamEquationSpec,
+) -> Result<CompiledStreamEquation, PortEquationError> {
+    compile_stream_one(spec)
+}
+
+/// Compile a deterministic mixed batch of effort/flow and stream declarations.
+///
+/// Input order is irrelevant. Reusing one stable port identity for both kinds
+/// refuses before generation because the stream's admitted energy coordinate
+/// would duplicate the effort/flow power term. Duplicate same-kind identities
+/// and duplicate concrete accounting owners also refuse transactionally.
+///
+/// # Errors
+/// Any batch, exclusivity, ownership, schema, metadata, resource, or system
+/// refusal.
+pub fn compile_interface_equations(
+    mut specs: Vec<InterfaceEquationSpec>,
+) -> Result<InterfaceEquationBatch, PortEquationError> {
+    if specs.is_empty() {
+        return Err(PortEquationError::EmptyBatch);
+    }
+    if specs.len() > MAX_PORT_EQUATIONS {
+        return Err(PortEquationError::TooManyEquations {
+            count: specs.len(),
+            cap: MAX_PORT_EQUATIONS,
+        });
+    }
+    specs.sort_by(|left, right| left.port_id().cmp(right.port_id()));
+    for pair in specs.windows(2) {
+        if pair[0].port_id() == pair[1].port_id() {
+            let port = pair[0].port_id().as_str().to_string();
+            return match (&pair[0], &pair[1]) {
+                (InterfaceEquationSpec::Port(_), InterfaceEquationSpec::Stream(_))
+                | (InterfaceEquationSpec::Stream(_), InterfaceEquationSpec::Port(_)) => {
+                    Err(PortEquationError::DuplicateEnergyCarrier { port })
+                }
+                _ => Err(PortEquationError::DuplicatePortId { port }),
+            };
+        }
+    }
+
+    let mut owner_ports: BTreeMap<String, String> = BTreeMap::new();
+    for spec in &specs {
+        match spec {
+            InterfaceEquationSpec::Port(spec) => {
+                validate_ownership(spec.term_kind, &spec.ownership)?;
+                extension_estimate(spec)?;
+            }
+            InterfaceEquationSpec::Stream(spec) => {
+                validate_stream_version(spec)?;
+                stream_extension_estimate(spec)?;
+            }
+        }
+        if let Some(owner) = spec.owner()
+            && let Some(first_port) = owner_ports.insert(
+                owner.as_str().to_string(),
+                spec.port_id().as_str().to_string(),
+            )
+        {
+            return Err(PortEquationError::DuplicateOwnership {
+                owner: owner.as_str().to_string(),
+                first_port,
+                second_port: spec.port_id().as_str().to_string(),
+            });
+        }
+    }
+
+    let mut equations = Vec::new();
+    equations
+        .try_reserve_exact(specs.len())
+        .map_err(|_| PortEquationError::Resource)?;
+    for spec in specs {
+        equations.push(match spec {
+            InterfaceEquationSpec::Port(spec) => {
+                CompiledInterfaceEquation::Port(compile_one(spec)?)
+            }
+            InterfaceEquationSpec::Stream(spec) => {
+                CompiledInterfaceEquation::Stream(compile_stream_one(spec)?)
+            }
+        });
+    }
+    Ok(InterfaceEquationBatch { equations })
 }
 
 /// Compile a deterministic batch. Input order is irrelevant; duplicate port
@@ -776,6 +1196,76 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
     Ok(CompiledPortEquation { system, receipt })
 }
 
+fn validate_stream_version(spec: &StreamEquationSpec) -> Result<(), PortEquationError> {
+    if spec.stream.version() == STREAM_PORT_VERSION {
+        Ok(())
+    } else {
+        Err(PortEquationError::StreamSchemaVersionMismatch {
+            expected: STREAM_PORT_VERSION,
+            actual: spec.stream.version(),
+        })
+    }
+}
+
+fn compile_stream_one(
+    spec: StreamEquationSpec,
+) -> Result<CompiledStreamEquation, PortEquationError> {
+    validate_stream_version(&spec)?;
+    let extension = encode_stream_extension(&spec)?;
+    let binding = spec.stream.binding();
+    let coordinates = CoordinateConvention {
+        basis: ConventionRef::new(binding.coordinates().basis().as_str().to_string())?,
+        frame: ConventionRef::new(binding.coordinates().frame().as_str().to_string())?,
+        orientation: binding.coordinates().orientation(),
+    };
+    let clock = ConventionRef::new(binding.timestamp().clock().as_str().to_string())?;
+    let port_id = binding.port_id().as_str().to_string();
+    let constituent_count = spec.stream.constituent_flows().len();
+    let mut system = SystemDef::new().with_extension(extension)?;
+    for (name, n, dims) in [
+        ("stream-mass-flow", 1, MASS_FLOW_DIMS),
+        (
+            "stream-constituent-flow",
+            constituent_count,
+            AMOUNT_FLOW_DIMS,
+        ),
+        ("stream-momentum-flow", 3, MOMENTUM_FLOW_DIMS),
+        ("stream-energy-flow", 1, POWER_DIMS),
+        ("stream-entropy-flow", 1, ENTROPY_FLOW_DIMS),
+    ] {
+        let space = Space {
+            degree: RAW_VECTOR_DEGREE,
+            n,
+            dims,
+        };
+        system.declare_field(FieldDecl {
+            name: name.to_string(),
+            space,
+            quantity: FieldQuantity::Dimensional(dims),
+            coordinates: coordinates.clone(),
+            clock: clock.clone(),
+            support: SpatialSupport::BoundaryTrace,
+            state: StateOwnership::External,
+        })?;
+    }
+    let system = system.admit()?;
+    let stream_schema_version = spec.stream.version();
+    let source_receipt = spec.source_receipt.as_str().to_string();
+    let chart_kind = StreamEnergyChartKind::from_chart(spec.stream.energy_chart());
+    let energy_flow_bits = spec.stream.energy_flow().value().to_bits();
+    let receipt = StreamEquationReceipt {
+        port_id,
+        stream_schema_version,
+        source_receipt,
+        system_identity: system.identity(),
+        chart_kind,
+        constituent_count,
+        energy_flow_bits,
+        energy_ownership: spec.energy_ownership,
+    };
+    Ok(CompiledStreamEquation { system, receipt })
+}
+
 fn derive_loss_ownership_id(
     spec: &PortEquationSpec,
     effort_space: Space,
@@ -887,6 +1377,152 @@ fn pairing_measure(pairing: PowerPairing) -> Dims {
             measure_dimensions, ..
         } => measure_dimensions,
     }
+}
+
+fn encode_stream_extension(spec: &StreamEquationSpec) -> Result<Vec<u8>, PortEquationError> {
+    let estimated = stream_extension_estimate(spec)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(estimated)
+        .map_err(|_| PortEquationError::Resource)?;
+    bytes.extend_from_slice(&STREAM_EXTENSION_VERSION.to_le_bytes());
+    push_text(&mut bytes, "stream-bundle");
+    push_text(&mut bytes, crate::VERSION);
+    bytes.extend_from_slice(&spec.stream.version().to_le_bytes());
+    push_text(&mut bytes, spec.source_receipt.as_str());
+
+    let binding = spec.stream.binding();
+    push_text(&mut bytes, binding.port_id().as_str());
+    push_text(&mut bytes, binding.state_schema().as_str());
+    push_text(&mut bytes, binding.constituent_basis().as_str());
+    bytes.extend_from_slice(&(binding.constituent_axis().len() as u64).to_le_bytes());
+    for constituent in binding.constituent_axis() {
+        encode_stream_constituent_id(&mut bytes, constituent);
+    }
+    push_text(&mut bytes, binding.chemical_reference_state().as_str());
+    push_text(&mut bytes, binding.coordinates().basis().as_str());
+    push_text(&mut bytes, binding.coordinates().frame().as_str());
+    bytes.push(orientation_tag(binding.coordinates().orientation()));
+    push_text(&mut bytes, binding.timestamp().clock().as_str());
+    bytes.extend_from_slice(&binding.timestamp().tick().to_le_bytes());
+    push_text(&mut bytes, binding.gravity_datum().as_str());
+    bytes.push(match binding.stress_convention() {
+        StreamStressWorkConvention::CauchyTensionPositiveOutwardPower => 0,
+    });
+
+    push_f64_bits(&mut bytes, spec.stream.mass_flow().value());
+    bytes.extend_from_slice(&(spec.stream.constituent_flows().len() as u64).to_le_bytes());
+    for constituent in spec.stream.constituent_flows() {
+        encode_stream_constituent_id(&mut bytes, constituent.id());
+        push_f64_bits(&mut bytes, constituent.amount_flow().value());
+    }
+    for component in spec.stream.momentum_flow() {
+        push_f64_bits(&mut bytes, component.value());
+    }
+    push_f64_bits(&mut bytes, spec.stream.energy_flow().value());
+    push_f64_bits(&mut bytes, spec.stream.entropy_flow().value());
+    bytes.push(stream_chart_kind_tag(StreamEnergyChartKind::from_chart(
+        spec.stream.energy_chart(),
+    )));
+    bytes.extend_from_slice(&(spec.stream.conservation_roles().len() as u64).to_le_bytes());
+    for role in spec.stream.conservation_roles() {
+        bytes.push(conservation_role_tag(*role));
+    }
+    encode_stream_ownership(&mut bytes, &spec.energy_ownership);
+    if bytes.len() > MAX_SYSTEM_EXTENSION_BYTES {
+        return Err(PortEquationError::CompilerMetadataTooLarge {
+            bytes: bytes.len(),
+            cap: MAX_SYSTEM_EXTENSION_BYTES,
+        });
+    }
+    Ok(bytes)
+}
+
+fn stream_extension_estimate(spec: &StreamEquationSpec) -> Result<usize, PortEquationError> {
+    let binding = spec.stream.binding();
+    let ownership_bytes = match &spec.energy_ownership {
+        StreamEnergyOwnership::Owned(owner) => owner.as_str().len(),
+        StreamEnergyOwnership::ExplicitlyUnowned { rationale } => rationale.as_str().len(),
+    };
+    let mut variable_bytes = 0usize;
+    for len in [
+        "stream-bundle".len(),
+        crate::VERSION.len(),
+        spec.source_receipt.as_str().len(),
+        binding.port_id().as_str().len(),
+        binding.state_schema().as_str().len(),
+        binding.constituent_basis().as_str().len(),
+        binding.chemical_reference_state().as_str().len(),
+        binding.coordinates().basis().as_str().len(),
+        binding.coordinates().frame().as_str().len(),
+        binding.timestamp().clock().as_str().len(),
+        binding.gravity_datum().as_str().len(),
+        ownership_bytes,
+    ] {
+        variable_bytes = checked_metadata_add(variable_bytes, len)?;
+    }
+    for constituent in binding.constituent_axis() {
+        variable_bytes = checked_metadata_add(variable_bytes, stream_constituent_len(constituent))?;
+        variable_bytes = checked_metadata_add(variable_bytes, 9)?;
+    }
+    for constituent in spec.stream.constituent_flows() {
+        variable_bytes =
+            checked_metadata_add(variable_bytes, stream_constituent_len(constituent.id()))?;
+        variable_bytes = checked_metadata_add(variable_bytes, 17)?;
+    }
+    let estimated = checked_metadata_add(variable_bytes, 512)?;
+    if estimated > MAX_SYSTEM_EXTENSION_BYTES {
+        return Err(PortEquationError::CompilerMetadataTooLarge {
+            bytes: estimated,
+            cap: MAX_SYSTEM_EXTENSION_BYTES,
+        });
+    }
+    Ok(estimated)
+}
+
+fn checked_metadata_add(left: usize, right: usize) -> Result<usize, PortEquationError> {
+    left.checked_add(right)
+        .ok_or(PortEquationError::CompilerMetadataTooLarge {
+            bytes: usize::MAX,
+            cap: MAX_SYSTEM_EXTENSION_BYTES,
+        })
+}
+
+fn stream_constituent_len(constituent: &StreamConstituentId) -> usize {
+    match constituent {
+        StreamConstituentId::Species(id) => id.as_str().len(),
+        StreamConstituentId::Element(id) => id.as_str().len(),
+    }
+}
+
+fn encode_stream_constituent_id(bytes: &mut Vec<u8>, constituent: &StreamConstituentId) {
+    match constituent {
+        StreamConstituentId::Species(id) => {
+            bytes.push(0);
+            push_text(bytes, id.as_str());
+        }
+        StreamConstituentId::Element(id) => {
+            bytes.push(1);
+            push_text(bytes, id.as_str());
+        }
+    }
+}
+
+fn encode_stream_ownership(bytes: &mut Vec<u8>, ownership: &StreamEnergyOwnership) {
+    match ownership {
+        StreamEnergyOwnership::Owned(owner) => {
+            bytes.push(0);
+            push_text(bytes, owner.as_str());
+        }
+        StreamEnergyOwnership::ExplicitlyUnowned { rationale } => {
+            bytes.push(1);
+            push_text(bytes, rationale.as_str());
+        }
+    }
+}
+
+fn push_f64_bits(bytes: &mut Vec<u8>, value: f64) {
+    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
 }
 
 fn encode_extension(
@@ -1084,6 +1720,14 @@ const fn accounting_kind_tag(kind: AccountingTermKind) -> u8 {
         AccountingTermKind::Storage => 1,
         AccountingTermKind::Source => 2,
         AccountingTermKind::Dissipation => 3,
+    }
+}
+
+const fn stream_chart_kind_tag(kind: StreamEnergyChartKind) -> u8 {
+    match kind {
+        StreamEnergyChartKind::MovingStreamEnthalpy => 0,
+        StreamEnergyChartKind::InternalEnergyCauchyWork => 1,
+        StreamEnergyChartKind::ConjugatePotential => 2,
     }
 }
 

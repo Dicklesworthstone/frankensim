@@ -249,17 +249,36 @@ documented in the bead close); cross-ISA golden hash.
   exposes that identity, the re-derived dimensional proof, exact sign,
   role/ownership, generated `SystemId`, structural-generated authority, and
   explicit no-claim language.
-- `tests/ports.rs` supplies G0/G3 scalar and field-duality generation,
-  orientation-reversal, canonical batch-order, ownership-uniqueness,
-  component-shape, empty-input, and metadata-resource-bomb fixtures. The test
-  target is explicitly gated by `required-features = ["port-equations"]`.
+- `compile_stream_equation` imports an already-admitted `fs_couple::StreamPort`
+  and lowers its mass, canonical constituent amount, momentum, energy, and
+  entropy rates into five typed external boundary field blocks. The generated
+  identity binds the complete public stream context, exact rate bits, selected
+  chart family, fixed conservation roles, an upstream chart-admission receipt,
+  and exactly-one owned or explicitly-unowned stream-energy disposition. The
+  upstream receipt is asserted provenance: this compiler does not authenticate
+  or rerun the private thermodynamic evidence behind it.
+- `compile_interface_equations` is the cross-kind transactional entry point.
+  It sorts port and stream declarations by stable interface ID, refuses
+  same-kind duplicates, and refuses an effort/flow power equation plus a stream
+  bundle with the same ID as `DuplicateEnergyCarrier`. That refusal happens
+  before generation, so a stream energy chart cannot silently duplicate power
+  already carried by an effort/flow term. The batch also applies concrete-owner
+  uniqueness across both declaration kinds. Separate standalone compiler calls
+  do not establish this cross-kind exclusivity claim.
+- `tests/ports.rs` supplies G0/G3 scalar, field-duality, and stream generation;
+  orientation reversal; canonical same-kind and mixed batch order; ownership
+  uniqueness; stream-energy double-count adversaries; component shape;
+  empty-input; and metadata-resource-bomb fixtures. The test target is
+  explicitly gated by `required-features = ["port-equations"]`.
 - NO-CLAIM: this slice generates structural equations; it does not execute the
   scalar/vector/tensor/field contraction, quadrature, trace pullback, numeric
-  port adapter, source/dissipation law, or closed-window audit. Stream bundles,
-  stream-vs-effort/flow energy double-count refusal, junction permutations,
-  storage/source operator lowering, and reversible skew-block preservation are
-  subsequent I01.3 slices. A receipt proves that the supplied schema lowered
-  consistently, not that the schema or its referenced physical evidence is
-  true. The [F] baseline deck, activation threshold, kill criterion, cost
-  percentiles, and independent reproduction pack remain pending, so the
-  feature stays default-off.
+  port adapter, source/dissipation law, or closed-window audit. Stream-bundle
+  lowering and stream-vs-effort/flow exclusivity are structural only: no
+  numeric boundary application, pullback, chart-evidence authentication, or
+  window recomposition is claimed. Junction permutations, storage/source
+  operator lowering, and reversible skew-block preservation remain subsequent
+  I01.3 slices. A receipt
+  proves that the supplied schema lowered consistently, not that the schema or
+  its referenced physical evidence is true. The [F] baseline deck, activation
+  threshold, kill criterion, cost percentiles, and independent reproduction
+  pack remain pending, so the feature stays default-off.
