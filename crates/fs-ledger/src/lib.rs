@@ -42,6 +42,7 @@ pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
 pub use state_checkpoint::{
     KnownStateSemantics, MAX_RUNTIME_STATE_CHECKPOINT_BYTES, MAX_STATE_CHECKPOINT_LAW_ID_BYTES,
     RUNTIME_STATE_ARTIFACT_KIND, STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,
+    STATE_CHECKPOINT_RECEIPT_IDENTITY_SCHEMA_DECLARATION,
     STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION, StateCheckpointClaim, StateCheckpointDecodeError,
     StateCheckpointReceipt, StateSlotId, VerifiedStateCheckpoint,
 };
@@ -2395,7 +2396,9 @@ impl ExtensionTable {
     }
 }
 
-/// Referential/shape hygiene report. All-zero means clean.
+/// Referential/shape hygiene report. All-zero means the storage envelopes are
+/// clean; semantic receipt replay and artifact re-hashing remain separate,
+/// explicit verification operations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LintReport {
     /// Edges whose op id does not exist.
@@ -2434,7 +2437,8 @@ pub struct LintReport {
     pub malformed_qty_crosswalks: u64,
     /// Semantic state-checkpoint rows whose runtime-state artifact is absent.
     pub orphan_state_checkpoint_artifacts: u64,
-    /// Semantic state-checkpoint rows violating their bounded storage envelope.
+    /// Semantic state-checkpoint rows violating their bounded SQL storage
+    /// envelope. This does not re-hash receipts or runtime-state artifacts.
     pub malformed_state_checkpoints: u64,
 }
 

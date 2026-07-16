@@ -210,10 +210,15 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   historical rows.
 - Semantic state checkpoints (`state_checkpoint`, schema v12):
   `record_state_checkpoint` mints one portable private-field receipt over a
-  typed state-slot identity, fs-matdb law/version/state-schema metadata, the
-  L1-minted canonical parameter-block hash, one retained
+  typed state-slot identity, caller-asserted fs-matdb law/version/state-schema
+  metadata and canonical parameter-block hash, one retained
   `constitutive-runtime-state` artifact, and an injected L3 contract/code
-  identity. Exact retry dedupes by receipt hash; one stable slot may accumulate
+  identity. The identity preimage is the receipt version as little-endian
+  `u32`, the 32-byte state slot, a little-endian `u16` law-id byte count plus
+  exact UTF-8, both semantic versions as little-endian `u32`, and the three
+  32-byte artifact/parameter/code hashes in canonical order; the portable
+  transport appends the resulting 32-byte identity. Exact retry dedupes by
+  receipt hash; one stable slot may accumulate
   successive immutable checkpoints. `load_state_checkpoint` accepts the
   receipt hash plus caller-known law/parameter/code semantics, compares the
   complete semantic tuple before materializing state bytes, and returns a
@@ -225,10 +230,12 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
   `unsafe_capsules`.
-- Hygiene: `lint()` (orphan edges/metrics/chunks/crosswalk artifacts; artifact,
+- Storage-envelope hygiene: `lint()` (orphan edges/metrics/chunks/crosswalk artifacts; artifact,
   op, tune, crosswalk, and semantic-checkpoint storage bounds; storage-shape
   and length invariants; half-finished ops; dangling branch references) —
-  all-zero on any healthy or crash-recovered ledger.
+  all-zero on any healthy or crash-recovered ledger). Lint deliberately does
+  not replace semantic receipt replay or full artifact re-hashing; callers use
+  the receipt verifiers and integrity scan for those stronger claims.
 - Time travel (`travel` module, schema v2): `fork`/`branches`/`branch_diff`
   (a fork is a new op-log branch sharing every artifact by hash; visibility
   = own ops + ancestors' up to each fork point), `begin_op_on` (branch +
@@ -796,12 +803,14 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   or quantity-kind identity and cannot authorize dimensionally equal
   substitutions.
 - A semantic state-checkpoint receipt proves exact persistence and equality of
-  an injected semantic tuple. fs-ledger does not mint or inspect the L3
-  contract/code identity, interpret the runtime-state codec, prove that the
-  bytes are a sufficient restart snapshot, or prove cancel/resume/bit-replay.
-  Those authorities remain with the executable L3 law and the E0d machine
-  lifecycle. A generic v10 solver checkpoint is not silently upgraded into
-  this stronger claim.
+  an injected semantic tuple. The nominal state-slot wrapper prevents implicit
+  role exchange inside fs-ledger, but raw-hash adaptation and
+  `KnownStateSemantics` remain caller assertions: fs-ledger does not prove that
+  fs-ir, fs-matdb, or an L3 owner minted them. It also does not interpret the
+  runtime-state codec, prove that the bytes are a sufficient restart snapshot,
+  or prove cancel/resume/bit-replay. Those authorities remain with the
+  executable L3 law and the E0d machine lifecycle. A generic v10 solver
+  checkpoint is not silently upgraded into this stronger claim.
 - Safe std-only identity generation is implemented through `/dev/urandom` on
   Unix. Fresh identity creation on non-Unix targets is explicitly refused;
   existing v4+ ledgers remain readable when their persisted identity and

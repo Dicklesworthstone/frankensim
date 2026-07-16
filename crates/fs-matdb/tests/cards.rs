@@ -246,6 +246,24 @@ fn canonical_parameter_block_hash_is_ordered_and_narrowly_scoped() {
         .value = 276.0e6 + 1.0;
     assert_ne!(parameter_hash(&base), parameter_hash(&moved_value));
 
+    let mut positive_zero = j2_card();
+    positive_zero
+        .parameters
+        .get_mut("yield_stress")
+        .expect("parameter exists")
+        .value = 0.0;
+    let mut negative_zero = j2_card();
+    negative_zero
+        .parameters
+        .get_mut("yield_stress")
+        .expect("parameter exists")
+        .value = -0.0;
+    assert_ne!(
+        parameter_hash(&positive_zero),
+        parameter_hash(&negative_zero),
+        "parameter identity preserves exact floating-point bits"
+    );
+
     let mut moved_dims = j2_card();
     moved_dims
         .parameters
@@ -264,16 +282,45 @@ fn canonical_parameter_block_hash_is_ordered_and_narrowly_scoped() {
         .insert("yield_strength".to_string(), yield_stress);
     assert_ne!(parameter_hash(&base), parameter_hash(&renamed));
 
-    let mut other_semantics = j2_card();
-    other_semantics.law = LawId("different-law".to_string());
-    other_semantics.law_version = 9;
-    other_semantics.state_schema_version = 7;
-    other_semantics.validity = ValidityDomain::unconstrained().with("T", 1.0, 2.0);
-    other_semantics.sources = vec![hash_bytes(b"different source")];
+    let mut extra_parameter = j2_card();
+    extra_parameter.parameters.insert(
+        "viscosity".to_string(),
+        LawParameter {
+            value: 2.0,
+            dims: Dims([0, 0, 0, 0, 0, 0]),
+        },
+    );
+    assert_ne!(parameter_hash(&base), parameter_hash(&extra_parameter));
+
+    let base_hash = parameter_hash(&base);
+    let mut moved_law = j2_card();
+    moved_law.law = LawId("different-law".to_string());
+    assert_eq!(base_hash, parameter_hash(&moved_law));
+    let mut moved_law_version = j2_card();
+    moved_law_version.law_version = 9;
+    assert_eq!(base_hash, parameter_hash(&moved_law_version));
+    let mut moved_state_schema = j2_card();
+    moved_state_schema.state_schema_version = 7;
+    assert_eq!(base_hash, parameter_hash(&moved_state_schema));
+    let mut moved_initial_state = j2_card();
+    moved_initial_state.initial_state = InitialStatePolicy::RequiresDeclaredState;
+    assert_eq!(base_hash, parameter_hash(&moved_initial_state));
+    let mut moved_validity = j2_card();
+    moved_validity.validity = ValidityDomain::unconstrained().with("T", 1.0, 2.0);
+    assert_eq!(base_hash, parameter_hash(&moved_validity));
+    let mut moved_sources = j2_card();
+    moved_sources.sources = vec![hash_bytes(b"different source")];
+    assert_eq!(base_hash, parameter_hash(&moved_sources));
+    let mut moved_provenance = j2_card();
+    moved_provenance.provenance = Provenance {
+        source: "independent parameter audit".to_string(),
+        license: "test-only".to_string(),
+        artifact: Some(hash_bytes(b"parameter audit")),
+    };
     assert_eq!(
-        parameter_hash(&base),
-        parameter_hash(&other_semantics),
-        "law and state semantics are separate checkpoint bindings"
+        base_hash,
+        parameter_hash(&moved_provenance),
+        "non-parameter semantics and provenance bind outside this narrow identity"
     );
 
     let mut invalid = j2_card();

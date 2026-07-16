@@ -32,14 +32,16 @@ const STATE_CHECKPOINT_RECEIPT_FIXED_TRANSPORT_BYTES: usize =
 /// Typed durable identity of one logical state slot.
 ///
 /// The wrapped digest is normally adapted from the Machine-IR `StateSlotId`.
-/// Keeping it nominal here prevents accidental exchange with the runtime-state,
+/// Keeping it nominal here prevents implicit exchange with the runtime-state,
 /// parameter, or implementation hashes at the persistence boundary without
-/// creating an `fs-ledger` -> `fs-ir` dependency cycle.
+/// creating an `fs-ledger` -> `fs-ir` dependency cycle. The explicit raw-hash
+/// adapter does not itself prove which upstream component minted the digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StateSlotId(ContentHash);
 
 impl StateSlotId {
-    /// Wrap an already domain-separated durable state-slot digest.
+    /// Explicitly adapt a caller-asserted, already domain-separated durable
+    /// state-slot digest.
     #[must_use]
     pub const fn from_content_hash(hash: ContentHash) -> Self {
         Self(hash)
@@ -52,11 +54,10 @@ impl StateSlotId {
     }
 }
 
-/// Exact semantics a caller claims to have available for replay.
+/// Exact opaque semantics a caller claims to have available for replay.
 ///
-/// `contract_and_code_hash` is minted by the L3 law owner. The ledger treats it
-/// as an injected identity and can compare it exactly, but cannot manufacture
-/// or interpret an executable implementation.
+/// The ledger compares these injected values exactly, but cannot prove which
+/// upstream component minted them or interpret an executable implementation.
 #[derive(Debug, Clone, Copy)]
 pub struct KnownStateSemantics<'a> {
     /// Exact fs-matdb law id.
@@ -65,9 +66,9 @@ pub struct KnownStateSemantics<'a> {
     pub law_version: u32,
     /// Exact runtime-state schema version.
     pub state_schema_version: u32,
-    /// L1-minted canonical parameter-block identity.
+    /// Caller-asserted canonical parameter-block identity expected from L1.
     pub canonical_parameters_hash: ContentHash,
-    /// Exact L3 contract plus implementation identity understood by replay.
+    /// Caller-asserted L3 contract plus implementation identity.
     pub contract_and_code_hash: ContentHash,
 }
 
@@ -77,7 +78,7 @@ pub struct StateCheckpointClaim<'a> {
     /// Stable logical slot, independent of vector position.
     pub state_slot: StateSlotId,
     /// Complete law/parameter/schema/implementation tuple used to encode the
-    /// state. The canonical parameter hash must be minted by fs-matdb.
+    /// state. Upstream admission remains responsible for mint provenance.
     pub semantics: KnownStateSemantics<'a>,
     /// Existing `constitutive-runtime-state` artifact.
     pub runtime_state_artifact: ContentHash,
@@ -96,6 +97,65 @@ pub struct StateCheckpointReceipt {
     contract_and_code_hash: ContentHash,
     content_hash: ContentHash,
 }
+
+/// Exhaustive owner-type classifier for the semantic checkpoint identity.
+/// Adding a receipt field must break identity governance until its role is
+/// classified deliberately.
+#[allow(dead_code)]
+fn classify_state_checkpoint_receipt_identity_fields(source: &StateCheckpointReceipt) {
+    let StateCheckpointReceipt {
+        state_slot,
+        law_id,
+        law_version,
+        state_schema_version,
+        runtime_state_artifact,
+        canonical_parameters_hash,
+        contract_and_code_hash,
+        content_hash,
+    } = source;
+    let _ = (
+        state_slot,
+        law_id,
+        law_version,
+        state_schema_version,
+        runtime_state_artifact,
+        canonical_parameters_hash,
+        contract_and_code_hash,
+        content_hash,
+    );
+}
+
+/// Owner-local semantic state-checkpoint declaration consumed by
+/// `xtask check-identities`.
+#[allow(dead_code)]
+pub const STATE_CHECKPOINT_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-ledger:state-checkpoint-receipt",
+    "version_const=STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-ledger.state-checkpoint-receipt.v1",
+    "domain_const=STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN",
+    "encoder=checkpoint_receipt_hash",
+    "encoder_helpers=checkpoint_receipt_hash_with_schema",
+    "schema_constants=STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION,STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,STATE_CHECKPOINT_RECEIPT_FIXED_TRANSPORT_BYTES,MAX_STATE_CHECKPOINT_LAW_ID_BYTES,RUNTIME_STATE_ARTIFACT_KIND,MAX_RUNTIME_STATE_CHECKPOINT_BYTES,crates/fs-ledger/src/schema.rs#V12",
+    "schema_functions=StateCheckpointReceipt::to_bytes,StateCheckpointReceipt::from_bytes,validate_receipt_identity,validate_law_id,receipt_from_semantics,Ledger::stored_state_checkpoint,Ledger::insert_state_checkpoint,Ledger::record_state_checkpoint,Ledger::load_state_checkpoint,Ledger::verify_state_checkpoint_receipt,Ledger::ensure_known_state_semantics,Ledger::load_runtime_state_artifact,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-ledger:artifact-content,fs-matdb:canonical-parameter-block",
+    "digest=blake3-256-domain-separated",
+    "encoding=typed-binary",
+    "sources=StateCheckpointReceipt",
+    "source_fields=StateCheckpointReceipt.state_slot:semantic,StateCheckpointReceipt.law_id:semantic,StateCheckpointReceipt.law_version:semantic,StateCheckpointReceipt.state_schema_version:semantic,StateCheckpointReceipt.runtime_state_artifact:semantic,StateCheckpointReceipt.canonical_parameters_hash:semantic,StateCheckpointReceipt.contract_and_code_hash:semantic,StateCheckpointReceipt.content_hash:derived:recomputed-from-semantic-fields",
+    "source_bindings=StateCheckpointReceipt.state_slot>state-slot,StateCheckpointReceipt.law_id>law-id-byte-count+law-id-utf8,StateCheckpointReceipt.law_version>law-version,StateCheckpointReceipt.state_schema_version>state-schema-version,StateCheckpointReceipt.runtime_state_artifact>runtime-state-artifact,StateCheckpointReceipt.canonical_parameters_hash>canonical-parameters-hash,StateCheckpointReceipt.contract_and_code_hash>contract-and-code-hash",
+    "external_semantic_fields=identity-domain,identity-version,canonical-field-order",
+    "semantic_fields=identity-domain,identity-version,canonical-field-order,state-slot,law-id-byte-count,law-id-utf8,law-version,state-schema-version,runtime-state-artifact,canonical-parameters-hash,contract-and-code-hash",
+    "excluded_fields=none",
+    "consumers=Ledger::record_state_checkpoint,Ledger::load_state_checkpoint,Ledger::verify_state_checkpoint_receipt,StateCheckpointReceipt::from_bytes",
+    "mutations=identity-domain:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,identity-version:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,canonical-field-order:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,state-slot:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,law-id-byte-count:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,law-id-utf8:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,law-version:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,state-schema-version:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,runtime-state-artifact:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,canonical-parameters-hash:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field,contract-and-code-hash:crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_state_checkpoint_receipt_identity_fields",
+    "transport_guard=validate_receipt_identity",
+    "version_guard=crates/fs-ledger/src/state_checkpoint.rs#receipt_identity_and_transport_bind_every_field",
+    "coupling_surface=fs-ledger:state-checkpoint-receipt",
+];
 
 impl StateCheckpointReceipt {
     /// Stable logical state slot.
@@ -128,13 +188,13 @@ impl StateCheckpointReceipt {
         self.runtime_state_artifact
     }
 
-    /// L1-minted canonical parameter-block identity.
+    /// Caller-asserted canonical parameter-block identity.
     #[must_use]
     pub const fn canonical_parameters_hash(&self) -> ContentHash {
         self.canonical_parameters_hash
     }
 
-    /// Injected L3 contract plus implementation identity.
+    /// Caller-asserted L3 contract plus implementation identity.
     #[must_use]
     pub const fn contract_and_code_hash(&self) -> ContentHash {
         self.contract_and_code_hash
@@ -680,9 +740,9 @@ impl Ledger {
 
     /// Mint or exactly replay one immutable semantic state-checkpoint receipt.
     ///
-    /// The caller injects an already-admitted canonical parameter hash from
-    /// fs-matdb and an L3 contract/code identity. The ledger binds those opaque
-    /// identities and integrity-checks the complete retained runtime-state
+    /// The caller injects an opaque canonical parameter hash expected from
+    /// fs-matdb and an opaque L3 contract/code identity. The ledger binds those
+    /// caller assertions exactly and integrity-checks the retained runtime-state
     /// artifact under a 64 MiB cap before insertion. An exact retry returns the
     /// original receipt. A stable slot may accumulate successive immutable
     /// checkpoints because each distinct state/semantic tuple has a distinct
@@ -845,7 +905,12 @@ mod tests {
         changed.state_slot = StateSlotId(ContentHash([0x22; 32]));
         mutations.push(changed);
         let mut changed = base.clone();
-        changed.law_id = "other-law".into();
+        changed.law_id = "checkpoint-best-law".into();
+        assert_eq!(changed.law_id.len(), base.law_id.len());
+        mutations.push(changed);
+        let mut changed = base.clone();
+        changed.law_id = "short-law".into();
+        assert_ne!(changed.law_id.len(), base.law_id.len());
         mutations.push(changed);
         let mut changed = base.clone();
         changed.law_version += 1;
@@ -874,14 +939,42 @@ mod tests {
             ),
             base.content_hash
         );
-        assert_ne!(
-            checkpoint_receipt_hash_with_schema(
-                &base,
-                STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION,
-                "org.frankensim.fs-ledger.state-checkpoint-receipt.foreign",
-            ),
-            base.content_hash
+        let foreign_domain_hash = checkpoint_receipt_hash_with_schema(
+            &base,
+            STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION,
+            "org.frankensim.fs-ledger.state-checkpoint-receipt.foreign",
         );
+        assert_ne!(foreign_domain_hash, base.content_hash);
+        let mut foreign_domain_receipt = base.clone();
+        foreign_domain_receipt.content_hash = foreign_domain_hash;
+        assert!(matches!(
+            StateCheckpointReceipt::from_bytes(&foreign_domain_receipt.to_bytes()),
+            Err(StateCheckpointDecodeError::HashMismatch)
+        ));
+
+        let law = base.law_id.as_bytes();
+        let mut reordered = Vec::new();
+        reordered.extend_from_slice(&STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION.to_le_bytes());
+        reordered.extend_from_slice(base.state_slot.0.as_bytes());
+        reordered.extend_from_slice(
+            &u16::try_from(law.len())
+                .expect("bounded fixture law id")
+                .to_le_bytes(),
+        );
+        reordered.extend_from_slice(law);
+        reordered.extend_from_slice(&base.state_schema_version.to_le_bytes());
+        reordered.extend_from_slice(&base.law_version.to_le_bytes());
+        reordered.extend_from_slice(base.runtime_state_artifact.as_bytes());
+        reordered.extend_from_slice(base.canonical_parameters_hash.as_bytes());
+        reordered.extend_from_slice(base.contract_and_code_hash.as_bytes());
+        let reordered_hash = hash_domain(STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN, &reordered);
+        assert_ne!(reordered_hash, base.content_hash);
+        let mut reordered_receipt = base.clone();
+        reordered_receipt.content_hash = reordered_hash;
+        assert!(matches!(
+            StateCheckpointReceipt::from_bytes(&reordered_receipt.to_bytes()),
+            Err(StateCheckpointDecodeError::HashMismatch)
+        ));
 
         let mut future = base.to_bytes();
         future[..4].copy_from_slice(&2u32.to_le_bytes());
@@ -895,6 +988,20 @@ mod tests {
             StateCheckpointReceipt::from_bytes(&tampered),
             Err(StateCheckpointDecodeError::HashMismatch)
         ));
+        let mut malformed_law_length = base.to_bytes();
+        let encoded_law_length =
+            u16::try_from(base.law_id.len() + 1).expect("bounded fixture law id");
+        malformed_law_length[36..38].copy_from_slice(&encoded_law_length.to_le_bytes());
+        assert!(matches!(
+            StateCheckpointReceipt::from_bytes(&malformed_law_length),
+            Err(StateCheckpointDecodeError::Length { .. })
+        ));
+        let mut invalid_utf8 = base.to_bytes();
+        invalid_utf8[38] = 0xff;
+        assert!(matches!(
+            StateCheckpointReceipt::from_bytes(&invalid_utf8),
+            Err(StateCheckpointDecodeError::LawIdUtf8)
+        ));
         let mut extended = base.to_bytes();
         extended.push(0);
         assert!(matches!(
@@ -906,8 +1013,13 @@ mod tests {
     #[test]
     fn law_id_limit_is_utf8_byte_bounded() {
         let exactly_256_bytes = "é".repeat(128);
-        let mut exact = semantics(ContentHash([0x42; 32]));
-        exact.law_id = &exactly_256_bytes;
+        let exact = KnownStateSemantics {
+            law_id: &exactly_256_bytes,
+            law_version: 3,
+            state_schema_version: 7,
+            canonical_parameters_hash: ContentHash([0x11; 32]),
+            contract_and_code_hash: ContentHash([0x42; 32]),
+        };
         let receipt = receipt_from_semantics(
             StateSlotId(ContentHash([0x23; 32])),
             exact,
@@ -922,8 +1034,13 @@ mod tests {
         );
 
         let over_limit = "é".repeat(129);
-        let mut oversized = exact;
-        oversized.law_id = &over_limit;
+        let oversized = KnownStateSemantics {
+            law_id: &over_limit,
+            law_version: exact.law_version,
+            state_schema_version: exact.state_schema_version,
+            canonical_parameters_hash: exact.canonical_parameters_hash,
+            contract_and_code_hash: exact.contract_and_code_hash,
+        };
         assert!(matches!(
             receipt_from_semantics(
                 StateSlotId(ContentHash([0x24; 32])),

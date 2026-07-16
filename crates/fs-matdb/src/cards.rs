@@ -86,6 +86,65 @@ pub struct ConstitutiveModelCard {
     pub provenance: Provenance,
 }
 
+/// Exhaustive owner-type classifier for the canonical parameter-block
+/// identity. Adding a model-card field must make identity governance fail
+/// until that field is classified deliberately.
+#[allow(dead_code)]
+fn classify_canonical_parameter_block_identity_fields(source: &ConstitutiveModelCard) {
+    let ConstitutiveModelCard {
+        law,
+        law_version,
+        parameters,
+        state_schema_version,
+        initial_state,
+        validity,
+        sources,
+        provenance,
+    } = source;
+    let _ = (
+        law,
+        law_version,
+        parameters,
+        state_schema_version,
+        initial_state,
+        validity,
+        sources,
+        provenance,
+    );
+}
+
+/// Owner-local canonical parameter-block declaration consumed by
+/// `xtask check-identities`.
+#[allow(dead_code)]
+pub const CANONICAL_PARAMETER_BLOCK_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-matdb:canonical-parameter-block",
+    "version_const=CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-matdb.canonical-parameter-block.v1",
+    "domain_const=CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN",
+    "encoder=ConstitutiveModelCard::canonical_parameters_hash",
+    "encoder_helpers=ConstitutiveModelCard::canonical_parameters_hash_with_schema",
+    "schema_constants=CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION,CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,crates/fs-qty/src/lib.rs#DIMENSION_COUNT",
+    "schema_functions=ConstitutiveModelCard::validate,crates/fs-matdb/src/lib.rs#dims_bytes,crates/fs-matdb/src/lib.rs#Provenance::validate,crates/fs-evidence/src/lib.rs#ValidityDomain::bounds,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=blake3-256-domain-separated",
+    "encoding=typed-binary",
+    "sources=ConstitutiveModelCard",
+    "source_fields=ConstitutiveModelCard.law:nonsemantic:bound-separately-by-checkpoint,ConstitutiveModelCard.law_version:nonsemantic:bound-separately-by-checkpoint,ConstitutiveModelCard.parameters:semantic,ConstitutiveModelCard.state_schema_version:nonsemantic:bound-separately-by-checkpoint,ConstitutiveModelCard.initial_state:nonsemantic:initialization-policy-not-parameter-bytes,ConstitutiveModelCard.validity:nonsemantic:admission-envelope-not-parameter-identity,ConstitutiveModelCard.sources:nonsemantic:calibration-provenance-not-parameter-identity,ConstitutiveModelCard.provenance:nonsemantic:provenance-envelope-not-parameter-identity",
+    "source_bindings=ConstitutiveModelCard.parameters>parameter-count+parameter-order+parameter-name-byte-count+parameter-name-utf8+parameter-value-byte-count+parameter-value-f64-exact-bits-le+parameter-dimensions-byte-count+parameter-dimensions-six-i8-twos-complement",
+    "external_semantic_fields=identity-domain,identity-version,canonical-field-order,part-length-u64-le",
+    "semantic_fields=identity-domain,identity-version,canonical-field-order,part-length-u64-le,parameter-count,parameter-order,parameter-name-byte-count,parameter-name-utf8,parameter-value-byte-count,parameter-value-f64-exact-bits-le,parameter-dimensions-byte-count,parameter-dimensions-six-i8-twos-complement",
+    "excluded_fields=none",
+    "consumers=ConstitutiveModelCard::canonical_parameters_hash,crates/fs-ledger/src/state_checkpoint.rs#KnownStateSemantics",
+    "mutations=identity-domain:crates/fs-matdb/src/cards.rs#canonical_parameter_identity_schema_moves_version_and_domain,identity-version:crates/fs-matdb/src/cards.rs#canonical_parameter_identity_schema_moves_version_and_domain,canonical-field-order:crates/fs-matdb/src/cards.rs#canonical_parameter_identity_schema_moves_version_and_domain,part-length-u64-le:crates/fs-matdb/src/cards.rs#canonical_parameter_identity_schema_moves_version_and_domain,parameter-count:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-order:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-name-byte-count:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-name-utf8:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-value-byte-count:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-value-f64-exact-bits-le:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-dimensions-byte-count:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,parameter-dimensions-six-i8-twos-complement:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped",
+    "nonsemantic_mutations=ConstitutiveModelCard.law:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,ConstitutiveModelCard.law_version:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,ConstitutiveModelCard.state_schema_version:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,ConstitutiveModelCard.initial_state:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,ConstitutiveModelCard.validity:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,ConstitutiveModelCard.sources:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped,ConstitutiveModelCard.provenance:crates/fs-matdb/tests/cards.rs#canonical_parameter_block_hash_is_ordered_and_narrowly_scoped",
+    "field_guard=classify_canonical_parameter_block_identity_fields",
+    "transport_guard=ConstitutiveModelCard::canonical_parameters_hash",
+    "version_guard=crates/fs-matdb/src/cards.rs#canonical_parameter_identity_schema_moves_version_and_domain",
+    "coupling_surface=fs-matdb:canonical-parameter-block",
+];
+
 impl ConstitutiveModelCard {
     /// Validate the card's structural gates (finite parameters, usable
     /// validity, load-bearing provenance, nonempty parameter block).
@@ -208,6 +267,13 @@ mod tests {
                 dims: Dims([0; 6]),
             },
         );
+        parameters.insert(
+            "q".to_string(),
+            LawParameter {
+                value: 2.0,
+                dims: Dims([1, 0, 0, 0, 0, 0]),
+            },
+        );
         ConstitutiveModelCard {
             law: LawId("identity-test".to_string()),
             law_version: 1,
@@ -224,12 +290,50 @@ mod tests {
         }
     }
 
+    fn parameter_preimage(
+        parameters: &[(&str, &LawParameter)],
+        encoded_count: u64,
+        length_override: Option<(usize, u64)>,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION.to_le_bytes());
+        payload.extend_from_slice(&encoded_count.to_le_bytes());
+        let mut part_index = 0usize;
+        let mut push = |part: &[u8]| {
+            let encoded_len = length_override
+                .filter(|(index, _)| *index == part_index)
+                .map_or_else(|| u64::try_from(part.len()).unwrap(), |(_, len)| len);
+            payload.extend_from_slice(&encoded_len.to_le_bytes());
+            payload.extend_from_slice(part);
+            part_index += 1;
+        };
+        for (name, parameter) in parameters {
+            push(name.as_bytes());
+            push(&parameter.value.to_bits().to_le_bytes());
+            push(&crate::dims_bytes(parameter.dims));
+        }
+        payload
+    }
+
     #[test]
     fn canonical_parameter_identity_schema_moves_version_and_domain() {
         let model = model();
         let canonical = model
             .canonical_parameters_hash()
             .expect("valid model mints parameter identity");
+        let ordered = model
+            .parameters
+            .iter()
+            .map(|(name, parameter)| (name.as_str(), parameter))
+            .collect::<Vec<_>>();
+        let encoded_count = u64::try_from(ordered.len()).expect("bounded fixture parameter count");
+        assert_eq!(
+            canonical,
+            hash_domain(
+                CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
+                &parameter_preimage(&ordered, encoded_count, None),
+            )
+        );
         assert_ne!(
             canonical,
             model.canonical_parameters_hash_with_schema(
@@ -243,6 +347,64 @@ mod tests {
                 CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION,
                 "org.frankensim.fs-matdb.canonical-parameter-block.foreign",
             )
+        );
+
+        let reversed = ordered.iter().rev().copied().collect::<Vec<_>>();
+        assert_ne!(
+            canonical,
+            hash_domain(
+                CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
+                &parameter_preimage(&reversed, encoded_count, None),
+            ),
+            "canonical parameter order is part of the identity schema"
+        );
+        assert_ne!(
+            canonical,
+            hash_domain(
+                CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
+                &parameter_preimage(&ordered, encoded_count + 1, None),
+            ),
+            "parameter count is part of the identity schema"
+        );
+        for (part_index, label) in [
+            (0, "parameter-name-byte-count"),
+            (1, "parameter-value-byte-count"),
+            (2, "parameter-dimensions-byte-count"),
+        ] {
+            assert_ne!(
+                canonical,
+                hash_domain(
+                    CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
+                    &parameter_preimage(&ordered, encoded_count, Some((part_index, 99))),
+                ),
+                "{label} is part of the identity schema"
+            );
+        }
+
+        let mut reordered = Vec::new();
+        reordered.extend_from_slice(&CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION.to_le_bytes());
+        reordered.extend_from_slice(
+            &u64::try_from(model.parameters.len())
+                .expect("bounded fixture parameter count")
+                .to_le_bytes(),
+        );
+        let mut push = |part: &[u8]| {
+            reordered.extend_from_slice(
+                &u64::try_from(part.len())
+                    .expect("bounded fixture field")
+                    .to_le_bytes(),
+            );
+            reordered.extend_from_slice(part);
+        };
+        for (name, parameter) in &model.parameters {
+            push(&parameter.value.to_bits().to_le_bytes());
+            push(name.as_bytes());
+            push(&crate::dims_bytes(parameter.dims));
+        }
+        assert_ne!(
+            canonical,
+            hash_domain(CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN, &reordered),
+            "canonical field order is part of the parameter identity schema"
         );
     }
 }

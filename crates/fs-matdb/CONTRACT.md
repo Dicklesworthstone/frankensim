@@ -112,7 +112,11 @@ persistence.
   names, exact value bits, and six-base dimensions under
   `org.frankensim.fs-matdb.canonical-parameter-block.v1`; it is never a model
   identity by itself and must travel with law/version/state-schema and
-  implementation-contract identities. Minting first runs the ordinary card
+  implementation-contract identities. Its preimage is the identity version as
+  little-endian `u32`, the parameter count as little-endian `u64`, then each
+  BTreeMap-ordered name, exact little-endian `f64` bits, and six signed
+  dimension bytes, with every part framed by a little-endian `u64` byte count.
+  Minting first runs the ordinary card
   admission gates, so empty or non-finite parameter blocks cannot acquire an
   authoritative canonical hash.
 - `MaterialStateId` / `MaterialCard` (PR-2) — a NAMED MATERIAL STATE
