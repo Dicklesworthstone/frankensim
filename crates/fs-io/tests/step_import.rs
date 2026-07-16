@@ -1,4 +1,4 @@
-//! G0/G3/G4 coverage for the caller-tessellated STEP-to-estimated-SDF handoff.
+//! G0/G3/G4 coverage for the identified STEP-tessellation-to-SDF handoff.
 
 use fs_evidence::{NumericalCertificate, NumericalKind, vv::UnitId};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -12,7 +12,7 @@ use fs_rep_mesh::{MeshSdfError, Soup, shapes};
 fn parsed_fixture() -> ParsedStep {
     let source = b"ISO-10303-21;\n\
         HEADER;\n\
-        FILE_DESCRIPTION(('caller tessellation fixture'),'2;1');\n\
+        FILE_DESCRIPTION(('identified tessellation fixture'),'2;1');\n\
         FILE_NAME('fixture.step','2026-07-16T00:00:00',('fs-io'),\
         ('FrankenSim'),'fs-io','FrankenSim','');\n\
         FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));\n\
@@ -122,10 +122,10 @@ fn step_import_001_closed_mesh_yields_source_bound_estimate_receipt() {
         assert!(json.contains("\"authority\":\"estimate\""));
         assert!(json.contains("\"sign_confidence\":\"uncertified\""));
         assert!(json.contains("\"source_fingerprint_fnv1a64\""));
-        assert!(json.contains("\"step_import_semantics\":\"step-tessellation-to-sdf-v1\""));
+        assert!(json.contains("\"step_import_semantics\":\"step-tessellation-to-sdf-v2\""));
         assert!(json.contains("\"execution_mode\":\"deterministic\""));
         assert!(json.contains("\"tessellation_fingerprint_domain\""));
-        assert!(json.contains("caller-supplied tessellation"));
+        assert!(json.contains("identified tessellation materialization"));
 
         let different_deviation = import_step_tessellation(
             &parsed,

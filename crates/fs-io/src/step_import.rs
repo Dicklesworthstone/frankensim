@@ -1,8 +1,8 @@
-//! Caller-tessellated STEP handoff into the existing mesh-to-SDF lane.
+//! Identified STEP-tessellation handoff into the existing mesh-to-SDF lane.
 //!
 //! The Part-21 syntax kernel does not interpret EXPRESS geometry. This module
 //! accepts a tessellation produced by an explicitly identified external or
-//! future in-house adapter, removes duplicate/degenerate faces and unreferenced
+//! in-house adapter, removes duplicate/degenerate faces and unreferenced
 //! vertices, repairs orientation, then refuses leaks/non-manifoldness rather
 //! than filling them. A successful result is still only an **estimated** SDF: component
 //! nesting, self-intersection freedom, and generalized-winding sign remain
@@ -16,9 +16,9 @@ use fs_rep_mesh::{MeshChart, MeshQuality, MeshSdfError, RepairReceipt, Soup, mes
 use fs_rep_sdf::TiledSdf;
 use std::fmt::Write as _;
 
-/// Maximum vertices admitted in one caller-supplied STEP tessellation.
+/// Maximum vertices admitted in one materialized STEP tessellation.
 pub const MAX_STEP_TESSELLATION_VERTICES: usize = 1_000_000;
-/// Maximum triangles admitted in one caller-supplied STEP tessellation.
+/// Maximum triangles admitted in one materialized STEP tessellation.
 pub const MAX_STEP_TESSELLATION_TRIANGLES: usize = 1_000_000;
 /// Maximum localized mesh defects retained in a refusal.
 pub const MAX_STEP_LOCALIZED_DEFECTS: usize = 256;
@@ -30,7 +30,7 @@ const ESTIMATED_AUX_BYTES_PER_VERTEX: usize = 64;
 const ESTIMATED_AUX_BYTES_PER_TRIANGLE: usize = 384;
 const CANCELLATION_POLL_STRIDE: usize = 4_096;
 /// Versioned semantics label for the complete STEP-tessellation handoff.
-pub const STEP_IMPORT_SEMANTICS_VERSION: &str = "step-tessellation-to-sdf-v1";
+pub const STEP_IMPORT_SEMANTICS_VERSION: &str = "step-tessellation-to-sdf-v2";
 /// Domain of the bit-exact, non-cryptographic tessellation fingerprint.
 pub const STEP_TESSELLATION_FINGERPRINT_DOMAIN: &str = "org.frankensim.fs-io.step-tessellation.v1";
 
@@ -187,7 +187,7 @@ impl std::error::Error for StepImportRefusal {
     }
 }
 
-/// Source-bound receipt for the caller-tessellated estimated-SDF handoff.
+/// Source-bound receipt for the identified-tessellation estimated-SDF handoff.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepImportReceipt {
     source_fingerprint: u64,
@@ -223,7 +223,7 @@ impl StepImportReceipt {
         self.canonical_layout_fingerprint
     }
 
-    /// Bit-exact non-cryptographic fingerprint of the caller's triangle soup.
+    /// Bit-exact non-cryptographic fingerprint of the input triangle soup.
     #[must_use]
     pub const fn source_tessellation_fingerprint(&self) -> u64 {
         self.source_tessellation_fingerprint
@@ -241,7 +241,7 @@ impl StepImportReceipt {
         &self.schemas
     }
 
-    /// Caller-declared tessellator identity retained by the receipt.
+    /// Identified tessellation materializer retained by the receipt.
     #[must_use]
     pub const fn tessellator(&self) -> &StepTessellatorIdentity {
         &self.tessellator
@@ -253,7 +253,7 @@ impl StepImportReceipt {
         &self.length_unit
     }
 
-    /// Caller-declared tessellation deviation band.
+    /// Declared tessellation deviation band.
     #[must_use]
     pub const fn tessellation_deviation(&self) -> NumericalCertificate {
         self.tessellation_deviation
@@ -265,7 +265,7 @@ impl StepImportReceipt {
         self.combined_numerical
     }
 
-    /// Mesh-to-SDF numerical evidence before caller-deviation composition.
+    /// Mesh-to-SDF numerical evidence before declared-deviation composition.
     #[must_use]
     pub const fn mesh_sdf_numerical(&self) -> NumericalCertificate {
         self.mesh_sdf_numerical
@@ -380,7 +380,7 @@ impl StepImportReceipt {
             out,
             ",\"output_provenance_fingerprint\":\"{:016x}\",\
              \"sign_confidence\":\"uncertified\",\
-             \"no_claim\":\"caller-supplied tessellation; no EXPRESS interpretation, component-nesting proof, self-intersection certificate, or globally certified winding sign\"}}",
+             \"no_claim\":\"identified tessellation materialization; no full EXPRESS interpretation, component-nesting proof, self-intersection certificate, or globally certified winding sign\"}}",
             self.output_provenance.0
         );
         out
@@ -408,7 +408,7 @@ impl StepImportOutcome {
     }
 }
 
-/// Convert an explicitly caller-tessellated STEP document into an estimated
+/// Convert an explicitly materialized STEP document into an estimated
 /// tiled SDF.
 ///
 /// Duplicate/degenerate faces and unreferenced vertices may be removed, and
@@ -627,9 +627,9 @@ pub fn import_step_tessellation(
     evidence
         .model
         .cards
-        .push("step-caller-tessellation".to_string());
+        .push("step-tessellation-materialization".to_string());
     evidence.model.assumptions.push(format!(
-        "STEP geometry was materialized by caller-identified tessellator {}@{} in unit {} with a caller-supplied {:?} deviation upper bound {}; component nesting, self-intersection freedom, semantic correspondence to Part-21 entities, and generalized-winding sign remain uncertified",
+        "STEP geometry was materialized by identified adapter {}@{} in unit {} with a declared {:?} deviation upper bound {}; component nesting, self-intersection freedom, full semantic correspondence to Part-21 entities, and generalized-winding sign remain uncertified",
         tessellator.name,
         tessellator.version,
         length_unit,

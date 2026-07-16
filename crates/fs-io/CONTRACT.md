@@ -5,9 +5,9 @@ Dirty geometry comes in, useful artifacts go out — and no imported
 artifact becomes a trusted value without a certification receipt.
 
 Ambition tags: STL/OBJ/PLY + quarantine + catalogs + 3MF/GLB/VTK [S];
-bounded STEP Part-21 syntax kernel and caller-tessellated estimated-SDF
-handoff [S]; native CAD/EXPRESS interpretation, tessellation, and B-rep
-interchange explicitly STAGED (no-claim below).
+bounded STEP Part-21 syntax, strict native triangular faceted-resource
+decoding, and estimated-SDF handoff [S]; broader CAD/EXPRESS interpretation,
+surface tessellation, and B-rep export explicitly STAGED (no-claim below).
 
 ## Purpose and layer
 
@@ -66,9 +66,9 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   FNV fingerprints, schemas, graph counts, and a strictly non-authoritative
   AP203/AP214 label hint. HELM must replace fingerprints with its
   collision-resistant artifact identity before authority-bearing use.
-- **STEP tessellation handoff** (`step_import` module): accepts a caller-
-  supplied triangle soup only alongside the sealed `ParsedStep`, an explicit
-  tessellator name/version/configuration fingerprint, a caller-declared
+- **STEP tessellation handoff** (`step_import` module): accepts a materialized
+  triangle soup only alongside the sealed `ParsedStep`, an explicit
+  adapter name/version/configuration fingerprint, a declared
   tessellation-deviation certificate, one shared length-unit ID for coordinates,
   deviation, and sampling spacing, a positive sampling spacing, and `Cx`.
   It removes duplicate/degenerate faces and unreferenced vertices, may unify
@@ -79,6 +79,17 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   a source-bound receipt that separately retains tessellation deviation,
   mesh-to-SDF numerical evidence, their outward-rounded combined estimate,
   repairs, quality counters, and adapter identity.
+- **Strict native STEP faceted decoding** (`step_faceted` module): materializes
+  one caller-selected, root-reachable `FACETED_BREP -> CLOSED_SHELL -> FACE ->
+  FACE_OUTER_BOUND -> POLY_LOOP -> CARTESIAN_POINT` closure. V1 admits exactly
+  one triangular outer loop per face, preserves loop order except for explicit
+  `.F.` bound reversal, canonicalizes EXPRESS `SET` face traversal by numeric
+  instance ID, and passes the resulting soup into the existing topology/SDF
+  handoff. A separate decoder receipt retains the exact admitted schema label,
+  root/shell IDs, syntax and semantic fingerprints, resource limits, and a
+  conservative decimal-to-f64 spatial estimate. This is bounded resource-entity
+  decoding, not AP203/AP214 conformance; callers supply the length unit because
+  the admitted closure deliberately excludes representation context.
 
 ## Invariants
 
@@ -116,7 +127,7 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
    conflicts, vertex-link failures, and non-outward aggregate orientation
    refuse publication; localized diagnostics are bounded to 256 records and
    state when truncated.
-10. **No deviation laundering**: caller deviation must be a finite, ordered,
+10. **No deviation laundering**: declared deviation must be a finite, ordered,
     non-negative `Exact`, `Enclosure`, or `Estimate` band. It remains separate
     in the receipt, and its upper bound is added with outward rounding to the
     mesh-to-SDF upper bound. The combined result is always `Estimate`, never a
@@ -133,6 +144,33 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     admission estimate, and at most 256 retained localized defects. The
     receipt records these limits, crate versions, STEP-import semantics label,
     and tessellation-fingerprint domain.
+13. **Native faceted traversal is explicit and closed**: callers select a
+    positive `FACETED_BREP` root. Only its fixed-depth six-entity closure is
+    interpreted; every reachable instance must be simple, exact-arity, and the
+    expected entity type. Unknown unrelated instances remain outside the claim.
+14. **No implicit triangulation or welding**: every `POLY_LOOP` has exactly
+    three unique point references. Shared point IDs become shared soup vertices;
+    distinct IDs with equal coordinates remain distinct. Holes, extra bounds,
+    non-triangular loops, reused bounds/loops, and complex reachable instances
+    refuse instead of being guessed or repaired by the decoder.
+15. **Canonical semantic materialization**: shell face references, point
+    positions, and triangles are emitted in numeric instance-ID order. Shell
+    `SET` permutation therefore preserves the soup and semantic fingerprint;
+    source spelling remains separately fingerprinted. `.T.` preserves the
+    `POLY_LOOP` order and `.F.` reverses it.
+16. **Schema labels gate but do not certify**: v1 admits one exact declaration,
+    either `CONFIG_CONTROL_DESIGN` or `AUTOMOTIVE_DESIGN`. The declaration is
+    recorded as provenance, never promoted into EXPRESS or application-protocol
+    authority. Finite coordinate conversion carries a conservative `Estimate`,
+    and the existing zero-hole-fill handoff remains the sole owner of its
+    bounded edge-use, local vertex-link, and aggregate-orientation admission;
+    neither receipt claims global shell connectedness, component nesting, or
+    self-intersection certification.
+17. **Decoder memory admission is portable and explicit**: the auxiliary cap
+    covers checked logical element payloads for every simultaneously live
+    decoder vector. Platform allocator rounding and container headers are not
+    misrepresented as measured bytes; `try_reserve_exact` failure still returns
+    a structured resource refusal.
 
 ## Error model
 
@@ -144,20 +182,31 @@ characters and binary literals, and `ResourceBound` for every declared
 limit. `StepImportRefusal` separates raw admission, localized mesh integrity,
 preprocessing resource admission, SDF build/cancellation, and evidence-
 composition failures; each variant keeps the source fingerprint and later-
-stage variants keep repair receipts.
+stage variants keep repair receipts. `StepFacetedRefusal` separately reports
+schema-gate, root-reachable entity, decoder-resource, and cancellation refusals
+with the source fingerprint plus exact instance relationship or decoder stage.
+`StepFacetedImportRefusal` preserves whether refusal happened during native
+materialization or the downstream topology/SDF handoff; a downstream refusal
+retains the successful decoder receipt and selected-root provenance.
 
 ## Determinism class
 
 **D0**: fixed parse/emit orders, deterministic welds/topology sorts, no ambient
-state. The STEP tessellation handoff rejects `ExecMode::Fast`; its receipt and
-provenance explicitly bind deterministic mode.
+state. Native faceted decoding sorts schema-defined `SET` members and materializes
+points/faces by numeric instance ID. The STEP tessellation handoff rejects
+`ExecMode::Fast`; its receipt and provenance explicitly bind deterministic mode.
 
 ## Cancellation behavior
 
 Legacy mesh/catalog parsers are single-pass and element-capped. The STEP
 kernel is deliberately multi-pass (parse, shape/graph validation,
 canonical-layout serialization) and cap-bounded, but it has no `Cx` and
-makes no cancellation-latency claim. The caller-tessellation handoff polls `Cx`
+makes no cancellation-latency claim. Native faceted decoding polls at entry,
+publication, duplicate/deduplication scans, and every 4096 indexed instances,
+faces, and points. Sorting is a deterministic sequence of at-most-4096-element
+local sorts followed by a cancellable k-way merge, so no million-record
+standard-library sort becomes an unpolled region. The identified tessellation
+handoff polls `Cx`
 at entry, around cap-bounded library calls, and every 4096 records in its owned
 validation, fingerprint, vertex-compaction, edge-localization, and vertex-link
 passes before forwarding the same `Cx` to mesh-to-SDF sampling. Cancellation is
@@ -202,6 +251,15 @@ retention; closed disconnected vertex-link refusal; pre-requested cancellation;
 outward-rounding overflow refusal; and fast-mode refusal. Differential fixtures
 require changed soup bits or deviation claims to move output provenance.
 
+`tests/step_faceted.rs` (G0/G3/G4): unsorted tetrahedron closure and canonical
+soup materialization; bound-orientation reversal; shell-`SET` permutation
+invariance; exact supported and refused schema declarations; explicit staged
+`FACE_SURFACE`, non-triangular, duplicate-point, non-finite-coordinate,
+vertex-cap, and auxiliary-memory refusals plus the independent triangle cap;
+pre-requested cancellation; and
+proof that the native bridge reaches
+the existing topology quarantine rather than laundering an open shell.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -214,15 +272,21 @@ import identically in both ASCII and binary (conformance-tested).
 
 ## No-claim boundaries
 
-- **Native STEP CAD semantics remain STAGED**: the syntax kernel does not load
-  an EXPRESS schema, authorize AP203/AP214 conformance, interpret products,
-  assemblies, units, topology, or geometry, or tessellate surfaces.
-  `StepProfileHint` is label recognition only. The optional handoff consumes
-  a triangle soup and deviation supplied by an explicitly identified caller;
-  it does not derive either from STEP records or certify the caller's bound.
+- **Full native STEP CAD semantics remain STAGED**: the syntax kernel does not
+  load an EXPRESS schema or authorize AP203/AP214 conformance.
+  `StepProfileHint` is label recognition only. The strict faceted decoder derives
+  a triangle soup from one bounded six-entity resource closure, but does not
+  interpret products, assemblies, shape-representation linkage, units/context,
+  AP global rules, surfaces, voids, or general B-rep topology. External handoff
+  adapters remain responsible for their declared tessellation deviation. V1
+  deliberately refuses the plane-backed `FACE_SURFACE` records used by normal
+  AP203/AP214 faceted exchange; `PLANE`, placements, and directions need a
+  separately pinned semantic subset before that path can ship.
 - **STEP-derived SDF authority is Estimate only**: the handoff does not certify
   component nesting, self-intersection freedom, generalized-winding sign, or
-  semantic correspondence between the Part-21 records and caller tessellation.
+  full semantic correspondence between arbitrary Part-21 records and a
+  tessellation. The native decoder claims correspondence only for its selected
+  admitted closure and records decimal-to-f64 conversion as an estimate.
   It does not fit NURBS, write a topological B-rep/solid, or establish
   manufacturing predicates.
 - **Part-21 encoded characters and binary literals are refused** in this

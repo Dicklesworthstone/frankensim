@@ -17,6 +17,7 @@ pub mod obj;
 pub mod ply;
 pub mod quarantine;
 pub mod step;
+pub mod step_faceted;
 pub mod step_import;
 pub mod stl;
 
@@ -27,6 +28,11 @@ pub use step::{
     ParsedStep, STEP_SYNTAX_VERSION, StepDocument, StepEntity, StepHeader, StepInstance,
     StepLimits, StepProfileHint, StepStructureReceipt, StepValue, parse_step,
     parse_step_with_limits, write_step, write_step_with_limits,
+};
+pub use step_faceted::{
+    DecodedFacetedBrep, STEP_FACETED_DECODER_VERSION, STEP_FACETED_MATERIALIZER_NAME,
+    StepFacetedImportOutcome, StepFacetedImportRefusal, StepFacetedLimits, StepFacetedProfile,
+    StepFacetedReceipt, StepFacetedRefusal, decode_faceted_brep_with_limits, import_faceted_brep,
 };
 pub use step_import::{
     MAX_STEP_ADAPTER_ID_BYTES, MAX_STEP_LOCALIZED_DEFECTS, MAX_STEP_TESSELLATION_TRIANGLES,
