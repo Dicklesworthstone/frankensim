@@ -10,7 +10,9 @@
 FrankenScript — the system's one true interface (plan §11.1, Decalogue
 P10): a typed, versioned IR with two isomorphic concrete syntaxes
 (canonical s-expressions; lossless JSON mapping), both parsing to the same
-typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
+typed AST. Layer: L6 (HELM). Production dependencies are declared in
+`Cargo.toml`; the moonshot `derived-crosswalk` feature adds fs-blake3/fs-exec
+and enables fs-geom's admitted derived-geometry boundary.
 
 ## Public types and semantics
 
@@ -62,6 +64,17 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   invalid-atom path, before recursive descent.
 - `IrError` — span + stable kind code + detail + fix hint (refusals
   teach). `IR_VERSION` — the language version this build reads/writes.
+- `derived_crosswalk` (`derived-crosswalk`, [M]) —
+  `admit_derived_machine_model_crosswalk_candidate_v1` binds one exact sealed
+  `AdmittedDerivedGeometryV1` to nominal Machine-IR model, subject, immutable
+  version, frame, and unit selectors. Its domain-separated evidence-node
+  receipt retains the current `IR_VERSION`, exact typed derived-geometry child plus
+  redundant subject/version/frame/unit selectors, four endpoint-specific
+  nominal mapping artifacts, one aggregate declaration, and a mandatory
+  no-authority artifact. Admission refuses zero identities, stale schema or IR
+  versions, a raw geometry ID that does not name the supplied sealed object,
+  and every redundant selector mismatch. The token is structural lineage only:
+  Machine IR has no admitted semantic model graph yet.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
@@ -241,6 +254,10 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
    every injected default. Admission binds the raw and fully lowered canonical
    versioned identities before authority checks. Invalid raw or expanded ASTs
    refuse before those checks and cannot mint a missing identity.
+6. A derived/Machine-IR crosswalk candidate cannot detach its nominal mapping
+   artifacts from the sealed derived geometry: geometry identity, subject,
+   immutable model version, frame, and unit system must all match the supplied
+   admitted object exactly, and every retained field is identity-semantic.
 
 - Admission determinism: same study + context → byte-identical
   `diagnosis()`; findings sorted (check, span).
@@ -261,6 +278,10 @@ versioned artifact whose bytes are not its canonical persisted identity.
 caller-forged invalid atoms and trees that fit only the bare, not versioned,
 depth envelope become deterministic lowering refusals. Neither boundary panics
 on malformed caller data.
+`DerivedMachineModelCrosswalkCandidateErrorV1` is the feature-gated typed
+refusal surface for schema/IR-version drift, zero selectors or artifacts,
+raw-to-sealed geometry mismatch, redundant derived-selector mismatch,
+cancellation, and canonical identity failure. No partial crosswalk token escapes.
 
 ## Determinism class
 
@@ -268,6 +289,10 @@ Parsing, printing, and lowering are pure functions of their input text.
 Planner replay is deterministic for the same family, query, ladders, cache
 contents, and learned cost table: fixed operator ordering, exact cache-key
 framing, coordinate-ordered prolongation, and deterministic tie-breaking.
+For the same crosswalk candidate, same sealed derived object, and same current
+IR version, crosswalk admission emits the same typed receipt. Every selector,
+mapping artifact, aggregate declaration, and no-authority artifact occupies one
+fixed canonical field; there is no map-order or platform-dependent input.
 
 ## Cancellation behavior
 
@@ -278,6 +303,9 @@ allocation, cache insertion, and telemetry. Sub-operator cancellation still
 lands with fs-exec integration; no claim is made that a running solve or
 verification can be interrupted inside its admitted coefficient-by-cell work
 envelope.
+Derived-crosswalk admission polls at entry, during canonical identity
+construction, and immediately before publication. Its work is a fixed 17-field
+envelope; cancellation publishes no partial token.
 
 ## Unsafe boundary
 
@@ -289,6 +317,10 @@ None. Safe Rust only.
   (`dep:fs-verify`); disabled until its Gauntlet tier + kill metric are
   green. Gates the `planner`, `plancal`, and `anytime` targets. All
   other current IR behavior is `[S]` default-path.
+- `derived-crosswalk` [M] (default OFF) — nominal L6 Machine-IR selectors
+  bound to exact admitted L2 derived geometry. It enables
+  `fs-geom/derived-geometry` and the fs-blake3/fs-exec identity/cancellation
+  dependencies. It does not promote the absent Machine-IR model graph.
 
 ## Conformance tests
 
@@ -351,6 +383,15 @@ hints without future telemetry, verifier-family/flux identity retention, and
 that `Stop` prevents later work telemetry and cache insertion while retaining
 telemetry for a completed speculative transition.
 
+`derived_crosswalk` unit tests (`derived-crosswalk`, G0/G3/G4/G5): schema and
+receipt replay, exact accessors, independent identity movement for every
+Machine-IR selector, derived selector, mapping artifact, aggregate declaration,
+and no-authority field, including direct identity movement for the otherwise
+version-gated IR-language field; stale schema/IR version refusal; raw-to-sealed geometry
+and subject/version/frame/unit mismatch refusal; all-zero refusal for every
+selector/artifact role; and entry, identity-construction, and pre-publication
+cancellation with no token publication.
+
 ## No-claim boundaries
 
 - No operator catalog or per-operator semantic versions — gp3.6; the
@@ -387,6 +428,15 @@ telemetry for a completed speculative transition.
 - Bare `sexpr::parse`/`json::parse` intentionally do not infer an artifact
   version. Persisted or replayed programs must use `VersionedProgram`; callers
   that ledger a bare AST have no version-binding claim.
+- The `derived-crosswalk` token does not prove that any nominal Machine-IR
+  selector identifies a real, admitted, or canonical model. It does not decode
+  or inspect a Machine-IR model graph; execute the subject/version/frame/unit
+  mapping artifacts; prove semantic or physical preservation; provide an
+  inverse or composition law; construct a `VersionedProgram`; convert into a
+  derived morphism/equivalence; or transport/strengthen evidence. A future
+  Machine-IR model schema must introduce strong machine-side identities and a
+  successor crosswalk before those questions can be admitted. The mandatory
+  no-authority artifact records this boundary; it is not a proof by itself.
 - The query language is v0: a FIXED QoI menu (max/integral/exceedance), not
   a general program surface. `Query::admit` type-checks well-posedness and
   dimensions ONLY — it does NOT plan, cost, or execute a query (the greedy

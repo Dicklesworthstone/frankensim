@@ -11,7 +11,9 @@ description = "FrankenScript IR: typed AST with spans, isomorphic s-expr/JSON sy
 layer = "L6"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom" }
 fs-plan = { path = "../fs-plan" }
 fs-qty = { path = "../fs-qty" }
@@ -21,6 +23,10 @@ fs-verify = { path = "../fs-verify", features = ["certified-speculation"], optio
 [dev-dependencies]
 
 [features]
+# [M]-gated: nominal Machine-IR selectors can be bound to one exact admitted
+# derived geometry, but v1 grants no executable crosswalk or equivalence
+# authority while the Machine-IR model graph itself remains unadmitted.
+derived-crosswalk = ["dep:fs-blake3", "dep:fs-exec", "fs-geom/derived-geometry"]
 # [F]-gated per the Ambition-Tag rule: the greedy ladder-walk planner
 # ships disabled until its Gauntlet tier + kill metric are green.
 ladder-planner = ["dep:fs-verify"]

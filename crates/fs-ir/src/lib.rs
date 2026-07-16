@@ -14,12 +14,15 @@
 //! - [`study::Study`] recognizes the Appendix C study forms and extracts
 //!   the Five Explicits' pillars (validity POLICY is the admission bead's).
 //!
-//! Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
+//! Layer: L6 (HELM). Production dependencies and feature-gated deltas are
+//! declared explicitly in `Cargo.toml`.
 
 pub mod admission;
 #[cfg(feature = "ladder-planner")]
 pub mod anytime;
 pub mod ast;
+#[cfg(feature = "derived-crosswalk")]
+pub mod derived_crosswalk;
 pub mod json;
 pub mod lower;
 #[cfg(feature = "ladder-planner")]
