@@ -148,7 +148,20 @@ documented in the bead close); cross-ISA golden hash.
   or mint a different identity — the transport carries no authority.
   Round-trip canonicality and the pinned migration golden
   (`sys_014`) hold the identity still; the golden moves only with a
-  deliberate `SYSTEM_IR_VERSION` bump and recorded cause.
+  deliberate `SYSTEM_IR_VERSION` bump and recorded cause. Pullbacks and
+  clock transfers are now EXPLICIT OPERATORS, not just refusal
+  boundaries: `TransformSignature`/`ClockTransferSignature` register
+  named, content-referenced maps between coordinate conventions/clocks,
+  and `SystemExpr::Pullback`/`ClockTransfer` are the only admitted
+  cross-frame/cross-clock/cross-orientation compositions — wrong
+  endpoints refuse with both sides named
+  (`TransformEndpointMismatch`), mixed orientations without a
+  transform refuse (`OrientationMismatch`), and both tables follow the
+  atom identity discipline (content-bearing, canonically sorted and
+  remapped, byte-identical payloads refused). NO-CLAIM: v1 transforms
+  are space-preserving type-level declarations — the numeric transport
+  of values between frames/clocks is the caller's registry's job; the
+  IR binds WHICH map was used, never that the map is correct.
 - Pointwise laws are scalar diagonal (dof-local). Tensor-valued
   constitutive nodes (hyperelastic energy through `fs_ad::Real`
   generics) and state-dependent laws (plasticity history) are the

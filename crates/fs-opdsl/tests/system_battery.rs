@@ -860,7 +860,7 @@ fn sys_014_migration_golden_identity_is_pinned() {
     let identity = two_field_system(("velocity", "force"), false);
     let hex = identity.to_string();
     assert_eq!(
-        hex, "2db84c5e4cab57a2b1bac5c0ebe109062ddf21464ddd6365d4c71353c4865bc8",
+        hex, "340ef5db441d0a52d5a0f088349e603846fbf906d04c184c1531861ccf9911c6",
         "system-identity golden moved: bump SYSTEM_IR_VERSION deliberately and record the cause"
     );
 }
@@ -959,5 +959,267 @@ fn sys_015_atom_identity_is_order_and_name_free_but_content_bearing() {
         ),
         "duplicate atom payloads must refuse, got {:?}",
         ambiguous.map(|admitted| admitted.identity())
+    );
+}
+
+#[test]
+fn sys_016_pullback_admits_cross_frame_composition_explicitly() {
+    use fs_opdsl::TransformSignature;
+    let build = |content: &str| {
+        let mut system = SystemDef::new();
+        let lab = system
+            .declare_field(field(
+                "lab-velocity",
+                0,
+                16,
+                FieldQuantity::Dimensional(VELOCITY),
+                ("chart-a", "lab", "clk-main"),
+                0,
+            ))
+            .expect("lab field");
+        let rotor = system
+            .declare_field(field(
+                "rotor-velocity",
+                0,
+                16,
+                FieldQuantity::Dimensional(VELOCITY),
+                ("chart-a", "rotor", "clk-main"),
+                1,
+            ))
+            .expect("rotor field");
+        let (lab_coords, _) = refs("chart-a", "lab", "clk-main");
+        let (rotor_coords, _) = refs("chart-a", "rotor", "clk-main");
+        let map = system.register_transform(TransformSignature {
+            name: "lab-to-rotor".to_string(),
+            content: ConventionRef::new(content).expect("content"),
+            from: lab_coords,
+            to: rotor_coords,
+        });
+        (system, lab, rotor, map)
+    };
+
+    // Cross-frame sum still refuses without the transform.
+    let (mut system, lab, rotor, _) = build("frame-map:lab-to-rotor:v1");
+    let bare = system.add_equation(BlockEquation {
+        name: "bare".to_string(),
+        target: rotor,
+        rhs: SystemExpr::Add(
+            Box::new(SystemExpr::FieldRef(rotor)),
+            Box::new(SystemExpr::FieldRef(lab)),
+        ),
+    });
+    assert!(matches!(
+        bare,
+        Err(SystemTypeError::ConventionMismatch { .. })
+    ));
+
+    // Wrapping the lab operand in the explicit pullback admits.
+    let (mut system, lab, rotor, map) = build("frame-map:lab-to-rotor:v1");
+    system
+        .add_equation(BlockEquation {
+            name: "pulled".to_string(),
+            target: rotor,
+            rhs: SystemExpr::Add(
+                Box::new(SystemExpr::FieldRef(rotor)),
+                Box::new(SystemExpr::Pullback {
+                    transform: map,
+                    arg: Box::new(SystemExpr::FieldRef(lab)),
+                }),
+            ),
+        })
+        .expect("explicit pullback admits cross-frame composition");
+    let baseline = system.admit().expect("admits").identity();
+
+    // Applying the pullback to the WRONG endpoint refuses by name.
+    let (mut system, _lab, rotor, map) = build("frame-map:lab-to-rotor:v1");
+    let wrong = system.add_equation(BlockEquation {
+        name: "wrong-endpoint".to_string(),
+        target: rotor,
+        rhs: SystemExpr::Pullback {
+            transform: map,
+            arg: Box::new(SystemExpr::FieldRef(rotor)),
+        },
+    });
+    assert!(
+        matches!(
+            wrong,
+            Err(SystemTypeError::TransformEndpointMismatch {
+                context: "pullback from-convention",
+                ..
+            })
+        ),
+        "wrong-endpoint pullback must refuse, got {wrong:?}"
+    );
+
+    // The transform's content reference is identity-bearing.
+    let (mut system, lab, rotor, map) = build("frame-map:lab-to-rotor:v2");
+    system
+        .add_equation(BlockEquation {
+            name: "pulled".to_string(),
+            target: rotor,
+            rhs: SystemExpr::Add(
+                Box::new(SystemExpr::FieldRef(rotor)),
+                Box::new(SystemExpr::Pullback {
+                    transform: map,
+                    arg: Box::new(SystemExpr::FieldRef(lab)),
+                }),
+            ),
+        })
+        .expect("v2 map admits identically");
+    assert_ne!(
+        baseline,
+        system.admit().expect("admits").identity(),
+        "the transform content reference is identity-bearing"
+    );
+}
+
+#[test]
+fn sys_017_clock_transfer_admits_cross_clock_composition_explicitly() {
+    use fs_opdsl::ClockTransferSignature;
+    let mut system = SystemDef::new();
+    let fast = system
+        .declare_field(field(
+            "fast",
+            0,
+            16,
+            FieldQuantity::Dimensional(VELOCITY),
+            ("chart-a", "lab", "clk-fast"),
+            0,
+        ))
+        .expect("fast field");
+    let slow = system
+        .declare_field(field(
+            "slow",
+            0,
+            16,
+            FieldQuantity::Dimensional(VELOCITY),
+            ("chart-a", "lab", "clk-slow"),
+            1,
+        ))
+        .expect("slow field");
+    let transfer = system.register_clock_transfer(ClockTransferSignature {
+        name: "subsample".to_string(),
+        content: ConventionRef::new("clock-map:fast-to-slow:v1").expect("content"),
+        from_clock: ConventionRef::new("clk-fast").expect("from"),
+        to_clock: ConventionRef::new("clk-slow").expect("to"),
+    });
+    system
+        .add_equation(BlockEquation {
+            name: "transferred".to_string(),
+            target: slow,
+            rhs: SystemExpr::Add(
+                Box::new(SystemExpr::FieldRef(slow)),
+                Box::new(SystemExpr::ClockTransfer {
+                    transfer,
+                    arg: Box::new(SystemExpr::FieldRef(fast)),
+                }),
+            ),
+        })
+        .expect("explicit clock transfer admits cross-clock composition");
+
+    // Wrong from-clock refuses by name.
+    let wrong = system.add_equation(BlockEquation {
+        name: "wrong-clock".to_string(),
+        target: slow,
+        rhs: SystemExpr::ClockTransfer {
+            transfer,
+            arg: Box::new(SystemExpr::FieldRef(slow)),
+        },
+    });
+    assert!(
+        matches!(
+            wrong,
+            Err(SystemTypeError::TransformEndpointMismatch {
+                context: "clock-transfer from-clock",
+                ..
+            })
+        ),
+        "wrong-clock transfer must refuse, got {wrong:?}"
+    );
+    system.admit().expect("system admits");
+}
+
+#[test]
+fn sys_018_orientation_mismatch_refuses_and_transport_carries_transforms() {
+    use fs_opdsl::TransformSignature;
+    // Orientation is composition-checked, not merely identity-hashed.
+    let mut system = SystemDef::new();
+    let (mut along_coords, along_clock) = refs("chart-a", "lab", "clk-main");
+    along_coords.orientation = PortOrientation::AlongFrame;
+    let (mut against_coords, against_clock) = refs("chart-a", "lab", "clk-main");
+    against_coords.orientation = PortOrientation::AgainstFrame;
+    let along = system
+        .declare_field(FieldDecl {
+            name: "along".to_string(),
+            space: Space {
+                degree: 0,
+                n: 8,
+                dims: VELOCITY,
+            },
+            quantity: FieldQuantity::Dimensional(VELOCITY),
+            coordinates: along_coords.clone(),
+            clock: along_clock,
+            support: SpatialSupport::Interior,
+            state: StateOwnership::Owned { slot: 0 },
+        })
+        .expect("along field");
+    let against = system
+        .declare_field(FieldDecl {
+            name: "against".to_string(),
+            space: Space {
+                degree: 0,
+                n: 8,
+                dims: VELOCITY,
+            },
+            quantity: FieldQuantity::Dimensional(VELOCITY),
+            coordinates: against_coords.clone(),
+            clock: against_clock,
+            support: SpatialSupport::Interior,
+            state: StateOwnership::Owned { slot: 1 },
+        })
+        .expect("against field");
+    let mixed = system.add_equation(BlockEquation {
+        name: "mixed-orientation".to_string(),
+        target: along,
+        rhs: SystemExpr::Add(
+            Box::new(SystemExpr::FieldRef(along)),
+            Box::new(SystemExpr::FieldRef(against)),
+        ),
+    });
+    assert!(
+        matches!(mixed, Err(SystemTypeError::OrientationMismatch { .. })),
+        "mixed-orientation summation must refuse, got {mixed:?}"
+    );
+
+    // Transport round-trips transforms and clock transfers.
+    let flip = system.register_transform(TransformSignature {
+        name: "flip".to_string(),
+        content: ConventionRef::new("orientation-flip:v1").expect("content"),
+        from: against_coords,
+        to: along_coords,
+    });
+    system
+        .add_equation(BlockEquation {
+            name: "flipped".to_string(),
+            target: along,
+            rhs: SystemExpr::Add(
+                Box::new(SystemExpr::FieldRef(along)),
+                Box::new(SystemExpr::Pullback {
+                    transform: flip,
+                    arg: Box::new(SystemExpr::FieldRef(against)),
+                }),
+            ),
+        })
+        .expect("explicit orientation flip admits");
+    let admitted = system.admit().expect("admits");
+    let text = fs_opdsl::system::transport::to_text(&admitted).expect("serializes");
+    let reparsed = fs_opdsl::system::transport::from_text(&text)
+        .expect("parses")
+        .admit()
+        .expect("re-admits");
+    assert_eq!(
+        admitted.identity(),
+        reparsed.identity(),
+        "transport round trip preserves identity with transforms"
     );
 }

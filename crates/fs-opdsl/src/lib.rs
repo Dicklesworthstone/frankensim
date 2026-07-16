@@ -39,9 +39,10 @@ pub use law::{CubicReaction, LawId, PointwiseLaw};
 pub use mms::{MmsReport, mms_poisson_study};
 pub use plan::{LoweredOperator, PlanReport, dwr_indicators};
 pub use system::{
-    AdmittedSystem, AtomSignature, BlockEquation, ConventionRef, CoordinateConvention, FieldDecl,
-    FieldId, FieldQuantity, ParameterRole, SYSTEM_IR_VERSION, ScalarConvention, SpatialSupport,
-    StateOwnership, SystemDef, SystemExpr, SystemId, SystemTypeError,
+    AdmittedSystem, AtomSignature, BlockEquation, ClockTransferSignature, ConventionRef,
+    CoordinateConvention, FieldDecl, FieldId, FieldQuantity, ParameterRole, SYSTEM_IR_VERSION,
+    ScalarConvention, SpatialSupport, StateOwnership, SystemDef, SystemExpr, SystemId,
+    SystemTypeError, TransformSignature,
 };
 
 /// Crate version, re-exported for provenance stamping.

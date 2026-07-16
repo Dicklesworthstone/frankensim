@@ -213,6 +213,24 @@ pub enum SystemExpr {
     Scale(f64, Box<SystemExpr>),
     /// Sum of two expressions in the same admitted space/convention.
     Add(Box<SystemExpr>, Box<SystemExpr>),
+    /// An explicit registered coordinate transform applied to the
+    /// operand: the operand's convention must equal the transform's
+    /// `from`; the result carries the transform's `to`.
+    Pullback {
+        /// Index into the system's transform table.
+        transform: usize,
+        /// The operand.
+        arg: Box<SystemExpr>,
+    },
+    /// An explicit registered clock transfer applied to the operand:
+    /// the operand's clock must equal the transfer's `from_clock`; the
+    /// result advances on `to_clock`.
+    ClockTransfer {
+        /// Index into the system's clock-transfer table.
+        transfer: usize,
+        /// The operand.
+        arg: Box<SystemExpr>,
+    },
     /// A power-conjugate pairing of two sub-expressions (effort, flow)
     /// under a declared port kind: admitted only when the operand
     /// dimensions multiply (with the measure) to power.
@@ -247,6 +265,40 @@ pub struct AtomSignature {
     pub in_space: Space,
     /// Output space.
     pub out_space: Space,
+}
+
+/// A registered coordinate transform (pullback): an explicit, named
+/// map between coordinate conventions. Applying [`SystemExpr::Pullback`]
+/// is the ONLY way cross-frame structure composes — the map's content
+/// reference is identity-bearing, exactly like atom content. v1
+/// transforms are space-preserving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransformSignature {
+    /// Display name (diagnostics only; not a hash input).
+    pub name: String,
+    /// Identity-bearing content reference into the caller's transform
+    /// registry (e.g. `frame-map:lab-to-rotor:v1`).
+    pub content: ConventionRef,
+    /// The convention the operand must be expressed in.
+    pub from: CoordinateConvention,
+    /// The convention the result is expressed in.
+    pub to: CoordinateConvention,
+}
+
+/// A registered clock transfer: an explicit, named map between time
+/// clocks (sub-sampling, interpolation, phase alignment — declared by
+/// reference). Applying [`SystemExpr::ClockTransfer`] is the ONLY way
+/// cross-clock structure composes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockTransferSignature {
+    /// Display name (diagnostics only; not a hash input).
+    pub name: String,
+    /// Identity-bearing content reference into the caller's registry.
+    pub content: ConventionRef,
+    /// The clock the operand must advance on.
+    pub from_clock: ConventionRef,
+    /// The clock the result advances on.
+    pub to_clock: ConventionRef,
 }
 
 /// One block equation: `residual(target) = rhs`, i.e. the rhs
@@ -390,6 +442,33 @@ pub enum SystemTypeError {
         /// The offending bits.
         bits: u64,
     },
+    /// Cross-orientation composition without an explicit transform.
+    OrientationMismatch {
+        /// Left orientation.
+        left: &'static str,
+        /// Right orientation.
+        right: &'static str,
+    },
+    /// A transform/clock-transfer applied to an operand whose
+    /// convention/clock does not match the declared endpoint.
+    TransformEndpointMismatch {
+        /// Which endpoint check failed.
+        context: &'static str,
+        /// The declared endpoint.
+        expected: String,
+        /// What the operand carries.
+        found: String,
+    },
+    /// Two transforms or clock transfers with byte-identical semantic
+    /// payloads: declare each map once.
+    IndistinguishableTransforms {
+        /// Which table.
+        what: &'static str,
+        /// First display name.
+        first: String,
+        /// Second display name.
+        second: String,
+    },
     /// Two atoms whose complete semantic payloads (content reference
     /// plus spaces) are byte-identical: declare one atom once.
     IndistinguishableAtoms {
@@ -413,6 +492,7 @@ pub enum SystemTypeError {
 }
 
 impl std::fmt::Display for SystemTypeError {
+    #[allow(clippy::too_many_lines)] // One exhaustive diagnostic table: every refusal's message in one place.
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidConventionRef { raw } => write!(
@@ -485,6 +565,26 @@ impl std::fmt::Display for SystemTypeError {
             Self::NonFiniteScale { bits } => {
                 write!(out, "scale constant is not finite (bits {bits:#018x})")
             }
+            Self::OrientationMismatch { left, right } => write!(
+                out,
+                "cross-orientation composition ({left} vs {right}): interpose an explicit pullback"
+            ),
+            Self::TransformEndpointMismatch {
+                context,
+                expected,
+                found,
+            } => write!(
+                out,
+                "{context}: operand carries {found:?} but the declared endpoint is {expected:?}"
+            ),
+            Self::IndistinguishableTransforms {
+                what,
+                first,
+                second,
+            } => write!(
+                out,
+                "{what} {first:?} and {second:?} have byte-identical payloads: declare each map once"
+            ),
             Self::IndistinguishableAtoms { first, second } => write!(
                 out,
                 "atoms {first:?} and {second:?} have byte-identical content/space payloads: declare one atom once"
@@ -516,6 +616,8 @@ impl CanonicalSchema for SystemIdentitySchemaV1 {
         FieldSpec::required("atom-signatures", WireType::OrderedBytes),
         FieldSpec::required("fields", WireType::OrderedBytes),
         FieldSpec::required("equations", WireType::OrderedBytes),
+        FieldSpec::required("transforms", WireType::OrderedBytes),
+        FieldSpec::required("clock-transfers", WireType::OrderedBytes),
         FieldSpec::optional_bytes("opaque-extension"),
     ];
 }
@@ -529,6 +631,8 @@ pub type SystemId = SemanticId<SystemIdentitySchemaV1>;
 pub struct AdmittedSystem {
     fields: Vec<FieldDecl>,
     atoms: Vec<AtomSignature>,
+    transforms: Vec<TransformSignature>,
+    clock_transfers: Vec<ClockTransferSignature>,
     equations: Vec<BlockEquation>,
     scalar_convention: ScalarConvention,
     extension: Vec<u8>,
@@ -546,6 +650,18 @@ impl AdmittedSystem {
     #[must_use]
     pub fn atoms(&self) -> &[AtomSignature] {
         &self.atoms
+    }
+
+    /// The registered coordinate transforms.
+    #[must_use]
+    pub fn transforms(&self) -> &[TransformSignature] {
+        &self.transforms
+    }
+
+    /// The registered clock transfers.
+    #[must_use]
+    pub fn clock_transfers(&self) -> &[ClockTransferSignature] {
+        &self.clock_transfers
     }
 
     /// The block equations, in declaration order.
@@ -579,6 +695,8 @@ impl AdmittedSystem {
 pub struct SystemDef {
     fields: Vec<FieldDecl>,
     atoms: Vec<AtomSignature>,
+    transforms: Vec<TransformSignature>,
+    clock_transfers: Vec<ClockTransferSignature>,
     equations: Vec<BlockEquation>,
     scalar_convention: Option<ScalarConvention>,
     extension: Vec<u8>,
@@ -657,6 +775,18 @@ impl SystemDef {
         self.atoms.len() - 1
     }
 
+    /// Register a coordinate transform.
+    pub fn register_transform(&mut self, transform: TransformSignature) -> usize {
+        self.transforms.push(transform);
+        self.transforms.len() - 1
+    }
+
+    /// Register a clock transfer.
+    pub fn register_clock_transfer(&mut self, transfer: ClockTransferSignature) -> usize {
+        self.clock_transfers.push(transfer);
+        self.clock_transfers.len() - 1
+    }
+
     /// Add a block equation after full admissibility checking of its
     /// right-hand side against the target field.
     ///
@@ -690,6 +820,7 @@ impl SystemDef {
     /// # Errors
     /// Any residual admissibility refusal (indistinguishable fields,
     /// duplicate equations, encoder bounds).
+    #[allow(clippy::too_many_lines)] // One canonicalization transaction: sort/tie-refuse/remap every table, then encode.
     pub fn admit(self) -> Result<AdmittedSystem, SystemTypeError> {
         let scalar_convention = self.scalar_convention.unwrap_or(ScalarConvention::RealOnly);
 
@@ -735,10 +866,28 @@ impl SystemDef {
             atom_remap[*declaration] = canonical;
         }
 
+        let (transform_payloads, transform_remap) = canonical_table(
+            &self.transforms,
+            canonical_transform_bytes,
+            |t| t.name.clone(),
+            "transforms",
+        )?;
+        let (clock_transfer_payloads, clock_transfer_remap) = canonical_table(
+            &self.clock_transfers,
+            canonical_clock_transfer_bytes,
+            |t| t.name.clone(),
+            "clock-transfers",
+        )?;
+        let ordinals = CanonicalOrdinals {
+            fields: &remap,
+            atoms: &atom_remap,
+            transforms: &transform_remap,
+            clock_transfers: &clock_transfer_remap,
+        };
         let mut equation_payloads: Vec<Vec<u8>> = self
             .equations
             .iter()
-            .map(|equation| canonical_equation_bytes(equation, &remap, &atom_remap))
+            .map(|equation| canonical_equation_bytes(equation, &ordinals))
             .collect();
         equation_payloads.sort();
         for pair in equation_payloads.windows(2) {
@@ -781,8 +930,20 @@ impl SystemDef {
                 equation_payloads.len() as u64,
                 equation_payloads.iter().map(Vec::as_slice),
             )?;
+            encoder = encoder.ordered_bytes(
+                Field::new(5, "transforms"),
+                transform_payloads.len() as u64,
+                transform_payloads.iter().map(|(bytes, _)| bytes.as_slice()),
+            )?;
+            encoder = encoder.ordered_bytes(
+                Field::new(6, "clock-transfers"),
+                clock_transfer_payloads.len() as u64,
+                clock_transfer_payloads
+                    .iter()
+                    .map(|(bytes, _)| bytes.as_slice()),
+            )?;
             encoder = encoder.optional_bytes(
-                Field::new(5, "opaque-extension"),
+                Field::new(7, "opaque-extension"),
                 if self.extension.is_empty() {
                     None
                 } else {
@@ -798,6 +959,8 @@ impl SystemDef {
         Ok(AdmittedSystem {
             fields: self.fields,
             atoms: self.atoms,
+            transforms: self.transforms,
+            clock_transfers: self.clock_transfers,
             equations: self.equations,
             scalar_convention,
             extension: self.extension,
@@ -846,6 +1009,24 @@ impl SystemDef {
                     stack.push((left, depth + 1));
                     stack.push((right, depth + 1));
                 }
+                SystemExpr::Pullback { transform, arg } => {
+                    if *transform >= self.transforms.len() {
+                        return Err(SystemTypeError::UnknownId {
+                            what: "transform",
+                            id: *transform,
+                        });
+                    }
+                    stack.push((arg, depth + 1));
+                }
+                SystemExpr::ClockTransfer { transfer, arg } => {
+                    if *transfer >= self.clock_transfers.len() {
+                        return Err(SystemTypeError::UnknownId {
+                            what: "clock-transfer",
+                            id: *transfer,
+                        });
+                    }
+                    stack.push((arg, depth + 1));
+                }
                 SystemExpr::PortPair { effort, flow, .. } => {
                     stack.push((effort, depth + 1));
                     stack.push((flow, depth + 1));
@@ -866,6 +1047,10 @@ impl SystemDef {
                         SystemExpr::Add(left, right) => {
                             work.push(Step::Enter(right));
                             work.push(Step::Enter(left));
+                        }
+                        SystemExpr::Pullback { arg, .. }
+                        | SystemExpr::ClockTransfer { arg, .. } => {
+                            work.push(Step::Enter(arg));
                         }
                         SystemExpr::PortPair { effort, flow, .. } => {
                             work.push(Step::Enter(flow));
@@ -899,6 +1084,7 @@ impl SystemDef {
                     convention: Some(FieldConvention {
                         basis: declared.coordinates.basis.clone(),
                         frame: declared.coordinates.frame.clone(),
+                        orientation: declared.coordinates.orientation,
                         clock: declared.clock.clone(),
                     }),
                     affine_field: declared
@@ -972,6 +1158,12 @@ impl SystemDef {
                                 right: (b.basis.as_str().to_string(), b.frame.as_str().to_string()),
                             });
                         }
+                        if a.orientation != b.orientation {
+                            return Err(SystemTypeError::OrientationMismatch {
+                                left: orientation_name(a.orientation),
+                                right: orientation_name(b.orientation),
+                            });
+                        }
                         Some(a.clone())
                     }
                     (Some(a), None) | (None, Some(a)) => Some(a.clone()),
@@ -981,6 +1173,77 @@ impl SystemDef {
                     space: left.space,
                     convention,
                     affine_field: None,
+                })
+            }
+            SystemExpr::Pullback { transform, .. } => {
+                let arg = values.pop().expect("pullback operand admitted");
+                let signature = &self.transforms[*transform];
+                let Some(convention) = arg.convention else {
+                    return Err(SystemTypeError::TransformEndpointMismatch {
+                        context: "pullback operand convention",
+                        expected: signature.from.basis.as_str().to_string(),
+                        found: "no field-derived convention".to_string(),
+                    });
+                };
+                if convention.basis != signature.from.basis
+                    || convention.frame != signature.from.frame
+                {
+                    return Err(SystemTypeError::TransformEndpointMismatch {
+                        context: "pullback from-convention",
+                        expected: format!(
+                            "{}/{}",
+                            signature.from.basis.as_str(),
+                            signature.from.frame.as_str()
+                        ),
+                        found: format!(
+                            "{}/{}",
+                            convention.basis.as_str(),
+                            convention.frame.as_str()
+                        ),
+                    });
+                }
+                if convention.orientation != signature.from.orientation {
+                    return Err(SystemTypeError::TransformEndpointMismatch {
+                        context: "pullback from-orientation",
+                        expected: orientation_name(signature.from.orientation).to_string(),
+                        found: orientation_name(convention.orientation).to_string(),
+                    });
+                }
+                Ok(AdmittedExpr {
+                    space: arg.space,
+                    convention: Some(FieldConvention {
+                        basis: signature.to.basis.clone(),
+                        frame: signature.to.frame.clone(),
+                        orientation: signature.to.orientation,
+                        clock: convention.clock,
+                    }),
+                    affine_field: arg.affine_field,
+                })
+            }
+            SystemExpr::ClockTransfer { transfer, .. } => {
+                let arg = values.pop().expect("clock-transfer operand admitted");
+                let signature = &self.clock_transfers[*transfer];
+                let Some(convention) = arg.convention else {
+                    return Err(SystemTypeError::TransformEndpointMismatch {
+                        context: "clock-transfer operand convention",
+                        expected: signature.from_clock.as_str().to_string(),
+                        found: "no field-derived convention".to_string(),
+                    });
+                };
+                if convention.clock != signature.from_clock {
+                    return Err(SystemTypeError::TransformEndpointMismatch {
+                        context: "clock-transfer from-clock",
+                        expected: signature.from_clock.as_str().to_string(),
+                        found: convention.clock.as_str().to_string(),
+                    });
+                }
+                Ok(AdmittedExpr {
+                    space: arg.space,
+                    convention: Some(FieldConvention {
+                        clock: signature.to_clock.clone(),
+                        ..convention
+                    }),
+                    affine_field: arg.affine_field,
                 })
             }
             SystemExpr::PortPair {
@@ -1032,7 +1295,16 @@ enum Step<'e> {
 struct FieldConvention {
     basis: ConventionRef,
     frame: ConventionRef,
+    orientation: PortOrientation,
     clock: ConventionRef,
+}
+
+fn orientation_name(orientation: PortOrientation) -> &'static str {
+    match orientation {
+        PortOrientation::OutwardFromOwner => "outward-from-owner",
+        PortOrientation::AlongFrame => "along-frame",
+        PortOrientation::AgainstFrame => "against-frame",
+    }
 }
 
 impl Clone for FieldConvention {
@@ -1040,6 +1312,7 @@ impl Clone for FieldConvention {
         Self {
             basis: self.basis.clone(),
             frame: self.frame.clone(),
+            orientation: self.orientation,
             clock: self.clock.clone(),
         }
     }
@@ -1059,6 +1332,12 @@ fn check_convention_match(
         return Err(SystemTypeError::ClockMismatch {
             left: convention.clock.as_str().to_string(),
             right: target.clock.as_str().to_string(),
+        });
+    }
+    if convention.orientation != target.coordinates.orientation {
+        return Err(SystemTypeError::OrientationMismatch {
+            left: orientation_name(convention.orientation),
+            right: orientation_name(target.coordinates.orientation),
         });
     }
     if convention.basis != target.coordinates.basis || convention.frame != target.coordinates.frame
@@ -1151,6 +1430,71 @@ fn canonical_field_bytes(field: &FieldDecl) -> Vec<u8> {
     bytes
 }
 
+/// Sorted canonical payloads (with declaration indices) plus the
+/// declaration-to-canonical ordinal remap.
+type CanonicalTable = (Vec<(Vec<u8>, usize)>, Vec<usize>);
+
+struct CanonicalOrdinals<'a> {
+    fields: &'a [usize],
+    atoms: &'a [usize],
+    transforms: &'a [usize],
+    clock_transfers: &'a [usize],
+}
+
+fn canonical_table<T>(
+    table: &[T],
+    payload: fn(&T) -> Vec<u8>,
+    display: fn(&T) -> String,
+    what: &'static str,
+) -> Result<CanonicalTable, SystemTypeError> {
+    let mut payloads: Vec<(Vec<u8>, usize)> = table
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (payload(item), index))
+        .collect();
+    payloads.sort();
+    for pair in payloads.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(SystemTypeError::IndistinguishableTransforms {
+                what,
+                first: display(&table[pair[0].1]),
+                second: display(&table[pair[1].1]),
+            });
+        }
+    }
+    let mut remap = vec![0usize; table.len()];
+    for (canonical, (_, declaration)) in payloads.iter().enumerate() {
+        remap[*declaration] = canonical;
+    }
+    Ok((payloads, remap))
+}
+
+fn push_convention(bytes: &mut Vec<u8>, convention: &CoordinateConvention) {
+    push_ref(bytes, &convention.basis);
+    push_ref(bytes, &convention.frame);
+    bytes.push(match convention.orientation {
+        PortOrientation::OutwardFromOwner => 0,
+        PortOrientation::AlongFrame => 1,
+        PortOrientation::AgainstFrame => 2,
+    });
+}
+
+fn canonical_transform_bytes(transform: &TransformSignature) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_ref(&mut bytes, &transform.content);
+    push_convention(&mut bytes, &transform.from);
+    push_convention(&mut bytes, &transform.to);
+    bytes
+}
+
+fn canonical_clock_transfer_bytes(transfer: &ClockTransferSignature) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_ref(&mut bytes, &transfer.content);
+    push_ref(&mut bytes, &transfer.from_clock);
+    push_ref(&mut bytes, &transfer.to_clock);
+    bytes
+}
+
 fn canonical_atom_bytes(atom: &AtomSignature) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_ref(&mut bytes, &atom.content);
@@ -1159,15 +1503,11 @@ fn canonical_atom_bytes(atom: &AtomSignature) -> Vec<u8> {
     bytes
 }
 
-fn canonical_equation_bytes(
-    equation: &BlockEquation,
-    remap: &[usize],
-    atom_remap: &[usize],
-) -> Vec<u8> {
+fn canonical_equation_bytes(equation: &BlockEquation, ordinals: &CanonicalOrdinals<'_>) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_u32(
         &mut bytes,
-        u32::try_from(remap[equation.target.0]).expect("bounded field table"),
+        u32::try_from(ordinals.fields[equation.target.0]).expect("bounded field table"),
     );
     // Iterative pre-order serialization with explicit child counts: the
     // tree shape is unambiguous without recursion.
@@ -1178,14 +1518,14 @@ fn canonical_equation_bytes(
                 bytes.push(0);
                 push_u32(
                     &mut bytes,
-                    u32::try_from(remap[field.0]).expect("bounded field table"),
+                    u32::try_from(ordinals.fields[field.0]).expect("bounded field table"),
                 );
             }
             SystemExpr::Apply { atom, arg } => {
                 bytes.push(1);
                 push_u32(
                     &mut bytes,
-                    u32::try_from(atom_remap[*atom]).expect("bounded atom table"),
+                    u32::try_from(ordinals.atoms[*atom]).expect("bounded atom table"),
                 );
                 stack.push(arg);
             }
@@ -1198,6 +1538,23 @@ fn canonical_equation_bytes(
                 bytes.push(3);
                 stack.push(right);
                 stack.push(left);
+            }
+            SystemExpr::Pullback { transform, arg } => {
+                bytes.push(5);
+                push_u32(
+                    &mut bytes,
+                    u32::try_from(ordinals.transforms[*transform]).expect("bounded transforms"),
+                );
+                stack.push(arg);
+            }
+            SystemExpr::ClockTransfer { transfer, arg } => {
+                bytes.push(6);
+                push_u32(
+                    &mut bytes,
+                    u32::try_from(ordinals.clock_transfers[*transfer])
+                        .expect("bounded clock transfers"),
+                );
+                stack.push(arg);
             }
             SystemExpr::PortPair {
                 kind,
@@ -1228,9 +1585,10 @@ fn canonical_equation_bytes(
 /// different [`SystemId`] — it cannot alias the original identity.
 pub mod transport {
     use super::{
-        AdmittedSystem, AtomSignature, BlockEquation, ConventionRef, CoordinateConvention,
-        FieldDecl, FieldId, FieldQuantity, ParameterRole, SYSTEM_IR_VERSION, ScalarConvention,
-        SpatialSupport, StateOwnership, SystemDef, SystemExpr, SystemTypeError,
+        AdmittedSystem, AtomSignature, BlockEquation, ClockTransferSignature, ConventionRef,
+        CoordinateConvention, FieldDecl, FieldId, FieldQuantity, ParameterRole, SYSTEM_IR_VERSION,
+        ScalarConvention, SpatialSupport, StateOwnership, SystemDef, SystemExpr, SystemTypeError,
+        TransformSignature,
     };
     use crate::expr::Space;
     use fs_couple::{PortKind, PortOrientation};
@@ -1246,6 +1604,12 @@ pub mod transport {
     enum Frame {
         Apply {
             atom: usize,
+        },
+        Pullback {
+            transform: usize,
+        },
+        ClockTransfer {
+            transfer: usize,
         },
         Scale {
             bits: u64,
@@ -1342,6 +1706,23 @@ pub mod transport {
         }
     }
 
+    fn render_orientation(orientation: PortOrientation) -> &'static str {
+        match orientation {
+            PortOrientation::OutwardFromOwner => "outward",
+            PortOrientation::AlongFrame => "along",
+            PortOrientation::AgainstFrame => "against",
+        }
+    }
+
+    fn parse_orientation(token: &str, line: usize) -> Result<PortOrientation, SystemTypeError> {
+        match token {
+            "outward" => Ok(PortOrientation::OutwardFromOwner),
+            "along" => Ok(PortOrientation::AlongFrame),
+            "against" => Ok(PortOrientation::AgainstFrame),
+            unknown => Err(malformed(line, format!("unknown orientation {unknown:?}"))),
+        }
+    }
+
     fn render_port_kind(kind: PortKind) -> &'static str {
         match kind {
             PortKind::MechanicalForceVelocity => "mechanical-force-velocity",
@@ -1375,6 +1756,14 @@ pub mod transport {
                     let _ = write!(out, "x{:016x}", value.to_bits());
                     stack.push(inner);
                 }
+                SystemExpr::Pullback { transform, arg } => {
+                    let _ = write!(out, "t{transform}");
+                    stack.push(arg);
+                }
+                SystemExpr::ClockTransfer { transfer, arg } => {
+                    let _ = write!(out, "c{transfer}");
+                    stack.push(arg);
+                }
                 SystemExpr::Add(left, right) => {
                     out.push('+');
                     stack.push(right);
@@ -1404,6 +1793,7 @@ pub mod transport {
     /// # Errors
     /// [`SystemTypeError::InvalidName`] when a display name cannot be
     /// carried fail-closed (control characters or tabs).
+    #[allow(clippy::too_many_lines)] // One canonical record emitter: every record grammar in one place.
     pub fn to_text(system: &AdmittedSystem) -> Result<String, SystemTypeError> {
         let mut out = String::new();
         out.push_str(MAGIC);
@@ -1433,6 +1823,32 @@ pub mod transport {
                 atom.content.as_str(),
                 render_space(&atom.in_space),
                 render_space(&atom.out_space)
+            );
+        }
+        for transform in system.transforms() {
+            validate_name(&transform.name)?;
+            let _ = writeln!(
+                out,
+                "transform\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                transform.name,
+                transform.content.as_str(),
+                transform.from.basis.as_str(),
+                transform.from.frame.as_str(),
+                render_orientation(transform.from.orientation),
+                transform.to.basis.as_str(),
+                transform.to.frame.as_str(),
+                render_orientation(transform.to.orientation),
+            );
+        }
+        for transfer in system.clock_transfers() {
+            validate_name(&transfer.name)?;
+            let _ = writeln!(
+                out,
+                "clock-transfer\t{}\t{}\t{}\t{}",
+                transfer.name,
+                transfer.content.as_str(),
+                transfer.from_clock.as_str(),
+                transfer.to_clock.as_str(),
             );
         }
         for field in system.fields() {
@@ -1465,11 +1881,7 @@ pub mod transport {
                 quantity,
                 field.coordinates.basis.as_str(),
                 field.coordinates.frame.as_str(),
-                match field.coordinates.orientation {
-                    PortOrientation::OutwardFromOwner => "outward",
-                    PortOrientation::AlongFrame => "along",
-                    PortOrientation::AgainstFrame => "against",
-                },
+                render_orientation(field.coordinates.orientation),
                 field.clock.as_str(),
                 match field.support {
                     SpatialSupport::Interior => "interior",
@@ -1677,6 +2089,18 @@ pub mod transport {
                             arg: Box::new(value),
                         });
                     }
+                    Some(Frame::Pullback { transform }) => {
+                        pending = Some(SystemExpr::Pullback {
+                            transform,
+                            arg: Box::new(value),
+                        });
+                    }
+                    Some(Frame::ClockTransfer { transfer }) => {
+                        pending = Some(SystemExpr::ClockTransfer {
+                            transfer,
+                            arg: Box::new(value),
+                        });
+                    }
                     Some(Frame::Scale { bits }) => {
                         pending = Some(SystemExpr::Scale(f64::from_bits(bits), Box::new(value)));
                     }
@@ -1724,6 +2148,16 @@ pub mod transport {
                     .parse::<usize>()
                     .map_err(|_| malformed(line, format!("atom token {token:?}")))?;
                 frames.push(Frame::Apply { atom });
+            } else if let Some(index) = token.strip_prefix('t') {
+                let transform = index
+                    .parse::<usize>()
+                    .map_err(|_| malformed(line, format!("transform token {token:?}")))?;
+                frames.push(Frame::Pullback { transform });
+            } else if let Some(index) = token.strip_prefix('c') {
+                let transfer = index
+                    .parse::<usize>()
+                    .map_err(|_| malformed(line, format!("clock-transfer token {token:?}")))?;
+                frames.push(Frame::ClockTransfer { transfer });
             } else if let Some(hex) = token.strip_prefix('x') {
                 let bits = u64::from_str_radix(hex, 16)
                     .map_err(|_| malformed(line, format!("scale token {token:?}")))?;
@@ -1823,6 +2257,48 @@ pub mod transport {
                     }
                     system = system.with_extension(bytes)?;
                 }
+                "transform" => {
+                    let [
+                        name,
+                        content,
+                        from_basis,
+                        from_frame,
+                        from_orientation,
+                        to_basis,
+                        to_frame,
+                        to_orientation,
+                    ] = rest.as_slice()
+                    else {
+                        return Err(malformed(line, "transform takes 8 members"));
+                    };
+                    validate_name(name)?;
+                    system.register_transform(TransformSignature {
+                        name: (*name).to_string(),
+                        content: ConventionRef::new(*content)?,
+                        from: CoordinateConvention {
+                            basis: ConventionRef::new(*from_basis)?,
+                            frame: ConventionRef::new(*from_frame)?,
+                            orientation: parse_orientation(from_orientation, line)?,
+                        },
+                        to: CoordinateConvention {
+                            basis: ConventionRef::new(*to_basis)?,
+                            frame: ConventionRef::new(*to_frame)?,
+                            orientation: parse_orientation(to_orientation, line)?,
+                        },
+                    });
+                }
+                "clock-transfer" => {
+                    let [name, content, from_clock, to_clock] = rest.as_slice() else {
+                        return Err(malformed(line, "clock-transfer takes 4 members"));
+                    };
+                    validate_name(name)?;
+                    system.register_clock_transfer(ClockTransferSignature {
+                        name: (*name).to_string(),
+                        content: ConventionRef::new(*content)?,
+                        from_clock: ConventionRef::new(*from_clock)?,
+                        to_clock: ConventionRef::new(*to_clock)?,
+                    });
+                }
                 "atom" => {
                     let [name, content, in_space, out_space] = rest.as_slice() else {
                         return Err(malformed(
@@ -1886,17 +2362,7 @@ pub mod transport {
                         coordinates: CoordinateConvention {
                             basis: ConventionRef::new(*basis)?,
                             frame: ConventionRef::new(*frame)?,
-                            orientation: match *orientation {
-                                "outward" => PortOrientation::OutwardFromOwner,
-                                "along" => PortOrientation::AlongFrame,
-                                "against" => PortOrientation::AgainstFrame,
-                                unknown => {
-                                    return Err(malformed(
-                                        line,
-                                        format!("unknown orientation {unknown:?}"),
-                                    ));
-                                }
-                            },
+                            orientation: parse_orientation(orientation, line)?,
                         },
                         clock: ConventionRef::new(*clock)?,
                         support: match *support {
