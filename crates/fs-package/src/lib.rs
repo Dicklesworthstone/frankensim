@@ -33,8 +33,14 @@ use origin::{identity_reason, is_placeholder_token, validate_origin_shape};
 
 pub use fs_blake3::ContentHash;
 
+pub mod color_admission;
 pub mod coverage;
 pub mod origin;
+
+pub use color_admission::{
+    PackageColorAdmissionRefusal, PackageColorAdmissionVerifier,
+    package_color_admission_policy_fingerprint,
+};
 pub use coverage::{
     ConceptPresence, CoverageStatus, PackageCoverageReport, PackagePresenceReport,
     package_coverage, package_coverage_with, package_presence, package_presence_with,
@@ -1738,6 +1744,13 @@ impl AdmittedClaim<'_> {
     #[must_use]
     pub fn anchors(&self) -> &[AnchorRecord] {
         &self.claim.anchors
+    }
+
+    /// Domain-separated declaration hash used as the color-admission node
+    /// identity (bead 6pf9). Crate-private: consumers receive it inside an
+    /// `fs_evidence::AdmissionReceipt`, never as a bare address.
+    pub(crate) fn claim_declaration_hash(&self) -> ContentHash {
+        self.claim.declared_content_hash_unverified()
     }
 }
 

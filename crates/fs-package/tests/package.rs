@@ -3483,3 +3483,141 @@ fn origin_transport_and_machine_identity_boundaries_fail_closed() {
         Err(PackageError::InvalidOrigin { .. })
     ));
 }
+
+#[test]
+fn package_admission_mints_admitted_color_with_claim_lineage() {
+    use fs_evidence::AdmittedColor;
+    use fs_package::PackageColorAdmissionVerifier;
+
+    let verified_package = EvidencePackage::new(prov())
+        .with_claim(verified("c1"))
+        .with_claim(estimated("c3"))
+        .into_verified_with(&source_capabilities())
+        .expect("mixed package verifies");
+    let declaration_hash = verified("c1").declared_content_hash_unverified();
+
+    let receipt = verified_package
+        .claim_admission_receipt("c1")
+        .expect("scientific claim mints");
+    assert_eq!(receipt.node_hash(), declaration_hash);
+
+    let candidate = verified_package
+        .admitted_claims()
+        .find(|claim| claim.id() == "c1")
+        .expect("claim present")
+        .scientific_color()
+        .expect("scientific class")
+        .clone();
+    let admitted = AdmittedColor::from_receipt(
+        candidate,
+        receipt,
+        &PackageColorAdmissionVerifier::new(&verified_package),
+    )
+    .expect("package authority admits its own scientific claim");
+    assert_eq!(admitted.rank(), fs_evidence::ColorRank::Verified);
+    assert_eq!(admitted.receipt().node_hash(), declaration_hash);
+}
+
+#[test]
+fn package_admission_refuses_estimated_unknown_and_waived_claims() {
+    use fs_package::PackageColorAdmissionRefusal;
+
+    let verified_package = EvidencePackage::new(prov())
+        .with_claim(verified("c1"))
+        .with_claim(estimated("c3"))
+        .into_verified_with(&source_capabilities())
+        .expect("mixed package verifies");
+    assert_eq!(
+        verified_package.claim_admission_receipt("c3"),
+        Err(PackageColorAdmissionRefusal::NotPositive {
+            id: "c3".to_string(),
+            rank: fs_evidence::ColorRank::Estimated,
+        })
+    );
+    assert_eq!(
+        verified_package.claim_admission_receipt("absent"),
+        Err(PackageColorAdmissionRefusal::UnknownClaim {
+            id: "absent".to_string(),
+        })
+    );
+
+    let waived = waived_package(prov(), "waiver-6pf9", 200)
+        .into_verified_with(
+            &VerificationCapabilities::deny_all().with_waivers(&HASH_WAIVER_VERIFIER, 199),
+        )
+        .expect("authorized waiver verifies");
+    assert_eq!(
+        waived.claim_admission_receipt("waived"),
+        Err(PackageColorAdmissionRefusal::WaiverTainted {
+            id: "waived".to_string(),
+        })
+    );
+}
+
+#[test]
+fn package_admission_verifier_refuses_forgery_and_cross_authority() {
+    use fs_evidence::{
+        AdmissionReceipt, AdmissionRejection, AdmittedColor, COLOR_ALGEBRA_VERSION,
+        NoAdmissionVerifier,
+    };
+    use fs_package::{
+        CLAIM_DECLARATION_IDENTITY_VERSION, PackageColorAdmissionVerifier,
+        package_color_admission_policy_fingerprint,
+    };
+
+    let verified_package = EvidencePackage::new(prov())
+        .with_claim(verified("c1"))
+        .into_verified_with(&source_capabilities())
+        .expect("package verifies");
+    let verifier = PackageColorAdmissionVerifier::new(&verified_package);
+    let receipt = verified_package
+        .claim_admission_receipt("c1")
+        .expect("scientific claim mints");
+    let genuine = verified_package
+        .admitted_claims()
+        .next()
+        .expect("claim present")
+        .scientific_color()
+        .expect("scientific class")
+        .clone();
+
+    // Substituted candidate: right receipt, different color bytes.
+    let substituted =
+        AdmittedColor::from_receipt(Color::Verified { lo: -9.0, hi: 9.0 }, receipt, &verifier)
+            .expect_err("substituted candidate must refuse");
+    assert!(matches!(substituted, AdmissionRejection::Refused { .. }));
+
+    // Forged node identity: right versions and policy, wrong claim address.
+    let forged = AdmissionReceipt::from_parts(
+        fs_blake3::hash_bytes(b"not-a-claim"),
+        CLAIM_DECLARATION_IDENTITY_VERSION,
+        COLOR_ALGEBRA_VERSION,
+        package_color_admission_policy_fingerprint(),
+    );
+    let forged_refusal = AdmittedColor::from_receipt(genuine.clone(), forged, &verifier)
+        .expect_err("forged node identity must refuse");
+    assert!(matches!(forged_refusal, AdmissionRejection::Refused { .. }));
+
+    // Cross-authority confusion: a receipt bound to some other authority's
+    // policy fingerprint never satisfies the package verifier.
+    let foreign = AdmissionReceipt::from_parts(
+        receipt.node_hash(),
+        CLAIM_DECLARATION_IDENTITY_VERSION,
+        COLOR_ALGEBRA_VERSION,
+        fs_blake3::hash_bytes(b"fs-ledger/color-admission-policy/v1/other-authority"),
+    );
+    let cross = AdmittedColor::from_receipt(genuine.clone(), foreign, &verifier)
+        .expect_err("cross-authority receipt must refuse");
+    assert!(matches!(cross, AdmissionRejection::Refused { .. }));
+
+    // UTIL-layer deny-all default: nothing admits without the injected
+    // package authority.
+    let deny = AdmittedColor::from_receipt(genuine, receipt, &NoAdmissionVerifier)
+        .expect_err("deny-all default must refuse");
+    assert_eq!(
+        deny,
+        AdmissionRejection::Refused {
+            policy: fs_evidence::no_admission_policy(),
+        }
+    );
+}

@@ -23,6 +23,27 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   Raw declarations are exposed only by explicitly named `*_unverified`
   accessors. Scientific callers consume `VerifiedPackage::admitted_claims`,
   where waiver-dependent descendants have no `scientific_color()`.
+- Package-side color admission (bead 6pf9, stage S2) — `scientific_color()`
+  still returns a raw, copyable `Color`; downstream positive-evidence
+  consumers should instead convert through the admission bridge:
+  `VerifiedPackage::claim_admission_receipt(claim_id)` mints an
+  `fs_evidence::AdmissionReceipt` whose node identity is the claim's
+  domain-separated declaration hash (`fs-package:v8:claim` surface,
+  `CLAIM_DECLARATION_IDENTITY_VERSION`), refusing unknown, waiver-tainted
+  (transitively), and non-positive claims, and refusing everything when the
+  retained package/report binding no longer re-derives.
+  `PackageColorAdmissionVerifier` is the injected
+  `fs_evidence::AdmissionVerifier` that authenticates a (candidate, receipt)
+  pair by re-deriving it from the retained pair: exact claim address, exact
+  canonical color bytes, exact schema/algebra versions, this authority's own
+  policy fingerprint, and a re-validated binding. The policy fingerprint
+  (`package_color_admission_policy_fingerprint`) is deliberately distinct
+  from the ledger authority's, so package-admitted and ledger-admitted
+  colors remain separately auditable and receipts cannot cross authorities.
+  NO-CLAIM: admission authenticates that the checker's policy admitted the
+  claim inside this retained pair — it is capability injection, not
+  cryptography, and it does not upgrade the origin/dataset trust recorded by
+  the verification receipt.
 - `SemanticWitness { family, schema_version, canonical_payload }` — a sealed,
   portable envelope whose family-owned canonical bytes can be interpreted by a
   standalone semantic-checker plugin. `content_hash()` binds field lengths,
