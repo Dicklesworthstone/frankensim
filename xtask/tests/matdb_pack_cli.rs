@@ -11,6 +11,9 @@ static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 const PACK_BYTES_GOLDEN: usize = 3_177;
 const PACK_HASH_GOLDEN: &str = "c1fb2f443708d297423179f4ac6024ee26b1d0c940a229d1d9084726ccbd2bc5";
+const NASA9_PACK_BYTES_GOLDEN: usize = 4_940;
+const NASA9_PACK_HASH_GOLDEN: &str =
+    "006177a7cc6f7b4ae10a9eb4a5bf49faaf21911ef9473190a29ecfc3a818a162";
 
 const MANIFEST: &str = concat!(
     "frankensim.matdb-manifest.v1\n",
@@ -305,7 +308,9 @@ fn g3_cli_compiles_nasa9_regions_into_identical_verified_model_packs() {
     let first_bytes = fs::read(first_path).expect("read first NASA-9 pack");
     let second_bytes = fs::read(second_path).expect("read second NASA-9 pack");
     assert_eq!(first_bytes, second_bytes, "NASA-9 pack bytes moved");
+    assert_eq!(first_bytes.len(), NASA9_PACK_BYTES_GOLDEN);
     let decoded = NormalizedModelPack::from_bytes(&first_bytes).expect("decode NASA-9 model pack");
+    assert_eq!(decoded.content_hash().to_string(), NASA9_PACK_HASH_GOLDEN);
     let decoded = NormalizedModelPack::from_bytes_verified(decoded.content_hash(), &first_bytes)
         .expect("verified NASA-9 model pack");
     assert_eq!(decoded.pack_id(), "N2");
@@ -327,6 +332,11 @@ fn g3_cli_compiles_nasa9_regions_into_identical_verified_model_packs() {
     assert!(decisions.contains("\"reason_code\":\"species_pack_id_bound\""));
     assert!(decisions.contains("\"reason_code\":\"nasa9_region_normalized\""));
     assert!(decisions.contains("\"reason_code\":\"runtime_model_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{NASA9_PACK_HASH_GOLDEN}\"")))
+    );
 }
 
 #[test]
