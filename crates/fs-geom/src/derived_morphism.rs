@@ -12622,7 +12622,7 @@ mod tests {
             cx,
         );
         let span_ir = span_ir(source, apex, target, &left_leg, &right_leg, 57);
-        let span = admit_derived_span_correspondence_v1(&span_ir, &left_leg, &right_leg, cx)
+        let span = admit_derived_span_correspondence_v1(span_ir, &left_leg, &right_leg, cx)
             .expect("valid evidence-route span");
 
         let left_ir = evidence_polarity_candidate_ir(&left_leg, polarity, polarity, 58);
