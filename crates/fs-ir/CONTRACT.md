@@ -12,8 +12,9 @@ P10): a typed, versioned IR with two isomorphic concrete syntaxes
 (canonical s-expressions; lossless JSON mapping), both parsing to the same
 typed AST. Layer: L6 (HELM). Production dependencies are declared in
 `Cargo.toml`; fs-blake3 supplies the default [S] identity kernel, while the
-moonshot `derived-crosswalk` feature adds fs-exec and enables fs-geom's admitted
-derived-geometry boundary.
+default fs-exec/fs-scenario seam supplies cancellation-correct PR-5 scenario
+projection, and the moonshot `derived-crosswalk` feature enables fs-geom's
+admitted derived-geometry boundary.
 
 ## Public types and semantics
 
@@ -76,7 +77,7 @@ derived-geometry boundary.
   versions, a raw geometry ID that does not name the supplied sealed object,
   and every redundant selector mismatch. The token is structural lineage only:
   it does not bind or inspect an admitted Machine-IR graph.
-- `machine` (Machine-IR E0 PR-1/PR-2/PR-3/PR-4, [S]) — six nominally distinct durable entity
+- `machine` (Machine-IR E0 PR-1 through PR-5, [S]) — six nominally distinct durable entity
   types (`BodyId`, `SurfacePatchId`, `ContactFeatureId`, `TerminalId`,
   `PortId`, `StateSlotId`) use `fs-blake3::identity::EntityId` under six
   different static schemas. Their bounded, human-auditable hierarchical keys
@@ -192,6 +193,42 @@ derived-geometry boundary.
   canonicalizes every outer and nested collection, returns sorted duplicate-
   free `MachineAssuranceFinding`s, and publishes no `MachineAssuranceIdV1` on
   any graph, evidence, scope, accounting, or fidelity refusal.
+- `machine::lowering::admit_machine_domain_lowering_v1` is the PR-5 one-way
+  projection boundary. It accepts the exact admitted graph/behavior/assurance
+  chain, one caller-materialized concrete `fs_scenario::Scenario`, exact
+  versioned external domain-artifact references, an exact versioned projection
+  policy, and one mapping-law-bound crosswalk row for every required Machine
+  source. Required sources comprise the three aggregate identities plus every
+  separately durable clock, subsystem, Machine element, relation, interface,
+  event, tolerance, sensor, experiment, hazard, fault, accounting window, and
+  fidelity rung. Aggregate graph/behavior/assurance identities transitively
+  bind declarations that deliberately have no separate local ID; collection
+  positions never become identity.
+- Projection admission verifies the source chain before work, preflights
+  public and aggregate resource bounds (including a hard fixed-record bound
+  before the legacy scenario-plan scan), canonicalizes artifact/crosswalk
+  order, rejects missing/duplicate/foreign sources and missing/ambiguous
+  scenario locators, rejects unknown or orphan external artifacts, and runs
+  `Scenario::validate_with_budget` under the supplied `Cx`. The
+  `admit_machine_domain_lowering_with_decision_v1` variant retains bounded
+  submitted artifact/crosswalk/target counts plus stable admitted/refused and
+  detailed-refusal codes for structured tracing. Admission then requires a
+  current-version, migration-free, value-equal, byte-identical
+  `write_ir -> parse_ir -> write_ir` round trip before publishing
+  `MachineDomainLoweringIdV1`.
+- The projection identity binds PR-5 and FrankenScript IR versions; exact
+  graph, behavior, and assurance IDs; scenario IR version and canonical byte
+  hash; the explicit validation budget and preflight plan; projection policy;
+  canonical external-artifact rows; every crosswalk source, target, and law;
+  and the canonical manifest hash. The admitted value retains that manifest
+  plus a framed portable payload containing the manifest and scenario bytes.
+  `verify_replay` independently reparses and re-derives scenario, manifest,
+  payload, typed identity, and canonical-preimage receipt. The standalone
+  `parse_machine_domain_portable_payload_v1` boundary independently checks
+  payload/manifest framing and bounds, schema/build versions, typed aggregate
+  IDs, complete opaque row framing, canonical scenario parse/reprint, and
+  scenario hash binding without reconstructing authority-bearing domain
+  artifacts or claiming that row bodies are canonical.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
@@ -618,6 +655,19 @@ public and aggregate-V&V resource refusal; rich outer/nested permutation
 invariance; behavior/graph mismatch refusal; and identity movement through an
 admitted V&V receipt, escalation trigger, and fixed replay reference.
 
+`tests/machine_lowering.rs` (Machine-IR E0 PR-5, G0/G3/G4/G5): complete
+durable-source enumeration; one-way scenario/external-domain crosswalk
+admission; missing/duplicate/foreign source, invalid locator,
+orphan artifact, invalid scenario, and pre-cancellation refusals; caller-order
+invariance; independent identity movement by scenario bytes, external artifact
+hash, mapping law, and projection policy; exact scenario/manifest/payload
+replay; portable `fs-package::SemanticWitness` JSON transport with tamper
+refusal; and deterministic `fs-ledger` replay/mismatch evidence. Package,
+ledger, witness, plain content, and typed Machine identities are asserted in
+their separate domains rather than conflated. Hard scenario-record admission,
+empty external selectors, structured decision counts/codes, and outer/nested
+portable framing tamper are covered directly.
+
 ## No-claim boundaries
 
 - No operator catalog or per-operator semantic versions — gp3.6; the
@@ -654,8 +704,31 @@ admitted V&V receipt, escalation trigger, and fixed replay reference.
   declarations do not validate applicability, rank model accuracy, prove
   crosswalk commutation, guarantee evidence monotonicity, choose an optimal
   model, or authorize runtime promotion. Opaque references are bound exactly
-  but not executed or authenticated here. Scenario/domain lowering, runtime
-  routing, artifact snapshots, and stable-ID/hash round trips remain PR-5.
+  but not executed or authenticated here. Runtime routing and scientific
+  execution remain outside Machine assurance; PR-5 can bind exact projection
+  artifacts but does not retroactively strengthen this receipt.
+- Machine-domain projection is explicit crosswalk admission, not automatic
+  semantic inference. PR-2--4 model, material, value, history, distribution,
+  motion, guard, reset, correlation, evidence, and policy references do not
+  contain enough concrete data to synthesize domain values. The caller owns
+  materialization and supplies a versioned mapping law; PR-5 binds those exact
+  inputs and validates the resulting scenario but neither authenticates the
+  external law/artifact nor proves semantic equivalence, physical fidelity,
+  inverse reconstruction, crosswalk commutation, execution correctness, or
+  evidence-color promotion.
+- The current FrankenScript AST has no Machine-IR syntax/codec, so PR-5 proves
+  `admitted Machine stack -> explicit projection -> canonical scenario/domain
+  package -> exact transport/replay`; it does not claim the charter's initial
+  FrankenScript-to-Machine leg. `fs-package` structural verification proves
+  exact witness transport, not family semantics, and ledger replay compares
+  recorded operation/output identities rather than re-executing the lowerer.
+  `fs-package::SemanticWitness` independently caps witness payloads at 256 KiB,
+  so only projections whose portable payload fits that budget are packageable
+  through that witness type; PR-5 makes no universal packageability claim.
+  The standalone decoder treats artifact and crosswalk row bodies as opaque
+  framed bytes: it proves exact transport and scenario/hash binding, not row
+  grammar, canonical ordering, mapping-law authority, or crosswalk semantics.
+  Full package/ledger receipt migration remains the separate dependent Bead.
 - Router certification is currently a validated declaration on
   `ConverterSpec`, not an authenticated checker/ledger receipt. Admission
   refuses explicitly estimated routes, but full opaque admitted-converter
@@ -696,11 +769,12 @@ admitted V&V receipt, escalation trigger, and fixed replay reference.
   conservation, passivity, constitutive validity, geometric compatibility, or
   scheduler behavior. Algebraic-cycle detection is not a DAE-index proof, and
   naming a solve policy does not prove convergence. Opaque model/material/
-  interface/policy references are not authenticated or inspected. PR-3 still
-  owns IC/BC/motion/event/reset and tolerance/correlation semantics; PR-4 owns
-  sensors, hazards, ContextOfUse, accounting, and fidelity policy; PR-5 owns
-  scenario/domain lowering and stable-ID/hash round trips. Lineage persistence
-  and authenticated crosswalk authority are also absent. Admission-decision
+  interface/policy references are not authenticated or inspected. PR-3 owns
+  IC/BC/motion/event/reset and tolerance/correlation declarations; PR-4 owns
+  sensors, hazards, ContextOfUse, accounting, and fidelity policy; PR-5 admits
+  caller-materialized scenario/domain crosswalks and stable-ID/hash round
+  trips without inventing executable meanings. Lineage persistence and
+  authenticated crosswalk authority are also absent. Admission-decision
   summaries are not canonical digests of early-refused drafts and are not by
   themselves replayable ledger records.
 - The query language is v0: a FIXED QoI menu (max/integral/exceedance), not

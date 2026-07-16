@@ -12,12 +12,17 @@
 //! [`assurance`] module then binds sensors and experiment lineage, operational
 //! context and QoIs, hazards/faults, explicit accounting boundaries, and a
 //! terminating fidelity-escalation policy to one exact admitted behavior.
+//! PR-5's [`lowering`] module admits a one-way projection into one concrete,
+//! validated `fs-scenario` artifact plus exact externally owned domain
+//! artifacts and a complete stable-ID crosswalk. It deliberately does not
+//! infer executable meaning from the opaque references admitted by PR-2--4.
 //!
 //! Runtime coupling, executable material/interface cards, controllers,
 //! safety adjudication, physical validation, balance proofs, adaptive routing,
-//! and scenario lowering remain outside this module's current authority.
+//! and inverse/equivalence claims remain outside this module's authority.
 
 pub mod assurance;
+pub mod lowering;
 pub mod semantics;
 
 use core::fmt;
