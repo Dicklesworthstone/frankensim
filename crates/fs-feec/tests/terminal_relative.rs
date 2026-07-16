@@ -11,14 +11,16 @@ use fs_couple::{
     CoordinateBinding, PortKind, PortOrientation, PortSchema, PortTimestamp, StableId,
 };
 use fs_feec::terminal_relative::{
-    BoundaryIncidence, CellRef, CellularSubcomplex, ConductorComponent, ConductorComponentId,
-    ConversionMapId, DeclaredPhysicalMap, DeclaredPhysicalMapKind, DistributedCurrent,
-    FiniteCellComplex, GeometricCoil, IncidenceSign, IntegralRelativeChain,
+    BoundaryIncidence, CellRef, CellularSubcomplex, ComponentRelabelEntry, ConductorComponent,
+    ConductorComponentId, ConversionMapId, DeclaredPhysicalMap, DeclaredPhysicalMapKind,
+    DistributedCurrent, FiniteCellComplex, GeometricCoil, IncidenceSign, IntegralRelativeChain,
     IntegralRelativeCochain, IntegralWindingRepresentative, MachineBindingStatus,
-    OrientationMapSign, PhaseId, PhysicalObjectId, PhysicalTerminal, PhysicalTerminalId,
-    PresentedMachinePortRef, RealCurrentAmplitude, RealRelativeCochain, SignedCellRelabelEntry,
-    TerminalOrientation, TerminalPortCoordinate, TerminalPortTrivialization,
-    TerminalRelativeCoefficientDomain, TerminalRelativeError, TerminalRelativePair,
+    OrientationMapSign, PhaseCurrentSign, PhaseId, PhaseRelabelEntry, PhysicalObjectId,
+    PhysicalTerminal, PhysicalTerminalId, PresentedMachinePortRef, RealCurrentAmplitude,
+    RealRelativeCochain, SignedCellRelabelEntry, TerminalOrientation, TerminalPortCoordinate,
+    TerminalPortTrivialization, TerminalRelabelEntry, TerminalRelativeCoefficientDomain,
+    TerminalRelativeError, TerminalRelativePair, TerminalRelativePhysicalRelabel,
+    TerminalRelativePhysicalRelabelError, TerminalRelativeSemanticPermutation,
     TerminalRelativeSignedRelabel, TerminalRelativeSignedRelabelError, TerminalRole,
     TrivializationId,
 };
@@ -104,6 +106,33 @@ fn terminal_for(
     sign: OrientationMapSign,
     tick: u64,
 ) -> PhysicalTerminal {
+    terminal_for_with_current_reference(
+        ambient,
+        ordinal,
+        id,
+        component,
+        phase,
+        role,
+        orientation,
+        sign,
+        tick,
+        stable(&format!("current-reference/{id}")),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terminal_for_with_current_reference(
+    ambient: &FiniteCellComplex,
+    ordinal: u32,
+    id: &str,
+    component: &str,
+    phase: &str,
+    role: TerminalRole,
+    orientation: TerminalOrientation,
+    sign: OrientationMapSign,
+    tick: u64,
+    current_reference: StableId,
+) -> PhysicalTerminal {
     let port = electrical_port(&format!("port/{id}"), tick);
     PhysicalTerminal::new(
         PhysicalTerminalId::new(format!("terminal/{id}")).expect("terminal id"),
@@ -133,7 +162,7 @@ fn terminal_for(
             port.id().clone(),
             sign,
             stable("voltage-reference/dc-link-negative"),
-            stable(&format!("current-reference/{id}")),
+            current_reference,
         ),
     )
     .expect("physical terminal")
@@ -365,6 +394,262 @@ fn reflected_cut_loop_entries() -> Vec<SignedCellRelabelEntry> {
             )
         }))
         .collect()
+}
+
+fn two_phase_preserve_swap_cell_entries() -> Vec<SignedCellRelabelEntry> {
+    vec![
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 0),
+            CellRef::new(0, 2),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 1),
+            CellRef::new(0, 3),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 2),
+            CellRef::new(0, 0),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 3),
+            CellRef::new(0, 1),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(1, 0),
+            CellRef::new(1, 1),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(1, 1),
+            CellRef::new(1, 0),
+            IncidenceSign::Positive,
+        ),
+    ]
+}
+
+fn two_phase_terminal_reverse_cell_entries() -> Vec<SignedCellRelabelEntry> {
+    vec![
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 0),
+            CellRef::new(0, 1),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 1),
+            CellRef::new(0, 0),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 2),
+            CellRef::new(0, 3),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 3),
+            CellRef::new(0, 2),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(1, 0),
+            CellRef::new(1, 0),
+            IncidenceSign::Negative,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(1, 1),
+            CellRef::new(1, 1),
+            IncidenceSign::Negative,
+        ),
+    ]
+}
+
+fn two_phase_preserve_swap_semantics() -> TerminalRelativeSemanticPermutation {
+    TerminalRelativeSemanticPermutation::new(
+        vec![
+            ComponentRelabelEntry::new(
+                ConductorComponentId::new("component/a").unwrap(),
+                ConductorComponentId::new("component/b").unwrap(),
+            ),
+            ComponentRelabelEntry::new(
+                ConductorComponentId::new("component/b").unwrap(),
+                ConductorComponentId::new("component/a").unwrap(),
+            ),
+        ],
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/b").unwrap(),
+                PhaseId::new("phase/a").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+        ],
+        vec![
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/a-positive").unwrap(),
+                PhysicalTerminalId::new("terminal/b-positive").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/a-return").unwrap(),
+                PhysicalTerminalId::new("terminal/b-return").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/b-positive").unwrap(),
+                PhysicalTerminalId::new("terminal/a-positive").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/b-return").unwrap(),
+                PhysicalTerminalId::new("terminal/a-return").unwrap(),
+            ),
+        ],
+    )
+}
+
+fn two_phase_terminal_reverse_semantics() -> TerminalRelativeSemanticPermutation {
+    TerminalRelativeSemanticPermutation::new(
+        vec![
+            ComponentRelabelEntry::new(
+                ConductorComponentId::new("component/a").unwrap(),
+                ConductorComponentId::new("component/a").unwrap(),
+            ),
+            ComponentRelabelEntry::new(
+                ConductorComponentId::new("component/b").unwrap(),
+                ConductorComponentId::new("component/b").unwrap(),
+            ),
+        ],
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/a").unwrap(),
+                PhaseCurrentSign::Reverse,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/b").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Reverse,
+            ),
+        ],
+        vec![
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/a-positive").unwrap(),
+                PhysicalTerminalId::new("terminal/a-return").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/a-return").unwrap(),
+                PhysicalTerminalId::new("terminal/a-positive").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/b-positive").unwrap(),
+                PhysicalTerminalId::new("terminal/b-return").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/b-return").unwrap(),
+                PhysicalTerminalId::new("terminal/b-positive").unwrap(),
+            ),
+        ],
+    )
+}
+
+fn reversed_semantic_rows(
+    semantics: &TerminalRelativeSemanticPermutation,
+) -> TerminalRelativeSemanticPermutation {
+    let mut components = semantics.components().to_vec();
+    let mut phases = semantics.phases().to_vec();
+    let mut terminals = semantics.terminals().to_vec();
+    components.reverse();
+    phases.reverse();
+    terminals.reverse();
+    TerminalRelativeSemanticPermutation::new(components, phases, terminals)
+}
+
+fn two_phase_composed_cell_entries() -> Vec<SignedCellRelabelEntry> {
+    vec![
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 0),
+            CellRef::new(0, 3),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 1),
+            CellRef::new(0, 2),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 2),
+            CellRef::new(0, 1),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(0, 3),
+            CellRef::new(0, 0),
+            IncidenceSign::Positive,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(1, 0),
+            CellRef::new(1, 1),
+            IncidenceSign::Negative,
+        ),
+        SignedCellRelabelEntry::new(
+            CellRef::new(1, 1),
+            CellRef::new(1, 0),
+            IncidenceSign::Negative,
+        ),
+    ]
+}
+
+fn two_phase_composed_semantics() -> TerminalRelativeSemanticPermutation {
+    TerminalRelativeSemanticPermutation::new(
+        two_phase_preserve_swap_semantics().components().to_vec(),
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Reverse,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/b").unwrap(),
+                PhaseId::new("phase/a").unwrap(),
+                PhaseCurrentSign::Reverse,
+            ),
+        ],
+        vec![
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/a-positive").unwrap(),
+                PhysicalTerminalId::new("terminal/b-return").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/a-return").unwrap(),
+                PhysicalTerminalId::new("terminal/b-positive").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/b-positive").unwrap(),
+                PhysicalTerminalId::new("terminal/a-return").unwrap(),
+            ),
+            TerminalRelabelEntry::new(
+                PhysicalTerminalId::new("terminal/b-return").unwrap(),
+                PhysicalTerminalId::new("terminal/a-positive").unwrap(),
+            ),
+        ],
+    )
+}
+
+fn two_phase_current_winding_product(
+    winding: &IntegralWindingRepresentative,
+    amplitude: &RealCurrentAmplitude,
+) -> [f64; 2] {
+    assert_eq!(winding.chain().phase(), amplitude.phase());
+    let coefficient = winding.chain().coefficients()[0] as f64 * amplitude.value().value();
+    match winding.chain().phase().as_str() {
+        "phase/a" => [coefficient, 0.0],
+        "phase/b" => [0.0, coefficient],
+        phase => panic!("unexpected two-phase fixture phase {phase}"),
+    }
 }
 
 #[test]
@@ -1027,6 +1312,17 @@ fn i13_2a_010_integral_coboundary_satisfies_exact_stokes_pairing() {
 }
 
 fn disconnected_two_phase_pair() -> TerminalRelativePair {
+    disconnected_two_phase_pair_with_current_references([
+        "current-reference/two-phase",
+        "current-reference/two-phase",
+        "current-reference/two-phase",
+        "current-reference/two-phase",
+    ])
+}
+
+fn disconnected_two_phase_pair_with_current_references(
+    current_references: [&str; 4],
+) -> TerminalRelativePair {
     let complex = FiniteCellComplex::try_new(
         1,
         vec![4, 2],
@@ -1100,7 +1396,7 @@ fn disconnected_two_phase_pair() -> TerminalRelativePair {
         subcomplex(&complex, "support/two-phase-insulation-empty", []),
         vec![component_b, component_a],
         vec![
-            terminal_for(
+            terminal_for_with_current_reference(
                 &complex,
                 0,
                 "a-positive",
@@ -1110,8 +1406,9 @@ fn disconnected_two_phase_pair() -> TerminalRelativePair {
                 TerminalOrientation::OutOfConductor,
                 OrientationMapSign::Preserve,
                 37,
+                stable(current_references[0]),
             ),
-            terminal_for(
+            terminal_for_with_current_reference(
                 &complex,
                 1,
                 "a-return",
@@ -1121,8 +1418,9 @@ fn disconnected_two_phase_pair() -> TerminalRelativePair {
                 TerminalOrientation::IntoConductor,
                 OrientationMapSign::Reverse,
                 37,
+                stable(current_references[1]),
             ),
-            terminal_for(
+            terminal_for_with_current_reference(
                 &complex,
                 2,
                 "b-positive",
@@ -1132,8 +1430,9 @@ fn disconnected_two_phase_pair() -> TerminalRelativePair {
                 TerminalOrientation::OutOfConductor,
                 OrientationMapSign::Preserve,
                 37,
+                stable(current_references[2]),
             ),
-            terminal_for(
+            terminal_for_with_current_reference(
                 &complex,
                 3,
                 "b-return",
@@ -1143,6 +1442,7 @@ fn disconnected_two_phase_pair() -> TerminalRelativePair {
                 TerminalOrientation::IntoConductor,
                 OrientationMapSign::Reverse,
                 37,
+                stable(current_references[3]),
             ),
         ],
     )
@@ -1757,5 +2057,540 @@ fn i13_2a_019_signed_transport_refuses_exact_coefficient_overflow() {
         Err(TerminalRelativeSignedRelabelError::CoefficientOverflow {
             cell: CellRef::new(1, 0),
         })
+    );
+}
+
+#[test]
+fn i13_2a_020_physical_phase_swap_is_canonical_and_transports_each_coefficient_sector() {
+    let pair = disconnected_two_phase_pair();
+    let canonical_cells = two_phase_preserve_swap_cell_entries();
+    let mut reversed_cells = canonical_cells.clone();
+    reversed_cells.reverse();
+    let canonical_semantics = two_phase_preserve_swap_semantics();
+    let relabel = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        reversed_cells,
+        reversed_semantic_rows(&canonical_semantics),
+    )
+    .expect("physical phase swap");
+    let canonical_replay = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        canonical_cells.clone(),
+        canonical_semantics.clone(),
+    )
+    .expect("canonical phase-swap replay");
+
+    assert_eq!(relabel.cell_entries(), canonical_cells.as_slice());
+    assert_eq!(
+        relabel.semantic_permutation().components(),
+        canonical_semantics.components()
+    );
+    assert_eq!(
+        relabel.semantic_permutation().phases(),
+        canonical_semantics.phases()
+    );
+    assert_eq!(
+        relabel.semantic_permutation().terminals(),
+        canonical_semantics.terminals()
+    );
+    assert_eq!(relabel.identity(), canonical_replay.identity());
+
+    let phase_a = PhaseId::new("phase/a").unwrap();
+    let phase_b = PhaseId::new("phase/b").unwrap();
+    let chain =
+        IntegralRelativeChain::try_new(&pair, phase_a.clone(), 1, vec![7]).expect("phase-a chain");
+    let transported_chain = relabel
+        .transport_integral_chain(&pair, &pair, &chain)
+        .expect("swap chain phase");
+    assert_eq!(transported_chain.phase(), &phase_b);
+    assert_eq!(transported_chain.coefficients(), &[7]);
+
+    let cochain = IntegralRelativeCochain::try_new(&pair, phase_a.clone(), 1, vec![11])
+        .expect("phase-a cochain");
+    let transported_cochain = relabel
+        .transport_integral_cochain(&pair, &pair, &cochain)
+        .expect("swap cochain phase");
+    assert_eq!(transported_cochain.phase(), &phase_b);
+    assert_eq!(transported_cochain.coefficients(), &[11]);
+
+    let winding = IntegralWindingRepresentative::try_new(&pair, phase_a.clone(), vec![3])
+        .expect("phase-a winding");
+    let amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/current-a-before-phase-swap").unwrap(),
+        &pair,
+        phase_a,
+        Current::new(2.5),
+    )
+    .expect("phase-a current amplitude");
+    let transported_winding = relabel
+        .transport_winding_representative(&pair, &pair, &winding)
+        .expect("swap winding phase");
+    let target_amplitude_id = PhysicalObjectId::new("object/current-b-after-phase-swap").unwrap();
+    let transported_amplitude = relabel
+        .transport_current_amplitude(&pair, &pair, &amplitude, target_amplitude_id.clone())
+        .expect("swap current-amplitude phase");
+    assert_eq!(transported_winding.chain().phase(), &phase_b);
+    assert_eq!(transported_winding.chain().coefficients(), &[3]);
+    assert_eq!(transported_amplitude.phase(), &phase_b);
+    assert_eq!(
+        transported_amplitude.value().value().to_bits(),
+        2.5_f64.to_bits()
+    );
+    assert_eq!(transported_amplitude.id(), &target_amplitude_id);
+    assert_eq!(
+        two_phase_current_winding_product(&winding, &amplitude),
+        [7.5, 0.0]
+    );
+    assert_eq!(
+        two_phase_current_winding_product(&transported_winding, &transported_amplitude),
+        [0.0, 7.5]
+    );
+
+    let winding_b = IntegralWindingRepresentative::try_new(&pair, phase_b.clone(), vec![-5])
+        .expect("phase-b winding");
+    let amplitude_b = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/current-b-before-phase-swap").unwrap(),
+        &pair,
+        phase_b,
+        Current::new(1.5),
+    )
+    .expect("phase-b current amplitude");
+    let transported_winding_b = relabel
+        .transport_winding_representative(&pair, &pair, &winding_b)
+        .expect("swap phase-b winding");
+    let transported_amplitude_b = relabel
+        .transport_current_amplitude(
+            &pair,
+            &pair,
+            &amplitude_b,
+            PhysicalObjectId::new("object/current-a-after-phase-swap").unwrap(),
+        )
+        .expect("swap phase-b current amplitude");
+    assert_eq!(
+        two_phase_current_winding_product(&winding_b, &amplitude_b),
+        [0.0, -7.5]
+    );
+    assert_eq!(
+        two_phase_current_winding_product(&transported_winding_b, &transported_amplitude_b),
+        [-7.5, 0.0]
+    );
+}
+
+#[test]
+fn i13_2a_021_terminal_current_reversal_separates_cell_and_physical_signs() {
+    let pair = disconnected_two_phase_pair();
+    let reversal = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_terminal_reverse_cell_entries(),
+        two_phase_terminal_reverse_semantics(),
+    )
+    .expect("terminal/current reversal");
+    let phase_a = PhaseId::new("phase/a").unwrap();
+
+    let chain =
+        IntegralRelativeChain::try_new(&pair, phase_a.clone(), 1, vec![7]).expect("phase-a chain");
+    assert_eq!(
+        reversal
+            .transport_integral_chain(&pair, &pair, &chain)
+            .expect("reverse raw chain")
+            .coefficients(),
+        &[-7]
+    );
+    let cochain = IntegralRelativeCochain::try_new(&pair, phase_a.clone(), 1, vec![11])
+        .expect("phase-a cochain");
+    assert_eq!(
+        reversal
+            .transport_integral_cochain(&pair, &pair, &cochain)
+            .expect("reverse raw cochain")
+            .coefficients(),
+        &[-11]
+    );
+
+    let winding = IntegralWindingRepresentative::try_new(&pair, phase_a.clone(), vec![3])
+        .expect("phase-a winding");
+    let amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/current-a-before-terminal-reversal").unwrap(),
+        &pair,
+        phase_a.clone(),
+        Current::new(2.5),
+    )
+    .expect("phase-a amplitude");
+    let transported_winding = reversal
+        .transport_winding_representative(&pair, &pair, &winding)
+        .expect("combine cell and current reversals");
+    let target_amplitude_id =
+        PhysicalObjectId::new("object/current-a-after-terminal-reversal").unwrap();
+    let transported_amplitude = reversal
+        .transport_current_amplitude(&pair, &pair, &amplitude, target_amplitude_id.clone())
+        .expect("reverse physical current coordinate");
+    assert_eq!(transported_winding.chain().coefficients(), &[3]);
+    assert_eq!(transported_amplitude.phase(), &phase_a);
+    assert_eq!(
+        transported_amplitude.value().value().to_bits(),
+        (-2.5_f64).to_bits()
+    );
+    assert_eq!(transported_amplitude.id(), &target_amplitude_id);
+    assert_eq!(
+        two_phase_current_winding_product(&winding, &amplitude),
+        [7.5, 0.0]
+    );
+    assert_eq!(
+        two_phase_current_winding_product(&transported_winding, &transported_amplitude),
+        [-7.5, 0.0]
+    );
+
+    let minimum_winding =
+        IntegralWindingRepresentative::try_new(&pair, phase_a.clone(), vec![i64::MIN])
+            .expect("minimum exact winding coefficient");
+    assert_eq!(
+        reversal
+            .transport_winding_representative(&pair, &pair, &minimum_winding)
+            .expect("two reversals avoid an intermediate negation")
+            .chain()
+            .coefficients(),
+        &[i64::MIN]
+    );
+    let minimum_chain = IntegralRelativeChain::try_new(&pair, phase_a, 1, vec![i64::MIN])
+        .expect("minimum exact raw-chain coefficient");
+    assert_eq!(
+        reversal.transport_integral_chain(&pair, &pair, &minimum_chain),
+        Err(TerminalRelativePhysicalRelabelError::CoefficientOverflow {
+            cell: CellRef::new(1, 0),
+        })
+    );
+}
+
+#[test]
+fn i13_2a_022_physical_relabel_inverse_and_composition_obey_the_same_exact_action() {
+    let pair = disconnected_two_phase_pair();
+    let phase_swap = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_preserve_swap_cell_entries(),
+        two_phase_preserve_swap_semantics(),
+    )
+    .expect("phase swap");
+    let terminal_reversal = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_terminal_reverse_cell_entries(),
+        two_phase_terminal_reverse_semantics(),
+    )
+    .expect("terminal/current reversal");
+    let direct_composition = TerminalRelativePhysicalRelabel::try_new(
+        &pair,
+        &pair,
+        two_phase_composed_cell_entries(),
+        two_phase_composed_semantics(),
+    )
+    .expect("direct composed action");
+    let phase_then_terminal = phase_swap
+        .compose(&terminal_reversal, &pair, &pair, &pair)
+        .expect("terminal reversal after phase swap");
+    let terminal_then_phase = terminal_reversal
+        .compose(&phase_swap, &pair, &pair, &pair)
+        .expect("phase swap after terminal reversal");
+    assert_eq!(
+        phase_then_terminal.identity(),
+        direct_composition.identity()
+    );
+    assert_eq!(
+        terminal_then_phase.identity(),
+        direct_composition.identity()
+    );
+
+    assert_eq!(
+        phase_swap
+            .inverse(&pair, &pair)
+            .expect("phase-swap inverse")
+            .identity(),
+        phase_swap.identity()
+    );
+    assert_eq!(
+        terminal_reversal
+            .inverse(&pair, &pair)
+            .expect("terminal-reversal inverse")
+            .identity(),
+        terminal_reversal.identity()
+    );
+    assert_eq!(
+        direct_composition
+            .inverse(&pair, &pair)
+            .expect("composed inverse")
+            .identity(),
+        direct_composition.identity()
+    );
+    let identity = TerminalRelativePhysicalRelabel::identity_on(&pair).expect("physical identity");
+    assert_eq!(
+        phase_swap
+            .compose(&phase_swap, &pair, &pair, &pair)
+            .expect("phase swap squared")
+            .identity(),
+        identity.identity()
+    );
+    assert_eq!(
+        terminal_reversal
+            .compose(&terminal_reversal, &pair, &pair, &pair)
+            .expect("terminal reversal squared")
+            .identity(),
+        identity.identity()
+    );
+    assert_eq!(
+        direct_composition
+            .compose(&direct_composition, &pair, &pair, &pair)
+            .expect("composed involution squared")
+            .identity(),
+        identity.identity()
+    );
+
+    let phase_a = PhaseId::new("phase/a").unwrap();
+    let winding = IntegralWindingRepresentative::try_new(&pair, phase_a.clone(), vec![3])
+        .expect("phase-a winding");
+    let amplitude = RealCurrentAmplitude::try_new(
+        PhysicalObjectId::new("object/current-a-before-composition").unwrap(),
+        &pair,
+        phase_a,
+        Current::new(2.5),
+    )
+    .expect("phase-a amplitude");
+    let intermediate_winding = phase_swap
+        .transport_winding_representative(&pair, &pair, &winding)
+        .expect("first winding transport");
+    let sequential_winding = terminal_reversal
+        .transport_winding_representative(&pair, &pair, &intermediate_winding)
+        .expect("second winding transport");
+    let direct_winding = direct_composition
+        .transport_winding_representative(&pair, &pair, &winding)
+        .expect("direct winding transport");
+    assert_eq!(sequential_winding.identity(), direct_winding.identity());
+
+    let intermediate_amplitude = phase_swap
+        .transport_current_amplitude(
+            &pair,
+            &pair,
+            &amplitude,
+            PhysicalObjectId::new("object/current-b-between-composed-actions").unwrap(),
+        )
+        .expect("first amplitude transport");
+    let final_amplitude_id =
+        PhysicalObjectId::new("object/current-b-after-composed-actions").unwrap();
+    let sequential_amplitude = terminal_reversal
+        .transport_current_amplitude(
+            &pair,
+            &pair,
+            &intermediate_amplitude,
+            final_amplitude_id.clone(),
+        )
+        .expect("second amplitude transport");
+    let direct_amplitude = direct_composition
+        .transport_current_amplitude(&pair, &pair, &amplitude, final_amplitude_id.clone())
+        .expect("direct amplitude transport");
+    assert_eq!(sequential_amplitude, direct_amplitude);
+    assert_eq!(direct_amplitude.id(), &final_amplitude_id);
+    assert_eq!(
+        two_phase_current_winding_product(&direct_winding, &direct_amplitude),
+        [0.0, -7.5]
+    );
+}
+
+#[test]
+fn i13_2a_023_physical_relabel_admission_refuses_incomplete_or_noncommuting_data() {
+    let pair = disconnected_two_phase_pair();
+    let preserve_swap = two_phase_preserve_swap_semantics();
+
+    let missing_component = TerminalRelativeSemanticPermutation::new(
+        preserve_swap.components()[..1].to_vec(),
+        preserve_swap.phases().to_vec(),
+        preserve_swap.terminals().to_vec(),
+    );
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &pair,
+            two_phase_preserve_swap_cell_entries(),
+            missing_component,
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::SemanticEntryCountMismatch {
+                role: "conductor component",
+                expected: 2,
+                actual: 1,
+            }
+        )
+    );
+
+    let duplicate_phase_source = TerminalRelativeSemanticPermutation::new(
+        preserve_swap.components().to_vec(),
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/a").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+        ],
+        preserve_swap.terminals().to_vec(),
+    );
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &pair,
+            two_phase_preserve_swap_cell_entries(),
+            duplicate_phase_source,
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::DuplicateSemanticSource {
+                role: "phase",
+                id: "phase/a".to_owned(),
+            }
+        )
+    );
+
+    let duplicate_phase_target = TerminalRelativeSemanticPermutation::new(
+        preserve_swap.components().to_vec(),
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/b").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+        ],
+        preserve_swap.terminals().to_vec(),
+    );
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &pair,
+            two_phase_preserve_swap_cell_entries(),
+            duplicate_phase_target,
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::DuplicateSemanticTarget {
+                role: "phase",
+                id: "phase/b".to_owned(),
+            }
+        )
+    );
+
+    let wrong_current_parity = TerminalRelativeSemanticPermutation::new(
+        preserve_swap.components().to_vec(),
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Reverse,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/b").unwrap(),
+                PhaseId::new("phase/a").unwrap(),
+                PhaseCurrentSign::Reverse,
+            ),
+        ],
+        preserve_swap.terminals().to_vec(),
+    );
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &pair,
+            two_phase_preserve_swap_cell_entries(),
+            wrong_current_parity,
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::TerminalConventionMismatch {
+                source_terminal: "terminal/a-positive".to_owned(),
+                target_terminal: "terminal/b-positive".to_owned(),
+                field: "terminal role/current-sign parity",
+            }
+        )
+    );
+
+    let changed_current_reference_target = disconnected_two_phase_pair_with_current_references([
+        "current-reference/two-phase",
+        "current-reference/two-phase",
+        "current-reference/changed-only-for-target-b-positive",
+        "current-reference/two-phase",
+    ]);
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &changed_current_reference_target,
+            two_phase_preserve_swap_cell_entries(),
+            preserve_swap.clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::TerminalConventionMismatch {
+                source_terminal: "terminal/a-positive".to_owned(),
+                target_terminal: "terminal/b-positive".to_owned(),
+                field: "current reference",
+            }
+        )
+    );
+
+    let identity_cells = TerminalRelativePhysicalRelabel::identity_on(&pair)
+        .expect("physical identity")
+        .cell_entries()
+        .to_vec();
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &pair,
+            identity_cells,
+            preserve_swap.clone(),
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::MappedSemanticSupportMismatch {
+                role: "conductor component support",
+                source_owner: "component/a".to_owned(),
+                target_owner: "component/b".to_owned(),
+                cell: CellRef::new(0, 0),
+                expected_mapped: true,
+                actual_target: false,
+            }
+        )
+    );
+
+    let wrong_phase_square = TerminalRelativeSemanticPermutation::new(
+        preserve_swap.components().to_vec(),
+        vec![
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/a").unwrap(),
+                PhaseId::new("phase/a").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+            PhaseRelabelEntry::new(
+                PhaseId::new("phase/b").unwrap(),
+                PhaseId::new("phase/b").unwrap(),
+                PhaseCurrentSign::Preserve,
+            ),
+        ],
+        preserve_swap.terminals().to_vec(),
+    );
+    assert_eq!(
+        TerminalRelativePhysicalRelabel::try_new(
+            &pair,
+            &pair,
+            two_phase_preserve_swap_cell_entries(),
+            wrong_phase_square,
+        ),
+        Err(
+            TerminalRelativePhysicalRelabelError::PhaseComponentSquareMismatch {
+                source_phase: "phase/a".to_owned(),
+                target_phase: "phase/a".to_owned(),
+                expected_target_component: "component/b".to_owned(),
+                actual_target_component: "component/a".to_owned(),
+            }
+        )
     );
 }

@@ -173,6 +173,9 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   `TerminalRelativeSignedRelabel` admits a representation witness only when a
   complete signed cell bijection commutes with every exact incidence and maps
   conductor, relative, insulation, component, and terminal supports exactly.
+  `TerminalRelativePhysicalRelabel` additionally carries complete explicit
+  component, phase, and terminal bijections plus a per-phase current-coordinate
+  sign; no semantic permutation or orientation compensation is inferred.
 
 ## Invariants
 
@@ -218,6 +221,17 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   basis reindexing, boundary/coboundary commutation, and evaluation pairing.
   This first relabel lane preserves component, phase, terminal, port, and
   Machine-reference semantic identities rather than silently permuting them.
+- A physical relabel validates the component-support, phase/component, and
+  terminal/phase/component squares against its signed cell action. Preserve
+  keeps terminal role, physical orientation, and trivialization sign; Reverse
+  flips all three. Port physics, presented Machine authority, and the explicit
+  voltage/current reference artifacts remain exact; only mapped terminal-local
+  nominal bundle identities may differ. Generic integral chains/cochains
+  receive only the cellular sign, while a winding representative receives the
+  combined cellular/current sign and a real current amplitude receives only
+  the declared current sign.
+  Checked combination occurs before coefficient application so two reversals
+  cancel exactly without a spurious intermediate `i64` overflow.
 - Vector families (vecfam battery): dimension counts r = 1..4 match
   the closed forms (N: 6/20/45/84, RT: 4/15/36/70 per tet) and the
   exact-sequence Euler identity Σ(−1)ᵏ dim Vᵏ = 1 holds on
@@ -396,6 +410,9 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   Parallel-edge and orientation-reflection relabel fixtures pin signed basis
   transport, exact naturality, inverse/composition, canonical row ordering, and
   fail-closed non-chain/support maps.
+  Multiphase/component and driven/return permutation fixtures pin complete
+  semantic squares, explicit current-sign compensation, generic-versus-physical
+  transport separation, current-times-winding invariance, and invalid twins.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -535,6 +552,10 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   tree/cotree or cut changes, non-unimodular/partial maps, refinement, remesh,
   topology events, and homology/cohomology induced-map authority require their
   own explicit schemas and evidence.
+- An admitted physical relabel covers only its enumerated bijections. It does
+  not authenticate a MachineGraph or netlist equivalence, transport distributed
+  currents/real fields/geometric coils/conversion maps, infer phase sequence or
+  polarity, or establish refinement/remesh/cut/topology-event naturality.
 - No field transfer, current-density solve, electromagnetic force, material,
   thermal, manufacturability, geometric embedding, cancellation-latency,
   performance, or authority-receipt claim follows from these types.

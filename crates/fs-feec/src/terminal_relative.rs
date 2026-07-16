@@ -43,6 +43,8 @@ const PAIR_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(4 * 1_024 * 1_024, 2 * 1_024 * 1_024, 1, 1, 256);
 const SIGNED_RELABEL_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(4 * 1_024 * 1_024, 2 * 1_024 * 1_024, 3, 1, 256);
+const PHYSICAL_RELABEL_IDENTITY_LIMITS: CanonicalLimits =
+    CanonicalLimits::new(12 * 1_024 * 1_024, 2 * 1_024 * 1_024, 6, 1, 256);
 
 /// Strong semantic identity of one admitted physical terminal-relative pair.
 pub enum TerminalRelativePairSchemaV1 {}
@@ -83,6 +85,28 @@ impl CanonicalSchema for TerminalRelativeSignedRelabelSchemaV1 {
 
 /// Nominal identity of one admitted terminal-relative signed relabeling.
 pub type TerminalRelativeSignedRelabelId = SemanticId<TerminalRelativeSignedRelabelSchemaV1>;
+
+/// Strong semantic identity of one admitted physical terminal-relative
+/// relabeling with explicit semantic permutations and phase-current action.
+pub enum TerminalRelativePhysicalRelabelSchemaV1 {}
+
+impl CanonicalSchema for TerminalRelativePhysicalRelabelSchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-feec.terminal-relative-physical-relabel.v1";
+    const NAME: &'static str = "terminal-relative-physical-relabel";
+    const VERSION: u32 = TERMINAL_RELATIVE_SCHEMA_VERSION;
+    const CONTEXT: &'static str = "complete signed cell bijection with explicit component, phase, terminal, and phase-current transport";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::child_of("source-pair", &TERMINAL_RELATIVE_SIGNED_RELABEL_PAIR_CHILD),
+        FieldSpec::child_of("target-pair", &TERMINAL_RELATIVE_SIGNED_RELABEL_PAIR_CHILD),
+        FieldSpec::required("signed-cell-map", WireType::Bytes),
+        FieldSpec::required("component-map", WireType::Bytes),
+        FieldSpec::required("phase-map", WireType::Bytes),
+        FieldSpec::required("terminal-map", WireType::Bytes),
+    ];
+}
+
+/// Nominal identity of one admitted physical terminal-relative relabeling.
+pub type TerminalRelativePhysicalRelabelId = SemanticId<TerminalRelativePhysicalRelabelSchemaV1>;
 
 /// Strong semantic identity of one declared integral winding representative.
 pub enum IntegralWindingRepresentativeSchemaV1 {}
@@ -222,6 +246,223 @@ impl SignedCellRelabelEntry {
     #[must_use]
     pub const fn sign(self) -> IncidenceSign {
         self.sign
+    }
+}
+
+/// Explicit action on the positive-current coordinate of one mapped phase.
+///
+/// This is deliberately distinct from [`OrientationMapSign`], which describes
+/// one terminal's port trivialization rather than a change of physical phase
+/// convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PhaseCurrentSign {
+    /// Preserve the positive-current coordinate.
+    Preserve,
+    /// Negate the positive-current coordinate.
+    Reverse,
+}
+
+impl PhaseCurrentSign {
+    /// Apply this action to a finite real current amplitude.
+    #[must_use]
+    pub fn apply(self, value: Current) -> Current {
+        match self {
+            Self::Preserve => value,
+            Self::Reverse => Current::new(-value.value()),
+        }
+    }
+
+    /// Compose `next` after this action.
+    #[must_use]
+    pub const fn compose(self, next: Self) -> Self {
+        match (self, next) {
+            (Self::Preserve, Self::Preserve) | (Self::Reverse, Self::Reverse) => Self::Preserve,
+            (Self::Preserve, Self::Reverse) | (Self::Reverse, Self::Preserve) => Self::Reverse,
+        }
+    }
+
+    /// Every sign action is its own inverse.
+    #[must_use]
+    pub const fn inverse(self) -> Self {
+        self
+    }
+
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Preserve => 0,
+            Self::Reverse => 1,
+        }
+    }
+
+    const fn incidence_sign(self) -> IncidenceSign {
+        match self {
+            Self::Preserve => IncidenceSign::Positive,
+            Self::Reverse => IncidenceSign::Negative,
+        }
+    }
+
+    const fn map_role(self, role: TerminalRole) -> TerminalRole {
+        match (self, role) {
+            (Self::Preserve, role) => role,
+            (Self::Reverse, TerminalRole::Driven) => TerminalRole::ReturnReference,
+            (Self::Reverse, TerminalRole::ReturnReference) => TerminalRole::Driven,
+        }
+    }
+
+    const fn map_orientation(self, orientation: TerminalOrientation) -> TerminalOrientation {
+        match (self, orientation) {
+            (Self::Preserve, orientation) => orientation,
+            (Self::Reverse, TerminalOrientation::IntoConductor) => {
+                TerminalOrientation::OutOfConductor
+            }
+            (Self::Reverse, TerminalOrientation::OutOfConductor) => {
+                TerminalOrientation::IntoConductor
+            }
+        }
+    }
+
+    const fn map_trivialization(self, sign: OrientationMapSign) -> OrientationMapSign {
+        match (self, sign) {
+            (Self::Preserve, sign) => sign,
+            (Self::Reverse, OrientationMapSign::Preserve) => OrientationMapSign::Reverse,
+            (Self::Reverse, OrientationMapSign::Reverse) => OrientationMapSign::Preserve,
+        }
+    }
+}
+
+/// One explicitly declared source-to-target conductor-component row.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentRelabelEntry {
+    source: ConductorComponentId,
+    target: ConductorComponentId,
+}
+
+impl ComponentRelabelEntry {
+    /// Declare one component image.
+    #[must_use]
+    pub const fn new(source: ConductorComponentId, target: ConductorComponentId) -> Self {
+        Self { source, target }
+    }
+
+    /// Source component identity.
+    #[must_use]
+    pub const fn source(&self) -> &ConductorComponentId {
+        &self.source
+    }
+
+    /// Target component identity.
+    #[must_use]
+    pub const fn target(&self) -> &ConductorComponentId {
+        &self.target
+    }
+}
+
+/// One explicitly declared source-to-target phase row and current action.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PhaseRelabelEntry {
+    source: PhaseId,
+    target: PhaseId,
+    current_sign: PhaseCurrentSign,
+}
+
+impl PhaseRelabelEntry {
+    /// Declare one phase image and its physical positive-current action.
+    #[must_use]
+    pub const fn new(source: PhaseId, target: PhaseId, current_sign: PhaseCurrentSign) -> Self {
+        Self {
+            source,
+            target,
+            current_sign,
+        }
+    }
+
+    /// Source phase identity.
+    #[must_use]
+    pub const fn source(&self) -> &PhaseId {
+        &self.source
+    }
+
+    /// Target phase identity.
+    #[must_use]
+    pub const fn target(&self) -> &PhaseId {
+        &self.target
+    }
+
+    /// Explicit positive-current action.
+    #[must_use]
+    pub const fn current_sign(&self) -> PhaseCurrentSign {
+        self.current_sign
+    }
+}
+
+/// One explicitly declared source-to-target physical-terminal row.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalRelabelEntry {
+    source: PhysicalTerminalId,
+    target: PhysicalTerminalId,
+}
+
+impl TerminalRelabelEntry {
+    /// Declare one physical-terminal image.
+    #[must_use]
+    pub const fn new(source: PhysicalTerminalId, target: PhysicalTerminalId) -> Self {
+        Self { source, target }
+    }
+
+    /// Source terminal identity.
+    #[must_use]
+    pub const fn source(&self) -> &PhysicalTerminalId {
+        &self.source
+    }
+
+    /// Target terminal identity.
+    #[must_use]
+    pub const fn target(&self) -> &PhysicalTerminalId {
+        &self.target
+    }
+}
+
+/// Complete explicit semantic permutation carried by a physical relabeling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRelativeSemanticPermutation {
+    components: Vec<ComponentRelabelEntry>,
+    phases: Vec<PhaseRelabelEntry>,
+    terminals: Vec<TerminalRelabelEntry>,
+}
+
+impl TerminalRelativeSemanticPermutation {
+    /// Declare the three total semantic maps. Admission and canonical sorting
+    /// occur only with both endpoint pairs in
+    /// [`TerminalRelativePhysicalRelabel::try_new`].
+    #[must_use]
+    pub const fn new(
+        components: Vec<ComponentRelabelEntry>,
+        phases: Vec<PhaseRelabelEntry>,
+        terminals: Vec<TerminalRelabelEntry>,
+    ) -> Self {
+        Self {
+            components,
+            phases,
+            terminals,
+        }
+    }
+
+    /// Canonically source-sorted component rows after admission.
+    #[must_use]
+    pub fn components(&self) -> &[ComponentRelabelEntry] {
+        &self.components
+    }
+
+    /// Canonically source-sorted phase rows after admission.
+    #[must_use]
+    pub fn phases(&self) -> &[PhaseRelabelEntry] {
+        &self.phases
+    }
+
+    /// Canonically source-sorted terminal rows after admission.
+    #[must_use]
+    pub fn terminals(&self) -> &[TerminalRelabelEntry] {
+        &self.terminals
     }
 }
 
@@ -2273,6 +2514,526 @@ impl TerminalRelativeSignedRelabel {
     }
 }
 
+/// Admitted physical relabeling with explicit cell, component, phase,
+/// terminal, and phase-current actions.
+///
+/// This receipt proves only the declared finite bijections and the commuting
+/// squares checked by [`Self::try_new`]. It is not refinement, remesh,
+/// topology-event, homology-class, field-transfer, or MachineGraph authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRelativePhysicalRelabel {
+    source_pair: TerminalRelativePairId,
+    target_pair: TerminalRelativePairId,
+    cells: Vec<SignedCellRelabelEntry>,
+    semantics: TerminalRelativeSemanticPermutation,
+    identity_receipt: IdentityReceipt<TerminalRelativePhysicalRelabelId>,
+}
+
+impl TerminalRelativePhysicalRelabel {
+    /// Admit complete physical relabeling data between two terminal-relative
+    /// pairs.
+    ///
+    /// Every map is supplied explicitly. Declaration order is discarded only
+    /// after total source/target bijection checks; no semantic row or current
+    /// action is inferred from canonical ordering or terminal metadata.
+    #[allow(clippy::too_many_lines)]
+    pub fn try_new(
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        cells: Vec<SignedCellRelabelEntry>,
+        semantics: TerminalRelativeSemanticPermutation,
+    ) -> Result<Self, TerminalRelativePhysicalRelabelError> {
+        let (cells, cell_map) = admit_physical_cell_map(source, target, cells)
+            .map_err(TerminalRelativePhysicalRelabelError::CellRelabel)?;
+        let semantics = canonicalize_semantic_permutation(source, target, semantics)?;
+        verify_physical_component_map(source, target, &cell_map, &semantics)?;
+        verify_physical_phase_map(source, target, &semantics)?;
+        verify_physical_terminal_map(source, target, &cell_map, &semantics)?;
+
+        let cell_payload = canonical_signed_relabel_payload(&cells)
+            .map_err(TerminalRelativePhysicalRelabelError::CellRelabel)?;
+        let component_payload = canonical_component_relabel_payload(&semantics.components)?;
+        let phase_payload = canonical_phase_relabel_payload(&semantics.phases)?;
+        let terminal_payload = canonical_terminal_relabel_payload(&semantics.terminals)?;
+        let identity_receipt = CanonicalEncoder::<TerminalRelativePhysicalRelabelId, _>::new(
+            PHYSICAL_RELABEL_IDENTITY_LIMITS,
+            NeverCancel,
+        )?
+        .child(Field::new(0, "source-pair"), source.identity())?
+        .child(Field::new(1, "target-pair"), target.identity())?
+        .bytes(Field::new(2, "signed-cell-map"), &cell_payload)?
+        .bytes(Field::new(3, "component-map"), &component_payload)?
+        .bytes(Field::new(4, "phase-map"), &phase_payload)?
+        .bytes(Field::new(5, "terminal-map"), &terminal_payload)?
+        .finish()?;
+
+        Ok(Self {
+            source_pair: source.identity(),
+            target_pair: target.identity(),
+            cells,
+            semantics,
+            identity_receipt,
+        })
+    }
+
+    /// Construct the explicit identity relabeling of one pair.
+    pub fn identity_on(
+        pair: &TerminalRelativePair,
+    ) -> Result<Self, TerminalRelativePhysicalRelabelError> {
+        let mut cells = Vec::new();
+        for (degree, count) in pair.complex.cell_counts.iter().copied().enumerate() {
+            let degree =
+                u8::try_from(degree).expect("admitted terminal-relative dimension always fits u8");
+            for ordinal in 0..count {
+                let cell = CellRef::new(degree, ordinal);
+                cells.push(SignedCellRelabelEntry::new(
+                    cell,
+                    cell,
+                    IncidenceSign::Positive,
+                ));
+            }
+        }
+        let components = pair
+            .components
+            .iter()
+            .map(|component| ComponentRelabelEntry::new(component.id.clone(), component.id.clone()))
+            .collect();
+        let phases = pair
+            .phase_components
+            .keys()
+            .map(|phase| {
+                PhaseRelabelEntry::new(phase.clone(), phase.clone(), PhaseCurrentSign::Preserve)
+            })
+            .collect();
+        let terminals = pair
+            .terminals
+            .iter()
+            .map(|terminal| TerminalRelabelEntry::new(terminal.id.clone(), terminal.id.clone()))
+            .collect();
+        Self::try_new(
+            pair,
+            pair,
+            cells,
+            TerminalRelativeSemanticPermutation::new(components, phases, terminals),
+        )
+    }
+
+    /// Strong identity of this exact directed physical relabeling.
+    #[must_use]
+    pub const fn identity(&self) -> TerminalRelativePhysicalRelabelId {
+        self.identity_receipt.id()
+    }
+
+    /// Strong identity plus canonical-preimage/schema audit roots.
+    #[must_use]
+    pub const fn identity_receipt(&self) -> IdentityReceipt<TerminalRelativePhysicalRelabelId> {
+        self.identity_receipt
+    }
+
+    /// Strong identity of the admitted source pair.
+    #[must_use]
+    pub const fn source_pair_id(&self) -> TerminalRelativePairId {
+        self.source_pair
+    }
+
+    /// Strong identity of the admitted target pair.
+    #[must_use]
+    pub const fn target_pair_id(&self) -> TerminalRelativePairId {
+        self.target_pair
+    }
+
+    /// Canonically source-sorted complete signed cell map.
+    #[must_use]
+    pub fn cell_entries(&self) -> &[SignedCellRelabelEntry] {
+        &self.cells
+    }
+
+    /// Canonically source-sorted semantic maps.
+    #[must_use]
+    pub const fn semantic_permutation(&self) -> &TerminalRelativeSemanticPermutation {
+        &self.semantics
+    }
+
+    /// Target cell and orientation sign for one source cell.
+    #[must_use]
+    pub fn cell_image(&self, source: CellRef) -> Option<(CellRef, IncidenceSign)> {
+        self.cells
+            .binary_search_by_key(&source, |entry| entry.source)
+            .ok()
+            .map(|index| {
+                let entry = self.cells[index];
+                (entry.target, entry.sign)
+            })
+    }
+
+    /// Target component for one source component.
+    #[must_use]
+    pub fn component_image(&self, source: &ConductorComponentId) -> Option<&ConductorComponentId> {
+        self.semantics
+            .components
+            .binary_search_by(|entry| entry.source.cmp(source))
+            .ok()
+            .map(|index| &self.semantics.components[index].target)
+    }
+
+    /// Target phase and explicit current action for one source phase.
+    #[must_use]
+    pub fn phase_image(&self, source: &PhaseId) -> Option<(&PhaseId, PhaseCurrentSign)> {
+        self.semantics
+            .phases
+            .binary_search_by(|entry| entry.source.cmp(source))
+            .ok()
+            .map(|index| {
+                let entry = &self.semantics.phases[index];
+                (&entry.target, entry.current_sign)
+            })
+    }
+
+    /// Target terminal for one source terminal.
+    #[must_use]
+    pub fn terminal_image(&self, source: &PhysicalTerminalId) -> Option<&PhysicalTerminalId> {
+        self.semantics
+            .terminals
+            .binary_search_by(|entry| entry.source.cmp(source))
+            .ok()
+            .map(|index| &self.semantics.terminals[index].target)
+    }
+
+    /// Transport an arbitrary integral chain by the cell action and phase
+    /// permutation only. The physical current sign is intentionally not
+    /// applied to a generic algebraic chain.
+    pub fn transport_integral_chain(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        chain: &IntegralRelativeChain,
+    ) -> Result<IntegralRelativeChain, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        self.verify_value_pair("integral chain source", chain.pair)?;
+        let (target_phase, _) = self.required_phase_image(&chain.phase)?;
+        let target_phase = target_phase.clone();
+        let coefficients = self.transport_integral_coefficients(
+            source,
+            target,
+            &chain.phase,
+            &target_phase,
+            chain.degree,
+            &chain.coefficients,
+            PhaseCurrentSign::Preserve,
+        )?;
+        IntegralRelativeChain::try_new(target, target_phase, chain.degree, coefficients)
+            .map_err(Into::into)
+    }
+
+    /// Transport an arbitrary integral cochain by the cell action and phase
+    /// permutation only. The physical current sign is intentionally not
+    /// applied to a generic algebraic cochain.
+    pub fn transport_integral_cochain(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        cochain: &IntegralRelativeCochain,
+    ) -> Result<IntegralRelativeCochain, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        self.verify_value_pair("integral cochain source", cochain.pair)?;
+        let (target_phase, _) = self.required_phase_image(&cochain.phase)?;
+        let target_phase = target_phase.clone();
+        let coefficients = self.transport_integral_coefficients(
+            source,
+            target,
+            &cochain.phase,
+            &target_phase,
+            cochain.degree,
+            &cochain.coefficients,
+            PhaseCurrentSign::Preserve,
+        )?;
+        IntegralRelativeCochain::try_new(target, target_phase, cochain.degree, coefficients)
+            .map_err(Into::into)
+    }
+
+    /// Transport a winding representative through the combined cell and
+    /// phase-current sign in one exact coefficient operation.
+    ///
+    /// Combining the two signs before touching a coefficient ensures that two
+    /// reversals preserve `i64::MIN` instead of spuriously overflowing through
+    /// an intermediate negation.
+    pub fn transport_winding_representative(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        representative: &IntegralWindingRepresentative,
+    ) -> Result<IntegralWindingRepresentative, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        self.verify_value_pair("winding representative source", representative.chain.pair)?;
+        let (target_phase, current_sign) =
+            self.required_phase_image(&representative.chain.phase)?;
+        let target_phase = target_phase.clone();
+        let coefficients = self.transport_integral_coefficients(
+            source,
+            target,
+            &representative.chain.phase,
+            &target_phase,
+            representative.chain.degree,
+            &representative.chain.coefficients,
+            current_sign,
+        )?;
+        IntegralWindingRepresentative::try_new(target, target_phase, coefficients)
+            .map_err(Into::into)
+    }
+
+    /// Transport one finite scalar current amplitude with the phase's explicit
+    /// current action. The caller must declare the target physical-object ID;
+    /// this API never silently reuses or invents object identity.
+    pub fn transport_current_amplitude(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        amplitude: &RealCurrentAmplitude,
+        target_id: PhysicalObjectId,
+    ) -> Result<RealCurrentAmplitude, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        self.verify_value_pair("current amplitude source", amplitude.pair)?;
+        let (target_phase, current_sign) = self.required_phase_image(&amplitude.phase)?;
+        RealCurrentAmplitude::try_new(
+            target_id,
+            target,
+            target_phase.clone(),
+            current_sign.apply(amplitude.value),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Admit the exact inverse physical relabeling.
+    pub fn inverse(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+    ) -> Result<Self, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, target)?;
+        let cells = self
+            .cells
+            .iter()
+            .map(|entry| SignedCellRelabelEntry::new(entry.target, entry.source, entry.sign))
+            .collect();
+        let components = self
+            .semantics
+            .components
+            .iter()
+            .map(|entry| ComponentRelabelEntry::new(entry.target.clone(), entry.source.clone()))
+            .collect();
+        let phases = self
+            .semantics
+            .phases
+            .iter()
+            .map(|entry| {
+                PhaseRelabelEntry::new(
+                    entry.target.clone(),
+                    entry.source.clone(),
+                    entry.current_sign.inverse(),
+                )
+            })
+            .collect();
+        let terminals = self
+            .semantics
+            .terminals
+            .iter()
+            .map(|entry| TerminalRelabelEntry::new(entry.target.clone(), entry.source.clone()))
+            .collect();
+        Self::try_new(
+            target,
+            source,
+            cells,
+            TerminalRelativeSemanticPermutation::new(components, phases, terminals),
+        )
+    }
+
+    /// Compose `next` after `self`, including semantic permutations and the
+    /// exact composed phase-current action.
+    pub fn compose(
+        &self,
+        next: &Self,
+        source: &TerminalRelativePair,
+        intermediate: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+    ) -> Result<Self, TerminalRelativePhysicalRelabelError> {
+        self.verify_pair_bindings(source, intermediate)?;
+        next.verify_pair_bindings(intermediate, target)?;
+
+        let mut cells = Vec::with_capacity(self.cells.len());
+        for entry in &self.cells {
+            let Some((target_cell, next_sign)) = next.cell_image(entry.target) else {
+                return Err(TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                    role: "cell",
+                    id: format!("{}:{}", entry.target.degree, entry.target.ordinal),
+                });
+            };
+            cells.push(SignedCellRelabelEntry::new(
+                entry.source,
+                target_cell,
+                multiply_incidence_sign(entry.sign, next_sign),
+            ));
+        }
+
+        let mut components = Vec::with_capacity(self.semantics.components.len());
+        for entry in &self.semantics.components {
+            let Some(target_component) = next.component_image(&entry.target) else {
+                return Err(TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                    role: "conductor component",
+                    id: entry.target.as_str().to_owned(),
+                });
+            };
+            components.push(ComponentRelabelEntry::new(
+                entry.source.clone(),
+                target_component.clone(),
+            ));
+        }
+
+        let mut phases = Vec::with_capacity(self.semantics.phases.len());
+        for entry in &self.semantics.phases {
+            let Some((target_phase, next_sign)) = next.phase_image(&entry.target) else {
+                return Err(TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                    role: "phase",
+                    id: entry.target.as_str().to_owned(),
+                });
+            };
+            phases.push(PhaseRelabelEntry::new(
+                entry.source.clone(),
+                target_phase.clone(),
+                entry.current_sign.compose(next_sign),
+            ));
+        }
+
+        let mut terminals = Vec::with_capacity(self.semantics.terminals.len());
+        for entry in &self.semantics.terminals {
+            let Some(target_terminal) = next.terminal_image(&entry.target) else {
+                return Err(TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                    role: "physical terminal",
+                    id: entry.target.as_str().to_owned(),
+                });
+            };
+            terminals.push(TerminalRelabelEntry::new(
+                entry.source.clone(),
+                target_terminal.clone(),
+            ));
+        }
+
+        Self::try_new(
+            source,
+            target,
+            cells,
+            TerminalRelativeSemanticPermutation::new(components, phases, terminals),
+        )
+    }
+
+    fn verify_pair_bindings(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+    ) -> Result<(), TerminalRelativePhysicalRelabelError> {
+        if source.identity() != self.source_pair {
+            return Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+                role: "source pair",
+                expected: self.source_pair,
+                actual: source.identity(),
+            });
+        }
+        if target.identity() != self.target_pair {
+            return Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+                role: "target pair",
+                expected: self.target_pair,
+                actual: target.identity(),
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_value_pair(
+        &self,
+        role: &'static str,
+        actual: TerminalRelativePairId,
+    ) -> Result<(), TerminalRelativePhysicalRelabelError> {
+        if actual != self.source_pair {
+            return Err(TerminalRelativePhysicalRelabelError::PairIdentityMismatch {
+                role,
+                expected: self.source_pair,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    fn required_phase_image(
+        &self,
+        source: &PhaseId,
+    ) -> Result<(&PhaseId, PhaseCurrentSign), TerminalRelativePhysicalRelabelError> {
+        self.phase_image(source).ok_or_else(|| {
+            TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                role: "phase",
+                id: source.as_str().to_owned(),
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transport_integral_coefficients(
+        &self,
+        source: &TerminalRelativePair,
+        target: &TerminalRelativePair,
+        source_phase: &PhaseId,
+        target_phase: &PhaseId,
+        degree: u8,
+        coefficients: &[i64],
+        coefficient_action: PhaseCurrentSign,
+    ) -> Result<Vec<i64>, TerminalRelativePhysicalRelabelError> {
+        let source_basis = source.phase_relative_basis(source_phase, degree)?;
+        if source_basis.len() != coefficients.len() {
+            return Err(TerminalRelativeError::CoefficientArity {
+                expected: source_basis.len(),
+                actual: coefficients.len(),
+            }
+            .into());
+        }
+        let target_basis = target.phase_relative_basis(target_phase, degree)?;
+        let target_indices: BTreeMap<_, _> = target_basis
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, cell)| (cell, index))
+            .collect();
+        let mut transported = vec![0_i64; target_basis.len()];
+        for (source_cell, coefficient) in source_basis.iter().zip(coefficients) {
+            let Some((target_cell, cell_sign)) = self.cell_image(*source_cell) else {
+                return Err(TerminalRelativePhysicalRelabelError::MissingSemanticImage {
+                    role: "cell",
+                    id: format!("{}:{}", source_cell.degree, source_cell.ordinal),
+                });
+            };
+            let Some(target_index) = target_indices.get(&target_cell) else {
+                return Err(
+                    TerminalRelativePhysicalRelabelError::MappedBasisCellMissing {
+                        source_phase: source_phase.as_str().to_owned(),
+                        target_phase: target_phase.as_str().to_owned(),
+                        degree,
+                        source: *source_cell,
+                        target: target_cell,
+                    },
+                );
+            };
+            let effective_sign =
+                multiply_incidence_sign(cell_sign, coefficient_action.incidence_sign());
+            transported[*target_index] = match effective_sign {
+                IncidenceSign::Positive => *coefficient,
+                IncidenceSign::Negative => coefficient.checked_neg().ok_or(
+                    TerminalRelativePhysicalRelabelError::CoefficientOverflow {
+                        cell: *source_cell,
+                    },
+                )?,
+            };
+        }
+        Ok(transported)
+    }
+}
+
 const fn multiply_incidence_sign(left: IncidenceSign, right: IncidenceSign) -> IncidenceSign {
     match (left, right) {
         (IncidenceSign::Negative, IncidenceSign::Positive)
@@ -2280,6 +3041,120 @@ const fn multiply_incidence_sign(left: IncidenceSign, right: IncidenceSign) -> I
         (IncidenceSign::Negative, IncidenceSign::Negative)
         | (IncidenceSign::Positive, IncidenceSign::Positive) => IncidenceSign::Positive,
     }
+}
+
+fn admit_physical_cell_map(
+    source: &TerminalRelativePair,
+    target: &TerminalRelativePair,
+    mut entries: Vec<SignedCellRelabelEntry>,
+) -> Result<
+    (
+        Vec<SignedCellRelabelEntry>,
+        BTreeMap<CellRef, SignedCellRelabelEntry>,
+    ),
+    TerminalRelativeSignedRelabelError,
+> {
+    if source.complex.dimension != target.complex.dimension {
+        return Err(
+            TerminalRelativeSignedRelabelError::ComplexDimensionMismatch {
+                source: source.complex.dimension,
+                target: target.complex.dimension,
+            },
+        );
+    }
+    for (degree, (source_count, target_count)) in source
+        .complex
+        .cell_counts
+        .iter()
+        .zip(&target.complex.cell_counts)
+        .enumerate()
+    {
+        if source_count != target_count {
+            return Err(TerminalRelativeSignedRelabelError::CellCountMismatch {
+                degree: u8::try_from(degree)
+                    .expect("admitted cell-complex degree always fits in u8"),
+                source: *source_count,
+                target: *target_count,
+            });
+        }
+    }
+    let expected_entries = source
+        .complex
+        .cell_counts
+        .iter()
+        .fold(0_usize, |total, count| {
+            total.saturating_add(usize::try_from(*count).unwrap_or(usize::MAX))
+        });
+    if entries.len() != expected_entries {
+        return Err(TerminalRelativeSignedRelabelError::EntryCountMismatch {
+            expected: expected_entries,
+            actual: entries.len(),
+        });
+    }
+
+    entries.sort_unstable_by_key(|entry| entry.source);
+    for entry in &entries {
+        if !source.complex.contains(entry.source) {
+            return Err(TerminalRelativeSignedRelabelError::SourceCellOutOfRange {
+                cell: entry.source,
+            });
+        }
+        if !target.complex.contains(entry.target) {
+            return Err(TerminalRelativeSignedRelabelError::TargetCellOutOfRange {
+                cell: entry.target,
+            });
+        }
+        if entry.source.degree != entry.target.degree {
+            return Err(TerminalRelativeSignedRelabelError::CellDegreeMismatch {
+                source: entry.source,
+                target: entry.target,
+            });
+        }
+    }
+    if let Some(duplicate) = entries
+        .windows(2)
+        .find(|pair| pair[0].source == pair[1].source)
+        .map(|pair| pair[0].source)
+    {
+        return Err(TerminalRelativeSignedRelabelError::DuplicateSourceCell { cell: duplicate });
+    }
+    let mut target_cells = BTreeSet::new();
+    for entry in &entries {
+        if !target_cells.insert(entry.target) {
+            return Err(TerminalRelativeSignedRelabelError::DuplicateTargetCell {
+                cell: entry.target,
+            });
+        }
+    }
+
+    let entry_map: BTreeMap<_, _> = entries
+        .iter()
+        .copied()
+        .map(|entry| (entry.source, entry))
+        .collect();
+    verify_signed_incidence_commutation(source, target, &entry_map)?;
+    verify_mapped_subcomplex(
+        "conductor",
+        None,
+        &source.conductor,
+        &target.conductor,
+        &entry_map,
+    )?;
+    verify_mapped_subcomplex(
+        "relative subcomplex",
+        None,
+        &source.relative,
+        &target.relative,
+        &entry_map,
+    )?;
+    verify_mapped_subcomplex(
+        "insulation",
+        None,
+        &source.insulation,
+        &target.insulation,
+        &entry_map,
+    )?;
+    Ok((entries, entry_map))
 }
 
 fn incidence_coordinate(incidence: &BoundaryIncidence) -> (CellRef, CellRef) {
@@ -2592,6 +3467,488 @@ fn verify_terminal_semantics(
         );
     }
     Ok(())
+}
+
+fn canonicalize_semantic_permutation(
+    source: &TerminalRelativePair,
+    target: &TerminalRelativePair,
+    mut semantics: TerminalRelativeSemanticPermutation,
+) -> Result<TerminalRelativeSemanticPermutation, TerminalRelativePhysicalRelabelError> {
+    if source.components.len() != target.components.len() {
+        return Err(
+            TerminalRelativePhysicalRelabelError::SemanticCardinalityMismatch {
+                role: "conductor component",
+                source: source.components.len(),
+                target: target.components.len(),
+            },
+        );
+    }
+    if semantics.components.len() != source.components.len() {
+        return Err(
+            TerminalRelativePhysicalRelabelError::SemanticEntryCountMismatch {
+                role: "conductor component",
+                expected: source.components.len(),
+                actual: semantics.components.len(),
+            },
+        );
+    }
+    semantics
+        .components
+        .sort_unstable_by(|left, right| left.source.cmp(&right.source));
+    let source_components: BTreeSet<_> = source
+        .components
+        .iter()
+        .map(|component| component.id.clone())
+        .collect();
+    let target_components: BTreeSet<_> = target
+        .components
+        .iter()
+        .map(|component| component.id.clone())
+        .collect();
+    for entry in &semantics.components {
+        if !source_components.contains(&entry.source) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::UnknownSemanticSource {
+                    role: "conductor component",
+                    id: entry.source.as_str().to_owned(),
+                },
+            );
+        }
+        if !target_components.contains(&entry.target) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::UnknownSemanticTarget {
+                    role: "conductor component",
+                    id: entry.target.as_str().to_owned(),
+                },
+            );
+        }
+    }
+    if let Some(duplicate) = semantics
+        .components
+        .windows(2)
+        .find(|pair| pair[0].source == pair[1].source)
+        .map(|pair| pair[0].source.as_str().to_owned())
+    {
+        return Err(
+            TerminalRelativePhysicalRelabelError::DuplicateSemanticSource {
+                role: "conductor component",
+                id: duplicate,
+            },
+        );
+    }
+    let mut component_targets = BTreeSet::new();
+    for entry in &semantics.components {
+        if !component_targets.insert(entry.target.clone()) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::DuplicateSemanticTarget {
+                    role: "conductor component",
+                    id: entry.target.as_str().to_owned(),
+                },
+            );
+        }
+    }
+
+    if source.phase_components.len() != target.phase_components.len() {
+        return Err(
+            TerminalRelativePhysicalRelabelError::SemanticCardinalityMismatch {
+                role: "phase",
+                source: source.phase_components.len(),
+                target: target.phase_components.len(),
+            },
+        );
+    }
+    if semantics.phases.len() != source.phase_components.len() {
+        return Err(
+            TerminalRelativePhysicalRelabelError::SemanticEntryCountMismatch {
+                role: "phase",
+                expected: source.phase_components.len(),
+                actual: semantics.phases.len(),
+            },
+        );
+    }
+    semantics
+        .phases
+        .sort_unstable_by(|left, right| left.source.cmp(&right.source));
+    let source_phases: BTreeSet<_> = source.phase_components.keys().cloned().collect();
+    let target_phases: BTreeSet<_> = target.phase_components.keys().cloned().collect();
+    for entry in &semantics.phases {
+        if !source_phases.contains(&entry.source) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::UnknownSemanticSource {
+                    role: "phase",
+                    id: entry.source.as_str().to_owned(),
+                },
+            );
+        }
+        if !target_phases.contains(&entry.target) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::UnknownSemanticTarget {
+                    role: "phase",
+                    id: entry.target.as_str().to_owned(),
+                },
+            );
+        }
+    }
+    if let Some(duplicate) = semantics
+        .phases
+        .windows(2)
+        .find(|pair| pair[0].source == pair[1].source)
+        .map(|pair| pair[0].source.as_str().to_owned())
+    {
+        return Err(
+            TerminalRelativePhysicalRelabelError::DuplicateSemanticSource {
+                role: "phase",
+                id: duplicate,
+            },
+        );
+    }
+    let mut phase_targets = BTreeSet::new();
+    for entry in &semantics.phases {
+        if !phase_targets.insert(entry.target.clone()) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::DuplicateSemanticTarget {
+                    role: "phase",
+                    id: entry.target.as_str().to_owned(),
+                },
+            );
+        }
+    }
+
+    if source.terminals.len() != target.terminals.len() {
+        return Err(
+            TerminalRelativePhysicalRelabelError::SemanticCardinalityMismatch {
+                role: "physical terminal",
+                source: source.terminals.len(),
+                target: target.terminals.len(),
+            },
+        );
+    }
+    if semantics.terminals.len() != source.terminals.len() {
+        return Err(
+            TerminalRelativePhysicalRelabelError::SemanticEntryCountMismatch {
+                role: "physical terminal",
+                expected: source.terminals.len(),
+                actual: semantics.terminals.len(),
+            },
+        );
+    }
+    semantics
+        .terminals
+        .sort_unstable_by(|left, right| left.source.cmp(&right.source));
+    let source_terminals: BTreeSet<_> = source
+        .terminals
+        .iter()
+        .map(|terminal| terminal.id.clone())
+        .collect();
+    let target_terminals: BTreeSet<_> = target
+        .terminals
+        .iter()
+        .map(|terminal| terminal.id.clone())
+        .collect();
+    for entry in &semantics.terminals {
+        if !source_terminals.contains(&entry.source) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::UnknownSemanticSource {
+                    role: "physical terminal",
+                    id: entry.source.as_str().to_owned(),
+                },
+            );
+        }
+        if !target_terminals.contains(&entry.target) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::UnknownSemanticTarget {
+                    role: "physical terminal",
+                    id: entry.target.as_str().to_owned(),
+                },
+            );
+        }
+    }
+    if let Some(duplicate) = semantics
+        .terminals
+        .windows(2)
+        .find(|pair| pair[0].source == pair[1].source)
+        .map(|pair| pair[0].source.as_str().to_owned())
+    {
+        return Err(
+            TerminalRelativePhysicalRelabelError::DuplicateSemanticSource {
+                role: "physical terminal",
+                id: duplicate,
+            },
+        );
+    }
+    let mut terminal_targets = BTreeSet::new();
+    for entry in &semantics.terminals {
+        if !terminal_targets.insert(entry.target.clone()) {
+            return Err(
+                TerminalRelativePhysicalRelabelError::DuplicateSemanticTarget {
+                    role: "physical terminal",
+                    id: entry.target.as_str().to_owned(),
+                },
+            );
+        }
+    }
+
+    Ok(semantics)
+}
+
+fn verify_physical_component_map(
+    source: &TerminalRelativePair,
+    target: &TerminalRelativePair,
+    cells: &BTreeMap<CellRef, SignedCellRelabelEntry>,
+    semantics: &TerminalRelativeSemanticPermutation,
+) -> Result<(), TerminalRelativePhysicalRelabelError> {
+    let source_components: BTreeMap<_, _> = source
+        .components
+        .iter()
+        .map(|component| (component.id.clone(), component))
+        .collect();
+    let target_components: BTreeMap<_, _> = target
+        .components
+        .iter()
+        .map(|component| (component.id.clone(), component))
+        .collect();
+    for entry in &semantics.components {
+        let source_component = source_components
+            .get(&entry.source)
+            .expect("canonical semantic admission retains every source component");
+        let target_component = target_components
+            .get(&entry.target)
+            .expect("canonical semantic admission retains every target component");
+        verify_physical_mapped_support(
+            "conductor component support",
+            entry.source.as_str(),
+            entry.target.as_str(),
+            &source_component.support,
+            &target_component.support,
+            cells,
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_physical_phase_map(
+    source: &TerminalRelativePair,
+    target: &TerminalRelativePair,
+    semantics: &TerminalRelativeSemanticPermutation,
+) -> Result<(), TerminalRelativePhysicalRelabelError> {
+    let component_images: BTreeMap<_, _> = semantics
+        .components
+        .iter()
+        .map(|entry| (entry.source.clone(), entry.target.clone()))
+        .collect();
+    for entry in &semantics.phases {
+        let source_component = source
+            .phase_components
+            .get(&entry.source)
+            .expect("canonical semantic admission retains every source phase");
+        let target_component = target
+            .phase_components
+            .get(&entry.target)
+            .expect("canonical semantic admission retains every target phase");
+        let expected_target = component_images
+            .get(source_component)
+            .expect("total component permutation has every phase component");
+        if target_component != expected_target {
+            return Err(
+                TerminalRelativePhysicalRelabelError::PhaseComponentSquareMismatch {
+                    source_phase: entry.source.as_str().to_owned(),
+                    target_phase: entry.target.as_str().to_owned(),
+                    expected_target_component: expected_target.as_str().to_owned(),
+                    actual_target_component: target_component.as_str().to_owned(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_physical_terminal_map(
+    source: &TerminalRelativePair,
+    target: &TerminalRelativePair,
+    cells: &BTreeMap<CellRef, SignedCellRelabelEntry>,
+    semantics: &TerminalRelativeSemanticPermutation,
+) -> Result<(), TerminalRelativePhysicalRelabelError> {
+    let source_terminals: BTreeMap<_, _> = source
+        .terminals
+        .iter()
+        .map(|terminal| (terminal.id.clone(), terminal))
+        .collect();
+    let target_terminals: BTreeMap<_, _> = target
+        .terminals
+        .iter()
+        .map(|terminal| (terminal.id.clone(), terminal))
+        .collect();
+    let component_images: BTreeMap<_, _> = semantics
+        .components
+        .iter()
+        .map(|entry| (entry.source.clone(), entry.target.clone()))
+        .collect();
+    let phase_images: BTreeMap<_, _> = semantics
+        .phases
+        .iter()
+        .map(|entry| {
+            (
+                entry.source.clone(),
+                (entry.target.clone(), entry.current_sign),
+            )
+        })
+        .collect();
+
+    for entry in &semantics.terminals {
+        let source_terminal = source_terminals
+            .get(&entry.source)
+            .expect("canonical semantic admission retains every source terminal");
+        let target_terminal = target_terminals
+            .get(&entry.target)
+            .expect("canonical semantic admission retains every target terminal");
+        verify_physical_mapped_support(
+            "physical terminal support",
+            entry.source.as_str(),
+            entry.target.as_str(),
+            &source_terminal.support,
+            &target_terminal.support,
+            cells,
+        )?;
+
+        let (expected_phase, current_sign) = phase_images
+            .get(&source_terminal.phase)
+            .expect("total phase permutation has every terminal phase");
+        if &target_terminal.phase != expected_phase {
+            return Err(
+                TerminalRelativePhysicalRelabelError::TerminalPhaseSquareMismatch {
+                    source_terminal: entry.source.as_str().to_owned(),
+                    target_terminal: entry.target.as_str().to_owned(),
+                    expected_target_phase: expected_phase.as_str().to_owned(),
+                    actual_target_phase: target_terminal.phase.as_str().to_owned(),
+                },
+            );
+        }
+        let expected_component = component_images
+            .get(&source_terminal.component)
+            .expect("total component permutation has every terminal component");
+        if &target_terminal.component != expected_component {
+            return Err(
+                TerminalRelativePhysicalRelabelError::TerminalComponentSquareMismatch {
+                    source_terminal: entry.source.as_str().to_owned(),
+                    target_terminal: entry.target.as_str().to_owned(),
+                    expected_target_component: expected_component.as_str().to_owned(),
+                    actual_target_component: target_terminal.component.as_str().to_owned(),
+                },
+            );
+        }
+
+        let mismatch = if target_terminal.role != current_sign.map_role(source_terminal.role) {
+            Some("terminal role/current-sign parity")
+        } else if target_terminal.orientation
+            != current_sign.map_orientation(source_terminal.orientation)
+        {
+            Some("terminal orientation/current-sign parity")
+        } else if target_terminal.trivialization.sign()
+            != current_sign.map_trivialization(source_terminal.trivialization.sign())
+        {
+            Some("terminal trivialization/current-sign parity")
+        } else {
+            physical_terminal_convention_mismatch(source_terminal, target_terminal)
+        };
+        if let Some(field) = mismatch {
+            return Err(
+                TerminalRelativePhysicalRelabelError::TerminalConventionMismatch {
+                    source_terminal: entry.source.as_str().to_owned(),
+                    target_terminal: entry.target.as_str().to_owned(),
+                    field,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_physical_mapped_support(
+    role: &'static str,
+    source_owner: &str,
+    target_owner: &str,
+    source: &CellularSubcomplex,
+    target: &CellularSubcomplex,
+    cells: &BTreeMap<CellRef, SignedCellRelabelEntry>,
+) -> Result<(), TerminalRelativePhysicalRelabelError> {
+    let mut mapped = BTreeSet::new();
+    for source_cell in &source.cells {
+        let entry = cells.get(source_cell).ok_or_else(|| {
+            TerminalRelativePhysicalRelabelError::CellRelabel(
+                TerminalRelativeSignedRelabelError::MissingSourceCell { cell: *source_cell },
+            )
+        })?;
+        mapped.insert(entry.target);
+    }
+    if mapped != target.cells {
+        let cell = mapped
+            .symmetric_difference(&target.cells)
+            .next()
+            .copied()
+            .expect("unequal finite support sets have a witness");
+        return Err(
+            TerminalRelativePhysicalRelabelError::MappedSemanticSupportMismatch {
+                role,
+                source_owner: source_owner.to_owned(),
+                target_owner: target_owner.to_owned(),
+                cell,
+                expected_mapped: mapped.contains(&cell),
+                actual_target: target.cells.contains(&cell),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn physical_terminal_convention_mismatch(
+    source: &PhysicalTerminal,
+    target: &PhysicalTerminal,
+) -> Option<&'static str> {
+    let source_port = &source.port;
+    let target_port = &target.port;
+    if source.coordinate != target.coordinate {
+        Some("terminal coordinate")
+    } else if source_port.version() != target_port.version() {
+        Some("port schema version")
+    } else if source_port.kind() != target_port.kind() {
+        Some("port kind")
+    } else if source_port.effort_dimensions() != target_port.effort_dimensions() {
+        Some("effort dimensions")
+    } else if source_port.flow_dimensions() != target_port.flow_dimensions() {
+        Some("flow dimensions")
+    } else if source_port.shape() != target_port.shape() {
+        Some("port value shape")
+    } else if source_port.coordinates().basis() != target_port.coordinates().basis() {
+        Some("coordinate basis")
+    } else if source_port.coordinates().frame() != target_port.coordinates().frame() {
+        Some("coordinate frame")
+    } else if source_port.coordinates().orientation() != target_port.coordinates().orientation() {
+        Some("coordinate orientation")
+    } else if source_port.power_pairing() != target_port.power_pairing() {
+        Some("power pairing")
+    } else if source_port.timestamp().clock() != target_port.timestamp().clock() {
+        Some("clock domain")
+    } else if source_port.timestamp().tick() != target_port.timestamp().tick() {
+        Some("clock tick")
+    } else if source_port.conservation_roles() != target_port.conservation_roles() {
+        Some("conservation roles")
+    } else if source.machine.authority_domain() != target.machine.authority_domain() {
+        Some("MachineGraph authority domain")
+    } else if source.machine.schema_version() != target.machine.schema_version() {
+        Some("MachineGraph schema version")
+    } else if source.machine.graph_digest() != target.machine.graph_digest() {
+        Some("MachineGraph digest")
+    } else if source.machine.owner() != target.machine.owner() {
+        Some("MachineGraph owner")
+    } else if source.trivialization.voltage_reference() != target.trivialization.voltage_reference()
+    {
+        Some("voltage reference")
+    } else if source.trivialization.current_reference() != target.trivialization.current_reference()
+    {
+        Some("current reference")
+    } else {
+        None
+    }
 }
 
 /// Integral chain on the canonical terminal-relative quotient basis.
@@ -3366,6 +4723,46 @@ fn canonical_signed_relabel_payload(
         writer.cell(entry.source)?;
         writer.cell(entry.target)?;
         writer.u8(entry.sign.tag())?;
+    }
+    Ok(writer.finish())
+}
+
+fn canonical_component_relabel_payload(
+    entries: &[ComponentRelabelEntry],
+) -> Result<Vec<u8>, TerminalRelativePhysicalRelabelError> {
+    let mut writer = CanonicalWriter::new();
+    writer.u32(TERMINAL_RELATIVE_SCHEMA_VERSION)?;
+    writer.len(entries.len())?;
+    for entry in entries {
+        writer.text(entry.source.as_str())?;
+        writer.text(entry.target.as_str())?;
+    }
+    Ok(writer.finish())
+}
+
+fn canonical_phase_relabel_payload(
+    entries: &[PhaseRelabelEntry],
+) -> Result<Vec<u8>, TerminalRelativePhysicalRelabelError> {
+    let mut writer = CanonicalWriter::new();
+    writer.u32(TERMINAL_RELATIVE_SCHEMA_VERSION)?;
+    writer.len(entries.len())?;
+    for entry in entries {
+        writer.text(entry.source.as_str())?;
+        writer.text(entry.target.as_str())?;
+        writer.u8(entry.current_sign.tag())?;
+    }
+    Ok(writer.finish())
+}
+
+fn canonical_terminal_relabel_payload(
+    entries: &[TerminalRelabelEntry],
+) -> Result<Vec<u8>, TerminalRelativePhysicalRelabelError> {
+    let mut writer = CanonicalWriter::new();
+    writer.u32(TERMINAL_RELATIVE_SCHEMA_VERSION)?;
+    writer.len(entries.len())?;
+    for entry in entries {
+        writer.text(entry.source.as_str())?;
+        writer.text(entry.target.as_str())?;
     }
     Ok(writer.finish())
 }
@@ -4177,3 +5574,172 @@ impl fmt::Display for TerminalRelativeSignedRelabelError {
 }
 
 impl core::error::Error for TerminalRelativeSignedRelabelError {}
+
+/// Fail-closed diagnostics for admission and use of an explicit physical
+/// terminal-relative relabeling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalRelativePhysicalRelabelError {
+    /// The complete signed cell map or exact top-level support checks refused.
+    CellRelabel(TerminalRelativeSignedRelabelError),
+    /// Source and target semantic identity sets have different cardinality.
+    SemanticCardinalityMismatch {
+        /// Semantic identity role.
+        role: &'static str,
+        /// Source identity count.
+        source: usize,
+        /// Target identity count.
+        target: usize,
+    },
+    /// A semantic map did not declare exactly one row per source identity.
+    SemanticEntryCountMismatch {
+        /// Semantic identity role.
+        role: &'static str,
+        /// Required row count.
+        expected: usize,
+        /// Supplied row count.
+        actual: usize,
+    },
+    /// A semantic row names an identity absent from the source pair.
+    UnknownSemanticSource {
+        /// Semantic identity role.
+        role: &'static str,
+        /// Unknown source identity.
+        id: String,
+    },
+    /// A semantic row names an identity absent from the target pair.
+    UnknownSemanticTarget {
+        /// Semantic identity role.
+        role: &'static str,
+        /// Unknown target identity.
+        id: String,
+    },
+    /// Two semantic rows use the same source identity.
+    DuplicateSemanticSource {
+        /// Semantic identity role.
+        role: &'static str,
+        /// Repeated source identity.
+        id: String,
+    },
+    /// Two semantic rows use the same target identity.
+    DuplicateSemanticTarget {
+        /// Semantic identity role.
+        role: &'static str,
+        /// Repeated target identity.
+        id: String,
+    },
+    /// Explicitly mapped component or terminal support cells differ.
+    MappedSemanticSupportMismatch {
+        /// Mapped support role.
+        role: &'static str,
+        /// Source semantic owner.
+        source_owner: String,
+        /// Target semantic owner.
+        target_owner: String,
+        /// Target-space witness cell.
+        cell: CellRef,
+        /// Whether the mapped source support contains the witness.
+        expected_mapped: bool,
+        /// Whether the target support contains the witness.
+        actual_target: bool,
+    },
+    /// Phase and component permutations do not form a commuting square.
+    PhaseComponentSquareMismatch {
+        /// Source phase identity.
+        source_phase: String,
+        /// Declared target phase identity.
+        target_phase: String,
+        /// Component required by the component permutation.
+        expected_target_component: String,
+        /// Component actually bound to the target phase.
+        actual_target_component: String,
+    },
+    /// Terminal and phase permutations do not form a commuting square.
+    TerminalPhaseSquareMismatch {
+        /// Source terminal identity.
+        source_terminal: String,
+        /// Declared target terminal identity.
+        target_terminal: String,
+        /// Phase required by the phase permutation.
+        expected_target_phase: String,
+        /// Phase actually bound to the target terminal.
+        actual_target_phase: String,
+    },
+    /// Terminal and component permutations do not form a commuting square.
+    TerminalComponentSquareMismatch {
+        /// Source terminal identity.
+        source_terminal: String,
+        /// Declared target terminal identity.
+        target_terminal: String,
+        /// Component required by the component permutation.
+        expected_target_component: String,
+        /// Component actually bound to the target terminal.
+        actual_target_component: String,
+    },
+    /// Terminal parity or non-nominal port/Machine convention changed.
+    TerminalConventionMismatch {
+        /// Source terminal identity.
+        source_terminal: String,
+        /// Declared target terminal identity.
+        target_terminal: String,
+        /// First incompatible field or parity rule.
+        field: &'static str,
+    },
+    /// A pair or transported value was not bound to the expected endpoint.
+    PairIdentityMismatch {
+        /// Endpoint or value role.
+        role: &'static str,
+        /// Expected pair identity.
+        expected: TerminalRelativePairId,
+        /// Actual pair identity.
+        actual: TerminalRelativePairId,
+    },
+    /// An admitted or composed operation could not find a required image.
+    MissingSemanticImage {
+        /// Image role.
+        role: &'static str,
+        /// Missing source identity or cell coordinate.
+        id: String,
+    },
+    /// A mapped phase-local basis cell was absent from the target basis.
+    MappedBasisCellMissing {
+        /// Source phase identity.
+        source_phase: String,
+        /// Target phase identity.
+        target_phase: String,
+        /// Basis degree.
+        degree: u8,
+        /// Source basis cell.
+        source: CellRef,
+        /// Mapped target cell.
+        target: CellRef,
+    },
+    /// The single required exact coefficient negation overflowed `i64`.
+    CoefficientOverflow {
+        /// Source cell whose coefficient overflowed.
+        cell: CellRef,
+    },
+    /// Existing terminal-relative construction or validation refused.
+    TerminalRelative(TerminalRelativeError),
+    /// Strong canonical identity admission refused.
+    CanonicalIdentity(CanonicalError),
+}
+
+impl From<TerminalRelativeError> for TerminalRelativePhysicalRelabelError {
+    fn from(value: TerminalRelativeError) -> Self {
+        Self::TerminalRelative(value)
+    }
+}
+
+impl From<CanonicalError> for TerminalRelativePhysicalRelabelError {
+    fn from(value: CanonicalError) -> Self {
+        Self::CanonicalIdentity(value)
+    }
+}
+
+impl fmt::Display for TerminalRelativePhysicalRelabelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "terminal-relative physical relabel refused: {self:?}")
+    }
+}
+
+impl core::error::Error for TerminalRelativePhysicalRelabelError {}
