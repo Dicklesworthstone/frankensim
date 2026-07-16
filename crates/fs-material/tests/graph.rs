@@ -9,7 +9,8 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
 use fs_material::graph::{
     AggregateStateSchema, Differentiability, EnergyBehavior, GraphError, LawNode, LawRegistry,
-    NodeDeclaration, NodeOutput, NodeRole, Port, admit_node, check_consistent_tangent,
+    NodeDeclaration, NodeOutput, NodeRole, Port, TimeParity, admit_node, check_consistent_tangent,
+    check_free_energy_consistency, check_onsager_casimir, check_psd_symmetric_part,
 };
 use fs_qty::Dims;
 
@@ -67,10 +68,12 @@ impl FourierNode {
                 inputs: vec![Port {
                     name: "grad_T".to_string(),
                     dims: GRAD_T_DIMS,
+                    parity: TimeParity::Even,
                 }],
                 outputs: vec![Port {
                     name: "heat_flux".to_string(),
                     dims: FLUX_DIMS,
+                    parity: TimeParity::Even,
                 }],
                 state_slots: Vec::new(),
                 state_schema_version: card.state_schema_version,
@@ -168,10 +171,12 @@ fn admission_rejects_incomplete_declarations_with_typed_diagnostics() {
                 Port {
                     name: "grad_T".to_string(),
                     dims: GRAD_T_DIMS,
+                    parity: TimeParity::Even,
                 },
                 Port {
                     name: "grad_T".to_string(),
                     dims: GRAD_T_DIMS,
+                    parity: TimeParity::Even,
                 },
             ],
             ..template.clone()
@@ -327,5 +332,199 @@ fn aggregate_state_codec_round_trips_and_refuses_drift() {
     println!(
         "{{\"suite\":\"fs-material\",\"case\":\"state-codec\",\"verdict\":\"pass\",\
          \"detail\":\"round trip exact; version/length/count drift refuses; layout moves version\"}}"
+    );
+}
+
+/// Increment-2 fixture: a linear-elastic storage node, psi = k/2 x².
+/// `gradient_scale` != 1 makes the outputs LIE about being conjugate
+/// forces (the energy-consistency gate must catch it).
+struct ElasticEnergyNode {
+    declaration: NodeDeclaration,
+    k: f64,
+    gradient_scale: f64,
+    provide_energy: bool,
+}
+
+impl ElasticEnergyNode {
+    fn new(k: f64, gradient_scale: f64, provide_energy: bool) -> ElasticEnergyNode {
+        ElasticEnergyNode {
+            declaration: NodeDeclaration {
+                law: LawId("linear-elastic-energy".to_string()),
+                law_version: 1,
+                role: NodeRole::InternalMemory,
+                inputs: vec![Port {
+                    name: "strain".to_string(),
+                    dims: Dims([0, 0, 0, 0, 0, 0]),
+                    parity: TimeParity::Even,
+                }],
+                outputs: vec![Port {
+                    name: "stress".to_string(),
+                    dims: Dims([-1, 1, -2, 0, 0, 0]),
+                    parity: TimeParity::Even,
+                }],
+                state_slots: Vec::new(),
+                state_schema_version: 1,
+                calibration: ValidityDomain::unconstrained(),
+                differentiability: Differentiability::Smooth,
+                energy: EnergyBehavior::FreeEnergyStorage,
+                tangent_claimed: true,
+            },
+            k,
+            gradient_scale,
+            provide_energy,
+        }
+    }
+}
+
+impl LawNode for ElasticEnergyNode {
+    fn declaration(&self) -> &NodeDeclaration {
+        &self.declaration
+    }
+    fn evaluate(&self, _state: &[f64], inputs: &[f64]) -> Result<NodeOutput, GraphError> {
+        Ok(NodeOutput {
+            outputs: vec![self.gradient_scale * self.k * inputs[0]],
+            next_state: Vec::new(),
+            dissipation_rate: None,
+        })
+    }
+    fn tangent(&self, _state: &[f64], _inputs: &[f64]) -> Option<Vec<f64>> {
+        Some(vec![self.gradient_scale * self.k])
+    }
+    fn free_energy(&self, _state: &[f64], inputs: &[f64]) -> Option<f64> {
+        self.provide_energy
+            .then(|| 0.5 * self.k * inputs[0] * inputs[0])
+    }
+}
+
+/// Increment-2 fixture: a 2x2 coupling block with declared parities and
+/// a controllable off-diagonal relationship.
+struct CoupledBlockNode {
+    declaration: NodeDeclaration,
+    matrix: [f64; 4],
+}
+
+impl CoupledBlockNode {
+    fn new(matrix: [f64; 4], parities: [TimeParity; 2]) -> CoupledBlockNode {
+        let port = |name: &str, parity: TimeParity| Port {
+            name: name.to_string(),
+            dims: Dims([0, 0, 0, 0, 0, 0]),
+            parity,
+        };
+        CoupledBlockNode {
+            declaration: NodeDeclaration {
+                law: LawId("coupled-block".to_string()),
+                law_version: 1,
+                role: NodeRole::ReversibleCoupling,
+                inputs: vec![port("force_a", parities[0]), port("force_b", parities[1])],
+                outputs: vec![port("flux_a", parities[0]), port("flux_b", parities[1])],
+                state_slots: Vec::new(),
+                state_schema_version: 1,
+                calibration: ValidityDomain::unconstrained(),
+                differentiability: Differentiability::Smooth,
+                energy: EnergyBehavior::NonNegativeDissipation,
+                tangent_claimed: true,
+            },
+            matrix,
+        }
+    }
+}
+
+impl LawNode for CoupledBlockNode {
+    fn declaration(&self) -> &NodeDeclaration {
+        &self.declaration
+    }
+    fn evaluate(&self, _state: &[f64], inputs: &[f64]) -> Result<NodeOutput, GraphError> {
+        Ok(NodeOutput {
+            outputs: vec![
+                self.matrix[0] * inputs[0] + self.matrix[1] * inputs[1],
+                self.matrix[2] * inputs[0] + self.matrix[3] * inputs[1],
+            ],
+            next_state: Vec::new(),
+            dissipation_rate: None,
+        })
+    }
+    fn tangent(&self, _state: &[f64], _inputs: &[f64]) -> Option<Vec<f64>> {
+        Some(self.matrix.to_vec())
+    }
+}
+
+#[test]
+fn free_energy_gates_pass_storage_laws_and_catch_violations() {
+    let honest = ElasticEnergyNode::new(2.0e9, 1.0, true);
+    admit_node("memory/elastic", &honest).expect("storage node with psi admits");
+    check_free_energy_consistency("memory/elastic", &honest, &[], &[1e-3], 1e-3)
+        .expect("conjugate-force gradient and symmetric Hessian pass");
+
+    let liar = ElasticEnergyNode::new(2.0e9, 2.0, true);
+    let refusal = check_free_energy_consistency("memory/liar", &liar, &[], &[1e-3], 1e-3)
+        .expect_err("scaled outputs are not the conjugate forces");
+    assert!(matches!(
+        &refusal,
+        GraphError::IncompleteDeclaration { obligation, .. }
+            if obligation.contains("conjugate forces")
+    ));
+
+    let no_psi = ElasticEnergyNode::new(2.0e9, 1.0, false);
+    assert!(matches!(
+        admit_node("memory/no-psi", &no_psi),
+        Err(GraphError::EnergyClaimUnmet { .. })
+    ));
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"free-energy-gates\",\"verdict\":\"pass\",\
+         \"detail\":\"conjugate-force+Hessian gates pass honest storage, catch scaled gradients \
+         and missing psi\"}}"
+    );
+}
+
+#[test]
+fn psd_gate_enforces_the_second_law_on_transport_blocks() {
+    // Force -> flux convention: sigma / kappa matrices must have a PSD
+    // symmetric part.
+    let passive = CoupledBlockNode::new([4.0, 0.3, 0.3, 2.0], [TimeParity::Even, TimeParity::Even]);
+    check_psd_symmetric_part("bulk/passive", &passive, &[], &[0.0, 0.0], 1e-12)
+        .expect("passive conductivity passes");
+
+    let active = CoupledBlockNode::new([4.0, 0.3, 0.3, -2.0], [TimeParity::Even, TimeParity::Even]);
+    let refusal = check_psd_symmetric_part("bulk/active", &active, &[], &[0.0, 0.0], 1e-12)
+        .expect_err("negative branch conductivity fails");
+    assert!(matches!(
+        &refusal,
+        GraphError::IncompleteDeclaration { obligation, .. }
+            if obligation.contains("positive semidefinite")
+    ));
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"psd-gate\",\"verdict\":\"pass\",\
+         \"detail\":\"Sylvester audit of the symmetric part passes passive blocks, refuses \
+         active ones\"}}"
+    );
+}
+
+#[test]
+fn onsager_casimir_gate_separates_reciprocity_classes() {
+    // Even-even coupling (thermoelectric): off-diagonals must MATCH.
+    let onsager = CoupledBlockNode::new([4.0, 0.3, 0.3, 2.0], [TimeParity::Even, TimeParity::Even]);
+    check_onsager_casimir("couple/thermoelectric", &onsager, &[], &[0.0, 0.0], 1e-12)
+        .expect("symmetric even-even coupling passes");
+    let broken = CoupledBlockNode::new([4.0, 0.3, -0.3, 2.0], [TimeParity::Even, TimeParity::Even]);
+    assert!(
+        check_onsager_casimir("couple/broken", &broken, &[], &[0.0, 0.0], 1e-12).is_err(),
+        "antisymmetric even-even coupling violates Onsager"
+    );
+
+    // Mixed parity (gyroscopic/Hall class): off-diagonals must be
+    // ANTISYMMETRIC (Casimir), and the symmetric version must refuse.
+    let casimir = CoupledBlockNode::new([4.0, 0.3, -0.3, 2.0], [TimeParity::Even, TimeParity::Odd]);
+    check_onsager_casimir("couple/gyroscopic", &casimir, &[], &[0.0, 0.0], 1e-12)
+        .expect("antisymmetric mixed-parity coupling passes");
+    let wrong_class =
+        CoupledBlockNode::new([4.0, 0.3, 0.3, 2.0], [TimeParity::Even, TimeParity::Odd]);
+    assert!(
+        check_onsager_casimir("couple/wrong-class", &wrong_class, &[], &[0.0, 0.0], 1e-12).is_err(),
+        "symmetric mixed-parity coupling violates Casimir"
+    );
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"onsager-casimir\",\"verdict\":\"pass\",\
+         \"detail\":\"even-even demands symmetry, mixed parity demands antisymmetry; both \
+         violations refuse\"}}"
     );
 }

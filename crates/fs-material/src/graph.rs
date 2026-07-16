@@ -101,13 +101,28 @@ pub enum EnergyBehavior {
     Empirical,
 }
 
-/// One typed port: a named quantity with dimensions.
+/// Time-reversal parity of a port's quantity (Onsager–Casimir): heat
+/// flux and temperature gradient are Even; magnetization rates,
+/// velocities, and Hall-type variables are Odd. Required on
+/// reversible-coupling nodes, where the reciprocity gate reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeParity {
+    /// Invariant under time reversal.
+    Even,
+    /// Sign-flips under time reversal.
+    Odd,
+}
+
+/// One typed port: a named quantity with dimensions and time parity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Port {
     /// Port name (unique within its direction on a node).
     pub name: String,
     /// The quantity's dimensions.
     pub dims: Dims,
+    /// Time-reversal parity (read by the Onsager–Casimir gate on
+    /// reversible-coupling nodes; informational elsewhere).
+    pub parity: TimeParity,
 }
 
 /// A node's complete declaration. Admission validates every field; an
@@ -170,6 +185,14 @@ pub trait LawNode {
     fn tangent(&self, _state: &[f64], _inputs: &[f64]) -> Option<Vec<f64>> {
         None
     }
+
+    /// Free energy ψ(state, inputs) for nodes whose declared energy
+    /// behavior claims storage (`FreeEnergyStorage` /
+    /// `StorageAndDissipation`). MUST be provided exactly when storage
+    /// is claimed; the Hessian gates differentiate it.
+    fn free_energy(&self, _state: &[f64], _inputs: &[f64]) -> Option<f64> {
+        None
+    }
 }
 
 /// Everything the graph boundary can refuse, always naming the node,
@@ -195,6 +218,14 @@ pub enum GraphError {
     /// The node claims a tangent but its probe returned none or a
     /// wrongly-sized matrix.
     TangentClaimUnmet {
+        /// The node id.
+        node: String,
+        /// The law id.
+        law: String,
+    },
+    /// The node declares free-energy storage but provides no ψ
+    /// evaluator.
+    EnergyClaimUnmet {
         /// The node id.
         node: String,
         /// The law id.
@@ -304,6 +335,11 @@ impl fmt::Display for GraphError {
             GraphError::TangentClaimUnmet { node, law } => write!(
                 f,
                 "node '{node}' (law '{law}') claims a consistent tangent but does not provide one"
+            ),
+            GraphError::EnergyClaimUnmet { node, law } => write!(
+                f,
+                "node '{node}' (law '{law}') declares free-energy storage but provides no \
+                 evaluator"
             ),
             GraphError::ArityMismatch {
                 node,
@@ -455,7 +491,275 @@ pub fn admit_node(node_id: &str, node: &dyn LawNode) -> Result<(), GraphError> {
             }
         }
     }
+    if matches!(
+        declaration.energy,
+        EnergyBehavior::FreeEnergyStorage | EnergyBehavior::StorageAndDissipation
+    ) {
+        let state = vec![0.0; declaration.state_slots.len()];
+        let inputs = vec![0.0; declaration.inputs.len()];
+        if node.free_energy(&state, &inputs).is_none() {
+            return Err(GraphError::EnergyClaimUnmet {
+                node: node_id.to_string(),
+                law,
+            });
+        }
+    }
     Ok(())
+}
+
+/// Gate a storage-claiming node's energy consistency at a point:
+/// (a) the outputs are the conjugate forces ∂ψ/∂inputs (central FD),
+/// and (b) the tangent — which for such a node IS the Hessian of ψ —
+/// is symmetric within `atol` (Maxwell reciprocity).
+///
+/// # Errors
+/// [`GraphError::EnergyClaimUnmet`] when ψ is not provided;
+/// [`GraphError::TangentClaimUnmet`] when the tangent is missing;
+/// [`GraphError::IncompleteDeclaration`] naming the failed obligation
+/// (gradient mismatch or Hessian asymmetry).
+pub fn check_free_energy_consistency(
+    node_id: &str,
+    node: &dyn LawNode,
+    state: &[f64],
+    inputs: &[f64],
+    atol: f64,
+) -> Result<(), GraphError> {
+    let declaration = node.declaration();
+    let law = declaration.law.0.clone();
+    if node.free_energy(state, inputs).is_none() {
+        return Err(GraphError::EnergyClaimUnmet {
+            node: node_id.to_string(),
+            law,
+        });
+    }
+    let n = declaration.inputs.len();
+    let m = declaration.outputs.len();
+    let h = 1e-6;
+    let mut probe = inputs.to_vec();
+    let value = node.evaluate(state, inputs)?;
+    for j in 0..n.min(m) {
+        let base = probe[j];
+        probe[j] = base + h;
+        let plus = node
+            .free_energy(state, &probe)
+            .ok_or_else(|| GraphError::EnergyClaimUnmet {
+                node: node_id.to_string(),
+                law: law.clone(),
+            })?;
+        probe[j] = base - h;
+        let minus =
+            node.free_energy(state, &probe)
+                .ok_or_else(|| GraphError::EnergyClaimUnmet {
+                    node: node_id.to_string(),
+                    law: law.clone(),
+                })?;
+        probe[j] = base;
+        let gradient = (plus - minus) / (2.0 * h);
+        if (gradient - value.outputs[j]).abs() > atol {
+            return Err(GraphError::IncompleteDeclaration {
+                node: node_id.to_string(),
+                law: law.clone(),
+                obligation: "outputs are not the conjugate forces of the declared free energy",
+            });
+        }
+    }
+    let Some(tangent) = node.tangent(state, inputs) else {
+        return Err(GraphError::TangentClaimUnmet {
+            node: node_id.to_string(),
+            law,
+        });
+    };
+    check_symmetry(
+        node_id,
+        &law,
+        &tangent,
+        m,
+        n,
+        atol,
+        "free-energy Hessian is asymmetric",
+    )
+}
+
+/// Gate the PSD symmetric part of a node's tangent: the second-law
+/// obligation for dissipative/transport blocks — the symmetric part of
+/// the conductivity/coupling matrix must be positive semidefinite.
+/// Checked by Sylvester's criterion on the symmetric part (leading
+/// principal minors `>= -atol`); fixture-scale `n` only.
+///
+/// # Errors
+/// [`GraphError::TangentClaimUnmet`] when no tangent is provided;
+/// [`GraphError::IncompleteDeclaration`] when a leading principal minor
+/// is negative beyond `atol`.
+pub fn check_psd_symmetric_part(
+    node_id: &str,
+    node: &dyn LawNode,
+    state: &[f64],
+    inputs: &[f64],
+    atol: f64,
+) -> Result<(), GraphError> {
+    let declaration = node.declaration();
+    let law = declaration.law.0.clone();
+    let n = declaration.inputs.len();
+    let m = declaration.outputs.len();
+    let Some(tangent) = node.tangent(state, inputs) else {
+        return Err(GraphError::TangentClaimUnmet {
+            node: node_id.to_string(),
+            law,
+        });
+    };
+    if m != n {
+        return Err(GraphError::IncompleteDeclaration {
+            node: node_id.to_string(),
+            law,
+            obligation: "PSD audit needs a square tangent (matched input/output ports)",
+        });
+    }
+    // Symmetric part, then leading principal minors by Gaussian
+    // elimination without pivoting (adequate at fixture scale).
+    let mut s = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            s[i * n + j] = f64::midpoint(tangent[i * n + j], tangent[j * n + i]);
+        }
+    }
+    for k in 1..=n {
+        if minor_determinant(&s, n, k) < -atol {
+            return Err(GraphError::IncompleteDeclaration {
+                node: node_id.to_string(),
+                law,
+                obligation: "symmetric dissipative part is not positive semidefinite",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Gate Onsager–Casimir reciprocity on a reversible-coupling block at
+/// zero applied field: `L[i][j] = e_i * e_j * L[j][i]` with `e` the
+/// declared time parities (+1 Even, −1 Odd). Even–even pairs must be
+/// symmetric (Onsager); mixed-parity pairs antisymmetric (Casimir).
+///
+/// # Errors
+/// [`GraphError::TangentClaimUnmet`] when no tangent is provided;
+/// [`GraphError::IncompleteDeclaration`] when the block is not square
+/// or a pair violates its reciprocity class beyond `atol`.
+pub fn check_onsager_casimir(
+    node_id: &str,
+    node: &dyn LawNode,
+    state: &[f64],
+    inputs: &[f64],
+    atol: f64,
+) -> Result<(), GraphError> {
+    let declaration = node.declaration();
+    let law = declaration.law.0.clone();
+    let n = declaration.inputs.len();
+    let m = declaration.outputs.len();
+    if m != n {
+        return Err(GraphError::IncompleteDeclaration {
+            node: node_id.to_string(),
+            law,
+            obligation: "reciprocity audit needs a square coupling block",
+        });
+    }
+    let Some(tangent) = node.tangent(state, inputs) else {
+        return Err(GraphError::TangentClaimUnmet {
+            node: node_id.to_string(),
+            law,
+        });
+    };
+    let sign = |parity: TimeParity| -> f64 {
+        match parity {
+            TimeParity::Even => 1.0,
+            TimeParity::Odd => -1.0,
+        }
+    };
+    for i in 0..n {
+        for j in 0..n {
+            let expected = sign(declaration.outputs[i].parity)
+                * sign(declaration.outputs[j].parity)
+                * tangent[j * n + i];
+            if (tangent[i * n + j] - expected).abs() > atol {
+                return Err(GraphError::IncompleteDeclaration {
+                    node: node_id.to_string(),
+                    law,
+                    obligation: "coupling block violates Onsager-Casimir reciprocity",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_symmetry(
+    node_id: &str,
+    law: &str,
+    tangent: &[f64],
+    m: usize,
+    n: usize,
+    atol: f64,
+    obligation: &'static str,
+) -> Result<(), GraphError> {
+    if m != n {
+        return Err(GraphError::IncompleteDeclaration {
+            node: node_id.to_string(),
+            law: law.to_string(),
+            obligation: "symmetry audit needs a square tangent",
+        });
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if (tangent[i * n + j] - tangent[j * n + i]).abs() > atol {
+                return Err(GraphError::IncompleteDeclaration {
+                    node: node_id.to_string(),
+                    law: law.to_string(),
+                    obligation,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Leading principal minor determinant of order `k` (Laplace at fixture
+/// scale).
+fn minor_determinant(s: &[f64], n: usize, k: usize) -> f64 {
+    let mut a = vec![0.0f64; k * k];
+    for i in 0..k {
+        for j in 0..k {
+            a[i * k + j] = s[i * n + j];
+        }
+    }
+    det(&mut a, k)
+}
+
+fn det(a: &mut [f64], k: usize) -> f64 {
+    let mut result = 1.0;
+    for col in 0..k {
+        // Partial pivot for stability at fixture scale.
+        let mut pivot = col;
+        for row in (col + 1)..k {
+            if a[row * k + col].abs() > a[pivot * k + col].abs() {
+                pivot = row;
+            }
+        }
+        if a[pivot * k + col] == 0.0 {
+            return 0.0;
+        }
+        if pivot != col {
+            for j in 0..k {
+                a.swap(col * k + j, pivot * k + j);
+            }
+            result = -result;
+        }
+        result *= a[col * k + col];
+        for row in (col + 1)..k {
+            let factor = a[row * k + col] / a[col * k + col];
+            for j in col..k {
+                a[row * k + j] -= factor * a[col * k + j];
+            }
+        }
+    }
+    result
 }
 
 /// Gate a node's tangent against central finite differences at a point:
