@@ -167,6 +167,9 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   typed identity receipt, coefficient and incidence domains, current units,
   terminal/PortSchema and presented Machine-IR bindings, admitted conversion
   families, schema version, authority status, and explicit no-claim states.
+  Integral chains and `IntegralRelativeCochain` values use the phase-owned
+  component quotient basis; exact boundary, integral coboundary, and evaluation
+  pairing expose the integer Stokes identity without a metric/Hodge coercion.
 
 ## Invariants
 
@@ -199,9 +202,13 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   electrical flow/current, and meets exactly one component top cell. Every
   phase carries exactly one driven plus one return/reference terminal, both
   current directions, and a common version/shape/basis/frame/clock/power/
-  conservation/voltage-reference convention. Relative boundary and coboundary
-  use the canonical quotient basis; integral accumulation is exact and refuses
-  publication overflow.
+  conservation/voltage-reference convention. Its two terminals name exactly one
+  conductor component, every component has exactly one such phase binding, and
+  two phases cannot silently claim the same component. Geometric-coil rows must
+  name the component owned by their phase.
+  Relative boundary and real/integral coboundary use the canonical phase-local
+  quotient basis; integral accumulation and chain/cochain evaluation are exact
+  and refuse publication overflow.
 - Vector families (vecfam battery): dimension counts r = 1..4 match
   the closed forms (N: 6/20/45/84, RT: 4/15/36/70 per tet) and the
   exact-sequence Euler identity Σ(−1)ᵏ dim Vᵏ = 1 holds on
@@ -373,7 +380,10 @@ phase/orientation failures, complete PortSchema and presented Machine-IR
 identity mutations, declaration-order replay, nominal separation of integral
 representative/current/distributed-current/geometry sectors, named conversion
 families, real coboundary typing, nonfinite refusal, and flow-coordinate plus
-trivialization enforcement.
+trivialization enforcement; a terminal-cut loop graph checks exact integral
+  Stokes pairing and three relative cycles, while disconnected and shared-
+  closure two-phase graphs check owned top-cell restriction, explicit phase
+  tagging, and the refusal of ambiguous component or conversion bindings.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -501,6 +511,13 @@ trivialization enforcement.
   protective-ground, phasor/RMS, phase-sequence, multi-winding permutation,
   polarity-inference, or topology-event semantics are claimed. Terminal-free
   and single-terminal relative pairs are not admitted by this first slice.
+- Phase-local support currently admits exactly one conductor component per
+  phase. Parallel-path/branch/netlist aggregation requires a later explicit
+  phase-to-component-set schema; an integral cochain is a dual algebraic object,
+  not a real field, metric dual, cocycle class, or geometric linking witness.
+  Components may share lower-dimensional closure cells, and those cell
+  generators intentionally occur in each owning phase's separately tagged
+  basis; this slice does not construct a tagged-copy/direct-sum cell complex.
 - No field transfer, current-density solve, electromagnetic force, material,
   thermal, manufacturability, geometric embedding, cancellation-latency,
   performance, or authority-receipt claim follows from these types.

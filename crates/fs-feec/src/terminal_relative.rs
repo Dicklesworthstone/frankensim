@@ -1122,6 +1122,7 @@ pub struct TerminalRelativePair {
     insulation: CellularSubcomplex,
     components: Vec<ConductorComponent>,
     terminals: Vec<PhysicalTerminal>,
+    phase_components: BTreeMap<PhaseId, ConductorComponentId>,
     receipt: TerminalRelativeComplexReceipt,
 }
 
@@ -1129,7 +1130,8 @@ impl TerminalRelativePair {
     /// Admit the complete pair.  Components must partition the conductor;
     /// terminal supports must be disjoint subsets of their named components;
     /// terminal and insulation supports must be disjoint; each phase must
-    /// declare a driven terminal and an explicit return/reference terminal.
+    /// declare a driven terminal and an explicit return/reference terminal;
+    /// every component must be owned by exactly one phase in this first slice.
     #[allow(clippy::too_many_lines)]
     pub fn try_new(
         complex: FiniteCellComplex,
@@ -1396,6 +1398,8 @@ impl TerminalRelativePair {
                 .or_default()
                 .push(terminal);
         }
+        let mut phase_components = BTreeMap::new();
+        let mut component_phases = BTreeMap::<ConductorComponentId, PhaseId>::new();
         for (phase, phase_terminals) in &phases {
             if phase_terminals.len() != 2 {
                 return Err(TerminalRelativeError::PhaseTerminalCardinality {
@@ -1428,6 +1432,36 @@ impl TerminalRelativePair {
                     phase: phase.as_str().to_owned(),
                 });
             }
+            let driven_terminal = phase_terminals
+                .iter()
+                .find(|terminal| terminal.role == TerminalRole::Driven)
+                .ok_or_else(|| TerminalRelativeError::MissingPhaseRole {
+                    phase: phase.as_str().to_owned(),
+                    role: TerminalRole::Driven,
+                })?;
+            let return_terminal = phase_terminals
+                .iter()
+                .find(|terminal| terminal.role == TerminalRole::ReturnReference)
+                .ok_or_else(|| TerminalRelativeError::MissingPhaseRole {
+                    phase: phase.as_str().to_owned(),
+                    role: TerminalRole::ReturnReference,
+                })?;
+            let component = &driven_terminal.component;
+            if return_terminal.component != *component {
+                return Err(TerminalRelativeError::PhaseComponentMismatch {
+                    phase: phase.as_str().to_owned(),
+                    driven_component: component.as_str().to_owned(),
+                    return_component: return_terminal.component.as_str().to_owned(),
+                });
+            }
+            if let Some(existing) = component_phases.insert(component.clone(), phase.clone()) {
+                return Err(TerminalRelativeError::ComponentPhaseConflict {
+                    component: component.as_str().to_owned(),
+                    first_phase: existing.as_str().to_owned(),
+                    second_phase: phase.as_str().to_owned(),
+                });
+            }
+            phase_components.insert(phase.clone(), component.clone());
             let into = phase_terminals
                 .iter()
                 .filter(|terminal| terminal.orientation == TerminalOrientation::IntoConductor)
@@ -1445,6 +1479,13 @@ impl TerminalRelativePair {
                 return Err(TerminalRelativeError::PhaseConventionMismatch {
                     phase: phase.as_str().to_owned(),
                     field,
+                });
+            }
+        }
+        for component in &components {
+            if !component_phases.contains_key(&component.id) {
+                return Err(TerminalRelativeError::UnboundConductorComponent {
+                    component: component.id.as_str().to_owned(),
                 });
             }
         }
@@ -1470,6 +1511,7 @@ impl TerminalRelativePair {
             insulation,
             components,
             terminals,
+            phase_components,
             receipt,
         })
     }
@@ -1529,6 +1571,12 @@ impl TerminalRelativePair {
         &self.terminals
     }
 
+    /// Conductor component explicitly owned by a phase's two terminal rows.
+    #[must_use]
+    pub fn phase_component(&self, phase: &PhaseId) -> Option<&ConductorComponentId> {
+        self.phase_components.get(phase)
+    }
+
     /// Canonical quotient basis: conductor cells not killed by the explicitly
     /// declared relative subcomplex.
     #[must_use]
@@ -1541,12 +1589,40 @@ impl TerminalRelativePair {
             .collect()
     }
 
-    /// Whether a phase is declared by at least one admitted terminal.
+    /// Canonical quotient basis restricted to the component owned by `phase`.
+    pub fn phase_relative_basis(
+        &self,
+        phase: &PhaseId,
+        degree: u8,
+    ) -> Result<Vec<CellRef>, TerminalRelativeError> {
+        let Some(component_id) = self.phase_components.get(phase) else {
+            return Err(TerminalRelativeError::UnknownPhase {
+                phase: phase.as_str().to_owned(),
+            });
+        };
+        let Some(component) = self
+            .components
+            .iter()
+            .find(|component| &component.id == component_id)
+        else {
+            return Err(TerminalRelativeError::PhaseComponentBindingLost {
+                phase: phase.as_str().to_owned(),
+                component: component_id.as_str().to_owned(),
+            });
+        };
+        Ok(component
+            .support
+            .cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.degree == degree && !self.relative.cells.contains(cell))
+            .collect())
+    }
+
+    /// Whether a phase has an admitted component binding.
     #[must_use]
     pub fn contains_phase(&self, phase: &PhaseId) -> bool {
-        self.terminals
-            .iter()
-            .any(|terminal| &terminal.phase == phase)
+        self.phase_components.contains_key(phase)
     }
 
     /// Apply the exact relative boundary map to an integral chain.
@@ -1560,8 +1636,8 @@ impl TerminalRelativePair {
         let Some(target_degree) = chain.degree.checked_sub(1) else {
             return Err(TerminalRelativeError::NoBoundaryPredecessor);
         };
-        let source_basis = self.relative_basis(chain.degree);
-        let target_basis = self.relative_basis(target_degree);
+        let source_basis = self.phase_relative_basis(&chain.phase, chain.degree)?;
+        let target_basis = self.phase_relative_basis(&chain.phase, target_degree)?;
         if source_basis.len() != chain.coefficients.len() {
             return Err(TerminalRelativeError::CoefficientArity {
                 expected: source_basis.len(),
@@ -1610,8 +1686,8 @@ impl TerminalRelativePair {
         if target_degree > self.complex.dimension {
             return Err(TerminalRelativeError::NoCoboundarySuccessor);
         }
-        let source_basis = self.relative_basis(cochain.degree);
-        let target_basis = self.relative_basis(target_degree);
+        let source_basis = self.phase_relative_basis(&cochain.phase, cochain.degree)?;
+        let target_basis = self.phase_relative_basis(&cochain.phase, target_degree)?;
         if source_basis.len() != cochain.values.len() {
             return Err(TerminalRelativeError::CoefficientArity {
                 expected: source_basis.len(),
@@ -1654,6 +1730,106 @@ impl TerminalRelativePair {
             values,
         )
     }
+
+    /// Apply the transpose incidence as an exact integral relative
+    /// coboundary map. No real-to-integer coercion is available.
+    pub fn integral_coboundary(
+        &self,
+        cochain: &IntegralRelativeCochain,
+    ) -> Result<IntegralRelativeCochain, TerminalRelativeError> {
+        if cochain.pair != self.identity() {
+            return Err(TerminalRelativeError::PairIdentityMismatch);
+        }
+        let Some(target_degree) = cochain.degree.checked_add(1) else {
+            return Err(TerminalRelativeError::NoCoboundarySuccessor);
+        };
+        if target_degree > self.complex.dimension {
+            return Err(TerminalRelativeError::NoCoboundarySuccessor);
+        }
+        let source_basis = self.phase_relative_basis(&cochain.phase, cochain.degree)?;
+        let target_basis = self.phase_relative_basis(&cochain.phase, target_degree)?;
+        if source_basis.len() != cochain.coefficients.len() {
+            return Err(TerminalRelativeError::CoefficientArity {
+                expected: source_basis.len(),
+                actual: cochain.coefficients.len(),
+            });
+        }
+        let source_indices: BTreeMap<_, _> = source_basis
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, cell)| (cell, index))
+            .collect();
+        let mut accumulated = vec![0_i128; target_basis.len()];
+        for (target_index, target) in target_basis.iter().enumerate() {
+            for incidence in self
+                .complex
+                .incidences
+                .iter()
+                .filter(|entry| entry.upper == *target)
+            {
+                if let Some(source_index) = source_indices.get(&incidence.lower) {
+                    let contribution =
+                        i128::from(cochain.coefficients[*source_index]) * incidence.sign.as_i128();
+                    accumulated[target_index] = accumulated[target_index]
+                        .checked_add(contribution)
+                        .ok_or(TerminalRelativeError::CoefficientOverflow)?;
+                }
+            }
+        }
+        let coefficients = accumulated
+            .into_iter()
+            .map(|value| {
+                i64::try_from(value).map_err(|_| TerminalRelativeError::CoefficientOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        IntegralRelativeCochain::try_new(self, cochain.phase.clone(), target_degree, coefficients)
+    }
+
+    /// Exact evaluation pairing between an integral cochain and chain.
+    pub fn integral_pairing(
+        &self,
+        cochain: &IntegralRelativeCochain,
+        chain: &IntegralRelativeChain,
+    ) -> Result<i128, TerminalRelativeError> {
+        if cochain.pair != self.identity() || chain.pair != self.identity() {
+            return Err(TerminalRelativeError::PairIdentityMismatch);
+        }
+        if cochain.phase != chain.phase {
+            return Err(TerminalRelativeError::PairingPhaseMismatch {
+                cochain: cochain.phase.as_str().to_owned(),
+                chain: chain.phase.as_str().to_owned(),
+            });
+        }
+        if cochain.degree != chain.degree {
+            return Err(TerminalRelativeError::PairingDegreeMismatch {
+                cochain: cochain.degree,
+                chain: chain.degree,
+            });
+        }
+        let expected = self.phase_relative_basis(&chain.phase, chain.degree)?.len();
+        if cochain.coefficients.len() != expected {
+            return Err(TerminalRelativeError::CoefficientArity {
+                expected,
+                actual: cochain.coefficients.len(),
+            });
+        }
+        if chain.coefficients.len() != expected {
+            return Err(TerminalRelativeError::CoefficientArity {
+                expected,
+                actual: chain.coefficients.len(),
+            });
+        }
+        cochain
+            .coefficients
+            .iter()
+            .zip(&chain.coefficients)
+            .try_fold(0_i128, |sum, (dual, primal)| {
+                let product = i128::from(*dual) * i128::from(*primal);
+                sum.checked_add(product)
+                    .ok_or(TerminalRelativeError::PairingOverflow)
+            })
+    }
 }
 
 /// Integral chain on the canonical terminal-relative quotient basis.
@@ -1684,7 +1860,7 @@ impl IntegralRelativeChain {
                 dimension: pair.complex.dimension,
             });
         }
-        let expected = pair.relative_basis(degree).len();
+        let expected = pair.phase_relative_basis(&phase, degree)?.len();
         if coefficients.len() != expected {
             return Err(TerminalRelativeError::CoefficientArity {
                 expected,
@@ -1724,6 +1900,75 @@ impl IntegralRelativeChain {
     }
 }
 
+/// Integral cochain on the phase-local relative quotient basis.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntegralRelativeCochain {
+    pair: TerminalRelativePairId,
+    phase: PhaseId,
+    degree: u8,
+    coefficients: Vec<i64>,
+}
+
+impl IntegralRelativeCochain {
+    /// Construct an exact integral cochain. It is neither a real physical
+    /// field nor a cohomology-class witness.
+    pub fn try_new(
+        pair: &TerminalRelativePair,
+        phase: PhaseId,
+        degree: u8,
+        coefficients: Vec<i64>,
+    ) -> Result<Self, TerminalRelativeError> {
+        if !pair.contains_phase(&phase) {
+            return Err(TerminalRelativeError::UnknownPhase {
+                phase: phase.as_str().to_owned(),
+            });
+        }
+        if degree > pair.complex.dimension {
+            return Err(TerminalRelativeError::DegreeOutOfRange {
+                degree,
+                dimension: pair.complex.dimension,
+            });
+        }
+        let expected = pair.phase_relative_basis(&phase, degree)?.len();
+        if coefficients.len() != expected {
+            return Err(TerminalRelativeError::CoefficientArity {
+                expected,
+                actual: coefficients.len(),
+            });
+        }
+        Ok(Self {
+            pair: pair.identity(),
+            phase,
+            degree,
+            coefficients,
+        })
+    }
+
+    /// Pair identity.
+    #[must_use]
+    pub const fn pair_id(&self) -> TerminalRelativePairId {
+        self.pair
+    }
+
+    /// Phase identity.
+    #[must_use]
+    pub const fn phase(&self) -> &PhaseId {
+        &self.phase
+    }
+
+    /// Cochain degree.
+    #[must_use]
+    pub const fn degree(&self) -> u8 {
+        self.degree
+    }
+
+    /// Exact integral coefficients in dual-basis order.
+    #[must_use]
+    pub fn coefficients(&self) -> &[i64] {
+        &self.coefficients
+    }
+}
+
 /// Real cochain with explicit physical dimensions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RealRelativeCochain {
@@ -1754,7 +1999,7 @@ impl RealRelativeCochain {
                 dimension: pair.complex.dimension,
             });
         }
-        let expected = pair.relative_basis(degree).len();
+        let expected = pair.phase_relative_basis(&phase, degree)?.len();
         if values.len() != expected {
             return Err(TerminalRelativeError::CoefficientArity {
                 expected,
@@ -2042,14 +2287,21 @@ impl GeometricCoil {
         connectivity_artifact: StableId,
         manufacturing_artifact: StableId,
     ) -> Result<Self, TerminalRelativeError> {
-        if !pair.contains_phase(&phase) {
+        let Some(expected_component) = pair.phase_component(&phase) else {
             return Err(TerminalRelativeError::UnknownPhase {
                 phase: phase.as_str().to_owned(),
             });
-        }
+        };
         if !pair.components.iter().any(|entry| entry.id == component) {
             return Err(TerminalRelativeError::UnknownCoilComponent {
                 component: component.as_str().to_owned(),
+            });
+        }
+        if expected_component != &component {
+            return Err(TerminalRelativeError::CoilPhaseComponentMismatch {
+                phase: phase.as_str().to_owned(),
+                expected_component: expected_component.as_str().to_owned(),
+                actual_component: component.as_str().to_owned(),
             });
         }
         if connectivity_artifact == manufacturing_artifact {
@@ -2809,6 +3061,36 @@ pub enum TerminalRelativeError {
         /// Phase ID.
         phase: String,
     },
+    /// Driven and return terminals of one phase named different components.
+    PhaseComponentMismatch {
+        /// Phase ID.
+        phase: String,
+        /// Component named by the driven terminal.
+        driven_component: String,
+        /// Component named by the return terminal.
+        return_component: String,
+    },
+    /// Two electrical phases claimed the same conductor component.
+    ComponentPhaseConflict {
+        /// Contested component ID.
+        component: String,
+        /// First phase ID.
+        first_phase: String,
+        /// Second phase ID.
+        second_phase: String,
+    },
+    /// A conductor component had no driven/return phase binding.
+    UnboundConductorComponent {
+        /// Component missing a phase binding.
+        component: String,
+    },
+    /// An admitted pair's derived phase/component binding could not be resolved.
+    PhaseComponentBindingLost {
+        /// Phase ID.
+        phase: String,
+        /// Missing component ID.
+        component: String,
+    },
     /// Phase terminals did not include both current directions.
     PhaseOrientationDoesNotClose {
         /// Phase ID.
@@ -2859,6 +3141,22 @@ pub enum TerminalRelativeError {
     NoCoboundarySuccessor,
     /// Exact integral accumulation overflowed i64 publication.
     CoefficientOverflow,
+    /// Integral chain/cochain evaluation used different phases.
+    PairingPhaseMismatch {
+        /// Cochain phase.
+        cochain: String,
+        /// Chain phase.
+        chain: String,
+    },
+    /// Integral chain/cochain evaluation used different degrees.
+    PairingDegreeMismatch {
+        /// Cochain degree.
+        cochain: u8,
+        /// Chain degree.
+        chain: u8,
+    },
+    /// Exact integral pairing accumulation overflowed i128.
+    PairingOverflow,
     /// A real coefficient was NaN or infinite.
     NonFiniteRealCoefficient {
         /// Coefficient index.
@@ -2882,6 +3180,15 @@ pub enum TerminalRelativeError {
     UnknownCoilComponent {
         /// Missing component ID.
         component: String,
+    },
+    /// A geometric coil used a component owned by another phase.
+    CoilPhaseComponentMismatch {
+        /// Coil phase.
+        phase: String,
+        /// Component owned by the coil phase.
+        expected_component: String,
+        /// Component supplied by the coil declaration.
+        actual_component: String,
     },
     /// Conversion endpoints used different phases.
     ConversionPhaseMismatch {
