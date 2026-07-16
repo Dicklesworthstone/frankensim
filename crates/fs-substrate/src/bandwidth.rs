@@ -30,9 +30,43 @@ const REPS: usize = 3;
 /// because this axis divides single-thread attainments directly).
 const SINGLE_SAMPLES: usize = 5;
 
+/// Four AVX2 vectors (or eight Neon vectors) per source-level body. The fixed
+/// body exposes independent loads/stores to the optimizer instead of relying
+/// on target-specific vectorization of one indexed scalar statement.
+const TRIAD_UNROLL: usize = 16;
+
 fn triad(a: &mut [f64], b: &[f64], c: &[f64], s: f64) {
-    for i in 0..a.len() {
-        a[i] = b[i] + s * c[i];
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(a.len(), c.len());
+
+    let unrolled_len = a.len() / TRIAD_UNROLL * TRIAD_UNROLL;
+    let (a_head, a_tail) = a.split_at_mut(unrolled_len);
+    let (b_head, b_tail) = b.split_at(unrolled_len);
+    let (c_head, c_tail) = c.split_at(unrolled_len);
+    for ((a_chunk, b_chunk), c_chunk) in a_head
+        .chunks_exact_mut(TRIAD_UNROLL)
+        .zip(b_head.chunks_exact(TRIAD_UNROLL))
+        .zip(c_head.chunks_exact(TRIAD_UNROLL))
+    {
+        a_chunk[0] = b_chunk[0] + s * c_chunk[0];
+        a_chunk[1] = b_chunk[1] + s * c_chunk[1];
+        a_chunk[2] = b_chunk[2] + s * c_chunk[2];
+        a_chunk[3] = b_chunk[3] + s * c_chunk[3];
+        a_chunk[4] = b_chunk[4] + s * c_chunk[4];
+        a_chunk[5] = b_chunk[5] + s * c_chunk[5];
+        a_chunk[6] = b_chunk[6] + s * c_chunk[6];
+        a_chunk[7] = b_chunk[7] + s * c_chunk[7];
+        a_chunk[8] = b_chunk[8] + s * c_chunk[8];
+        a_chunk[9] = b_chunk[9] + s * c_chunk[9];
+        a_chunk[10] = b_chunk[10] + s * c_chunk[10];
+        a_chunk[11] = b_chunk[11] + s * c_chunk[11];
+        a_chunk[12] = b_chunk[12] + s * c_chunk[12];
+        a_chunk[13] = b_chunk[13] + s * c_chunk[13];
+        a_chunk[14] = b_chunk[14] + s * c_chunk[14];
+        a_chunk[15] = b_chunk[15] + s * c_chunk[15];
+    }
+    for ((out, left), right) in a_tail.iter_mut().zip(b_tail).zip(c_tail) {
+        *out = *left + s * *right;
     }
 }
 
@@ -143,6 +177,23 @@ pub fn measure(logical_cpus: usize) -> Measured {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrolled_triad_matches_scalar_reference_including_tails() {
+        for len in [0, 1, 7, 15, 16, 17, 31, 32, 33, 257] {
+            let b: Vec<f64> = (0..len).map(|i| i as f64 * 0.25 - 7.0).collect();
+            let c: Vec<f64> = (0..len).map(|i| 11.0 - i as f64 * 0.125).collect();
+            let scale = -1.25;
+            let expected: Vec<f64> = b
+                .iter()
+                .zip(&c)
+                .map(|(left, right)| *left + scale * *right)
+                .collect();
+            let mut actual = vec![f64::NAN; len];
+            triad(&mut actual, &b, &c, scale);
+            assert_eq!(actual, expected, "tail mismatch at len={len}");
+        }
+    }
 
     #[test]
     fn bandwidth_is_physically_plausible() {

@@ -23,7 +23,10 @@ Probe surface:
 - `dispatch_tier() -> SimdTier` (Scalar/Neon/Avx2/Avx512) — resolved EXACTLY
   once (OnceLock; `dispatch_resolution_count()` test hook proves it).
 - `bandwidth::measure` — STREAM-triad sweep (24 B/elem accounting, 64 MiB
-  arrays, best-of-3), single-thread + all-core aggregate.
+  arrays, safe 16-element unroll plus exact scalar tail), best-of-5
+  single-thread + best-of-3 all-core aggregate. The fixed-width body exposes
+  four AVX2 vectors or eight Neon vectors of independent work to the optimizer
+  without ISA-specific code or a different accounting convention.
 
 Tile-layout surface:
 - `morton::{morton3_encode, morton3_decode}` — 3D Morton codec, 21 bits per
