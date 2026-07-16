@@ -1,10 +1,10 @@
 # CONTRACT: fs-matdb
 
-> Status: ACTIVE (bead 5hmy, PR-1 + PR-2 of 5 landed). Owns the
+> Status: ACTIVE (bead 5hmy, PR-1..PR-3 of 5 landed). Owns the
 > immutable typed material-data schema, its fail-closed insertion
-> boundary, and the material/constitutive card layer with supersedes
-> lineage. The query path with `Evidence<PropertySample>` +
-> `PropertyUsageReceipt` is PR-4; InterfaceSystemCard is PR-3; the
+> boundary, the material/constitutive card layer with supersedes
+> lineage, and the ordered interface-system card. The query path with
+> `Evidence<PropertySample>` + `PropertyUsageReceipt` is PR-4; the
 > receipt mutation battery is PR-5.
 
 ## Purpose and layer
@@ -79,6 +79,18 @@ persistence.
   (`org.frankensim.fs-matdb.material-card.v1`) binds the id, schema
   version, lineage link, every claim/observation content id, and every
   model-card hash — so it binds the full transitive content.
+- `SurfaceSpec` / `SystemContext` / `InterfaceSystemCard` (PR-3) — an
+  ORDERED interface system: surface A (material state + opaque
+  texture-frame id; blank refuses), surface B, and the system context
+  (medium, optional third body, environment, NAMED history state —
+  each blank member refuses). Friction, wetting, contact conductance,
+  wear, and adhesion are claimed against the SYSTEM, never against an
+  unordered bulk pair: `(a, b)` and `(b, a)` hash differently, history
+  is identity-bearing, and wetting is a solid–liquid–gas system (the
+  liquid is the medium, the gas is the environment). Content-addressed
+  (`org.frankensim.fs-matdb.interface-system-card.v1`) over both
+  ordered surfaces, the full context, and the transitive
+  claim/observation/model identities.
 
 ## Invariants
 
@@ -145,6 +157,11 @@ unlicensed-model refusals; supersession chain 0→1→2 with predecessor
 hashes bound and predecessors immutable; model-card hash field
 sensitivity (parameter value/version/state-policy/validity/sources);
 material-card hash binding claims, models, and the named-state id.
+
+`tests/interface.rs` (PR-3): surface-order and history hash
+sensitivity; three-phase wetting with advancing/receding hysteresis as
+coexisting claims; unnamed-texture-frame and blank
+medium/history/third-body refusals.
 
 ## No-claim boundaries
 

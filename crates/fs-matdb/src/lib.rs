@@ -31,11 +31,13 @@ use fs_evidence::ValidityDomain;
 use fs_qty::Dims;
 
 mod cards;
+mod interface;
 
 pub use cards::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, MATDB_SCHEMA_VERSION,
     MaterialCard, MaterialStateId,
 };
+pub use interface::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 
 /// Hash domain for property-claim canonical identity.
 const CLAIM_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.property-claim.v1";
@@ -123,6 +125,18 @@ pub enum MatDbError {
         /// What is wrong.
         reason: &'static str,
     },
+    /// An interface surface has no texture-frame id: a claim against an
+    /// unnamed surface state is unreproducible.
+    MissingTextureFrame {
+        /// The surface's bulk material state.
+        material: MaterialStateId,
+    },
+    /// A required interface-system field (medium, environment, history,
+    /// or a present-but-blank third body) is empty.
+    MissingSystemField {
+        /// Which field.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for MatDbError {
@@ -183,6 +197,15 @@ impl fmt::Display for MatDbError {
             MatDbError::SupersedesMismatch { reason } => {
                 write!(f, "supersession impossible: {reason}")
             }
+            MatDbError::MissingTextureFrame { material } => write!(
+                f,
+                "surface of {material} has no texture-frame id; interface claims against an \
+                 unnamed surface state are unreproducible"
+            ),
+            MatDbError::MissingSystemField { field } => write!(
+                f,
+                "interface system field '{field}' is blank; the system identity is incomplete"
+            ),
         }
     }
 }
@@ -640,14 +663,14 @@ impl ClaimSet {
                 found,
             });
         }
-        if let Some(&registered) = self.key_dims.get(claim.key.name()) {
-            if registered != claim.key.dims() {
-                return Err(MatDbError::DimsMismatch {
-                    key: claim.key.clone(),
-                    expected: registered,
-                    found,
-                });
-            }
+        if let Some(&registered) = self.key_dims.get(claim.key.name())
+            && registered != claim.key.dims()
+        {
+            return Err(MatDbError::DimsMismatch {
+                key: claim.key.clone(),
+                expected: registered,
+                found,
+            });
         }
         for observation in &claim.observations {
             if !self.observations.contains_key(observation) {
