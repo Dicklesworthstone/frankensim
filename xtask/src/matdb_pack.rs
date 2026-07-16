@@ -1,10 +1,13 @@
-//! Strict offline compiler for canonical fs-matdb scalar/curve packs.
+//! Strict offline compiler for canonical fs-matdb material and model packs.
 //!
 //! This tool boundary owns source-format and redistribution decisions. The
-//! runtime fs-matdb crate only admits the normalized artifact. Schema v1 is
-//! deliberately honest: it supports scalar/curve material claims and typed
-//! joint statistics, while species, NASA-9, and kinetics profiles refuse until
-//! their runtime codecs exist.
+//! runtime fs-matdb crate only admits the normalized artifact. The material
+//! profile emits [`NormalizedPack`]. The NASA-9 profile emits a separate
+//! [`NormalizedModelPack`] whose pack id is exactly one validated species id;
+//! the generic runtime artifact does not claim to authenticate that source
+//! association or supply the wider thermochemical convention. Standalone
+//! species metadata and kinetics profiles still refuse until their owning
+//! runtime codecs exist.
 //!
 //! The bounded manifest is tab-separated: one pack_id, redistribution,
 //! citation, and license record, followed by source records containing logical
@@ -24,15 +27,18 @@ use std::os::unix::fs::MetadataExt as _;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimId, ClaimSet, InterpolationPolicy, JointStatistics, MATDB_PACK_TARGET_BASIS,
-    NormalizationReceipt, NormalizationTarget, NormalizedPack, ObservationDataset, ObservationId,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, StatisticMember, UncertaintyModel,
-    ValidityBoundSide,
+    ClaimId, ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy,
+    JointStatistics, LawId, LawParameter, MATDB_PACK_TARGET_BASIS, MODEL_PACK_TARGET_BASIS,
+    ModelNormalizationReceipt, ModelNormalizationTarget, NormalizationReceipt, NormalizationTarget,
+    NormalizedModelPack, NormalizedPack, ObservationDataset, ObservationId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, StatisticMember, UncertaintyModel, ValidityBoundSide,
 };
 use fs_qty::Dims;
+use fs_qty::chemistry::SpeciesId;
 use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
 
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
+const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 /// Semantic contract version for normalized material-pack compilation.
 ///
 /// Bump this whenever parsing, admission, normalization, or provenance
@@ -41,7 +47,13 @@ const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
 pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 2;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
+const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const MATERIAL_PROFILE: &str = "material-tsv-v1";
+const NASA9_PROFILE: &str = "nasa9-v1";
+const NASA9_LAW_ID: &str = "nasa9-standard-state";
+const NASA9_LAW_VERSION: u32 = 1;
+const NASA9_STATE_SCHEMA_VERSION: u32 = 0;
+const NASA9_COEFFICIENT_NAMES: [&str; 9] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
 const SOURCE_ENVELOPE_DOMAIN: &str = "org.frankensim.xtask.matdb-pack.source-envelope.v1";
 const SOURCE_FILE_DOMAIN: &str = "org.frankensim.xtask.matdb-pack.source-file.v1";
 const SOURCE_RECORD_DOMAIN: &str = "org.frankensim.xtask.matdb-pack.source-record.v1";
@@ -59,6 +71,8 @@ const MAX_CURVE_KNOTS: usize = 1_000_000;
 const MAX_JOINT_MEMBERS: usize = 256;
 const MAX_NORMALIZATION_RECEIPTS: usize = 100_000;
 const MAX_REPEATED_PROVENANCE_BYTES: usize = 64 * 1_048_576;
+const MAX_NASA9_REGIONS: usize = 16;
+const MAX_NASA9_COEFFICIENTS: usize = MAX_NASA9_REGIONS * NASA9_COEFFICIENT_NAMES.len();
 const QTY_BUDGET: ParseBudget = ParseBudget::new(4_096, 256, 64, 256);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,9 +208,64 @@ fn print_refusal_decisions(error: &CompileError, input_hash: Option<ContentHash>
 
 #[derive(Debug)]
 struct CompileOutput {
-    pack: NormalizedPack,
+    pack: CompiledPack,
     bytes: Vec<u8>,
     decisions: Vec<Decision>,
+}
+
+#[derive(Debug)]
+enum CompiledPack {
+    Material(NormalizedPack),
+    Model(NormalizedModelPack),
+}
+
+impl CompiledPack {
+    fn source_artifact(&self) -> ContentHash {
+        match self {
+            Self::Material(pack) => pack.source_artifact(),
+            Self::Model(pack) => pack.source_artifact(),
+        }
+    }
+
+    fn content_hash(&self) -> ContentHash {
+        match self {
+            Self::Material(pack) => pack.content_hash(),
+            Self::Model(pack) => pack.content_hash(),
+        }
+    }
+
+    fn verify_bytes(&self, expected: ContentHash, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Material(_) => NormalizedPack::from_bytes_verified(expected, bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Self::Model(_) => NormalizedModelPack::from_bytes_verified(expected, bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    fn material(&self) -> &NormalizedPack {
+        let Self::Material(pack) = self else {
+            panic!("expected a material pack");
+        };
+        pack
+    }
+
+    #[cfg(test)]
+    fn model(&self) -> &NormalizedModelPack {
+        let Self::Model(pack) = self else {
+            panic!("expected a model pack");
+        };
+        pack
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceProfile {
+    Material,
+    Nasa9,
 }
 
 #[derive(Debug)]
@@ -322,6 +391,37 @@ struct RawDatabase {
     curve_knots: usize,
 }
 
+#[derive(Debug)]
+struct RawNasa9Region {
+    species: SpeciesId,
+    id: String,
+    temperature_lower: String,
+    temperature_upper: String,
+    temperature_unit: String,
+    reference_pressure: String,
+    reference_pressure_unit: String,
+    source_id: String,
+    source_hash: ContentHash,
+    record_hash: ContentHash,
+}
+
+#[derive(Debug)]
+struct RawNasa9Coefficient {
+    value: String,
+    unit: String,
+    source_id: String,
+    source_hash: ContentHash,
+    record_hash: ContentHash,
+}
+
+#[derive(Debug, Default)]
+struct RawNasa9Database {
+    regions: BTreeMap<(SpeciesId, String), RawNasa9Region>,
+    coefficients: BTreeMap<(SpeciesId, String, String), RawNasa9Coefficient>,
+    decisions: Vec<Decision>,
+    records: usize,
+}
+
 #[derive(Debug, Clone)]
 struct ParsedQuantity {
     value: f64,
@@ -406,7 +506,7 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
     }
 
     let pack_hash = first.pack.content_hash();
-    write_new_verified(&output_path, &first.bytes, pack_hash).map_err(|error| {
+    write_new_verified(&output_path, &first.bytes, &first.pack).map_err(|error| {
         println!(
             "{}",
             render_decision(&Decision::refusal_for_pack(&error, pack_hash))
@@ -666,6 +766,40 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
     })
 }
 
+fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
+    let Some((first, rest)) = manifest.sources.split_first() else {
+        return Err(CompileError::new(
+            "missing_sources",
+            "manifest",
+            "at least one source record is required",
+        ));
+    };
+    for source in rest {
+        if source.profile != first.profile {
+            return Err(CompileError::new(
+                "mixed_source_profiles",
+                format!("source:{}", source.id),
+                format!(
+                    "one output may contain exactly one artifact profile; source {:?} uses {:?} while source {:?} uses {:?}",
+                    first.id, first.profile, source.id, source.profile
+                ),
+            ));
+        }
+    }
+    match first.profile.as_str() {
+        MATERIAL_PROFILE => Ok(SourceProfile::Material),
+        NASA9_PROFILE => Ok(SourceProfile::Nasa9),
+        _ => Err(CompileError::new(
+            "unsupported_source_profile",
+            format!("source:{}", first.id),
+            format!(
+                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?} and {NASA9_PROFILE:?}",
+                first.profile
+            ),
+        )),
+    }
+}
+
 fn load_sources(
     manifest_path: &Path,
     manifest: &Manifest,
@@ -681,16 +815,6 @@ fn load_sources(
     let mut loaded = Vec::with_capacity(manifest.sources.len());
     let mut total = 0usize;
     for spec in &manifest.sources {
-        if spec.profile != MATERIAL_PROFILE {
-            return Err(CompileError::new(
-                "unsupported_source_profile",
-                format!("source:{}", spec.id),
-                format!(
-                    "profile {:?} has no runtime-loadable v1 codec; supported profile is {MATERIAL_PROFILE:?}",
-                    spec.profile
-                ),
-            ));
-        }
         let path = resolve_safe_source(&canonical_parent, &spec.relative_path, &spec.id)?;
         let bytes = read_bounded_regular(&path, MAX_SOURCE_BYTES, &format!("source:{}", spec.id))?;
         let hash = hash_domain(SOURCE_FILE_DOMAIN, &bytes);
@@ -1228,7 +1352,7 @@ fn parse_source(source: &LoadedSource, raw: &mut RawDatabase) -> Result<(), Comp
                 return Err(CompileError::new(
                     "unsupported_source_record",
                     subject,
-                    "species, NASA-9, and kinetics records await a runtime-loadable codec",
+                    "material-tsv-v1 admits only material records; NASA-9 data must use the nasa9-v1 source profile, while standalone species and kinetics codecs remain unavailable",
                 ));
             }
             Some(other) => {
@@ -1245,6 +1369,176 @@ fn parse_source(source: &LoadedSource, raw: &mut RawDatabase) -> Result<(), Comp
         format!("source:{}", source.spec.id),
         "source_schema_admitted",
         "bounded material-tsv-v1 source parsed without inference",
+        Some(source.hash),
+    ));
+    Ok(())
+}
+
+fn parse_species_id(raw: &str, subject: &str) -> Result<SpeciesId, CompileError> {
+    SpeciesId::new(raw.to_string()).map_err(|error| {
+        CompileError::new(
+            "invalid_species_id",
+            subject,
+            format!("fs-qty refused the canonical species id: {error}"),
+        )
+    })
+}
+
+fn parse_nasa9_source(
+    source: &LoadedSource,
+    raw: &mut RawNasa9Database,
+) -> Result<(), CompileError> {
+    if source.text.as_bytes().contains(&0) {
+        return Err(CompileError::new(
+            "invalid_source_encoding",
+            format!("source:{}", source.spec.id),
+            "NUL bytes are forbidden",
+        ));
+    }
+    let mut lines = source.text.lines();
+    if lines.next() != Some(NASA9_SOURCE_HEADER) {
+        return Err(CompileError::new(
+            "unsupported_source_schema",
+            format!("source:{}", source.spec.id),
+            format!("first line must be {NASA9_SOURCE_HEADER:?}"),
+        ));
+    }
+    for (offset, line) in lines.enumerate() {
+        let line_number = offset + 2;
+        let subject = format!("source:{}:line:{line_number}", source.spec.id);
+        if line.len() > MAX_LINE_BYTES {
+            return Err(CompileError::new(
+                "resource_limit",
+                subject,
+                "line exceeds the public byte budget",
+            ));
+        }
+        if line.is_empty() {
+            return Err(CompileError::new(
+                "invalid_source_record",
+                subject,
+                "blank records are forbidden",
+            ));
+        }
+        raw.records = raw.records.checked_add(1).ok_or_else(|| {
+            CompileError::new("resource_limit", "records", "record count overflowed")
+        })?;
+        if raw.records > MAX_RECORDS {
+            return Err(CompileError::new(
+                "resource_limit",
+                "records",
+                format!("at most {MAX_RECORDS} source records are admitted"),
+            ));
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        let record_hash = hash_domain(SOURCE_RECORD_DOMAIN, line.as_bytes());
+        match fields.first().copied() {
+            Some("region") => {
+                require_field_count(&fields, 8, &source.spec.id, line_number)?;
+                let species = parse_species_id(fields[1], &subject)?;
+                let id = require_identifier(fields[2], "region id", &subject)?;
+                let key = (species.clone(), id.clone());
+                if !raw.regions.contains_key(&key) && raw.regions.len() == MAX_NASA9_REGIONS {
+                    return Err(CompileError::new(
+                        "resource_limit",
+                        subject,
+                        format!(
+                            "one species artifact admits at most {MAX_NASA9_REGIONS} NASA-9 regions"
+                        ),
+                    ));
+                }
+                let region = RawNasa9Region {
+                    species,
+                    id,
+                    temperature_lower: require_number_token(
+                        fields[3],
+                        "temperature lower bound",
+                        &subject,
+                    )?,
+                    temperature_upper: require_number_token(
+                        fields[4],
+                        "temperature upper bound",
+                        &subject,
+                    )?,
+                    temperature_unit: require_unit(fields[5], "temperature unit", &subject)?,
+                    reference_pressure: require_number_token(
+                        fields[6],
+                        "reference pressure",
+                        &subject,
+                    )?,
+                    reference_pressure_unit: require_unit(
+                        fields[7],
+                        "reference pressure unit",
+                        &subject,
+                    )?,
+                    source_id: source.spec.id.clone(),
+                    source_hash: source.hash,
+                    record_hash,
+                };
+                if raw.regions.insert(key, region).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_nasa9_region",
+                        subject,
+                        "a species may name each NASA-9 region id once",
+                    ));
+                }
+            }
+            Some("coefficient") => {
+                require_field_count(&fields, 6, &source.spec.id, line_number)?;
+                let species = parse_species_id(fields[1], &subject)?;
+                let region = require_identifier(fields[2], "region id", &subject)?;
+                let name = require_identifier(fields[3], "coefficient name", &subject)?;
+                if !NASA9_COEFFICIENT_NAMES.contains(&name.as_str()) {
+                    return Err(CompileError::new(
+                        "unexpected_nasa9_coefficient",
+                        subject,
+                        format!(
+                            "coefficient {name:?} is not one of the exact a0..a8 NASA-9 fields"
+                        ),
+                    ));
+                }
+                let key = (species, region, name);
+                if !raw.coefficients.contains_key(&key)
+                    && raw.coefficients.len() == MAX_NASA9_COEFFICIENTS
+                {
+                    return Err(CompileError::new(
+                        "resource_limit",
+                        subject,
+                        format!(
+                            "one species artifact admits at most {MAX_NASA9_COEFFICIENTS} NASA-9 coefficient records"
+                        ),
+                    ));
+                }
+                let coefficient = RawNasa9Coefficient {
+                    value: require_number_token(fields[4], "coefficient value", &subject)?,
+                    unit: require_unit(fields[5], "coefficient unit", &subject)?,
+                    source_id: source.spec.id.clone(),
+                    source_hash: source.hash,
+                    record_hash,
+                };
+                if raw.coefficients.insert(key, coefficient).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_nasa9_coefficient",
+                        subject,
+                        "a NASA-9 region may declare each coefficient exactly once",
+                    ));
+                }
+            }
+            Some(other) => {
+                return Err(CompileError::new(
+                    "unknown_source_record",
+                    subject,
+                    format!("unknown NASA-9 record type {other:?}; expected region or coefficient"),
+                ));
+            }
+            None => unreachable!("split always returns one field"),
+        }
+    }
+    raw.decisions.push(Decision::admit(
+        format!("source:{}", source.spec.id),
+        "source_schema_admitted",
+        "bounded nasa9-v1 source parsed without unit or species inference",
         Some(source.hash),
     ));
     Ok(())
@@ -1631,6 +1925,420 @@ fn positive_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
 }
 
+const NASA9_TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
+const NASA9_PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+
+fn nasa9_coefficient_dims(name: &str) -> Dims {
+    match name {
+        "a0" => Dims([0, 0, 0, 2, 0, 0]),
+        "a1" => Dims([0, 0, 0, 1, 0, 0]),
+        "a2" | "a8" => Dims::NONE,
+        "a3" => Dims([0, 0, 0, -1, 0, 0]),
+        "a4" => Dims([0, 0, 0, -2, 0, 0]),
+        "a5" => Dims([0, 0, 0, -3, 0, 0]),
+        "a6" => Dims([0, 0, 0, -4, 0, 0]),
+        "a7" => Dims([0, 0, 0, 1, 0, 0]),
+        _ => unreachable!("parser admits only a0..a8"),
+    }
+}
+
+fn require_nasa9_dims(
+    field: &str,
+    expected: Dims,
+    found: Dims,
+    subject: &str,
+) -> Result<(), CompileError> {
+    if found == expected {
+        Ok(())
+    } else {
+        Err(CompileError::new(
+            "nasa9_dims_mismatch",
+            subject,
+            format!("{field} has dimensions {found:?}, expected {expected:?}"),
+        ))
+    }
+}
+
+fn parse_nasa9_linear_quantity(
+    number: &str,
+    unit: &str,
+    subject: &str,
+) -> Result<ParsedQuantity, CompileError> {
+    let (_, _, offset) = unit_transform(unit, subject)?;
+    if offset != 0.0 {
+        return Err(CompileError::new(
+            "affine_nasa9_parameter_unit",
+            subject,
+            "NASA-9 coefficients and reference pressure require linear units; affine units are valid only for temperature-region endpoints",
+        ));
+    }
+    parse_linear_quantity(number, unit, subject)
+}
+
+fn model_normalization(
+    target: ModelNormalizationTarget,
+    quantity: &ParsedQuantity,
+) -> ModelNormalizationReceipt {
+    ModelNormalizationReceipt::new(
+        target,
+        quantity.literal_hash,
+        quantity.dims,
+        quantity.scale,
+        quantity.offset,
+        quantity.unit.clone(),
+        MODEL_PACK_TARGET_BASIS,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // The NASA-9 admission pipeline is intentionally auditable in order.
+fn compile_nasa9_manifest(
+    manifest: Manifest,
+    sources: &[LoadedSource],
+    source_artifact: ContentHash,
+) -> Result<CompileOutput, CompileError> {
+    let mut raw = RawNasa9Database::default();
+    for source in sources {
+        if let Err(error) = parse_nasa9_source(source, &mut raw) {
+            return Err(error
+                .with_input_hash(source_artifact)
+                .with_prior_decisions(std::mem::take(&mut raw.decisions)));
+        }
+    }
+    let mut decisions = std::mem::take(&mut raw.decisions);
+    let result = (|| -> Result<CompileOutput, CompileError> {
+        if raw.regions.is_empty() {
+            return Err(CompileError::new(
+                "missing_nasa9_regions",
+                "sources",
+                "NASA-9 model pack requires at least one region record",
+            ));
+        }
+        for (species, region, coefficient) in raw.coefficients.keys() {
+            if !raw.regions.contains_key(&(species.clone(), region.clone())) {
+                return Err(CompileError::new(
+                    "unknown_nasa9_region",
+                    format!("species:{species}:region:{region}:coefficient:{coefficient}"),
+                    "coefficient references a region that was not declared",
+                ));
+            }
+        }
+        let species_set: BTreeSet<SpeciesId> = raw
+            .regions
+            .keys()
+            .map(|(species, _)| species.clone())
+            .collect();
+        if species_set.len() != 1 {
+            return Err(CompileError::new(
+                "multiple_species_in_model_pack",
+                "sources",
+                "nasa9-v1 emits one explicitly associated species artifact per manifest",
+            ));
+        }
+        let species = species_set.into_iter().next().ok_or_else(|| {
+            CompileError::new(
+                "missing_nasa9_regions",
+                "sources",
+                "NASA-9 model pack requires one species",
+            )
+        })?;
+        if manifest.pack_id != species.as_str() {
+            return Err(CompileError::new(
+                "species_pack_id_mismatch",
+                "manifest:pack_id",
+                format!(
+                    "nasa9-v1 requires pack_id {:?} to equal the sole canonical SpeciesId {:?}",
+                    manifest.pack_id,
+                    species.as_str()
+                ),
+            ));
+        }
+
+        decisions.push(Decision::admit(
+            "manifest:redistribution",
+            "redistribution_permitted",
+            "explicit permitted policy and nonblank retained terms admitted before compilation",
+            Some(source_artifact),
+        ));
+        decisions.push(Decision::admit(
+            "manifest:provenance",
+            "licensed_citation_admitted",
+            "nonblank source citation and license attached to every emitted model card",
+            Some(source_artifact),
+        ));
+        decisions.push(Decision::admit(
+            format!("species:{species}"),
+            "species_pack_id_bound",
+            "manifest pack_id exactly matches the fs-qty-validated source SpeciesId; this is a source association, not physical authentication",
+            Some(source_artifact),
+        ));
+
+        let mut models = Vec::with_capacity(raw.regions.len());
+        let mut normalizations = Vec::with_capacity(raw.regions.len().saturating_mul(12));
+        let mut intervals: Vec<(f64, f64, String)> = Vec::with_capacity(raw.regions.len());
+        let mut reference_pressure_bits = None;
+
+        for ((region_species, region_id), region) in &raw.regions {
+            debug_assert_eq!(region_species, &region.species);
+            debug_assert_eq!(region_id, &region.id);
+            let region_subject = format!("species:{region_species}:region:{region_id}");
+            let temperature_lower = parse_quantity(
+                &region.temperature_lower,
+                &region.temperature_unit,
+                &format!("{region_subject}:temperature:lower"),
+            )?;
+            let temperature_upper = parse_quantity(
+                &region.temperature_upper,
+                &region.temperature_unit,
+                &format!("{region_subject}:temperature:upper"),
+            )?;
+            require_nasa9_dims(
+                "temperature lower bound",
+                NASA9_TEMPERATURE_DIMS,
+                temperature_lower.dims,
+                &region_subject,
+            )?;
+            require_nasa9_dims(
+                "temperature upper bound",
+                NASA9_TEMPERATURE_DIMS,
+                temperature_upper.dims,
+                &region_subject,
+            )?;
+            if temperature_lower.value <= 0.0 || temperature_lower.value >= temperature_upper.value
+            {
+                return Err(CompileError::new(
+                    "invalid_nasa9_temperature_region",
+                    &region_subject,
+                    "normalized temperature bounds must be positive and strictly increasing",
+                ));
+            }
+            let reference_pressure = parse_nasa9_linear_quantity(
+                &region.reference_pressure,
+                &region.reference_pressure_unit,
+                &format!("{region_subject}:reference_pressure"),
+            )?;
+            require_nasa9_dims(
+                "reference pressure",
+                NASA9_PRESSURE_DIMS,
+                reference_pressure.dims,
+                &region_subject,
+            )?;
+            if reference_pressure.value <= 0.0 {
+                return Err(CompileError::new(
+                    "invalid_nasa9_reference_pressure",
+                    &region_subject,
+                    "normalized reference pressure must be positive",
+                ));
+            }
+            match reference_pressure_bits {
+                Some(expected) if expected != reference_pressure.value.to_bits() => {
+                    return Err(CompileError::new(
+                        "nasa9_reference_pressure_mismatch",
+                        &region_subject,
+                        "all regions in one species artifact require bit-identical normalized reference pressure",
+                    ));
+                }
+                None => reference_pressure_bits = Some(reference_pressure.value.to_bits()),
+                Some(_) => {}
+            }
+
+            let mut parameters = BTreeMap::new();
+            let mut parsed_coefficients = Vec::with_capacity(NASA9_COEFFICIENT_NAMES.len());
+            let mut card_sources = BTreeSet::from([region.source_hash, region.record_hash]);
+            for name in NASA9_COEFFICIENT_NAMES {
+                let coefficient = raw
+                    .coefficients
+                    .get(&(region_species.clone(), region_id.clone(), name.to_string()))
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "missing_nasa9_coefficient",
+                            format!("{region_subject}:coefficient:{name}"),
+                            "every NASA-9 region requires exactly a0 through a8",
+                        )
+                    })?;
+                if coefficient.source_id != region.source_id
+                    || coefficient.source_hash != region.source_hash
+                {
+                    return Err(CompileError::new(
+                        "cross_source_nasa9_region",
+                        format!("{region_subject}:coefficient:{name}"),
+                        "a region and all of its coefficient records must share one admitted source file",
+                    ));
+                }
+                let parsed = parse_nasa9_linear_quantity(
+                    &coefficient.value,
+                    &coefficient.unit,
+                    &format!("{region_subject}:coefficient:{name}"),
+                )?;
+                let expected = nasa9_coefficient_dims(name);
+                require_nasa9_dims(
+                    &format!("coefficient {name}"),
+                    expected,
+                    parsed.dims,
+                    &region_subject,
+                )?;
+                parameters.insert(
+                    name.to_string(),
+                    LawParameter {
+                        value: parsed.value,
+                        dims: parsed.dims,
+                    },
+                );
+                card_sources.insert(coefficient.source_hash);
+                card_sources.insert(coefficient.record_hash);
+                parsed_coefficients.push((name.to_string(), parsed));
+            }
+            parameters.insert(
+                "reference_pressure".to_string(),
+                LawParameter {
+                    value: reference_pressure.value,
+                    dims: reference_pressure.dims,
+                },
+            );
+            let card = ConstitutiveModelCard {
+                law: LawId(NASA9_LAW_ID.to_string()),
+                law_version: NASA9_LAW_VERSION,
+                parameters,
+                state_schema_version: NASA9_STATE_SCHEMA_VERSION,
+                initial_state: InitialStatePolicy::ZeroInternalState,
+                validity: ValidityDomain::unconstrained().with(
+                    "T",
+                    temperature_lower.value,
+                    temperature_upper.value,
+                ),
+                sources: card_sources.into_iter().collect(),
+                provenance: Provenance {
+                    source: format!(
+                        "{} [source:{}] [species:{}] [region:{}]",
+                        manifest.citation, region.source_id, region_species, region_id
+                    ),
+                    license: manifest.license.clone(),
+                    artifact: Some(region.source_hash),
+                },
+            };
+            card.validate().map_err(|error| {
+                CompileError::new(
+                    "nasa9_card_refused",
+                    &region_subject,
+                    format!("fs-matdb refused the compiled model card: {error}"),
+                )
+            })?;
+            let model = card.content_hash();
+            for (parameter, parsed) in parsed_coefficients {
+                normalizations.push(model_normalization(
+                    ModelNormalizationTarget::Parameter { model, parameter },
+                    &parsed,
+                ));
+            }
+            normalizations.push(model_normalization(
+                ModelNormalizationTarget::Parameter {
+                    model,
+                    parameter: "reference_pressure".to_string(),
+                },
+                &reference_pressure,
+            ));
+            for (side, parsed) in [
+                (ValidityBoundSide::Lower, &temperature_lower),
+                (ValidityBoundSide::Upper, &temperature_upper),
+            ] {
+                normalizations.push(model_normalization(
+                    ModelNormalizationTarget::ValidityBound {
+                        model,
+                        axis: "T".to_string(),
+                        side,
+                    },
+                    parsed,
+                ));
+            }
+            intervals.push((
+                temperature_lower.value,
+                temperature_upper.value,
+                region_subject.clone(),
+            ));
+            decisions.push(Decision::admit(
+                region_subject,
+                "nasa9_region_normalized",
+                "complete a0..a8 block, temperature interval, and reference pressure compiled into one immutable model card",
+                Some(region.record_hash),
+            ));
+            models.push(card);
+        }
+
+        intervals.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        for pair in intervals.windows(2) {
+            if pair[0].1 > pair[1].0 {
+                return Err(CompileError::new(
+                    "overlapping_nasa9_regions",
+                    &pair[1].2,
+                    format!(
+                        "temperature interval overlaps preceding region {}",
+                        pair[0].2
+                    ),
+                ));
+            }
+        }
+
+        let pack = NormalizedModelPack::new(
+            manifest.pack_id,
+            NASA9_COMPILER_ID,
+            source_artifact,
+            manifest.redistribution_terms,
+            models,
+            normalizations,
+        )
+        .map_err(|error| {
+            CompileError::new(
+                "normalized_model_pack_refused",
+                "pack",
+                format!("runtime model-pack admission refused the compiled artifact: {error}"),
+            )
+        })?;
+        let bytes = pack.to_bytes();
+        let pack_hash = pack.content_hash();
+        let decoded =
+            NormalizedModelPack::from_bytes_verified(pack_hash, &bytes).map_err(|error| {
+                CompileError::new(
+                    "self_verification_failed",
+                    "pack",
+                    format!("fresh artifact failed verified runtime decode: {error}"),
+                )
+            })?;
+        if decoded.to_bytes() != bytes {
+            return Err(CompileError::new(
+                "self_verification_failed",
+                "pack",
+                "verified runtime decode did not reproduce canonical model-pack bytes",
+            ));
+        }
+        decisions.push(Decision::admit(
+            "pack",
+            "runtime_model_pack_self_verified",
+            "canonical FSMODPK bytes decoded under their externally pinned content hash",
+            Some(source_artifact),
+        ));
+        for decision in &mut decisions {
+            decision.pack_hash = Some(pack_hash);
+        }
+        sort_decisions(&mut decisions);
+        Ok(CompileOutput {
+            pack: CompiledPack::Model(pack),
+            bytes,
+            decisions: std::mem::take(&mut decisions),
+        })
+    })();
+    result.map_err(|error| {
+        error
+            .with_input_hash(source_artifact)
+            .with_prior_decisions(decisions)
+    })
+}
+
 #[allow(clippy::too_many_lines)] // The ordered admission pipeline is easier to audit in one pass.
 fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError> {
     let manifest_bytes = read_bounded_regular(manifest_path, MAX_MANIFEST_BYTES, "manifest")?;
@@ -1645,9 +2353,14 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     })?;
     let manifest =
         parse_manifest(manifest_text).map_err(|error| error.with_input_hash(manifest_snapshot))?;
+    let profile =
+        source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let sources = load_sources(manifest_path, &manifest)
         .map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let source_artifact = source_envelope_hash(&manifest, &sources);
+    if profile == SourceProfile::Nasa9 {
+        return compile_nasa9_manifest(manifest, &sources, source_artifact);
+    }
     let mut raw = RawDatabase::default();
     for source in &sources {
         if let Err(error) = parse_source(source, &mut raw) {
@@ -1955,7 +2668,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         }
         sort_decisions(&mut decisions);
         Ok(CompileOutput {
-            pack,
+            pack: CompiledPack::Material(pack),
             bytes,
             decisions: std::mem::take(&mut decisions),
         })
@@ -2714,8 +3427,9 @@ fn render_decision(decision: &Decision) -> String {
 fn write_new_verified(
     output: &Path,
     bytes: &[u8],
-    expected: ContentHash,
+    pack: &CompiledPack,
 ) -> Result<(), CompileError> {
+    let expected = pack.content_hash();
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let file_name = output.file_name().ok_or_else(|| {
         CompileError::new(
@@ -2826,13 +3540,14 @@ fn write_new_verified(
             "candidate bytes differ from the verified compiler artifact",
         ));
     }
-    NormalizedPack::from_bytes_verified(expected, &staged_bytes).map_err(|error| {
-        CompileError::new(
-            "output_validation_failed",
-            "output",
-            format!("candidate failed runtime admission: {error}"),
-        )
-    })?;
+    pack.verify_bytes(expected, &staged_bytes)
+        .map_err(|error| {
+            CompileError::new(
+                "output_validation_failed",
+                "output",
+                format!("candidate failed runtime admission: {error}"),
+            )
+        })?;
     fs::hard_link(&stage_path, &canonical_output).map_err(|error| {
         let (code, detail) = if error.kind() == std::io::ErrorKind::AlreadyExists {
             (
@@ -2855,7 +3570,7 @@ fn write_new_verified(
             "published hard link does not retain the verified candidate bytes",
         ));
     }
-    NormalizedPack::from_bytes_verified(expected, &published).map_err(|error| {
+    pack.verify_bytes(expected, &published).map_err(|error| {
         CompileError::new(
             "output_validation_failed",
             "output",
@@ -2899,6 +3614,30 @@ mod tests {
         "joint\tcoupon\tdensity-modulus\tdensity:scalar,modulus:y:0\t0.000025,0,0.000009\t1,0,1\t1\n",
     );
 
+    const NASA9_SOURCE: &str = concat!(
+        "frankensim.nasa9-source.v1\n",
+        "region\tN2\tlow\t200\t1000\tK\t100\tkPa\n",
+        "coefficient\tN2\tlow\ta0\t0\tK^2\n",
+        "coefficient\tN2\tlow\ta1\t0\tK\n",
+        "coefficient\tN2\tlow\ta2\t3.5\t1\n",
+        "coefficient\tN2\tlow\ta3\t0.001\tK^-1\n",
+        "coefficient\tN2\tlow\ta4\t0\tK^-2\n",
+        "coefficient\tN2\tlow\ta5\t0\tK^-3\n",
+        "coefficient\tN2\tlow\ta6\t0\tK^-4\n",
+        "coefficient\tN2\tlow\ta7\t100\tK\n",
+        "coefficient\tN2\tlow\ta8\t1\t1\n",
+        "region\tN2\thigh\t1000\t6000\tK\t100000\tPa\n",
+        "coefficient\tN2\thigh\ta0\t0\tK^2\n",
+        "coefficient\tN2\thigh\ta1\t0\tK\n",
+        "coefficient\tN2\thigh\ta2\t4\t1\n",
+        "coefficient\tN2\thigh\ta3\t0.0001\tK^-1\n",
+        "coefficient\tN2\thigh\ta4\t0\tK^-2\n",
+        "coefficient\tN2\thigh\ta5\t0\tK^-3\n",
+        "coefficient\tN2\thigh\ta6\t0\tK^-4\n",
+        "coefficient\tN2\thigh\ta7\t200\tK\n",
+        "coefficient\tN2\thigh\ta8\t2\t1\n",
+    );
+
     fn fixture_dir() -> PathBuf {
         loop {
             let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -2927,6 +3666,17 @@ mod tests {
              citation\tfixture handbook table 7\n\
              license\tCC-BY-4.0\n\
              source\tprimary\tsource.tsv\t{profile}\n"
+        )
+    }
+
+    fn nasa9_manifest(pack_id: &str) -> String {
+        format!(
+            "{MANIFEST_HEADER}\n\
+             pack_id\t{pack_id}\n\
+             redistribution\tpermitted\tCC-BY-4.0 redistribution with attribution\n\
+             citation\tfixture NASA-9 species table\n\
+             license\tCC-BY-4.0\n\
+             source\tprimary\tsource.tsv\t{NASA9_PROFILE}\n"
         )
     }
 
@@ -3088,6 +3838,77 @@ mod tests {
     }
 
     #[test]
+    fn compiles_complete_nasa9_regions_into_a_verified_model_pack() {
+        let (manifest_path, _) = write_fixture(&nasa9_manifest("N2"), NASA9_SOURCE);
+        let first = compile_manifest(&manifest_path).expect("NASA-9 fixture compiles");
+        let second = compile_manifest(&manifest_path).expect("independent repeat compiles");
+
+        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(first.decisions, second.decisions);
+        assert_eq!(first.pack.content_hash(), second.pack.content_hash());
+        let pack = first.pack.model();
+        assert_eq!(pack.pack_id(), "N2");
+        assert_eq!(pack.compiler(), NASA9_COMPILER_ID);
+        assert_eq!(pack.models().len(), 2);
+        assert_eq!(pack.normalizations().len(), 24);
+        assert!(pack.models().iter().all(|card| {
+            card.law.0 == NASA9_LAW_ID
+                && card.law_version == NASA9_LAW_VERSION
+                && card.parameters.len() == 10
+                && card.validity.bound("T").is_some()
+        }));
+        let decoded = NormalizedModelPack::from_bytes_verified(pack.content_hash(), &first.bytes)
+            .expect("compiler output is runtime-loadable");
+        assert_eq!(decoded.to_bytes(), first.bytes);
+        assert!(first.decisions.iter().all(|decision| {
+            decision.verdict == "admit" && decision.pack_hash == Some(pack.content_hash())
+        }));
+    }
+
+    #[test]
+    fn nasa9_profile_refuses_incomplete_dims_mismatched_and_overlapping_regions() {
+        let cases = [
+            (
+                NASA9_SOURCE.replacen("coefficient\tN2\tlow\ta8\t1\t1\n", "", 1),
+                "missing_nasa9_coefficient",
+            ),
+            (
+                NASA9_SOURCE.replacen(
+                    "coefficient\tN2\tlow\ta0\t0\tK^2",
+                    "coefficient\tN2\tlow\ta0\t0\t1",
+                    1,
+                ),
+                "nasa9_dims_mismatch",
+            ),
+            (
+                NASA9_SOURCE.replacen(
+                    "coefficient\tN2\tlow\ta1\t0\tK",
+                    "coefficient\tN2\tlow\ta1\t0\tdegC",
+                    1,
+                ),
+                "affine_nasa9_parameter_unit",
+            ),
+            (
+                NASA9_SOURCE.replacen(
+                    "region\tN2\thigh\t1000\t6000\tK",
+                    "region\tN2\thigh\t900\t6000\tK",
+                    1,
+                ),
+                "overlapping_nasa9_regions",
+            ),
+        ];
+        for (source, code) in cases {
+            let (manifest_path, _) = write_fixture(&nasa9_manifest("N2"), &source);
+            let error = compile_manifest(&manifest_path).expect_err("malformed NASA-9 refuses");
+            assert_eq!(error.code, code);
+        }
+
+        let (manifest_path, _) = write_fixture(&nasa9_manifest("O2"), NASA9_SOURCE);
+        let error = compile_manifest(&manifest_path).expect_err("pack id binds species");
+        assert_eq!(error.code, "species_pack_id_mismatch");
+    }
+
+    #[test]
     fn multi_observation_claims_are_canonicalized_by_content_id() {
         let source = SOURCE
             .replacen(
@@ -3105,7 +3926,7 @@ mod tests {
             );
         let (manifest_path, _) = write_fixture(&manifest(MATERIAL_PROFILE, true), &source);
         let compiled = compile_manifest(&manifest_path).expect("two observations compile");
-        let density = compiled.pack.claims().claims_for("density")[0].1;
+        let density = compiled.pack.material().claims().claims_for("density")[0].1;
 
         assert_eq!(density.observations.len(), 2);
         assert!(
@@ -3211,13 +4032,15 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_species_profile_is_a_typed_refusal() {
-        let (manifest_path, _) = write_fixture(&manifest("nasa9-v1", true), SOURCE);
-        let error =
-            compile_manifest(&manifest_path).expect_err("no runtime species codec exists yet");
+    fn unsupported_species_and_kinetics_profiles_are_typed_refusals() {
+        for profile in ["species-v1", "kinetics-v1"] {
+            let (manifest_path, _) = write_fixture(&manifest(profile, true), SOURCE);
+            let error = compile_manifest(&manifest_path)
+                .expect_err("standalone species and kinetics codecs do not exist yet");
 
-        assert_eq!(error.code, "unsupported_source_profile");
-        assert_eq!(error.subject, "source:primary");
+            assert_eq!(error.code, "unsupported_source_profile");
+            assert_eq!(error.subject, "source:primary");
+        }
     }
 
     #[test]
@@ -3325,7 +4148,7 @@ mod tests {
         let output = directory.join("pack.fsmatpk");
         fs::write(&output, b"sentinel").expect("preexisting output");
 
-        let error = write_new_verified(&output, &compiled.bytes, compiled.pack.content_hash())
+        let error = write_new_verified(&output, &compiled.bytes, &compiled.pack)
             .expect_err("replacement is forbidden");
         assert_eq!(error.code, "output_exists");
         assert_eq!(fs::read(output).expect("sentinel retained"), b"sentinel");
@@ -3337,7 +4160,7 @@ mod tests {
         let compiled = compile_manifest(&manifest_path).expect("fixture compiles");
         let output = directory.join("pack.fsmatpk");
 
-        write_new_verified(&output, &compiled.bytes, compiled.pack.content_hash())
+        write_new_verified(&output, &compiled.bytes, &compiled.pack)
             .expect("verified no-clobber publication");
         let retained = read_bounded_regular(&output, compiled.bytes.len(), "test-output")
             .expect("published output");
@@ -3359,7 +4182,7 @@ mod tests {
             std::process::id()
         ));
 
-        write_new_verified(&output, &compiled.bytes, compiled.pack.content_hash())
+        write_new_verified(&output, &compiled.bytes, &compiled.pack)
             .expect("candidate alias is skipped");
         assert_eq!(
             read_bounded_regular(&output, compiled.bytes.len(), "aliased-output")

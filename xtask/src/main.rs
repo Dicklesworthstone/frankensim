@@ -19,7 +19,7 @@
 //! - `check-citable-producers` — exhaustively inventory authority-gated `citation_eligible` sinks.
 //! - `check-all`      — all of the above; non-zero exit on any violation.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
-//! - `matdb-pack`     — compile strict licensed material TSV sources into a normalized pack.
+//! - `matdb-pack`     — compile licensed material TSV or NASA-9 sources into normalized packs.
 //!
 //! Output is JSON-lines (one verdict object per check per crate) so agents parse
 //! outcomes without scraping; a human-readable summary goes to stderr.

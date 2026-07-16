@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs_matdb::{NormalizedPack, PropertyValue};
+use fs_matdb::{NormalizedModelPack, NormalizedPack, PropertyValue};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -79,6 +79,39 @@ const LUBRICANT_SOURCE: &str = concat!(
     "validity\tlubricant-viscosity\ttemperature\t-20\t100\tdegC\n",
 );
 
+const NASA9_MANIFEST: &str = concat!(
+    "frankensim.matdb-manifest.v1\n",
+    "pack_id\tN2\n",
+    "redistribution\tpermitted\tCC-BY-4.0 redistribution with attribution\n",
+    "citation\tfixture NASA-9 species table\n",
+    "license\tCC-BY-4.0\n",
+    "source\tprimary\tnasa9.tsv\tnasa9-v1\n",
+);
+
+const NASA9_SOURCE: &str = concat!(
+    "frankensim.nasa9-source.v1\n",
+    "region\tN2\tlow\t-73.15\t700\tdegC\t100\tkPa\n",
+    "coefficient\tN2\tlow\ta0\t0\tK^2\n",
+    "coefficient\tN2\tlow\ta1\t0\tK\n",
+    "coefficient\tN2\tlow\ta2\t3.5\t1\n",
+    "coefficient\tN2\tlow\ta3\t0.001\tK^-1\n",
+    "coefficient\tN2\tlow\ta4\t0\tK^-2\n",
+    "coefficient\tN2\tlow\ta5\t0\tK^-3\n",
+    "coefficient\tN2\tlow\ta6\t0\tK^-4\n",
+    "coefficient\tN2\tlow\ta7\t100\tK\n",
+    "coefficient\tN2\tlow\ta8\t1\t1\n",
+    "region\tN2\thigh\t1000\t6000\tK\t100000\tPa\n",
+    "coefficient\tN2\thigh\ta0\t0\tK^2\n",
+    "coefficient\tN2\thigh\ta1\t0\tK\n",
+    "coefficient\tN2\thigh\ta2\t4\t1\n",
+    "coefficient\tN2\thigh\ta3\t0.0001\tK^-1\n",
+    "coefficient\tN2\thigh\ta4\t0\tK^-2\n",
+    "coefficient\tN2\thigh\ta5\t0\tK^-3\n",
+    "coefficient\tN2\thigh\ta6\t0\tK^-4\n",
+    "coefficient\tN2\thigh\ta7\t200\tK\n",
+    "coefficient\tN2\thigh\ta8\t2\t1\n",
+);
+
 fn fixture_dir() -> PathBuf {
     loop {
         let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -114,6 +147,14 @@ fn write_material_families_fixture() -> (PathBuf, PathBuf) {
     ] {
         fs::write(directory.join(name), source).expect("write family source fixture");
     }
+    (directory, manifest)
+}
+
+fn write_nasa9_fixture() -> (PathBuf, PathBuf) {
+    let directory = fixture_dir();
+    let manifest = directory.join("manifest.tsv");
+    fs::write(&manifest, NASA9_MANIFEST).expect("write NASA-9 manifest fixture");
+    fs::write(directory.join("nasa9.tsv"), NASA9_SOURCE).expect("write NASA-9 source fixture");
     (directory, manifest)
 }
 
@@ -242,8 +283,55 @@ fn g3_cli_compiles_handbook_bh_sn_and_lubricant_material_claims() {
 }
 
 #[test]
-fn g3_cli_refuses_species_nasa9_and_kinetics_without_runtime_codecs() {
-    for profile in ["species-v1", "nasa9-v1", "kinetics-v1"] {
+fn g3_cli_compiles_nasa9_regions_into_identical_verified_model_packs() {
+    let (directory, manifest) = write_nasa9_fixture();
+    let first_path = directory.join("nasa9-first.fsmodpk");
+    let second_path = directory.join("nasa9-second.fsmodpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first NASA-9 compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second NASA-9 compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout, "NASA-9 decision stream moved");
+
+    let first_bytes = fs::read(first_path).expect("read first NASA-9 pack");
+    let second_bytes = fs::read(second_path).expect("read second NASA-9 pack");
+    assert_eq!(first_bytes, second_bytes, "NASA-9 pack bytes moved");
+    let decoded = NormalizedModelPack::from_bytes(&first_bytes).expect("decode NASA-9 model pack");
+    let decoded = NormalizedModelPack::from_bytes_verified(decoded.content_hash(), &first_bytes)
+        .expect("verified NASA-9 model pack");
+    assert_eq!(decoded.pack_id(), "N2");
+    assert_eq!(
+        decoded.compiler(),
+        "frankensim-matdb-nasa9-model-pack-compiler-v1"
+    );
+    assert_eq!(decoded.models().len(), 2);
+    assert_eq!(decoded.normalizations().len(), 24);
+    assert!(decoded.models().iter().all(|card| {
+        card.law.0 == "nasa9-standard-state"
+            && card.law_version == 1
+            && card.parameters.len() == 10
+            && card.validity.bound("T").is_some()
+            && card.provenance.source.contains("[species:N2]")
+    }));
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"species_pack_id_bound\""));
+    assert!(decisions.contains("\"reason_code\":\"nasa9_region_normalized\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_model_pack_self_verified\""));
+}
+
+#[test]
+fn g3_cli_refuses_standalone_species_and_kinetics_without_runtime_codecs() {
+    for profile in ["species-v1", "kinetics-v1"] {
         let manifest_text = MANIFEST.replacen("material-tsv-v1", profile, 1);
         assert_ne!(manifest_text, MANIFEST);
         let directory = fixture_dir();
