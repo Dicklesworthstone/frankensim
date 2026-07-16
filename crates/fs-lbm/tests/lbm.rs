@@ -569,11 +569,13 @@ fn d2q9_moving_couette_measures_common_boost_residual() {
     println!(
         concat!(
             "{{\"deck\":\"d2q9-moving-couette-common-boost\",",
-            "\"common_boost\":0.02,\"profile_residual\":{profile_frame_residual:.17e},",
-            "\"wall_impulse_residual\":{impulse_frame_residual:.17e},",
+            "\"common_boost\":0.02,\"profile_residual\":{:.17e},",
+            "\"wall_impulse_residual\":{:.17e},",
             "\"reference_profile_error\":{:.17e},\"boosted_profile_error\":{:.17e},",
             "\"links_per_wall\":{}}}"
         ),
+        profile_frame_residual,
+        impulse_frame_residual,
         reference.normalized_profile_error,
         boosted.normalized_profile_error,
         reference.top.measured_links
