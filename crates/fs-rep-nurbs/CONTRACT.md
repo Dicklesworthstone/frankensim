@@ -94,8 +94,11 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   exact reconstruction, derived validation, reinsertion, comparison, and final
   publication; restored verifier storage is dropped before the final
   checkpoint.
-  Its admitted `span_boxes_with_cx` returns transactional
-  `CurveSpanBoxesRun` state and publishes only the complete ordered box table.
+  Its owning and admitted `span_boxes_with_cx` entry points return
+  transactional `CurveSpanBoxesRun` state and publish only the complete
+  ordered box table. The owning path carries one gate through source admission
+  and the admitted builder; the admitted path avoids repeating structural
+  validation.
   Its owning and admitted `to_bezier_form_with_cx` entry points return
   transactional `CurveBezierRun` state and publish only a fully validated
   exact derived generation. The owning path carries one gate through source
@@ -138,9 +141,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   `partials_with_cx` avoids that source rescan. Both return transactional
   `SurfacePartialsRun` state and publish value plus both first partials only as
   one complete result;
-  its admitted `span_boxes_with_cx` returns transactional
-  `SurfaceSpanBoxesRun` state and publishes only the complete U-major, V-minor
-  box table;
+  its owning and admitted `span_boxes_with_cx` entry points return transactional
+  `SurfaceSpanBoxesRun` state and publish only the complete U-major, V-minor
+  box table. The owning path carries one gate through source admission and the
+  admitted builder; the admitted path avoids repeating structural validation;
   its admitted directional insertions reuse the immutable source authority,
   while `insert_knot_u_with_cx` / `insert_knot_v_with_cx` return transactional
   `SurfaceInsertionRun` state and publish only a complete validated exact
@@ -400,15 +404,18 @@ is excluded from the derived-storage envelope; allocator, destructor, and
 individual generic-scalar operations are not preemptible, and this primitive
 adds no wall-time, exact caller-budget, owning-admission, drain/finalize,
 resumability, or geometric-certificate claim.
-Admitted curve and surface `span_boxes_with_cx` preserve their existing checked
-traversal-work and 64 MiB retained-output envelopes before carrying bounded
-polling through output allocation, candidate spans (including skipped
-zero-width spans), Cartesian projection/bound updates, and final table
-publication. Their Cancelled variants expose no partial box vector. Individual
-allocator calls and generic scalar division/comparison remain non-preemptible;
-the APIs add no wall-time, Cx-budget, drain/finalize, tight-box, topology, or
-certificate claim, and the documented exact-scalar overflow boundary is
-unchanged.
+Owning curve and surface `span_boxes_with_cx` carry one gate through bounded
+structural validation and the admitted builder; admitted entry points avoid
+repeating source validation. The span-box phase preserves its existing checked
+traversal-work and 64 MiB retained-output envelopes before carrying the gate
+through output allocation, candidate spans (including skipped zero-width
+spans), Cartesian projection/bound updates, and final table publication.
+Source validation and span-box construction retain independent defensive work
+ceilings. Cancelled variants expose no admitted authority or partial box
+vector. Individual allocator calls and generic scalar division/comparison
+remain non-preemptible; the APIs add no wall-time, Cx-budget, drain/finalize,
+tight-box, topology, or certificate claim, and the documented exact-scalar
+overflow boundary is unchanged.
 `NurbsCurve::new_with_cx` preserves dimension, count, aggregate validation-work,
 and 64 MiB derived homogeneous-control retained-byte refusal precedence before
 observing cancellation. The retained envelope excludes the transferred sealed

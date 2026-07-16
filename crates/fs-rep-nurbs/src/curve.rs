@@ -3134,6 +3134,37 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         self.admit()?.span_boxes()
     }
 
+    /// Validate this owning curve and build its complete ordered span-box
+    /// table with one cancellation gate.
+    ///
+    /// Dimension and checked structural-validation work refusals precede the
+    /// first checkpoint. Cancellation then spans structural admission and the
+    /// same admitted span-box pipeline as
+    /// [`AdmittedNurbsCurve::span_boxes_with_cx`]. No partial admitted
+    /// authority or box table is published. This primitive does not consume
+    /// the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning builder's structure, traversal-work,
+    /// retained-memory, finite-arithmetic, and allocation refusals when they
+    /// win before an observed cancellation.
+    pub fn span_boxes_with_cx(&self, cx: &Cx<'_>) -> Result<CurveSpanBoxesRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_boxes_with_poll(&mut should_cancel)
+    }
+
+    fn span_boxes_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveSpanBoxesRun<S, DIM>, NurbsError> {
+        match self.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => self
+                .admitted_after_validation()
+                .span_boxes_with_poll(should_cancel),
+            CurveWorkRun::Cancelled => Ok(CurveSpanBoxesRun::Cancelled),
+        }
+    }
+
     fn span_boxes_after_validation(&self) -> Result<Vec<SpanBox<S, DIM>>, NurbsError> {
         let mut never_cancel = || false;
         match self.span_boxes_after_validation_with_poll(&mut never_cancel)? {
@@ -5236,6 +5267,12 @@ mod tests {
         let admitted = curve.admit().expect("admitted line");
         with_curve_cx(true, |cx| {
             assert!(matches!(
+                curve
+                    .span_boxes_with_cx(cx)
+                    .expect("valid owning span-box request"),
+                CurveSpanBoxesRun::Cancelled
+            ));
+            assert!(matches!(
                 admitted
                     .span_boxes_with_cx(cx)
                     .expect("valid span-box request"),
@@ -5244,6 +5281,14 @@ mod tests {
         });
         with_curve_cx(false, |cx| {
             assert_eq!(
+                curve
+                    .span_boxes_with_cx(cx)
+                    .expect("active owning span-box request"),
+                CurveSpanBoxesRun::Complete {
+                    boxes: curve.span_boxes().expect("legacy owning span boxes"),
+                }
+            );
+            assert_eq!(
                 admitted
                     .span_boxes_with_cx(cx)
                     .expect("active span-box request"),
@@ -5251,6 +5296,41 @@ mod tests {
                     boxes: admitted.span_boxes().expect("legacy span boxes"),
                 }
             );
+        });
+
+        let mut admission_polls = 0usize;
+        let mut observe_admission = || {
+            admission_polls += 1;
+            false
+        };
+        assert!(matches!(
+            curve
+                .validate_live_structure_with_poll(&mut observe_admission)
+                .expect("healthy source admission"),
+            CurveWorkRun::Complete(())
+        ));
+        let mut owning_polls = 0usize;
+        let mut cancel_at_first_box_poll = || {
+            owning_polls += 1;
+            owning_polls == admission_polls + 1
+        };
+        assert_eq!(
+            curve
+                .span_boxes_with_poll(&mut cancel_at_first_box_poll)
+                .expect("owning span-box cancellation"),
+            CurveSpanBoxesRun::Cancelled
+        );
+        assert_eq!(owning_polls, admission_polls + 1);
+
+        let invalid_dimension = NurbsCurve::<f64, 4> {
+            knots: KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+            cpw: vec![[0.0, 0.0, 0.0, 1.0]; 2],
+        };
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                invalid_dimension.span_boxes_with_cx(cx),
+                Err(NurbsError::Structure { .. })
+            ));
         });
 
         let degree = 1_024usize;
@@ -5287,6 +5367,14 @@ mod tests {
         .expect("exact line");
         let admitted_exact = exact.admit().expect("admitted exact line");
         with_curve_cx(false, |cx| {
+            assert_eq!(
+                exact
+                    .span_boxes_with_cx(cx)
+                    .expect("active exact owning span-box request"),
+                CurveSpanBoxesRun::Complete {
+                    boxes: exact.span_boxes().expect("legacy exact owning span boxes"),
+                }
+            );
             assert_eq!(
                 admitted_exact
                     .span_boxes_with_cx(cx)

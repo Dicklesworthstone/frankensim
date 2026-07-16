@@ -1632,6 +1632,37 @@ impl<S: Scalar> NurbsSurface<S> {
     pub fn span_boxes(&self) -> Result<Vec<SurfaceSpanBox<S>>, NurbsError> {
         self.admit()?.span_boxes()
     }
+
+    /// Validate this owning surface and build its complete U-major, V-minor
+    /// span-box table with one cancellation gate.
+    ///
+    /// Checked structural-validation work refusal precedes the first
+    /// checkpoint. Cancellation then spans structural admission and the same
+    /// admitted span-box pipeline as
+    /// [`AdmittedNurbsSurface::span_boxes_with_cx`]. No partial admitted
+    /// authority or box table is published. This primitive does not consume
+    /// the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning builder's structure, traversal-work,
+    /// retained-memory, finite-arithmetic, and allocation refusals when they
+    /// win before an observed cancellation.
+    pub fn span_boxes_with_cx(&self, cx: &Cx<'_>) -> Result<SurfaceSpanBoxesRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.span_boxes_with_poll(&mut should_cancel)
+    }
+
+    fn span_boxes_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceSpanBoxesRun<S>, NurbsError> {
+        match self.validate_live_structure_with_poll(should_cancel)? {
+            SurfaceValidationOutcome::Complete => self
+                .admitted_after_validation()
+                .span_boxes_with_poll(should_cancel),
+            SurfaceValidationOutcome::Cancelled => Ok(SurfaceSpanBoxesRun::Cancelled),
+        }
+    }
 }
 
 impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
@@ -3989,6 +4020,12 @@ mod tests {
         let admitted = surface.admit().expect("admitted bilinear surface");
         with_surface_cx(true, |cx| {
             assert!(matches!(
+                surface
+                    .span_boxes_with_cx(cx)
+                    .expect("valid owning span-box request"),
+                SurfaceSpanBoxesRun::Cancelled
+            ));
+            assert!(matches!(
                 admitted
                     .span_boxes_with_cx(cx)
                     .expect("valid span-box request"),
@@ -3997,6 +4034,14 @@ mod tests {
         });
         with_surface_cx(false, |cx| {
             assert_eq!(
+                surface
+                    .span_boxes_with_cx(cx)
+                    .expect("active owning span-box request"),
+                SurfaceSpanBoxesRun::Complete {
+                    boxes: surface.span_boxes().expect("legacy owning span boxes"),
+                }
+            );
+            assert_eq!(
                 admitted
                     .span_boxes_with_cx(cx)
                     .expect("active span-box request"),
@@ -4004,6 +4049,39 @@ mod tests {
                     boxes: admitted.span_boxes().expect("legacy span boxes"),
                 }
             );
+        });
+
+        let mut admission_polls = 0usize;
+        let mut observe_admission = || {
+            admission_polls += 1;
+            false
+        };
+        assert!(matches!(
+            surface
+                .validate_live_structure_with_poll(&mut observe_admission)
+                .expect("healthy source admission"),
+            SurfaceValidationOutcome::Complete
+        ));
+        let mut owning_polls = 0usize;
+        let mut cancel_at_first_box_poll = || {
+            owning_polls += 1;
+            owning_polls == admission_polls + 1
+        };
+        assert_eq!(
+            surface
+                .span_boxes_with_poll(&mut cancel_at_first_box_poll)
+                .expect("owning span-box cancellation"),
+            SurfaceSpanBoxesRun::Cancelled
+        );
+        assert_eq!(owning_polls, admission_polls + 1);
+
+        let mut invalid_u = bilinear_surface();
+        invalid_u.knots_u.knots.clear();
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                invalid_u.span_boxes_with_cx(cx),
+                Err(NurbsError::Structure { .. })
+            ));
         });
 
         let zero = Rat::int(0);
@@ -4020,6 +4098,14 @@ mod tests {
         .expect("exact bilinear surface");
         let admitted_exact = exact.admit().expect("admitted exact surface");
         with_surface_cx(false, |cx| {
+            assert_eq!(
+                exact
+                    .span_boxes_with_cx(cx)
+                    .expect("active exact owning span-box request"),
+                SurfaceSpanBoxesRun::Complete {
+                    boxes: exact.span_boxes().expect("legacy exact owning span boxes"),
+                }
+            );
             assert_eq!(
                 admitted_exact
                     .span_boxes_with_cx(cx)
