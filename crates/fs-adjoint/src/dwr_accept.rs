@@ -1291,6 +1291,7 @@ fn verify_factor(
     }
     let color_matches = matches!(
         &report.color,
+        // declared-color-ok: pattern READ checking a retained report's color against exact replay bits; constructs nothing (6pf9)
         Some(Color::Verified { lo, hi })
             if lo.to_bits() == 0.0_f64.to_bits()
                 && hi.to_bits() == report.bound.hi.to_bits()

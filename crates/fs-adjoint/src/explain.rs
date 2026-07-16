@@ -786,6 +786,7 @@ fn certified_coverage(nodes: &[ExplanationNode], aggregation_roundoff: f64) -> f
         .iter()
         .filter_map(|node| match (node.authority.origin, &node.color) {
             (ExplanationNodeOrigin::BuiltIn, Color::Verified { .. }) => Some(node.bound),
+            // declared-color-ok: pattern READ classifying retained node colors for coverage; constructs nothing (6pf9)
             (ExplanationNodeOrigin::BuiltIn, Color::Validated { .. } | Color::Estimated { .. })
             | (ExplanationNodeOrigin::Unretained, _) => None,
         })
