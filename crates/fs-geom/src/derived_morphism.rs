@@ -8673,6 +8673,26 @@ mod tests {
         ir: DerivedStratificationRefinementCandidateIrV1,
     }
 
+    fn exhaustive_map_with_test_selectors(
+        map: &AdmittedDerivedExhaustiveStratifiedMapCandidateV1,
+        source_geometry: DerivedGeometryIdV1,
+        source_stratification: StratificationIdV1,
+        target_geometry: DerivedGeometryIdV1,
+        target_stratification: StratificationIdV1,
+    ) -> AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
+        AdmittedDerivedExhaustiveStratifiedMapCandidateV1 {
+            source_geometry,
+            source_stratification,
+            target_geometry,
+            target_stratification,
+            components: map.components().to_vec(),
+            nominal_assembly: map.nominal_assembly(),
+            nominal_constructibility: map.nominal_constructibility(),
+            no_authority: map.no_authority(),
+            receipt: map.identity_receipt(),
+        }
+    }
+
     fn stratification_refinement_candidate_fixture(
         cx: &Cx<'_>,
     ) -> StratificationRefinementCandidateFixtureV1 {
@@ -9834,49 +9854,73 @@ mod tests {
                 Err(DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapIdentityMismatch)
             );
 
-            let wrong_endpoint_ir = DerivedStratificationRefinementCandidateIrV1 {
-                refined_geometry: geometry_id(201),
-                ..fixture.ir
-            };
-            assert_eq!(
-                admit_derived_stratification_refinement_candidate_v1(
-                    &wrong_endpoint_ir,
-                    &fixture.exhaustive_map,
-                    &fixture.refined,
-                    &fixture.coarse,
-                    cx,
+            for (field, changed_ir) in [
+                (
+                    "refined-geometry",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        refined_geometry: geometry_id(201),
+                        ..fixture.ir
+                    },
                 ),
-                Err(
-                    DerivedStratificationRefinementCandidateErrorV1::EndpointMismatch {
-                        field: "refined-geometry",
-                    }
-                )
-            );
+                (
+                    "coarse-geometry",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        coarse_geometry: geometry_id(202),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    admit_derived_stratification_refinement_candidate_v1(
+                        &changed_ir,
+                        &fixture.exhaustive_map,
+                        &fixture.refined,
+                        &fixture.coarse,
+                        cx,
+                    ),
+                    Err(
+                        DerivedStratificationRefinementCandidateErrorV1::EndpointMismatch { field }
+                    )
+                );
+            }
 
-            let wrong_stratification_ir = DerivedStratificationRefinementCandidateIrV1 {
-                refined_stratification: stratification_id(202),
-                ..fixture.ir
-            };
-            assert_eq!(
-                admit_derived_stratification_refinement_candidate_v1(
-                    &wrong_stratification_ir,
-                    &fixture.exhaustive_map,
-                    &fixture.refined,
-                    &fixture.coarse,
-                    cx,
+            for (field, changed_ir) in [
+                (
+                    "refined-stratification",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        refined_stratification: stratification_id(203),
+                        ..fixture.ir
+                    },
                 ),
-                Err(
-                    DerivedStratificationRefinementCandidateErrorV1::StratificationMismatch {
-                        field: "refined-stratification",
-                    }
-                )
-            );
+                (
+                    "coarse-stratification",
+                    DerivedStratificationRefinementCandidateIrV1 {
+                        coarse_stratification: stratification_id(204),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    admit_derived_stratification_refinement_candidate_v1(
+                        &changed_ir,
+                        &fixture.exhaustive_map,
+                        &fixture.refined,
+                        &fixture.coarse,
+                        cx,
+                    ),
+                    Err(
+                        DerivedStratificationRefinementCandidateErrorV1::StratificationMismatch {
+                            field,
+                        }
+                    )
+                );
+            }
 
             let reversed_map = admit_exhaustive_map_for_targets(
                 &fixture.coarse,
                 &fixture.refined,
                 &[0, 1],
-                203,
+                209,
                 cx,
             );
             let reversed_ir = DerivedStratificationRefinementCandidateIrV1 {
@@ -9897,6 +9941,64 @@ mod tests {
                     }
                 )
             );
+
+            for (field, child) in [
+                (
+                    "child-refined-geometry",
+                    exhaustive_map_with_test_selectors(
+                        &fixture.exhaustive_map,
+                        geometry_id(205),
+                        fixture.ir.refined_stratification,
+                        fixture.ir.coarse_geometry,
+                        fixture.ir.coarse_stratification,
+                    ),
+                ),
+                (
+                    "child-refined-stratification",
+                    exhaustive_map_with_test_selectors(
+                        &fixture.exhaustive_map,
+                        fixture.ir.refined_geometry,
+                        stratification_id(206),
+                        fixture.ir.coarse_geometry,
+                        fixture.ir.coarse_stratification,
+                    ),
+                ),
+                (
+                    "child-coarse-geometry",
+                    exhaustive_map_with_test_selectors(
+                        &fixture.exhaustive_map,
+                        fixture.ir.refined_geometry,
+                        fixture.ir.refined_stratification,
+                        geometry_id(207),
+                        fixture.ir.coarse_stratification,
+                    ),
+                ),
+                (
+                    "child-coarse-stratification",
+                    exhaustive_map_with_test_selectors(
+                        &fixture.exhaustive_map,
+                        fixture.ir.refined_geometry,
+                        fixture.ir.refined_stratification,
+                        fixture.ir.coarse_geometry,
+                        stratification_id(208),
+                    ),
+                ),
+            ] {
+                assert_eq!(
+                    admit_derived_stratification_refinement_candidate_v1(
+                        &fixture.ir,
+                        &child,
+                        &fixture.refined,
+                        &fixture.coarse,
+                        cx,
+                    ),
+                    Err(
+                        DerivedStratificationRefinementCandidateErrorV1::ExhaustiveMapEndpointMismatch {
+                            field,
+                        }
+                    )
+                );
+            }
         });
 
         with_cx(true, |cx| {
