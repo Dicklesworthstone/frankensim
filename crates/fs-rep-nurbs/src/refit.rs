@@ -232,7 +232,7 @@ fn validate_refit_request(
     )?)?;
     add_bytes(bytes_for(dense_scalars, size_of::<f64>())?)?;
     add_bytes(bytes_for(control_points, size_of::<Vec<f64>>())?)?;
-    add_bytes(bytes_for(control_points, size_of::<f64>())?)?; // rhs
+    add_bytes(bytes_for(control_points, size_of::<[f64; 3]>())?)?; // x/y/z RHS vectors
     add_bytes(bytes_for(control_points, size_of::<[f64; 3]>())?)?; // net
     add_bytes(bytes_for(config.nu, size_of::<Vec<[f64; 3]>>())?)?;
     add_bytes(bytes_for(control_points, size_of::<f64>())?)?; // weights
@@ -536,6 +536,19 @@ pub enum RefitSampleBasisRowRun {
     Complete {
         /// Row-major U-by-V basis values for one refit sample.
         values: Vec<f64>,
+    },
+    /// Cancellation was observed before publication.
+    Cancelled,
+}
+
+/// Transactional outcome of cancellation-aware refit right-hand-side assembly.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefitRightHandSidesRun {
+    /// Borrowed inputs were validated and all three RHS vectors were accumulated.
+    Complete {
+        /// X/Y/Z right-hand sides, each with one entry per control.
+        right_hand_sides: [Vec<f64>; 3],
     },
     /// Cancellation was observed before publication.
     Cancelled,
@@ -1664,6 +1677,205 @@ fn refit_sample_basis_row(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefitRightHandSidesPlan {
+    row_count: usize,
+    control_count: usize,
+}
+
+fn preflight_refit_right_hand_sides_counts(
+    row_count: usize,
+    target_count: usize,
+    control_count: usize,
+) -> Result<RefitRightHandSidesPlan, NurbsError> {
+    if row_count == 0 {
+        return Err(refit_structure_error(
+            "refit right-hand-side assembly requires at least one sample row",
+        ));
+    }
+    if row_count != target_count {
+        return Err(refit_structure_error(format!(
+            "refit right-hand-side has {row_count} sample rows but {target_count} targets"
+        )));
+    }
+    if control_count == 0 {
+        return Err(refit_structure_error(
+            "refit right-hand-side assembly requires at least one control",
+        ));
+    }
+    let entries = checked_refit_work_product(
+        &[row_count as u128, control_count as u128],
+        "right-hand-side matrix traversal",
+    )?;
+    let row_validation =
+        checked_refit_work_product(&[row_count as u128, 4], "right-hand-side row validation")?;
+    let accumulation = checked_refit_work_product(&[entries, 12], "right-hand-side accumulation")?;
+    let output_fill =
+        checked_refit_work_product(&[control_count as u128, 3], "right-hand-side output fill")?;
+    let total_work = checked_refit_work_sum(
+        &[row_validation, entries, output_fill, accumulation, 5],
+        "right-hand-side aggregate",
+    )?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit right-hand-side requests {total_work} work units above static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+    let retained_scalars = control_count.checked_mul(3).ok_or_else(|| {
+        refit_structure_error("refit right-hand-side retained-scalar estimate overflows usize")
+    })?;
+    let retained_bytes = retained_scalars
+        .checked_mul(size_of::<f64>())
+        .ok_or_else(|| {
+            refit_structure_error("refit right-hand-side byte estimate overflows usize")
+        })?;
+    if retained_bytes > REFIT_MAX_ALLOC_BYTES {
+        return Err(refit_structure_error(format!(
+            "refit right-hand-sides retain {retained_bytes} requested bytes above static cap {REFIT_MAX_ALLOC_BYTES}"
+        )));
+    }
+    Ok(RefitRightHandSidesPlan {
+        row_count,
+        control_count,
+    })
+}
+
+/// Assemble all three coordinate right-hand sides `B^T targets` in one pass.
+///
+/// Count compatibility, aggregate borrowed validation/three-axis accumulation
+/// work, and requested output payload are admitted before the first checkpoint
+/// or scan. One gate then spans deterministic row/target/value validation,
+/// three fallible zero-output allocations, finite row-major accumulation, and
+/// final publication, polling after at most 64 rows, values, or matrix entries.
+/// Cancellation drops all partial RHS vectors. Borrowed inputs are excluded from
+/// the retained envelope; the primitive does not consume the `Cx` budget or
+/// grant solve, conditioning, fit, or geometric authority.
+///
+/// # Errors
+/// Returns a structured dimension, checked work/retained-byte, allocation,
+/// borrowed-value, or finite-arithmetic refusal.
+pub fn assemble_refit_right_hand_sides_with_cx(
+    rows_b: &[Vec<f64>],
+    targets: &[[f64; 3]],
+    cx: &Cx<'_>,
+) -> Result<RefitRightHandSidesRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    assemble_refit_right_hand_sides_with_poll(rows_b, targets, &mut should_cancel)
+}
+
+fn assemble_refit_right_hand_sides_with_poll(
+    rows_b: &[Vec<f64>],
+    targets: &[[f64; 3]],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitRightHandSidesRun, NurbsError> {
+    let control_count = rows_b.first().map_or(0, Vec::len);
+    let plan = preflight_refit_right_hand_sides_counts(rows_b.len(), targets.len(), control_count)?;
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
+    for (row_index, (row, target)) in rows_b.iter().zip(targets).enumerate() {
+        if row.len() != plan.control_count {
+            return Err(refit_structure_error(format!(
+                "refit right-hand-side row {row_index} has length {}, expected {}",
+                row.len(),
+                plan.control_count
+            )));
+        }
+        if target.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(refit_structure_error(format!(
+                "refit right-hand-side target {row_index} must be finite"
+            )));
+        }
+        if refit_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(RefitRightHandSidesRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+
+    operations_since_poll = 0;
+    for row in rows_b {
+        for value in row {
+            if !value.is_finite() {
+                return Err(refit_structure_error(
+                    "refit right-hand-side sample matrix values must be finite",
+                ));
+            }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitRightHandSidesRun::Cancelled);
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+
+    let rhs_x = try_vec_with_capacity(plan.control_count, "refit X right-hand side")?;
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+    let rhs_y = try_vec_with_capacity(plan.control_count, "refit Y right-hand side")?;
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+    let rhs_z = try_vec_with_capacity(plan.control_count, "refit Z right-hand side")?;
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+    let mut right_hand_sides = [rhs_x, rhs_y, rhs_z];
+    operations_since_poll = 0;
+    for right_hand_side in &mut right_hand_sides {
+        for _ in 0..plan.control_count {
+            right_hand_side.push(0.0);
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitRightHandSidesRun::Cancelled);
+            }
+        }
+    }
+
+    operations_since_poll = 0;
+    for (row, target) in rows_b.iter().zip(targets) {
+        for (control_index, &weight) in row.iter().enumerate() {
+            if weight != 0.0 {
+                for axis in 0..3 {
+                    let contribution = weight * target[axis];
+                    let accumulated = right_hand_sides[axis][control_index] + contribution;
+                    if !contribution.is_finite() || !accumulated.is_finite() {
+                        return Err(refit_structure_error(
+                            "refit right-hand-side accumulation became non-finite",
+                        ));
+                    }
+                    right_hand_sides[axis][control_index] = accumulated;
+                }
+            }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitRightHandSidesRun::Cancelled);
+            }
+        }
+    }
+    debug_assert_eq!(rows_b.len(), plan.row_count);
+    if should_cancel() {
+        return Ok(RefitRightHandSidesRun::Cancelled);
+    }
+    Ok(RefitRightHandSidesRun::Complete { right_hand_sides })
+}
+
+fn assemble_refit_right_hand_sides(
+    rows_b: &[Vec<f64>],
+    targets: &[[f64; 3]],
+) -> Result<[Vec<f64>; 3], NurbsError> {
+    let mut never_cancel = || false;
+    match assemble_refit_right_hand_sides_with_poll(rows_b, targets, &mut never_cancel)? {
+        RefitRightHandSidesRun::Complete { right_hand_sides } => Ok(right_hand_sides),
+        RefitRightHandSidesRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit right-hand-side assembly observed cancellation",
+        )),
+    }
+}
+
 /// Row of basis values over the whole control axis (dense, small).
 fn basis_row(kv: AdmittedKnotVector<'_, f64>, t: f64) -> Result<Vec<f64>, NurbsError> {
     let mut never_cancel = || false;
@@ -2031,15 +2243,9 @@ pub fn refit_radial(
     // sides against the same deterministic factor.
     let mut net = try_filled_matrix(nu, nv, [0.0f64; 3], "refit control net")?;
     let factor = cholesky_factor(assemble_normal(&rows_b, nu, nv, config.lambda)?)?;
-    for axis in 0..3 {
-        let mut rhs = try_filled_vec(control_points, 0.0f64, "refit right-hand side")?;
-        for (row, t) in rows_b.iter().zip(&targets) {
-            for (k, &w) in row.iter().enumerate() {
-                if w != 0.0 {
-                    rhs[k] += w * t[axis];
-                }
-            }
-        }
+    let right_hand_sides = assemble_refit_right_hand_sides(&rows_b, &targets)?;
+    for (axis, rhs) in right_hand_sides.into_iter().enumerate() {
+        debug_assert_eq!(rhs.len(), control_points);
         let rhs = cholesky_solve_factored(&factor, rhs)?;
         for i in 0..nu {
             for j in 0..nv {
@@ -3109,6 +3315,124 @@ mod tests {
         let retained = preflight_refit_sample_basis_row_counts(6_000, 1, 6_000, 1)
             .expect_err("unbounded simultaneously live payload must be refused");
         assert!(retained.to_string().contains("retains"));
+    }
+
+    // G0/G5: the cancellable RHS primitive preserves deterministic row-major
+    // accumulation for an exactly known small system.
+    #[test]
+    fn refit_right_hand_sides_with_cx_match_known_accumulation() {
+        let rows = vec![vec![1.0, 0.0, 2.0], vec![0.5, -1.0, 0.0]];
+        let targets = [[2.0, 3.0, 4.0], [6.0, 7.0, 8.0]];
+        let expected = [
+            vec![5.0, -6.0, 4.0],
+            vec![6.5, -7.0, 6.0],
+            vec![8.0, -8.0, 8.0],
+        ];
+        assert_eq!(
+            assemble_refit_right_hand_sides(&rows, &targets).expect("synchronous right-hand sides"),
+            expected
+        );
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                assemble_refit_right_hand_sides_with_cx(&rows, &targets, cx)
+                    .expect("cancellable right-hand sides"),
+                RefitRightHandSidesRun::Complete {
+                    right_hand_sides: expected.clone()
+                }
+            );
+        });
+    }
+
+    // G4/G5: validation, fallible output initialization, accumulation, and
+    // publication share replayable checkpoints and expose no partial RHS.
+    #[test]
+    fn refit_right_hand_sides_polling_is_bounded_and_transactional() {
+        let rows = vec![vec![1.0; 130]; 130];
+        let targets = vec![[1.0, 2.0, 3.0]; 130];
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let outcome = assemble_refit_right_hand_sides_with_poll(&rows, &targets, &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("valid right-hand sides");
+            (outcome, polls.get())
+        };
+
+        let (complete, healthy_polls) = run(None);
+        assert!(matches!(complete, RefitRightHandSidesRun::Complete { .. }));
+        assert!(healthy_polls > 32);
+        for cancel_at in [1, healthy_polls / 2, healthy_polls] {
+            assert_eq!(
+                run(Some(cancel_at)),
+                (RefitRightHandSidesRun::Cancelled, cancel_at)
+            );
+        }
+        with_refit_cx(true, |cx| {
+            assert_eq!(
+                assemble_refit_right_hand_sides_with_cx(&rows, &targets, cx)
+                    .expect("pre-cancellation is terminal"),
+                RefitRightHandSidesRun::Cancelled
+            );
+        });
+    }
+
+    // G0/G4: constant/count refusals win before polling and malformed borrowed
+    // values refuse before output allocation or accumulation.
+    #[test]
+    fn refit_right_hand_sides_refusals_are_typed_and_preflighted() {
+        let polls = Cell::new(0usize);
+        let empty = assemble_refit_right_hand_sides_with_poll(&[], &[], &mut || {
+            polls.set(polls.get() + 1);
+            true
+        })
+        .expect_err("empty system must be refused");
+        assert!(empty.to_string().contains("at least one sample row"));
+        assert_eq!(polls.get(), 0);
+
+        let mismatch = preflight_refit_right_hand_sides_counts(2, 1, 3)
+            .expect_err("sample/target mismatch must be refused");
+        assert!(mismatch.to_string().contains("2 sample rows but 1 targets"));
+
+        let work = preflight_refit_right_hand_sides_counts(1_000_000, 1_000_000, 1_000_000)
+            .expect_err("unbounded traversal work must be refused");
+        assert!(work.to_string().contains("work units"));
+
+        let retained_controls = REFIT_MAX_ALLOC_BYTES / (3 * size_of::<f64>()) + 1;
+        let retained = preflight_refit_right_hand_sides_counts(1, 1, retained_controls)
+            .expect_err("unbounded three-vector output payload must be refused");
+        assert!(retained.to_string().contains("retains"));
+
+        let malformed = assemble_refit_right_hand_sides_with_poll(
+            &[vec![1.0, 2.0], vec![3.0]],
+            &[[1.0; 3], [2.0; 3]],
+            &mut || false,
+        )
+        .expect_err("ragged sample matrix must be refused");
+        assert!(malformed.to_string().contains("row 1 has length 1"));
+
+        let nonfinite =
+            assemble_refit_right_hand_sides_with_poll(&[vec![f64::NAN]], &[[1.0; 3]], &mut || {
+                false
+            })
+            .expect_err("non-finite matrix value must be refused");
+        assert!(
+            nonfinite
+                .to_string()
+                .contains("matrix values must be finite")
+        );
+
+        let overflowed = assemble_refit_right_hand_sides_with_poll(
+            &[vec![f64::MAX]],
+            &[[2.0, 1.0, 1.0]],
+            &mut || false,
+        )
+        .expect_err("finite inputs with overflowed accumulation must be refused");
+        assert!(
+            overflowed
+                .to_string()
+                .contains("accumulation became non-finite")
+        );
     }
 
     #[test]

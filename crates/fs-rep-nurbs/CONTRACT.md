@@ -811,6 +811,16 @@ tensor arithmetic, fixed-stride fill, and final publication. Cancellation drops
 all local rows. Spare capacity, allocator metadata/rounding, scalar wall time,
 caller-budget consumption, drain/finalize, conditioning, and fit/geometric
 authority remain outside this measured primitive.
+`assemble_refit_right_hand_sides_with_cx` preserves sample/target count
+compatibility, count-derived row/value validation and all three `B^T targets`
+workloads, and requested three-vector output payload before its first checkpoint.
+One gate spans bounded rectangular-row, finite-target, and finite-weight
+validation; three fallible zero-output allocations; deterministic row-major
+three-axis accumulation with finite arithmetic checks; and final publication.
+Cancellation drops all partial RHS vectors. Borrowed sample rows/targets, vector
+headers, spare capacity, allocator metadata/rounding, scalar wall time,
+caller-budget consumption, drain/finalize, conditioning, solve, fit, and geometry
+authority remain outside this measured primitive.
 `assemble_refit_normal_with_cx` preserves checked dimensions, finite
 non-negative regularization, count-derived aggregate work, and the 256 MiB
 requested dense-output envelope ahead of its first checkpoint. One gate then
