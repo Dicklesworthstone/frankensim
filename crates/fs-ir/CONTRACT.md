@@ -110,21 +110,28 @@ admitted derived-geometry boundary.
   interface, and solve-policy references are nominal, versioned, nonzero
   semantic digests under canonical namespaces; `fs-ir` neither imports nor
   impersonates their runtime owners.
-- `machine::codec` is the additive FrankenScript-to-Machine graph-v1 boundary.
-  One current-version `VersionedProgram` body decodes through the closed,
-  positional `machine-graph-v1` grammar into an authority-free
-  `MachineGraphDraft`; only the existing graph admission may publish a
-  `MachineGraphIdV1`. The reverse writer accepts only an admitted graph, emits
-  canonical row order, and re-enters the global version envelope. Both
-  concrete syntaxes therefore share one AST grammar rather than independent
-  Machine parsers. Role-specific IDs are reconstructed from canonical keys;
-  external references require a canonical namespace, nonzero full-range u64
-  version encoded as a decimal string, and exact lowercase 64-hex digest.
-  Syntax/resource refusals retain a stable code, source span, structural path,
-  detail, and repair hint without flattening semantic `MachineGraphFinding`s.
-  Decode preflights at most 262,144 AST nodes, 16 MiB aggregate atom text, all
-  public graph collection caps, and the 16,384-element aggregate ownership cap
-  before recursive AST validation or decoded-vector allocation.
+- `machine::codec` is the additive FrankenScript-to-Machine graph/behavior-v1
+  boundary. One current-version `VersionedProgram` body decodes through either
+  closed positional grammar into an authority-free draft; only the existing
+  graph or behavior admission may publish semantic identity. Behavior syntax
+  carries the exact `MachineGraphIdV1` it extends, and admission refuses an
+  attempted rebind before inspecting behavior semantics. Reverse writers
+  accept only admitted values, emit their canonical row order, and re-enter the
+  global version envelope. Both concrete syntaxes therefore share one AST
+  grammar rather than independent Machine parsers. Role-specific IDs are
+  reconstructed from canonical keys; external references require a canonical
+  namespace, nonzero full-range u64 version encoded as a decimal string, and
+  exact lowercase 64-hex digest. Syntax/resource refusals retain a stable code,
+  source span, structural path, detail, and repair hint without flattening
+  semantic `MachineGraphFinding`s or `MachineBehaviorFinding`s. Graph decode
+  preflights at most 262,144 AST nodes, 16 MiB aggregate atom text, all public
+  graph collection caps, and the 16,384-element aggregate ownership cap.
+  Behavior decode separately preflights a derived 2,359,360-node canonical
+  envelope, 192 MiB atom text, all six public collection caps, and 32,768
+  aggregate history-event, guard-read, reset-write, and dependence-member
+  references. The admitted-value writer runs those same preflights. All
+  resource passes precede recursive AST validation and decoded-vector
+  allocation.
 - Graph admission accumulates sorted, duplicate-free `MachineGraphFinding`s
   before publishing any `MachineGraphIdV1`. It rejects dangling or duplicate
   ownership, unsupported semantic scalar forms, quantity/shape/frame/
@@ -731,14 +738,15 @@ portable framing tamper are covered directly.
   external law/artifact nor proves semantic equivalence, physical fidelity,
   inverse reconstruction, crosswalk commutation, execution correctness, or
   evidence-color promotion.
-- The current FrankenScript codec covers the admitted Machine graph only.
-  Behavior and assurance overlays still have no literal AST grammar, and
-  assurance requires caller-supplied admitted V&V authority that must never be
-  minted from embedded hashes. PR-5 therefore proves `FrankenScript ->
-  admitted Machine graph` plus the separately constructed `admitted Machine
-  stack -> explicit projection -> canonical scenario/domain package -> exact
-  transport/replay`; it does not yet claim one uninterrupted literal
-  FrankenScript-to-Machine-stack leg. `fs-package` structural verification proves
+- The current FrankenScript codec covers admitted Machine graph and behavior
+  syntax, including the behavior-to-graph identity binding. The assurance
+  overlay still has no literal AST grammar, and assurance requires
+  caller-supplied admitted V&V authority that must never be minted from
+  embedded hashes. PR-5 therefore proves `FrankenScript -> admitted Machine
+  graph -> admitted Machine behavior` plus the separately constructed
+  `admitted Machine stack -> explicit projection -> canonical scenario/domain
+  package -> exact transport/replay`; it does not yet claim one uninterrupted
+  literal FrankenScript-to-Machine-stack leg. `fs-package` structural verification proves
   exact witness transport, not family semantics, and ledger replay compares
   recorded operation/output identities rather than re-executing the lowerer.
   `fs-package::SemanticWitness` independently caps witness payloads at 256 KiB,
