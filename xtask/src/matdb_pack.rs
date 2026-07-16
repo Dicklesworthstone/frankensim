@@ -33,6 +33,12 @@ use fs_qty::Dims;
 use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
 
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
+/// Semantic contract version for normalized material-pack compilation.
+///
+/// Bump this whenever parsing, admission, normalization, or provenance
+/// semantics can change the canonical compiler fixture.
+#[allow(dead_code)] // consumed textually by `xtask check-goldens`
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 1;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const MATERIAL_PROFILE: &str = "material-tsv-v1";
@@ -2853,6 +2859,10 @@ mod tests {
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+    const MATDB_PACK_FIXTURE_V1_BYTES_GOLDEN: usize = 3_177;
+    const MATDB_PACK_FIXTURE_V1_CONTENT_HASH_GOLDEN: &str =
+        "c1fb2f443708d297423179f4ac6024ee26b1d0c940a229d1d9084726ccbd2bc5";
+
     const SOURCE: &str = concat!(
         "frankensim.matdb-source.v1\n",
         "observation\tcoupon\talloy-X-solution-treated\tASTM-fixture\tjoint coupon series\n",
@@ -2915,6 +2925,17 @@ mod tests {
         assert_eq!(first.bytes, second.bytes);
         assert_eq!(first.decisions, second.decisions);
         assert_eq!(first.pack.content_hash(), second.pack.content_hash());
+        assert_eq!(
+            first.bytes.len(),
+            MATDB_PACK_FIXTURE_V1_BYTES_GOLDEN,
+            "normalized compiler fixture byte length moved; actual content hash {}",
+            first.pack.content_hash()
+        );
+        assert_eq!(
+            first.pack.content_hash().to_string(),
+            MATDB_PACK_FIXTURE_V1_CONTENT_HASH_GOLDEN,
+            "normalized compiler fixture content hash moved"
+        );
         let decoded = NormalizedPack::from_bytes_verified(first.pack.content_hash(), &first.bytes)
             .expect("compiler output is runtime-loadable");
         assert_eq!(decoded.to_bytes(), first.bytes);
