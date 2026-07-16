@@ -778,6 +778,16 @@ metadata/rounding, spare capacity, and destructor latency are excluded from the
 retained envelope; individual allocations remain non-preemptible. The primitive
 does not consume a caller budget, migrate refit orchestration, own
 drain/finalize, promise wall-time preemption, or grant fit/geometric authority.
+`close_refit_u_seam_with_cx` takes exclusive ownership of a rectangular control
+net and admits count-derived shape/finite-validation/midpoint work plus requested
+row-header and control payload before scanning. One caller gate spans bounded
+shape and finite-coordinate checks, deterministic componentwise midpoint tying
+of the first and last U rows, and final publication. Cancellation or error drops
+the consumed net, so no partially tied owner escapes. The primitive allocates no
+numerical payload; spare capacity, allocator metadata/rounding, input-drop
+latency, and scalar-operation wall time remain outside its envelope. Exact G0
+closure grants no G1, surface-validity, caller-budget, drain/finalize, or
+resumability authority.
 `evaluate_refit_dense_basis_with_cx` consumes an admitted knot generation and
 preserves aggregate basis-plus-dense-expansion work plus the maximum of nested
 basis scratch and active-basis-plus-dense-row requested payload ahead of the

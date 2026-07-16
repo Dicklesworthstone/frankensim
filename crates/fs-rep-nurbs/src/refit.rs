@@ -542,6 +542,19 @@ pub enum RefitOpenUniformKnotRun {
     Cancelled,
 }
 
+/// Transactional outcome of exact periodic-u refit seam closure.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum RefitSeamClosureRun {
+    /// The complete rectangular net has finite controls and tied boundary rows.
+    Complete {
+        /// Exclusively owned control net after exact G0 closure.
+        net: Vec<Vec<[f64; 3]>>,
+    },
+    /// Cancellation was observed; the consumed net was dropped unpublished.
+    Cancelled,
+}
+
 fn validate_radial_projection_request(
     center: [f64; 3],
     dir: [f64; 3],
@@ -1189,6 +1202,176 @@ fn open_uniform_knots(n: usize, degree: usize) -> Result<KnotVector<f64>, NurbsE
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefitSeamClosurePlan {
+    rows: usize,
+    cols: usize,
+    control_count: usize,
+}
+
+fn preflight_refit_u_seam_closure(
+    rows: usize,
+    cols: usize,
+) -> Result<RefitSeamClosurePlan, NurbsError> {
+    if rows < 2 {
+        return Err(refit_structure_error(
+            "refit U-seam closure requires at least two control rows",
+        ));
+    }
+    if cols == 0 {
+        return Err(refit_structure_error(
+            "refit U-seam closure requires a nonempty control row",
+        ));
+    }
+    let control_count = rows
+        .checked_mul(cols)
+        .ok_or_else(|| refit_structure_error("refit U-seam control-grid size overflow"))?;
+    // Charge rectangular-shape checks, three finite coordinates plus one
+    // checkpoint unit per control, conservative midpoint arithmetic, entry
+    // gates, and final publication.
+    let validation_work =
+        checked_refit_work_product(&[control_count as u128, 4], "U-seam control validation")?;
+    let closure_work = checked_refit_work_product(&[cols as u128, 16], "U-seam midpoint closure")?;
+    let total_work = checked_refit_work_sum(
+        &[rows as u128, validation_work, closure_work, 3],
+        "U-seam closure aggregate",
+    )?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit U-seam closure requests {total_work} work units above static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+
+    let row_header_bytes = (rows as u128)
+        .checked_mul(size_of::<Vec<[f64; 3]>>() as u128)
+        .ok_or_else(|| refit_structure_error("refit U-seam row-byte accounting overflow"))?;
+    let control_bytes = (control_count as u128)
+        .checked_mul(size_of::<[f64; 3]>() as u128)
+        .ok_or_else(|| refit_structure_error("refit U-seam control-byte accounting overflow"))?;
+    let retained_bytes = row_header_bytes
+        .checked_add(control_bytes)
+        .ok_or_else(|| refit_structure_error("refit U-seam retained-byte accounting overflow"))?;
+    if retained_bytes > REFIT_MAX_ALLOC_BYTES as u128 {
+        return Err(refit_structure_error(format!(
+            "refit U-seam net retains {retained_bytes} requested bytes above static cap {REFIT_MAX_ALLOC_BYTES}"
+        )));
+    }
+    Ok(RefitSeamClosurePlan {
+        rows,
+        cols,
+        control_count,
+    })
+}
+
+/// Tie the first and last U rows of one owned refit control net exactly.
+///
+/// Count-derived aggregate work and the valid rectangular net's requested
+/// payload are admitted before the first checkpoint or scan. One gate then
+/// spans row-shape validation, finite-control validation, deterministic midpoint
+/// tying, and final publication, polling after at most 64 rows or controls.
+/// Taking exclusive ownership makes cancellation transactional: a partially
+/// tied net is dropped and never returned. The primitive allocates no numerical
+/// payload, does not consume the `Cx` budget, and grants no G1 or surface-validity
+/// authority.
+///
+/// # Errors
+/// Returns a structured shape, checked work/retained-byte, or non-finite-control
+/// refusal.
+pub fn close_refit_u_seam_with_cx(
+    net: Vec<Vec<[f64; 3]>>,
+    cx: &Cx<'_>,
+) -> Result<RefitSeamClosureRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    close_refit_u_seam_with_poll(net, &mut should_cancel)
+}
+
+fn close_refit_u_seam_with_poll(
+    mut net: Vec<Vec<[f64; 3]>>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitSeamClosureRun, NurbsError> {
+    let rows = net.len();
+    let cols = net.first().map_or(0, Vec::len);
+    let plan = preflight_refit_u_seam_closure(rows, cols)?;
+    if should_cancel() {
+        return Ok(RefitSeamClosureRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
+    for (row_index, row) in net.iter().enumerate() {
+        if row.len() != plan.cols {
+            return Err(refit_structure_error(format!(
+                "refit U-seam row {row_index} has length {}, expected {}",
+                row.len(),
+                plan.cols
+            )));
+        }
+        if refit_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(RefitSeamClosureRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(RefitSeamClosureRun::Cancelled);
+    }
+
+    operations_since_poll = 0;
+    for row in &net {
+        for control in row {
+            if control.iter().any(|coordinate| !coordinate.is_finite()) {
+                return Err(refit_structure_error(
+                    "refit U-seam control coordinates must be finite",
+                ));
+            }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitSeamClosureRun::Cancelled);
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(RefitSeamClosureRun::Cancelled);
+    }
+
+    let (first_row, rest) = net
+        .split_first_mut()
+        .ok_or_else(|| refit_structure_error("refit U-seam control net is empty"))?;
+    let last_row = rest
+        .last_mut()
+        .ok_or_else(|| refit_structure_error("refit U-seam control net has only one row"))?;
+    operations_since_poll = 0;
+    for (first, last) in first_row.iter_mut().zip(last_row.iter_mut()) {
+        let midpoint = [
+            f64::midpoint(first[0], last[0]),
+            f64::midpoint(first[1], last[1]),
+            f64::midpoint(first[2], last[2]),
+        ];
+        if midpoint.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(refit_structure_error(
+                "refit U-seam midpoint arithmetic became non-finite",
+            ));
+        }
+        *first = midpoint;
+        *last = midpoint;
+        if refit_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(RefitSeamClosureRun::Cancelled);
+        }
+    }
+    debug_assert_eq!(net.len(), plan.rows);
+    debug_assert_eq!(net.iter().map(Vec::len).sum::<usize>(), plan.control_count);
+    if should_cancel() {
+        return Ok(RefitSeamClosureRun::Cancelled);
+    }
+    Ok(RefitSeamClosureRun::Complete { net })
+}
+
+fn close_refit_u_seam(net: Vec<Vec<[f64; 3]>>) -> Result<Vec<Vec<[f64; 3]>>, NurbsError> {
+    let mut never_cancel = || false;
+    match close_refit_u_seam_with_poll(net, &mut never_cancel)? {
+        RefitSeamClosureRun::Complete { net } => Ok(net),
+        RefitSeamClosureRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit U-seam closure observed cancellation",
+        )),
+    }
+}
+
 fn preflight_refit_dense_basis(control_count: usize, degree: usize) -> Result<(), NurbsError> {
     if control_count == 0 {
         return Err(refit_structure_error(
@@ -1690,18 +1873,9 @@ pub fn refit_radial(
             }
         }
     }
-    // EXACT G0 seam closure: tie the u-boundary control columns.
-    let (first_row, rest) = net.split_first_mut().expect("nu >= 2");
-    let last_row = rest.last_mut().expect("nu >= 2");
-    for (c0, c1) in first_row.iter_mut().zip(last_row.iter_mut()) {
-        let avg = [
-            f64::midpoint(c0[0], c1[0]),
-            f64::midpoint(c0[1], c1[1]),
-            f64::midpoint(c0[2], c1[2]),
-        ];
-        *c0 = avg;
-        *c1 = avg;
-    }
+    // EXACT G0 seam closure: tie the u-boundary control rows through the same
+    // aggregate-admitted primitive exposed to successor orchestration.
+    let net = close_refit_u_seam(net)?;
     let weights = try_filled_matrix(nu, nv, 1.0f64, "refit unit weights")?;
     let surface = NurbsSurface::new(ku, kv, &net, &weights)?;
     let report_surface = surface.admit()?;
@@ -2471,6 +2645,97 @@ mod tests {
             );
             assert_eq!(polls.get(), 0);
         }
+    }
+
+    // G0/G5: the consuming primitive preserves deterministic componentwise
+    // midpoint tying and leaves every interior row unchanged.
+    #[test]
+    fn refit_u_seam_closure_matches_exact_midpoints() {
+        let source = vec![
+            vec![[0.0, 0.0, 0.0], [2.0, 4.0, 6.0]],
+            vec![[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+            vec![[2.0, 2.0, 2.0], [4.0, 6.0, 8.0]],
+        ];
+        let expected = vec![
+            vec![[1.0, 1.0, 1.0], [3.0, 5.0, 7.0]],
+            source[1].clone(),
+            vec![[1.0, 1.0, 1.0], [3.0, 5.0, 7.0]],
+        ];
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                close_refit_u_seam_with_cx(source.clone(), cx)
+                    .expect("cancellable exact seam closure"),
+                RefitSeamClosureRun::Complete {
+                    net: expected.clone()
+                }
+            );
+        });
+        assert_eq!(
+            close_refit_u_seam(source).expect("synchronous exact seam closure"),
+            expected
+        );
+    }
+
+    // G4/G5: shape validation, finite scanning, mutation, and owner publication
+    // share replayable checkpoints; a partially tied consumed net never escapes.
+    #[test]
+    fn refit_u_seam_closure_polling_is_bounded_and_transactional() {
+        let source = vec![vec![[0.0; 3]; 130], vec![[2.0; 3]; 130]];
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let outcome = close_refit_u_seam_with_poll(source.clone(), &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("valid seam closure");
+            (outcome, polls.get())
+        };
+
+        let (complete, healthy_polls) = run(None);
+        assert!(matches!(complete, RefitSeamClosureRun::Complete { .. }));
+        assert!(healthy_polls > 6);
+        for cancel_at in [1, healthy_polls / 2, healthy_polls] {
+            assert_eq!(
+                run(Some(cancel_at)),
+                (RefitSeamClosureRun::Cancelled, cancel_at)
+            );
+        }
+        with_refit_cx(true, |cx| {
+            assert_eq!(
+                close_refit_u_seam_with_cx(source, cx).expect("pre-cancellation is terminal"),
+                RefitSeamClosureRun::Cancelled
+            );
+        });
+    }
+
+    // G0/G4: count refusals precede polling; malformed rectangular structure
+    // and non-finite controls refuse before any boundary mutation.
+    #[test]
+    fn refit_u_seam_closure_refusals_are_typed_and_preflighted() {
+        let overflow = preflight_refit_u_seam_closure(usize::MAX, 2)
+            .expect_err("unrepresentable grid must be refused");
+        assert!(overflow.to_string().contains("control-grid size overflow"));
+
+        let polls = Cell::new(0usize);
+        let too_short = close_refit_u_seam_with_poll(vec![vec![[0.0; 3]]], &mut || {
+            polls.set(polls.get() + 1);
+            true
+        })
+        .expect_err("single-row grid must be refused");
+        assert!(too_short.to_string().contains("at least two control rows"));
+        assert_eq!(polls.get(), 0);
+
+        let malformed =
+            close_refit_u_seam_with_poll(vec![vec![[0.0; 3]; 2], vec![[1.0; 3]]], &mut || false)
+                .expect_err("ragged grid must be refused");
+        assert!(malformed.to_string().contains("row 1 has length 1"));
+
+        let nonfinite = close_refit_u_seam_with_poll(
+            vec![vec![[0.0; 3]], vec![[f64::NAN, 0.0, 0.0]]],
+            &mut || false,
+        )
+        .expect_err("non-finite grid must be refused");
+        assert!(nonfinite.to_string().contains("must be finite"));
     }
 
     #[test]
