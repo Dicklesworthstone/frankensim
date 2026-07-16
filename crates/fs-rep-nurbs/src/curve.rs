@@ -3303,6 +3303,47 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
         Self::derivatives_from_admitted_parts_after_preflight(knots, &self.cpw, t, order)
     }
 
+    /// Validate the owning curve and evaluate its Cartesian jet with one
+    /// cancellation gate.
+    ///
+    /// Constant-time shape, order, and parameter refusals precede the first
+    /// checkpoint. Cancellation then spans structural admission and the same
+    /// admitted derivative pipeline as [`AdmittedNurbsCurve::derivatives_with_cx`].
+    /// No partial admitted authority or derivative jet is published. This
+    /// primitive does not consume the `Cx` budget or finalize its executor
+    /// scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning derivative evaluator's request,
+    /// structure, work, memory, allocation, and finite-arithmetic refusals when
+    /// they win before an observed cancellation.
+    pub fn derivatives_with_cx(
+        &self,
+        t: f64,
+        order: usize,
+        cx: &Cx<'_>,
+    ) -> Result<CurveDerivativesRun<DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        self.derivatives_with_poll(t, order, &mut should_cancel)
+    }
+
+    fn derivatives_with_poll(
+        &self,
+        t: f64,
+        order: usize,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveDerivativesRun<DIM>, NurbsError> {
+        Self::preflight_derivative_shape(t, order)?;
+        self.knots.preflight_parameter(t, "curve derivative")?;
+        match self.validate_live_structure_with_poll(should_cancel)? {
+            CurveWorkRun::Complete(()) => {
+                self.admitted_after_validation()
+                    .derivatives_with_poll(t, order, should_cancel)
+            }
+            CurveWorkRun::Cancelled => Ok(CurveDerivativesRun::Cancelled),
+        }
+    }
+
     fn derivatives_after_validation(
         &self,
         t: f64,
@@ -4741,6 +4782,97 @@ mod tests {
         };
         assert_eq!(run(), run());
         assert_eq!(run(), (true, 2));
+    }
+
+    // G0/G4: the owning wrapper preserves refusal order and exact healthy output.
+    #[test]
+    fn owning_curve_derivatives_with_cx_are_transactional_and_exact() {
+        let curve = line_curve();
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                curve
+                    .derivatives_with_cx(0.25, 1, cx)
+                    .expect("valid pre-cancelled derivative request"),
+                CurveDerivativesRun::Cancelled
+            ));
+
+            let parameter_error = curve
+                .derivatives(-1.0, 1)
+                .expect_err("legacy parameter refusal");
+            assert_eq!(
+                curve
+                    .derivatives_with_cx(-1.0, 1, cx)
+                    .expect_err("parameter refusal must precede cancellation"),
+                parameter_error
+            );
+            let order_error = curve
+                .derivatives(0.25, 65)
+                .expect_err("legacy order refusal");
+            assert_eq!(
+                curve
+                    .derivatives_with_cx(0.25, 65, cx)
+                    .expect_err("order refusal must precede cancellation"),
+                order_error
+            );
+
+            let invalid_dimension = NurbsCurve::<f64, 4> {
+                knots: KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                cpw: vec![[0.0, 0.0, 0.0, 1.0]; 2],
+            };
+            let dimension_error = invalid_dimension
+                .derivatives(0.25, 1)
+                .expect_err("legacy dimension refusal");
+            assert_eq!(
+                invalid_dimension
+                    .derivatives_with_cx(0.25, 1, cx)
+                    .expect_err("dimension refusal must precede cancellation"),
+                dimension_error
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                curve
+                    .derivatives_with_cx(0.25, 1, cx)
+                    .expect("active owning derivative request"),
+                CurveDerivativesRun::Complete {
+                    derivatives: curve.derivatives(0.25, 1).expect("legacy derivatives"),
+                }
+            );
+        });
+    }
+
+    // G4/G5: one callback spans owning admission and admitted derivative work.
+    #[test]
+    fn owning_curve_derivative_cancellation_replays_across_both_phases() {
+        let long_curve = long_linear_curve();
+        let run_admission = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 13
+            };
+            let outcome = long_curve
+                .derivatives_with_poll(0.25, 1, &mut should_cancel)
+                .expect("valid long-curve derivative request");
+            (matches!(outcome, CurveDerivativesRun::Cancelled), polls)
+        };
+        assert_eq!(run_admission(), run_admission());
+        assert_eq!(run_admission(), (true, 13));
+
+        let curve = line_curve();
+        let run_derivative = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 8
+            };
+            let outcome = curve
+                .derivatives_with_poll(0.25, 1, &mut should_cancel)
+                .expect("valid line derivative request");
+            (matches!(outcome, CurveDerivativesRun::Cancelled), polls)
+        };
+        assert_eq!(run_derivative(), run_derivative());
+        assert_eq!(run_derivative(), (true, 8));
     }
 
     #[test]

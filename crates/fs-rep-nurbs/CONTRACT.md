@@ -76,8 +76,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   homogeneous representation. Its admitted-only `eval_with_cx` returns
   transactional `CurveEvaluationRun` state and never publishes a partial
   Cartesian point.
-  Its f64-only admitted `derivatives_with_cx` returns transactional
-  `CurveDerivativesRun` state and publishes only a complete Cartesian jet.
+  Its f64-only owning `derivatives_with_cx` carries one gate through structural
+  admission and the admitted derivative pipeline. The admitted-only
+  `derivatives_with_cx` avoids that source rescan. Both return transactional
+  `CurveDerivativesRun` state and publish only a complete Cartesian jet.
   Its admitted-only `insert_knot_with_cx` returns transactional
   `CurveInsertionRun` state and publishes only a complete validated exact
   refinement generation.
@@ -343,15 +345,19 @@ Allocator calls, scalar/array copies, and nested-vector destruction are
 non-preemptible; the primitive performs no source revalidation and claims no
 wall-time bound, exact caller-budget consumption, executor drain/finalize,
 resumability, surface regularity, topology, or geometric certificate.
-`AdmittedNurbsCurve::derivatives_with_cx` preserves request, ordinary-continuity,
-checked work, and retained-memory refusal precedence, then polls before every
-allocation and through derivative-net copies and differences, reduced knot and
-basis scans, homogeneous accumulation, the rational quotient recurrence, and
-final jet publication. `CurveDerivativesRun::Cancelled` carries no partial jet
+`NurbsCurve::derivatives_with_cx` preserves its constant-time dimension, order,
+and parameter refusals before carrying one gate through bounded structural
+admission and the admitted derivative pipeline.
+`AdmittedNurbsCurve::derivatives_with_cx` preserves request,
+ordinary-continuity, checked work, and retained-memory refusal precedence, then
+polls before every allocation and through derivative-net copies and
+differences, reduced knot and basis scans, homogeneous accumulation, the
+rational quotient recurrence, and final jet publication.
+`CurveDerivativesRun::Cancelled` carries no admitted authority or partial jet
 and drops all scratch. The f64 scalar operations and allocator calls themselves
 are not preemptible, the conservative legacy envelope is not an exact caller
-work-budget ledger, and owning admission, one-sided jets, executor
-drain/finalize, and resumability remain outside the claim.
+work-budget ledger, and one-sided jets, executor drain/finalize, and
+resumability remain outside the claim.
 `AdmittedNurbsCurve::insert_knot_with_cx` preserves open-domain, checked
 aggregate-work, and 64 MiB derived-output refusal precedence, then carries one
 gate through the admitted span search, output allocations and copies,
@@ -657,20 +663,20 @@ Individual allocations, heap calls, scalar operations, and nested-`Vec`
 destructors remain non-preemptible; cleanup latency, caller-budget consumption,
 wall-time preemption, resumability, and request-drain-finalize ownership remain
 explicit no-claims.
-Owning derivative and complete refit construction paths are not all migrated
-yet; they make no claim of caller-budgeted preflight or end-to-end validate-once
-execution. The standalone radial-projection primitive is a narrow exception:
+Complete refit construction paths are not migrated yet; they make no claim of
+caller-budgeted preflight or end-to-end validate-once execution. The standalone
+radial-projection primitive is a narrow exception:
 `project_radial_with_cx` validates its constant-time request before polling,
 polls at the start of each attempted sample for up to 42 field calls (42 on a
 complete run), and gates its complete radius behind a final publication
-checkpoint. It drops
-the local bracket on cancellation, but does not consume caller budget, preempt a
-field closure already in flight, drain/finalize caller work, or make
+checkpoint. It drops the local bracket on cancellation, but does not consume a
+caller budget or preempt a field closure already in flight, drain/finalize
+caller work, or make
 `refit_radial` cancellation-aware. The SDF shell rejects malformed
 point/tolerance input before surface planning, admits each immutable surface
-once per distance query,
-reuses that admission through closest and Gauss-Newton polish, and carries the
-winning admission into gradient, orientation, and regular-witness sign work.
+once per distance query, reuses that admission through closest and Gauss-Newton
+polish, and carries the winning admission into gradient, orientation, and
+regular-witness sign work.
 It reuses the same split/frontier model, exports worst-case seed and split heap
 coefficients into its aggregate work gate, and additionally charges
 structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
