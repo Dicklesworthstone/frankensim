@@ -197,6 +197,65 @@ fn basis_operation_work(control_count: usize, degree: usize) -> Result<u128, Nur
         })
 }
 
+fn surface_evaluation_envelope(
+    control_count_u: usize,
+    control_count_v: usize,
+    degree_u: usize,
+    degree_v: usize,
+) -> Result<(u128, u128), NurbsError> {
+    let order_u = degree_u.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface-evaluation u order overflows usize".to_string(),
+    })?;
+    let order_v = degree_v.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface-evaluation v order overflows usize".to_string(),
+    })?;
+    let basis_work_u = basis_operation_work(control_count_u, degree_u)?;
+    let basis_work_v = basis_operation_work(control_count_v, degree_v)?;
+    KnotVector::<f64>::enforce_work(basis_work_u, "admitted surface U basis evaluation")?;
+    KnotVector::<f64>::enforce_work(basis_work_v, "admitted surface V basis evaluation")?;
+    let tensor_visits = (order_u as u128)
+        .checked_mul(order_v as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-evaluation tensor work overflows u128".to_string(),
+        })?;
+    // One tensor-weight product, four homogeneous multiply-adds, finite
+    // checks, Cartesian projection, and polling are conservatively priced.
+    let contraction_work = tensor_visits
+        .checked_mul(8)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-evaluation contraction work overflows u128".to_string(),
+        })?;
+    let work = basis_work_u
+        .checked_add(basis_work_v)
+        .and_then(|value| value.checked_add(contraction_work))
+        .and_then(|value| value.checked_add(24))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-evaluation aggregate work overflows u128".to_string(),
+        })?;
+
+    // Each basis call owns three exact-order buffers. The completed U values
+    // remain live while V allocates its three buffers; after V returns, only
+    // the two published value rows remain. Vec headers, allocator metadata,
+    // and spare capacity are intentionally excluded.
+    let scalar_bytes = core::mem::size_of::<f64>() as u128;
+    let u_order = order_u as u128;
+    let v_order = order_v as u128;
+    let u_basis_peak = u_order
+        .checked_mul(3)
+        .and_then(|count| count.checked_mul(scalar_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-evaluation U basis bytes overflow u128".to_string(),
+        })?;
+    let v_basis_peak = v_order
+        .checked_mul(3)
+        .and_then(|count| count.checked_add(u_order))
+        .and_then(|count| count.checked_mul(scalar_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-evaluation V basis bytes overflow u128".to_string(),
+        })?;
+    Ok((work, u_basis_peak.max(v_basis_peak)))
+}
+
 fn enforce_partials_envelope(work: u128, retained_bytes: u128) -> Result<(), NurbsError> {
     if work > NurbsCurve::<f64, 3>::MAX_DERIVATIVE_WORK_UNITS {
         return Err(NurbsError::Domain {
@@ -2465,6 +2524,21 @@ impl NurbsSurface<f64> {
 }
 
 impl AdmittedNurbsSurface<'_, f64> {
+    /// Return the conservative work and exact requested basis-buffer peak for
+    /// one admitted Cartesian evaluation, without scanning or allocating.
+    /// Compound measured primitives use this to price repeated evaluations
+    /// before entering the first nested basis operation.
+    pub(crate) fn evaluation_envelope(&self) -> Result<(u128, u128), NurbsError> {
+        let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        surface_evaluation_envelope(
+            knots_u.control_count(),
+            knots_v.control_count(),
+            knots_u.degree(),
+            knots_v.degree(),
+        )
+    }
+
     /// Return the exact work and peak requested temporary payload enforced by
     /// one admitted first-partials evaluation, without scanning or allocating.
     /// Compound measured primitives use this to admit repeated evaluations as

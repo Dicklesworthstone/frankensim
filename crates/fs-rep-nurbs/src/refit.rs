@@ -30,7 +30,9 @@
 use crate::NurbsError;
 use crate::basis::{AdmittedKnotVector, BASIS_MAX_WORK_UNITS, BasisRun, KnotVector};
 use crate::closest::norm3;
-use crate::surface::{AdmittedNurbsSurface, NurbsSurface, SurfacePartialsRun};
+use crate::surface::{
+    AdmittedNurbsSurface, NurbsSurface, SurfaceEvaluationRun, SurfacePartialsRun,
+};
 use core::mem::size_of;
 use fs_exec::Cx;
 use fs_math::det;
@@ -593,6 +595,22 @@ pub enum RefitResidualSummaryRun {
         warnings: Vec<LocalizedFitResidualWarning>,
     },
     /// Cancellation was observed before publication.
+    Cancelled,
+}
+
+/// Transactional outcome of a dense measured refit field probe.
+///
+/// The scalar is only the largest retained `abs(field(surface(u, v)))` sample.
+/// It carries no field, zero-set, distance, or between-sample authority.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RefitFieldProbeRun {
+    /// Every grid point and opaque field call completed with finite arithmetic.
+    Complete {
+        /// Maximum absolute field value over the retained cell-center grid.
+        max_abs_field: f64,
+    },
+    /// Cancellation was observed before scalar publication.
     Cancelled,
 }
 
@@ -2245,6 +2263,151 @@ fn summarize_refit_residuals(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefitFieldProbePlan {
+    probe: usize,
+}
+
+fn preflight_refit_field_probe_envelope(
+    probe: usize,
+    evaluation_work: u128,
+    evaluation_retained_bytes: u128,
+) -> Result<RefitFieldProbePlan, NurbsError> {
+    if probe == 0 {
+        return Err(refit_structure_error(
+            "refit field probe resolution must be positive",
+        ));
+    }
+    let probe_points = probe
+        .checked_mul(probe)
+        .ok_or_else(|| refit_structure_error("refit field probe grid size overflows usize"))?;
+    if probe_points > REFIT_MAX_PROBE_POINTS {
+        return Err(refit_structure_error(format!(
+            "refit field probe grid {probe_points} exceeds static cap {REFIT_MAX_PROBE_POINTS}"
+        )));
+    }
+    let nested_work = checked_refit_work_product(
+        &[probe_points as u128, evaluation_work],
+        "field-probe surface evaluations",
+    )?;
+    // Grid parameter construction, pre/post opaque-call gates, finite/absolute
+    // reduction, and loop bookkeeping. The opaque closure's own cost cannot be
+    // inferred from this API and remains outside the measured envelope.
+    let reduction_work =
+        checked_refit_work_product(&[probe_points as u128, 16], "field-probe reduction")?;
+    let total_work =
+        checked_refit_work_sum(&[nested_work, reduction_work, 2], "field-probe aggregate")?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit field probe requests {total_work} work units above static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+    if evaluation_retained_bytes > REFIT_MAX_ALLOC_BYTES as u128 {
+        return Err(refit_structure_error(format!(
+            "refit field probe evaluation retains {evaluation_retained_bytes} requested bytes above static cap {REFIT_MAX_ALLOC_BYTES}"
+        )));
+    }
+    Ok(RefitFieldProbePlan { probe })
+}
+
+fn preflight_refit_field_probe(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    probe: usize,
+) -> Result<RefitFieldProbePlan, NurbsError> {
+    let (evaluation_work, evaluation_retained_bytes) = surface.evaluation_envelope()?;
+    preflight_refit_field_probe_envelope(probe, evaluation_work, evaluation_retained_bytes)
+}
+
+/// Measure `max(abs(field(surface(u, v))))` on a dense cell-center grid.
+///
+/// Grid size, all repeated admitted-surface evaluation work, and the peak
+/// requested nested basis payload are composed before the first checkpoint.
+/// One caller gate then spans deterministic row-major parameters, every nested
+/// surface evaluation, cancellation immediately before each opaque field call,
+/// finite absolute-value reduction, and final scalar publication. Cancellation
+/// exposes no provisional maximum.
+///
+/// The field closure itself is opaque: one in-flight call is non-preemptible
+/// and its cost, side effects, continuity, units, Lipschitz behavior, zero-set
+/// meaning, and distance authority are outside this measured primitive. The
+/// method does not consume the `Cx` budget or own request drain/finalize.
+///
+/// # Errors
+/// Returns a structured grid/count/work/retained-byte refusal, a nested surface
+/// evaluation error, or a non-finite field-value refusal.
+pub fn measure_refit_field_probe_with_cx(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    field: &dyn Fn([f64; 3]) -> f64,
+    probe: usize,
+    cx: &Cx<'_>,
+) -> Result<RefitFieldProbeRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    measure_refit_field_probe_with_poll(surface, field, probe, &mut should_cancel)
+}
+
+fn measure_refit_field_probe_with_poll(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    field: &dyn Fn([f64; 3]) -> f64,
+    probe: usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitFieldProbeRun, NurbsError> {
+    let plan = preflight_refit_field_probe(surface, probe)?;
+    if should_cancel() {
+        return Ok(RefitFieldProbeRun::Cancelled);
+    }
+
+    let mut max_abs_field = 0.0f64;
+    for a in 0..plan.probe {
+        for b in 0..plan.probe {
+            #[allow(clippy::cast_precision_loss)]
+            let (u, v) = (
+                (a as f64 + 0.5) / plan.probe as f64,
+                (b as f64 + 0.5) / plan.probe as f64,
+            );
+            let point = match surface.eval_with_poll(u, v, should_cancel)? {
+                SurfaceEvaluationRun::Complete { point } => point,
+                SurfaceEvaluationRun::Cancelled => return Ok(RefitFieldProbeRun::Cancelled),
+            };
+            if point.iter().any(|coordinate| !coordinate.is_finite()) {
+                return Err(refit_structure_error(format!(
+                    "fitted surface returned a non-finite probe point at ({u}, {v})"
+                )));
+            }
+            if should_cancel() {
+                return Ok(RefitFieldProbeRun::Cancelled);
+            }
+            let field_value = field(point);
+            if !field_value.is_finite() {
+                return Err(refit_structure_error(format!(
+                    "implicit field returned non-finite value at probe {point:?}"
+                )));
+            }
+            max_abs_field = max_abs_field.max(field_value.abs());
+            if should_cancel() {
+                return Ok(RefitFieldProbeRun::Cancelled);
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(RefitFieldProbeRun::Cancelled);
+    }
+    Ok(RefitFieldProbeRun::Complete { max_abs_field })
+}
+
+fn measure_refit_field_probe(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    field: &dyn Fn([f64; 3]) -> f64,
+    probe: usize,
+) -> Result<f64, NurbsError> {
+    let mut never_cancel = || false;
+    match measure_refit_field_probe_with_poll(surface, field, probe, &mut never_cancel)? {
+        RefitFieldProbeRun::Complete { max_abs_field } => Ok(max_abs_field),
+        RefitFieldProbeRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit field probe observed cancellation",
+        )),
+    }
+}
+
 /// Row of basis values over the whole control axis (dense, small).
 fn basis_row(kv: AdmittedKnotVector<'_, f64>, t: f64) -> Result<Vec<f64>, NurbsError> {
     let mut never_cancel = || false;
@@ -2634,30 +2797,7 @@ pub fn refit_radial(
     // Spline → field: dense probe plus an analytic-model Lipschitz estimate;
     // the other reported direction stays the sampled fit-target worst case and
     // does not claim that a generic closure's targets belong to a source set.
-    let mut sampled = 0.0f64;
-    for a in 0..probe {
-        for b in 0..probe {
-            #[allow(clippy::cast_precision_loss)]
-            let (u, v) = (
-                (a as f64 + 0.5) / probe as f64,
-                (b as f64 + 0.5) / probe as f64,
-            );
-            let p = report_surface.eval(u, v)?;
-            let point = [p[0], p[1], p[2]];
-            if point.iter().any(|coordinate| !coordinate.is_finite()) {
-                return Err(refit_structure_error(format!(
-                    "fitted surface returned a non-finite probe point at ({u}, {v})"
-                )));
-            }
-            let field_value = field(point);
-            if !field_value.is_finite() {
-                return Err(refit_structure_error(format!(
-                    "implicit field returned non-finite value at probe {point:?}"
-                )));
-            }
-            sampled = sampled.max(field_value.abs());
-        }
-    }
+    let sampled = measure_refit_field_probe(report_surface, field, probe)?;
     let coverage = max_res;
     let (lip_u, lip_v) = lipschitz_estimate(report_surface)?;
     let lip = lip_u + lip_v;
@@ -4053,6 +4193,129 @@ mod tests {
                 .to_string()
                 .contains("point evaluation became non-finite")
         );
+    }
+
+    // G0/G5: the Cx-aware probe preserves the legacy U-major cell-center grid
+    // and measured absolute-field reduction on an exactly known surface.
+    #[test]
+    fn refit_field_probe_with_cx_matches_known_cell_centers() {
+        let knots = open_uniform_knots(2, 1).expect("linear knots");
+        let net = vec![
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+        ];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(knots.clone(), knots, &net, &weights).expect("surface");
+        let admitted = surface.admit().expect("admitted surface");
+        let field = |point: [f64; 3]| point[0] + point[1];
+
+        assert_eq!(
+            measure_refit_field_probe(admitted, &field, 2).expect("synchronous field probe"),
+            1.5
+        );
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                measure_refit_field_probe_with_cx(admitted, &field, 2, cx)
+                    .expect("cancellable field probe"),
+                RefitFieldProbeRun::Complete { max_abs_field: 1.5 }
+            );
+        });
+    }
+
+    // G4/G5: all nested evaluations, pre-field boundaries, reductions, and
+    // final scalar publication share one deterministic cancellation callback.
+    #[test]
+    fn refit_field_probe_polling_is_bounded_and_transactional() {
+        let knots = open_uniform_knots(2, 1).expect("linear knots");
+        let net = vec![
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+        ];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(knots.clone(), knots, &net, &weights).expect("surface");
+        let admitted = surface.admit().expect("admitted surface");
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let field_calls = Cell::new(0usize);
+            let field = |point: [f64; 3]| {
+                field_calls.set(field_calls.get() + 1);
+                point[0] - point[1]
+            };
+            let outcome = measure_refit_field_probe_with_poll(admitted, &field, 17, &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("finite field probe");
+            (outcome, polls.get(), field_calls.get())
+        };
+
+        let (complete, healthy_polls, healthy_field_calls) = run(None);
+        assert!(matches!(complete, RefitFieldProbeRun::Complete { .. }));
+        assert_eq!(healthy_field_calls, 17 * 17);
+        assert!(healthy_polls > healthy_field_calls * 2);
+        for cancel_at in [1, healthy_polls / 2, healthy_polls] {
+            let (outcome, polls, field_calls) = run(Some(cancel_at));
+            assert_eq!(outcome, RefitFieldProbeRun::Cancelled);
+            assert_eq!(polls, cancel_at);
+            assert!(field_calls <= healthy_field_calls);
+        }
+
+        let public_calls = Cell::new(0usize);
+        let public_field = |_: [f64; 3]| {
+            public_calls.set(public_calls.get() + 1);
+            0.0
+        };
+        with_refit_cx(true, |cx| {
+            assert_eq!(
+                measure_refit_field_probe_with_cx(admitted, &public_field, 17, cx)
+                    .expect("pre-cancellation is terminal"),
+                RefitFieldProbeRun::Cancelled
+            );
+        });
+        assert_eq!(public_calls.get(), 0);
+    }
+
+    // G0/G4: hostile grid/work/payload counts refuse before polling, and a
+    // non-finite opaque result cannot be published as a measured residual.
+    #[test]
+    fn refit_field_probe_refusals_are_preflighted_and_finite() {
+        let empty = preflight_refit_field_probe_envelope(0, 1, 0)
+            .expect_err("zero probe resolution must be refused");
+        assert!(empty.to_string().contains("must be positive"));
+
+        let overflow = preflight_refit_field_probe_envelope(usize::MAX, 1, 0)
+            .expect_err("unrepresentable probe grid must be refused");
+        assert!(overflow.to_string().contains("overflows usize"));
+
+        let capped = preflight_refit_field_probe_envelope(2_049, 1, 0)
+            .expect_err("grid above the static point cap must be refused");
+        assert!(capped.to_string().contains("exceeds static cap"));
+
+        let work = preflight_refit_field_probe_envelope(2, REFIT_MAX_WORK_UNITS, 0)
+            .expect_err("repeated nested evaluation work must be aggregate-bounded");
+        assert!(work.to_string().contains("work units"));
+
+        let work_overflow = preflight_refit_field_probe_envelope(2, u128::MAX, 0)
+            .expect_err("nested evaluation multiplication must be checked");
+        assert!(work_overflow.to_string().contains("overflows u128"));
+
+        let retained =
+            preflight_refit_field_probe_envelope(1, 0, REFIT_MAX_ALLOC_BYTES as u128 + 1)
+                .expect_err("peak nested basis payload must honor the refit cap");
+        assert!(retained.to_string().contains("evaluation retains"));
+
+        let knots = open_uniform_knots(2, 1).expect("linear knots");
+        let net = vec![vec![[0.0; 3]; 2]; 2];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(knots.clone(), knots, &net, &weights).expect("surface");
+        let error = measure_refit_field_probe_with_poll(
+            surface.admit().expect("admitted surface"),
+            &|_| f64::NAN,
+            1,
+            &mut || false,
+        )
+        .expect_err("non-finite field samples must be refused");
+        assert!(error.to_string().contains("non-finite value at probe"));
     }
 
     #[test]

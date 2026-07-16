@@ -834,6 +834,19 @@ headers; spare capacity; allocator metadata/rounding; scalar wall time; caller
 budget consumption; drain/finalize; and destructor latency remain outside the
 envelope. The outputs measure only the retained pairs and grant no field,
 zero-set, Hausdorff, topology, continuum-fit, or geometric-distance authority.
+`measure_refit_field_probe_with_cx` composes the complete cell-center grid size,
+the conservative admitted Cartesian-evaluation work envelope for every probe,
+and the exact peak requested nested basis-buffer payload before its first
+checkpoint. One caller gate spans deterministic row-major parameters, both
+nested basis/evaluation paths, a cancellation check immediately before each
+opaque field call, finite absolute-value reduction, and final scalar
+publication. Cancellation exposes no provisional maximum. Evaluations are
+sequential, so their peak temporary payload is not multiplied. The closure is
+opaque: an in-flight call is non-preemptible, and its cost, side effects, units,
+continuity, Lipschitz behavior, zero-set meaning, distance semantics, and
+between-sample behavior remain outside the envelope and authority. The measured
+scalar does not consume a caller budget, migrate refit orchestration, own
+drain/finalize, or establish a field or geometry certificate.
 `assemble_refit_normal_with_cx` preserves checked dimensions, finite
 non-negative regularization, count-derived aggregate work, and the 256 MiB
 requested dense-output envelope ahead of its first checkpoint. One gate then
