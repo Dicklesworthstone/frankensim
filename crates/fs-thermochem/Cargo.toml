@@ -1,0 +1,22 @@
+[package]
+name = "fs-thermochem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Typed, deterministic thermochemical law data and standard-state evaluation."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+fs-matdb = { path = "../fs-matdb" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[lints]
+workspace = true
