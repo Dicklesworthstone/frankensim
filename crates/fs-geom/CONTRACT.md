@@ -169,6 +169,14 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   primitive path. Mixed generic-strict/chart-map composition produces a
   `HeterogeneousPath` without erasing primitive family or endpoints; any two
   adjacent chart-map primitives still require an exact chart seam.
+  `DerivedChartTransitionInverseLawCandidateIrV1` separately binds two direct
+  declared chart-map children with exactly reversed geometry and chart
+  endpoints, one exact common nominal overlap, two nominal round-trip
+  declarations, and a no-authority artifact. Admission additionally requires
+  the declared evidence transports to have one variance and to compose across
+  both ordered artifact/rank seams. The packet does not execute either map or
+  turn either round-trip declaration into equality, inverse, or equivalence
+  authority.
   `DeclaredComplexRefinement` is a coarse-source to refined-target finite-
   complex rank-envelope declaration. It binds exact source/target complex and
   resolution IDs plus nominal aggregate prolongation and differential-
@@ -209,14 +217,52 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   not that the components execute or glue into a continuous, constructible, or
   incidence-preserving whole map. It has no conversion, composition, evidence-
   transport, inverse, or equivalence API.
+  `DerivedStratificationRefinementCandidateIrV1` binds one exact exhaustive
+  fine-to-coarse assembly to exact refined/coarse geometry and stratification
+  selectors. Admission requires canonical coverage of every refined stratum,
+  at least one selected preimage for every coarse stratum, and no increase from
+  a refined stratum's dimension to its selected coarse stratum. A separate
+  `DerivedStratificationRefinementCompositionCandidateIrV1` retains two exact
+  candidates only when both middle geometry and stratification selectors match.
+  Neither token mints a direct refinement map, containment/incidence/link
+  theorem, transitivity, evidence transport, or equivalence authority.
+  `DerivedParallelMorphismComparisonCandidateIrV1` binds two exact ordered
+  structural paths with one exact common source and target plus nominal scope,
+  relation, and no-authority artifacts. It is a comparison input only: direct
+  and composite paths, identities and cycles, may be retained without claiming
+  path equality, commutativity, homotopy, coherence, execution, or equivalence.
   `DerivedSpanCorrespondenceIrV1` is deliberately separate from the directed
   morphism-kind algebra. It declares `source <- apex -> target` by binding exact
   source/apex/target geometry IDs and two already-admitted morphism receipts
   oriented `apex -> source` and `apex -> target`, plus an explicit no-authority
   artifact. The sealed span exposes no direct source-to-target evidence
-  transport. V1 does not compose spans: actual composition requires a separately
-  admitted pullback apex, projections, commuting square, and pullback authority,
-  and associativity is only available under the resulting scoped equivalences.
+  transport and has no composition method.
+  `DerivedSpanMorphismCandidateIrV1` binds two fixed-foot spans, one exact apex
+  morphism, and exact ordered comparison children between each source leg and
+  the recomposed apex-map-then-target-leg route. It binds the exact structural
+  wiring, not either commuting triangle or a span 2-cell.
+  `DerivedSpanPullbackSquareCandidateIrV1` binds two structurally composable
+  spans, exact projections from one proposed apex, and one exact ordered
+  comparison of the recomposed routes to the common middle geometry.
+  `DerivedSpanCompositionCandidateIrV1` then binds that exact square, one exact
+  proposed outer span, and the exact recomposed routes to both outer feet.
+  These packets retain a proposed pullback and outer composite shape only; they
+  grant no square commutativity, pullback existence/universality, categorical
+  or bicategorical composition, associativity, base-change, pull-push, or
+  evidence authority.
+  `DerivedMorphismInverseLawCandidateIrV1` binds exact oppositely oriented
+  morphisms, derives both endpoint identities and both round-trip composites,
+  and requires exact ordered identity-versus-round-trip comparison children.
+  Caller-authored identity slots are intentionally absent. The packet grants no
+  path equality, inverse, isomorphism, homotopy, simplification, or equivalence.
+  `DerivedSpanEquivalenceCandidateIrV1` assembles exact source/target spans,
+  ordered forward/reverse fixed-foot span-morphism candidates, and the exact
+  inverse-law candidate for their ordered apex morphisms. Admission rechecks
+  every outer-foot, span, apex, direction, and apex-map seam transitively. The
+  resulting structural packet deliberately cannot convert to
+  `DerivedEquivalenceBoundaryV1` and grants no span equivalence, invertible
+  2-cell, unit/counit, triangle, coherence, interchange, semantic, or physical
+  authority.
   `DerivedFixedResolutionQuasiIsomorphismCandidateIrV1` is another standalone
   declaration outside the morphism-kind and equivalence algebras. It binds one
   exact sealed homogeneous refinement path to exact source/target local-model,
@@ -242,6 +288,10 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   declaration and a no-authority artifact are retained. Payload semantics,
   functionality, composition, evidence transport, inverse, and equivalence are
   intentionally absent and require independent RD.1c promotion.
+  Across every RD.1b candidate, nominal relation/theorem/comparison/round-trip/
+  composition/equivalence declarations and no-authority artifacts are opaque
+  nonzero identities. Structural admission retains and domain-separates those
+  bytes; it never dereferences, executes, authenticates, or upgrades them.
   Evidence transport is explicitly contravariant restriction or covariant
   balance corestriction and binds exact input/output geometry identities plus
   nominal caller-declared input/output evidence-artifact identities and ranks.
@@ -260,13 +310,18 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   artifact IDs and `ColorRank` values are structural
   declarations with zero payload authority: they do not authenticate evidence,
   establish payload preservation or validity-domain inclusion, prove theorem
-  truth, or establish physical equivalence. Invertible chart transitions,
-  geometric/stratified refinements, authenticated subobject inclusions,
-  authoritative constructible/stratified maps, composable or authenticated
-  correspondences, and L6 Machine-IR crosswalks remain typed follow-ups rather
-  than being represented as strict maps. Authoritative quasi-isomorphism and
-  global stratified-map receipts require RD.1c independent checking of their
-  structural candidates and retained artifacts.
+  truth, or establish physical equivalence. RD.1b now provides separate
+  structural no-authority candidates for direct chart-transition inverse laws,
+  finite stratification refinement and its ordered composition, parallel paths,
+  fixed-foot span morphisms, pullback/composition-shaped spans, generic inverse
+  laws, and span equivalence;
+  none is represented as a strict map or authority-bearing equivalence. The L6
+  Machine-IR crosswalk likewise lives at the `fs-ir` feature seam rather than in
+  this L2 morphism algebra. Authenticated subobject inclusion, geometric and
+  stratified refinement theorems, authoritative constructible/global maps,
+  actual span pullbacks/composites/equivalences, quasi-isomorphisms, and physical
+  crosswalks require independent RD.1c or higher-layer checking of the retained
+  structural candidates and artifacts.
 
 - `exit_path` module (RD.X1, `[M]`, behind `derived-geometry`) admits a bounded,
   executable statement language for maximal exit/entrance-path approximation
@@ -664,6 +719,35 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    those four selectors are derived from sealed children, not supplied by the
    caller. The assembly requires a nonzero no-authority artifact and grants no
    equivalence, inverse, homotopy, composition, or evidence-transport API.
+15. Finite stratification-refinement candidates bind exact refined/coarse
+   selectors to one exact exhaustive child, cover both finite stratum families
+   in their declared directions, permit repeated coarse targets, and enforce
+   dimension monotonicity. Ordered two-step candidates require exact equality
+   of both middle selectors and do not synthesize a direct refinement.
+16. Direct chart-transition inverse-law candidates accept only two direct
+   declared chart maps with exact reversed geometry/chart endpoints, one common
+   overlap, one evidence variance, and both exact ordered evidence seams.
+   Parallel-path candidates independently require exact common endpoints and
+   preserve caller-significant left/right order; neither candidate proves its
+   nominal relation.
+17. Fixed-foot span-morphism candidates bind exact source/target spans, one
+   exact apex morphism with the required orientation, all four exact parent
+   legs, both recomposed apex-to-foot routes, and exact ordered comparison
+   children. No commuting triangle or 2-cell is inferred.
+18. Span pullback-square candidates bind exact composable parent spans,
+   projections from one exact proposed apex, and exact ordered routes to the
+   common middle geometry. Span-composition candidates bind one exact square,
+   one exact proposed outer span, and both exact recomposed outer legs. No
+   pullback or composition authority is inferred.
+19. Generic inverse-law candidates bind exact forward/reverse morphisms to
+   reversed endpoints, derive both canonical identities and round trips, and
+   require exact ordered identity-versus-round-trip comparison children. They
+   expose no caller-authored identity slot and mint no inverse.
+20. Span-equivalence candidates bind exact source/target spans, ordered
+   forward/reverse span-morphism candidates, and the exact apex inverse-law
+   candidate. All direct IDs and transitive outer-foot/span/apex/morphism seams
+   are rechecked; the mandatory no-authority artifact cannot be converted into
+   an equivalence boundary.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -705,9 +789,33 @@ stratum coverage, raw/sealed component identity and endpoint seams, direct-
 component shape, bounded retention, allocation, cancellation, and canonical
 identity failures. Refusal publishes no assembly candidate and grants no global
 map authority.
+Finite-refinement candidate admission uses
+`DerivedStratificationRefinementCandidateErrorV1` for raw/sealed selector and
+child mismatches, two-sided coverage, dimension increase, resource/allocation,
+cancellation, and identity defects. Ordered refinement composition uses
+`DerivedStratificationRefinementCompositionCandidateErrorV1` for raw/sealed
+children and both exact middle seams. Neither refusal publishes a partial
+candidate or direct refinement.
 Standalone span admission uses `DerivedSpanCorrespondenceErrorV1` for schema,
 zero no-authority identity, raw-leg/sealed-leg mismatch, leg orientation,
 cancellation, and canonical-identity defects. Refusal publishes no span token.
+Parallel-path, span-morphism, pullback-square, and span-composition admission use
+`DerivedParallelMorphismComparisonCandidateErrorV1`,
+`DerivedSpanMorphismCandidateErrorV1`,
+`DerivedSpanPullbackSquareCandidateErrorV1`, and
+`DerivedSpanCompositionCandidateErrorV1`, respectively. They distinguish
+raw/sealed child mismatch from endpoint/orientation, exact parent-leg or
+projection binding, recomposition refusal, ordered comparison-route drift, and
+proposed outer-span drift; no refusal publishes partial categorical authority.
+Direct chart and generic inverse-law admission use
+`DerivedChartTransitionInverseLawCandidateErrorV1` and
+`DerivedMorphismInverseLawCandidateErrorV1` for direct-child shape,
+reversed-endpoint, overlap/variance/evidence-seam, derived identity/round-trip,
+and ordered comparison defects. Span-equivalence assembly uses
+`DerivedSpanEquivalenceCandidateErrorV1` for raw/sealed child mismatch,
+ordered outer-foot/span-morphism binding, exact apex inverse-law binding,
+cancellation, and canonical-identity defects. All three refuse without
+upgrading any supplied child.
 Fixed-resolution quasi-isomorphism candidate admission uses
 `DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1` for schema, exact
 endpoint/path/selector, local-model ownership, role/complex/chart/locality,
@@ -771,6 +879,17 @@ Standalone span receipts use a separate schema/domain and encode exact
 source/apex/target geometry IDs, left then right admitted-leg IDs, and the
 no-authority artifact. Replaying the same ordered legs is stable; swapping valid
 distinct equal-endpoint legs changes identity.
+Recent structural-candidate receipts each use a separate schema/domain and
+recursively bind complete typed child descriptors. Their exact parent/recursive
+field counts are: stratification refinement 7/15, ordered refinement composition
+10/40, direct chart-transition inverse law 10/22, parallel-path comparison 7/19,
+span morphism 11/67, pullback square 13/56, span composition 10/84, generic
+inverse law 8/58, and span equivalence 11/215. Each receipt encodes selectors
+derived from or exact-validated against sealed children and admitted endpoints,
+plus ordered direct child IDs and nominal/no-authority fields; changing
+child order, a derived selector, or any retained declaration changes identity.
+Shared child IDs are counted again at each typed edge, and no parent receipt
+authenticates a nominal relation merely by retaining it.
 Fixed-resolution quasi-isomorphism candidate receipts use another separate
 schema/domain and encode the exact refinement path; ordered endpoint geometry,
 local-model, complex, and resolution IDs; the selected complex role; both
@@ -828,6 +947,19 @@ identity construction, and immediately before publication. Cancellation exposes
 no partial assembly candidate.
 Standalone span admission polls at entry, before and inside identity encoding,
 and immediately before publication. Cancellation exposes no partial span token.
+Finite-refinement admission additionally polls at a fixed stride while scanning
+canonical two-sided stratum coverage and uses fallible bounded coarse-coverage
+storage; ordered refinement composition polls at entry, inside identity
+encoding, and before publication. Span morphism propagates cancellation from
+both target-route compositions, pullback-square from both middle-route
+compositions, span composition from both outer-route compositions, and generic
+inverse law from both canonical identity constructions and both round-trip
+compositions. Direct chart inverse-law checks exactly two ordered evidence-cycle
+compositions rather than an unbounded loop. Parallel and span-equivalence
+assembly allocate no child collection. Every candidate polls at entry, inside
+its bounded canonical encoder, and before publication; cancellation exposes no
+partial comparison, refinement, inverse-law, pullback/composition, or
+equivalence token.
 Fixed-resolution quasi-isomorphism candidate admission additionally polls while
 scanning the bounded typed refinement path, before and inside identity encoding,
 and immediately before publication. Cancellation exposes no partial candidate
@@ -955,6 +1087,29 @@ identity movement, left/right order sensitivity, raw-leg ID mismatch, all four
 apex/outer-endpoint orientation refusals, identity-left graph shape, and already-
 requested entry cancellation. No test claims that a graph-shaped span is
 functional or that arbitrary spans compose.
+Finite stratification-refinement coverage adds exact recursive child schemas,
+two-sided coverage, repeated coarse targets, dimension monotonicity, every raw
+and sealed selector seam, reversed orientation, deterministic replay, and entry
+cancellation. Its ordered composition coverage adds both exact middle seams,
+isolated child order, raw/sealed mismatch, every receipt field, and explicit
+no-transitivity authority.
+Direct chart-transition inverse-law coverage exercises both covariant and
+contravariant closed evidence cycles, direct-child and reversed endpoint/chart
+binding, common overlap, mixed variance, both ordered artifact/rank seam
+failures, deterministic receipt replay, and cancellation. Parallel-path
+coverage exercises identity-versus-cycle and direct-versus-composite pairs,
+isolated left/right order, both endpoint mismatches and precedence, raw/sealed
+children, every receipt field, and cancellation without claiming equality.
+The layered span suite covers fixed-foot span morphisms, proposed pullback
+squares, proposed outer composition spans, generic inverse-law packets, and the
+final structural span-equivalence assembly. Genuine fixtures recompose every
+retained route. Adversarial cases cover typed-child domains, zero and nonzero
+raw/sealed drift, representative direct outer-foot/span/apex/projection/leg
+bindings, transitive aggregate seams, evidence seams, reversed route and child
+order, stale or forged transitive tokens,
+derived identity/round-trip mismatch, exact recursive receipt fields, refusal
+precedence, replay, and entry cancellation. These tests establish fail-closed
+structural wiring only; they do not test or mint categorical laws.
 `tests/exit_path.rs` supplies RD.X1 G0/G3 examples and a bounded-cancellation
 regression: regular-cell poset sufficiency, cone/cusp groupoid-enriched
 one-category fallback, circular-stratum local systems, finite-versus-full
@@ -1043,6 +1198,12 @@ claim those stronger G4/G5 results.
   atlas compatibility, coordinate equivalence, or physical correspondence.
   Those require a separate scoped-equivalence receipt with independently
   checked inverse laws; `IdentityOnly` is refused for every declared chart map.
+- `AdmittedDerivedChartTransitionInverseLawCandidateV1` proves only that two
+  direct declared chart-map children have exact reversed selectors, one nominal
+  overlap, one variance, and structurally composable evidence seams in both
+  orders. It does not execute the maps, authenticate either nominal round trip,
+  prove composite identity, atlas compatibility, inverse, coordinate
+  equivalence, evidence preservation, or physical correspondence.
 - `DeclaredComplexRefinement` proves only a same-chart, structurally monotone
   finite graded-rank/truncation envelope. It does not prove that the target is
   geometrically or numerically finer; that prolongation exists, is linear,
@@ -1051,6 +1212,13 @@ claim those stronger G4/G5 results.
   reduction, convergence, constraints, strata, physics, or evidence authority
   are preserved. Nonzero prolongation and commutation IDs name nominal artifacts
   only, and `IdentityOnly` is refused.
+- `AdmittedDerivedStratificationRefinementCandidateV1` proves only finite
+  selector coverage and dimension monotonicity for one exact exhaustive
+  fine-to-coarse component family. It proves no containment, incidence/frontier
+  or link compatibility, Whitney/Thom condition, component execution/gluing,
+  refinement theorem, evidence preservation, or equivalence. Its ordered
+  composition candidate proves only exact middle-selector alignment; it does
+  not mint a direct map or transitivity.
 - `AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1` proves only that
   exact endpoint local models select the declared role complexes under matching
   endpoint-local `FixedResolution` scopes, and that an exact homogeneous
@@ -1137,6 +1305,12 @@ claim those stronger G4/G5 results.
   every component, check the selected global policy and retained falsifiers,
   and mint a new authority receipt rather than upgrading this candidate in
   place.
+- `AdmittedDerivedParallelMorphismComparisonCandidateV1` proves only that two
+  exact ordered structural paths share exact endpoints and are retained under
+  nominal comparison metadata. It proves no equality, commutativity, homotopy,
+  naturality, coherence, execution agreement, evidence transport, inverse, or
+  equivalence or physical agreement. Identity-versus-cycle and direct-versus-
+  composite packets remain merely well-typed comparison inputs.
 - `AdmittedDerivedSpanCorrespondenceV1` proves only that two exact sealed legs
   share the declared apex and land at the declared outer endpoints. It proves no
   totality, single-valuedness, functionality, injectivity, surjectivity,
@@ -1145,15 +1319,51 @@ claim those stronger G4/G5 results.
   equivalence. No pullback, base-change, pull-push, Beck-Chevalley, projection-
   formula, or composition authority is available. Even an identity-left
   graph-shaped span remains only a structural declaration.
+- `AdmittedDerivedSpanMorphismCandidateV1` proves only exact fixed-foot/apex-map
+  wiring and exact ordered comparison routes. Neither nominal comparison proves
+  a commuting triangle or any path equality/homotopy, so the token is not a
+  natural transformation, invertible 2-cell, inverse, span identity/composite,
+  or equivalence. It grants no execution, evidence preservation, functionality,
+  physical correspondence, associativity/coherence/interchange, pullback,
+  base-change, Beck-Chevalley, or projection-formula authority.
+- `AdmittedDerivedSpanPullbackSquareCandidateV1` and
+  `AdmittedDerivedSpanCompositionCandidateV1` prove only exact proposed-apex,
+  projection, middle-route, outer-span, and outer-route wiring. They prove no
+  square commutativity, pullback existence/universality/uniqueness/nonemptiness,
+  outer-correspondence functionality, categorical or bicategorical composition,
+  unit/associativity/coherence, base-change, Beck-Chevalley,
+  projection-formula, pull-push, evidence, equivalence, or physical-
+  correspondence law.
+- `AdmittedDerivedMorphismInverseLawCandidateV1` proves only exact reversed
+  endpoints and exact ordered identity-versus-round-trip comparison wiring.
+  Its comparison relations remain nominal; it proves no path equality,
+  left/right inverse, isomorphism, homotopy or quasi-isomorphism, evidence-cycle
+  identity, execution, evidence preservation, naturality, simplification,
+  coherence, or physical correspondence.
+- `AdmittedDerivedSpanEquivalenceCandidateV1` proves only that exact source and
+  target spans, ordered forward/reverse span-morphism packets, and the exact
+  apex inverse-law packet cross-bind transitively. Because none of those nested
+  relations is authenticated, the assembly proves no span equivalence,
+  commuting triangle, path equality, invertible 2-cell, apex inverse,
+  Morita-style relation, unit/counit or triangle identity, naturality,
+  coherence/interchange, composition/pullback/base-change law, execution,
+  functionality, semantic agreement, evidence preservation, or physical
+  correspondence. It intentionally has no conversion to
+  `DerivedEquivalenceBoundaryV1`.
 - The v1 sublanguage containing identities, generic strict maps, and declared
   chart maps, finite-complex refinements, and whole-object inclusion declarations
   closes mixed map-family composition through ordered typed heterogeneous paths
   whenever its exact geometry, evidence, adjacent-chart, and adjacent-refinement
   seams pass. This removes the implemented-family closure gap but does not
-  promote the full RD.1b category claim. Authenticated subobject inclusions,
-  geometric/stratified refinements, pullback-composable/authenticated
-  correspondences, scoped equivalences, and crosswalks still need distinct
-  primitives and their own seam laws before that broader claim is promotable.
+  promote the full RD.1b category claim. Separate structural candidates now
+  retain finite stratification refinements, parallel comparisons, direct chart
+  and generic inverse-law shapes, pullback/composition-shaped spans, span
+  equivalence, scoped local-presentation equivalence, and the L6 Machine-IR
+  crosswalk. Those packets close typed seam-shape gaps only. Authenticated
+  subobject inclusion, geometric/stratified refinement, map execution,
+  categorical pullback/composition/equivalence, quasi-isomorphism, evidence
+  preservation, and physical crosswalk authority still require independent
+  checker receipts before the broader claim is promotable.
 - V1 refuses unbounded and infinite-dimensional local models, opaque external
   analytic functions, unknown compactness/regularity, and infinite computation.
   These are admitted-class limits, not claims that the excluded mathematics is
