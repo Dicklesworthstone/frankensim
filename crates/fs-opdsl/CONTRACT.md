@@ -184,3 +184,37 @@ documented in the bead close); cross-ISA golden hash.
 - Perf numbers are debug-build fixture measurements, documented not
   contractual; the ≥80%-of-hand release-build target is the perf-CI
   lane's gate (fz2.4).
+
+## Constitutive-graph adaptation (bead i94v.1.1.2, feature `constitutive-graph`, default-off)
+
+- I01.2 opaque protocol: canonical fs-material law nodes enter ONLY as
+  `&dyn LawNode` behind `BoundConstitutiveNode`; the compiler retains its
+  OWN `MaterialProvenance` receipt (law/version, state-schema
+  version+arity, port dims, compiler-owned differentiability and
+  thermodynamic-potential-chart spellings) — proven to survive binding
+  exactly with single-field mutation visibility. fs-material never
+  imports compiler internals; the dependency arrow points L3-ward only.
+- A supplied tangent is EVIDENCE: binding verifies consistent-tangent
+  claims against the L3 finite-difference gate before granting the
+  `Consistent` lane; `PiecewiseSmooth` routes to a caveated lane;
+  `NonSmooth` claiming a tangent refuses typed; unclaimed tangents route
+  `DerivativeFree`, where tangent/VJP requests refuse instead of
+  differentiating. VJPs are exact transpose contractions of the verified
+  tangent. State-owning nodes demand explicit initialization; the state
+  codec refuses schema drift with both versions named. The hand-written
+  escape hatch binds under identical gates and permanently retains a
+  no-generated-consistency marker.
+- Batched evaluation (`evaluate_batch`) runs a canonical
+  `ConstitutiveGraph` over material-point batches under `fs_exec::Cx`
+  with request-drain-finalize: polls at `BATCH_POLL_STRIDE` boundaries,
+  drains whole points (never partial), finalizes with a deterministic
+  resume cursor whose resumed remainder is bitwise-equivalent to the
+  uncancelled run; a defective point refuses the whole batch typed with
+  its index named.
+- NO-CLAIM boundaries: no SystemExpr grammar splice yet (bound nodes are
+  not yet referencable from `AdmittedSystem` equations — that increment
+  is identity-sensitive and coordinated with the I01.1 owner); ambition
+  [F] promotion (baseline deck, activation threshold, kill criterion,
+  reproduction pack) has NOT begun — the feature stays default-off; the
+  binding-time tangent gate probes the zero point only (per-application
+  re-verification belongs to the generated-program gates).
