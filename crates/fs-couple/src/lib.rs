@@ -9,11 +9,27 @@
 //! the coupled components, discretizations, transfers, iterations, time
 //! integrators, sources, or a finite accounting window are passive.
 //!
+//! [`PortSchema`] v2 is the dependency-light, versioned description carried by
+//! new coupling relations. It makes identity, dimensions, shape, coordinates,
+//! clock, power pairing, and conservation roles explicit. The four primitive
+//! relation descriptors distinguish conservative junctions, storage,
+//! dissipation, and sources/reservoirs instead of smuggling all four claims
+//! into a lossless topology.
+//!
 //! For the hard, strongly-coupled cases, [`AitkenRelaxation`] gives dynamic
 //! interface relaxation: on the classic ADDED-MASS-INSTABILITY fixture (a light
 //! structure in a dense fluid) naive staggering diverges, while Aitken-relaxed
 //! coupling converges — demonstrated by [`iterate_fixed_relaxation`] vs
-//! [`iterate_aitken`]. Deterministic; no dependencies.
+//! [`iterate_aitken`]. Deterministic; depends only on the neutral `fs-iface`
+//! vocabulary and `fs-qty`'s six-base dimension vector.
+
+use core::num::NonZeroUsize;
+
+use fs_iface::SpaceType;
+use fs_qty::{Dims, Force, Power, Pressure, Temperature, Velocity, VolumetricFlowRate};
+
+/// Current public port-schema version.
+pub const PORT_SCHEMA_VERSION: u16 = 2;
 
 /// The physical type of a power-conjugate port (its effort/flow pair).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +40,470 @@ pub enum PortKind {
     FluidPressureFlux,
     /// Thermal: temperature (effort) × entropy flow.
     ThermalTemperatureEntropy,
+}
+
+impl PortKind {
+    /// The effort dimension of the three scalar seed port kinds.
+    #[must_use]
+    pub const fn scalar_effort_dimensions(self) -> Dims {
+        match self {
+            Self::MechanicalForceVelocity => Force::DIMS,
+            Self::FluidPressureFlux => Pressure::DIMS,
+            Self::ThermalTemperatureEntropy => Temperature::DIMS,
+        }
+    }
+
+    /// The flow dimension of the three scalar seed port kinds.
+    #[must_use]
+    pub const fn scalar_flow_dimensions(self) -> Dims {
+        match self {
+            Self::MechanicalForceVelocity => Velocity::DIMS,
+            Self::FluidPressureFlux => VolumetricFlowRate::DIMS,
+            // Entropy flow is W/K.
+            Self::ThermalTemperatureEntropy => Dims([2, 1, -3, -1, 0, 0]),
+        }
+    }
+
+    /// Migrate one legacy scalar kind into an explicit v2 schema.
+    ///
+    /// Identity, coordinates, and time remain caller supplied: the migration
+    /// must not invent any of the Five Explicits.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured schema error if the supplied metadata does not
+    /// form an admissible scalar power pairing.
+    pub fn scalar_seed_schema(
+        self,
+        id: StableId,
+        coordinates: CoordinateBinding,
+        timestamp: PortTimestamp,
+    ) -> Result<PortSchema, CoupleError> {
+        PortSchema::try_new(
+            id,
+            self,
+            self.scalar_effort_dimensions(),
+            self.scalar_flow_dimensions(),
+            PortValueShape::Scalar,
+            coordinates,
+            PowerPairing::ScalarProduct,
+            timestamp,
+            [ConservationRole::Energy],
+        )
+    }
+}
+
+/// A validated, stable machine identifier used by port and relation schemas.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StableId(String);
+
+impl StableId {
+    /// Validate a stable identifier.
+    ///
+    /// The admitted alphabet is intentionally transport-safe and canonical:
+    /// ASCII alphanumerics plus `-`, `_`, `.`, `:`, and `/`. The first byte
+    /// must be alphanumeric.
+    ///
+    /// # Errors
+    ///
+    /// [`CoupleError::InvalidStableId`] for an empty or non-canonical value.
+    pub fn new(value: impl Into<String>) -> Result<Self, CoupleError> {
+        let value = value.into();
+        let mut chars = value.chars();
+        let valid_first = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+        let valid_tail =
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'));
+        if !valid_first || !valid_tail {
+            return Err(CoupleError::InvalidStableId { value });
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the canonical identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The shape paired by a port's effort and flow coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortValueShape {
+    /// One scalar effort and one scalar flow.
+    Scalar,
+    /// A finite vector with a statically non-zero component count.
+    Vector(NonZeroUsize),
+    /// A finite tensor in a declared basis.
+    Tensor {
+        /// Row count.
+        rows: NonZeroUsize,
+        /// Column count.
+        columns: NonZeroUsize,
+    },
+    /// A field trace in a neutral function-space role.
+    Field {
+        /// Component count at each field point.
+        components: NonZeroUsize,
+        /// FEEC/interface function-space role.
+        space: SpaceType,
+    },
+}
+
+impl PortValueShape {
+    /// Construct a non-empty vector shape.
+    ///
+    /// # Errors
+    /// [`CoupleError::EmptyPortShape`] when `components == 0`.
+    pub fn vector(components: usize) -> Result<Self, CoupleError> {
+        NonZeroUsize::new(components)
+            .map(Self::Vector)
+            .ok_or(CoupleError::EmptyPortShape)
+    }
+
+    /// Construct a non-empty tensor shape.
+    ///
+    /// # Errors
+    /// [`CoupleError::EmptyPortShape`] when either extent is zero.
+    pub fn tensor(rows: usize, columns: usize) -> Result<Self, CoupleError> {
+        let rows = NonZeroUsize::new(rows).ok_or(CoupleError::EmptyPortShape)?;
+        let columns = NonZeroUsize::new(columns).ok_or(CoupleError::EmptyPortShape)?;
+        Ok(Self::Tensor { rows, columns })
+    }
+
+    /// Construct a non-empty field shape.
+    ///
+    /// # Errors
+    /// [`CoupleError::EmptyPortShape`] when `components == 0`.
+    pub fn field(components: usize, space: SpaceType) -> Result<Self, CoupleError> {
+        let components = NonZeroUsize::new(components).ok_or(CoupleError::EmptyPortShape)?;
+        Ok(Self::Field { components, space })
+    }
+}
+
+/// The positive-coordinate convention of a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortOrientation {
+    /// Positive flow leaves the component that owns the port.
+    OutwardFromOwner,
+    /// Positive values follow the declared frame/basis orientation.
+    AlongFrame,
+    /// Positive values oppose the declared frame/basis orientation.
+    AgainstFrame,
+}
+
+impl PortOrientation {
+    fn composes_with(self, other: Self) -> bool {
+        // PR-1's executable scalar relation is proven only in the standard
+        // component-owned convention: both flows are positive outward, hence
+        // their algebraic values sum to zero. Common-frame orientations need
+        // an explicit public pullback before they may be interconnected.
+        matches!(
+            (self, other),
+            (Self::OutwardFromOwner, Self::OutwardFromOwner)
+        )
+    }
+}
+
+/// Basis, reference frame, and sign convention for a port value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinateBinding {
+    basis: StableId,
+    frame: StableId,
+    orientation: PortOrientation,
+}
+
+impl CoordinateBinding {
+    /// Bind a port to an explicit basis, frame, and orientation.
+    #[must_use]
+    pub fn new(basis: StableId, frame: StableId, orientation: PortOrientation) -> Self {
+        Self {
+            basis,
+            frame,
+            orientation,
+        }
+    }
+
+    /// Declared basis identifier.
+    #[must_use]
+    pub fn basis(&self) -> &StableId {
+        &self.basis
+    }
+
+    /// Declared frame identifier.
+    #[must_use]
+    pub fn frame(&self) -> &StableId {
+        &self.frame
+    }
+
+    /// Declared positive orientation.
+    #[must_use]
+    pub fn orientation(&self) -> PortOrientation {
+        self.orientation
+    }
+}
+
+/// A deterministic port timestamp in a named logical clock domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortTimestamp {
+    clock: StableId,
+    tick: u64,
+}
+
+impl PortTimestamp {
+    /// A timestamp. The clock defines the unit and epoch of `tick`.
+    #[must_use]
+    pub fn new(clock: StableId, tick: u64) -> Self {
+        Self { clock, tick }
+    }
+
+    /// Clock-domain identifier.
+    #[must_use]
+    pub fn clock(&self) -> &StableId {
+        &self.clock
+    }
+
+    /// Logical clock tick.
+    #[must_use]
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
+}
+
+/// How effort and flow coordinates are contracted into instantaneous power.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerPairing {
+    /// Scalar multiplication.
+    ScalarProduct,
+    /// Euclidean component-wise dot product.
+    EuclideanDot,
+    /// A declared field duality/integral pairing with its integration-measure
+    /// dimensions (for example area for a boundary traction/velocity pair).
+    FieldDuality {
+        /// Dimensions contributed by the integration measure.
+        measure_dimensions: Dims,
+    },
+}
+
+/// Conserved or audited quantities transported by a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConservationRole {
+    /// Energy/power exchange.
+    Energy,
+    /// Total mass.
+    Mass,
+    /// Amount of substance or species/element amount.
+    Amount,
+    /// Linear momentum.
+    LinearMomentum,
+    /// Angular momentum.
+    AngularMomentum,
+    /// Entropy.
+    Entropy,
+    /// Electric charge.
+    ElectricCharge,
+}
+
+/// Versioned schema for one typed effort/flow port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortSchema {
+    version: u16,
+    id: StableId,
+    kind: PortKind,
+    effort_dimensions: Dims,
+    flow_dimensions: Dims,
+    shape: PortValueShape,
+    coordinates: CoordinateBinding,
+    power_pairing: PowerPairing,
+    timestamp: PortTimestamp,
+    conservation_roles: Vec<ConservationRole>,
+}
+
+impl PortSchema {
+    /// Construct and structurally admit a v2 port schema.
+    ///
+    /// This PR-1 admission proves only that the shape/pairing agree and that
+    /// effort × flow (plus the declared measure for field duality) has
+    /// dimensions of power. Port-kind-specific semantic dimension vocabularies
+    /// are the PR-2 gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for dimension overflow, a non-power
+    /// dimension product, an incompatible shape/pairing, or omission of the
+    /// mandatory energy conservation role.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        id: StableId,
+        kind: PortKind,
+        effort_dimensions: Dims,
+        flow_dimensions: Dims,
+        shape: PortValueShape,
+        coordinates: CoordinateBinding,
+        power_pairing: PowerPairing,
+        timestamp: PortTimestamp,
+        conservation_roles: impl IntoIterator<Item = ConservationRole>,
+    ) -> Result<Self, CoupleError> {
+        let pairing_matches_shape = matches!(
+            (shape, power_pairing),
+            (PortValueShape::Scalar, PowerPairing::ScalarProduct)
+                | (PortValueShape::Vector(_), PowerPairing::EuclideanDot)
+                | (PortValueShape::Tensor { .. }, PowerPairing::EuclideanDot)
+                | (
+                    PortValueShape::Field { .. },
+                    PowerPairing::FieldDuality { .. }
+                )
+        );
+        if !pairing_matches_shape {
+            return Err(CoupleError::PairingShapeMismatch {
+                shape,
+                pairing: power_pairing,
+            });
+        }
+
+        let pointwise_product = effort_dimensions.checked_plus(flow_dimensions).ok_or(
+            CoupleError::PortDimensionOverflow {
+                effort: effort_dimensions,
+                flow: flow_dimensions,
+            },
+        )?;
+        let product = match power_pairing {
+            PowerPairing::FieldDuality { measure_dimensions } => pointwise_product
+                .checked_plus(measure_dimensions)
+                .ok_or(CoupleError::PortMeasureDimensionOverflow {
+                    pointwise_product,
+                    measure: measure_dimensions,
+                })?,
+            PowerPairing::ScalarProduct | PowerPairing::EuclideanDot => pointwise_product,
+        };
+        if product != Power::DIMS {
+            return Err(CoupleError::PortPowerDimensionMismatch {
+                effort: effort_dimensions,
+                flow: flow_dimensions,
+                product,
+            });
+        }
+
+        let mut conservation_roles: Vec<_> = conservation_roles.into_iter().collect();
+        conservation_roles.sort_unstable();
+        conservation_roles.dedup();
+        if !conservation_roles.contains(&ConservationRole::Energy) {
+            return Err(CoupleError::MissingEnergyConservationRole);
+        }
+
+        Ok(Self {
+            version: PORT_SCHEMA_VERSION,
+            id,
+            kind,
+            effort_dimensions,
+            flow_dimensions,
+            shape,
+            coordinates,
+            power_pairing,
+            timestamp,
+            conservation_roles,
+        })
+    }
+
+    /// Schema version.
+    #[must_use]
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Stable port identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Physical port vocabulary entry.
+    #[must_use]
+    pub fn kind(&self) -> PortKind {
+        self.kind
+    }
+
+    /// Effort dimensions.
+    #[must_use]
+    pub fn effort_dimensions(&self) -> Dims {
+        self.effort_dimensions
+    }
+
+    /// Flow dimensions.
+    #[must_use]
+    pub fn flow_dimensions(&self) -> Dims {
+        self.flow_dimensions
+    }
+
+    /// Value/field shape.
+    #[must_use]
+    pub fn shape(&self) -> PortValueShape {
+        self.shape
+    }
+
+    /// Coordinate binding.
+    #[must_use]
+    pub fn coordinates(&self) -> &CoordinateBinding {
+        &self.coordinates
+    }
+
+    /// Power contraction.
+    #[must_use]
+    pub fn power_pairing(&self) -> PowerPairing {
+        self.power_pairing
+    }
+
+    /// Clock/timestamp binding.
+    #[must_use]
+    pub fn timestamp(&self) -> &PortTimestamp {
+        &self.timestamp
+    }
+
+    /// Canonically sorted, duplicate-free conservation roles.
+    #[must_use]
+    pub fn conservation_roles(&self) -> &[ConservationRole] {
+        &self.conservation_roles
+    }
+
+    fn first_conjugacy_mismatch(&self, other: &Self) -> Option<&'static str> {
+        if self.id == other.id {
+            return Some("stable_id");
+        }
+        if self.kind != other.kind {
+            return Some("kind");
+        }
+        if self.effort_dimensions != other.effort_dimensions {
+            return Some("effort_dimensions");
+        }
+        if self.flow_dimensions != other.flow_dimensions {
+            return Some("flow_dimensions");
+        }
+        if self.shape != other.shape {
+            return Some("shape");
+        }
+        if self.coordinates.basis != other.coordinates.basis {
+            return Some("basis");
+        }
+        if self.coordinates.frame != other.coordinates.frame {
+            return Some("frame");
+        }
+        if !self
+            .coordinates
+            .orientation
+            .composes_with(other.coordinates.orientation)
+        {
+            return Some("orientation");
+        }
+        if self.power_pairing != other.power_pairing {
+            return Some("power_pairing");
+        }
+        if self.timestamp != other.timestamp {
+            return Some("clock_timestamp");
+        }
+        if self.conservation_roles != other.conservation_roles {
+            return Some("conservation_roles");
+        }
+        None
+    }
 }
 
 /// A power port: an effort/flow pair. `power = effort × flow`.
@@ -58,6 +538,597 @@ impl Port {
     }
 }
 
+/// A scalar runtime value bound to an explicit [`PortSchema`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaPort {
+    schema: PortSchema,
+    effort: f64,
+    flow: f64,
+}
+
+impl SchemaPort {
+    fn new(schema: PortSchema, effort: f64, flow: f64) -> Self {
+        Self {
+            schema,
+            effort,
+            flow,
+        }
+    }
+
+    /// Explicit schema carried by this value.
+    #[must_use]
+    pub fn schema(&self) -> &PortSchema {
+        &self.schema
+    }
+
+    /// Scalar effort value in coherent SI units.
+    #[must_use]
+    pub fn effort(&self) -> f64 {
+        self.effort
+    }
+
+    /// Scalar flow value in coherent SI units.
+    #[must_use]
+    pub fn flow(&self) -> f64 {
+        self.flow
+    }
+
+    /// Instantaneous scalar power.
+    #[must_use]
+    pub fn power(&self) -> f64 {
+        self.effort * self.flow
+    }
+}
+
+/// A schema-bound two-port Dirac interconnection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaInterconnection {
+    /// Side A, with caller-supplied flow sign.
+    pub port_a: SchemaPort,
+    /// Side B, with the balancing flow sign.
+    pub port_b: SchemaPort,
+    /// Net scalar interface power; zero for finite admitted inputs.
+    pub interface_power: f64,
+}
+
+/// A conservative Dirac/Stokes–Dirac junction descriptor.
+///
+/// PR-1 implements the exact scalar two-port seed. Multi-port matrix/field
+/// relations remain a later operator lane, but the schema admission is already
+/// general over scalar, vector, tensor, and field shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConservativeJunction {
+    id: StableId,
+    port_a: PortSchema,
+    port_b: PortSchema,
+}
+
+impl ConservativeJunction {
+    /// Admit a lossless two-port relation between conjugate schemas.
+    ///
+    /// # Errors
+    /// [`CoupleError::IncompatiblePortSchemas`] localizes the first metadata
+    /// mismatch, including reused port IDs and any orientation other than the
+    /// PR-1 scalar seed's outward-from-owner convention on both sides.
+    pub fn new(id: StableId, port_a: PortSchema, port_b: PortSchema) -> Result<Self, CoupleError> {
+        if id == port_a.id || id == port_b.id {
+            return Err(CoupleError::DuplicateIdentity {
+                id: id.as_str().to_string(),
+            });
+        }
+        if let Some(field) = port_a.first_conjugacy_mismatch(&port_b) {
+            return Err(CoupleError::IncompatiblePortSchemas {
+                a: port_a.id.as_str().to_string(),
+                b: port_b.id.as_str().to_string(),
+                field,
+            });
+        }
+        Ok(Self { id, port_a, port_b })
+    }
+
+    /// Junction identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// The admitted pair, in deterministic A/B order.
+    #[must_use]
+    pub fn ports(&self) -> (&PortSchema, &PortSchema) {
+        (&self.port_a, &self.port_b)
+    }
+
+    /// Evaluate the migrated scalar seed: shared effort, opposite flow.
+    ///
+    /// # Errors
+    /// Refuses a non-scalar schema or non-finite runtime input. This keeps the
+    /// schema-bound path fail-closed; the legacy raw [`Port`] path remains for
+    /// migration comparison only.
+    pub fn interconnect_scalar(
+        &self,
+        effort: f64,
+        flow: f64,
+    ) -> Result<SchemaInterconnection, CoupleError> {
+        if self.port_a.shape != PortValueShape::Scalar {
+            return Err(CoupleError::ScalarOperationRequiresScalarPort {
+                id: self.port_a.id.as_str().to_string(),
+                shape: self.port_a.shape,
+            });
+        }
+        if !effort.is_finite() {
+            return Err(CoupleError::NonFinitePortValue { field: "effort" });
+        }
+        if !flow.is_finite() {
+            return Err(CoupleError::NonFinitePortValue { field: "flow" });
+        }
+        let side_power = effort * flow;
+        if !side_power.is_finite() {
+            return Err(CoupleError::NonFinitePortValue { field: "power" });
+        }
+        let port_a = SchemaPort::new(self.port_a.clone(), effort, flow);
+        let port_b = SchemaPort::new(self.port_b.clone(), effort, -flow);
+        Ok(SchemaInterconnection {
+            interface_power: side_power + -side_power,
+            port_a,
+            port_b,
+        })
+    }
+
+    fn require_added_mass_fixture_schema(&self) -> Result<(), CoupleError> {
+        if self.port_a.kind != PortKind::MechanicalForceVelocity {
+            return Err(CoupleError::AddedMassFixtureRequiresMechanicalPort {
+                kind: self.port_a.kind,
+            });
+        }
+        if self.port_a.shape != PortValueShape::Scalar {
+            return Err(CoupleError::ScalarOperationRequiresScalarPort {
+                id: self.port_a.id.as_str().to_string(),
+                shape: self.port_a.shape,
+            });
+        }
+        Ok(())
+    }
+
+    /// Run the legacy fixed-relaxation added-mass fixture through this
+    /// schema-bound mechanical junction.
+    ///
+    /// This is a migration bridge, not a general FSI operator. It lets retained
+    /// goldens prove that PortSchema v2 preserves the original scalar fixture
+    /// bit-for-bit while downstream domain adapters migrate.
+    ///
+    /// # Errors
+    /// Refuses a non-mechanical or non-scalar junction and propagates
+    /// [`CoupleError::NonFinitePortValue`] if an iteration residual cannot be
+    /// represented by the schema-bound scalar exchange.
+    pub fn iterate_added_mass_fixed(
+        &self,
+        mu: f64,
+        c: f64,
+        x0: f64,
+        omega: f64,
+        max_steps: usize,
+        tol: f64,
+    ) -> Result<FsiResult, CoupleError> {
+        self.require_added_mass_fixture_schema()?;
+        let mut x = x0;
+        for step in 1..=max_steps {
+            let raw_residual = interface_map(mu, c, x) - x;
+            // Unit coherent-SI effort is a migration witness: the numerical
+            // residual is round-tripped through the typed Dirac pair without
+            // changing its bits, and the balancing side is exercised at every
+            // iteration. This does not turn the scalar map into a physical FSI
+            // discretization.
+            let exchange = self.interconnect_scalar(1.0, raw_residual)?;
+            let residual = exchange.port_a.flow();
+            x += omega * residual;
+            if !x.is_finite() || x.abs() > BLOWUP {
+                return Ok(FsiResult {
+                    converged: false,
+                    steps: step,
+                    solution: x,
+                    final_residual: f64::INFINITY,
+                });
+            }
+            if residual.abs() < tol {
+                return Ok(FsiResult {
+                    converged: true,
+                    steps: step,
+                    solution: x,
+                    final_residual: residual.abs(),
+                });
+            }
+        }
+        let raw_residual = interface_map(mu, c, x) - x;
+        let residual = self
+            .interconnect_scalar(1.0, raw_residual)?
+            .port_a
+            .flow()
+            .abs();
+        Ok(FsiResult {
+            converged: residual < tol,
+            steps: max_steps,
+            solution: x,
+            final_residual: residual,
+        })
+    }
+
+    /// Run the legacy Aitken added-mass fixture through this schema-bound
+    /// mechanical junction.
+    ///
+    /// # Errors
+    /// Refuses a non-mechanical or non-scalar junction and propagates
+    /// [`CoupleError::NonFinitePortValue`] if an iteration residual cannot be
+    /// represented by the schema-bound scalar exchange.
+    #[allow(clippy::too_many_arguments)]
+    pub fn iterate_added_mass_aitken(
+        &self,
+        mu: f64,
+        c: f64,
+        x0: f64,
+        omega_init: f64,
+        omega_max: f64,
+        max_steps: usize,
+        tol: f64,
+    ) -> Result<FsiResult, CoupleError> {
+        self.require_added_mass_fixture_schema()?;
+        let mut x = x0;
+        let mut aitken = AitkenRelaxation::new(omega_init, omega_max);
+        for step in 1..=max_steps {
+            let raw_residual = interface_map(mu, c, x) - x;
+            let exchange = self.interconnect_scalar(1.0, raw_residual)?;
+            let residual = exchange.port_a.flow();
+            if residual.abs() < tol {
+                return Ok(FsiResult {
+                    converged: true,
+                    steps: step,
+                    solution: x,
+                    final_residual: residual.abs(),
+                });
+            }
+            let omega = aitken.next_omega(residual);
+            x += omega * residual;
+            if !x.is_finite() || x.abs() > BLOWUP {
+                return Ok(FsiResult {
+                    converged: false,
+                    steps: step,
+                    solution: x,
+                    final_residual: f64::INFINITY,
+                });
+            }
+        }
+        let raw_residual = interface_map(mu, c, x) - x;
+        let residual = self
+            .interconnect_scalar(1.0, raw_residual)?
+            .port_a
+            .flow()
+            .abs();
+        Ok(FsiResult {
+            converged: residual < tol,
+            steps: max_steps,
+            solution: x,
+            final_residual: residual,
+        })
+    }
+}
+
+/// Thermodynamic potential represented by a storage element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoragePotential {
+    /// Hamiltonian energy state.
+    Hamiltonian,
+    /// Free-energy state under an explicit thermodynamic chart.
+    FreeEnergy,
+}
+
+/// A typed storage primitive.
+///
+/// The state and constitutive-gradient operator are durable references, not
+/// hidden executable closures; domain crates implement the public operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageElement {
+    id: StableId,
+    port: PortSchema,
+    potential: StoragePotential,
+    state_schema: StableId,
+    state_dimension: NonZeroUsize,
+    constitutive_gradient: StableId,
+}
+
+impl StorageElement {
+    /// Construct a storage descriptor with an explicit state and gradient.
+    ///
+    /// # Errors
+    /// Refuses identity aliasing between the relation and its port.
+    pub fn new(
+        id: StableId,
+        port: PortSchema,
+        potential: StoragePotential,
+        state_schema: StableId,
+        state_dimension: NonZeroUsize,
+        constitutive_gradient: StableId,
+    ) -> Result<Self, CoupleError> {
+        reject_relation_port_alias(&id, &port)?;
+        Ok(Self {
+            id,
+            port,
+            potential,
+            state_schema,
+            state_dimension,
+            constitutive_gradient,
+        })
+    }
+
+    /// Stable relation identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Exposed power port.
+    #[must_use]
+    pub fn port(&self) -> &PortSchema {
+        &self.port
+    }
+
+    /// Hamiltonian or free-energy chart.
+    #[must_use]
+    pub fn potential(&self) -> StoragePotential {
+        self.potential
+    }
+
+    /// Durable state-schema identifier.
+    #[must_use]
+    pub fn state_schema(&self) -> &StableId {
+        &self.state_schema
+    }
+
+    /// Number of state coordinates consumed by the gradient operator.
+    #[must_use]
+    pub fn state_dimension(&self) -> NonZeroUsize {
+        self.state_dimension
+    }
+
+    /// Durable constitutive-gradient operator identifier.
+    #[must_use]
+    pub fn constitutive_gradient(&self) -> &StableId {
+        &self.constitutive_gradient
+    }
+}
+
+/// Physical family of a dissipative constitutive relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DissipationLaw {
+    /// Electrical or generalized resistance.
+    Resistive,
+    /// Dry or rate-dependent friction.
+    Frictional,
+    /// Viscous momentum loss.
+    Viscous,
+    /// Thermal conduction.
+    Conductive,
+    /// Plastic flow.
+    Plastic,
+}
+
+/// Evidence required before a dissipative relation may make a sign claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DissipationEvidence {
+    /// A durable monotonicity proof/receipt.
+    Monotonicity(StableId),
+    /// A durable nonnegative-production proof/receipt.
+    NonnegativeProduction(StableId),
+}
+
+/// A typed dissipative primitive with mandatory evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DissipativeRelation {
+    id: StableId,
+    port: PortSchema,
+    law: DissipationLaw,
+    constitutive_operator: StableId,
+    evidence: DissipationEvidence,
+}
+
+impl DissipativeRelation {
+    /// Construct an evidence-bound dissipative relation.
+    ///
+    /// # Errors
+    /// Refuses identity aliasing between the relation and its port.
+    pub fn new(
+        id: StableId,
+        port: PortSchema,
+        law: DissipationLaw,
+        constitutive_operator: StableId,
+        evidence: DissipationEvidence,
+    ) -> Result<Self, CoupleError> {
+        reject_relation_port_alias(&id, &port)?;
+        Ok(Self {
+            id,
+            port,
+            law,
+            constitutive_operator,
+            evidence,
+        })
+    }
+
+    /// Stable relation identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Exposed power port.
+    #[must_use]
+    pub fn port(&self) -> &PortSchema {
+        &self.port
+    }
+
+    /// Constitutive loss family.
+    #[must_use]
+    pub fn law(&self) -> DissipationLaw {
+        self.law
+    }
+
+    /// Public constitutive-operator identifier.
+    #[must_use]
+    pub fn constitutive_operator(&self) -> &StableId {
+        &self.constitutive_operator
+    }
+
+    /// Proof/receipt that licenses the dissipation sign claim.
+    #[must_use]
+    pub fn evidence(&self) -> &DissipationEvidence {
+        &self.evidence
+    }
+}
+
+/// What crosses a source/reservoir accounting boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceClass {
+    /// Prescribed effort, such as voltage or temperature.
+    PrescribedEffort,
+    /// Prescribed flow, such as current or heat input.
+    PrescribedFlow,
+    /// Environment/fuel/body treated as a reservoir exchange.
+    Reservoir,
+}
+
+/// How a boundary contribution appears in a closed accounting window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryTreatment {
+    /// The source term is explicitly included inside the audited model.
+    IncludedSourceTerm,
+    /// The exchange crosses to an explicitly external reservoir.
+    ExternalReservoirExchange,
+}
+
+/// Explicit boundary that prevents a source from disappearing from an audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountingBoundary {
+    id: StableId,
+    coordinates: CoordinateBinding,
+    treatment: BoundaryTreatment,
+}
+
+impl AccountingBoundary {
+    /// Declare a signed accounting boundary.
+    #[must_use]
+    pub fn new(id: StableId, coordinates: CoordinateBinding, treatment: BoundaryTreatment) -> Self {
+        Self {
+            id,
+            coordinates,
+            treatment,
+        }
+    }
+
+    /// Boundary identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Basis, frame, and positive contribution convention.
+    #[must_use]
+    pub fn coordinates(&self) -> &CoordinateBinding {
+        &self.coordinates
+    }
+
+    /// Whether this is an included source or external exchange.
+    #[must_use]
+    pub fn treatment(&self) -> BoundaryTreatment {
+        self.treatment
+    }
+}
+
+/// A typed source or reservoir primitive with an explicit audit boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOrReservoir {
+    id: StableId,
+    port: PortSchema,
+    class: SourceClass,
+    boundary: AccountingBoundary,
+}
+
+impl SourceOrReservoir {
+    /// Construct a source/reservoir descriptor.
+    ///
+    /// # Errors
+    /// Refuses identity aliasing among the relation, port, and boundary, or an
+    /// [`CoupleError::AccountingBoundaryMismatch`] between their coordinate
+    /// bindings.
+    pub fn new(
+        id: StableId,
+        port: PortSchema,
+        class: SourceClass,
+        boundary: AccountingBoundary,
+    ) -> Result<Self, CoupleError> {
+        reject_relation_port_alias(&id, &port)?;
+        if id == boundary.id || port.id == boundary.id {
+            return Err(CoupleError::DuplicateIdentity {
+                id: boundary.id.as_str().to_string(),
+            });
+        }
+        if port.coordinates != boundary.coordinates {
+            return Err(CoupleError::AccountingBoundaryMismatch {
+                port: port.id.as_str().to_string(),
+                boundary: boundary.id.as_str().to_string(),
+            });
+        }
+        Ok(Self {
+            id,
+            port,
+            class,
+            boundary,
+        })
+    }
+
+    /// Stable relation identifier.
+    #[must_use]
+    pub fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Exposed power port.
+    #[must_use]
+    pub fn port(&self) -> &PortSchema {
+        &self.port
+    }
+
+    /// Prescribed-effort, prescribed-flow, or reservoir class.
+    #[must_use]
+    pub fn class(&self) -> SourceClass {
+        self.class
+    }
+
+    /// Explicit signed accounting boundary.
+    #[must_use]
+    pub fn boundary(&self) -> &AccountingBoundary {
+        &self.boundary
+    }
+}
+
+/// Closed vocabulary of the four port-thermodynamic relation primitives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortPrimitive {
+    /// Lossless topology only.
+    ConservativeJunction(ConservativeJunction),
+    /// Stored-energy relation.
+    StorageElement(StorageElement),
+    /// Evidence-bound dissipative relation.
+    DissipativeRelation(DissipativeRelation),
+    /// Explicit source/reservoir boundary.
+    SourceOrReservoir(SourceOrReservoir),
+}
+
+fn reject_relation_port_alias(id: &StableId, port: &PortSchema) -> Result<(), CoupleError> {
+    if id == &port.id {
+        return Err(CoupleError::DuplicateIdentity {
+            id: id.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// A structured coupling failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoupleError {
@@ -67,6 +1138,83 @@ pub enum CoupleError {
         a: PortKind,
         /// The second port's kind.
         b: PortKind,
+    },
+    /// A stable identifier was empty or outside the canonical alphabet.
+    InvalidStableId {
+        /// Rejected value.
+        value: String,
+    },
+    /// A vector, tensor, or field shape had a zero extent.
+    EmptyPortShape,
+    /// Effort/flow exponent addition overflowed the six-base vector.
+    PortDimensionOverflow {
+        /// Effort dimensions.
+        effort: Dims,
+        /// Flow dimensions.
+        flow: Dims,
+    },
+    /// A field pairing's pointwise product plus measure dimensions overflowed.
+    PortMeasureDimensionOverflow {
+        /// Checked effort × flow dimensions before integration.
+        pointwise_product: Dims,
+        /// Integration-measure dimensions.
+        measure: Dims,
+    },
+    /// Effort × flow did not have watt dimensions.
+    PortPowerDimensionMismatch {
+        /// Effort dimensions.
+        effort: Dims,
+        /// Flow dimensions.
+        flow: Dims,
+        /// Checked product dimensions.
+        product: Dims,
+    },
+    /// The declared contraction cannot consume the declared shape.
+    PairingShapeMismatch {
+        /// Value/field shape.
+        shape: PortValueShape,
+        /// Requested contraction.
+        pairing: PowerPairing,
+    },
+    /// Every power port must declare energy as a conservation role.
+    MissingEnergyConservationRole,
+    /// Two port schemas disagree on a localized conjugacy field.
+    IncompatiblePortSchemas {
+        /// First port ID.
+        a: String,
+        /// Second port ID.
+        b: String,
+        /// First incompatible schema field.
+        field: &'static str,
+    },
+    /// Stable identities aliased within one relation.
+    DuplicateIdentity {
+        /// Reused identity.
+        id: String,
+    },
+    /// The scalar seed evaluator was called on a non-scalar schema.
+    ScalarOperationRequiresScalarPort {
+        /// Port ID.
+        id: String,
+        /// Actual shape.
+        shape: PortValueShape,
+    },
+    /// A schema-bound runtime value was non-finite.
+    NonFinitePortValue {
+        /// Offending input field.
+        field: &'static str,
+    },
+    /// The retained scalar added-mass fixture is mechanical-only.
+    AddedMassFixtureRequiresMechanicalPort {
+        /// Actual port kind.
+        kind: PortKind,
+    },
+    /// A source boundary used a different basis/frame/orientation than its port.
+    AccountingBoundaryMismatch {
+        /// Source port ID.
+        port: String,
+        /// Accounting-boundary ID.
+        boundary: String,
     },
 }
 

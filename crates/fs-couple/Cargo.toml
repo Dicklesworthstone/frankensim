@@ -5,12 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Multiphysics composition through port-Hamiltonian Dirac structures (fs-couple): partitioned coupling that is PASSIVE BY CONSTRUCTION. Power-conjugate ports, a Dirac interconnection that conserves interface power exactly, an energy audit that measures (never assumes) passivity, and Aitken interface acceleration that stabilizes added-mass-instability-prone FSI where naive staggering diverges."
+description = "Multiphysics composition through typed port-thermodynamic relations (fs-couple): lossless Dirac interconnections, explicit storage/dissipation/source boundaries, measured energy audits, and Aitken interface acceleration without false whole-system passivity claims."
 
 [package.metadata.frankensim]
 layer = "L3"
 
 [dependencies]
+fs-iface = { path = "../fs-iface" }
+fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
 

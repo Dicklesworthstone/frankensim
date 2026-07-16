@@ -956,6 +956,10 @@ dependencies = [
 [[package]]
 name = "fs-couple"
 version = "0.0.1"
+dependencies = [
+ "fs-iface",
+ "fs-qty",
+]
 
 [[package]]
 name = "fs-crosswalk"
