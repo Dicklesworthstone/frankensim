@@ -757,15 +757,29 @@ destructors remain non-preemptible; cleanup latency, caller-budget consumption,
 wall-time preemption, resumability, and request-drain-finalize ownership remain
 explicit no-claims.
 Complete refit construction paths are not migrated yet; they make no claim of
-caller-budgeted preflight or end-to-end validate-once execution. The standalone
-radial-projection primitive is a narrow exception:
+caller-budgeted preflight or end-to-end validate-once execution. The currently
+migrated building blocks are narrow exceptions. The standalone radial-projection
+primitive
 `project_radial_with_cx` validates its constant-time request before polling,
 polls at the start of each attempted sample for up to 42 field calls (42 on a
 complete run), and gates its complete radius behind a final publication
 checkpoint. It drops the local bracket on cancellation, but does not consume a
 caller budget or preempt a field closure already in flight, drain/finalize
 caller work, or make
-`refit_radial` cancellation-aware. The SDF shell rejects malformed
+`refit_radial` cancellation-aware.
+`assemble_refit_normal_with_cx` preserves checked dimensions, finite
+non-negative regularization, count-derived aggregate work, and the 256 MiB
+requested dense-output envelope ahead of its first checkpoint. One gate then
+spans borrowed row-shape and finite-value validation, fallible zero-matrix
+allocation, deterministic `B^T B` accumulation, the five-point thin-plate
+stencil, finite-arithmetic checks, and final publication, polling after at most
+64 logical scalar operations and around every row allocation. Cancellation
+drops the entire partial matrix and returns `RefitNormalAssemblyRun::Cancelled`.
+The borrowed sample matrix, allocator metadata/rounding, and spare capacity are
+outside the retained envelope; individual allocator calls are non-preemptible.
+This primitive does not consume a caller budget, factor or solve the matrix,
+migrate the refit pipeline, own drain/finalize, promise wall-time preemption, or
+grant conditioning or fit-quality authority. The SDF shell rejects malformed
 point/tolerance input before surface planning, admits each immutable surface
 once per distance query, reuses that admission through closest and Gauss-Newton
 polish, and carries the winning admission into gradient, orientation, and

@@ -78,6 +78,7 @@ impl Default for RefitConfig {
 const REFIT_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
 const REFIT_MAX_PROBE_POINTS: usize = 4 * 1024 * 1024;
 const REFIT_MAX_WORK_UNITS: u128 = 1_000_000_000;
+const REFIT_CANCELLATION_STRIDE: usize = 64;
 
 fn refit_structure_error(what: impl Into<String>) -> NurbsError {
     NurbsError::Structure { what: what.into() }
@@ -444,6 +445,22 @@ pub enum RadialProjectionRun {
     Cancelled,
 }
 
+/// Transactional outcome of cancellation-aware normal-matrix assembly.
+///
+/// Cancellation drops the partially initialized or accumulated dense matrix;
+/// callers receive either the complete matrix or no matrix at all.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefitNormalAssemblyRun {
+    /// The complete `B^T B + lambda L^T L` matrix is safe to publish.
+    Complete {
+        /// Dense row-major normal matrix.
+        matrix: Vec<Vec<f64>>,
+    },
+    /// Cancellation was observed before publication.
+    Cancelled,
+}
+
 fn validate_radial_projection_request(
     center: [f64; 3],
     dir: [f64; 3],
@@ -585,6 +602,81 @@ fn project_radial(
             "non-cancellable radial projection observed cancellation",
         )),
     }
+}
+
+fn refit_poll_due(
+    operations_since_poll: &mut usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> bool {
+    *operations_since_poll += 1;
+    if *operations_since_poll < REFIT_CANCELLATION_STRIDE {
+        return false;
+    }
+    *operations_since_poll = 0;
+    should_cancel()
+}
+
+fn preflight_refit_normal_assembly(
+    row_count: usize,
+    nu: usize,
+    nv: usize,
+    lambda: f64,
+) -> Result<usize, NurbsError> {
+    if nu == 0 || nv == 0 {
+        return Err(refit_structure_error(
+            "refit normal-matrix axes must be nonzero",
+        ));
+    }
+    if !lambda.is_finite() || lambda < 0.0 {
+        return Err(refit_structure_error(
+            "refit normal-matrix lambda must be finite and non-negative",
+        ));
+    }
+    let n = nu
+        .checked_mul(nv)
+        .ok_or_else(|| refit_structure_error("refit normal-matrix dimension overflow"))?;
+    let matrix_scalars = n
+        .checked_mul(n)
+        .ok_or_else(|| refit_structure_error("refit normal-matrix size overflow"))?;
+    let matrix_bytes = matrix_scalars
+        .checked_mul(size_of::<f64>())
+        .and_then(|bytes| {
+            n.checked_mul(size_of::<Vec<f64>>())
+                .and_then(|headers| bytes.checked_add(headers))
+        })
+        .ok_or_else(|| refit_structure_error("refit normal-matrix byte estimate overflow"))?;
+    if matrix_bytes > REFIT_MAX_ALLOC_BYTES {
+        return Err(refit_structure_error(format!(
+            "refit normal-matrix allocation estimate {matrix_bytes} bytes exceeds static cap {REFIT_MAX_ALLOC_BYTES}"
+        )));
+    }
+
+    let row_count = row_count as u128;
+    let n_work = n as u128;
+    let row_validation_work =
+        checked_refit_work_product(&[row_count, n_work], "normal row validation")?;
+    let matrix_initialization_work =
+        checked_refit_work_product(&[n_work, n_work], "normal matrix initialization")?;
+    let gram_work =
+        checked_refit_work_product(&[row_count, n_work, n_work], "normal Gram assembly")?;
+    // A five-point lattice stencil contributes at most 5 * 5 outer products.
+    let regularization_work = checked_refit_work_product(&[n_work, 25], "normal regularization")?;
+    let total_work = checked_refit_work_sum(
+        &[
+            row_validation_work,
+            matrix_initialization_work,
+            gram_work,
+            regularization_work,
+            2,
+        ],
+        "normal assembly",
+    )?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit normal-matrix work estimate {total_work} exceeds static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+    Ok(n)
 }
 
 /// Dense symmetric-positive-definite Cholesky factorization in place. The
@@ -741,25 +833,100 @@ fn lipschitz_estimate(surface: AdmittedNurbsSurface<'_, f64>) -> (f64, f64) {
 
 /// Fit one scalar/vector LSQ system: `(BᵀB + λ LᵀL) c = Bᵀy` where `L`
 /// is the discrete control-lattice Laplacian (thin-plate proxy).
-#[allow(clippy::needless_range_loop)]
-fn assemble_normal(
+///
+/// Checked dimension, requested-output, and worst-case work refusals precede
+/// the first checkpoint. One gate then covers borrowed row validation,
+/// fallible matrix initialization, deterministic Gram and regularization
+/// accumulation, finite-arithmetic checks, and final publication. A cancelled
+/// run exposes no partial matrix. This primitive does not consume the `Cx`
+/// budget or make the full refit pipeline cancellation-aware.
+///
+/// # Errors
+/// Returns a structured [`NurbsError`] for invalid dimensions, row shapes,
+/// non-finite inputs or arithmetic, checked work/retained-memory refusal, or
+/// allocation refusal.
+pub fn assemble_refit_normal_with_cx(
     rows_b: &[Vec<f64>],
     nu: usize,
     nv: usize,
     lambda: f64,
-) -> Result<Vec<Vec<f64>>, NurbsError> {
-    let n = nu
-        .checked_mul(nv)
-        .ok_or_else(|| refit_structure_error("refit normal-matrix dimension overflow"))?;
-    let mut a = try_filled_matrix(n, n, 0.0f64, "refit normal matrix")?;
+    cx: &Cx<'_>,
+) -> Result<RefitNormalAssemblyRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    assemble_refit_normal_with_poll(rows_b, nu, nv, lambda, &mut should_cancel)
+}
+
+#[allow(clippy::needless_range_loop, clippy::too_many_lines)]
+fn assemble_refit_normal_with_poll(
+    rows_b: &[Vec<f64>],
+    nu: usize,
+    nv: usize,
+    lambda: f64,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitNormalAssemblyRun, NurbsError> {
+    let n = preflight_refit_normal_assembly(rows_b.len(), nu, nv, lambda)?;
+    if should_cancel() {
+        return Ok(RefitNormalAssemblyRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
+    for (row_index, row) in rows_b.iter().enumerate() {
+        if row.len() != n {
+            return Err(refit_structure_error(format!(
+                "refit normal-matrix row {row_index} has length {}, expected {n}",
+                row.len()
+            )));
+        }
+        for value in row {
+            if !value.is_finite() {
+                return Err(refit_structure_error(format!(
+                    "refit normal-matrix row {row_index} contains a non-finite value"
+                )));
+            }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitNormalAssemblyRun::Cancelled);
+            }
+        }
+    }
+
+    let mut a = try_vec_with_capacity(n, "refit normal matrix")?;
+    if should_cancel() {
+        return Ok(RefitNormalAssemblyRun::Cancelled);
+    }
+    for _ in 0..n {
+        let mut row = try_vec_with_capacity(n, "refit normal matrix")?;
+        if should_cancel() {
+            return Ok(RefitNormalAssemblyRun::Cancelled);
+        }
+        for _ in 0..n {
+            row.push(0.0);
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitNormalAssemblyRun::Cancelled);
+            }
+        }
+        a.push(row);
+    }
+
     for row in rows_b {
         for i in 0..n {
             if row[i] == 0.0 {
+                if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(RefitNormalAssemblyRun::Cancelled);
+                }
                 continue;
             }
             for j in 0..n {
                 if row[j] != 0.0 {
-                    a[i][j] += row[i] * row[j];
+                    let next = a[i][j] + row[i] * row[j];
+                    if !next.is_finite() {
+                        return Err(refit_structure_error(
+                            "refit normal-matrix Gram assembly became non-finite",
+                        ));
+                    }
+                    a[i][j] = next;
+                }
+                if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(RefitNormalAssemblyRun::Cancelled);
                 }
             }
         }
@@ -795,12 +962,39 @@ fn assemble_normal(
             stencil[0].1 = degree;
             for &(p, wp) in &stencil[..stencil_len] {
                 for &(q, wq) in &stencil[..stencil_len] {
-                    a[p][q] += lambda * wp * wq;
+                    let next = a[p][q] + lambda * wp * wq;
+                    if !next.is_finite() {
+                        return Err(refit_structure_error(
+                            "refit normal-matrix regularization became non-finite",
+                        ));
+                    }
+                    a[p][q] = next;
+                    if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(RefitNormalAssemblyRun::Cancelled);
+                    }
                 }
             }
         }
     }
-    Ok(a)
+    if should_cancel() {
+        return Ok(RefitNormalAssemblyRun::Cancelled);
+    }
+    Ok(RefitNormalAssemblyRun::Complete { matrix: a })
+}
+
+fn assemble_normal(
+    rows_b: &[Vec<f64>],
+    nu: usize,
+    nv: usize,
+    lambda: f64,
+) -> Result<Vec<Vec<f64>>, NurbsError> {
+    let mut never_cancel = || false;
+    match assemble_refit_normal_with_poll(rows_b, nu, nv, lambda, &mut never_cancel)? {
+        RefitNormalAssemblyRun::Complete { matrix } => Ok(matrix),
+        RefitNormalAssemblyRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit normal assembly observed cancellation",
+        )),
+    }
 }
 
 /// The implicit-field → NURBS refit (radial pipeline; star-shaped domains).
@@ -1248,6 +1442,101 @@ mod tests {
         );
         assert_eq!(replay_calls.get(), healthy_calls.get());
         assert_eq!(replay_polls.get(), healthy_polls.get());
+    }
+
+    // G0/G5: the cancellable primitive preserves the deterministic thin-plate
+    // matrix, including the four-neighbor regularizer's exact update order.
+    #[test]
+    fn normal_assembly_with_cx_matches_the_known_two_by_two_lattice() {
+        let rows = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        ];
+        let expected = vec![
+            vec![2.5, -1.0, -1.0, 0.5],
+            vec![-1.0, 2.5, 0.5, -1.0],
+            vec![-1.0, 0.5, 2.5, -1.0],
+            vec![0.5, -1.0, -1.0, 2.5],
+        ];
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                assemble_refit_normal_with_cx(&rows, 2, 2, 0.25, cx)
+                    .expect("cancellable normal assembly"),
+                RefitNormalAssemblyRun::Complete {
+                    matrix: expected.clone(),
+                }
+            );
+        });
+        assert_eq!(
+            assemble_normal(&rows, 2, 2, 0.25).expect("legacy normal assembly"),
+            expected
+        );
+    }
+
+    // G4/G5: cancellation is replayable during validation/assembly and at the
+    // final publication checkpoint; every cancelled path drops the matrix.
+    #[test]
+    fn normal_assembly_polling_is_bounded_and_transactional() {
+        let rows = vec![vec![1.0; 8]; 16];
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let outcome = assemble_refit_normal_with_poll(&rows, 2, 4, 0.125, &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("valid normal assembly");
+            (outcome, polls.get())
+        };
+
+        let (complete, healthy_polls) = run(None);
+        assert!(matches!(complete, RefitNormalAssemblyRun::Complete { .. }));
+        assert!(healthy_polls > 4);
+        assert_eq!(run(Some(1)), (RefitNormalAssemblyRun::Cancelled, 1));
+        let middle_poll = healthy_polls / 2;
+        assert_eq!(
+            run(Some(middle_poll)),
+            (RefitNormalAssemblyRun::Cancelled, middle_poll)
+        );
+        assert_eq!(
+            run(Some(healthy_polls)),
+            (RefitNormalAssemblyRun::Cancelled, healthy_polls)
+        );
+    }
+
+    // G4: count-derived refusals precede cancellation, while traversed source
+    // refusals remain inside the cancellable gate and allocate no output.
+    #[test]
+    fn normal_assembly_refusals_are_typed_and_preflighted() {
+        let polls = Cell::new(0usize);
+        let dimension_error = assemble_refit_normal_with_poll(&[], usize::MAX, 2, 0.0, &mut || {
+            polls.set(polls.get() + 1);
+            true
+        })
+        .expect_err("dimension overflow must precede cancellation");
+        assert!(dimension_error.to_string().contains("dimension overflow"));
+        assert_eq!(polls.get(), 0);
+
+        let work_error = preflight_refit_normal_assembly(usize::MAX, 1, 1, 0.0)
+            .expect_err("unbounded borrowed-row work must be refused");
+        assert!(work_error.to_string().contains("work estimate"));
+
+        let malformed = assemble_refit_normal_with_poll(&[vec![1.0; 3]], 2, 2, 0.0, &mut || {
+            polls.set(polls.get() + 1);
+            false
+        })
+        .expect_err("malformed borrowed row must be refused");
+        assert!(malformed.to_string().contains("length 3, expected 4"));
+        assert_eq!(polls.get(), 1);
+
+        with_refit_cx(true, |cx| {
+            assert_eq!(
+                assemble_refit_normal_with_cx(&[vec![1.0; 4]], 2, 2, 0.0, cx)
+                    .expect("pre-cancellation is a terminal state"),
+                RefitNormalAssemblyRun::Cancelled
+            );
+        });
     }
 
     #[test]
