@@ -223,7 +223,10 @@ fn dwr_003_goal_oriented_beats_uniform() {
         uniform.push((est.dofs, err));
         let _ = write!(uni_rows, "{{\"dofs\":{},\"err\":{err:.3e}}},", est.dofs);
     }
-    // Adaptive loop from base 3.
+    // Adaptive loop from base 3. `adapt_loop` reserves its final row for an
+    // estimate-only receipt, so six rows attempt five refinement waves. The
+    // unchanged uniform-5 DOF cap below prevents that extra wave from buying
+    // accuracy through a larger space.
     let mut grid = Quadtree::with_room(3, 8);
     grid.refine_toward_interface(&disk, 3);
     let (steps, _) = adapt_loop(
@@ -234,7 +237,7 @@ fn dwr_003_goal_oriented_beats_uniform() {
         &zero,
         &goal,
         0.5,
-        5,
+        6,
     )
     .expect("adaptive loop");
     let mut ad_rows = String::new();
