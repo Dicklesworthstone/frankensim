@@ -693,18 +693,19 @@ fn a_non_finite_constraint_value_is_never_certified_feasible() {
     let problem = b.finish();
     let spec = hard("domain", g);
 
-    // Out-of-domain point (x0 = -0.5 -> sqrt = NaN): must be Violated, never
-    // Satisfied, with a positive (infinite) violation.
-    let nan_ev = evaluate(&problem, &spec, &[-0.5], None).expect("evaluate returns Ok");
+    // Out-of-domain point (x0 = -0.5 -> sqrt = NaN): the explicit-stack
+    // evaluator (bead xf8v7) refuses with a typed non-finite error naming
+    // the exact node — strictly stronger than the previous
+    // Violated-with-infinite-violation contract, and still never
+    // certified feasible.
+    let nan_err = evaluate(&problem, &spec, &[-0.5], None)
+        .expect_err("a non-finite constraint value must refuse evaluation");
     assert!(
-        matches!(nan_ev.status, Status::Violated),
-        "a non-finite constraint must be Violated, got {:?}",
-        nan_ev.status
-    );
-    assert!(
-        nan_ev.violation > 0.0,
-        "a non-finite constraint must report a positive violation, got {}",
-        nan_ev.violation
+        matches!(
+            nan_err,
+            ConError::Eval(fs_opt::OptError::EvalNonFinite { .. })
+        ),
+        "expected a typed EvalNonFinite refusal, got {nan_err:?}"
     );
     // A finite in-domain point still classifies with a FINITE violation.
     let finite_ev = evaluate(&problem, &spec, &[4.0], None).expect("evaluate returns Ok");
@@ -715,8 +716,12 @@ fn a_non_finite_constraint_value_is_never_certified_feasible() {
     );
     verdict(
         "fscon-nonfinite",
-        matches!(nan_ev.status, Status::Violated) && finite_ev.violation.is_finite(),
-        "a NaN (out-of-domain) constraint is Violated, not a feasible exact-0 certificate",
+        matches!(
+            nan_err,
+            ConError::Eval(fs_opt::OptError::EvalNonFinite { .. })
+        ) && finite_ev.violation.is_finite(),
+        "a NaN (out-of-domain) constraint refuses with a typed EvalNonFinite, never a feasible \
+         exact-0 certificate",
     );
 }
 
