@@ -2026,7 +2026,7 @@ fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
             branch: FloquetBranchConventionV1::MultipliersOnly,
         },
     );
-    let descriptor_axes = axes(
+    let descriptor_axes = crate::axes(
         21,
         descriptor_class,
         SpectralScalarFieldV1::Complex,
@@ -2434,7 +2434,7 @@ fn certified_empty_region_is_exact_and_replay_resistant() {
         },
         SpectralOperatorOriginV1::Direct,
     );
-    let descriptor_axes = axes(
+    let descriptor_axes = crate::axes(
         28,
         descriptor_class,
         SpectralScalarFieldV1::Complex,
@@ -3949,7 +3949,7 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         DescriptorRoleV1::Ordinary,
         SpectralOperatorOriginV1::Direct,
     );
-    let generalized = axes(
+    let generalized = crate::axes(
         48,
         generalized_class,
         SpectralScalarFieldV1::Complex,
@@ -4150,7 +4150,7 @@ fn structure_tolerance_claims_respect_nested_defect_sets() {
         DescriptorRoleV1::Ordinary,
         SpectralOperatorOriginV1::Direct,
     );
-    let generalized = axes(
+    let generalized = crate::axes(
         54,
         generalized_class,
         SpectralScalarFieldV1::Complex,
