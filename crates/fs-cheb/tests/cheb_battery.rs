@@ -385,19 +385,19 @@ fn dirichlet_eigenvalues_match_analytic() {
     );
 }
 
-/// LAST ADMITTED VALUE (bead 27d3, 2026-07-11): fs-fft commit 535aa839 moved
-/// the DCT substrate from mixed radix-4/2 to mixed radix-8/4/2 Stockham.
-/// That deliberately changes butterfly and twiddle order; the unchanged
-/// DCT oracle, recovery, calculus, root, and eigenvalue tests remain green.
-/// Debug and release both produce this value on M4 Pro. The upstream FFT
-/// stage-path golden was verified in all four ISA/profile quadrants. The
-/// current reference-coordinate root-refinement and exceptional integral
-/// changes intentionally invalidate this downstream value; it remains armed
-/// and known-red until a current admitted debug/release, two-ISA replay can
-/// justify the replacement. Never copy a value from a stale local binary.
+/// LAST ADMITTED VALUE (bead sj31i.55 repair, 2026-07-16): commit 6ee7267
+/// deliberately moved reference-coordinate root-refinement and exceptional
+/// integral bits (its own golden comment declared this value invalidated and
+/// armed); d93fa29 then completed the finite-term-overflow fallback, touching
+/// only a previously-panicking path, so no additional bits moved. The
+/// unchanged DCT oracle, recovery, calculus, root, and eigenvalue tests stay
+/// green. FOUR-QUADRANT VERIFICATION at 0fba65d: aarch64 M4 Pro debug and
+/// release, x86-64 ts1 5975WX debug and release — all bit-identical at this
+/// value. Never copy a value from a stale local binary.
 /// HISTORY: radix-2 0xaee4_8002_1eea_9097 (M4 Pro + trj); radix-4/2
-/// 0x22e7_ea21_58c9_e587 (M4 Pro only).
-const GOLDEN_HASH: u64 = 0xeea0_4b0a_01de_46cd;
+/// 0x22e7_ea21_58c9_e587 (M4 Pro only); radix-8/4/2 pre-root-refinement
+/// 0xeea0_4b0a_01de_46cd (M4 Pro + ts1 + ts2, bead obq0).
+const GOLDEN_HASH: u64 = 0x5d2f_e305_ce90_06fb;
 
 #[test]
 fn cheb_golden_hash() {
