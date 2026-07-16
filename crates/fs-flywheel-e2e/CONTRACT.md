@@ -122,18 +122,22 @@ ac_003 through ac_005: the harness retains the verifier's original serialized
 receipt, resolves its presented artifact root, independently reruns exact
 verifier admission for the bound problem, candidate, tolerance, query/QoI,
 units, flux reconstruction, hypotheses, work disposition, and verifier family,
-then requires a separate detached-format producer-process attestation fixture
-before exposing the lower-owned claim or constructing the solver-free
-source-certificate verifier. The attestation subject canonically binds its
+then requires separately injected detached-format producer-process attestation,
+executable-observation, and promotion-root capabilities before exposing the
+lower-owned claim or constructing the solver-free source-certificate verifier.
+The acceptance adapter still supplies deterministic fixtures for those
+capabilities. The attestation subject canonically binds its
 purpose, exact receipt root (the complete ordered receipt-sequence root in
 ac_004), current-process executable schema/byte count/raw-content hash,
 producer crate/version/features, source and dependency cones, workspace
 manifest and lock, and toolchain. The fixture sidecar first crosses concrete
-exact verifier and policy capabilities; the
-domain-owned `PromotionTrustRoot` then re-adjudicates exact pinned verifier and
-key-policy byte observations and alone can mint the opaque `PromotionWitness`
-required by the claim-bearing type. Missing or truncated sidecars, executable
-drift, foreign receipt scopes, verifier/policy substitution, fixed/fake hashes,
+exact verifier and policy capabilities; `resolve_for_promotion` constructs
+neither authority. It consumes an injected domain-owned `PromotionTrustRoot`
+plus independently retained verifier and key-policy byte observations, then
+that root alone can mint the opaque `PromotionWitness` required by the
+claim-bearing type. Missing or truncated sidecars, missing promotion roots,
+changed retained identity observations, executable drift, foreign receipt
+scopes, verifier/policy substitution, fixed/fake hashes,
 producer relabeling, changed interval endpoints, and cross-problem, cross-QoI,
 or cross-tolerance replay fail closed. ac_004 binds the executable root,
 attestation audit/anchor/policy roots, retained receipt roots, and source/build
@@ -173,10 +177,12 @@ test cost.
   `acceptance` test process; it does not prove that those bytes equal the
   already mapped memory image, that a separately deployed `fs-verify` binary
   ran, or that the operating system prevented replacement between reads.
-- The detached producer-attestation sidecar, verifier, and key policy used by
-  the acceptance battery are deterministic, publicly derivable fixtures. The
-  opaque `PromotionWitness` makes the trust-root/type boundary and transplant
-  refusals executable, but the fixture is not a cryptographic signature,
+- The injected producer-attestation sidecar capability, executable observation,
+  promotion root, verifier observation, and key-policy observation used by the
+  acceptance battery are deterministic, publicly derivable fixtures. The
+  injection seam and opaque `PromotionWitness` make the trust-root/type boundary,
+  missing-root refusal, observation drift, and transplant refusals executable,
+  but the fixture is not a cryptographic signature,
   transparency-log inclusion, revocation check, hardware/process attestation,
   or vendor-independent trust root. Production promotion still requires an
   externally produced retained sidecar and independently provisioned verifier

@@ -3,8 +3,10 @@
 //! colored, priced, auditable package and crosses the solver-free checker's
 //! typed capability boundary. Scientific promotion consumes an immutable
 //! `fs-verify` receipt and independently replays its exact problem/candidate;
-//! scientific promotion additionally requires an opaque producer-attestation
-//! witness over the stable current-process executable and exact receipt scope.
+//! scientific promotion additionally consumes injected producer-attestation,
+//! executable-observation, and promotion-root capabilities before minting an
+//! opaque witness over the stable current-process executable and exact receipt
+//! scope.
 //! The detached sidecar and package-root signature policies remain
 //! deterministic fixtures, not vendor-independent cryptographic
 //! authentication. The retained certificate covers the exact 1-D manufactured
@@ -281,19 +283,39 @@ fn trusted_producer_attestation_policy()
     producer_attestation_policy_identity("fs-flywheel-e2e/executable-and-receipt-required/v1", 1)
 }
 
-fn configured_producer_promotion_root() -> ProducerPromotionRoot {
-    ProducerPromotionRoot::configure(
-        ObservedIdentity::from_receipt(trusted_producer_attestation_verifier()),
-        ObservedIdentity::from_receipt(trusted_producer_attestation_policy()),
-        PRODUCER_ATTESTATION_CONTEXT,
-    )
-    .expect("non-empty pinned producer-promotion context")
-}
-
-struct PolicyRelativeProducerAuthority {
-    authority: AdmittedProducerAuthority,
+#[derive(Clone, Copy)]
+struct ConfiguredProducerPromotion {
+    trust_root: ProducerPromotionRoot,
     verifier_observation: fs_blake3::identity::ByteObservation,
     policy_observation: fs_blake3::identity::ByteObservation,
+}
+
+fn configured_producer_promotion() -> ConfiguredProducerPromotion {
+    let verifier = trusted_producer_attestation_verifier();
+    let policy = trusted_producer_attestation_policy();
+    ConfiguredProducerPromotion {
+        trust_root: ProducerPromotionRoot::configure(
+            ObservedIdentity::from_receipt(verifier),
+            ObservedIdentity::from_receipt(policy),
+            PRODUCER_ATTESTATION_CONTEXT,
+        )
+        .expect("non-empty pinned producer-promotion context"),
+        verifier_observation: ObservedIdentity::from_receipt(verifier).bytes(),
+        policy_observation: ObservedIdentity::from_receipt(policy).bytes(),
+    }
+}
+
+trait ProducerAttestationAuthority {
+    fn verify_and_admit(
+        &self,
+        expected_subject: IdentityReceipt<ProducerAttestationSubject>,
+    ) -> Result<AdmittedProducerAuthority, &'static str>;
+}
+
+#[derive(Clone, Copy)]
+struct ProducerAttestationCapability<'a> {
+    authority: &'a dyn ProducerAttestationAuthority,
+    observed_executable: ProducerExecutableIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -351,27 +373,24 @@ impl DetachedFixtureProducerAuthority {
         self.anchor_bytes
             == fixture_attestation_sidecar_bytes(self.subject, self.verifier, self.policy)
     }
+}
 
+impl ProducerAttestationAuthority for DetachedFixtureProducerAuthority {
     fn verify_and_admit(
         &self,
         expected_subject: IdentityReceipt<ProducerAttestationSubject>,
-    ) -> Result<PolicyRelativeProducerAuthority, &'static str> {
+    ) -> Result<AdmittedProducerAuthority, &'static str> {
         if expected_subject != self.subject {
             return Err("detached producer attestation belongs to another subject");
         }
-        let authority = AuthorityRef::present(
+        AuthorityRef::present(
             self.subject,
             self.presented_anchor(),
             self.verifier.id(),
             self.policy.id(),
         )
         .verify(self)?
-        .admit(self)?;
-        Ok(PolicyRelativeProducerAuthority {
-            authority,
-            verifier_observation: ObservedIdentity::from_receipt(self.verifier).bytes(),
-            policy_observation: ObservedIdentity::from_receipt(self.policy).bytes(),
-        })
+        .admit(self)
     }
 }
 
@@ -728,6 +747,16 @@ fn producer_attestation_fixture(
     DetachedFixtureProducerAuthority::for_subject(subject)
 }
 
+fn fixture_producer_attestation_capability(
+    authority: &DetachedFixtureProducerAuthority,
+) -> ProducerAttestationCapability<'_> {
+    ProducerAttestationCapability {
+        authority,
+        observed_executable: current_producer_process_executable_identity()
+            .expect("fixture producer executable must remain readable before promotion"),
+    }
+}
+
 fn producer_attestation_gated<'a>(
     estimator: &'static str,
     no_claim: &'static str,
@@ -744,7 +773,8 @@ fn producer_attestation_gated<'a>(
 fn resolve_for_promotion<'a>(
     resolver: Option<&'a AuthenticReceiptResolver>,
     scope: ProducerAttestationScope,
-    authority: Option<&DetachedFixtureProducerAuthority>,
+    attestation: Option<ProducerAttestationCapability<'_>>,
+    configured_promotion: Option<ConfiguredProducerPromotion>,
 ) -> ReceiptPromotion<'a> {
     let Some(resolver) = resolver else {
         return ReceiptPromotion::Gated {
@@ -755,22 +785,23 @@ fn resolve_for_promotion<'a>(
             no_claim: "NO-CLAIM: upstream verifier receipt authority is unavailable",
         };
     };
-    let Some(authority) = authority else {
+    let Some(attestation) = attestation else {
         return producer_attestation_gated(
             "missing-producer-attestation-capability",
-            "NO-CLAIM: producer-attestation fixture/capability is unavailable",
+            "NO-CLAIM: producer-attestation capability is unavailable",
         );
     };
-    let Ok(observed_executable) = current_producer_process_executable_identity() else {
+    let Some(configured_promotion) = configured_promotion else {
         return producer_attestation_gated(
-            "producer-process-executable-unreadable",
-            "NO-CLAIM: producer-process executable identity could not be recaptured",
+            "missing-producer-promotion-trust-root",
+            "NO-CLAIM: independently configured producer-promotion trust root is unavailable",
         );
     };
+    let observed_executable = attestation.observed_executable;
     if observed_executable != resolver.producer_executable {
         return producer_attestation_gated(
             "producer-process-executable-drift",
-            "NO-CLAIM: producer-process executable changed across verifier publication",
+            "NO-CLAIM: retained producer-process executable observation differs from verifier publication",
         );
     }
     match resolver.resolve() {
@@ -783,16 +814,17 @@ fn resolve_for_promotion<'a>(
                     "NO-CLAIM: producer attestation subject could not be canonicalized",
                 );
             };
-            let Ok(policy_relative) = authority.verify_and_admit(expected_subject) else {
+            let Ok(policy_relative) = attestation.authority.verify_and_admit(expected_subject)
+            else {
                 return producer_attestation_gated(
                     "producer-attestation-capability-refusal",
-                    "NO-CLAIM: detached producer-attestation fixture/capability was refused",
+                    "NO-CLAIM: detached producer-attestation capability was refused",
                 );
             };
-            let Ok(promotion) = configured_producer_promotion_root().admit_for_promotion(
-                &policy_relative.authority,
-                policy_relative.verifier_observation,
-                policy_relative.policy_observation,
+            let Ok(promotion) = configured_promotion.trust_root.admit_for_promotion(
+                &policy_relative,
+                configured_promotion.verifier_observation,
+                configured_promotion.policy_observation,
             ) else {
                 return producer_attestation_gated(
                     "producer-attestation-trust-root-refusal",
@@ -1241,7 +1273,8 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
     let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
         Some(&resolver),
         attestation_scope,
-        Some(&producer_authority),
+        Some(fixture_producer_attestation_capability(&producer_authority)),
+        Some(configured_producer_promotion()),
     ) else {
         panic!("the authentic final receipt and producer attestation must resolve");
     };
@@ -1324,7 +1357,7 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         .passed(),
         "a tampered root fails the independent checker code path"
     );
-    match resolve_for_promotion(None, attestation_scope, None) {
+    match resolve_for_promotion(None, attestation_scope, None, None) {
         ReceiptPromotion::Gated { color, no_claim } => {
             assert!(matches!(color, Color::Estimated { .. }));
             assert!(no_claim.contains("NO-CLAIM") && no_claim.contains("unavailable"));
@@ -1333,7 +1366,12 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
             panic!("missing upstream authority must never mint a verified claim")
         }
     }
-    match resolve_for_promotion(Some(&resolver), attestation_scope, None) {
+    match resolve_for_promotion(
+        Some(&resolver),
+        attestation_scope,
+        None,
+        Some(configured_producer_promotion()),
+    ) {
         ReceiptPromotion::Gated { color, no_claim } => {
             assert!(matches!(color, Color::Estimated { .. }));
             assert!(no_claim.contains("NO-CLAIM") && no_claim.contains("attestation"));
@@ -1463,17 +1501,65 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         evidence_root: resolver.receipt.artifact_root().content_hash(),
     };
     let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
+    let producer_capability = fixture_producer_attestation_capability(&producer_authority);
+    let configured_promotion = configured_producer_promotion();
     let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
         Some(&resolver),
         attestation_scope,
-        Some(&producer_authority),
+        Some(producer_capability),
+        Some(configured_promotion),
     ) else {
         panic!("baseline production receipt must promote");
     };
     assert_producer_attestation_gated(
-        resolve_for_promotion(Some(&resolver), attestation_scope, None),
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            None,
+            Some(configured_promotion),
+        ),
         "missing-producer-attestation-capability",
         "missing detached attestation authority",
+    );
+    assert_producer_attestation_gated(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(producer_capability),
+            None,
+        ),
+        "missing-producer-promotion-trust-root",
+        "an attestation authority cannot synthesize its own promotion trust root",
+    );
+    let mut changed_verifier_observation = configured_promotion;
+    changed_verifier_observation.verifier_observation = fs_blake3::identity::ByteObservation::new(
+        configured_promotion.verifier_observation.content_id(),
+        configured_promotion.verifier_observation.length() + 1,
+    );
+    assert_producer_attestation_gated(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(producer_capability),
+            Some(changed_verifier_observation),
+        ),
+        "producer-attestation-trust-root-refusal",
+        "changed retained verifier bytes",
+    );
+    let mut changed_policy_observation = configured_promotion;
+    changed_policy_observation.policy_observation = fs_blake3::identity::ByteObservation::new(
+        configured_promotion.policy_observation.content_id(),
+        configured_promotion.policy_observation.length() + 1,
+    );
+    assert_producer_attestation_gated(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(producer_capability),
+            Some(changed_policy_observation),
+        ),
+        "producer-attestation-trust-root-refusal",
+        "changed retained key-policy bytes",
     );
 
     let mut stale_hash = resolver.clone();
@@ -1482,7 +1568,8 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         resolve_for_promotion(
             Some(&stale_hash),
             attestation_scope,
-            Some(&producer_authority),
+            Some(producer_capability),
+            Some(configured_promotion),
         ),
         "producer-process-executable-drift",
         "foreign executable content hash",
@@ -1499,7 +1586,10 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         resolve_for_promotion(
             Some(&resolver),
             attestation_scope,
-            Some(&foreign_executable_authority),
+            Some(fixture_producer_attestation_capability(
+                &foreign_executable_authority,
+            )),
+            Some(configured_promotion),
         ),
         "producer-attestation-capability-refusal",
         "valid sidecar transplanted from a foreign executable",
@@ -1511,7 +1601,12 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         .pop()
         .expect("fixture sidecar is non-empty");
     assert_producer_attestation_gated(
-        resolve_for_promotion(Some(&resolver), attestation_scope, Some(&truncated_sidecar)),
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(fixture_producer_attestation_capability(&truncated_sidecar)),
+            Some(configured_promotion),
+        ),
         "producer-attestation-capability-refusal",
         "truncated detached attestation sidecar",
     );
@@ -1521,7 +1616,12 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         evidence_root: flip(attestation_scope.evidence_root),
     };
     assert_producer_attestation_gated(
-        resolve_for_promotion(Some(&resolver), foreign_scope, Some(&producer_authority)),
+        resolve_for_promotion(
+            Some(&resolver),
+            foreign_scope,
+            Some(producer_capability),
+            Some(configured_promotion),
+        ),
         "producer-attestation-capability-refusal",
         "attestation transplanted to another receipt scope",
     );
@@ -1535,7 +1635,12 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         foreign_verifier.policy,
     );
     assert_producer_attestation_gated(
-        resolve_for_promotion(Some(&resolver), attestation_scope, Some(&foreign_verifier)),
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(fixture_producer_attestation_capability(&foreign_verifier)),
+            Some(configured_promotion),
+        ),
         "producer-attestation-trust-root-refusal",
         "foreign verifier identity",
     );
@@ -1548,7 +1653,12 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         foreign_policy.policy,
     );
     assert_producer_attestation_gated(
-        resolve_for_promotion(Some(&resolver), attestation_scope, Some(&foreign_policy)),
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(fixture_producer_attestation_capability(&foreign_policy)),
+            Some(configured_promotion),
+        ),
         "producer-attestation-trust-root-refusal",
         "foreign producer-promotion key policy",
     );
@@ -2105,7 +2215,8 @@ fn ac_004_g5_whole_path_replay() -> Result<(), PlanError> {
         let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
             Some(&resolver),
             attestation_scope,
-            Some(&producer_authority),
+            Some(fixture_producer_attestation_capability(&producer_authority)),
+            Some(configured_producer_promotion()),
         ) else {
             panic!("the final replay receipt sequence and producer attestation must resolve");
         };
@@ -2387,7 +2498,8 @@ fn ac_005_laundering_invariant_across_the_path() -> Result<(), PlanError> {
     let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
         Some(&resolver),
         attestation_scope,
-        Some(&producer_authority),
+        Some(fixture_producer_attestation_capability(&producer_authority)),
+        Some(configured_producer_promotion()),
     ) else {
         panic!("the authentic and producer-attested hard component must resolve");
     };
