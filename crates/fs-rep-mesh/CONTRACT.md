@@ -26,7 +26,11 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
   and prevalidated cell measures. Construction rejects malformed indices,
   payloads without a two-cell, repeated keys/cells, non-manifold or
   same-direction shared edges, non-finite coordinates, negative axisymmetric
-  radii, degenerate faces, and non-representable measures.
+  radii, degenerate faces, and non-representable measures. Its coordinate,
+  stable-key, face, and canonical-edge tables are sealed behind read-only slice
+  accessors because incidence rows, typed feature IDs, and measures are cached
+  derived state; topology or embedding edits require constructing and admitting
+  a new complex.
 - `TriComplex2LineageId` / `TriFeatureId` — schema- and role-typed entity
   identities from `fs-blake3`. A lineage binds an exact caller-owned namespace;
   a feature binds that lineage, its topological dimension, and the canonical
@@ -175,7 +179,9 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
     orientation, matches hand-computed whole-boundary and selected-face traces,
     preserves vertex and surviving boundary-edge typed IDs across append-only
     refinement, and reproduces the closed-form full-turn axisymmetric triangle
-    measure.
+    measure. Compile-fail seals and detached-copy mutations prove safe callers
+    cannot desynchronize admitted tables from cached incidence, identities,
+    measures, or traces.
 
 ## Error model
 Structured teaching errors (`MeshBuildError`, `TriComplex2Error`,

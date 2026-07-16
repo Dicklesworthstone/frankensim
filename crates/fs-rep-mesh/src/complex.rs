@@ -427,19 +427,36 @@ pub struct TraceMap2 {
 }
 
 /// A genuine oriented two-dimensional triangle cell complex.
+///
+/// The admitted coordinate, key, face, and edge tables are sealed because
+/// incidence rows, feature identities, and metric measures are derived from
+/// them. Callers inspect those tables through read-only slices and construct a
+/// new complex for any topology or embedding revision.
+///
+/// ```compile_fail
+/// fn corrupt_admitted_topology(complex: &mut fs_rep_mesh::TriComplex2) {
+///     complex.faces.clear();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn corrupt_admitted_geometry(complex: &mut fs_rep_mesh::TriComplex2) {
+///     complex.vertices()[0] = [f64::NAN, 0.0];
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct TriComplex2 {
     lineage: TriComplex2LineageId,
     metric: Metric2,
     /// Embedding coordinates `(x, y)` for planar measure or `(radius, z)` for
     /// axisymmetric measure.
-    pub vertices: Vec<[f64; 2]>,
+    vertices: Vec<[f64; 2]>,
     /// Stable caller-owned keys, one per vertex.
-    pub vertex_keys: Vec<u64>,
+    vertex_keys: Vec<u64>,
     /// Oriented triangles. Even permutations preserve orientation.
-    pub faces: Vec<[u32; 3]>,
+    faces: Vec<[u32; 3]>,
     /// Canonical unoriented edges, sorted by storage vertex index.
-    pub edges: Vec<[u32; 2]>,
+    edges: Vec<[u32; 2]>,
     vertex_ids: Vec<TriFeatureId>,
     edge_ids: Vec<TriFeatureId>,
     face_ids: Vec<TriFeatureId>,
@@ -693,6 +710,30 @@ impl TriComplex2 {
     #[must_use]
     pub const fn metric(&self) -> Metric2 {
         self.metric
+    }
+
+    /// Admitted embedding coordinates in storage order.
+    #[must_use]
+    pub fn vertices(&self) -> &[[f64; 2]] {
+        &self.vertices
+    }
+
+    /// Admitted caller-owned stable vertex keys in storage order.
+    #[must_use]
+    pub fn vertex_keys(&self) -> &[u64] {
+        &self.vertex_keys
+    }
+
+    /// Admitted oriented triangle rows in storage order.
+    #[must_use]
+    pub fn faces(&self) -> &[[u32; 3]] {
+        &self.faces
+    }
+
+    /// Canonical admitted unoriented edges.
+    #[must_use]
+    pub fn edges(&self) -> &[[u32; 2]] {
+        &self.edges
     }
 
     /// Stable typed vertex identities in storage order.

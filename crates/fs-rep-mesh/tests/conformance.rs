@@ -637,8 +637,8 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
                 panic!("fan case {case}, ring {ring_len} construction refused: {error}")
             });
         let (d0, d1) = (complex.d0(), complex.d1());
-        for probe in 0..complex.vertices.len() {
-            let mut basis = vec![0i64; complex.vertices.len()];
+        for probe in 0..complex.vertices().len() {
+            let mut basis = vec![0i64; complex.vertices().len()];
             basis[probe] = 1;
             let first = d0.apply(&basis);
             let chain = d1.apply(&first);
@@ -663,6 +663,24 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
     .expect("coherent square complex");
     assert_eq!(square.topological_dimension(), 2);
     assert_eq!(square.embedding_dimension(), 2);
+    assert_eq!(square.vertices(), square_vertices.as_slice());
+    assert_eq!(square.vertex_keys(), square_keys.as_slice());
+    assert_eq!(square.faces(), &[[0, 1, 2], [0, 2, 3]]);
+    assert_eq!(square.edges(), &[[0, 1], [0, 2], [0, 3], [1, 2], [2, 3]]);
+
+    // The admitted tables are exposed only as shared slices. Detached caller
+    // edits cannot desynchronize the complex's cached incidence, identities,
+    // measures, or traces; an actual revision must pass construction again.
+    let original_vertex_ids = square.vertex_ids().to_vec();
+    let original_face_measure = square.face_measure(0);
+    let mut detached_vertices = square.vertices().to_vec();
+    let mut detached_faces = square.faces().to_vec();
+    detached_vertices[0] = [f64::NAN, f64::INFINITY];
+    detached_faces.clear();
+    assert_eq!(square.vertices(), square_vertices.as_slice());
+    assert_eq!(square.faces(), &[[0, 1, 2], [0, 2, 3]]);
+    assert_eq!(square.vertex_ids(), original_vertex_ids.as_slice());
+    assert_eq!(square.face_measure(0), original_face_measure);
 
     // Hand-computed CCW outer trace; the selected-face trace also retains the
     // diagonal as an interface edge.
@@ -684,7 +702,7 @@ fn rmesh_011_tricomplex2_exact_trace_identity_and_metric_contract() {
     let selected = square.trace_for_faces([0]).expect("selected-face trace");
     assert_eq!(selected.edges.len(), 3);
     assert!(selected.edges.iter().any(|edge| {
-        square.edges[edge.global_edge] == [0, 2] && edge.oriented_vertices == [2, 0]
+        square.edges()[edge.global_edge] == [0, 2] && edge.oriented_vertices == [2, 0]
     }));
 
     let flipped = TriComplex2::from_triangles(
