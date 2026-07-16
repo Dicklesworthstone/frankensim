@@ -14,7 +14,7 @@ layer = "L4"
 fs-adjoint = { path = "../fs-adjoint" }
 fs-cutfem = { path = "../fs-cutfem" }
 fs-ivl = { path = "../fs-ivl" }
-fs-solid = { path = "../fs-solid" }
+fs-material = { path = "../fs-material" }
 fs-sparse = { path = "../fs-sparse" }
 
 [lints]

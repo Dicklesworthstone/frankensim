@@ -19,8 +19,11 @@
 
 #![allow(clippy::cast_possible_wrap)] // lattice indices are tiny; i64 stencil arithmetic is exact
 
-use fs_cutfem::Quadtree;
-use fs_solid::{BoundaryTraction, CutElasticity, CutSolution, DesignBoxEdge, EdgeBand, SolidError};
+use fs_cutfem::{
+    BoundaryTraction, CutElasticity, CutElasticitySolution, CutFemError, DesignBoxEdge, EdgeBand,
+    Quadtree,
+};
+use fs_material::IsotropicElastic;
 use fs_topols::optimize::{Cantilever, material_volume};
 use fs_topols::{
     GridSdf, OptimizeSettings, Velocity, advect, extend_velocity, hausdorff, nucleate,
@@ -208,32 +211,40 @@ fn try_cantilever_solution(
     phi: &GridSdf,
     load: f64,
     band: f64,
-) -> Result<CutSolution, SolidError> {
+) -> Result<CutElasticitySolution, CutFemError> {
     if !(load.is_finite() && load > 0.0) {
-        return Err(SolidError::InvalidInput {
+        return Err(CutFemError::InvalidElasticityInput {
             what: format!("cantilever load magnitude {load} must be finite and strictly positive"),
         });
     }
     let support = EdgeBand::new(DesignBoxEdge::Right, 0.5 - band, 0.5 + band).map_err(|error| {
-        SolidError::InvalidInput {
+        CutFemError::InvalidElasticityInput {
             what: format!(
                 "cantilever load-band half-width {band} must be finite and lie in [0, 0.5]: {error}"
             ),
         }
     })?;
+    let material = IsotropicElastic::new(1.0, 0.3, 1.0).map_err(|error| {
+        CutFemError::InvalidElasticityInput {
+            what: format!("cantilever material card was refused: {error}"),
+        }
+    })?;
+    let (lambda, mu) = material.lame();
+    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let clamp = |x: f64, _y: f64| x < 1e-9;
     let traction = move |_: f64, _: f64| [0.0, -load];
     let solver = CutElasticity {
         grid,
         sdf: phi,
-        youngs: 1.0,
-        poisson: 0.3,
-        nitsche_beta: 20.0,
-        ghost_gamma: 0.5,
+        material: &material,
+        nitsche_beta: 20.0 * legacy_stiffness_scale,
+        ghost_gamma: 0.5 * legacy_stiffness_scale,
         quad_depth: 2,
         clamp: Some(&clamp),
         boundary_traction: None,
         traction_free_interface: true,
+        solver_tol: 1e-12,
+        solver_max_iters: 60_000,
     };
     solver.solve_with_boundary_traction(
         &|_, _| [0.0, 0.0],
@@ -269,7 +280,7 @@ fn typed_cantilever_support_succeeds_only_when_the_loaded_band_is_uncut() {
     let crossing = GridSdf::from_fn(n, &|_, y| y - 0.5);
     assert!(matches!(
         try_cantilever_solution(&grid, &crossing, 1.0, 0.125),
-        Err(SolidError::InvalidInput { .. })
+        Err(CutFemError::InvalidElasticityInput { .. })
     ));
 }
 
@@ -317,7 +328,7 @@ fn invalid_cantilever_and_material_settings_fail_before_mutation() {
         let mut phi = original.clone();
         assert!(matches!(
             optimize_compliance(&mut phi, fixture, settings),
-            Err(SolidError::InvalidInput { .. })
+            Err(CutFemError::InvalidElasticityInput { .. })
         ));
         assert_eq!(
             phi.nodes()
@@ -357,7 +368,7 @@ fn invalid_cantilever_and_material_settings_fail_before_mutation() {
         let mut phi = original.clone();
         assert!(matches!(
             optimize_compliance(&mut phi, fixture, invalid_settings),
-            Err(SolidError::InvalidInput { .. })
+            Err(CutFemError::InvalidElasticityInput { .. })
         ));
         assert_eq!(
             phi.nodes()
@@ -381,7 +392,9 @@ fn tls_005_sensitivity_numerical_gates() {
     let j0 = cantilever_compliance(&grid, &phi, 1.0, 0.12);
     // Gate A: topological derivative vs a real punched hole.
     let probe = [0.5, 0.5];
-    let (lambda, mu) = fs_solid::linear::lame(1.0, 0.3, fs_solid::PlaneKind::Strain);
+    let (lambda, mu) = IsotropicElastic::new(1.0, 0.3, 1.0)
+        .expect("valid sensitivity fixture material")
+        .lame();
     // Strain at the probe from a fresh solve (reuse the optimizer's
     // energy plumbing indirectly: finite differences of displacement).
     let load = 1.0f64;
@@ -460,7 +473,7 @@ fn tls_005_sensitivity_numerical_gates() {
     );
 }
 
-fn strain_probe(grid: &Quadtree, sol: &fs_solid::CutSolution, p: [f64; 2]) -> [f64; 3] {
+fn strain_probe(grid: &Quadtree, sol: &CutElasticitySolution, p: [f64; 2]) -> [f64; 3] {
     let level = grid.max_level();
     let nf = f64::from(1u32 << level);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

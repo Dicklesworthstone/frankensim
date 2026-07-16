@@ -6,7 +6,7 @@ Layer: L4 (ASCENT). Level-set topology optimization (plan §9.5 [S/F],
 bead 7tv.12): shape-gradient velocity advection with topological
 derivatives for hole nucleation — genuine, mathematically justified
 topology changes. The level set IS the geometry: physics is evaluated
-by fs-solid's CutFEM elasticity directly on the evolving discrete SDF
+by fs-cutfem's canonical elasticity operator directly on the evolving discrete SDF
 with zero meshing anywhere in the loop.
 
 ## Public types and semantics
@@ -52,6 +52,11 @@ with zero meshing anywhere in the loop.
   with compliance, volume, ℓ, drift, and FNV snapshot hashes. The load is
   definitionally zero outside the checked `EdgeBand`; unrelated SDF cuts on
   the same edge are skipped, while a cut through supported load refuses.
+  fs-topols constructs `IsotropicElastic` and calls fs-cutfem directly; the
+  historical Nitsche and ghost coefficients are multiplied by
+  `(lambda + 2*mu)/mu` so removing the fs-solid compatibility facade does not
+  change the discrete operator. The solver retains its `1e-12` relative gate
+  and 60,000-iteration cap.
   Reported compliance is canonical assembled-load `b^T u`, not the former
   node-mask/trapezoid proxy. With zero body force and embedded displacement
   data here, it is the exact discrete external work.
@@ -92,7 +97,8 @@ with zero meshing anywhere in the loop.
 
 ## Error model
 
-fs-solid's `SolidError` propagates from physics solves. `InvalidInput` names
+fs-cutfem's `CutFemError` propagates unchanged from physics solves.
+`InvalidElasticityInput` names
 invalid cantilever load/band data, invalid optimizer material data, or the
 canonical typed-support refusal when the SDF cuts a loaded segment. The
 inherited certified plane-strain bound is `(lambda + 2*mu)/mu <= 4`,
@@ -112,7 +118,7 @@ bitwise in the battery. Cross-ISA goldens not yet recorded.
 
 Bounded synchronous loops (fixed iteration counts, FIM sweep caps,
 CFL-bounded step counts). Chunked Cx polling belongs to the fs-exec
-driver (L4 consumes L3 kernels; the fs-cutfem/fs-solid discipline).
+driver (L4 consumes fs-cutfem's canonical L3 kernel directly).
 
 ## Unsafe boundary
 

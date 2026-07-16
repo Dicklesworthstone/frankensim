@@ -5,7 +5,7 @@
 //!
 //! Layer: L4 (ASCENT). The level set IS the geometry: [`GridSdf`]
 //! implements fs-cutfem's `CutSdf` with an EXACT bilinear enclosure,
-//! so fs-solid's CutFEM elasticity evaluates directly on the evolving
+//! so fs-cutfem's canonical elasticity operator evaluates directly on the evolving
 //! field — no mesh anywhere in the loop (the marquee coupling).
 //!
 //! - [`gridsdf`]: the discrete level set (nodal φ, bilinear, certified

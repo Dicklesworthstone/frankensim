@@ -1,5 +1,5 @@
 //! The compliance descent loop — THE marquee coupling: physics by
-//! fs-solid's CutFEM elasticity DIRECTLY on the evolving [`GridSdf`]
+//! fs-cutfem's canonical elasticity operator DIRECTLY on the evolving [`GridSdf`]
 //! (zero meshing, ever), shape velocity `v_n = w − ℓ` from the energy
 //! density (grow where strain energy exceeds the volume multiplier,
 //! shrink where it doesn't), Sobolev-smoothed through fs-adjoint's
@@ -15,10 +15,16 @@ use crate::topder::{NucleationEvent, nucleate, topological_derivative};
 use crate::veloext::extend_velocity;
 use crate::weno::{Velocity, advect, build_band};
 use fs_cutfem::quad::cut_cell_rules;
-use fs_cutfem::{CutSdf, MAX_PLANE_STRAIN_STIFFNESS_RATIO, Quadtree};
-use fs_solid::linear::lame;
-use fs_solid::{BoundaryTraction, CutElasticity, DesignBoxEdge, EdgeBand, PlaneKind, SolidError};
+use fs_cutfem::{
+    BoundaryTraction, CutElasticity, CutElasticitySolution, CutFemError, CutSdf, DesignBoxEdge,
+    EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO, Quadtree,
+};
+use fs_material::IsotropicElastic;
 use std::fmt::Write as _;
+
+const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
+const SOLVER_TOL: f64 = 1e-12;
+const SOLVER_MAX_ITERS: usize = 60_000;
 
 /// Optimizer controls.
 #[derive(Debug, Clone, Copy)]
@@ -129,11 +135,11 @@ pub struct Cantilever {
     pub band: f64,
 }
 
-fn invalid_input(what: impl Into<String>) -> SolidError {
-    SolidError::InvalidInput { what: what.into() }
+fn invalid_input(what: impl Into<String>) -> CutFemError {
+    CutFemError::InvalidElasticityInput { what: what.into() }
 }
 
-fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, SolidError> {
+fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, CutFemError> {
     if !(fixture.load.is_finite() && fixture.load > 0.0) {
         return Err(invalid_input(format!(
             "cantilever load magnitude {} must be finite and strictly positive",
@@ -148,7 +154,9 @@ fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, SolidError> {
     })
 }
 
-fn validated_plane_strain_lame(settings: OptimizeSettings) -> Result<(f64, f64), SolidError> {
+fn validated_plane_strain_material(
+    settings: OptimizeSettings,
+) -> Result<(IsotropicElastic, f64, f64), CutFemError> {
     if !(settings.youngs.is_finite() && settings.youngs > 0.0) {
         return Err(invalid_input(format!(
             "optimizer Young's modulus {} must be finite and positive",
@@ -161,7 +169,9 @@ fn validated_plane_strain_lame(settings: OptimizeSettings) -> Result<(f64, f64),
             settings.poisson
         )));
     }
-    let (lambda, mu) = lame(settings.youngs, settings.poisson, PlaneKind::Strain);
+    let material = IsotropicElastic::new(settings.youngs, settings.poisson, MATERIAL_STRAIN_LIMIT)
+        .map_err(|error| invalid_input(format!("optimizer material card was refused: {error}")))?;
+    let (lambda, mu) = material.lame();
     let bulk_2d = lambda + mu;
     let stiffness_ratio = (lambda + 2.0 * mu) / mu;
     if !(lambda.is_finite()
@@ -180,7 +190,7 @@ fn validated_plane_strain_lame(settings: OptimizeSettings) -> Result<(f64, f64),
             "optimizer plane-strain stiffness ratio (lambda + 2*mu)/mu = {stiffness_ratio} exceeds the certified limit {MAX_PLANE_STRAIN_STIFFNESS_RATIO}"
         )));
     }
-    Ok((lambda, mu))
+    Ok((material, lambda, mu))
 }
 
 /// Uniform Q1 mass/stiffness on the full node lattice (Sobolev step).
@@ -223,9 +233,9 @@ fn mass_stiffness(n: usize) -> (fs_sparse::Csr, fs_sparse::Csr) {
 /// level set evolves in place.
 ///
 /// # Errors
-/// Returns [`SolidError::InvalidInput`] before mutating `phi` when the load,
+/// Returns [`CutFemError::InvalidElasticityInput`] before mutating `phi` when the load,
 /// band, or material settings are outside the documented finite certified
-/// regime. Canonical fs-solid/fs-cutfem solve refusals otherwise propagate.
+/// regime. Canonical fs-cutfem solve refusals otherwise propagate unchanged.
 ///
 /// # Panics
 /// If `phi.n() != 2^level` (the SDF lattice must match the CutFEM
@@ -235,9 +245,13 @@ pub fn optimize_compliance(
     phi: &mut GridSdf,
     fixture: Cantilever,
     settings: OptimizeSettings,
-) -> Result<OptimizeReport, SolidError> {
+) -> Result<OptimizeReport, CutFemError> {
     let support = cantilever_support(fixture)?;
-    let (lambda, mu) = validated_plane_strain_lame(settings)?;
+    let (material, lambda, mu) = validated_plane_strain_material(settings)?;
+    // Preserve the former fs-solid facade's coefficient convention exactly:
+    // it expressed both constants against lambda + 2*mu, while fs-cutfem's
+    // canonical operator expresses them against mu.
+    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let n = 1usize << settings.level;
     assert_eq!(phi.n(), n, "SDF lattice must match the CutFEM grid");
     let grid = Quadtree::uniform(settings.level);
@@ -254,14 +268,15 @@ pub fn optimize_compliance(
         let solver = CutElasticity {
             grid: &grid,
             sdf: phi,
-            youngs: settings.youngs,
-            poisson: settings.poisson,
-            nitsche_beta: 20.0,
-            ghost_gamma: 0.5,
+            material: &material,
+            nitsche_beta: 20.0 * legacy_stiffness_scale,
+            ghost_gamma: 0.5 * legacy_stiffness_scale,
             quad_depth: 2,
             clamp: Some(&clamp),
             boundary_traction: None,
             traction_free_interface: true,
+            solver_tol: SOLVER_TOL,
+            solver_max_iters: SOLVER_MAX_ITERS,
         };
         let sol = solver.solve_with_boundary_traction(
             &|_, _| [0.0, 0.0],
@@ -396,7 +411,7 @@ pub fn optimize_compliance(
 fn strain_at(
     grid: &Quadtree,
     phi: &GridSdf,
-    sol: &fs_solid::CutSolution,
+    sol: &CutElasticitySolution,
     p: [f64; 2],
 ) -> ([f64; 3], bool) {
     let level = grid.max_level();
