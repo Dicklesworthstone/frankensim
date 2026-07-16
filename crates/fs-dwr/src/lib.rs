@@ -16,9 +16,11 @@
 //!   tie-breaking (indicator desc, cell key asc) — two runs mark
 //!   bitwise-identically.
 //! - [`adapt`]: the octree h-refinement loop (mechanism 1) — solve →
-//!   estimate → mark → split → rebalance → restore the cut-band
-//!   uniformity fs-cutfem's ghost penalty requires; accuracy-per-DOF
-//!   curves are the ledgered output.
+//!   estimate → mark → constraint-aware split admission → rebalance.
+//!   A scalar mark may deliberately raise the declared cut-band target; a
+//!   mismatch-only repair at the existing target is deferred in deterministic
+//!   indicator order, so local accuracy does not silently spend a global
+//!   refinement budget. Accuracy-per-DOF curves are the ledgered output.
 //! - [`aniso`]: anisotropic METRIC SYNTHESIS (mechanism 2) — recovered
 //!   Hessians weighted by adjoint magnitude, normalized to a target
 //!   complexity, exported as an fs-mesh `MetricField`-shaped tensor

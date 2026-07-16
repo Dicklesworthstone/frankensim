@@ -56,9 +56,16 @@ that knows the difference.
   descending, cell key ascending on ties, smallest prefix reaching
   θ·total. Bitwise-reproducible (P2).
 - `adapt_loop` → `AdaptStep` rows: solve → estimate → mark → split →
-  rebalance → RESTORE the uniform cut band (fs-cutfem's ghost-penalty
-  precondition) at the finest cut-adjacent level; ledger-style JSON
-  per step (dofs, J, η, marked).
+  rebalance under CONSTRAINED Dörfler admission. Candidates retain the
+  deterministic indicator order, but a local split is committed only when an
+  exact fs-cutfem build proves that it preserves the scalar ghost cut band.
+  A candidate whose raw split is inadmissible but whose one-cell-inflated
+  interface target rises may deliberately advance the entire band to that
+  higher target; this preserves the original quality-gated 3-to-4 policy.
+  An already-admissible local split remains local. A mismatch at an unchanged
+  target is deferred, and lower-ranked candidates continue until the requested
+  original indicator mass is actually refined. Ledger-style JSON records dofs,
+  J, η, and the count of original indicator cells actually refined.
 - `synthesize_metric`: per-cell 2×2 metrics from recovered Hessians
   (two-sided second differences — a one-sided stencil vanishes by
   antisymmetry at an odd layer's inflection, a measured pathology)
@@ -114,14 +121,27 @@ that knows the difference.
     finite. One active child is sufficient; four-child coverage is not
     invented as a stronger topology precondition.
 12. A non-final adaptive iteration with marked cells derives its reserved
-    balance/interface refinement headroom with checked arithmetic. A zero-level
-    grid refuses as `InvalidFemInput`; it never underflows or silently wraps the
-    refinement ceiling. An empty marked set requires no headroom.
+    balance/enrichment headroom with checked arithmetic. A zero-level grid
+    refuses as `InvalidFemInput`; it never underflows or silently wraps the
+    refinement ceiling. The marking fraction theta must be finite and in
+    `[0, 1]`; theta zero is the documented empty marking and requires no
+    headroom.
 13. Graded vector integration passes the unmodified compliance indicator map
     into fs-topopt's shared `refine_dwr_cut_band` policy for two consecutive
     positive split waves. Each wave is followed by a successful mixed-active-
     level CutFEM vector re-solve, with deterministic structure, coefficients,
     reconstructed nodes, and compliance on replay.
+14. Scalar adaptive refinement is atomic and locality-preserving: every trial
+    split is balanced and checked by the exact production `Space::build`
+    admission path. When the raw build reports `CutBandNotUniform`, a higher
+    one-cell-inflated target authorizes a deliberate whole-band advance. At an
+    unchanged target the candidate is deferred rather than promoting its
+    connected interface component; every other build refusal propagates. A
+    successful wave refines at least theta times the original absolute
+    indicator mass, counting indicator cells split as balance or
+    authorized-band side effects. Insufficient admissible mass refuses without
+    mutating the caller's grid. Ghost-free scalar paths admit the same local
+    grades normally.
 
 ## Error model
 
@@ -129,8 +149,11 @@ fs-cutfem's `CutFemError` teaching errors propagate unchanged
 (build/solve refusals). The scalar estimator and `goal_value` use
 `InvalidFemInput` to refuse the level-16 enrichment cap, active-space
 parent/child mismatch, missing or non-finite nodal/adjoint-corner data,
-non-finite goal/residual terms or totals, retained topology/rule mismatch, or a
-zero-level adaptive grid that needs another marked refinement iteration.
+non-finite goal/residual terms or totals, retained topology/rule mismatch, a
+zero-level adaptive grid that needs another marked refinement iteration, or a
+constrained marking wave with insufficient admissible indicator mass. The
+adaptive driver also refuses a non-finite or out-of-range marking fraction
+before solving or mutating the grid.
 Non-finite primal source/boundary callbacks may first surface through the
 propagated scalar build/solve teaching error because they enter assembly before
 the residual sweep.
@@ -150,7 +173,8 @@ golden hashes not yet recorded (follow-up).
 ## Cancellation behavior
 
 Bounded synchronous loops (solves are fs-cutfem's, estimator sweeps
-are linear in cells, the adaptive loop has a fixed iteration count).
+are linear in cells, and each fixed adaptive iteration tries at most two
+admission builds per indicator cell: raw, then optionally target-advanced).
 Chunked Cx polling belongs to the fs-exec driver (L3 discipline).
 
 ## Unsafe boundary
@@ -171,6 +195,14 @@ prefix; dwr-003 localized-QoI adaptive-vs-uniform accuracy-per-DOF;
 dwr-004 metric synthesis (complexity/alignment/graded-beats-iso);
 dwr-005 weighted Haar thresholding vs matched-compression unweighted;
 dwr-006 h-vs-p routing. Unit tests: Haar lossless/mean roundtrips.
+
+Scalar adaptivity unit coverage pins the exact certified-inside halo candidate
+that would otherwise force a connected cut-band promotion: constrained marking
+defers it, advances a lower-ranked safe candidate to the requested mass,
+preserves the caller grid on refusal, replays bit-identically, and accepts the
+same local grade when ghost stabilization is disabled. A separate fixture pins
+the intentional initial 3-to-4 band-target advance, preventing the locality fix
+from freezing all interface resolution.
 
 `tests/elasticity.rs`: independent-reference vector compliance
 effectivity rows across bulk/traction, embedded-Nitsche/ghost, and
