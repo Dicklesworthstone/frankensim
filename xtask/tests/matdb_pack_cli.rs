@@ -19,6 +19,10 @@ const PACK_HASH_GOLDEN: &str = "c1fb2f443708d297423179f4ac6024ee26b1d0c940a229d1
 const NASA9_PACK_BYTES_GOLDEN: usize = 4_940;
 const NASA9_PACK_HASH_GOLDEN: &str =
     "006177a7cc6f7b4ae10a9eb4a5bf49faaf21911ef9473190a29ecfc3a818a162";
+const MATERIAL_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
+const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
+const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
+const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 
 const MANIFEST: &str = concat!(
     "frankensim.matdb-manifest.v1\n",
@@ -228,6 +232,16 @@ fn run_compiler(manifest: &Path, output: &Path) -> Output {
         .expect("run xtask matdb-pack")
 }
 
+fn assert_decision_compiler(output: &Output, expected: &str) {
+    let stdout = std::str::from_utf8(&output.stdout).expect("decision stream is UTF-8");
+    assert!(!stdout.is_empty(), "compiler emitted no decision rows");
+    let expected_prefix = format!("{{\"check\":\"matdb-pack\",\"compiler\":\"{expected}\",");
+    assert!(
+        stdout.lines().all(|row| row.starts_with(&expected_prefix)),
+        "decision row used the wrong compiler identity:\n{stdout}"
+    );
+}
+
 #[test]
 fn g3_cli_compiles_two_identical_pinned_packs() {
     let (directory, manifest) = write_fixture(SOURCE);
@@ -247,6 +261,7 @@ fn g3_cli_compiles_two_identical_pinned_packs() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(first.stdout, second.stdout, "decision stream moved");
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
 
     let first_bytes = fs::read(&first_path).expect("read first normalized pack");
     let second_bytes = fs::read(&second_path).expect("read second normalized pack");
@@ -356,6 +371,7 @@ fn g3_cli_compiles_nasa9_regions_into_identical_verified_model_packs() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(first.stdout, second.stdout, "NASA-9 decision stream moved");
+    assert_decision_compiler(&first, NASA9_COMPILER_ID);
 
     let first_bytes = fs::read(first_path).expect("read first NASA-9 pack");
     let second_bytes = fs::read(second_path).expect("read second NASA-9 pack");
@@ -413,6 +429,7 @@ fn g3_cli_compiles_first_order_kinetics_into_an_identical_verified_model_pack() 
         first.stdout, second.stdout,
         "kinetics decision stream moved"
     );
+    assert_decision_compiler(&first, KINETICS_COMPILER_ID);
 
     let first_bytes = fs::read(first_path).expect("read first kinetics pack");
     let second_bytes = fs::read(second_path).expect("read second kinetics pack");
@@ -478,6 +495,7 @@ fn g3_cli_compiles_species_association_into_identical_verified_species_packs() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(first.stdout, second.stdout, "species decision stream moved");
+    assert_decision_compiler(&first, SPECIES_COMPILER_ID);
 
     let first_bytes = fs::read(first_path).expect("read first species pack");
     let second_bytes = fs::read(second_path).expect("read second species pack");
@@ -565,6 +583,7 @@ fn g3_cli_refuses_malformed_species_without_publishing() {
         "invalid species unexpectedly compiled"
     );
     assert!(!output.exists(), "species refusal published an output");
+    assert_decision_compiler(&refused, SPECIES_COMPILER_ID);
     let decisions = String::from_utf8(refused.stdout).expect("decision stream is UTF-8");
     assert_eq!(decisions.matches("\"verdict\":\"refuse\"").count(), 1);
     assert!(decisions.contains("\"reason_code\":\"species_molar_mass_dims_mismatch\""));
@@ -572,6 +591,43 @@ fn g3_cli_refuses_malformed_species_without_publishing() {
     assert!(
         String::from_utf8_lossy(&refused.stderr)
             .contains("error: matdb pack refused [species_molar_mass_dims_mismatch]")
+    );
+}
+
+#[test]
+fn g3_cli_uses_generic_driver_identity_for_an_unknown_profile() {
+    let directory = fixture_dir();
+    let manifest = directory.join("manifest.tsv");
+    let unsupported = MANIFEST.replace("material-tsv-v1", "future-profile-v1");
+    fs::write(&manifest, unsupported).expect("write unsupported-profile manifest");
+    fs::write(directory.join("source.tsv"), SOURCE).expect("write source fixture");
+    let output = directory.join("unsupported.fsmatpk");
+
+    let refused = run_compiler(&manifest, &output);
+    assert!(!refused.status.success());
+    assert!(!output.exists(), "unsupported profile published an output");
+    assert_decision_compiler(&refused, MATERIAL_COMPILER_ID);
+    assert!(
+        String::from_utf8_lossy(&refused.stdout)
+            .contains("\"reason_code\":\"unsupported_source_profile\"")
+    );
+}
+
+#[test]
+fn g3_cli_uses_generic_driver_identity_before_profile_selection() {
+    let directory = fixture_dir();
+    let manifest = directory.join("manifest.tsv");
+    let incomplete = MANIFEST.replace("license\tCC-BY-4.0\n", "");
+    fs::write(&manifest, incomplete).expect("write incomplete manifest");
+    fs::write(directory.join("source.tsv"), SOURCE).expect("write source fixture");
+    let output = directory.join("incomplete.fsmatpk");
+
+    let refused = run_compiler(&manifest, &output);
+    assert!(!refused.status.success());
+    assert!(!output.exists(), "incomplete manifest published an output");
+    assert_decision_compiler(&refused, MATERIAL_COMPILER_ID);
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains("\"reason_code\":\"missing_license\"")
     );
 }
 

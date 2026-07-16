@@ -56,7 +56,7 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 2;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 3;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
@@ -99,6 +99,7 @@ const QTY_BUDGET: ParseBudget = ParseBudget::new(4_096, 256, 64, 256);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompileError {
+    compiler_id: String,
     code: &'static str,
     subject: String,
     detail: String,
@@ -109,12 +110,18 @@ struct CompileError {
 impl CompileError {
     fn new(code: &'static str, subject: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
+            compiler_id: COMPILER_ID.to_string(),
             code,
             subject: subject.into(),
             detail: detail.into(),
             input_hash: None,
             prior_decisions: Vec::new(),
         }
+    }
+
+    fn with_compiler_id(mut self, compiler_id: impl Into<String>) -> Self {
+        self.compiler_id = compiler_id.into();
+        self
     }
 
     fn with_input_hash(mut self, input_hash: ContentHash) -> Self {
@@ -190,10 +197,10 @@ impl Decision {
         decision
     }
 
-    fn canonical_preimage(&self) -> Vec<u8> {
+    fn canonical_preimage(&self, compiler_id: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         for part in [
-            COMPILER_ID.as_bytes(),
+            compiler_id.as_bytes(),
             self.subject.as_bytes(),
             self.verdict.as_bytes(),
             self.reason_code.as_bytes(),
@@ -224,7 +231,7 @@ fn refusal_decisions(error: &CompileError, input_hash: Option<ContentHash>) -> V
 
 fn print_refusal_decisions(error: &CompileError, input_hash: Option<ContentHash>) {
     for decision in refusal_decisions(error, input_hash) {
-        println!("{}", render_decision(&decision));
+        println!("{}", render_decision(&error.compiler_id, &decision));
     }
 }
 
@@ -243,6 +250,14 @@ enum CompiledPack {
 }
 
 impl CompiledPack {
+    fn compiler_id(&self) -> &str {
+        match self {
+            Self::Material(pack) => pack.compiler(),
+            Self::Model(pack) => pack.compiler(),
+            Self::Species(pack) => pack.compiler(),
+        }
+    }
+
     fn source_artifact(&self) -> ContentHash {
         match self {
             Self::Material(pack) => pack.source_artifact(),
@@ -304,6 +319,17 @@ enum SourceProfile {
     Nasa9,
     Kinetics,
     Species,
+}
+
+impl SourceProfile {
+    const fn compiler_id(self) -> &'static str {
+        match self {
+            Self::Material => COMPILER_ID,
+            Self::Nasa9 => NASA9_COMPILER_ID,
+            Self::Kinetics => KINETICS_COMPILER_ID,
+            Self::Species => SPECIES_COMPILER_ID,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -572,32 +598,48 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
             "sources",
             "source envelope changed between the two complete compilation passes",
         )
+        .with_compiler_id(first.pack.compiler_id())
         .with_input_hash(hash_domain(SOURCE_ENVELOPE_DOMAIN, &pair));
         println!(
             "{}",
-            render_decision(&Decision::refusal(&error, error.input_hash))
+            render_decision(
+                &error.compiler_id,
+                &Decision::refusal(&error, error.input_hash)
+            )
         );
         return Err(error.to_string());
     }
-    if first.bytes != second.bytes || first.decisions != second.decisions {
+    if first.pack.compiler_id() != second.pack.compiler_id()
+        || first.bytes != second.bytes
+        || first.decisions != second.decisions
+    {
         let error = CompileError::new(
             "nondeterministic_compilation",
             "pack",
             "two complete source-to-pack passes produced different artifacts or decisions",
         )
+        .with_compiler_id(first.pack.compiler_id())
         .with_input_hash(first_source);
         println!(
             "{}",
-            render_decision(&Decision::refusal(&error, error.input_hash,))
+            render_decision(
+                &error.compiler_id,
+                &Decision::refusal(&error, error.input_hash,)
+            )
         );
         return Err(error.to_string());
     }
 
+    let compiler_id = first.pack.compiler_id().to_string();
     let pack_hash = first.pack.content_hash();
     write_new_verified(&output_path, &first.bytes, &first.pack).map_err(|error| {
+        let error = error.with_compiler_id(compiler_id.clone());
         println!(
             "{}",
-            render_decision(&Decision::refusal_for_pack(&error, pack_hash))
+            render_decision(
+                &error.compiler_id,
+                &Decision::refusal_for_pack(&error, pack_hash)
+            )
         );
         error.to_string()
     })?;
@@ -611,7 +653,7 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
     });
     sort_decisions(&mut first.decisions);
     for decision in &first.decisions {
-        println!("{}", render_decision(decision));
+        println!("{}", render_decision(&compiler_id, decision));
     }
     eprintln!(
         "matdb pack OK: {} bytes, hash {}, {} decisions",
@@ -2598,6 +2640,7 @@ fn compile_species_manifest(
     })();
     result.map_err(|error| {
         error
+            .with_compiler_id(SPECIES_COMPILER_ID)
             .with_input_hash(source_artifact)
             .with_prior_decisions(decisions)
     })
@@ -2945,6 +2988,7 @@ fn compile_nasa9_manifest(
     })();
     result.map_err(|error| {
         error
+            .with_compiler_id(NASA9_COMPILER_ID)
             .with_input_hash(source_artifact)
             .with_prior_decisions(decisions)
     })
@@ -3261,6 +3305,7 @@ fn compile_kinetics_manifest(
     })();
     result.map_err(|error| {
         error
+            .with_compiler_id(KINETICS_COMPILER_ID)
             .with_input_hash(source_artifact)
             .with_prior_decisions(decisions)
     })
@@ -3282,18 +3327,25 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         parse_manifest(manifest_text).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
-    let sources = load_sources(manifest_path, &manifest)
-        .map_err(|error| error.with_input_hash(manifest_snapshot))?;
+    let compiler_id = profile.compiler_id();
+    let sources = load_sources(manifest_path, &manifest).map_err(|error| {
+        error
+            .with_compiler_id(compiler_id)
+            .with_input_hash(manifest_snapshot)
+    })?;
     let source_artifact = source_envelope_hash(&manifest, &sources);
     match profile {
         SourceProfile::Nasa9 => {
-            return compile_nasa9_manifest(manifest, &sources, source_artifact);
+            return compile_nasa9_manifest(manifest, &sources, source_artifact)
+                .map_err(|error| error.with_compiler_id(compiler_id));
         }
         SourceProfile::Kinetics => {
-            return compile_kinetics_manifest(manifest, &sources, source_artifact);
+            return compile_kinetics_manifest(manifest, &sources, source_artifact)
+                .map_err(|error| error.with_compiler_id(compiler_id));
         }
         SourceProfile::Species => {
-            return compile_species_manifest(manifest, &sources, source_artifact);
+            return compile_species_manifest(manifest, &sources, source_artifact)
+                .map_err(|error| error.with_compiler_id(compiler_id));
         }
         SourceProfile::Material => {}
     }
@@ -3611,6 +3663,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     })();
     result.map_err(|error| {
         error
+            .with_compiler_id(compiler_id)
             .with_input_hash(source_artifact)
             .with_prior_decisions(decisions)
     })
@@ -4337,8 +4390,16 @@ fn sort_decisions(decisions: &mut [Decision]) {
     });
 }
 
-fn render_decision(decision: &Decision) -> String {
-    let case_id = hash_domain(DECISION_ID_DOMAIN, &decision.canonical_preimage()).to_hex();
+/// Render deterministic admission evidence for the selected compiler semantics.
+///
+/// The compiler and case identifiers bind provenance; they are not signatures,
+/// source authentication, legal determinations, or proof that a named binary ran.
+fn render_decision(compiler_id: &str, decision: &Decision) -> String {
+    let case_id = hash_domain(
+        DECISION_ID_DOMAIN,
+        &decision.canonical_preimage(compiler_id),
+    )
+    .to_hex();
     let source_hash = decision
         .source_hash
         .map_or_else(String::new, |hash| hash.to_hex());
@@ -4348,7 +4409,7 @@ fn render_decision(decision: &Decision) -> String {
     format!(
         "{{\"check\":\"matdb-pack\",\"compiler\":\"{}\",\"case_id\":\"{}\",\"subject\":\"{}\",\"verdict\":\"{}\",\
          \"reason_code\":\"{}\",\"source_hash\":\"{}\",\"pack_hash\":\"{}\",\"detail\":\"{}\"}}",
-        COMPILER_ID,
+        compiler_id,
         case_id,
         super::json_escape(&decision.subject),
         decision.verdict,
@@ -5489,8 +5550,11 @@ mod tests {
         assert_ne!(first_hash, second_hash);
         let first = Decision::refusal(&first_error, Some(first_hash));
         let second = Decision::refusal(&second_error, Some(second_hash));
-        assert_ne!(first.canonical_preimage(), second.canonical_preimage());
-        assert!(render_decision(&first).contains(&first_hash.to_hex()));
+        assert_ne!(
+            first.canonical_preimage(COMPILER_ID),
+            second.canonical_preimage(COMPILER_ID)
+        );
+        assert!(render_decision(COMPILER_ID, &first).contains(&first_hash.to_hex()));
     }
 
     #[test]
@@ -5548,25 +5612,61 @@ mod tests {
         let source = Decision::refusal(&error, Some(hash));
         let pack = Decision::refusal_for_pack(&error, hash);
 
-        assert_ne!(source.canonical_preimage(), pack.canonical_preimage());
         assert_ne!(
-            hash_domain(DECISION_ID_DOMAIN, &source.canonical_preimage()),
-            hash_domain(DECISION_ID_DOMAIN, &pack.canonical_preimage())
+            source.canonical_preimage(COMPILER_ID),
+            pack.canonical_preimage(COMPILER_ID)
         );
+        assert_ne!(
+            hash_domain(DECISION_ID_DOMAIN, &source.canonical_preimage(COMPILER_ID)),
+            hash_domain(DECISION_ID_DOMAIN, &pack.canonical_preimage(COMPILER_ID))
+        );
+    }
+
+    #[test]
+    fn decision_identity_is_bound_to_the_selected_profile_compiler() {
+        let decision = Decision::admit("fixture", "fixture_admitted", "typed admission", None);
+
+        let material_preimage = decision.canonical_preimage(COMPILER_ID);
+        let species_preimage = decision.canonical_preimage(SPECIES_COMPILER_ID);
+        assert_ne!(material_preimage, species_preimage);
+        assert_ne!(
+            hash_domain(DECISION_ID_DOMAIN, &material_preimage),
+            hash_domain(DECISION_ID_DOMAIN, &species_preimage)
+        );
+        assert_ne!(
+            render_decision(COMPILER_ID, &decision),
+            render_decision(SPECIES_COMPILER_ID, &decision)
+        );
+    }
+
+    #[test]
+    fn source_profiles_select_their_exact_compiler_identity() {
+        for (profile, expected) in [
+            (SourceProfile::Material, COMPILER_ID),
+            (SourceProfile::Nasa9, NASA9_COMPILER_ID),
+            (SourceProfile::Kinetics, KINETICS_COMPILER_ID),
+            (SourceProfile::Species, SPECIES_COMPILER_ID),
+        ] {
+            assert_eq!(profile.compiler_id(), expected);
+        }
     }
 
     #[test]
     fn decision_rows_are_stable_json_lines_without_host_paths() {
         let (manifest_path, directory) = write_fixture(&manifest(MATERIAL_PROFILE, true), SOURCE);
         let compiled = compile_manifest(&manifest_path).expect("fixture compiles");
-        let rows: Vec<String> = compiled.decisions.iter().map(render_decision).collect();
+        let rows: Vec<String> = compiled
+            .decisions
+            .iter()
+            .map(|decision| render_decision(compiled.pack.compiler_id(), decision))
+            .collect();
 
         assert_eq!(
             rows,
             compiled
                 .decisions
                 .iter()
-                .map(render_decision)
+                .map(|decision| render_decision(compiled.pack.compiler_id(), decision))
                 .collect::<Vec<_>>()
         );
         assert!(
