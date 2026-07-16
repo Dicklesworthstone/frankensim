@@ -9,6 +9,7 @@
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-libm`     — cross-ISA-claiming crates route transcendentals via fs_math::det (bead lyms).
+//! - `check-color-admission` — no new positive Color literals outside admission authorities (bead 6pf9).
 //! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
@@ -1067,6 +1068,130 @@ fn check_libm(root: &Path) -> Vec<Violation> {
                                      CONTRACT claims cross-ISA bitwise determinism (bead \
                                      lyms), so use fs_math::det::{method} (or det::pow for \
                                      cbrt/powf), or annotate `// det-ok: <reason>`",
+                                    idx + 1
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// The two color-admission AUTHORITY crates (bead 6pf9): fs-evidence owns
+/// the Color/AdmittedColor types themselves and fs-ledger's ColorGraph is
+/// the replay-audited admission oracle. Positive literals inside them are
+/// the mechanism, not a bypass.
+const COLOR_AUTHORITY_CRATES: &[&str] = &["fs-evidence", "fs-ledger"];
+
+/// Grandfathered direct positive-Color constructors (bead 6pf9 stage S3
+/// worklist, surveyed 2026-07-16 at d5a2da0). This list is a RATCHET: it
+/// only shrinks. Remove a crate here once its owner group migrates its
+/// positive-evidence surfaces to `fs_evidence::AdmittedColor` (or renames
+/// remaining construction sites under explicit declared/unverified
+/// discipline); never add a crate — new code routes through an admission
+/// authority (`ColorGraph::admission_receipt`,
+/// `VerifiedPackage::claim_admission_receipt`,
+/// `LoopReport::admitted_headline`) or carries a
+/// `// declared-color-ok: <reason>` annotation.
+const COLOR_DECLARED_CRATES: &[&str] = &[
+    "fs-adjoint",
+    "fs-benchmark",
+    "fs-diffreal-e2e",
+    "fs-epi-e2e",
+    "fs-flowcert-e2e",
+    "fs-flutter-e2e",
+    "fs-grammar-e2e",
+    "fs-lbm",
+    "fs-marquee",
+    "fs-metamat-e2e",
+    "fs-neuroshape-e2e",
+    "fs-package",
+    "fs-recompute",
+    "fs-robustopt-e2e",
+    "fs-thrust-e2e",
+    "fs-truss-e2e",
+    "fs-verify",
+    "fs-wasm",
+];
+
+/// check-color-admission (bead 6pf9, stage S4 lint, check-powi/check-libm
+/// precedent): a direct positive `Color::Verified`/`Color::Validated`
+/// literal outside the admission authorities is capability fabrication —
+/// structural validation cannot tell an admitted certificate from a
+/// fabricated literal. Inside `crates/*/src`, every such literal must live
+/// in an authority crate, a grandfathered [`COLOR_DECLARED_CRATES`] entry,
+/// test code (a `tests/` path or below a `#[cfg(test)]` marker), or carry a
+/// `// declared-color-ok: <reason>` annotation on the same or preceding
+/// line.
+fn check_color_admission(root: &Path) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let crates_dir = root.join("crates");
+    let Ok(crates) = std::fs::read_dir(&crates_dir) else {
+        return violations;
+    };
+    for krate in crates.flatten() {
+        let crate_path = krate.path();
+        let Some(crate_name) = crate_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if COLOR_AUTHORITY_CRATES.contains(&crate_name)
+            || COLOR_DECLARED_CRATES.contains(&crate_name)
+        {
+            continue;
+        }
+        let mut stack = vec![crate_path.join("src")];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+                let Ok(text) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                let mut prev_raw = "";
+                let mut in_test_code = false;
+                for (idx, raw) in text.lines().enumerate() {
+                    // Test fixtures legitimately declare colors; skip the
+                    // conventional trailing test module once its cfg marker
+                    // appears.
+                    if raw.contains("#[cfg(test)]") {
+                        in_test_code = true;
+                    }
+                    if in_test_code {
+                        continue;
+                    }
+                    let code = strip_line_comments(raw);
+                    let annotated = raw.contains("declared-color-ok:")
+                        || prev_raw.contains("declared-color-ok:");
+                    prev_raw = raw;
+                    if annotated {
+                        continue;
+                    }
+                    for variant in ["Color::Verified", "Color::Validated"] {
+                        if code.contains(variant) {
+                            violations.push(Violation {
+                                check: "color-admission",
+                                crate_name: rel.clone(),
+                                detail: format!(
+                                    "{rel}:{}: direct positive `{variant}` literal — a \
+                                     fabricated literal is indistinguishable from admitted \
+                                     evidence (bead 6pf9); mint through an admission authority \
+                                     (ColorGraph::admission_receipt, \
+                                     VerifiedPackage::claim_admission_receipt) and consume \
+                                     fs_evidence::AdmittedColor, or annotate \
+                                     `// declared-color-ok: <reason>`",
                                     idx + 1
                                 ),
                             });
@@ -3138,6 +3263,7 @@ fn main() -> ExitCode {
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-libm" => (check_libm(&root), vec!["libm-determinism"]),
+        "check-color-admission" => (check_color_admission(&root), vec!["color-admission"]),
         "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
         "check-identities" => (
@@ -3159,6 +3285,7 @@ fn main() -> ExitCode {
             v.extend(check_unsafe(&root));
             v.extend(check_powi(&root));
             v.extend(check_libm(&root));
+            v.extend(check_color_admission(&root));
             v.extend(check_terminology(&root));
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
@@ -3177,6 +3304,7 @@ fn main() -> ExitCode {
                     "unsafe-capsules",
                     "powi-determinism",
                     "libm-determinism",
+                    "color-admission",
                     TERMINOLOGY_CHECK,
                     "golden-couplings",
                     "semantic-identities",
