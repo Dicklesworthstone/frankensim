@@ -5,19 +5,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The world boundary: hardened STL/OBJ/PLY import with quarantine + certification receipts, 3MF/glTF(GLB)/VTK export, CSV/JSON catalog ingestion with schema validation."
+description = "The world boundary: hardened mesh and bounded STEP interchange with quarantine receipts, deterministic exports, and schema-validated catalogs."
 
 [package.metadata.frankensim]
 layer = "L2"
 
 [dependencies]
 fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
 fs-geom = { path = "../fs-geom" }
 fs-math = { path = "../fs-math" }
 fs-obs = { path = "../fs-obs" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-rep-sdf = { path = "../fs-rep-sdf" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true

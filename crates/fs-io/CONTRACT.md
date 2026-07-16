@@ -5,16 +5,17 @@ Dirty geometry comes in, useful artifacts go out — and no imported
 artifact becomes a trusted value without a certification receipt.
 
 Ambition tags: STL/OBJ/PLY + quarantine + catalogs + 3MF/GLB/VTK [S];
-bounded STEP Part-21 syntax kernel [S]; CAD/EXPRESS interpretation,
-tessellation, and B-rep interchange explicitly STAGED (no-claim below).
+bounded STEP Part-21 syntax kernel and caller-tessellated estimated-SDF
+handoff [S]; native CAD/EXPRESS interpretation, tessellation, and B-rep
+interchange explicitly STAGED (no-claim below).
 
 ## Purpose and layer
 
 Layer **L2** (MORPH). Runtime deps: `std`, fs-rep-mesh (repair +
-half-edge validity), fs-evidence, fs-geom, fs-obs, fs-math. PNG/EXR
-export is fs-img's (L5). Ledger `imports` rows are written HELM-side
-from the receipt JSON this crate emits — L2 never calls L6. Consumers:
-the P4 frame flagship (AISC catalogs), fs-fab.
+half-edge validity), fs-rep-sdf, fs-exec, fs-evidence, fs-geom, fs-obs,
+fs-math. PNG/EXR export is fs-img's (L5). Ledger `imports` rows are
+written HELM-side from the receipt JSON this crate emits — L2 never calls
+L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
 
 ## Public types and semantics
 
@@ -65,6 +66,19 @@ the P4 frame flagship (AISC catalogs), fs-fab.
   FNV fingerprints, schemas, graph counts, and a strictly non-authoritative
   AP203/AP214 label hint. HELM must replace fingerprints with its
   collision-resistant artifact identity before authority-bearing use.
+- **STEP tessellation handoff** (`step_import` module): accepts a caller-
+  supplied triangle soup only alongside the sealed `ParsedStep`, an explicit
+  tessellator name/version/configuration fingerprint, a caller-declared
+  tessellation-deviation certificate, one shared length-unit ID for coordinates,
+  deviation, and sampling spacing, a positive sampling spacing, and `Cx`.
+  It removes duplicate/degenerate faces and unreferenced vertices, may unify
+  orientation, and then refuses every residual boundary, non-manifold edge,
+  orientation conflict, or disconnected closed vertex link with a bounded
+  deterministic defect prefix.
+  Publication yields a sealed `StepImportOutcome`: `Evidence<TiledSdf>` plus
+  a source-bound receipt that separately retains tessellation deviation,
+  mesh-to-SDF numerical evidence, their outward-rounded combined estimate,
+  repairs, quality counters, and adapter identity.
 
 ## Invariants
 
@@ -97,6 +111,28 @@ the P4 frame flagship (AISC catalogs), fs-fab.
    reorders parameters or complex components, whose schema meaning is
    unknown at this layer. Numeric lexical spelling remains identity-bearing:
    this is layout canonicalization, not schema-aware numeric normalization.
+9. **No topology laundering at the STEP handoff**: repair is always invoked
+   with a zero hole-fill budget. Residual leaks, non-manifoldness, orientation
+   conflicts, vertex-link failures, and non-outward aggregate orientation
+   refuse publication; localized diagnostics are bounded to 256 records and
+   state when truncated.
+10. **No deviation laundering**: caller deviation must be a finite, ordered,
+    non-negative `Exact`, `Enclosure`, or `Estimate` band. It remains separate
+    in the receipt, and its upper bound is added with outward rounding to the
+    mesh-to-SDF upper bound. The combined result is always `Estimate`, never a
+    stronger authority grade.
+11. **Every semantic input moves provenance**: exact soup position bits and
+    triangle indices are FNV-fingerprinted before and after repair. Output
+    provenance also binds the Part-21 source/layout fingerprints, adapter
+    identity, shared length-unit ID, target-spacing bits, complete deviation
+    certificate, deterministic execution mode, repair result, and underlying
+    mesh-to-SDF provenance. These 64-bit fingerprints are replay aids, not
+    collision-resistant authority.
+12. **STEP tessellation preprocessing is separately bounded**: one million
+    vertices, one million triangles, a conservative 512 MiB auxiliary-memory
+    admission estimate, and at most 256 retained localized defects. The
+    receipt records these limits, crate versions, STEP-import semantics label,
+    and tessellation-fingerprint domain.
 
 ## Error model
 
@@ -105,19 +141,29 @@ the P4 frame flagship (AISC catalogs), fs-fab.
 defects + fixes + the refused receipt. The STEP syntax kernel uses
 `Malformed` for grammar/graph failures, `Unsupported` for staged encoded
 characters and binary literals, and `ResourceBound` for every declared
-limit.
+limit. `StepImportRefusal` separates raw admission, localized mesh integrity,
+preprocessing resource admission, SDF build/cancellation, and evidence-
+composition failures; each variant keeps the source fingerprint and later-
+stage variants keep repair receipts.
 
 ## Determinism class
 
-**D0**: fixed parse/emit orders, BTreeMap welds, no ambient state.
+**D0**: fixed parse/emit orders, deterministic welds/topology sorts, no ambient
+state. The STEP tessellation handoff rejects `ExecMode::Fast`; its receipt and
+provenance explicitly bind deterministic mode.
 
 ## Cancellation behavior
 
 Legacy mesh/catalog parsers are single-pass and element-capped. The STEP
 kernel is deliberately multi-pass (parse, shape/graph validation,
 canonical-layout serialization) and cap-bounded, but it has no `Cx` and
-makes no cancellation-latency claim. Cancellation-aware streaming belongs
-to the later geometry/tessellation lane.
+makes no cancellation-latency claim. The caller-tessellation handoff polls `Cx`
+at entry, around cap-bounded library calls, and every 4096 records in its owned
+validation, fingerprint, vertex-compaction, edge-localization, and vertex-link
+passes before forwarding the same `Cx` to mesh-to-SDF sampling. Cancellation is
+reported as `StepImportRefusal::SdfBuild`. The existing `repair`, topology-sort,
+and `MeshChart` construction calls have no internal poll, so this subset makes
+no sub-call latency claim for those separately bounded stages.
 
 ## Unsafe boundary
 
@@ -148,6 +194,14 @@ refusal, mandatory-header shape checks, strict uppercase keywords, exact
 typed-parameter arity, explicit resource/hard-depth-cap refusal, and
 writer-side revalidation of caller-constructed invalid graphs.
 
+`tests/step_import.rs` (G0/G3/G4): sealed source/adapter/error receipt
+composition on a closed fixture; deterministic leak and non-manifold
+localization; no-hole-fill repair behavior; hostile admission cases; retained
+duplicate/degenerate/unreferenced repair receipts; repair-exhausted audit
+retention; closed disconnected vertex-link refusal; pre-requested cancellation;
+outward-rounding overflow refusal; and fast-mode refusal. Differential fixtures
+require changed soup bits or deviation claims to move output provenance.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -160,12 +214,17 @@ import identically in both ASCII and binary (conformance-tested).
 
 ## No-claim boundaries
 
-- **STEP CAD semantics remain STAGED**: the shipping subset is a
-  syntax/instance-graph kernel only. It does not load an EXPRESS schema,
-  authorize AP203/AP214 conformance, interpret products/assemblies/units,
-  tessellate surfaces, produce a `Soup` or SDF chart, localize geometric
-  defects, fit NURBS, write a topological B-rep/solid, or certify a
-  deviation bound. `StepProfileHint` is label recognition only.
+- **Native STEP CAD semantics remain STAGED**: the syntax kernel does not load
+  an EXPRESS schema, authorize AP203/AP214 conformance, interpret products,
+  assemblies, units, topology, or geometry, or tessellate surfaces.
+  `StepProfileHint` is label recognition only. The optional handoff consumes
+  a triangle soup and deviation supplied by an explicitly identified caller;
+  it does not derive either from STEP records or certify the caller's bound.
+- **STEP-derived SDF authority is Estimate only**: the handoff does not certify
+  component nesting, self-intersection freedom, generalized-winding sign, or
+  semantic correspondence between the Part-21 records and caller tessellation.
+  It does not fit NURBS, write a topological B-rep/solid, or establish
+  manufacturing predicates.
 - **Part-21 encoded characters and binary literals are refused** in this
   first subset. Source bytes must be ASCII; encoded-character directives
   and binary payloads need their own bounded conformance fixtures before

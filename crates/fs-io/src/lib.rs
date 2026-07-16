@@ -7,9 +7,9 @@
 //! rejection, never a panic.
 //!
 //! Layer: L2 (MORPH). Runtime deps: `std`, fs-rep-mesh (repair/validity),
-//! fs-evidence, fs-geom, fs-obs, fs-math. PNG/EXR export is fs-img's job
-//! (L5); ledger `imports` rows are written HELM-side from the receipts
-//! this crate emits (L2 must not call L6).
+//! fs-rep-sdf, fs-exec, fs-evidence, fs-geom, fs-obs, fs-math. PNG/EXR
+//! export is fs-img's job (L5); ledger `imports` rows are written HELM-side
+//! from the receipts this crate emits (L2 must not call L6).
 
 pub mod catalog;
 pub mod export;
@@ -17,6 +17,7 @@ pub mod obj;
 pub mod ply;
 pub mod quarantine;
 pub mod step;
+pub mod step_import;
 pub mod stl;
 
 pub use catalog::{Catalog, ColumnKind, ColumnSpec, Schema};
@@ -26,6 +27,13 @@ pub use step::{
     ParsedStep, STEP_SYNTAX_VERSION, StepDocument, StepEntity, StepHeader, StepInstance,
     StepLimits, StepProfileHint, StepStructureReceipt, StepValue, parse_step,
     parse_step_with_limits, write_step, write_step_with_limits,
+};
+pub use step_import::{
+    MAX_STEP_ADAPTER_ID_BYTES, MAX_STEP_LOCALIZED_DEFECTS, MAX_STEP_TESSELLATION_TRIANGLES,
+    MAX_STEP_TESSELLATION_VERTICES, MAX_STEP_TOPOLOGY_AUXILIARY_BYTES,
+    STEP_IMPORT_SEMANTICS_VERSION, STEP_TESSELLATION_FINGERPRINT_DOMAIN, StepImportOutcome,
+    StepImportReceipt, StepImportRefusal, StepMeshDefect, StepMeshDefectKind,
+    StepTessellatorIdentity, import_step_tessellation,
 };
 
 use core::fmt;
