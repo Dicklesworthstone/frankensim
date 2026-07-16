@@ -15,11 +15,12 @@ use fs_exec::{BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::router::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
 use fs_geom::sheaf::{Interface, SheafComplex};
 use fs_geom::sheaf_repair::{
-    AdmittedSheafSkeleton, COMPONENT_FLOOR, SHEAF_NUMERICS_NORMALIZATION_V1,
-    SHEAF_SPECTRUM_NORMALIZATION_V1, SheafNumericsOutcome, SheafNumericsStoppingReason,
-    SheafRepairBudget, SheafRepairError, SheafRepairPlanBudget, SheafSkeleton, SheafSkeletonError,
-    SheafSpectrumScope, apply_gauge, assess_hodge_decomposition_bounded, hodge_decompose,
-    hodge_decompose_bounded, plan_repair, plan_repair_bounded, try_apply_gauge,
+    AdmittedSheafSkeleton, COMPONENT_FLOOR, RetainedSheafNumericsOutcome,
+    SHEAF_NUMERICS_NORMALIZATION_V1, SHEAF_SPECTRUM_NORMALIZATION_V1, SheafNumericsOutcome,
+    SheafNumericsPhase, SheafNumericsStoppingReason, SheafRepairBudget, SheafRepairError,
+    SheafRepairPlanBudget, SheafSkeleton, SheafSkeletonError, SheafSpectrumScope, apply_gauge,
+    assess_hodge_decomposition_bounded, assess_hodge_decomposition_retaining_sweeps_bounded,
+    hodge_decompose, hodge_decompose_bounded, plan_repair, plan_repair_bounded, try_apply_gauge,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -2261,5 +2262,322 @@ fn sr_021_smallest_subnormal_exact_cochains_do_not_underflow_authority() {
     verdict(
         "sr-021",
         "positive and negative smallest-subnormal exact cochains retain their signed bits, scale-safe unit energy, and exact-zero residual authority",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exact, verification, compatibility, and cap boundaries.
+fn sr_022_retained_exact_and_verification_interruptions_are_opaque() {
+    let path =
+        AdmittedSheafSkeleton::try_new(3, vec![(0, 1), (1, 2)], Vec::new()).expect("path admits");
+    let repair_budget = numerics_budget(4);
+    let generous = Budget {
+        deadline: None,
+        poll_quota: 100_000,
+        cost_quota: None,
+        priority: 0,
+    };
+    let baseline = with_budget_cx(generous, |cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &path,
+            &[1.0, 1.0],
+            0.0,
+            repair_budget,
+            cx,
+        )
+    });
+    let RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Indeterminate(
+        baseline_report,
+    )) = baseline
+    else {
+        panic!("the healthy retained-state lane must finish indeterminate: {baseline:?}");
+    };
+    let final_poll = baseline_report.usage().ambient_budget.polls_used;
+    let admitted_scalar_slots = baseline_report.usage().admitted_scalar_slots;
+    let admitted_work_items = baseline_report.usage().admitted_work_items;
+
+    let (exact_quota, exact_interruption) = (1..final_poll)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    assess_hodge_decomposition_retaining_sweeps_bounded(
+                        &path,
+                        &[1.0, 1.0],
+                        0.0,
+                        repair_budget,
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                RetainedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase() == SheafNumericsPhase::ExactProjection
+                        && interruption.checkpoint().exact_sweeps_completed() > 0
+                        && interruption.checkpoint().exact_sweeps_completed()
+                            < repair_budget.sweeps =>
+                {
+                    Some((poll_quota, interruption))
+                }
+                _ => None,
+            }
+        })
+        .expect("some exact poll quota must stop after a sealed sweep");
+    let checkpoint = exact_interruption.checkpoint();
+    assert_eq!(checkpoint.coexact_sweeps_completed(), 0);
+    assert_eq!(checkpoint.component_count(), 1);
+    assert_eq!(checkpoint.relative_tolerance(), 0.0);
+    assert_eq!(checkpoint.budget(), repair_budget);
+    assert_eq!(
+        checkpoint.usage().completed_sweeps,
+        checkpoint.exact_sweeps_completed()
+    );
+    assert_eq!(
+        checkpoint
+            .source()
+            .mismatch()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        [1.0f64.to_bits(), 1.0f64.to_bits()]
+    );
+    assert!(matches!(
+        exact_interruption.reason(),
+        SheafRepairError::AmbientBudgetRefused {
+            refusal: BudgetRefusal::PollsExhausted {
+                phase: "exact-projection",
+                quota,
+            },
+            completed_sweeps,
+            ..
+        } if quota == exact_quota && completed_sweeps == checkpoint.exact_sweeps_completed()
+    ));
+    let redacted = format!("{checkpoint:?}");
+    assert!(redacted.contains("state: \"<opaque>\""));
+    assert!(!redacted.contains("patch_potential"));
+
+    let (verification_quota, verification_interruption) = (1..final_poll)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    assess_hodge_decomposition_retaining_sweeps_bounded(
+                        &path,
+                        &[1.0, 1.0],
+                        0.0,
+                        repair_budget,
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                RetainedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase() == SheafNumericsPhase::Verification
+                        && matches!(
+                            interruption.reason(),
+                            SheafRepairError::AmbientBudgetRefused {
+                                refusal: BudgetRefusal::PollsExhausted {
+                                    phase: "numerics-publication",
+                                    ..
+                                },
+                                ..
+                            }
+                        ) =>
+                {
+                    Some((poll_quota, interruption))
+                }
+                _ => None,
+            }
+        })
+        .expect("some exact poll quota must stop at final publication");
+    let checkpoint = verification_interruption.checkpoint();
+    assert_eq!(checkpoint.exact_sweeps_completed(), repair_budget.sweeps);
+    assert_eq!(checkpoint.coexact_sweeps_completed(), 0);
+    assert!(matches!(
+        verification_interruption.reason(),
+        SheafRepairError::AmbientBudgetRefused {
+            refusal: BudgetRefusal::PollsExhausted {
+                phase: "numerics-publication",
+                quota,
+            },
+            ..
+        } if quota == verification_quota
+    ));
+    assert!(format!("{checkpoint:?}").contains("state: \"<opaque>\""));
+
+    let old = with_budget_cx(generous, |cx| {
+        assess_hodge_decomposition_bounded(&path, &[1.0, 1.0], 0.0, repair_budget, cx)
+    });
+    let SheafNumericsOutcome::Indeterminate(old_report) = old else {
+        panic!("the compatibility lane must remain indeterminate: {old:?}");
+    };
+    assert_eq!(
+        old_report.coboundary_candidate(),
+        baseline_report.coboundary_candidate()
+    );
+    assert_eq!(
+        old_report.patch_potential_candidate(),
+        baseline_report.patch_potential_candidate()
+    );
+    assert_eq!(
+        old_report.remainder_candidate(),
+        baseline_report.remainder_candidate()
+    );
+    assert_eq!(old_report.receipt(), baseline_report.receipt());
+
+    let gate = CancelGate::new();
+    gate.request();
+    let precancelled = with_gate_cx(&gate, |cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &path,
+            &[1.0, 1.0],
+            0.0,
+            repair_budget,
+            cx,
+        )
+    });
+    assert!(matches!(
+        precancelled,
+        RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Refused(
+            SheafRepairError::Cancelled {
+                completed_sweeps: 0,
+                ..
+            }
+        ))
+    ));
+    let underfunded = with_cx(|cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &path,
+            &[1.0, 1.0],
+            0.0,
+            SheafRepairBudget {
+                max_scalar_slots: admitted_scalar_slots - 1,
+                ..repair_budget
+            },
+            cx,
+        )
+    });
+    assert!(matches!(
+        underfunded,
+        RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Refused(
+            SheafRepairError::MemoryBudgetExceeded { required, cap }
+        ))
+            if required == admitted_scalar_slots as u128 && cap + 1 == admitted_scalar_slots
+    ));
+    let work_underfunded = with_cx(|cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &path,
+            &[1.0, 1.0],
+            0.0,
+            SheafRepairBudget {
+                max_work_items: admitted_work_items - 1,
+                ..repair_budget
+            },
+            cx,
+        )
+    });
+    assert!(matches!(
+        work_underfunded,
+        RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Refused(
+            SheafRepairError::WorkItemBudgetExceeded {
+                stage: "retained-numerics-work-preflight",
+                required,
+                cap,
+            }
+        )) if required == admitted_work_items as u128 && cap + 1 == admitted_work_items
+    ));
+    verdict(
+        "sr-022",
+        "the opt-in lane retains redacted exact and verification checkpoints only after sealed sweeps, while pre-cancellation and preflight caps refuse and healthy science matches the compatibility lane",
+    );
+}
+
+#[test]
+fn sr_023_retained_coexact_interruption_counts_only_sealed_sweeps() {
+    let triangle = admitted_triangle();
+    let mismatch = triangle
+        .d1t(&[2.0])
+        .expect("manufactured coexact basis is finite");
+    let repair_budget = numerics_budget(4);
+    let generous = Budget {
+        deadline: None,
+        poll_quota: 100_000,
+        cost_quota: None,
+        priority: 0,
+    };
+    let baseline = with_budget_cx(generous, |cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &triangle,
+            &mismatch,
+            1e-12,
+            repair_budget,
+            cx,
+        )
+    });
+    let RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Converged(baseline)) =
+        baseline
+    else {
+        panic!("manufactured coexact basis must finish converged: {baseline:?}");
+    };
+    let baseline = baseline.into_partial();
+    let final_poll = baseline.usage().ambient_budget.polls_used;
+    let (quota, interruption) = (1..final_poll)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    assess_hodge_decomposition_retaining_sweeps_bounded(
+                        &triangle,
+                        &mismatch,
+                        1e-12,
+                        repair_budget,
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                RetainedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase()
+                        == SheafNumericsPhase::CoexactProjection
+                        && interruption.checkpoint().coexact_sweeps_completed() > 0
+                        && interruption.checkpoint().coexact_sweeps_completed()
+                            < repair_budget.sweeps =>
+                {
+                    Some((poll_quota, interruption))
+                }
+                _ => None,
+            }
+        })
+        .expect("some poll quota must stop after a sealed coexact sweep");
+    let checkpoint = interruption.checkpoint();
+    assert_eq!(checkpoint.exact_sweeps_completed(), repair_budget.sweeps);
+    assert_eq!(
+        checkpoint.usage().completed_sweeps,
+        checkpoint.exact_sweeps_completed() + checkpoint.coexact_sweeps_completed()
+    );
+    assert!(matches!(
+        interruption.reason(),
+        SheafRepairError::AmbientBudgetRefused {
+            refusal: BudgetRefusal::PollsExhausted {
+                phase: "coexact-projection",
+                quota: observed,
+            },
+            completed_sweeps,
+            ..
+        } if observed == quota && completed_sweeps == checkpoint.usage().completed_sweeps
+    ));
+    assert!(format!("{checkpoint:?}").contains("state: \"<opaque>\""));
+    verdict(
+        "sr-023",
+        "coexact ambient interruption retains only a redacted complete-sweep checkpoint and keeps rolled-back physical work distinct from committed sweep counts",
     );
 }

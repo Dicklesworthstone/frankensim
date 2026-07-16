@@ -576,10 +576,25 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   therefore proves only
   the named finite-dimensional residual obligations; it does not prove
   continuum coverage, chart realizability, topology, H1, non-exactness, repair
-  feasibility, or merge/publication authority. Cancellation currently refuses
-  this transactional assessment without publishing an in-flight candidate;
-  retained last-complete-sweep continuation is still required before the full
-  43.2 Gauntlet closes.
+  feasibility, or merge/publication authority. The compatibility assessment
+  still refuses cancellation transactionally without publishing an in-flight
+  candidate. The additive
+  `assess_hodge_decomposition_retaining_sweeps_bounded` lane pre-binds the
+  admitted source and uses an accounted two-buffer projection schedule: its
+  committed iterate is changed only at a complete sweep boundary, while work
+  performed in a discarded partial sweep remains charged. After at least one
+  exact sweep, runtime cancellation or an ambient deadline, poll, or cost
+  refusal may return `Interrupted` with an opaque in-memory
+  `SheafSweepCheckpoint`. Public checkpoint metadata is limited to source,
+  tolerance, typed phase, component count, original budget, measured usage,
+  and committed exact/coexact sweep counts. Solver vectors remain private;
+  the token grants no candidate, residual, convergence, spectrum, topology,
+  repair, or publication authority. Invalid input, admission failure, local
+  cap failure, allocation failure, and numerical/arithmetic failure remain
+  ordinary `Finished(Refused)` outcomes. This first retained-state slice has no
+  resume, serialization, migration, fork, or cross-ISA claim; a linearly
+  consumed resume API with bounded multi-attempt accounting is still required
+  before the full 43.2 Gauntlet closes.
   Its INTERPRETATION CONTRACT is: fitted exact
   component → a sampled-mismatch 0-cochain correction candidate
   ONLY when every per-patch offset fits that chart's declared error
