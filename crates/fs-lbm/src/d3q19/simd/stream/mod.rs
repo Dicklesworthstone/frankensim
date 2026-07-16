@@ -56,7 +56,7 @@ pub fn d3q19_stream_simd_tier() -> D3q19StreamSimdTier {
     dispatch().tier
 }
 
-pub(super) fn stream_duct(
+pub(in crate::d3q19) fn stream_duct(
     post: &[Vec<Tile>; Q3],
     populations: &mut [Vec<Tile>; Q3],
     nx: usize,
