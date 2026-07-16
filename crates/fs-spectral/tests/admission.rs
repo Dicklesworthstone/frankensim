@@ -987,7 +987,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
     );
 
     let symplectic_axes = standard_axes(72, 4);
-    let finite = regularity_claim(
+    let symplectic_finite = regularity_claim(
         symplectic_axes,
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
@@ -1004,7 +1004,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
     let problem = validate_problem(default_spec(
         symplectic_axes,
         vec![symplectic],
-        vec![finite],
+        vec![symplectic_finite],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1027,7 +1027,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
     let positive_problem = validate_problem(default_spec(
         symplectic_axes,
         vec![j_self_adjoint],
-        vec![finite],
+        vec![symplectic_finite],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1068,7 +1068,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
         codomain: indefinite_metric,
         ..symplectic_axes
     };
-    let finite = regularity_claim(
+    let indefinite_finite = regularity_claim(
         indefinite_axes,
         RegularityClassV1::FiniteDimensional,
         WitnessDispositionV1::Witnessed,
@@ -1093,7 +1093,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
     let problem = validate_problem(default_spec(
         indefinite_axes,
         vec![j_self_adjoint, metric_self_adjoint],
-        vec![finite],
+        vec![indefinite_finite],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1119,7 +1119,7 @@ fn generalized_symplectic_and_krein_method_obligations_are_live() {
     let problem = validate_problem(default_spec(
         symplectic_axes,
         vec![nonnormal],
-        vec![finite],
+        vec![symplectic_finite],
         SpectralOrderingV1::SetValued,
         CompletenessScopeV1::CandidateOnly,
     ))
@@ -1965,6 +1965,9 @@ fn normalization_is_dimension_checked_reversible_and_overflow_safe() {
 #[test]
 fn admission_resource_caps_fire_before_quadratic_claim_analysis() {
     let axes = standard_axes(20, 4);
+    // Promotion-bearing schema-v2 witnesses make this canonical set larger
+    // than 64 KiB. The problem-specific field envelope must still admit the
+    // promised 256-claim boundary without broadening verifier/policy inputs.
     let at_limit_claims = (0..MAX_STRUCTURE_CLAIMS_V1)
         .map(|index| {
             let byte = u8::try_from(index).unwrap();

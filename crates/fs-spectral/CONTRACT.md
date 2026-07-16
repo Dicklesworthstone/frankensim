@@ -588,6 +588,10 @@ product (for example a generalized descriptor monodromy problem carrying
 finite-dimensional, regular-pencil, invertible-weight, regular-descriptor, and
 well-posed-monodromy evidence). Valid at-limit fixtures reach canonical problem
 identity construction; the caps are not merely early-rejection thresholds.
+Problem identities remain capped at 256 KiB total, with a problem-only 256 KiB
+field envelope so the 256 promotion-bearing schema-v2 structure claims are
+representable. Authority verifier and policy descriptors retain their tighter
+64 KiB field envelope; the problem accommodation does not broaden those inputs.
 
 ## Units and normalization
 

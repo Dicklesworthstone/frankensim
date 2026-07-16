@@ -38,6 +38,12 @@ pub const MAX_STRUCTURE_CLAIMS_V1: usize = 256;
 pub const MAX_REGULARITY_CLAIMS_V1: usize = 5;
 
 const IDENTITY_LIMITS: CanonicalLimits = CanonicalLimits::new(1 << 18, 1 << 16, 16, 4096, 4096);
+// A schema-v2 problem can carry 256 promotion-bearing structure claims. Their
+// one canonical-set field is larger than the tighter verifier/policy field
+// envelope. Keep its field bound at the complete 256 KiB frame cap and isolate
+// that broader allowance to problem identities.
+const PROBLEM_IDENTITY_LIMITS: CanonicalLimits =
+    CanonicalLimits::new(1 << 18, 1 << 18, 16, 4096, 4096);
 // Truth propositions may carry the full bounded region-boundary reference set
 // (4096 typed 32-byte IDs plus framing). Keep this distinct from the tighter
 // verifier/policy descriptor limit so the public truth cap is actually
@@ -3300,7 +3306,7 @@ fn canonical_problem_id(
     regularity_payloads.sort();
 
     CanonicalEncoder::<ProblemSemanticId<SpectralProblemIdentitySchemaV2>, _>::new(
-        IDENTITY_LIMITS,
+        PROBLEM_IDENTITY_LIMITS,
         NeverCancel,
     )?
     .bytes(Field::new(0, "subject"), spec.subject.as_bytes())?
