@@ -5257,7 +5257,16 @@ mod tests {
         ));
     }
 
+    /// The exact-cap boundary proof: MAX_SESSION_RECOVERY_PROBE_CLAIMS (8192)
+    /// canonical terminal inserts — twice the pause-fence fixture — are
+    /// quadratic through fsqlite's linear column-resolution join path, so the
+    /// default suite carries the small-scale smoke variant below instead and
+    /// deep cap lanes run this one with `--ignored` (bead q2x88; measured
+    /// >100 CPU-minutes on a contended M4, i3m4i precedent).
     #[test]
+    #[ignore = "100+ CPU minutes (bead q2x88): 8192 canonical inserts and per-row probes are \
+                quadratic under fsqlite's linear column resolution; behavior smoke coverage \
+                lives in recovery_probe_smoke_skips_terminalized_and_finds_pending_claims"]
     fn recovery_probe_accepts_exact_claim_cap_and_rejects_limit_plus_one() {
         let ledger = Ledger::open(":memory:").expect("recovery-cap ledger");
         ledger.begin().expect("bulk fixture transaction");
@@ -5372,6 +5381,79 @@ mod tests {
             ledger.read_queries() - overflow_snapshot_reads_before,
             2,
             "cap+1 spends only checked identity plus the bounded physical-mirror probe"
+        );
+    }
+
+    /// Small-scale behavior twin of the ignored 8192-row recovery-probe cap
+    /// test (bead q2x88): terminalized submissions are invisible to the
+    /// recovery probe (with its bounded two-read budget), while a claimed but
+    /// never-terminalized mutation is exactly what the probe recovers. The
+    /// exact-cap/cap+1 boundary itself stays in the deep `--ignored` lane.
+    #[test]
+    fn recovery_probe_smoke_skips_terminalized_and_finds_pending_claims() {
+        let ledger = Ledger::open(":memory:").expect("recovery-smoke ledger");
+        ledger.begin().expect("bulk fixture transaction");
+        for index in 0..8u64 {
+            let claim = SessionMutationClaim {
+                kind: PRECLAIM_REQUIRED_SUBMISSION_KIND,
+                causal_ordinal: Some(index + 1),
+                ..fixture_claim(&ledger, authority(240_000 + index), b"")
+            };
+            insert_canonical_submission_terminal_fixture(&ledger, claim);
+        }
+        ledger.commit().expect("terminalized fixture commit");
+
+        let envelope = SessionMutationClaim {
+            kind: PRECLAIM_REQUIRED_SUBMISSION_KIND,
+            causal_ordinal: Some(1),
+            ..fixture_claim(&ledger, authority(240_000), b"")
+        };
+        let reads_before = ledger.read_queries();
+        assert_eq!(
+            ledger
+                .pending_session_mutation(
+                    envelope.governor_hash,
+                    envelope.session_open_hash,
+                    envelope.kind,
+                    envelope.session,
+                    envelope.ledger_scope,
+                    envelope.generation,
+                )
+                .expect("terminalized recovery probe"),
+            None,
+            "terminalized submissions are not pending recovery work"
+        );
+        assert_eq!(
+            ledger.read_queries() - reads_before,
+            2,
+            "the recovery probe must not recurse through per-claim typed readers"
+        );
+
+        let pending = SessionMutationClaim {
+            kind: PRECLAIM_REQUIRED_SUBMISSION_KIND,
+            causal_ordinal: Some(9),
+            ..fixture_claim(&ledger, authority(240_008), b"")
+        };
+        assert!(matches!(
+            ledger
+                .claim_session_mutation(&pending)
+                .expect("pending fixture claim"),
+            SessionMutationClaimResult::Claimed { .. }
+        ));
+        let recovered = ledger
+            .pending_session_mutation(
+                envelope.governor_hash,
+                envelope.session_open_hash,
+                envelope.kind,
+                envelope.session,
+                envelope.ledger_scope,
+                envelope.generation,
+            )
+            .expect("pending recovery probe")
+            .expect("the never-terminalized claim is pending recovery work");
+        assert_eq!(
+            recovered.authority, pending.authority,
+            "the recovery probe returns the exact pending claim"
         );
     }
 
