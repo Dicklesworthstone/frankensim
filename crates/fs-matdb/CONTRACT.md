@@ -1,11 +1,15 @@
 # CONTRACT: fs-matdb
 
-> Status: ACTIVE (bead 5hmy, PR-1..PR-3 of 5 landed). Owns the
+> Status: ACTIVE (bead 5hmy complete: all five PRs landed). Owns the
 > immutable typed material-data schema, its fail-closed insertion
 > boundary, the material/constitutive card layer with supersedes
-> lineage, and the ordered interface-system card. The query path with
-> `Evidence<PropertySample>` + `PropertyUsageReceipt` is PR-4; the
-> receipt mutation battery is PR-5.
+> lineage, the ordered interface-system card, and the query path where
+> every answer is `Evidence<PropertySample>` + `PropertyUsageReceipt`
+> with replay-verified receipt completeness. Recorded residuals for
+> follow-up beads: joint-uncertainty correlation refs,
+> tensor/distribution payloads with frame-transform receipts (arrive
+> together), wider explicit fusion policies, and the curated seed
+> dataset (bead 1sxe).
 
 ## Purpose and layer
 
@@ -162,6 +166,21 @@ material-card hash binding claims, models, and the named-state id.
 sensitivity; three-phase wetting with advancing/receding hysteresis as
 coexisting claims; unnamed-texture-frame and blank
 medium/history/third-body refusals.
+
+`tests/query.rs` (PR-4 + PR-5): honest evidence slices (Estimate band
+from stated uncertainty; Unstated → numerical no-claim PROVEN never to
+certify); complete point-sensitive receipts; extrapolation, unknown
+property, and non-finite point refusals; explicit-fusion ambiguity
+refusal and the observation-backed preference policy; curve
+interpolation inside knots with exact-hit tagging and beyond-data
+refusal (fail-closed ordering: validity containment gates before
+evaluation, so `MissingQueryAxis` is only reachable through
+unconstrained validity); and the RECEIPT-COMPLETENESS MUTATION BATTERY —
+`ClaimSet::verify_receipt` replays the query from the receipt's own
+fields, 11 per-field mutations all refuse typed
+(`ReceiptMismatch { field }` / `UnknownPolicyTag` /
+`EvaluatorVersionDrift` / the replay's own refusals) and every mutation
+moves the receipt content hash.
 
 ## No-claim boundaries
 

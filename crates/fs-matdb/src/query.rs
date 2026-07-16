@@ -92,6 +92,20 @@ impl SelectionPolicy {
             SelectionPolicy::PreferObservationBacked => "prefer-observation-backed",
         }
     }
+
+    /// The policy a receipt tag names.
+    ///
+    /// # Errors
+    /// [`MatDbError::UnknownPolicyTag`] for a tag no policy owns.
+    pub fn from_tag(tag: &str) -> Result<SelectionPolicy, MatDbError> {
+        match tag {
+            "single-claim-only" => Ok(SelectionPolicy::SingleClaimOnly),
+            "prefer-observation-backed" => Ok(SelectionPolicy::PreferObservationBacked),
+            other => Err(MatDbError::UnknownPolicyTag {
+                tag: other.to_string(),
+            }),
+        }
+    }
 }
 
 /// How the selected claim was evaluated at the point (successful paths
@@ -365,6 +379,59 @@ impl ClaimSet {
             adjoint_ref: None,
         };
         Ok(MaterialAnswer { evidence, receipt })
+    }
+}
+
+impl ClaimSet {
+    /// Verify a receipt against this claim set: the receipt-completeness
+    /// battery's door (bead 5hmy, PR-5). The query is REPLAYED from the
+    /// receipt's own fields and every field must reproduce — a receipt
+    /// with any deleted, substituted, or stale field fails with a typed
+    /// refusal naming the first divergent field. A receipt that
+    /// verifies is exactly as trustworthy as the claim set it is
+    /// checked against, no more.
+    ///
+    /// # Errors
+    /// [`MatDbError::EvaluatorVersionDrift`] before any replay (a
+    /// receipt from another evaluator version cannot be adjudicated
+    /// here); [`MatDbError::UnknownPolicyTag`] for a foreign policy
+    /// tag; the replay's own refusals (e.g. a tampered query point may
+    /// refuse as out-of-domain); and
+    /// [`MatDbError::ReceiptMismatch`] naming the field that failed to
+    /// reproduce.
+    pub fn verify_receipt(&self, receipt: &PropertyUsageReceipt) -> Result<(), MatDbError> {
+        if receipt.evaluator_version != MATDB_EVALUATOR_VERSION {
+            return Err(MatDbError::EvaluatorVersionDrift {
+                receipt: receipt.evaluator_version,
+                current: MATDB_EVALUATOR_VERSION,
+            });
+        }
+        let policy = SelectionPolicy::from_tag(receipt.policy)?;
+        let mut point = QueryPoint::new();
+        for (axis, value) in &receipt.query_point {
+            point = point.with(axis.clone(), *value)?;
+        }
+        let replayed = self.query(&receipt.property, &point, policy)?;
+        let fresh = &replayed.receipt;
+        for (field, matches) in [
+            ("considered", fresh.considered == receipt.considered),
+            ("in_domain", fresh.in_domain == receipt.in_domain),
+            ("selected", fresh.selected == receipt.selected),
+            ("decision", fresh.decision == receipt.decision),
+            (
+                "observation_backed",
+                fresh.observation_backed == receipt.observation_backed,
+            ),
+            (
+                "source_hashes",
+                fresh.source_hashes == receipt.source_hashes,
+            ),
+        ] {
+            if !matches {
+                return Err(MatDbError::ReceiptMismatch { field });
+            }
+        }
+        Ok(())
     }
 }
 

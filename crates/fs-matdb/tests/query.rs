@@ -7,8 +7,8 @@ use fs_evidence::NumericalKind;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, EvaluationDecision, InterpolationPolicy, MATDB_EVALUATOR_VERSION, MatDbError,
-    ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
-    SelectionPolicy, UncertaintyModel,
+    ObservationDataset, PropertyClaim, PropertyKey, PropertyUsageReceipt, PropertyValue,
+    Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_qty::Dims;
 
@@ -295,5 +295,141 @@ fn unstated_uncertainty_is_marked_and_never_certifies() {
     println!(
         "{{\"suite\":\"fs-matdb\",\"case\":\"no-laundering\",\"verdict\":\"pass\",\
          \"detail\":\"Unstated maps to an explicit numerical no-claim and certification refuses\"}}"
+    );
+}
+
+#[test]
+fn receipt_completeness_mutation_battery() {
+    // PR-5: a receipt with ANY deleted, substituted, or stale field
+    // fails verification with a typed refusal. Fixture: two claims so
+    // considered/in_domain/selected are all nontrivial.
+    let mut set = ClaimSet::new();
+    set.insert_claim(density(2700.0, "MMPDS", stated()))
+        .expect("citation claim");
+    let obs = set
+        .register_observation(ObservationDataset {
+            specimen: "AA6061-T6 plate".to_string(),
+            method: "ASTM B311".to_string(),
+            artifact: hash_bytes(b"plate table"),
+            caveats: "none".to_string(),
+            provenance: provenance("lab report 9"),
+        })
+        .expect("observation registers");
+    let mut backed = density(2698.5, "internal lab", stated());
+    backed.observations.push(obs);
+    let other_id = set.insert_claim(backed).expect("backed claim");
+    let citation_id = set.claims_for("density")[0].0;
+
+    let answer = set
+        .query("density", &room(), SelectionPolicy::PreferObservationBacked)
+        .expect("query answers");
+    let good = answer.receipt.clone();
+    set.verify_receipt(&good)
+        .expect("authentic receipt verifies");
+
+    let mutations: Vec<(&str, PropertyUsageReceipt)> = vec![
+        ("property", {
+            let mut r = good.clone();
+            r.property = "viscosity".to_string();
+            r
+        }),
+        ("query_point", {
+            let mut r = good.clone();
+            r.query_point = vec![("T".to_string(), 150.0)];
+            r
+        }),
+        ("considered", {
+            let mut r = good.clone();
+            r.considered = vec![other_id];
+            r
+        }),
+        ("in_domain", {
+            let mut r = good.clone();
+            r.in_domain = vec![citation_id];
+            r
+        }),
+        ("selected", {
+            let mut r = good.clone();
+            r.selected = citation_id;
+            r
+        }),
+        ("policy", {
+            let mut r = good.clone();
+            r.policy = "single-claim-only";
+            r
+        }),
+        ("foreign-policy", {
+            let mut r = good.clone();
+            r.policy = "trust-me";
+            r
+        }),
+        ("decision", {
+            let mut r = good.clone();
+            r.decision = EvaluationDecision::ExactScalar;
+            r
+        }),
+        ("observation_backed", {
+            let mut r = good.clone();
+            r.observation_backed = false;
+            r
+        }),
+        ("evaluator_version", {
+            let mut r = good.clone();
+            r.evaluator_version = 999;
+            r
+        }),
+        ("source_hashes", {
+            let mut r = good.clone();
+            r.source_hashes.pop();
+            r
+        }),
+    ];
+    for (label, mutated) in &mutations {
+        let refused = set.verify_receipt(mutated);
+        assert!(
+            refused.is_err(),
+            "mutated receipt field '{label}' must fail verification"
+        );
+        assert_ne!(
+            mutated.content_hash(),
+            good.content_hash(),
+            "mutated receipt field '{label}' must move the receipt identity"
+        );
+    }
+    // The refusals are TYPED per class, not one blanket error.
+    assert!(matches!(
+        set.verify_receipt(&mutations[0].1),
+        Err(MatDbError::UnknownProperty { .. })
+    ));
+    assert!(matches!(
+        set.verify_receipt(&mutations[1].1),
+        Err(MatDbError::NoClaimInDomain { .. })
+    ));
+    assert!(matches!(
+        set.verify_receipt(&mutations[4].1),
+        Err(MatDbError::ReceiptMismatch { field: "selected" })
+    ));
+    assert!(matches!(
+        set.verify_receipt(&mutations[5].1),
+        Err(MatDbError::AmbiguousSelection { .. })
+    ));
+    assert!(matches!(
+        set.verify_receipt(&mutations[6].1),
+        Err(MatDbError::UnknownPolicyTag { .. })
+    ));
+    assert!(matches!(
+        set.verify_receipt(&mutations[7].1),
+        Err(MatDbError::ReceiptMismatch { field: "decision" })
+    ));
+    assert!(matches!(
+        set.verify_receipt(&mutations[9].1),
+        Err(MatDbError::EvaluatorVersionDrift {
+            receipt: 999,
+            current: 1
+        })
+    ));
+    println!(
+        "{{\"suite\":\"fs-matdb\",\"case\":\"receipt-mutation-battery\",\"verdict\":\"pass\",\
+         \"detail\":\"11 field mutations all refuse typed and all move the receipt identity\"}}"
     );
 }

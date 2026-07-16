@@ -192,6 +192,25 @@ pub enum MatDbError {
         /// What is wrong.
         reason: &'static str,
     },
+    /// A receipt names a selection-policy tag no policy owns.
+    UnknownPolicyTag {
+        /// The foreign tag.
+        tag: String,
+    },
+    /// A receipt was minted by a different evaluator version; it cannot
+    /// be adjudicated by this one.
+    EvaluatorVersionDrift {
+        /// The receipt's evaluator version.
+        receipt: u32,
+        /// This evaluator's version.
+        current: u32,
+    },
+    /// A replayed receipt field failed to reproduce: the receipt is
+    /// incomplete, tampered, or stale against this claim set.
+    ReceiptMismatch {
+        /// The first divergent field.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for MatDbError {
@@ -300,6 +319,18 @@ impl fmt::Display for MatDbError {
             MatDbError::UnsupportedEvaluation { reason } => {
                 write!(f, "unsupported evaluation: {reason}")
             }
+            MatDbError::UnknownPolicyTag { tag } => {
+                write!(f, "no selection policy owns receipt tag '{tag}'")
+            }
+            MatDbError::EvaluatorVersionDrift { receipt, current } => write!(
+                f,
+                "receipt evaluator version {receipt} cannot be adjudicated by evaluator {current}"
+            ),
+            MatDbError::ReceiptMismatch { field } => write!(
+                f,
+                "receipt field '{field}' failed to reproduce under replay: incomplete, tampered, \
+                 or stale"
+            ),
         }
     }
 }
