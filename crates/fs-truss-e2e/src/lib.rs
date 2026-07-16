@@ -396,6 +396,7 @@ pub fn load_path_color_from_certificate(status: &LoadPathCertificateStatus) -> C
     match status {
         LoadPathCertificateStatus::Certified(certificate) => {
             let bounds = certificate.path_weight_bounds();
+            // declared-color-ok: candidate from the local path-weight interval certificate; admitted only at a consumer's authority boundary (6pf9)
             Color::Verified {
                 lo: bounds.lo(),
                 hi: bounds.hi(),
@@ -433,6 +434,7 @@ pub fn optimality_color_from_certificate(
         && certificate.verifies_for_problem(problem, x, y, settings, cx)?
     {
         let bounds = certificate.bounds();
+        // declared-color-ok: candidate from the local compliance interval certificate; admitted only at a consumer's authority boundary (6pf9)
         return Ok(Color::Verified {
             lo: bounds.lower(),
             hi: bounds.upper(),
@@ -471,6 +473,7 @@ pub fn estimated_optimality_color(gap: f64, eq_residual: f64) -> Color {
 #[must_use]
 pub fn rescale_optimality_color(color: &Color, positive_divisor: f64) -> Color {
     match color {
+        // declared-color-ok: guarded match-arm pattern READ split across lines; destructures rank, constructs nothing (6pf9)
         Color::Verified { lo, hi }
             if positive_divisor.is_finite()
                 && positive_divisor > 0.0
@@ -480,6 +483,7 @@ pub fn rescale_optimality_color(color: &Color, positive_divisor: f64) -> Color {
         {
             let scaled = Interval::new(*lo, *hi) / Interval::point(positive_divisor);
             if scaled.lo().is_finite() && scaled.hi().is_finite() {
+                // declared-color-ok: rescaled candidate keeps its source certificate's declared rank; admitted only at a consumer's authority boundary (6pf9)
                 Color::Verified {
                     lo: scaled.lo(),
                     hi: scaled.hi(),

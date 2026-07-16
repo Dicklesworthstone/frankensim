@@ -195,6 +195,7 @@ pub fn run_battery() -> EpiE2eReport {
 }
 
 fn verified() -> Color {
+    // declared-color-ok: risk-register demo fixture exercising the laundering refusals (6pf9)
     Color::Verified { lo: -1.0, hi: 1.0 }
 }
 fn estimated() -> Color {
@@ -223,6 +224,7 @@ pub fn stage_laundering() -> StageLog {
     passed &= no_upgrade;
 
     // a validated claim OUT of its regime auto-demotes to estimated.
+    // declared-color-ok: risk-register demo fixture exercising regime auto-demotion (6pf9)
     let validated = Color::Validated {
         regime: cht_regime(),
         dataset: "wt-2026".to_string(),
@@ -239,6 +241,7 @@ pub fn stage_laundering() -> StageLog {
     passed &= demoted_ok;
 
     // a validated claim INSIDE its regime is preserved (no spurious demotion).
+    // declared-color-ok: risk-register demo fixture exercising in-regime preservation (6pf9)
     let validated2 = Color::Validated {
         regime: cht_regime(),
         dataset: "wt-2026".to_string(),

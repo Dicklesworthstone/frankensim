@@ -1096,18 +1096,7 @@ const COLOR_AUTHORITY_CRATES: &[&str] = &["fs-evidence", "fs-ledger"];
 /// `VerifiedPackage::claim_admission_receipt`,
 /// `LoopReport::admitted_headline`) or carries a
 /// `// declared-color-ok: <reason>` annotation.
-const COLOR_DECLARED_CRATES: &[&str] = &[
-    "fs-adjoint",
-    "fs-benchmark",
-    "fs-diffreal-e2e",
-    "fs-epi-e2e",
-    "fs-package",
-    "fs-robustopt-e2e",
-    "fs-thrust-e2e",
-    "fs-truss-e2e",
-    "fs-verify",
-    "fs-wasm",
-];
+const COLOR_DECLARED_CRATES: &[&str] = &["fs-adjoint", "fs-package", "fs-verify"];
 
 /// check-color-admission (bead 6pf9, stage S4 lint, check-powi/check-libm
 /// precedent): a direct positive `Color::Verified`/`Color::Validated`
@@ -1169,6 +1158,16 @@ fn check_color_admission(root: &Path) -> Vec<Violation> {
                         || prev_raw.contains("declared-color-ok:");
                     prev_raw = raw;
                     if annotated {
+                        continue;
+                    }
+                    // Pattern READS are not fabrication: destructuring a
+                    // positive color in a match arm, `matches!`, or `if let`
+                    // only branches on rank. Skip the three lexical read
+                    // shapes; a construction hidden on the same line as an
+                    // arm body is a tolerated false negative — this check is
+                    // a shrink-only ratchet, not a proof.
+                    if code.contains("=>") || code.contains("matches!") || code.contains("if let ")
+                    {
                         continue;
                     }
                     for variant in ["Color::Verified", "Color::Validated"] {

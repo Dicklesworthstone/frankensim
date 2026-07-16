@@ -162,6 +162,7 @@ pub fn run_campaign(families: &[Family], alpha: f64, sigma: f64, n: usize) -> Ro
                     certified_count += 1;
                     (
                         upper,
+                        // declared-color-ok: demo bound candidate from the local interval enclosure; admitted only at a consumer's authority boundary (6pf9)
                         Color::Verified {
                             lo: lower,
                             hi: upper,

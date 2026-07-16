@@ -135,6 +135,7 @@ fn full_color(res: &SimResult, impulse_scale: f64, tol_rel: f64) -> Color {
     };
     if rel <= tol_rel {
         let band = res.impulse_error.max(1e-9);
+        // declared-color-ok: demo drift candidate from the local impulse-error band; admitted only at a consumer's authority boundary (6pf9)
         Color::Verified {
             lo: res.drift - band,
             hi: res.drift + band,
