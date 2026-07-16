@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Typed, sealed, content-addressed VerificationManifest schema, authored leapfrog G1 drafts for I01, I02, I03, I04, I05, I06, I08, I10, I11, I12, and I15, and the RL portfolio aggregate."
+description = "Typed, sealed, content-addressed VerificationManifest schema, authored leapfrog G1 drafts for I01 through I15, and the CP, EM, PD, and RL portfolio aggregates."
 
 [package.metadata.frankensim]
 layer = "UTIL"
