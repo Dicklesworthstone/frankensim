@@ -376,6 +376,30 @@ impl TrimLoop {
     pub fn reversed_for_hole(&self) -> Result<TrimLoop, NurbsError> {
         self.admit()?.reversed_for_hole()
     }
+
+    /// Validate this owning loop and reverse its orientation with one caller
+    /// context.
+    ///
+    /// Cancellation spans exact source admission and the existing admitted
+    /// reversal pipeline. No partial admitted authority or reversed loop is
+    /// published. Source validation and reversal retain independent defensive
+    /// work ceilings. This primitive does not consume the `Cx` budget or own
+    /// request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous owning reversal's structural, work,
+    /// retained-memory, allocation, or exact-arithmetic refusal when it wins
+    /// before an observed cancellation.
+    pub fn reversed_for_hole_with_cx(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<TrimLoopReversalRun, NurbsError> {
+        let admitted = match self.admit_with_cx(cx)? {
+            TrimLoopAdmissionRun::Complete { admitted } => admitted,
+            TrimLoopAdmissionRun::Cancelled => return Ok(TrimLoopReversalRun::Cancelled),
+        };
+        admitted.reversed_for_hole_with_cx(cx)
+    }
 }
 
 fn finish_trim_loop_construction_with_poll(
@@ -2378,6 +2402,12 @@ mod tests {
 
         with_trim_cx(true, |cx| {
             assert_eq!(
+                trim_loop
+                    .reversed_for_hole_with_cx(cx)
+                    .expect("valid pre-cancelled owning reversal"),
+                TrimLoopReversalRun::Cancelled
+            );
+            assert_eq!(
                 admitted
                     .reversed_for_hole_with_cx(cx)
                     .expect("valid pre-cancelled reversal"),
@@ -2385,6 +2415,14 @@ mod tests {
             );
         });
         with_trim_cx(false, |cx| {
+            assert_eq!(
+                trim_loop
+                    .reversed_for_hole_with_cx(cx)
+                    .expect("active owning reversal"),
+                TrimLoopReversalRun::Complete {
+                    trim_loop: legacy.try_clone().expect("expected owning reversal copy"),
+                }
+            );
             assert_eq!(
                 admitted
                     .reversed_for_hole_with_cx(cx)
@@ -2414,6 +2452,35 @@ mod tests {
         };
         assert_eq!(reversed_winding, -source_winding);
         assert_ne!(source_winding, 0);
+
+        let mut invalid = point_trim_loop();
+        invalid.curve.knots.knots.clear();
+        with_trim_cx(true, |cx| {
+            assert!(matches!(
+                invalid.reversed_for_hole_with_cx(cx),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+
+        let open_curve = NurbsCurve::new(
+            KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+                .expect("open-loop knots"),
+            &[[Rat::int(0), Rat::int(0)], [Rat::int(1), Rat::int(0)]],
+            &[Rat::int(1); 2],
+        )
+        .expect("open curve");
+        let open_loop = TrimLoop { curve: open_curve };
+        let open_error = open_loop
+            .reversed_for_hole()
+            .expect_err("legacy open-loop reversal refusal");
+        with_trim_cx(false, |cx| {
+            assert_eq!(
+                open_loop
+                    .reversed_for_hole_with_cx(cx)
+                    .expect_err("active owning open-loop reversal refusal"),
+                open_error
+            );
+        });
     }
 
     #[test]

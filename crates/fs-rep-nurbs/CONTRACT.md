@@ -169,10 +169,12 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   publishes only a complete sealed exact copy after the nested curve-copy
   envelope. `TrimmedPatch::try_clone_with_cx` returns transactional
   `TrimmedPatchCloneRun` state after aggregate nested-copy work and retained
-  output admission. Admitted
-  `reversed_for_hole_with_cx` returns transactional `TrimLoopReversalRun`
-  state and publishes only a complete opposite-orientation loop after checked
-  aggregate work/retained-storage admission and full derived validation.
+  output admission. Owning and admitted
+  `reversed_for_hole_with_cx` entry points return transactional
+  `TrimLoopReversalRun` state and publish only a complete
+  opposite-orientation loop after checked aggregate work/retained-storage
+  admission and full derived validation. The owning path carries the same
+  caller context through exact source admission before the admitted reversal.
   Aggregate loop-count/structure validation is admitted before the first deep
   scan and spends the same defensive classification budget;
   shell ingestion shares a bounded construction-validation ledger across all
@@ -607,11 +609,17 @@ sequential endpoint basis scratch retains its existing bounded allocation
 policy. Allocator calls, exact-rational operations, and destructors are
 non-preemptible, and this primitive adds no exact caller-budget, wall-time,
 drain/finalize, resumability, topology, classification, or certificate claim.
-`AdmittedTrimLoop::reversed_for_hole_with_cx` preserves count-derived aggregate
-work and simultaneously-live retained-storage refusal precedence, then carries
-one `Cx` through fallible reversed-knot allocation, exact same-sign-safe knot
-mirroring, fallible reversed-control allocation, ordered fixed-stride copies,
-full derived loop admission, and final owned publication.
+`TrimLoop::reversed_for_hole_with_cx` first carries its `Cx` through exact
+source-loop admission, then reuses the resulting lifetime-bound authority in
+the admitted reversal without rescanning the source. Cancellation observed
+during source admission can precede reversal-plan refusals. Once source
+admission completes, `AdmittedTrimLoop::reversed_for_hole_with_cx` preserves
+count-derived aggregate work and simultaneously-live retained-storage refusal
+precedence, then carries the same `Cx` through fallible reversed-knot
+allocation, exact same-sign-safe knot mirroring, fallible reversed-control
+allocation, ordered fixed-stride copies, full derived loop admission, and final
+owned publication. Source admission and reversal retain independent defensive
+work ceilings.
 `TrimLoopReversalRun::Cancelled` exposes no partial loop and drops all derived
 storage. The borrowed source is excluded from the retained envelope; allocator
 calls, individual exact-rational operations, and destructors are
