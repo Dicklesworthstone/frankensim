@@ -210,6 +210,13 @@ structure; FLUX/UQ execute it.
   through the same borrowed-frame adapter without an intermediate binding copy.
   Reachability marks nodes when queued, so the pre-reserved worklist cannot
   exceed the root-bounded memo prefix.
+  The evaluator core accepts a private phase-tagged checkpoint seam. Public
+  `eval`/`eval_keyed`/`BindingFrame::eval` use a deterministic no-op adapter;
+  `descend_ir` binds the seam to its `Cx`. After capped cheap node/count/length
+  metadata preflight, it polls before and at most every 256 work items through
+  binding-envelope/value/domain scans, table initialization, reachability, the
+  root-prefix sweep, vector construction/reduction, output validation, and final
+  publication. A cancelled evaluation returns no `Value` or `DescentReport`.
   Exact child receipts make vector zip operators non-truncating by induction.
   The walk itself is EXPLICIT-STACK (reachability worklist
   + bottom-up arena-order sweep;
@@ -386,6 +393,8 @@ Initial-point membership and every descent retraction also poll before work and
 at most every 256 traversed scalar elements through finiteness scans, norm/Gram
 reductions, deterministic Stiefel QR projection/normalization, and output
 revalidation. Cancellation inside those loops returns no candidate point.
+IR-driven descent additionally polls the same `Cx` throughout every evaluator
+phase listed above, including both f0 and terminal evaluation.
 Initial positive/negative coordinate retraction preflight is cancellation-aware
 and precedes f0. The reported work/workspace bounds cover only fs-opt-owned
 descent and retraction plumbing; they do not meter arbitrary caller closure

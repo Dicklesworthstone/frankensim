@@ -21,8 +21,42 @@ const MANIFOLD_MEMBERSHIP_TOL: f64 = 1e-10;
 const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
 /// Maximum traversed scalar elements between retraction/domain cancellation polls.
 const RETRACTION_CHECKPOINT_STRIDE: usize = 256;
+/// Maximum evaluator work items between cancellation polls inside one phase.
+const EVAL_CHECKPOINT_STRIDE: usize = 256;
 const DEFAULT_DESCENT_MAX_WORK_UNITS: u64 = 1 << 24;
 const DEFAULT_DESCENT_MAX_WORKSPACE_BYTES: u64 = 1 << 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalPhase {
+    BindingEnvelope,
+    BindingValues,
+    BindingDomain,
+    StorageInitialization,
+    Reachability,
+    NodeSweep,
+    VectorConstruction,
+    VectorReduction,
+    OutputValidation,
+    Finalize,
+}
+
+fn no_eval_checkpoint(_phase: EvalPhase) -> Result<(), OptError> {
+    Ok(())
+}
+
+fn checkpoint_eval_work<F>(
+    index: usize,
+    phase: EvalPhase,
+    checkpoint: &mut F,
+) -> Result<(), OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    if index % EVAL_CHECKPOINT_STRIDE == 0 {
+        checkpoint(phase)?;
+    }
+    Ok(())
+}
 
 fn checkpoint_retraction_work<F>(index: usize, checkpoint: &mut F) -> Result<(), OptError>
 where
@@ -77,14 +111,23 @@ fn try_vec_capacity<T>(
     Ok(values)
 }
 
-fn try_clone_vector(
+fn try_clone_vector<F>(
     path: &'static str,
     node: Option<NodeId>,
     variable: Option<VarId>,
     values: &[f64],
-) -> Result<Vec<f64>, OptError> {
+    checkpoint: &mut F,
+) -> Result<Vec<f64>, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    checkpoint(EvalPhase::VectorConstruction)?;
     let mut output = try_vec_capacity(path, node, variable, values.len())?;
-    output.extend_from_slice(values);
+    for (component, value) in values.iter().enumerate() {
+        checkpoint_eval_work(component, EvalPhase::VectorConstruction, checkpoint)?;
+        output.push(*value);
+    }
+    checkpoint(EvalPhase::VectorConstruction)?;
     Ok(output)
 }
 
@@ -108,31 +151,71 @@ fn try_owned_diagnostic(
     Ok(output)
 }
 
-fn try_map_vector(
+fn try_map_vector<F>(
     path: &'static str,
     node: Option<NodeId>,
     values: &[f64],
     mut map: impl FnMut(f64) -> f64,
-) -> Result<Vec<f64>, OptError> {
+    checkpoint: &mut F,
+) -> Result<Vec<f64>, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    checkpoint(EvalPhase::VectorConstruction)?;
     let mut output = try_vec_capacity(path, node, None, values.len())?;
-    for value in values {
+    for (component, value) in values.iter().enumerate() {
+        checkpoint_eval_work(component, EvalPhase::VectorConstruction, checkpoint)?;
         output.push(map(*value));
     }
+    checkpoint(EvalPhase::VectorConstruction)?;
     Ok(output)
 }
 
-fn try_zip_vectors(
+fn try_zip_vectors<F>(
     path: &'static str,
     node: Option<NodeId>,
     left: &[f64],
     right: &[f64],
     mut map: impl FnMut(f64, f64) -> f64,
-) -> Result<Vec<f64>, OptError> {
+    checkpoint: &mut F,
+) -> Result<Vec<f64>, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    checkpoint(EvalPhase::VectorConstruction)?;
     let mut output = try_vec_capacity(path, node, None, left.len())?;
-    for (left, right) in left.iter().zip(right) {
+    for (component, (left, right)) in left.iter().zip(right).enumerate() {
+        checkpoint_eval_work(component, EvalPhase::VectorConstruction, checkpoint)?;
         output.push(map(*left, *right));
     }
+    checkpoint(EvalPhase::VectorConstruction)?;
     Ok(output)
+}
+
+fn reduce_dot<F>(left: &[f64], right: &[f64], checkpoint: &mut F) -> Result<f64, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    let mut sum = 0.0;
+    for (component, (left, right)) in left.iter().zip(right).enumerate() {
+        checkpoint_eval_work(component, EvalPhase::VectorReduction, checkpoint)?;
+        sum += *left * *right;
+    }
+    checkpoint(EvalPhase::VectorReduction)?;
+    Ok(sum)
+}
+
+fn reduce_norm_sq<F>(values: &[f64], checkpoint: &mut F) -> Result<f64, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    let mut sum = 0.0;
+    for (component, value) in values.iter().enumerate() {
+        checkpoint_eval_work(component, EvalPhase::VectorReduction, checkpoint)?;
+        sum += *value * *value;
+    }
+    checkpoint(EvalPhase::VectorReduction)?;
+    Ok(sum)
 }
 
 fn runtime_vector_len(values: &[f64]) -> u64 {
@@ -294,15 +377,27 @@ where
     eval_validated(problem, node, &frame.ordered)
 }
 
-fn eval_borrowed(problem: &Problem, node: NodeId, bindings: &[&[f64]]) -> Result<Value, OptError> {
-    let caps = validate_eval_envelope(problem, node)?;
+fn eval_borrowed_with_checkpoint<F>(
+    problem: &Problem,
+    node: NodeId,
+    bindings: &[&[f64]],
+    checkpoint: &mut F,
+) -> Result<Value, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    let caps = validate_eval_header(problem, node)?;
+    validate_binding_frame_header(problem, &caps)?;
     if bindings.len() != problem.vars.len() {
         return Err(OptError::BindingCount {
             vars: problem.vars.len() as u32,
             got: allocation_len(bindings.len()),
         });
     }
-    eval_ordered_with_caps(problem, node, bindings, &caps)
+    validate_ordered_binding_headers(problem, bindings, &caps)?;
+    validate_binding_frame_envelope_with_checkpoint(problem, &caps, checkpoint)?;
+    validate_ordered_binding_values_with_checkpoint(problem, bindings, checkpoint)?;
+    eval_validated_with_checkpoint(problem, node, bindings, checkpoint)
 }
 
 fn eval_ordered_with_caps(
@@ -311,11 +406,41 @@ fn eval_ordered_with_caps(
     bindings: &[&[f64]],
     caps: &AdmissionCaps,
 ) -> Result<Value, OptError> {
-    validate_ordered_bindings(problem, bindings, caps)?;
-    eval_validated(problem, node, bindings)
+    eval_ordered_with_caps_and_checkpoint(problem, node, bindings, caps, &mut no_eval_checkpoint)
+}
+
+fn eval_ordered_with_caps_and_checkpoint<F>(
+    problem: &Problem,
+    node: NodeId,
+    bindings: &[&[f64]],
+    caps: &AdmissionCaps,
+    checkpoint: &mut F,
+) -> Result<Value, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    validate_ordered_bindings_with_checkpoint(problem, bindings, caps, checkpoint)?;
+    eval_validated_with_checkpoint(problem, node, bindings, checkpoint)
 }
 
 fn validate_eval_envelope(problem: &Problem, node: NodeId) -> Result<AdmissionCaps, OptError> {
+    validate_eval_envelope_with_checkpoint(problem, node, &mut no_eval_checkpoint)
+}
+
+fn validate_eval_envelope_with_checkpoint<F>(
+    problem: &Problem,
+    node: NodeId,
+    checkpoint: &mut F,
+) -> Result<AdmissionCaps, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    let caps = validate_eval_header(problem, node)?;
+    validate_binding_frame_envelope_with_checkpoint(problem, &caps, checkpoint)?;
+    Ok(caps)
+}
+
+fn validate_eval_header(problem: &Problem, node: NodeId) -> Result<AdmissionCaps, OptError> {
     if node.0 as usize >= problem.exprs.len() {
         return Err(OptError::UnknownNode { id: node.0 });
     }
@@ -328,7 +453,6 @@ fn validate_eval_envelope(problem: &Problem, node: NodeId) -> Result<AdmissionCa
             cap: u64::from(caps.max_graph_depth),
         });
     }
-    validate_binding_frame_envelope(problem, &caps)?;
     Ok(caps)
 }
 
@@ -336,22 +460,18 @@ fn validate_binding_frame_envelope(
     problem: &Problem,
     caps: &AdmissionCaps,
 ) -> Result<(), OptError> {
-    let variable_count = problem.vars.len() as u64;
-    if variable_count > u64::from(caps.max_vars) {
-        return Err(OptError::CapExceeded {
-            what: "runtime binding variables",
-            count: variable_count,
-            cap: u64::from(caps.max_vars),
-        });
-    }
-    let work = problem.total_admission_work();
-    if work > caps.max_total_work {
-        return Err(OptError::CapExceeded {
-            what: "total admission work",
-            count: work,
-            cap: caps.max_total_work,
-        });
-    }
+    validate_binding_frame_envelope_with_checkpoint(problem, caps, &mut no_eval_checkpoint)
+}
+
+fn validate_binding_frame_envelope_with_checkpoint<F>(
+    problem: &Problem,
+    caps: &AdmissionCaps,
+    checkpoint: &mut F,
+) -> Result<(), OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    validate_binding_frame_header(problem, caps)?;
     let mut point_storage = 0u64;
     let mut validation_work = 0u64;
     for (variable_index, variable) in problem.vars.iter().enumerate() {
@@ -398,11 +518,114 @@ fn validate_binding_frame_envelope(
                 cap: caps.max_total_work,
             });
         }
+        checkpoint_eval_work(variable_index, EvalPhase::BindingEnvelope, checkpoint)?;
+    }
+    checkpoint(EvalPhase::BindingEnvelope)
+}
+
+fn validate_binding_frame_header(problem: &Problem, caps: &AdmissionCaps) -> Result<(), OptError> {
+    let variable_count = problem.vars.len() as u64;
+    if variable_count > u64::from(caps.max_vars) {
+        return Err(OptError::CapExceeded {
+            what: "runtime binding variables",
+            count: variable_count,
+            cap: u64::from(caps.max_vars),
+        });
+    }
+    let work = problem.total_admission_work();
+    if work > caps.max_total_work {
+        return Err(OptError::CapExceeded {
+            what: "total admission work",
+            count: work,
+            cap: caps.max_total_work,
+        });
     }
     Ok(())
 }
 
 fn validate_ordered_bindings(
+    problem: &Problem,
+    bindings: &[&[f64]],
+    caps: &AdmissionCaps,
+) -> Result<(), OptError> {
+    validate_ordered_bindings_with_checkpoint(problem, bindings, caps, &mut no_eval_checkpoint)
+}
+
+fn validate_ordered_bindings_with_checkpoint<F>(
+    problem: &Problem,
+    bindings: &[&[f64]],
+    caps: &AdmissionCaps,
+    checkpoint: &mut F,
+) -> Result<(), OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    let mut total_binding_components = 0u64;
+    for (i, (binding, var)) in bindings.iter().zip(&problem.vars).enumerate() {
+        let expected = var
+            .manifold
+            .point_dim()
+            .expect("sealed problems carry validated manifolds");
+        if binding.len() as u64 != u64::from(expected) {
+            return Err(OptError::BindingLen {
+                var: i as u32,
+                expected,
+                got: binding.len() as u64,
+            });
+        }
+        total_binding_components = total_binding_components.saturating_add(binding.len() as u64);
+        if total_binding_components > caps.max_total_point_storage {
+            return Err(OptError::CapExceeded {
+                what: "runtime binding components",
+                count: total_binding_components,
+                cap: caps.max_total_point_storage,
+            });
+        }
+        validate_binding_value_with_checkpoint(binding, var.manifold, i as u32, checkpoint)?;
+    }
+    checkpoint(EvalPhase::BindingValues)
+}
+
+fn validate_ordered_binding_values_with_checkpoint<F>(
+    problem: &Problem,
+    bindings: &[&[f64]],
+    checkpoint: &mut F,
+) -> Result<(), OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    for (i, (binding, var)) in bindings.iter().zip(&problem.vars).enumerate() {
+        validate_binding_value_with_checkpoint(binding, var.manifold, i as u32, checkpoint)?;
+    }
+    checkpoint(EvalPhase::BindingValues)
+}
+
+fn validate_binding_value_with_checkpoint<F>(
+    binding: &[f64],
+    manifold: Manifold,
+    variable: u32,
+    checkpoint: &mut F,
+) -> Result<(), OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
+    for (component_index, component) in binding.iter().enumerate() {
+        checkpoint_eval_work(component_index, EvalPhase::BindingValues, checkpoint)?;
+        if !component.is_finite() {
+            return Err(OptError::BindingNonFinite {
+                var: variable,
+                component: component_index as u32,
+                bits: component.to_bits(),
+            });
+        }
+    }
+    checkpoint(EvalPhase::BindingValues)?;
+    manifold.validate_binding_domain_with_checkpoint(binding, variable, &mut || {
+        checkpoint(EvalPhase::BindingDomain)
+    })
+}
+
+fn validate_ordered_binding_headers(
     problem: &Problem,
     bindings: &[&[f64]],
     caps: &AdmissionCaps,
@@ -428,21 +651,23 @@ fn validate_ordered_bindings(
                 cap: caps.max_total_point_storage,
             });
         }
-        for (component_index, component) in binding.iter().enumerate() {
-            if !component.is_finite() {
-                return Err(OptError::BindingNonFinite {
-                    var: i as u32,
-                    component: component_index as u32,
-                    bits: component.to_bits(),
-                });
-            }
-        }
-        var.manifold.validate_binding_domain(binding, i as u32)?;
     }
     Ok(())
 }
 
 fn eval_validated(problem: &Problem, node: NodeId, bindings: &[&[f64]]) -> Result<Value, OptError> {
+    eval_validated_with_checkpoint(problem, node, bindings, &mut no_eval_checkpoint)
+}
+
+fn eval_validated_with_checkpoint<F>(
+    problem: &Problem,
+    node: NodeId,
+    bindings: &[&[f64]],
+    checkpoint: &mut F,
+) -> Result<Value, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
     // Arena order guarantees every dependency has a lower id, so a
     // root-bounded memo prefix is sufficient; unrelated later nodes
     // cannot force memo allocation for this evaluation.
@@ -457,16 +682,30 @@ fn eval_validated(problem: &Problem, node: NodeId, bindings: &[&[f64]]) -> Resul
     // under the recursive walk.
     let root = node.0 as usize;
     let prefix_len = root + 1;
+    checkpoint(EvalPhase::StorageInitialization)?;
     let mut memo = try_vec_capacity("eval/memo", Some(node), None, prefix_len)?;
-    memo.resize_with(prefix_len, || None);
+    for index in 0..prefix_len {
+        checkpoint_eval_work(index, EvalPhase::StorageInitialization, checkpoint)?;
+        memo.push(None);
+    }
+    checkpoint(EvalPhase::StorageInitialization)?;
     let mut reachable = try_vec_capacity("eval/reachability", Some(node), None, prefix_len)?;
-    reachable.resize(prefix_len, false);
+    for index in 0..prefix_len {
+        checkpoint_eval_work(index, EvalPhase::StorageInitialization, checkpoint)?;
+        reachable.push(false);
+    }
+    checkpoint(EvalPhase::StorageInitialization)?;
     let mut worklist = try_vec_capacity("eval/worklist", Some(node), None, prefix_len)?;
     reachable[root] = true;
     worklist.push(node);
+    let mut reachability_work = 0usize;
     while let Some(n) = worklist.pop() {
+        checkpoint_eval_work(reachability_work, EvalPhase::Reachability, checkpoint)?;
+        reachability_work = reachability_work.saturating_add(1);
         let i = n.0 as usize;
         for child in crate::ir::children(&problem.exprs[i]) {
+            checkpoint_eval_work(reachability_work, EvalPhase::Reachability, checkpoint)?;
+            reachability_work = reachability_work.saturating_add(1);
             let child_index = child.0 as usize;
             if !reachable[child_index] {
                 reachable[child_index] = true;
@@ -474,26 +713,36 @@ fn eval_validated(problem: &Problem, node: NodeId, bindings: &[&[f64]]) -> Resul
             }
         }
     }
+    checkpoint(EvalPhase::Reachability)?;
     for i in 0..=root {
+        checkpoint_eval_work(i, EvalPhase::NodeSweep, checkpoint)?;
         if reachable[i] {
-            let value = eval_node(problem, NodeId(i as u32), bindings, &memo)?;
+            let value =
+                eval_node_with_checkpoint(problem, NodeId(i as u32), bindings, &memo, checkpoint)?;
             memo[i] = Some(value);
         }
     }
-    Ok(memo[root]
+    checkpoint(EvalPhase::NodeSweep)?;
+    let value = memo[root]
         .take()
-        .expect("the root is reachable from itself"))
+        .expect("the root is reachable from itself");
+    checkpoint(EvalPhase::Finalize)?;
+    Ok(value)
 }
 
 /// Evaluate ONE node whose children are already in `memo` (guaranteed
 /// by the bottom-up arena-order sweep in [`eval`]). Never recurses.
 #[allow(clippy::too_many_lines)] // one arm per node kind: the evaluator IS the semantics
-fn eval_node(
+fn eval_node_with_checkpoint<F>(
     problem: &Problem,
     node: NodeId,
     bindings: &[&[f64]],
     memo: &[Option<Value>],
-) -> Result<Value, OptError> {
+    checkpoint: &mut F,
+) -> Result<Value, OptError>
+where
+    F: FnMut(EvalPhase) -> Result<(), OptError>,
+{
     let ev = |n: NodeId| -> &Value {
         memo[n.0 as usize]
             .as_ref()
@@ -505,94 +754,102 @@ fn eval_node(
             Value::V(_) => unreachable!("builder enforced scalar shape"),
         }
     };
-    let out = match &problem.exprs[node.0 as usize] {
-        Expr::Var(v) => {
-            let x = bindings
-                .get(v.0 as usize)
-                .ok_or(OptError::UnknownVar { id: v.0 })?;
-            Value::V(try_clone_vector(
-                "eval/variable-value",
-                Some(node),
-                Some(*v),
-                x,
-            )?)
-        }
-        Expr::Component { of, index } => {
-            let v = ev(*of);
-            match v {
-                Value::V(xs) => Value::S(checked_component(node, *index, xs)?),
-                Value::S(_) => unreachable!("builder enforced vector shape"),
+    let out =
+        match &problem.exprs[node.0 as usize] {
+            Expr::Var(v) => {
+                let x = bindings
+                    .get(v.0 as usize)
+                    .ok_or(OptError::UnknownVar { id: v.0 })?;
+                Value::V(try_clone_vector(
+                    "eval/variable-value",
+                    Some(node),
+                    Some(*v),
+                    x,
+                    checkpoint,
+                )?)
             }
-        }
-        Expr::Const { value, .. } => Value::S(*value),
-        Expr::Add(a, b) => match (ev(*a), ev(*b)) {
-            (Value::S(x), Value::S(y)) => Value::S(*x + *y),
-            (Value::V(x), Value::V(y)) => Value::V(try_zip_vectors(
-                "eval/vector-add",
-                Some(node),
-                x,
-                y,
-                |p, q| p + q,
-            )?),
-            _ => unreachable!("builder enforced matching shapes"),
-        },
-        Expr::Sub(a, b) => match (ev(*a), ev(*b)) {
-            (Value::S(x), Value::S(y)) => Value::S(*x - *y),
-            (Value::V(x), Value::V(y)) => Value::V(try_zip_vectors(
-                "eval/vector-sub",
-                Some(node),
-                x,
-                y,
-                |p, q| p - q,
-            )?),
-            _ => unreachable!("builder enforced matching shapes"),
-        },
-        Expr::Mul(a, b) => match (ev(*a), ev(*b)) {
-            (Value::S(x), Value::S(y)) => Value::S(*x * *y),
-            (Value::S(s), Value::V(v)) | (Value::V(v), Value::S(s)) => {
-                Value::V(try_map_vector("eval/vector-scale", Some(node), v, |p| {
-                    p * *s
-                })?)
+            Expr::Component { of, index } => {
+                let v = ev(*of);
+                match v {
+                    Value::V(xs) => Value::S(checked_component(node, *index, xs)?),
+                    Value::S(_) => unreachable!("builder enforced vector shape"),
+                }
             }
-            _ => unreachable!("builder rejected vector*vector"),
-        },
-        Expr::Div(a, b) => {
-            let (x, y) = (scalar(ev(*a)), scalar(ev(*b)));
-            Value::S(x / y)
-        }
-        Expr::Neg(a) => match ev(*a) {
-            Value::S(x) => Value::S(-*x),
-            Value::V(v) => Value::V(try_map_vector("eval/vector-negate", Some(node), v, |p| -p)?),
-        },
-        Expr::Powi { base, exp } => Value::S(fs_math::det::powi(scalar(ev(*base)), *exp)),
-        Expr::Sqrt(a) => Value::S(fs_math::det::sqrt(scalar(ev(*a)))),
-        Expr::Exp(a) => Value::S(fs_math::det::exp(scalar(ev(*a)))),
-        Expr::Ln(a) => Value::S(fs_math::det::ln(scalar(ev(*a)))),
-        Expr::Tanh(a) => Value::S(fs_math::det::tanh(scalar(ev(*a)))),
-        Expr::Dot(a, b) => match (ev(*a), ev(*b)) {
-            (Value::V(x), Value::V(y)) => Value::S(x.iter().zip(y).map(|(p, q)| p * q).sum()),
-            _ => unreachable!("builder enforced vectors"),
-        },
-        Expr::NormSq(a) => match ev(*a) {
-            Value::V(x) => Value::S(x.iter().map(|p| p * p).sum()),
-            Value::S(_) => unreachable!("builder enforced vector"),
-        },
-        Expr::Min(a, b) => Value::S(scalar(ev(*a)).min(scalar(ev(*b)))),
-        Expr::Max(a, b) => Value::S(scalar(ev(*a)).max(scalar(ev(*b)))),
-        Expr::Abs(a) => Value::S(scalar(ev(*a)).abs()),
-        Expr::PdeResidual { .. } => {
-            return Err(OptError::Unevaluable {
-                node: node.0,
-                kind: "pde_residual (FLUX executes physics, not the IR)",
-            });
-        }
-        Expr::Expectation { .. } | Expr::Cvar { .. } | Expr::Quantile { .. } => {
-            return Err(OptError::Unevaluable {
-                node: node.0,
-                kind: "stochastic node (UQ runners execute these, not the IR)",
-            });
-        }
-    };
+            Expr::Const { value, .. } => Value::S(*value),
+            Expr::Add(a, b) => match (ev(*a), ev(*b)) {
+                (Value::S(x), Value::S(y)) => Value::S(*x + *y),
+                (Value::V(x), Value::V(y)) => Value::V(try_zip_vectors(
+                    "eval/vector-add",
+                    Some(node),
+                    x,
+                    y,
+                    |p, q| p + q,
+                    checkpoint,
+                )?),
+                _ => unreachable!("builder enforced matching shapes"),
+            },
+            Expr::Sub(a, b) => match (ev(*a), ev(*b)) {
+                (Value::S(x), Value::S(y)) => Value::S(*x - *y),
+                (Value::V(x), Value::V(y)) => Value::V(try_zip_vectors(
+                    "eval/vector-sub",
+                    Some(node),
+                    x,
+                    y,
+                    |p, q| p - q,
+                    checkpoint,
+                )?),
+                _ => unreachable!("builder enforced matching shapes"),
+            },
+            Expr::Mul(a, b) => match (ev(*a), ev(*b)) {
+                (Value::S(x), Value::S(y)) => Value::S(*x * *y),
+                (Value::S(s), Value::V(v)) | (Value::V(v), Value::S(s)) => Value::V(
+                    try_map_vector("eval/vector-scale", Some(node), v, |p| p * *s, checkpoint)?,
+                ),
+                _ => unreachable!("builder rejected vector*vector"),
+            },
+            Expr::Div(a, b) => {
+                let (x, y) = (scalar(ev(*a)), scalar(ev(*b)));
+                Value::S(x / y)
+            }
+            Expr::Neg(a) => match ev(*a) {
+                Value::S(x) => Value::S(-*x),
+                Value::V(v) => Value::V(try_map_vector(
+                    "eval/vector-negate",
+                    Some(node),
+                    v,
+                    |p| -p,
+                    checkpoint,
+                )?),
+            },
+            Expr::Powi { base, exp } => Value::S(fs_math::det::powi(scalar(ev(*base)), *exp)),
+            Expr::Sqrt(a) => Value::S(fs_math::det::sqrt(scalar(ev(*a)))),
+            Expr::Exp(a) => Value::S(fs_math::det::exp(scalar(ev(*a)))),
+            Expr::Ln(a) => Value::S(fs_math::det::ln(scalar(ev(*a)))),
+            Expr::Tanh(a) => Value::S(fs_math::det::tanh(scalar(ev(*a)))),
+            Expr::Dot(a, b) => match (ev(*a), ev(*b)) {
+                (Value::V(x), Value::V(y)) => Value::S(reduce_dot(x, y, checkpoint)?),
+                _ => unreachable!("builder enforced vectors"),
+            },
+            Expr::NormSq(a) => match ev(*a) {
+                Value::V(x) => Value::S(reduce_norm_sq(x, checkpoint)?),
+                Value::S(_) => unreachable!("builder enforced vector"),
+            },
+            Expr::Min(a, b) => Value::S(scalar(ev(*a)).min(scalar(ev(*b)))),
+            Expr::Max(a, b) => Value::S(scalar(ev(*a)).max(scalar(ev(*b)))),
+            Expr::Abs(a) => Value::S(scalar(ev(*a)).abs()),
+            Expr::PdeResidual { .. } => {
+                return Err(OptError::Unevaluable {
+                    node: node.0,
+                    kind: "pde_residual (FLUX executes physics, not the IR)",
+                });
+            }
+            Expr::Expectation { .. } | Expr::Cvar { .. } | Expr::Quantile { .. } => {
+                return Err(OptError::Unevaluable {
+                    node: node.0,
+                    kind: "stochastic node (UQ runners execute these, not the IR)",
+                });
+            }
+        };
     validate_runtime_shape(problem, node, &out)?;
     match &out {
         Value::S(value) if !value.is_finite() => {
@@ -603,17 +860,17 @@ fn eval_node(
             });
         }
         Value::V(values) => {
-            if let Some((component, value)) = values
-                .iter()
-                .enumerate()
-                .find(|(_, value)| !value.is_finite())
-            {
-                return Err(OptError::EvalNonFinite {
-                    node: node.0,
-                    component: Some(component as u32),
-                    bits: value.to_bits(),
-                });
+            for (component, value) in values.iter().enumerate() {
+                checkpoint_eval_work(component, EvalPhase::OutputValidation, checkpoint)?;
+                if !value.is_finite() {
+                    return Err(OptError::EvalNonFinite {
+                        node: node.0,
+                        component: Some(component as u32),
+                        bits: value.to_bits(),
+                    });
+                }
             }
+            checkpoint(EvalPhase::OutputValidation)?;
         }
         Value::S(_) => {}
     }
@@ -745,12 +1002,16 @@ impl Manifold {
         }
     }
 
-    fn validate_point_domain(&self, x: &[f64]) -> Result<(), OptError> {
-        self.validate_point_domain_with_checkpoint(x, &mut || Ok(()))
-    }
-
-    fn validate_binding_domain(&self, x: &[f64], var: u32) -> Result<(), OptError> {
-        match self.validate_point_domain(x) {
+    fn validate_binding_domain_with_checkpoint<F>(
+        &self,
+        x: &[f64],
+        var: u32,
+        checkpoint: &mut F,
+    ) -> Result<(), OptError>
+    where
+        F: FnMut() -> Result<(), OptError>,
+    {
+        match self.validate_point_domain_with_checkpoint(x, checkpoint) {
             Ok(()) => Ok(()),
             Err(OptError::RetractionDomain {
                 manifold,
@@ -1520,7 +1781,10 @@ fn descend_fn_checked(
 }
 
 /// Toy descent of a problem's FIRST objective over its FIRST variable
-/// (the IR-driven variant; enforces `problem.budget` per P4).
+/// (the IR-driven variant; enforces `problem.budget` per P4). The caller's
+/// [`Cx`] is threaded through binding validation and every proportional graph
+/// evaluation phase after the capped cheap node/count/length preflight, with at
+/// most 256 evaluator work items between polls.
 ///
 /// # Errors
 /// [`OptError::Cancelled`] / evaluation teaching errors.
@@ -1530,6 +1794,19 @@ pub fn descend_ir(
     opts: DescentOptions,
     cx: &Cx<'_>,
 ) -> Result<DescentReport, OptError> {
+    descend_ir_with_eval_checkpoint(problem, x0, opts, cx, &|_phase| descent_checkpoint(cx))
+}
+
+fn descend_ir_with_eval_checkpoint<F>(
+    problem: &Problem,
+    x0: &[f64],
+    opts: DescentOptions,
+    cx: &Cx<'_>,
+    eval_checkpoint: &F,
+) -> Result<DescentReport, OptError>
+where
+    F: Fn(EvalPhase) -> Result<(), OptError>,
+{
     // A problem with no objective or no variable is unsolvable — return a
     // structured error, never an index panic (`ProblemBuilder` does not
     // require either, and `descend_ir` is public).
@@ -1551,7 +1828,8 @@ pub fn descend_ir(
     // invocation is f0 and is counted exactly once, including under a
     // one-evaluation budget.
     let f = |x: &[f64], _site: ObjectiveEvalSite| -> Result<f64, OptError> {
-        let scalar = eval_borrowed(problem, obj.node, &[x])?
+        let mut checkpoint = eval_checkpoint;
+        let scalar = eval_borrowed_with_checkpoint(problem, obj.node, &[x], &mut checkpoint)?
             .scalar()
             .ok_or(OptError::NotScalar { node: obj.node.0 })?;
         finite_descent_value(sign * obj.weight * scalar, "weighted IR objective")
@@ -1564,6 +1842,363 @@ mod runtime_shape_tests {
     use super::*;
     use crate::ir::ProblemBuilder;
     use fs_qty::Dims;
+
+    fn checkpoint_problem() -> (Problem, NodeId, Vec<f64>) {
+        let dimension = u32::try_from(EVAL_CHECKPOINT_STRIDE * 2 + 1)
+            .expect("checkpoint fixture dimension fits u32");
+        let mut builder = ProblemBuilder::new();
+        let variable = builder
+            .var("x", Manifold::Rn { dim: dimension }, Dims::NONE)
+            .expect("variable");
+        let point = builder.var_ref(variable).expect("point");
+        let negated = builder.neg(point).expect("negation");
+        let cancelled = builder.add(point, negated).expect("vector addition");
+        let scale = builder.konst(0.5, Dims::NONE).expect("scale");
+        let scaled = builder.mul(scale, cancelled).expect("scaled vector");
+        let norm = builder.norm_sq(scaled).expect("norm squared");
+        let mut leaves = vec![norm];
+        for index in 1..=512u32 {
+            let value = builder
+                .konst(f64::from(index), Dims::NONE)
+                .expect("unique padding constant");
+            let negative = builder.neg(value).expect("padding negation");
+            leaves.push(builder.add(value, negative).expect("exact zero leaf"));
+        }
+        while leaves.len() > 1 {
+            let mut next = Vec::with_capacity(leaves.len().div_ceil(2));
+            let mut pairs = leaves.chunks_exact(2);
+            for pair in &mut pairs {
+                next.push(builder.add(pair[0], pair[1]).expect("balanced scalar sum"));
+            }
+            if let Some(remainder) = pairs.remainder().first() {
+                next.push(*remainder);
+            }
+            leaves = next;
+        }
+        let objective = leaves[0];
+        builder
+            .objective(objective, crate::ir::Sense::Minimize, 1.0)
+            .expect("objective");
+        let problem = builder.finish();
+        let mut binding: Vec<f64> = (0..dimension)
+            .map(|index| f64::from(index % 17) - 8.0)
+            .collect();
+        binding[0] = -0.0;
+        (problem, objective, binding)
+    }
+
+    fn with_test_cx<R>(gate: &fs_exec::CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                gate,
+                arena,
+                fs_exec::StreamKey {
+                    seed: 0xE7A1,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                asupersync::types::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+
+    fn assert_value_bits_eq(left: &Value, right: &Value) {
+        match (left, right) {
+            (Value::S(left), Value::S(right)) => assert_eq!(left.to_bits(), right.to_bits()),
+            (Value::V(left), Value::V(right)) => assert_eq!(
+                left.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                right
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            ),
+            _ => panic!("value shape changed under checkpointing"),
+        }
+    }
+
+    #[test]
+    fn checkpointed_eval_replays_and_every_poll_aborts_atomically() {
+        let (problem, objective, binding) = checkpoint_problem();
+        let public =
+            eval(&problem, objective, std::slice::from_ref(&binding)).expect("public evaluation");
+
+        let mut phases = Vec::new();
+        let checkpointed = eval_borrowed_with_checkpoint(
+            &problem,
+            objective,
+            &[binding.as_slice()],
+            &mut |phase| {
+                phases.push(phase);
+                Ok(())
+            },
+        )
+        .expect("checkpointed evaluation");
+        assert_value_bits_eq(&checkpointed, &public);
+        assert_eq!(
+            checkpointed.scalar().expect("scalar objective").to_bits(),
+            0.0f64.to_bits(),
+            "balanced exact-zero padding must retain the expected objective bits"
+        );
+
+        let mut replay_phases = Vec::new();
+        let replay = eval_borrowed_with_checkpoint(
+            &problem,
+            objective,
+            &[binding.as_slice()],
+            &mut |phase| {
+                replay_phases.push(phase);
+                Ok(())
+            },
+        )
+        .expect("checkpoint replay");
+        assert_value_bits_eq(&replay, &checkpointed);
+        assert_eq!(replay_phases, phases, "phase trace must replay exactly");
+
+        let expected_histogram = [
+            (EvalPhase::BindingEnvelope, 2usize),
+            (EvalPhase::BindingValues, 5),
+            (EvalPhase::BindingDomain, 1),
+            (EvalPhase::StorageInitialization, 21),
+            (EvalPhase::Reachability, 20),
+            (EvalPhase::NodeSweep, 10),
+            (EvalPhase::VectorConstruction, 20),
+            (EvalPhase::VectorReduction, 4),
+            (EvalPhase::OutputValidation, 16),
+            (EvalPhase::Finalize, 1),
+        ];
+        for (phase, expected) in expected_histogram {
+            let actual = phases.iter().filter(|seen| **seen == phase).count();
+            assert_eq!(actual, expected, "checkpoint cadence drifted for {phase:?}");
+        }
+        assert_eq!(phases.len(), 100, "complete phase trace is a G4 receipt");
+
+        for target in 1..=phases.len() {
+            let mut calls = 0usize;
+            let mut observed = Vec::new();
+            let result = eval_borrowed_with_checkpoint(
+                &problem,
+                objective,
+                &[binding.as_slice()],
+                &mut |phase| {
+                    calls += 1;
+                    observed.push(phase);
+                    if calls == target {
+                        Err(OptError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result, Err(OptError::Cancelled), "target poll {target}");
+            assert_eq!(calls, target, "work continued after target poll {target}");
+            assert_eq!(
+                observed.as_slice(),
+                &phases[..target],
+                "trace drift at poll {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpointed_eval_preserves_cheap_metadata_error_precedence() {
+        let (problem, objective, binding) = checkpoint_problem();
+        let mut polls = 0usize;
+        let missing = eval_borrowed_with_checkpoint(&problem, objective, &[], &mut |_phase| {
+            polls += 1;
+            Err(OptError::Cancelled)
+        });
+        assert!(matches!(
+            missing,
+            Err(OptError::BindingCount { got: 0, .. })
+        ));
+        assert_eq!(
+            polls, 0,
+            "binding count is checked before proportional work"
+        );
+
+        let short = &binding[..binding.len() - 1];
+        let malformed =
+            eval_borrowed_with_checkpoint(&problem, objective, &[short], &mut |_phase| {
+                polls += 1;
+                Err(OptError::Cancelled)
+            });
+        assert!(matches!(malformed, Err(OptError::BindingLen { .. })));
+        assert_eq!(
+            polls, 0,
+            "binding length is checked before proportional work"
+        );
+
+        let unknown = eval_borrowed_with_checkpoint(
+            &problem,
+            NodeId(u32::MAX),
+            &[binding.as_slice()],
+            &mut |_phase| {
+                polls += 1;
+                Err(OptError::Cancelled)
+            },
+        );
+        assert_eq!(unknown, Err(OptError::UnknownNode { id: u32::MAX }));
+        assert_eq!(polls, 0, "unknown node is checked before proportional work");
+    }
+
+    #[test]
+    fn binding_envelope_checkpoint_stride_is_pinned() {
+        let mut builder = ProblemBuilder::new();
+        let mut first = None;
+        for index in 0..=EVAL_CHECKPOINT_STRIDE {
+            let variable = builder
+                .var(&format!("x{index}"), Manifold::Rn { dim: 1 }, Dims::NONE)
+                .expect("bounded variable");
+            first.get_or_insert(variable);
+        }
+        let point = builder
+            .var_ref(first.expect("at least one variable"))
+            .expect("point");
+        let root = builder.component(point, 0).expect("scalar root");
+        let problem = builder.finish();
+        let owned = vec![vec![0.0]; EVAL_CHECKPOINT_STRIDE + 1];
+        let bindings: Vec<&[f64]> = owned.iter().map(Vec::as_slice).collect();
+        let mut phases = Vec::new();
+        let value = eval_borrowed_with_checkpoint(&problem, root, &bindings, &mut |phase| {
+            phases.push(phase);
+            Ok(())
+        })
+        .expect("wide binding frame");
+        assert_eq!(value, Value::S(0.0));
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|phase| **phase == EvalPhase::BindingEnvelope)
+                .count(),
+            3,
+            "indices 0 and 256 plus the terminal boundary must poll"
+        );
+
+        let mut envelope_polls = 0usize;
+        let cancelled = eval_borrowed_with_checkpoint(&problem, root, &bindings, &mut |phase| {
+            if phase == EvalPhase::BindingEnvelope {
+                envelope_polls += 1;
+                if envelope_polls == 2 {
+                    return Err(OptError::Cancelled);
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(cancelled, Err(OptError::Cancelled));
+        assert_eq!(envelope_polls, 2);
+    }
+
+    #[test]
+    fn descend_ir_routes_every_evaluator_poll_through_cx() {
+        let (problem, _objective, binding) = checkpoint_problem();
+        let options = DescentOptions {
+            steps: 0,
+            ..DescentOptions::default()
+        };
+        let baseline_gate = fs_exec::CancelGate::new_clock_free();
+        let baseline_phases = std::cell::RefCell::new(Vec::new());
+        let baseline = with_test_cx(&baseline_gate, |cx| {
+            descend_ir_with_eval_checkpoint(&problem, &binding, options, cx, &|phase| {
+                baseline_phases.borrow_mut().push(phase);
+                Ok(())
+            })
+            .expect("baseline IR descent")
+        });
+        let phases = baseline_phases.into_inner();
+        assert!(!phases.is_empty());
+        assert_eq!(
+            phases.len(),
+            100,
+            "f0 must traverse one complete evaluator trace"
+        );
+        assert_eq!(baseline.evals, 1);
+        assert_eq!(baseline.steps_taken, 0);
+        assert_eq!(baseline.stop, DescentStop::StepLimit);
+        assert!(!baseline.budget_stopped);
+        assert_eq!(baseline.f0.to_bits(), 0.0f64.to_bits());
+        assert_eq!(baseline.f_final.to_bits(), baseline.f0.to_bits());
+        assert_eq!(
+            baseline
+                .x
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            binding
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "steps=0 must return the exact input point bits"
+        );
+        assert_eq!(baseline.x[0].to_bits(), (-0.0f64).to_bits());
+
+        let replay_gate = fs_exec::CancelGate::new_clock_free();
+        let replay_phases = std::cell::RefCell::new(Vec::new());
+        let replay = with_test_cx(&replay_gate, |cx| {
+            descend_ir_with_eval_checkpoint(&problem, &binding, options, cx, &|phase| {
+                replay_phases.borrow_mut().push(phase);
+                Ok(())
+            })
+            .expect("replayed IR descent")
+        });
+        assert_eq!(replay_phases.into_inner(), phases);
+        assert_eq!(
+            replay
+                .x
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            baseline
+                .x
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(replay.f0.to_bits(), baseline.f0.to_bits());
+        assert_eq!(replay.f_final.to_bits(), baseline.f_final.to_bits());
+        assert_eq!(replay.evals, baseline.evals);
+        assert_eq!(replay.steps_taken, baseline.steps_taken);
+        assert_eq!(replay.stop, baseline.stop);
+        assert_eq!(replay.budget_stopped, baseline.budget_stopped);
+        assert_eq!(replay.work_upper_bound, baseline.work_upper_bound);
+        assert_eq!(
+            replay.workspace_upper_bound_bytes,
+            baseline.workspace_upper_bound_bytes
+        );
+
+        for target in 1..=phases.len() {
+            let gate = fs_exec::CancelGate::new_clock_free();
+            let calls = std::cell::Cell::new(0usize);
+            let observed = std::cell::RefCell::new(Vec::new());
+            with_test_cx(&gate, |cx| {
+                let result =
+                    descend_ir_with_eval_checkpoint(&problem, &binding, options, cx, &|phase| {
+                        let next = calls.get() + 1;
+                        calls.set(next);
+                        observed.borrow_mut().push(phase);
+                        if next == target {
+                            gate.request();
+                        }
+                        descent_checkpoint(cx)
+                    });
+                assert!(
+                    matches!(result, Err(OptError::Cancelled)),
+                    "target poll {target}"
+                );
+            });
+            assert!(gate.is_requested());
+            assert_eq!(calls.get(), target, "work continued after poll {target}");
+            let observed = observed.into_inner();
+            assert_eq!(
+                observed.as_slice(),
+                &phases[..target],
+                "IR descent trace drift at poll {target}"
+            );
+        }
+    }
 
     #[test]
     fn runtime_vector_reservations_refuse_capacity_overflow_without_partial_output() {
@@ -1594,11 +2229,20 @@ mod runtime_shape_tests {
         let left = [1.0, -0.0, f64::MIN_POSITIVE];
         let right = [2.0, 0.0, -f64::MIN_POSITIVE];
         let node = Some(NodeId(3));
-        let cloned =
-            try_clone_vector("test/clone", node, Some(VarId(2)), &left).expect("bounded clone");
-        let negated = try_map_vector("test/map", node, &left, |value| -value).expect("bounded map");
-        let added =
-            try_zip_vectors("test/zip", node, &left, &right, |a, b| a + b).expect("bounded zip");
+        let mut checkpoint = no_eval_checkpoint;
+        let cloned = try_clone_vector("test/clone", node, Some(VarId(2)), &left, &mut checkpoint)
+            .expect("bounded clone");
+        let negated = try_map_vector("test/map", node, &left, |value| -value, &mut checkpoint)
+            .expect("bounded map");
+        let added = try_zip_vectors(
+            "test/zip",
+            node,
+            &left,
+            &right,
+            |a, b| a + b,
+            &mut checkpoint,
+        )
+        .expect("bounded zip");
 
         assert_eq!(
             cloned
