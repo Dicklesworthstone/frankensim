@@ -584,6 +584,7 @@ fn sys_009_atom_application_and_extension_semantics() {
         .expect("velocity");
     let grad = system.register_atom(AtomSignature {
         name: "d0".to_string(),
+        content: ConventionRef::new("feec:d0:v1").expect("content ref"),
         in_space: Space {
             degree: 1,
             n: 64,
@@ -704,6 +705,7 @@ fn sys_011_transport_round_trips_and_preserves_identity() {
         .expect("temperature difference");
     let grad = system.register_atom(AtomSignature {
         name: "d0".to_string(),
+        content: ConventionRef::new("feec:d0:v1").expect("content ref"),
         in_space: Space {
             degree: 1,
             n: 64,
@@ -860,5 +862,102 @@ fn sys_014_migration_golden_identity_is_pinned() {
     assert_eq!(
         hex, "2db84c5e4cab57a2b1bac5c0ebe109062ddf21464ddd6365d4c71353c4865bc8",
         "system-identity golden moved: bump SYSTEM_IR_VERSION deliberately and record the cause"
+    );
+}
+
+#[test]
+fn sys_015_atom_identity_is_order_and_name_free_but_content_bearing() {
+    let build = |swap_order: bool, grad_content: &str, names: (&str, &str)| {
+        let mut system = SystemDef::new();
+        let velocity = system
+            .declare_field(field(
+                "velocity",
+                1,
+                64,
+                FieldQuantity::Dimensional(VELOCITY),
+                ("chart-a", "lab", "clk-main"),
+                0,
+            ))
+            .expect("velocity");
+        let space = Space {
+            degree: 1,
+            n: 64,
+            dims: VELOCITY,
+        };
+        let grad_sig = AtomSignature {
+            name: names.0.to_string(),
+            content: ConventionRef::new(grad_content).expect("content"),
+            in_space: space,
+            out_space: space,
+        };
+        let mass_sig = AtomSignature {
+            name: names.1.to_string(),
+            content: ConventionRef::new("feec:m1:v1").expect("content"),
+            in_space: space,
+            out_space: space,
+        };
+        let (grad, _mass) = if swap_order {
+            let m = system.register_atom(mass_sig);
+            let g = system.register_atom(grad_sig);
+            (g, m)
+        } else {
+            let g = system.register_atom(grad_sig);
+            let m = system.register_atom(mass_sig);
+            (g, m)
+        };
+        system
+            .add_equation(BlockEquation {
+                name: "apply-grad".to_string(),
+                target: velocity,
+                rhs: SystemExpr::Apply {
+                    atom: grad,
+                    arg: Box::new(SystemExpr::FieldRef(velocity)),
+                },
+            })
+            .expect("equation");
+        system.admit().expect("admits").identity()
+    };
+
+    let baseline = build(false, "feec:d0:v1", ("d0", "m1"));
+    assert_eq!(
+        baseline,
+        build(true, "feec:d0:v1", ("d0", "m1")),
+        "atom declaration order must not move identity"
+    );
+    assert_eq!(
+        baseline,
+        build(false, "feec:d0:v1", ("gradient", "mass")),
+        "atom display names must not move identity"
+    );
+    assert_ne!(
+        baseline,
+        build(false, "feec:d0:v2", ("d0", "m1")),
+        "the atom content reference is identity-bearing"
+    );
+
+    // Byte-identical atom payloads refuse as ambiguous.
+    let mut system = SystemDef::new();
+    let space = Space {
+        degree: 1,
+        n: 64,
+        dims: VELOCITY,
+    };
+    for name in ["first", "second"] {
+        system.register_atom(AtomSignature {
+            name: name.to_string(),
+            content: ConventionRef::new("feec:d0:v1").expect("content"),
+            in_space: space,
+            out_space: space,
+        });
+    }
+    let ambiguous = system.admit();
+    assert!(
+        matches!(
+            ambiguous,
+            Err(SystemTypeError::IndistinguishableAtoms { ref first, ref second })
+                if first == "first" && second == "second"
+        ),
+        "duplicate atom payloads must refuse, got {:?}",
+        ambiguous.map(|admitted| admitted.identity())
     );
 }

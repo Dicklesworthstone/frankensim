@@ -237,6 +237,12 @@ pub enum SystemExpr {
 pub struct AtomSignature {
     /// Display name (diagnostics only; not a hash input).
     pub name: String,
+    /// Identity-bearing content reference into the caller's operator
+    /// registry (e.g. `feec:d0:kuhn2-v1`). Two atoms with equal spaces
+    /// are still DIFFERENT operators; this reference is what
+    /// distinguishes them in the semantic identity, exactly like frame
+    /// and clock references.
+    pub content: ConventionRef,
     /// Input space.
     pub in_space: Space,
     /// Output space.
@@ -384,6 +390,14 @@ pub enum SystemTypeError {
         /// The offending bits.
         bits: u64,
     },
+    /// Two atoms whose complete semantic payloads (content reference
+    /// plus spaces) are byte-identical: declare one atom once.
+    IndistinguishableAtoms {
+        /// First atom display name.
+        first: String,
+        /// Second atom display name.
+        second: String,
+    },
     /// A display name the transport cannot carry fail-closed.
     InvalidName {
         /// The offending name.
@@ -471,6 +485,10 @@ impl std::fmt::Display for SystemTypeError {
             Self::NonFiniteScale { bits } => {
                 write!(out, "scale constant is not finite (bits {bits:#018x})")
             }
+            Self::IndistinguishableAtoms { first, second } => write!(
+                out,
+                "atoms {first:?} and {second:?} have byte-identical content/space payloads: declare one atom once"
+            ),
             Self::InvalidName { name } => write!(
                 out,
                 "display name {name:?} must be non-empty printable text without tabs or newlines"
@@ -697,13 +715,30 @@ impl SystemDef {
             remap[*declaration] = canonical;
         }
 
-        let mut atom_payloads: Vec<Vec<u8>> = self.atoms.iter().map(canonical_atom_bytes).collect();
+        let mut atom_payloads: Vec<(Vec<u8>, usize)> = self
+            .atoms
+            .iter()
+            .enumerate()
+            .map(|(index, atom)| (canonical_atom_bytes(atom), index))
+            .collect();
         atom_payloads.sort();
+        for pair in atom_payloads.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(SystemTypeError::IndistinguishableAtoms {
+                    first: self.atoms[pair[0].1].name.clone(),
+                    second: self.atoms[pair[1].1].name.clone(),
+                });
+            }
+        }
+        let mut atom_remap = vec![0usize; self.atoms.len()];
+        for (canonical, (_, declaration)) in atom_payloads.iter().enumerate() {
+            atom_remap[*declaration] = canonical;
+        }
 
         let mut equation_payloads: Vec<Vec<u8>> = self
             .equations
             .iter()
-            .map(|equation| canonical_equation_bytes(equation, &remap))
+            .map(|equation| canonical_equation_bytes(equation, &remap, &atom_remap))
             .collect();
         equation_payloads.sort();
         for pair in equation_payloads.windows(2) {
@@ -734,7 +769,7 @@ impl SystemDef {
             encoder = encoder.ordered_bytes(
                 Field::new(2, "atom-signatures"),
                 atom_payloads.len() as u64,
-                atom_payloads.iter().map(Vec::as_slice),
+                atom_payloads.iter().map(|(bytes, _)| bytes.as_slice()),
             )?;
             encoder = encoder.ordered_bytes(
                 Field::new(3, "fields"),
@@ -1118,12 +1153,17 @@ fn canonical_field_bytes(field: &FieldDecl) -> Vec<u8> {
 
 fn canonical_atom_bytes(atom: &AtomSignature) -> Vec<u8> {
     let mut bytes = Vec::new();
+    push_ref(&mut bytes, &atom.content);
     push_space(&mut bytes, &atom.in_space);
     push_space(&mut bytes, &atom.out_space);
     bytes
 }
 
-fn canonical_equation_bytes(equation: &BlockEquation, remap: &[usize]) -> Vec<u8> {
+fn canonical_equation_bytes(
+    equation: &BlockEquation,
+    remap: &[usize],
+    atom_remap: &[usize],
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_u32(
         &mut bytes,
@@ -1145,7 +1185,7 @@ fn canonical_equation_bytes(equation: &BlockEquation, remap: &[usize]) -> Vec<u8
                 bytes.push(1);
                 push_u32(
                     &mut bytes,
-                    u32::try_from(*atom).expect("bounded atom table"),
+                    u32::try_from(atom_remap[*atom]).expect("bounded atom table"),
                 );
                 stack.push(arg);
             }
@@ -1388,8 +1428,9 @@ pub mod transport {
             validate_name(&atom.name)?;
             let _ = writeln!(
                 out,
-                "atom\t{}\t{}\t{}",
+                "atom\t{}\t{}\t{}\t{}",
                 atom.name,
+                atom.content.as_str(),
                 render_space(&atom.in_space),
                 render_space(&atom.out_space)
             );
@@ -1783,12 +1824,16 @@ pub mod transport {
                     system = system.with_extension(bytes)?;
                 }
                 "atom" => {
-                    let [name, in_space, out_space] = rest.as_slice() else {
-                        return Err(malformed(line, "atom takes name, in-space, out-space"));
+                    let [name, content, in_space, out_space] = rest.as_slice() else {
+                        return Err(malformed(
+                            line,
+                            "atom takes name, content-ref, in-space, out-space",
+                        ));
                     };
                     validate_name(name)?;
                     system.register_atom(AtomSignature {
                         name: (*name).to_string(),
+                        content: ConventionRef::new(*content)?,
                         in_space: parse_space(in_space, line)?,
                         out_space: parse_space(out_space, line)?,
                     });
