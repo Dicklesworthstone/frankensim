@@ -18,8 +18,9 @@
 //! those sealed children into one role-complete, common-selector packet without
 //! promoting it to an equivalence. A standalone chart-transition packet can
 //! retain two oppositely oriented direct declared chart maps and nominal
-//! round-trip declarations without executing either map or promoting the pair
-//! to an inverse. This module deliberately cannot mint a
+//! round-trip declarations after checking that their evidence seams compose in
+//! both orders, without executing either map or promoting the pair to an
+//! inverse. This module deliberately cannot mint a
 //! non-identity equivalence: a witness digest is data, not a proof of an inverse,
 //! quasi-isomorphism, refinement theorem, or physical crosswalk.
 
@@ -962,7 +963,8 @@ pub struct DerivedSpanCorrespondenceIrV1 {
 ///
 /// Both children must be exact sealed, single-primitive declared chart maps.
 /// Admission checks only that their geometry and chart endpoints are reversed
-/// and their nominal overlap selector is identical. The round-trip declarations
+/// their nominal overlap selector is identical, and their declared evidence
+/// transports compose structurally in both orders. The round-trip declarations
 /// are not executed, authenticated, or promoted to inverse/equivalence authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DerivedChartTransitionInverseLawCandidateIrV1 {
@@ -1482,6 +1484,20 @@ pub enum DerivedChartTransitionInverseLawCandidateErrorV1 {
     },
     /// Forward and reverse primitives do not name the exact same overlap artifact.
     OverlapMismatch,
+    /// Forward and reverse children declare different evidence variance.
+    EvidenceVarianceMismatch,
+    /// One ordered evidence composite has a mismatched artifact or rank seam.
+    EvidenceSeamMismatch {
+        /// Stable ordered composite label.
+        composite: &'static str,
+    },
+    /// An unexpected evidence-composition refusal was retained fail-closed.
+    EvidenceCompositionRefused {
+        /// Stable ordered composite label.
+        composite: &'static str,
+        /// Underlying structural composition refusal.
+        cause: DerivedMorphismErrorV1,
+    },
     /// Cooperative cancellation was observed before publication.
     Cancelled {
         /// Stable admission stage.
@@ -2050,8 +2066,9 @@ impl AdmittedDerivedSpanCorrespondenceV1 {
 /// Sealed structural candidate for two direct chart maps to satisfy inverse laws.
 ///
 /// The token binds exact reversed geometry/chart endpoints and a shared nominal
-/// overlap. It exposes the two map artifacts and nominal round-trip declarations
-/// for independent checking, but no inverse, composition, equivalence,
+/// overlap after both declared evidence orders pass structural seam checks. It
+/// exposes the two map artifacts and nominal round-trip declarations for
+/// independent checking, but no inverse, composition, equivalence,
 /// coordinate-execution, or evidence-transport capability.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AdmittedDerivedChartTransitionInverseLawCandidateV1 {
@@ -4845,6 +4862,41 @@ struct ChartTransitionInverseLawBindingV1 {
     no_authority: DerivedNoClaimIdV1,
 }
 
+fn validate_chart_transition_evidence_cycle(
+    forward: &AdmittedDerivedMorphismV1,
+    reverse: &AdmittedDerivedMorphismV1,
+) -> Result<(), DerivedChartTransitionInverseLawCandidateErrorV1> {
+    for (first, second, composite) in [
+        (forward, reverse, "reverse-after-forward"),
+        (reverse, forward, "forward-after-reverse"),
+    ] {
+        match compose_evidence(first.evidence(), second.evidence()) {
+            Ok(_) => {}
+            Err(DerivedMorphismErrorV1::CompositionVarianceMismatch) => {
+                return Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceVarianceMismatch,
+                );
+            }
+            Err(DerivedMorphismErrorV1::CompositionEvidenceMismatch) => {
+                return Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceSeamMismatch {
+                        composite,
+                    },
+                );
+            }
+            Err(cause) => {
+                return Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceCompositionRefused {
+                        composite,
+                        cause,
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_chart_transition_inverse_law_candidate(
     ir: &DerivedChartTransitionInverseLawCandidateIrV1,
     forward: &AdmittedDerivedMorphismV1,
@@ -4917,6 +4969,7 @@ fn validate_chart_transition_inverse_law_candidate(
     if forward_primitive.overlap != reverse_primitive.overlap {
         return Err(DerivedChartTransitionInverseLawCandidateErrorV1::OverlapMismatch);
     }
+    validate_chart_transition_evidence_cycle(forward, reverse)?;
 
     Ok(ChartTransitionInverseLawBindingV1 {
         source_geometry: forward_primitive.source_geometry,
@@ -5005,15 +5058,18 @@ fn chart_transition_inverse_law_candidate_receipt(
 ///
 /// This admission checks only exact sealed child identity, direct single-map
 /// shape, reversed geometry/chart endpoints, one identical overlap selector,
-/// nonzero nominal round-trip declarations, and a nonzero no-authority artifact.
-/// It does not execute either coordinate map or check either ordered composite.
-/// A later independent checker must validate both composites against exact
-/// identity maps and mint a distinct authority-bearing receipt if justified.
+/// structural evidence composability in both orders, nonzero nominal round-trip
+/// declarations, and a nonzero no-authority artifact. Evidence composability
+/// proves only matching variance, artifact, and rank seams. It does not execute
+/// either coordinate map or establish that either composite is an identity. A
+/// later independent checker must validate both maps against exact identities
+/// and mint a distinct authority-bearing receipt if justified.
 ///
 /// # Errors
 /// Returns a typed refusal for schema, zero identity, raw/sealed child mismatch,
 /// non-direct or non-chart children, non-reversed endpoints, unequal overlap,
-/// cancellation, or canonical identity defects. No partial token escapes.
+/// evidence variance/seams, cancellation, or canonical identity defects. No
+/// partial token escapes.
 #[must_use = "a chart-transition pair has no inverse or equivalence authority"]
 pub fn admit_derived_chart_transition_inverse_law_candidate_v1(
     ir: &DerivedChartTransitionInverseLawCandidateIrV1,
@@ -7053,7 +7109,7 @@ mod tests {
                 declaration_seed,
                 overlap,
                 map,
-                ColorRank::Verified,
+                ColorRank::Validated,
                 ColorRank::Validated,
             ),
             source,
@@ -9117,6 +9173,10 @@ mod tests {
                 &ir, &forward, &reverse, cx,
             )
             .expect("deterministic structural candidate replay");
+            let source_cycle = compose_derived_morphisms_v1(&forward, &reverse, cx)
+                .expect("reverse after forward has a closed evidence seam");
+            let target_cycle = compose_derived_morphisms_v1(&reverse, &forward, cx)
+                .expect("forward after reverse has a closed evidence seam");
 
             assert_eq!(first, replay);
             assert_eq!(first.source_geometry(), source.id);
@@ -9132,6 +9192,303 @@ mod tests {
             assert_eq!(first.target_round_trip(), ir.target_round_trip);
             assert_eq!(first.no_authority(), ir.no_authority);
             assert_eq!(first.id(), first.identity_receipt().id());
+            assert_eq!(source_cycle.source(), source.id);
+            assert_eq!(source_cycle.target(), source.id);
+            assert_eq!(target_cycle.source(), target.id);
+            assert_eq!(target_cycle.target(), target.id);
+            assert_eq!(
+                source_cycle.evidence(),
+                DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                    input_geometry: source.id,
+                    output_geometry: source.id,
+                    input_evidence: evidence_id(source.id),
+                    output_evidence: evidence_id(source.id),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Validated,
+                }
+            );
+            assert_eq!(
+                target_cycle.evidence(),
+                DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                    input_geometry: target.id,
+                    output_geometry: target.id,
+                    input_evidence: evidence_id(target.id),
+                    output_evidence: evidence_id(target.id),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Validated,
+                }
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Both ordered artifact/rank seams and variance refusal.
+    fn direct_chart_transition_candidates_require_closed_evidence_cycles() {
+        with_cx(false, |cx| {
+            let source_charts = [chart(233, 2, 2, 23, 1.0)];
+            let target_charts = [chart(234, 2, 2, 23, 1.0)];
+            let source = endpoint_with_charts(235, &source_charts);
+            let target = endpoint_with_charts(236, &target_charts);
+            let overlap = DerivedChartOverlapIdV1::from_bytes([237; 32]);
+            let forward = admit_chart_map_with_artifacts(
+                source,
+                target,
+                source_charts[0].id,
+                target_charts[0].id,
+                238,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([239; 32]),
+                cx,
+            );
+            let admit_reverse = |seed, evidence| {
+                let mut reverse_ir = chart_map_ir_with_artifacts(
+                    target,
+                    source,
+                    target_charts[0].id,
+                    source_charts[0].id,
+                    seed,
+                    overlap,
+                    DerivedChartMapIdV1::from_bytes([seed.wrapping_add(1); 32]),
+                    ColorRank::Validated,
+                    ColorRank::Validated,
+                );
+                reverse_ir.evidence = evidence;
+                admit_between_endpoints(reverse_ir, target, source, cx)
+                    .expect("structurally admitted reverse chart map")
+            };
+
+            for (evidence, expected_composite) in [
+                (
+                    DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                        input_geometry: target.id,
+                        output_geometry: source.id,
+                        input_evidence: DerivedEvidenceArtifactIdV1::from_bytes([240; 32]),
+                        output_evidence: evidence_id(source.id),
+                        input_rank: ColorRank::Validated,
+                        output_rank: ColorRank::Validated,
+                    },
+                    "reverse-after-forward",
+                ),
+                (
+                    DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                        input_geometry: target.id,
+                        output_geometry: source.id,
+                        input_evidence: evidence_id(target.id),
+                        output_evidence: evidence_id(source.id),
+                        input_rank: ColorRank::Estimated,
+                        output_rank: ColorRank::Estimated,
+                    },
+                    "reverse-after-forward",
+                ),
+                (
+                    DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                        input_geometry: target.id,
+                        output_geometry: source.id,
+                        input_evidence: evidence_id(target.id),
+                        output_evidence: DerivedEvidenceArtifactIdV1::from_bytes([241; 32]),
+                        input_rank: ColorRank::Validated,
+                        output_rank: ColorRank::Validated,
+                    },
+                    "forward-after-reverse",
+                ),
+                (
+                    DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                        input_geometry: target.id,
+                        output_geometry: source.id,
+                        input_evidence: evidence_id(target.id),
+                        output_evidence: evidence_id(source.id),
+                        input_rank: ColorRank::Validated,
+                        output_rank: ColorRank::Estimated,
+                    },
+                    "forward-after-reverse",
+                ),
+            ] {
+                let reverse = admit_reverse(242, evidence);
+                let ir = chart_transition_inverse_law_ir(&forward, &reverse, 243);
+                assert_eq!(
+                    admit_derived_chart_transition_inverse_law_candidate_v1(
+                        &ir, &forward, &reverse, cx,
+                    ),
+                    Err(
+                        DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceSeamMismatch {
+                            composite: expected_composite,
+                        }
+                    )
+                );
+            }
+
+            let contravariant_reverse = admit_reverse(
+                244,
+                DerivedEvidenceTransportV1::RestrictionContravariant {
+                    input_geometry: source.id,
+                    output_geometry: target.id,
+                    input_evidence: evidence_id(source.id),
+                    output_evidence: evidence_id(target.id),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Validated,
+                },
+            );
+            let contravariant_ir =
+                chart_transition_inverse_law_ir(&forward, &contravariant_reverse, 245);
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &contravariant_ir,
+                    &forward,
+                    &contravariant_reverse,
+                    cx,
+                ),
+                Err(DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceVarianceMismatch)
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Contravariant cycle plus both ordered artifact/rank seams.
+    fn direct_chart_transition_candidates_support_closed_contravariant_cycles() {
+        with_cx(false, |cx| {
+            let source_charts = [chart(246, 2, 2, 24, 1.0)];
+            let target_charts = [chart(247, 2, 2, 24, 1.0)];
+            let source = endpoint_with_charts(248, &source_charts);
+            let target = endpoint_with_charts(249, &target_charts);
+            let overlap = DerivedChartOverlapIdV1::from_bytes([250; 32]);
+            let mut forward_ir = chart_map_ir_with_artifacts(
+                source,
+                target,
+                source_charts[0].id,
+                target_charts[0].id,
+                251,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([252; 32]),
+                ColorRank::Validated,
+                ColorRank::Validated,
+            );
+            forward_ir.evidence = DerivedEvidenceTransportV1::RestrictionContravariant {
+                input_geometry: target.id,
+                output_geometry: source.id,
+                input_evidence: evidence_id(target.id),
+                output_evidence: evidence_id(source.id),
+                input_rank: ColorRank::Validated,
+                output_rank: ColorRank::Validated,
+            };
+            let forward = admit_between_endpoints(forward_ir, source, target, cx)
+                .expect("valid contravariant forward chart map");
+            let admit_reverse = |seed, evidence| {
+                let mut reverse_ir = chart_map_ir_with_artifacts(
+                    target,
+                    source,
+                    target_charts[0].id,
+                    source_charts[0].id,
+                    seed,
+                    overlap,
+                    DerivedChartMapIdV1::from_bytes([seed.wrapping_add(1); 32]),
+                    ColorRank::Validated,
+                    ColorRank::Validated,
+                );
+                reverse_ir.evidence = evidence;
+                admit_between_endpoints(reverse_ir, target, source, cx)
+                    .expect("structurally admitted reverse chart map")
+            };
+            let reverse_evidence = |input_evidence, output_evidence, input_rank, output_rank| {
+                DerivedEvidenceTransportV1::RestrictionContravariant {
+                    input_geometry: source.id,
+                    output_geometry: target.id,
+                    input_evidence,
+                    output_evidence,
+                    input_rank,
+                    output_rank,
+                }
+            };
+            let closed_reverse_evidence = reverse_evidence(
+                evidence_id(source.id),
+                evidence_id(target.id),
+                ColorRank::Validated,
+                ColorRank::Validated,
+            );
+            let reverse = admit_reverse(253, closed_reverse_evidence);
+            let ir = chart_transition_inverse_law_ir(&forward, &reverse, 251);
+            let candidate = admit_derived_chart_transition_inverse_law_candidate_v1(
+                &ir, &forward, &reverse, cx,
+            )
+            .expect("valid closed contravariant candidate");
+            assert_eq!(candidate.no_authority(), ir.no_authority);
+            assert!(compose_derived_morphisms_v1(&forward, &reverse, cx).is_ok());
+            assert!(compose_derived_morphisms_v1(&reverse, &forward, cx).is_ok());
+
+            for (evidence, expected_composite) in [
+                (
+                    reverse_evidence(
+                        evidence_id(source.id),
+                        DerivedEvidenceArtifactIdV1::from_bytes([254; 32]),
+                        ColorRank::Validated,
+                        ColorRank::Validated,
+                    ),
+                    "reverse-after-forward",
+                ),
+                (
+                    reverse_evidence(
+                        evidence_id(source.id),
+                        evidence_id(target.id),
+                        ColorRank::Validated,
+                        ColorRank::Estimated,
+                    ),
+                    "reverse-after-forward",
+                ),
+                (
+                    reverse_evidence(
+                        DerivedEvidenceArtifactIdV1::from_bytes([255; 32]),
+                        evidence_id(target.id),
+                        ColorRank::Validated,
+                        ColorRank::Validated,
+                    ),
+                    "forward-after-reverse",
+                ),
+                (
+                    reverse_evidence(
+                        evidence_id(source.id),
+                        evidence_id(target.id),
+                        ColorRank::Verified,
+                        ColorRank::Validated,
+                    ),
+                    "forward-after-reverse",
+                ),
+            ] {
+                let changed_reverse = admit_reverse(253, evidence);
+                let changed_ir = chart_transition_inverse_law_ir(&forward, &changed_reverse, 251);
+                assert_eq!(
+                    admit_derived_chart_transition_inverse_law_candidate_v1(
+                        &changed_ir,
+                        &forward,
+                        &changed_reverse,
+                        cx,
+                    ),
+                    Err(
+                        DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceSeamMismatch {
+                            composite: expected_composite,
+                        }
+                    )
+                );
+            }
+
+            let covariant_reverse = admit_chart_map_with_artifacts(
+                target,
+                source,
+                target_charts[0].id,
+                source_charts[0].id,
+                253,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([254; 32]),
+                cx,
+            );
+            let mixed_ir = chart_transition_inverse_law_ir(&forward, &covariant_reverse, 251);
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &mixed_ir,
+                    &forward,
+                    &covariant_reverse,
+                    cx,
+                ),
+                Err(DerivedChartTransitionInverseLawCandidateErrorV1::EvidenceVarianceMismatch)
+            );
         });
     }
 
