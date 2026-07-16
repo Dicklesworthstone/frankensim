@@ -10,11 +10,13 @@
 //! exactly one direct sealed component for every source stratum without granting
 //! global-map authority. Another standalone token seals declared spans from two
 //! admitted legs without folding correspondences into directed-map composition.
-//! A final standalone token binds a fixed-resolution quasi-isomorphism
+//! A standalone token binds a fixed-resolution quasi-isomorphism
 //! *candidate* to an exact refinement path and exact local presentations,
-//! without granting theorem authority. This module deliberately cannot mint a
-//! non-identity equivalence: a witness digest is data, not a proof of an inverse,
-//! quasi-isomorphism, refinement theorem, or physical crosswalk.
+//! without granting theorem authority. Another candidate retains exhaustive
+//! many-to-many relations over exact local-presentation families without
+//! declaring semantic or physical agreement. This module deliberately cannot
+//! mint a non-identity equivalence: a witness digest is data, not a proof of an
+//! inverse, quasi-isomorphism, refinement theorem, or physical crosswalk.
 
 use core::fmt;
 
@@ -27,10 +29,11 @@ use fs_exec::Cx;
 
 use crate::derived::{
     AdmittedDerivedGeometryV1, CoefficientSystemV1, ConfigurationChartIdV1, ConfigurationChartV1,
-    DerivedCheckerIdV1, DerivedComplexIdV1, DerivedComplexRoleV1, DerivedFrameIdV1,
-    DerivedGeometryIdV1, DerivedLocalModelIdV1, DerivedLocalModelV1, DerivedModelVersionIdV1,
-    DerivedNoClaimIdV1, DerivedResolutionIdV1, DerivedSubjectIdV1, DerivedTheoremIdV1,
-    DerivedUnitSystemIdV1, DerivedWitnessIdV1, FiniteDerivedComplexV1, GeometricCategoryV1,
+    ConstitutiveDatumIdV1, ContactConstraintIdV1, DerivedCheckerIdV1, DerivedComplexIdV1,
+    DerivedComplexRoleV1, DerivedFrameIdV1, DerivedGeometryIdV1, DerivedLocalModelIdV1,
+    DerivedLocalModelV1, DerivedModelVersionIdV1, DerivedNoClaimIdV1, DerivedResolutionIdV1,
+    DerivedSubjectIdV1, DerivedTheoremIdV1, DerivedUnitSystemIdV1, DerivedWitnessIdV1,
+    EqualityConstraintIdV1, FiniteDerivedComplexV1, GeometricCategoryV1, InequalityConstraintIdV1,
     PresentationScopeV1, StratificationIdV1, StratumIdV1,
 };
 
@@ -44,6 +47,8 @@ pub const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
 pub const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for exhaustive local-presentation relation candidates.
+pub const DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Maximum primitive nonidentity factors retained in one flattened composition.
 pub const DERIVED_MORPHISM_MAX_FACTORS_V1: usize = 1024;
 const DERIVED_MORPHISM_CANCELLATION_STRIDE_V1: usize = 64;
@@ -55,6 +60,8 @@ const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalL
     CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
 const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
+const DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 17, 10, 1 << 11, 4096);
 
 /// Domain-separated semantic identity for one admitted structural morphism.
 pub enum DerivedMorphismIdentitySchemaV1 {}
@@ -181,6 +188,34 @@ impl CanonicalSchema for DerivedFixedResolutionQuasiIsomorphismCandidateIdentity
 /// Typed identity of one fixed-resolution quasi-isomorphism candidate.
 pub type DerivedFixedResolutionQuasiIsomorphismCandidateIdV1 =
     EvidenceNodeId<DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1>;
+
+/// Domain-separated semantic identity for one exhaustive local-presentation
+/// correspondence candidate.
+pub enum DerivedLocalPresentationCorrespondenceCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedLocalPresentationCorrespondenceCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str =
+        "org.frankensim.fs-geom.local-presentation-correspondence-candidate.v1";
+    const NAME: &'static str = "exhaustive-local-presentation-correspondence-candidate";
+    const VERSION: u32 = DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact endpoint geometries and local presentations, exhaustive canonical finite relations over equality, active-inequality, active-contact, and constitutive families, one nominal aggregate declaration, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::required("source-local-model", WireType::Bytes),
+        FieldSpec::required("target-local-model", WireType::Bytes),
+        FieldSpec::required("equality-relations", WireType::CanonicalSet),
+        FieldSpec::required("active-inequality-relations", WireType::CanonicalSet),
+        FieldSpec::required("active-contact-relations", WireType::CanonicalSet),
+        FieldSpec::required("constitutive-relations", WireType::CanonicalSet),
+        FieldSpec::required("nominal-correspondence", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one exhaustive local-presentation relation candidate.
+pub type DerivedLocalPresentationCorrespondenceCandidateIdV1 =
+    EvidenceNodeId<DerivedLocalPresentationCorrespondenceCandidateIdentitySchemaV1>;
 
 /// Nominal artifact implementing one declared chart map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -314,6 +349,42 @@ pub struct DerivedGlobalConstructibilityDeclarationIdV1([u8; 32]);
 
 impl DerivedGlobalConstructibilityDeclarationIdV1 {
     /// Construct a nominal global declaration identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nominal artifact for one declared local-presentation relation edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedLocalPresentationRelationIdV1([u8; 32]);
+
+impl DerivedLocalPresentationRelationIdV1 {
+    /// Construct a nominal relation identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nominal aggregate declaration for one complete local-presentation relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedLocalPresentationCorrespondenceIdV1([u8; 32]);
+
+impl DerivedLocalPresentationCorrespondenceIdV1 {
+    /// Construct a nominal aggregate identity from exact bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -815,6 +886,94 @@ pub struct DerivedFixedResolutionQuasiIsomorphismCandidateIrV1 {
     pub no_authority: DerivedNoClaimIdV1,
 }
 
+/// Exact local-presentation family retained by a correspondence candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedLocalPresentationFamilyV1 {
+    /// Equality-constraint germs.
+    Equality,
+    /// Explicitly active inequalities.
+    ActiveInequality,
+    /// Explicitly active unilateral contacts.
+    ActiveContact,
+    /// Constitutive metadata, kept distinct from geometric constraints.
+    Constitutive,
+}
+
+/// One nominal equality-relation edge between exact local presentations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedEqualityCorrespondenceBindingV1 {
+    /// Equality owned by the exact source local model.
+    pub source: EqualityConstraintIdV1,
+    /// Equality owned by the exact target local model.
+    pub target: EqualityConstraintIdV1,
+    /// Nominal semantic relation artifact; not authenticated by RD.1b.
+    pub relation: DerivedLocalPresentationRelationIdV1,
+}
+
+/// One nominal active-inequality relation edge between exact local presentations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedActiveInequalityCorrespondenceBindingV1 {
+    /// Active inequality owned by the exact source local model.
+    pub source: InequalityConstraintIdV1,
+    /// Active inequality owned by the exact target local model.
+    pub target: InequalityConstraintIdV1,
+    /// Nominal semantic relation artifact; not authenticated by RD.1b.
+    pub relation: DerivedLocalPresentationRelationIdV1,
+}
+
+/// One nominal active-contact relation edge between exact local presentations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedActiveContactCorrespondenceBindingV1 {
+    /// Active contact owned by the exact source local model.
+    pub source: ContactConstraintIdV1,
+    /// Active contact owned by the exact target local model.
+    pub target: ContactConstraintIdV1,
+    /// Nominal semantic relation artifact; not authenticated by RD.1b.
+    pub relation: DerivedLocalPresentationRelationIdV1,
+}
+
+/// One nominal constitutive-relation edge between exact local presentations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedConstitutiveCorrespondenceBindingV1 {
+    /// Constitutive datum owned by the exact source local model.
+    pub source: ConstitutiveDatumIdV1,
+    /// Constitutive datum owned by the exact target local model.
+    pub target: ConstitutiveDatumIdV1,
+    /// Nominal semantic relation artifact; not authenticated by RD.1b.
+    pub relation: DerivedLocalPresentationRelationIdV1,
+}
+
+/// Versioned exhaustive finite relation between two exact local presentations.
+///
+/// Every source and target member of each family must occur in at least one
+/// edge. Repeated sources and targets are allowed, so this is deliberately a
+/// relation rather than a hidden function or bijection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedLocalPresentationCorrespondenceCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact admitted source geometry.
+    pub source_geometry: DerivedGeometryIdV1,
+    /// Exact admitted target geometry.
+    pub target_geometry: DerivedGeometryIdV1,
+    /// Exact source local presentation.
+    pub source_local_model: DerivedLocalModelIdV1,
+    /// Exact target local presentation.
+    pub target_local_model: DerivedLocalModelIdV1,
+    /// Exhaustive finite equality relation.
+    pub equality_relations: Vec<DerivedEqualityCorrespondenceBindingV1>,
+    /// Exhaustive finite active-inequality relation.
+    pub active_inequality_relations: Vec<DerivedActiveInequalityCorrespondenceBindingV1>,
+    /// Exhaustive finite active-contact relation.
+    pub active_contact_relations: Vec<DerivedActiveContactCorrespondenceBindingV1>,
+    /// Exhaustive finite constitutive relation, physically non-authoritative.
+    pub constitutive_relations: Vec<DerivedConstitutiveCorrespondenceBindingV1>,
+    /// Nominal aggregate declaration; not resolved or executed by RD.1b.
+    pub nominal_correspondence: DerivedLocalPresentationCorrespondenceIdV1,
+    /// Explicit denial of semantic, functional, inverse, and equivalence authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
 /// Structured refusal from RD.1b structural morphism admission/composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedMorphismErrorV1 {
@@ -1212,6 +1371,104 @@ impl fmt::Display for DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1 {
 }
 
 impl core::error::Error for DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1 {}
+
+/// Structured refusal from exhaustive local-presentation correspondence admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedLocalPresentationCorrespondenceCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A raw endpoint does not name the supplied admitted geometry.
+    EndpointMismatch {
+        /// Stable source/target geometry field.
+        field: &'static str,
+    },
+    /// A required opaque identity used the all-zero sentinel.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A selected local-model ID is not owned by its exact endpoint geometry.
+    MissingLocalModel {
+        /// Stable source/target local-model field.
+        field: &'static str,
+    },
+    /// The endpoint geometries describe different physical subjects.
+    SubjectMismatch,
+    /// The endpoint geometries name different immutable model versions.
+    ModelVersionMismatch,
+    /// The endpoint geometries use different mathematical categories.
+    CategoryMismatch,
+    /// The endpoint geometries use different coefficient semantics.
+    CoefficientMismatch,
+    /// The endpoint geometries use different coordinate frames.
+    FrameMismatch,
+    /// The endpoint geometries use different unit systems.
+    UnitSystemMismatch,
+    /// The selected local presentations do not use one exact chart.
+    ChartMismatch,
+    /// The selected local presentations do not name one exact locality.
+    LocalityMismatch,
+    /// One relation edge names a member outside the selected local model.
+    MemberMismatch {
+        /// Exact local-presentation family.
+        family: DerivedLocalPresentationFamilyV1,
+        /// Stable source/target member field.
+        field: &'static str,
+        /// Canonicalized relation index.
+        index: usize,
+    },
+    /// A source or target presentation member has no retained relation edge.
+    MissingCoverage {
+        /// Exact local-presentation family.
+        family: DerivedLocalPresentationFamilyV1,
+        /// Stable uncovered source/target side.
+        field: &'static str,
+    },
+    /// Two relation edges repeat the same exact source/target pair.
+    DuplicateRelation {
+        /// Exact local-presentation family.
+        family: DerivedLocalPresentationFamilyV1,
+        /// Canonicalized duplicate index.
+        index: usize,
+    },
+    /// Aggregate relation retention exceeded the hard ceiling.
+    ResourceLimit {
+        /// Stable retained collection.
+        field: &'static str,
+        /// Requested entries.
+        requested: usize,
+        /// Hard limit.
+        limit: usize,
+    },
+    /// A fallible relation allocation was refused.
+    AllocationRefused {
+        /// Stable retained collection.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedLocalPresentationCorrespondenceCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "local-presentation correspondence candidate refused: {self:?}"
+        )
+    }
+}
+
+impl core::error::Error for DerivedLocalPresentationCorrespondenceCandidateErrorV1 {}
 
 /// Sealed, content-addressed structural morphism.
 #[derive(Debug, PartialEq, Eq)]
@@ -1646,6 +1903,102 @@ impl AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedFixedResolutionQuasiIsomorphismCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed exhaustive finite relation between two exact local presentations.
+///
+/// This token proves scoped family membership, canonical retention, and
+/// two-sided finite coverage only. It exposes no executable map, functionality,
+/// semantic preservation, physical crosswalk, inverse, or equivalence authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedLocalPresentationCorrespondenceCandidateV1 {
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_local_model: DerivedLocalModelIdV1,
+    target_local_model: DerivedLocalModelIdV1,
+    equality_relations: Vec<DerivedEqualityCorrespondenceBindingV1>,
+    active_inequality_relations: Vec<DerivedActiveInequalityCorrespondenceBindingV1>,
+    active_contact_relations: Vec<DerivedActiveContactCorrespondenceBindingV1>,
+    constitutive_relations: Vec<DerivedConstitutiveCorrespondenceBindingV1>,
+    nominal_correspondence: DerivedLocalPresentationCorrespondenceIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedLocalPresentationCorrespondenceCandidateIdV1>,
+}
+
+impl AdmittedDerivedLocalPresentationCorrespondenceCandidateV1 {
+    /// Exact source geometry.
+    #[must_use]
+    pub const fn source_geometry(&self) -> DerivedGeometryIdV1 {
+        self.source_geometry
+    }
+
+    /// Exact target geometry.
+    #[must_use]
+    pub const fn target_geometry(&self) -> DerivedGeometryIdV1 {
+        self.target_geometry
+    }
+
+    /// Exact source local presentation.
+    #[must_use]
+    pub const fn source_local_model(&self) -> DerivedLocalModelIdV1 {
+        self.source_local_model
+    }
+
+    /// Exact target local presentation.
+    #[must_use]
+    pub const fn target_local_model(&self) -> DerivedLocalModelIdV1 {
+        self.target_local_model
+    }
+
+    /// Canonical exhaustive equality relation.
+    #[must_use]
+    pub fn equality_relations(&self) -> &[DerivedEqualityCorrespondenceBindingV1] {
+        &self.equality_relations
+    }
+
+    /// Canonical exhaustive active-inequality relation.
+    #[must_use]
+    pub fn active_inequality_relations(&self) -> &[DerivedActiveInequalityCorrespondenceBindingV1] {
+        &self.active_inequality_relations
+    }
+
+    /// Canonical exhaustive active-contact relation.
+    #[must_use]
+    pub fn active_contact_relations(&self) -> &[DerivedActiveContactCorrespondenceBindingV1] {
+        &self.active_contact_relations
+    }
+
+    /// Canonical exhaustive constitutive relation.
+    #[must_use]
+    pub fn constitutive_relations(&self) -> &[DerivedConstitutiveCorrespondenceBindingV1] {
+        &self.constitutive_relations
+    }
+
+    /// Nominal aggregate declaration; not authenticated by this token.
+    #[must_use]
+    pub const fn nominal_correspondence(&self) -> DerivedLocalPresentationCorrespondenceIdV1 {
+        self.nominal_correspondence
+    }
+
+    /// Explicit artifact denying semantic and equivalence authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedLocalPresentationCorrespondenceCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedLocalPresentationCorrespondenceCandidateIdV1> {
         self.receipt
     }
 }
@@ -4515,6 +4868,573 @@ pub fn admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
     })
 }
 
+trait LocalPresentationRelationBindingV1: Copy + Ord {
+    type Member: Copy + Eq;
+
+    fn source(self) -> Self::Member;
+    fn target(self) -> Self::Member;
+    fn relation(self) -> DerivedLocalPresentationRelationIdV1;
+    fn canonical_bytes(self) -> [u8; 96];
+}
+
+impl LocalPresentationRelationBindingV1 for DerivedEqualityCorrespondenceBindingV1 {
+    type Member = EqualityConstraintIdV1;
+
+    fn source(self) -> Self::Member {
+        self.source
+    }
+
+    fn target(self) -> Self::Member {
+        self.target
+    }
+
+    fn relation(self) -> DerivedLocalPresentationRelationIdV1 {
+        self.relation
+    }
+
+    fn canonical_bytes(self) -> [u8; 96] {
+        relation_binding_bytes(
+            self.source.as_bytes(),
+            self.target.as_bytes(),
+            self.relation.as_bytes(),
+        )
+    }
+}
+
+impl LocalPresentationRelationBindingV1 for DerivedActiveInequalityCorrespondenceBindingV1 {
+    type Member = InequalityConstraintIdV1;
+
+    fn source(self) -> Self::Member {
+        self.source
+    }
+
+    fn target(self) -> Self::Member {
+        self.target
+    }
+
+    fn relation(self) -> DerivedLocalPresentationRelationIdV1 {
+        self.relation
+    }
+
+    fn canonical_bytes(self) -> [u8; 96] {
+        relation_binding_bytes(
+            self.source.as_bytes(),
+            self.target.as_bytes(),
+            self.relation.as_bytes(),
+        )
+    }
+}
+
+impl LocalPresentationRelationBindingV1 for DerivedActiveContactCorrespondenceBindingV1 {
+    type Member = ContactConstraintIdV1;
+
+    fn source(self) -> Self::Member {
+        self.source
+    }
+
+    fn target(self) -> Self::Member {
+        self.target
+    }
+
+    fn relation(self) -> DerivedLocalPresentationRelationIdV1 {
+        self.relation
+    }
+
+    fn canonical_bytes(self) -> [u8; 96] {
+        relation_binding_bytes(
+            self.source.as_bytes(),
+            self.target.as_bytes(),
+            self.relation.as_bytes(),
+        )
+    }
+}
+
+impl LocalPresentationRelationBindingV1 for DerivedConstitutiveCorrespondenceBindingV1 {
+    type Member = ConstitutiveDatumIdV1;
+
+    fn source(self) -> Self::Member {
+        self.source
+    }
+
+    fn target(self) -> Self::Member {
+        self.target
+    }
+
+    fn relation(self) -> DerivedLocalPresentationRelationIdV1 {
+        self.relation
+    }
+
+    fn canonical_bytes(self) -> [u8; 96] {
+        relation_binding_bytes(
+            self.source.as_bytes(),
+            self.target.as_bytes(),
+            self.relation.as_bytes(),
+        )
+    }
+}
+
+fn relation_binding_bytes(source: &[u8; 32], target: &[u8; 32], relation: &[u8; 32]) -> [u8; 96] {
+    let mut bytes = [0_u8; 96];
+    bytes[..32].copy_from_slice(source);
+    bytes[32..64].copy_from_slice(target);
+    bytes[64..].copy_from_slice(relation);
+    bytes
+}
+
+fn local_presentation_checkpoint(
+    cx: &Cx<'_>,
+    stage: &'static str,
+    completed: usize,
+) -> Result<(), DerivedLocalPresentationCorrespondenceCandidateErrorV1> {
+    if completed.is_multiple_of(DERIVED_MORPHISM_CANCELLATION_STRIDE_V1) && cx.checkpoint().is_err()
+    {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled { stage });
+    }
+    Ok(())
+}
+
+fn retain_local_presentation_relation<B>(
+    family: DerivedLocalPresentationFamilyV1,
+    allocation_field: &'static str,
+    raw: &[B],
+    source_members: &[B::Member],
+    target_members: &[B::Member],
+    cx: &Cx<'_>,
+) -> Result<(Vec<B>, Vec<[u8; 96]>), DerivedLocalPresentationCorrespondenceCandidateErrorV1>
+where
+    B: LocalPresentationRelationBindingV1,
+{
+    let mut retained = Vec::new();
+    retained.try_reserve_exact(raw.len()).map_err(|_| {
+        DerivedLocalPresentationCorrespondenceCandidateErrorV1::AllocationRefused {
+            field: allocation_field,
+        }
+    })?;
+    retained.extend_from_slice(raw);
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                stage: "presentation-relation-sort",
+            },
+        );
+    }
+    retained.sort_unstable();
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                stage: "presentation-relation-sort",
+            },
+        );
+    }
+
+    for (index, binding) in retained.iter().copied().enumerate() {
+        local_presentation_checkpoint(cx, "presentation-relation-membership", index)?;
+        if is_zero(binding.relation().as_bytes()) {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingIdentity {
+                    field: "relation",
+                },
+            );
+        }
+        if !source_members.contains(&binding.source()) {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::MemberMismatch {
+                    family,
+                    field: "source-member",
+                    index,
+                },
+            );
+        }
+        if !target_members.contains(&binding.target()) {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::MemberMismatch {
+                    family,
+                    field: "target-member",
+                    index,
+                },
+            );
+        }
+        if index > 0 {
+            let previous = retained[index - 1];
+            if previous.source() == binding.source() && previous.target() == binding.target() {
+                return Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::DuplicateRelation {
+                        family,
+                        index,
+                    },
+                );
+            }
+        }
+    }
+
+    for (member_index, member) in source_members.iter().copied().enumerate() {
+        local_presentation_checkpoint(cx, "presentation-source-coverage", member_index)?;
+        let mut covered = false;
+        for (relation_index, binding) in retained.iter().copied().enumerate() {
+            local_presentation_checkpoint(cx, "presentation-source-coverage", relation_index)?;
+            if binding.source() == member {
+                covered = true;
+                break;
+            }
+        }
+        if !covered {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingCoverage {
+                    family,
+                    field: "source-member",
+                },
+            );
+        }
+    }
+    for (member_index, member) in target_members.iter().copied().enumerate() {
+        local_presentation_checkpoint(cx, "presentation-target-coverage", member_index)?;
+        let mut covered = false;
+        for (relation_index, binding) in retained.iter().copied().enumerate() {
+            local_presentation_checkpoint(cx, "presentation-target-coverage", relation_index)?;
+            if binding.target() == member {
+                covered = true;
+                break;
+            }
+        }
+        if !covered {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingCoverage {
+                    family,
+                    field: "target-member",
+                },
+            );
+        }
+    }
+
+    let mut encoded = Vec::new();
+    encoded.try_reserve_exact(retained.len()).map_err(|_| {
+        DerivedLocalPresentationCorrespondenceCandidateErrorV1::AllocationRefused {
+            field: allocation_field,
+        }
+    })?;
+    for (index, binding) in retained.iter().copied().enumerate() {
+        local_presentation_checkpoint(cx, "presentation-relation-encoding", index)?;
+        encoded.push(binding.canonical_bytes());
+    }
+    Ok((retained, encoded))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_presentation_correspondence_candidate_receipt(
+    ir: &DerivedLocalPresentationCorrespondenceCandidateIrV1,
+    equality_relations: &[[u8; 96]],
+    active_inequality_relations: &[[u8; 96]],
+    active_contact_relations: &[[u8; 96]],
+    constitutive_relations: &[[u8; 96]],
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedLocalPresentationCorrespondenceCandidateIdV1>,
+    DerivedLocalPresentationCorrespondenceCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                stage: "presentation-correspondence-identity-entry",
+            },
+        );
+    }
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                stage: "presentation-correspondence-identity",
+            }
+        }
+        other => DerivedLocalPresentationCorrespondenceCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedLocalPresentationCorrespondenceCandidateIdV1, _>::new(
+        DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "source-geometry"),
+        ir.source_geometry.as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "target-geometry"),
+            ir.target_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "source-local-model"),
+            ir.source_local_model.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "target-local-model"),
+            ir.target_local_model.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.canonical_set(
+            Field::new(4, "equality-relations"),
+            equality_relations.len() as u64,
+            equality_relations.iter().map(|binding| binding.as_slice()),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.canonical_set(
+            Field::new(5, "active-inequality-relations"),
+            active_inequality_relations.len() as u64,
+            active_inequality_relations
+                .iter()
+                .map(|binding| binding.as_slice()),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.canonical_set(
+            Field::new(6, "active-contact-relations"),
+            active_contact_relations.len() as u64,
+            active_contact_relations
+                .iter()
+                .map(|binding| binding.as_slice()),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.canonical_set(
+            Field::new(7, "constitutive-relations"),
+            constitutive_relations.len() as u64,
+            constitutive_relations
+                .iter()
+                .map(|binding| binding.as_slice()),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(8, "nominal-correspondence"),
+            ir.nominal_correspondence.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(9, "no-authority"), ir.no_authority.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+fn validate_local_presentation_geometry_compatibility(
+    source: &AdmittedDerivedGeometryV1,
+    target: &AdmittedDerivedGeometryV1,
+) -> Result<(), DerivedLocalPresentationCorrespondenceCandidateErrorV1> {
+    if source.ir().subject != target.ir().subject {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::SubjectMismatch);
+    }
+    if source.ir().model_version != target.ir().model_version {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::ModelVersionMismatch);
+    }
+    if source.ir().category != target.ir().category {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::CategoryMismatch);
+    }
+    if source.ir().coefficients != target.ir().coefficients {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::CoefficientMismatch);
+    }
+    if source.ir().frame != target.ir().frame {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::FrameMismatch);
+    }
+    if source.ir().unit_system != target.ir().unit_system {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::UnitSystemMismatch);
+    }
+    Ok(())
+}
+
+/// Admit an exhaustive finite relation between two exact local presentations.
+///
+/// Each family is canonicalized independently and must cover every member on
+/// both sides. Repeated sources and targets remain valid, so admission neither
+/// infers functionality nor a bijection. Equality equations, inequality senses,
+/// contact laws, constitutive roles, units, and function payloads are not
+/// compared; relation and aggregate IDs remain nominal. The token has no map,
+/// composition, evidence-transport, inverse, or equivalence API.
+///
+/// # Errors
+/// Returns a typed refusal for schema, endpoint/model ownership, convention,
+/// exact chart/locality, family membership/coverage, duplicate relation,
+/// nominal-identity, resource, cancellation, or canonical-identity defects.
+#[must_use = "a raw local-presentation relation has no semantic authority"]
+#[allow(clippy::too_many_lines)]
+pub fn admit_derived_local_presentation_correspondence_candidate_v1(
+    ir: &DerivedLocalPresentationCorrespondenceCandidateIrV1,
+    source: &AdmittedDerivedGeometryV1,
+    target: &AdmittedDerivedGeometryV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedLocalPresentationCorrespondenceCandidateV1,
+    DerivedLocalPresentationCorrespondenceCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                stage: "presentation-correspondence-admission-entry",
+            },
+        );
+    }
+    if ir.schema_version != DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (matches, field) in [
+        (ir.source_geometry == source.id(), "source-geometry"),
+        (ir.target_geometry == target.id(), "target-geometry"),
+    ] {
+        if !matches {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::EndpointMismatch { field },
+            );
+        }
+    }
+    for (bytes, field) in [
+        (ir.source_local_model.as_bytes(), "source-local-model"),
+        (ir.target_local_model.as_bytes(), "target-local-model"),
+        (
+            ir.nominal_correspondence.as_bytes(),
+            "nominal-correspondence",
+        ),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(
+                DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingIdentity { field },
+            );
+        }
+    }
+    validate_local_presentation_geometry_compatibility(source, target)?;
+
+    let source_model = source
+        .ir()
+        .local_models
+        .iter()
+        .find(|model| model.id == ir.source_local_model)
+        .ok_or(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingLocalModel {
+                field: "source-local-model",
+            },
+        )?;
+    let target_model = target
+        .ir()
+        .local_models
+        .iter()
+        .find(|model| model.id == ir.target_local_model)
+        .ok_or(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingLocalModel {
+                field: "target-local-model",
+            },
+        )?;
+    let Some(source_chart) = source
+        .ir()
+        .charts
+        .iter()
+        .find(|chart| chart.id == source_model.chart)
+    else {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::ChartMismatch);
+    };
+    let Some(target_chart) = target
+        .ir()
+        .charts
+        .iter()
+        .find(|chart| chart.id == target_model.chart)
+    else {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::ChartMismatch);
+    };
+    if source_chart != target_chart {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::ChartMismatch);
+    }
+    if source_model.locality != target_model.locality {
+        return Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::LocalityMismatch);
+    }
+
+    let requested = [
+        ir.equality_relations.len(),
+        ir.active_inequality_relations.len(),
+        ir.active_contact_relations.len(),
+        ir.constitutive_relations.len(),
+    ]
+    .into_iter()
+    .try_fold(0_usize, usize::checked_add)
+    .unwrap_or(usize::MAX);
+    if requested > DERIVED_MORPHISM_MAX_FACTORS_V1 {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::ResourceLimit {
+                field: "presentation-relations",
+                requested,
+                limit: DERIVED_MORPHISM_MAX_FACTORS_V1,
+            },
+        );
+    }
+
+    let (equality_relations, equality_bytes) = retain_local_presentation_relation(
+        DerivedLocalPresentationFamilyV1::Equality,
+        "equality-relations",
+        &ir.equality_relations,
+        &source_model.equalities,
+        &target_model.equalities,
+        cx,
+    )?;
+    let (active_inequality_relations, active_inequality_bytes) =
+        retain_local_presentation_relation(
+            DerivedLocalPresentationFamilyV1::ActiveInequality,
+            "active-inequality-relations",
+            &ir.active_inequality_relations,
+            &source_model.active_inequalities,
+            &target_model.active_inequalities,
+            cx,
+        )?;
+    let (active_contact_relations, active_contact_bytes) = retain_local_presentation_relation(
+        DerivedLocalPresentationFamilyV1::ActiveContact,
+        "active-contact-relations",
+        &ir.active_contact_relations,
+        &source_model.active_contacts,
+        &target_model.active_contacts,
+        cx,
+    )?;
+    let (constitutive_relations, constitutive_bytes) = retain_local_presentation_relation(
+        DerivedLocalPresentationFamilyV1::Constitutive,
+        "constitutive-relations",
+        &ir.constitutive_relations,
+        &source_model.constitutive_data,
+        &target_model.constitutive_data,
+        cx,
+    )?;
+
+    let receipt = local_presentation_correspondence_candidate_receipt(
+        ir,
+        &equality_bytes,
+        &active_inequality_bytes,
+        &active_contact_bytes,
+        &constitutive_bytes,
+        cx,
+    )?;
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                stage: "presentation-correspondence-publication",
+            },
+        );
+    }
+    Ok(AdmittedDerivedLocalPresentationCorrespondenceCandidateV1 {
+        source_geometry: ir.source_geometry,
+        target_geometry: ir.target_geometry,
+        source_local_model: ir.source_local_model,
+        target_local_model: ir.target_local_model,
+        equality_relations,
+        active_inequality_relations,
+        active_contact_relations,
+        constitutive_relations,
+        nominal_correspondence: ir.nominal_correspondence,
+        no_authority: ir.no_authority,
+        receipt,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4522,12 +5442,16 @@ mod tests {
     use fs_exec::{CancelGate, ExecMode, StreamKey};
 
     use crate::derived::{
-        CompactnessV1, ComplexDifferentialV1, ConfigurationChartClassV1, DerivedAdmissionBudgetV1,
-        DerivedComplexRoleV1, DerivedGeometryIrV1, DerivedLinearMapIdV1, DerivedLocalModelClassV1,
-        DerivedProofStateV1, DerivedQuantityKindIdV1, FiniteComputabilityV1, FiniteResolutionV1,
-        GradedSpaceV1, LocalityScopeV1, RegularityClassV1, StratificationClassV1,
-        StratificationIdV1, StratificationV1, StratumIdV1, StratumSpecV1, UnitBindingV1,
-        admit_derived_geometry_v1,
+        ActiveSetStateV1, BoundaryOrientationV1, CompactnessV1, ComplexDifferentialV1,
+        ConfigurationChartClassV1, ConstitutiveDatumV1, ConstitutiveRoleV1, ContactConstraintV1,
+        ContactLawV1, DerivedAdmissionBudgetV1, DerivedComplexRoleV1, DerivedGeometryIrV1,
+        DerivedLinearMapIdV1, DerivedLocalModelClassV1, DerivedProofStateV1,
+        DerivedQuantityKindIdV1, EqualityConstraintGermV1, FiniteComputabilityV1,
+        FiniteResolutionV1, GradedSpaceV1, InequalityConstraintGermV1, InequalitySenseV1,
+        LocalFunctionEncodingV1, LocalLinkTopologyV1, LocalLinkV1, LocalityScopeV1,
+        NormalConeClassV1, PolynomialIdV1, RegularityClassV1, RelativeBoundaryIdV1,
+        RelativeBoundaryV1, StratificationClassV1, StratificationIdV1, StratificationV1,
+        StratumIdV1, StratumIncidenceV1, StratumSpecV1, UnitBindingV1, admit_derived_geometry_v1,
     };
 
     fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -5072,6 +5996,306 @@ mod tests {
                 no_claim: DerivedNoClaimIdV1::from_bytes([local_model_seed.wrapping_add(4); 32]),
             },
         }
+    }
+
+    fn presentation_function(seed: u8) -> LocalFunctionEncodingV1 {
+        LocalFunctionEncodingV1::Polynomial {
+            polynomial: PolynomialIdV1::from_bytes([seed; 32]),
+            variables: 2,
+            degree: 2,
+        }
+    }
+
+    fn presentation_units(seed: u8) -> UnitBindingV1 {
+        UnitBindingV1 {
+            system: DerivedUnitSystemIdV1::from_bytes([3; 32]),
+            quantity: DerivedQuantityKindIdV1::from_bytes([seed; 32]),
+            scale_to_canonical: 1.0,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // Complete admitted four-family presentation fixture.
+    fn local_presentation_geometry_ir(
+        tangent_complex_seed: u8,
+        tangent_resolution_seed: u8,
+        local_model_seed: u8,
+        member_seed: u8,
+    ) -> DerivedGeometryIrV1 {
+        let mut ir = fixed_resolution_geometry_ir(
+            tangent_complex_seed,
+            tangent_resolution_seed,
+            local_model_seed,
+            2,
+        );
+        let chart = ir.charts[0].id;
+        let equality = EqualityConstraintIdV1::from_bytes([member_seed; 32]);
+        let inequality = InequalityConstraintIdV1::from_bytes([member_seed.wrapping_add(1); 32]);
+        let contact = ContactConstraintIdV1::from_bytes([member_seed.wrapping_add(2); 32]);
+        let constitutive = ConstitutiveDatumIdV1::from_bytes([member_seed.wrapping_add(3); 32]);
+        let side_a = RelativeBoundaryIdV1::from_bytes([member_seed.wrapping_add(4); 32]);
+        let side_b = RelativeBoundaryIdV1::from_bytes([member_seed.wrapping_add(5); 32]);
+        let boundary_stratum = ir.stratification.strata[0].id;
+        let parent_stratum = StratumIdV1::from_bytes([member_seed.wrapping_add(10); 32]);
+        let parent_model = DerivedLocalModelIdV1::from_bytes([member_seed.wrapping_add(11); 32]);
+
+        ir.equalities.push(EqualityConstraintGermV1 {
+            id: equality,
+            chart,
+            codomain_dimension: 1,
+            equation: presentation_function(member_seed.wrapping_add(20)),
+            regularity: RegularityClassV1::Polynomial,
+            units: presentation_units(member_seed.wrapping_add(21)),
+            computability: FiniteComputabilityV1::ExactFinite {
+                kernel: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(22); 32]),
+            },
+        });
+        ir.inequalities.push(InequalityConstraintGermV1 {
+            id: inequality,
+            chart,
+            sense: InequalitySenseV1::NonNegative,
+            function: presentation_function(member_seed.wrapping_add(23)),
+            state: ActiveSetStateV1::Active {
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(24); 32]),
+            },
+            normal_cone: NormalConeClassV1::Ray,
+            units: presentation_units(member_seed.wrapping_add(25)),
+            computability: FiniteComputabilityV1::ExactFinite {
+                kernel: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(26); 32]),
+            },
+        });
+        ir.boundaries.extend([
+            RelativeBoundaryV1 {
+                id: side_a,
+                chart,
+                parent: parent_stratum,
+                boundary: boundary_stratum,
+                orientation: BoundaryOrientationV1::Outward,
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(27); 32]),
+                units: presentation_units(member_seed.wrapping_add(28)),
+            },
+            RelativeBoundaryV1 {
+                id: side_b,
+                chart,
+                parent: parent_stratum,
+                boundary: boundary_stratum,
+                orientation: BoundaryOrientationV1::Inward,
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(29); 32]),
+                units: presentation_units(member_seed.wrapping_add(30)),
+            },
+        ]);
+        ir.contacts.push(ContactConstraintV1 {
+            id: contact,
+            chart,
+            side_a,
+            side_b,
+            gap: presentation_function(member_seed.wrapping_add(31)),
+            state: ActiveSetStateV1::Active {
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(32); 32]),
+            },
+            normal_cone: NormalConeClassV1::Ray,
+            law: ContactLawV1::Frictionless,
+            units: presentation_units(member_seed.wrapping_add(33)),
+            computability: FiniteComputabilityV1::ExactFinite {
+                kernel: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(34); 32]),
+            },
+        });
+        ir.constitutive_data.push(ConstitutiveDatumV1 {
+            id: constitutive,
+            chart,
+            role: ConstitutiveRoleV1::GeneralRelation,
+            state_dimension: 2,
+            law: presentation_function(member_seed.wrapping_add(35)),
+            units: presentation_units(member_seed.wrapping_add(36)),
+            computability: FiniteComputabilityV1::ExactFinite {
+                kernel: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(37); 32]),
+            },
+        });
+
+        let selected_model = &mut ir.local_models[0];
+        selected_model.class = DerivedLocalModelClassV1::ContactCorner;
+        selected_model.equalities.push(equality);
+        selected_model.active_inequalities.push(inequality);
+        selected_model.active_contacts.push(contact);
+        selected_model.constitutive_data.push(constitutive);
+        let tangent_complex = selected_model.tangent_complex;
+        let cotangent_complex = selected_model.cotangent_complex;
+        let deformation_complex = selected_model.deformation_complex;
+        ir.local_models.push(DerivedLocalModelV1 {
+            id: parent_model,
+            chart,
+            class: DerivedLocalModelClassV1::GeneralFiniteDerived,
+            equalities: Vec::new(),
+            active_inequalities: Vec::new(),
+            active_contacts: Vec::new(),
+            constitutive_data: Vec::new(),
+            tangent_complex,
+            cotangent_complex,
+            deformation_complex,
+            virtual_dimension: 2,
+            locality: LocalityScopeV1::CompactNeighborhood {
+                chart,
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(38); 32]),
+            },
+            presentation: PresentationScopeV1::Literal {
+                no_claim: DerivedNoClaimIdV1::from_bytes([member_seed.wrapping_add(39); 32]),
+            },
+        });
+
+        let selected_stratum = &mut ir.stratification.strata[0];
+        selected_stratum.active_inequalities.push(inequality);
+        selected_stratum.active_contacts.push(contact);
+        selected_stratum.relative_boundary = Some(side_a);
+        ir.stratification.strata.push(StratumSpecV1 {
+            id: parent_stratum,
+            chart,
+            local_model: parent_model,
+            dimension: 2,
+            active_inequalities: Vec::new(),
+            active_contacts: Vec::new(),
+            relative_boundary: None,
+            regularity: RegularityClassV1::Polynomial,
+            compactness: CompactnessV1::RelativelyCompact {
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(40); 32]),
+            },
+        });
+        ir.stratification.incidences.push(StratumIncidenceV1 {
+            lower: boundary_stratum,
+            upper: parent_stratum,
+            codimension: 1,
+            witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(41); 32]),
+        });
+        ir.stratification.local_links.push(LocalLinkV1 {
+            id: crate::derived::LocalLinkIdV1::from_bytes([member_seed.wrapping_add(42); 32]),
+            stratum: boundary_stratum,
+            ambient_stratum: parent_stratum,
+            dimension: 0,
+            compactness_witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(43); 32]),
+            topology: LocalLinkTopologyV1::FiniteComplex {
+                resolution: DerivedResolutionIdV1::from_bytes([member_seed.wrapping_add(44); 32]),
+                witness: DerivedWitnessIdV1::from_bytes([member_seed.wrapping_add(45); 32]),
+            },
+        });
+        ir
+    }
+
+    fn add_presentation_equality(
+        ir: &mut DerivedGeometryIrV1,
+        selected_model: DerivedLocalModelIdV1,
+        seed: u8,
+        include_in_model: bool,
+    ) -> EqualityConstraintIdV1 {
+        let id = EqualityConstraintIdV1::from_bytes([seed; 32]);
+        let chart = ir
+            .local_models
+            .iter()
+            .find(|model| model.id == selected_model)
+            .expect("selected presentation fixture model")
+            .chart;
+        ir.equalities.push(EqualityConstraintGermV1 {
+            id,
+            chart,
+            codomain_dimension: 1,
+            equation: presentation_function(seed.wrapping_add(1)),
+            regularity: RegularityClassV1::Polynomial,
+            units: presentation_units(seed.wrapping_add(2)),
+            computability: FiniteComputabilityV1::ExactFinite {
+                kernel: DerivedWitnessIdV1::from_bytes([seed.wrapping_add(3); 32]),
+            },
+        });
+        if include_in_model {
+            ir.local_models
+                .iter_mut()
+                .find(|model| model.id == selected_model)
+                .expect("selected presentation fixture model")
+                .equalities
+                .push(id);
+        }
+        id
+    }
+
+    fn rewrite_presentation_unit_system(
+        ir: &mut DerivedGeometryIrV1,
+        unit_system: DerivedUnitSystemIdV1,
+    ) {
+        ir.unit_system = unit_system;
+        for chart in &mut ir.charts {
+            chart.coordinates.system = unit_system;
+        }
+        for equality in &mut ir.equalities {
+            equality.units.system = unit_system;
+        }
+        for inequality in &mut ir.inequalities {
+            inequality.units.system = unit_system;
+        }
+        for boundary in &mut ir.boundaries {
+            boundary.units.system = unit_system;
+        }
+        for contact in &mut ir.contacts {
+            contact.units.system = unit_system;
+        }
+        for datum in &mut ir.constitutive_data {
+            datum.units.system = unit_system;
+        }
+    }
+
+    fn local_presentation_candidate_ir(
+        source: &AdmittedDerivedGeometryV1,
+        target: &AdmittedDerivedGeometryV1,
+    ) -> DerivedLocalPresentationCorrespondenceCandidateIrV1 {
+        DerivedLocalPresentationCorrespondenceCandidateIrV1 {
+            schema_version: DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_SCHEMA_VERSION_V1,
+            source_geometry: source.id(),
+            target_geometry: target.id(),
+            source_local_model: DerivedLocalModelIdV1::from_bytes([90; 32]),
+            target_local_model: DerivedLocalModelIdV1::from_bytes([93; 32]),
+            equality_relations: vec![DerivedEqualityCorrespondenceBindingV1 {
+                source: EqualityConstraintIdV1::from_bytes([130; 32]),
+                target: EqualityConstraintIdV1::from_bytes([150; 32]),
+                relation: DerivedLocalPresentationRelationIdV1::from_bytes([200; 32]),
+            }],
+            active_inequality_relations: vec![DerivedActiveInequalityCorrespondenceBindingV1 {
+                source: InequalityConstraintIdV1::from_bytes([131; 32]),
+                target: InequalityConstraintIdV1::from_bytes([151; 32]),
+                relation: DerivedLocalPresentationRelationIdV1::from_bytes([201; 32]),
+            }],
+            active_contact_relations: vec![DerivedActiveContactCorrespondenceBindingV1 {
+                source: ContactConstraintIdV1::from_bytes([132; 32]),
+                target: ContactConstraintIdV1::from_bytes([152; 32]),
+                relation: DerivedLocalPresentationRelationIdV1::from_bytes([202; 32]),
+            }],
+            constitutive_relations: vec![DerivedConstitutiveCorrespondenceBindingV1 {
+                source: ConstitutiveDatumIdV1::from_bytes([133; 32]),
+                target: ConstitutiveDatumIdV1::from_bytes([153; 32]),
+                relation: DerivedLocalPresentationRelationIdV1::from_bytes([203; 32]),
+            }],
+            nominal_correspondence: DerivedLocalPresentationCorrespondenceIdV1::from_bytes(
+                [204; 32],
+            ),
+            no_authority: DerivedNoClaimIdV1::from_bytes([205; 32]),
+        }
+    }
+
+    fn local_presentation_candidate_fixture(
+        cx: &Cx<'_>,
+    ) -> (
+        AdmittedDerivedGeometryV1,
+        AdmittedDerivedGeometryV1,
+        DerivedLocalPresentationCorrespondenceCandidateIrV1,
+    ) {
+        let source = admit_derived_geometry_v1(
+            local_presentation_geometry_ir(70, 80, 90, 130),
+            DerivedAdmissionBudgetV1::STANDARD,
+            cx,
+        )
+        .expect("valid source local-presentation geometry");
+        let target = admit_derived_geometry_v1(
+            local_presentation_geometry_ir(73, 83, 93, 150),
+            DerivedAdmissionBudgetV1::STANDARD,
+            cx,
+        )
+        .expect("valid target local-presentation geometry");
+        let ir = local_presentation_candidate_ir(&source, &target);
+        (source, target, ir)
     }
 
     fn fixed_resolution_candidate_fixture(
@@ -8609,6 +9833,797 @@ mod tests {
                 Err(
                     DerivedFixedResolutionQuasiIsomorphismCandidateErrorV1::Cancelled {
                         stage: "candidate-admission-entry",
+                    }
+                )
+            ));
+        });
+    }
+
+    #[test]
+    fn local_presentation_candidate_replays_and_exposes_typed_relations() {
+        with_cx(false, |cx| {
+            let (source, target, ir) = local_presentation_candidate_fixture(cx);
+            let first = admit_derived_local_presentation_correspondence_candidate_v1(
+                &ir, &source, &target, cx,
+            )
+            .expect("valid exhaustive local-presentation relation");
+            let replay = admit_derived_local_presentation_correspondence_candidate_v1(
+                &ir, &source, &target, cx,
+            )
+            .expect("deterministic local-presentation replay");
+
+            assert_eq!(first.id(), replay.id());
+            assert_eq!(first.source_geometry(), source.id());
+            assert_eq!(first.target_geometry(), target.id());
+            assert_eq!(
+                first.source_local_model(),
+                DerivedLocalModelIdV1::from_bytes([90; 32])
+            );
+            assert_eq!(
+                first.target_local_model(),
+                DerivedLocalModelIdV1::from_bytes([93; 32])
+            );
+            assert_eq!(first.equality_relations(), &ir.equality_relations);
+            assert_eq!(
+                first.active_inequality_relations(),
+                &ir.active_inequality_relations
+            );
+            assert_eq!(
+                first.active_contact_relations(),
+                &ir.active_contact_relations
+            );
+            assert_eq!(first.constitutive_relations(), &ir.constitutive_relations);
+            assert_eq!(first.nominal_correspondence(), ir.nominal_correspondence);
+            assert_eq!(first.no_authority(), ir.no_authority);
+            assert_ne!(
+                DerivedLocalPresentationCorrespondenceCandidateIdentitySchemaV1::DOMAIN,
+                DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1::DOMAIN
+            );
+        });
+    }
+
+    #[test]
+    fn local_presentation_candidate_is_a_canonical_relation_not_a_bijection() {
+        with_cx(false, |cx| {
+            let mut source_ir = local_presentation_geometry_ir(70, 80, 90, 130);
+            let second_source = add_presentation_equality(
+                &mut source_ir,
+                DerivedLocalModelIdV1::from_bytes([90; 32]),
+                134,
+                true,
+            );
+            let mut target_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            let second_target = add_presentation_equality(
+                &mut target_ir,
+                DerivedLocalModelIdV1::from_bytes([93; 32]),
+                154,
+                true,
+            );
+            let source =
+                admit_derived_geometry_v1(source_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("source with two equality generators");
+            let target =
+                admit_derived_geometry_v1(target_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("target with two equality generators");
+            let mut ir = local_presentation_candidate_ir(&source, &target);
+            ir.equality_relations.extend([
+                DerivedEqualityCorrespondenceBindingV1 {
+                    source: EqualityConstraintIdV1::from_bytes([130; 32]),
+                    target: second_target,
+                    relation: DerivedLocalPresentationRelationIdV1::from_bytes([206; 32]),
+                },
+                DerivedEqualityCorrespondenceBindingV1 {
+                    source: second_source,
+                    target: EqualityConstraintIdV1::from_bytes([150; 32]),
+                    relation: DerivedLocalPresentationRelationIdV1::from_bytes([207; 32]),
+                },
+            ]);
+            ir.equality_relations.reverse();
+            let first = admit_derived_local_presentation_correspondence_candidate_v1(
+                &ir, &source, &target, cx,
+            )
+            .expect("many-to-many exhaustive relation");
+            assert_eq!(first.equality_relations().len(), 3);
+            assert!(
+                first
+                    .equality_relations()
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
+
+            ir.equality_relations.rotate_left(1);
+            let permuted = admit_derived_local_presentation_correspondence_candidate_v1(
+                &ir, &source, &target, cx,
+            )
+            .expect("caller ordering is nonsemantic");
+            assert_eq!(first.id(), permuted.id());
+            assert_eq!(first.equality_relations(), permuted.equality_relations());
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Two-sided coverage, membership, and empty boundaries.
+    fn local_presentation_candidate_requires_exact_two_sided_model_coverage() {
+        with_cx(false, |cx| {
+            let source = admit_derived_geometry_v1(
+                local_presentation_geometry_ir(70, 80, 90, 130),
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid source presentation");
+            let mut target_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            let _unrepresented = add_presentation_equality(
+                &mut target_ir,
+                DerivedLocalModelIdV1::from_bytes([93; 32]),
+                154,
+                true,
+            );
+            let target =
+                admit_derived_geometry_v1(target_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid target with added equality");
+            let ir = local_presentation_candidate_ir(&source, &target);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &ir, &source, &target, cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingCoverage {
+                        family: DerivedLocalPresentationFamilyV1::Equality,
+                        field: "target-member",
+                    }
+                )
+            );
+
+            let mut expanded_source_ir = local_presentation_geometry_ir(70, 80, 90, 130);
+            add_presentation_equality(
+                &mut expanded_source_ir,
+                DerivedLocalModelIdV1::from_bytes([90; 32]),
+                134,
+                true,
+            );
+            let expanded_source = admit_derived_geometry_v1(
+                expanded_source_ir,
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid source with added equality");
+            let plain_target = admit_derived_geometry_v1(
+                local_presentation_geometry_ir(73, 83, 93, 150),
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid plain target presentation");
+            let expanded_source_candidate =
+                local_presentation_candidate_ir(&expanded_source, &plain_target);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &expanded_source_candidate,
+                    &expanded_source,
+                    &plain_target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingCoverage {
+                        family: DerivedLocalPresentationFamilyV1::Equality,
+                        field: "source-member",
+                    }
+                )
+            );
+
+            let mut detached_target_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            let detached = add_presentation_equality(
+                &mut detached_target_ir,
+                DerivedLocalModelIdV1::from_bytes([93; 32]),
+                154,
+                false,
+            );
+            let detached_target = admit_derived_geometry_v1(
+                detached_target_ir,
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid top-level equality outside selected model");
+            let mut detached_ir = local_presentation_candidate_ir(&source, &detached_target);
+            detached_ir
+                .equality_relations
+                .push(DerivedEqualityCorrespondenceBindingV1 {
+                    source: EqualityConstraintIdV1::from_bytes([130; 32]),
+                    target: detached,
+                    relation: DerivedLocalPresentationRelationIdV1::from_bytes([206; 32]),
+                });
+            assert!(matches!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &detached_ir,
+                    &source,
+                    &detached_target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::MemberMismatch {
+                        family: DerivedLocalPresentationFamilyV1::Equality,
+                        field: "target-member",
+                        ..
+                    }
+                )
+            ));
+
+            let mut detached_source_ir = local_presentation_geometry_ir(70, 80, 90, 130);
+            let detached_source_member = add_presentation_equality(
+                &mut detached_source_ir,
+                DerivedLocalModelIdV1::from_bytes([90; 32]),
+                134,
+                false,
+            );
+            let detached_source = admit_derived_geometry_v1(
+                detached_source_ir,
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid top-level source equality outside selected model");
+            let mut detached_source_candidate =
+                local_presentation_candidate_ir(&detached_source, &plain_target);
+            detached_source_candidate.equality_relations.push(
+                DerivedEqualityCorrespondenceBindingV1 {
+                    source: detached_source_member,
+                    target: EqualityConstraintIdV1::from_bytes([150; 32]),
+                    relation: DerivedLocalPresentationRelationIdV1::from_bytes([206; 32]),
+                },
+            );
+            assert!(matches!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &detached_source_candidate,
+                    &detached_source,
+                    &plain_target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::MemberMismatch {
+                        family: DerivedLocalPresentationFamilyV1::Equality,
+                        field: "source-member",
+                        ..
+                    }
+                )
+            ));
+
+            let empty_source = admit_derived_geometry_v1(
+                fixed_resolution_geometry_ir(70, 80, 90, 1),
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid empty source presentation");
+            let empty_target = admit_derived_geometry_v1(
+                fixed_resolution_geometry_ir(73, 83, 93, 2),
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid empty target presentation");
+            let mut empty_candidate = local_presentation_candidate_ir(&empty_source, &empty_target);
+            empty_candidate.equality_relations.clear();
+            empty_candidate.active_inequality_relations.clear();
+            empty_candidate.active_contact_relations.clear();
+            empty_candidate.constitutive_relations.clear();
+            assert!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &empty_candidate,
+                    &empty_source,
+                    &empty_target,
+                    cx,
+                )
+                .is_ok()
+            );
+        });
+    }
+
+    #[test]
+    fn local_presentation_candidate_refuses_duplicate_zero_and_oversized_relations() {
+        with_cx(false, |cx| {
+            let (source, target, ir) = local_presentation_candidate_fixture(cx);
+
+            let mut duplicate = ir.clone();
+            duplicate
+                .equality_relations
+                .push(DerivedEqualityCorrespondenceBindingV1 {
+                    relation: DerivedLocalPresentationRelationIdV1::from_bytes([206; 32]),
+                    ..duplicate.equality_relations[0]
+                });
+            assert!(matches!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &duplicate, &source, &target, cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::DuplicateRelation {
+                        family: DerivedLocalPresentationFamilyV1::Equality,
+                        ..
+                    }
+                )
+            ));
+
+            let mut zero_relation = ir.clone();
+            zero_relation.equality_relations[0].relation =
+                DerivedLocalPresentationRelationIdV1::from_bytes([0; 32]);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &zero_relation,
+                    &source,
+                    &target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingIdentity {
+                        field: "relation",
+                    }
+                )
+            );
+
+            for (field, mut malformed) in [
+                ("nominal-correspondence", ir.clone()),
+                ("no-authority", ir.clone()),
+            ] {
+                match field {
+                    "nominal-correspondence" => {
+                        malformed.nominal_correspondence =
+                            DerivedLocalPresentationCorrespondenceIdV1::from_bytes([0; 32]);
+                    }
+                    "no-authority" => {
+                        malformed.no_authority = DerivedNoClaimIdV1::from_bytes([0; 32]);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    admit_derived_local_presentation_correspondence_candidate_v1(
+                        &malformed, &source, &target, cx,
+                    ),
+                    Err(
+                        DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingIdentity {
+                            field,
+                        }
+                    )
+                );
+            }
+
+            let mut oversized = ir;
+            oversized.equality_relations =
+                vec![oversized.equality_relations[0]; DERIVED_MORPHISM_MAX_FACTORS_V1 + 1];
+            assert!(matches!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &oversized,
+                    &source,
+                    &target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::ResourceLimit {
+                        field: "presentation-relations",
+                        requested,
+                        limit: DERIVED_MORPHISM_MAX_FACTORS_V1,
+                    }
+                ) if requested == DERIVED_MORPHISM_MAX_FACTORS_V1 + 4
+            ));
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Independent convention and exact-scope refusals.
+    fn local_presentation_candidate_binds_endpoints_conventions_and_locality() {
+        with_cx(false, |cx| {
+            let (source, target, ir) = local_presentation_candidate_fixture(cx);
+            let mut wrong_schema = ir.clone();
+            wrong_schema.schema_version += 1;
+            assert!(matches!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &wrong_schema,
+                    &source,
+                    &target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::UnsupportedSchemaVersion { .. })
+            ));
+            let mut wrong_endpoint = ir.clone();
+            wrong_endpoint.source_geometry = geometry_id(249);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &wrong_endpoint,
+                    &source,
+                    &target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::EndpointMismatch {
+                        field: "source-geometry",
+                    }
+                )
+            );
+            let mut missing_model = ir.clone();
+            missing_model.target_local_model = DerivedLocalModelIdV1::from_bytes([249; 32]);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &missing_model,
+                    &source,
+                    &target,
+                    cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingLocalModel {
+                        field: "target-local-model",
+                    }
+                )
+            );
+            for (field, mut zero_model) in [
+                ("source-local-model", ir.clone()),
+                ("target-local-model", ir.clone()),
+            ] {
+                match field {
+                    "source-local-model" => {
+                        zero_model.source_local_model = DerivedLocalModelIdV1::from_bytes([0; 32]);
+                    }
+                    "target-local-model" => {
+                        zero_model.target_local_model = DerivedLocalModelIdV1::from_bytes([0; 32]);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    admit_derived_local_presentation_correspondence_candidate_v1(
+                        &zero_model,
+                        &source,
+                        &target,
+                        cx,
+                    ),
+                    Err(
+                        DerivedLocalPresentationCorrespondenceCandidateErrorV1::MissingIdentity {
+                            field,
+                        }
+                    )
+                );
+            }
+
+            let mut subject_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            subject_ir.subject = DerivedSubjectIdV1::from_bytes([249; 32]);
+            let subject_target =
+                admit_derived_geometry_v1(subject_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid independently scoped subject");
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &local_presentation_candidate_ir(&source, &subject_target),
+                    &source,
+                    &subject_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::SubjectMismatch)
+            );
+
+            let mut category_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            category_ir.category = GeometricCategoryV1::Algebraic;
+            category_ir.charts[0].class = ConfigurationChartClassV1::Algebraic;
+            let category_target =
+                admit_derived_geometry_v1(category_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid algebraic target presentation");
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &local_presentation_candidate_ir(&source, &category_target),
+                    &source,
+                    &category_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::CategoryMismatch)
+            );
+
+            let mut coefficient_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            coefficient_ir.coefficients = CoefficientSystemV1::AlgebraicReal;
+            let coefficient_target =
+                admit_derived_geometry_v1(coefficient_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid algebraic-real coefficient target");
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &local_presentation_candidate_ir(&source, &coefficient_target),
+                    &source,
+                    &coefficient_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::CoefficientMismatch)
+            );
+
+            let mut frame_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            let changed_frame = DerivedFrameIdV1::from_bytes([249; 32]);
+            frame_ir.frame = changed_frame;
+            frame_ir.charts[0].frame = changed_frame;
+            let frame_target =
+                admit_derived_geometry_v1(frame_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid independently framed target");
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &local_presentation_candidate_ir(&source, &frame_target),
+                    &source,
+                    &frame_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::FrameMismatch)
+            );
+
+            let mut unit_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            rewrite_presentation_unit_system(
+                &mut unit_ir,
+                DerivedUnitSystemIdV1::from_bytes([249; 32]),
+            );
+            let unit_target =
+                admit_derived_geometry_v1(unit_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid independently unit-bound target");
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &local_presentation_candidate_ir(&source, &unit_target),
+                    &source,
+                    &unit_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::UnitSystemMismatch)
+            );
+
+            let mut version_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            version_ir.model_version = DerivedModelVersionIdV1::from_bytes([249; 32]);
+            let version_target =
+                admit_derived_geometry_v1(version_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid independently versioned target");
+            let version_candidate = local_presentation_candidate_ir(&source, &version_target);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &version_candidate,
+                    &source,
+                    &version_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::ModelVersionMismatch)
+            );
+
+            let mut chart_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            chart_ir.charts[0].coordinates.quantity =
+                DerivedQuantityKindIdV1::from_bytes([249; 32]);
+            let chart_target =
+                admit_derived_geometry_v1(chart_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid target reusing the chart ID with different semantics");
+            let chart_candidate = local_presentation_candidate_ir(&source, &chart_target);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &chart_candidate,
+                    &source,
+                    &chart_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::ChartMismatch)
+            );
+
+            let mut locality_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            locality_ir
+                .local_models
+                .iter_mut()
+                .find(|model| model.id == DerivedLocalModelIdV1::from_bytes([93; 32]))
+                .expect("selected target model")
+                .locality = LocalityScopeV1::GermAt {
+                chart: chart_id(4),
+                point: DerivedWitnessIdV1::from_bytes([249; 32]),
+            };
+            let locality_target =
+                admit_derived_geometry_v1(locality_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("valid target with a distinct exact model locality");
+            let locality_candidate = local_presentation_candidate_ir(&source, &locality_target);
+            assert_eq!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &locality_candidate,
+                    &source,
+                    &locality_target,
+                    cx,
+                ),
+                Err(DerivedLocalPresentationCorrespondenceCandidateErrorV1::LocalityMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn local_presentation_candidate_does_not_launder_semantic_or_physical_agreement() {
+        with_cx(false, |cx| {
+            let source = admit_derived_geometry_v1(
+                local_presentation_geometry_ir(70, 80, 90, 130),
+                DerivedAdmissionBudgetV1::STANDARD,
+                cx,
+            )
+            .expect("valid source presentation");
+            let mut target_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+            target_ir.equalities[0].codomain_dimension = 2;
+            target_ir.inequalities[0].sense = InequalitySenseV1::NonPositive;
+            target_ir.contacts[0].law = ContactLawV1::Coulomb {
+                friction_coefficient: 0.5,
+            };
+            target_ir.constitutive_data[0].role = ConstitutiveRoleV1::Energy;
+            let target =
+                admit_derived_geometry_v1(target_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+                    .expect("structurally valid but semantically distinct target");
+            let ir = local_presentation_candidate_ir(&source, &target);
+            let candidate = admit_derived_local_presentation_correspondence_candidate_v1(
+                &ir, &source, &target, cx,
+            )
+            .expect("nominal relation does not pretend to check payload semantics");
+            assert_eq!(candidate.no_authority(), ir.no_authority);
+            assert_eq!(candidate.equality_relations().len(), 1);
+            assert_eq!(candidate.constitutive_relations().len(), 1);
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Admission wiring plus every nested receipt field.
+    fn local_presentation_candidate_receipt_binds_every_schema_field() {
+        with_cx(false, |cx| {
+            let (source, target, ir) = local_presentation_candidate_fixture(cx);
+            let encoded = |value: &DerivedLocalPresentationCorrespondenceCandidateIrV1| {
+                let mut equalities = value
+                    .equality_relations
+                    .iter()
+                    .copied()
+                    .map(LocalPresentationRelationBindingV1::canonical_bytes)
+                    .collect::<Vec<_>>();
+                let mut inequalities = value
+                    .active_inequality_relations
+                    .iter()
+                    .copied()
+                    .map(LocalPresentationRelationBindingV1::canonical_bytes)
+                    .collect::<Vec<_>>();
+                let mut contacts = value
+                    .active_contact_relations
+                    .iter()
+                    .copied()
+                    .map(LocalPresentationRelationBindingV1::canonical_bytes)
+                    .collect::<Vec<_>>();
+                let mut constitutive = value
+                    .constitutive_relations
+                    .iter()
+                    .copied()
+                    .map(LocalPresentationRelationBindingV1::canonical_bytes)
+                    .collect::<Vec<_>>();
+                equalities.sort_unstable();
+                inequalities.sort_unstable();
+                contacts.sort_unstable();
+                constitutive.sort_unstable();
+                local_presentation_correspondence_candidate_receipt(
+                    value,
+                    &equalities,
+                    &inequalities,
+                    &contacts,
+                    &constitutive,
+                    cx,
+                )
+                .expect("canonical candidate receipt")
+                .id()
+            };
+            let base = encoded(&ir);
+            let admitted_base = admit_derived_local_presentation_correspondence_candidate_v1(
+                &ir, &source, &target, cx,
+            )
+            .expect("admission wires the canonical receipt")
+            .id();
+            assert_eq!(admitted_base, base);
+
+            for changed in [
+                {
+                    let mut changed = ir.clone();
+                    changed.equality_relations[0].relation =
+                        DerivedLocalPresentationRelationIdV1::from_bytes([210; 32]);
+                    changed
+                },
+                {
+                    let mut changed = ir.clone();
+                    changed.active_inequality_relations[0].relation =
+                        DerivedLocalPresentationRelationIdV1::from_bytes([211; 32]);
+                    changed
+                },
+                {
+                    let mut changed = ir.clone();
+                    changed.active_contact_relations[0].relation =
+                        DerivedLocalPresentationRelationIdV1::from_bytes([212; 32]);
+                    changed
+                },
+                {
+                    let mut changed = ir.clone();
+                    changed.constitutive_relations[0].relation =
+                        DerivedLocalPresentationRelationIdV1::from_bytes([213; 32]);
+                    changed
+                },
+                {
+                    let mut changed = ir.clone();
+                    changed.nominal_correspondence =
+                        DerivedLocalPresentationCorrespondenceIdV1::from_bytes([214; 32]);
+                    changed
+                },
+                {
+                    let mut changed = ir.clone();
+                    changed.no_authority = DerivedNoClaimIdV1::from_bytes([215; 32]);
+                    changed
+                },
+            ] {
+                let changed = admit_derived_local_presentation_correspondence_candidate_v1(
+                    &changed, &source, &target, cx,
+                )
+                .expect("valid identity-bearing field mutation")
+                .id();
+                assert_ne!(
+                    changed, admitted_base,
+                    "admission must wire every identity-bearing field"
+                );
+            }
+
+            let mut changed = ir.clone();
+            changed.source_geometry = target.id();
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.target_geometry = source.id();
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.source_local_model = DerivedLocalModelIdV1::from_bytes([208; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.target_local_model = DerivedLocalModelIdV1::from_bytes([209; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.equality_relations[0].relation =
+                DerivedLocalPresentationRelationIdV1::from_bytes([210; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.active_inequality_relations[0].relation =
+                DerivedLocalPresentationRelationIdV1::from_bytes([211; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.active_contact_relations[0].relation =
+                DerivedLocalPresentationRelationIdV1::from_bytes([212; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.constitutive_relations[0].relation =
+                DerivedLocalPresentationRelationIdV1::from_bytes([213; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.equality_relations[0].source = EqualityConstraintIdV1::from_bytes([216; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.equality_relations[0].target = EqualityConstraintIdV1::from_bytes([217; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.active_inequality_relations[0].source =
+                InequalityConstraintIdV1::from_bytes([218; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.active_inequality_relations[0].target =
+                InequalityConstraintIdV1::from_bytes([219; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.active_contact_relations[0].source =
+                ContactConstraintIdV1::from_bytes([220; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.active_contact_relations[0].target =
+                ContactConstraintIdV1::from_bytes([221; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.constitutive_relations[0].source = ConstitutiveDatumIdV1::from_bytes([222; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.constitutive_relations[0].target = ConstitutiveDatumIdV1::from_bytes([223; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.nominal_correspondence =
+                DerivedLocalPresentationCorrespondenceIdV1::from_bytes([214; 32]);
+            assert_ne!(encoded(&changed), base);
+            changed = ir.clone();
+            changed.no_authority = DerivedNoClaimIdV1::from_bytes([215; 32]);
+            assert_ne!(encoded(&changed), base);
+        });
+    }
+
+    #[test]
+    fn local_presentation_candidate_entry_cancellation_fails_closed() {
+        let (source, target, ir) = with_cx(false, local_presentation_candidate_fixture);
+        with_cx(true, |cx| {
+            assert!(matches!(
+                admit_derived_local_presentation_correspondence_candidate_v1(
+                    &ir, &source, &target, cx,
+                ),
+                Err(
+                    DerivedLocalPresentationCorrespondenceCandidateErrorV1::Cancelled {
+                        stage: "presentation-correspondence-admission-entry",
                     }
                 )
             ));

@@ -228,6 +228,20 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   checker, and external check-receipt IDs and an explicit no-authority artifact.
   These are structured inputs for RD.1c, not a quasi-isomorphism or equivalence
   capability; candidate composition and inversion are intentionally absent.
+  `DerivedLocalPresentationCorrespondenceCandidateIrV1` is a separate
+  exhaustive finite relation over exact source/target local models. Equality,
+  explicitly active inequality, explicitly active contact, and constitutive
+  families use distinct typed edge collections; constitutive metadata is never
+  reclassified as a geometric constraint. Each edge binds exact source/target
+  members plus one nominal relation artifact. Admission requires exact endpoint
+  conventions, chart, locality, and two-sided coverage of every member in every
+  selected family. Edges are canonicalized by `(source, target, relation)`;
+  duplicate pairs refuse even when their nominal relation artifacts differ.
+  Repeated sources and targets otherwise remain valid, so the token is a finite
+  relation rather than a hidden function or bijection. One nominal aggregate
+  declaration and a no-authority artifact are retained. Payload semantics,
+  functionality, composition, evidence transport, inverse, and equivalence are
+  intentionally absent and require independent RD.1c promotion.
   Evidence transport is explicitly contravariant restriction or covariant
   balance corestriction and binds exact input/output geometry identities plus
   nominal caller-declared input/output evidence-artifact identities and ranks.
@@ -604,6 +618,14 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    no-authority artifact. They do not enter morphism composition or the
    equivalence boundary, and no field can be omitted without changing or
    refusing the candidate receipt.
+13. Local-presentation correspondence candidates bind exact endpoint geometry
+   and local-model selectors; separate canonical sets for equality, active-
+   inequality, active-contact, and constitutive relation edges; one nominal
+   aggregate declaration; and one nonzero no-authority artifact. Every selected
+   source and target family member has at least one edge, exact duplicate pairs
+   refuse, and caller ordering is nonsemantic. Repeated sources and targets are
+   admitted explicitly, so coverage cannot be mistaken for functionality or a
+   bijection.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -826,6 +848,14 @@ replay/accessors, nominal-field identity movement, exact full source coverage,
 canonical order, raw/sealed ID binding, repeated target acceptance, identity-
 component acceptance, composite-path refusal, missing authority fields, the
 component cap, and entry cancellation.
+The local-presentation correspondence-candidate suite covers domain-separated
+replay and accessors for all four typed families, caller-order canonicalization,
+many-to-many source/target acceptance, two-sided missing-coverage refusal,
+top-level-but-out-of-model member refusal, duplicate-pair and zero-artifact
+refusal, exact endpoint/model/version/locality binding, nominal semantic and
+physical non-authority, aggregate capacity, every receipt field, and entry
+cancellation. Exact-scope cases also cover every geometry convention and full
+admitted-chart semantics rather than trusting a reused nominal chart ID.
 It also covers declared chart-map ownership, missing IDs, dimension/frame/unit/
 quantity/scale mutations, typed-ID-bound receipt replay and public primitive
 retention, homogeneous associativity, exact chart seams, identity neutrality,
@@ -959,6 +989,21 @@ claim those stronger G4/G5 results.
   generator/constraint correspondence plus inverse or zigzag and homotopy
   evidence; extension to later resolutions requires a separate naturality or
   coherent-zigzag theorem.
+- `AdmittedDerivedLocalPresentationCorrespondenceCandidateV1` proves only exact
+  endpoint/model ownership, shared structural conventions and local scope,
+  canonical duplicate-free relation retention, and finite two-sided coverage of
+  each selected equality, active-inequality, active-contact, and constitutive
+  family. It does not compare or authenticate equation/function payloads,
+  inequality senses, active-set witnesses, normal cones, contact sides/gaps/
+  laws, constitutive roles/state dimensions, regularity, units, computability,
+  locality maps, or the nominal edge/aggregate artifacts. Coverage does not
+  establish functionality, injectivity, surjectivity, a bijection, generator
+  equivalence, coordinate equivalence, physical correspondence, inverse,
+  homotopy, or presentation equivalence. Repeated source and target members are
+  therefore permitted; unrepresented added members refuse. RD.1c must resolve
+  and semantically check every relation edge and combine any promoted result
+  with the required role-specific quasi-isomorphisms and inverse/zigzag/homotopy
+  evidence in a new authority receipt.
 - `DeclaredInclusion` is a typed whole-object inclusion declaration, not a
   containment certificate. It proves no actual subset or validity-domain
   inclusion; map execution or payload truth; injectivity, monicity, embedding,
