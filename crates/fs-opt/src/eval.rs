@@ -18,6 +18,18 @@ const MANIFOLD_MEMBERSHIP_TOL: f64 = 1e-10;
 /// Candidates below this squared norm are numerically rank-deficient;
 /// normalizing them would fabricate a direction.
 const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
+/// Maximum traversed scalar elements between retraction/domain cancellation polls.
+const RETRACTION_CHECKPOINT_STRIDE: usize = 256;
+
+fn checkpoint_retraction_work<F>(index: usize, checkpoint: &mut F) -> Result<(), OptError>
+where
+    F: FnMut() -> Result<(), OptError>,
+{
+    if index % RETRACTION_CHECKPOINT_STRIDE == 0 {
+        checkpoint()?;
+    }
+    Ok(())
+}
 
 /// An evaluated node value.
 #[derive(Debug, Clone, PartialEq)]
@@ -503,8 +515,16 @@ impl Manifold {
         }
     }
 
-    fn validate_retraction_finite(input: &'static str, values: &[f64]) -> Result<(), OptError> {
+    fn validate_retraction_finite_with_checkpoint<F>(
+        input: &'static str,
+        values: &[f64],
+        checkpoint: &mut F,
+    ) -> Result<(), OptError>
+    where
+        F: FnMut() -> Result<(), OptError>,
+    {
         for (component, value) in values.iter().enumerate() {
+            checkpoint_retraction_work(component, checkpoint)?;
             if !value.is_finite() {
                 return Err(OptError::RetractionNonFinite {
                     input,
@@ -513,14 +533,26 @@ impl Manifold {
                 });
             }
         }
-        Ok(())
+        checkpoint()
     }
 
-    fn validate_point_domain(&self, x: &[f64]) -> Result<(), OptError> {
+    fn validate_point_domain_with_checkpoint<F>(
+        &self,
+        x: &[f64],
+        checkpoint: &mut F,
+    ) -> Result<(), OptError>
+    where
+        F: FnMut() -> Result<(), OptError>,
+    {
         match *self {
-            Manifold::Rn { .. } => Ok(()),
+            Manifold::Rn { .. } => checkpoint(),
             Manifold::Sphere { .. } | Manifold::So3 => {
-                let norm_sq = x.iter().map(|value| value * value).sum::<f64>();
+                let mut norm_sq = 0.0;
+                for (component, value) in x.iter().enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
+                    norm_sq += value * value;
+                }
+                checkpoint()?;
                 if !norm_sq.is_finite() {
                     return Err(self.domain_error(
                         "point norm squared must be finite",
@@ -541,9 +573,13 @@ impl Manifold {
                 let (n, p) = (n as usize, p as usize);
                 for column in 0..p {
                     for against in 0..=column {
-                        let dot = (0..n)
-                            .map(|row| x[column * n + row] * x[against * n + row])
-                            .sum::<f64>();
+                        checkpoint()?;
+                        let mut dot = 0.0;
+                        for row in 0..n {
+                            checkpoint_retraction_work(row, checkpoint)?;
+                            dot += x[column * n + row] * x[against * n + row];
+                        }
+                        checkpoint()?;
                         let location = Some((column as u32, against as u32));
                         if !dot.is_finite() {
                             return Err(self.domain_error(
@@ -562,9 +598,13 @@ impl Manifold {
                         }
                     }
                 }
-                Ok(())
+                checkpoint()
             }
         }
+    }
+
+    fn validate_point_domain(&self, x: &[f64]) -> Result<(), OptError> {
+        self.validate_point_domain_with_checkpoint(x, &mut || Ok(()))
     }
 
     fn validate_binding_domain(&self, x: &[f64], var: u32) -> Result<(), OptError> {
@@ -586,9 +626,16 @@ impl Manifold {
         }
     }
 
-    fn validate_retraction_output(&self, output: Vec<f64>) -> Result<Vec<f64>, OptError> {
-        Self::validate_retraction_finite("retraction output", &output)?;
-        self.validate_point_domain(&output)?;
+    fn validate_retraction_output_with_checkpoint<F>(
+        &self,
+        output: Vec<f64>,
+        checkpoint: &mut F,
+    ) -> Result<Vec<f64>, OptError>
+    where
+        F: FnMut() -> Result<(), OptError>,
+    {
+        Self::validate_retraction_finite_with_checkpoint("retraction output", &output, checkpoint)?;
+        self.validate_point_domain_with_checkpoint(&output, checkpoint)?;
         Ok(output)
     }
 
@@ -605,8 +652,21 @@ impl Manifold {
     /// [`OptError::ManifoldInvalid`], [`OptError::RetractionLen`],
     /// [`OptError::RetractionNonFinite`], or [`OptError::RetractionDomain`].
     #[must_use]
-    #[allow(clippy::too_many_lines)] // one auditable branch per manifold and refusal phase
     pub fn retract(&self, x: &[f64], t: &[f64]) -> Result<Vec<f64>, OptError> {
+        self.retract_with_checkpoint(x, t, &mut || Ok(()))
+    }
+
+    #[allow(clippy::too_many_lines)] // one auditable branch per manifold and refusal phase
+    fn retract_with_checkpoint<F>(
+        &self,
+        x: &[f64],
+        t: &[f64],
+        checkpoint: &mut F,
+    ) -> Result<Vec<f64>, OptError>
+    where
+        F: FnMut() -> Result<(), OptError>,
+    {
+        checkpoint()?;
         self.validate(&AdmissionCaps::default())?;
         let point_dim = self.point_dim().ok_or_else(|| OptError::ManifoldInvalid {
             what: format!("{self:?} has no representable point dimension"),
@@ -618,8 +678,8 @@ impl Manifold {
                 got: x.len() as u64,
             });
         }
-        Self::validate_retraction_finite("retraction point", x)?;
-        self.validate_point_domain(x)?;
+        Self::validate_retraction_finite_with_checkpoint("retraction point", x, checkpoint)?;
+        self.validate_point_domain_with_checkpoint(x, checkpoint)?;
         let param_dim = self.param_dim().ok_or_else(|| OptError::ManifoldInvalid {
             what: format!("{self:?} has no representable retraction parameter dimension"),
         })?;
@@ -630,16 +690,33 @@ impl Manifold {
                 got: t.len() as u64,
             });
         }
-        Self::validate_retraction_finite("retraction step", t)?;
+        Self::validate_retraction_finite_with_checkpoint("retraction step", t, checkpoint)?;
         match *self {
             Manifold::Rn { .. } => {
-                let output = x.iter().zip(t).map(|(a, b)| a + b).collect();
-                self.validate_retraction_output(output)
+                let mut output = Vec::with_capacity(x.len());
+                for (component, (a, b)) in x.iter().zip(t).enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
+                    output.push(a + b);
+                }
+                self.validate_retraction_output_with_checkpoint(output, checkpoint)
             }
             Manifold::Sphere { .. } => {
-                let y: Vec<f64> = x.iter().zip(t).map(|(a, b)| a + b).collect();
-                Self::validate_retraction_finite("retraction candidate", &y)?;
-                let norm_sq = y.iter().map(|value| value * value).sum::<f64>();
+                let mut y = Vec::with_capacity(x.len());
+                for (component, (a, b)) in x.iter().zip(t).enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
+                    y.push(a + b);
+                }
+                Self::validate_retraction_finite_with_checkpoint(
+                    "retraction candidate",
+                    &y,
+                    checkpoint,
+                )?;
+                let mut norm_sq = 0.0;
+                for (component, value) in y.iter().enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
+                    norm_sq += value * value;
+                }
+                checkpoint()?;
                 if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
                     return Err(self.domain_error(
                         "candidate norm squared must be finite and nonsingular",
@@ -648,9 +725,15 @@ impl Manifold {
                     ));
                 }
                 let norm = norm_sq.sqrt();
-                self.validate_retraction_output(y.iter().map(|value| value / norm).collect())
+                let mut output = Vec::with_capacity(y.len());
+                for (component, value) in y.iter().enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
+                    output.push(value / norm);
+                }
+                self.validate_retraction_output_with_checkpoint(output, checkpoint)
             }
             Manifold::So3 => {
+                checkpoint()?;
                 let half = [t[0] * 0.5, t[1] * 0.5, t[2] * 0.5];
                 let angle_sq = half[0] * half[0] + half[1] * half[1] + half[2] * half[2];
                 if !angle_sq.is_finite() {
@@ -674,8 +757,17 @@ impl Manifold {
                     q[0] * dq[2] - q[1] * dq[3] + q[2] * dq[0] + q[3] * dq[1],
                     q[0] * dq[3] + q[1] * dq[2] - q[2] * dq[1] + q[3] * dq[0],
                 ];
-                Self::validate_retraction_finite("retraction candidate", &out)?;
-                let norm_sq = out.iter().map(|value| value * value).sum::<f64>();
+                Self::validate_retraction_finite_with_checkpoint(
+                    "retraction candidate",
+                    &out,
+                    checkpoint,
+                )?;
+                let mut norm_sq = 0.0;
+                for (component, value) in out.iter().enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
+                    norm_sq += value * value;
+                }
+                checkpoint()?;
                 if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
                     return Err(self.domain_error(
                         "candidate norm squared must be finite and nonsingular",
@@ -684,25 +776,40 @@ impl Manifold {
                     ));
                 }
                 let norm = norm_sq.sqrt();
-                for v in &mut out {
+                for (component, v) in out.iter_mut().enumerate() {
+                    checkpoint_retraction_work(component, checkpoint)?;
                     *v /= norm;
                 }
-                self.validate_retraction_output(out.to_vec())
+                self.validate_retraction_output_with_checkpoint(out.to_vec(), checkpoint)
             }
             Manifold::Stiefel { n, p } => {
                 let (n, p) = (n as usize, p as usize);
                 let mut cols = Vec::with_capacity(p);
                 for column in 0..p {
-                    let candidate = (0..n)
-                        .map(|row| x[column * n + row] + t[column * n + row])
-                        .collect::<Vec<f64>>();
-                    Self::validate_retraction_finite("retraction candidate", &candidate)?;
+                    checkpoint()?;
+                    let mut candidate = Vec::with_capacity(n);
+                    for row in 0..n {
+                        checkpoint_retraction_work(row, checkpoint)?;
+                        candidate.push(x[column * n + row] + t[column * n + row]);
+                    }
+                    Self::validate_retraction_finite_with_checkpoint(
+                        "retraction candidate",
+                        &candidate,
+                        checkpoint,
+                    )?;
                     cols.push(candidate);
                 }
                 // Deterministic Gram-Schmidt (QR retraction).
                 for j in 0..p {
+                    checkpoint()?;
                     for k in 0..j {
-                        let d: f64 = (0..n).map(|i| cols[j][i] * cols[k][i]).sum();
+                        checkpoint()?;
+                        let mut d = 0.0;
+                        for i in 0..n {
+                            checkpoint_retraction_work(i, checkpoint)?;
+                            d += cols[j][i] * cols[k][i];
+                        }
+                        checkpoint()?;
                         if !d.is_finite() {
                             return Err(self.domain_error(
                                 "candidate Gram projection must be finite",
@@ -710,13 +817,26 @@ impl Manifold {
                                 d,
                             ));
                         }
-                        let prior = cols[k].clone();
-                        for (cj, ck) in cols[j].iter_mut().zip(&prior) {
-                            *cj -= d * ck;
+                        let (prior_columns, current_and_later) = cols.split_at_mut(j);
+                        let prior = &prior_columns[k];
+                        let current = &mut current_and_later[0];
+                        for i in 0..n {
+                            checkpoint_retraction_work(i, checkpoint)?;
+                            current[i] -= d * prior[i];
                         }
-                        Self::validate_retraction_finite("retraction candidate", &cols[j])?;
+                        Self::validate_retraction_finite_with_checkpoint(
+                            "retraction candidate",
+                            current,
+                            checkpoint,
+                        )?;
                     }
-                    let norm_sq = cols[j].iter().map(|value| value * value).sum::<f64>();
+                    let current = &mut cols[j];
+                    let mut norm_sq = 0.0;
+                    for (component, value) in current.iter().enumerate() {
+                        checkpoint_retraction_work(component, checkpoint)?;
+                        norm_sq += value * value;
+                    }
+                    checkpoint()?;
                     if !norm_sq.is_finite() || norm_sq <= RETRACTION_MIN_NORM_SQ {
                         return Err(self.domain_error(
                             "candidate column is rank-deficient",
@@ -725,13 +845,25 @@ impl Manifold {
                         ));
                     }
                     let norm = norm_sq.sqrt();
-                    for v in &mut cols[j] {
+                    for (component, v) in current.iter_mut().enumerate() {
+                        checkpoint_retraction_work(component, checkpoint)?;
                         *v /= norm;
                     }
                 }
-                self.validate_retraction_output(cols.concat())
+                let mut output = Vec::with_capacity(x.len());
+                for column in &cols {
+                    for (row, value) in column.iter().enumerate() {
+                        checkpoint_retraction_work(row, checkpoint)?;
+                        output.push(*value);
+                    }
+                }
+                self.validate_retraction_output_with_checkpoint(output, checkpoint)
             }
         }
+    }
+
+    fn retract_with_cx(&self, x: &[f64], t: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, OptError> {
+        self.retract_with_checkpoint(x, t, &mut || descent_checkpoint(cx))
     }
 }
 
@@ -776,8 +908,9 @@ pub struct DescentReport {
 
 /// Toy Riemannian gradient descent of a closure over ONE manifold
 /// variable: FD gradient through the retraction, fixed step. Proves
-/// retraction metadata is consumable; polls cancellation each step and
-/// honors an explicit [`EvalLimit`]. The manifold, start point
+/// retraction metadata is consumable; polls cancellation before objective
+/// work and at bounded intervals inside domain/retraction loops, and honors
+/// an explicit [`EvalLimit`]. The manifold, start point
 /// (length AND finite components), and step policy (`fd_h`/`lr`
 /// finite, positive) are leaf-gated BEFORE any descent arithmetic.
 /// With an unwind-capable panic strategy, an ordinary raw-objective
@@ -852,19 +985,6 @@ fn descend_fn_checked(
             got: x0.len() as u64,
         });
     }
-    // Leaf gating (review High #6, bead j3vb5): a non-finite start
-    // point or degenerate step policy must refuse BEFORE any descent
-    // arithmetic — NaN would otherwise propagate through retractions
-    // and finite differences as plausible-looking garbage.
-    for component in x0 {
-        if !component.is_finite() {
-            return Err(OptError::NonFinite {
-                what: "descent initial point component",
-                bits: component.to_bits(),
-            });
-        }
-    }
-    manifold.validate_point_domain(x0)?;
     if !(opts.fd_h.is_finite() && opts.fd_h > 0.0) {
         return Err(OptError::BadParam {
             what: "descent finite-difference step fd_h (finite, > 0)",
@@ -886,6 +1006,27 @@ fn descend_fn_checked(
         what: format!("{manifold:?} descent parameter dimension does not fit usize"),
     })?;
     let atomic_step_evals = u64::from(param_dim).saturating_mul(2).saturating_add(1);
+    // Preserve deterministic cheap-refusal precedence for malformed manifold,
+    // length, and policy metadata. Long point scans begin only after those O(1)
+    // gates, and are cancellation-aware from their first component onward.
+    descent_checkpoint(cx)?;
+    // Leaf gating (review High #6, bead j3vb5): a non-finite start
+    // point or degenerate step policy must refuse BEFORE any descent
+    // arithmetic — NaN would otherwise propagate through retractions
+    // and finite differences as plausible-looking garbage.
+    for (index, component) in x0.iter().enumerate() {
+        if index % RETRACTION_CHECKPOINT_STRIDE == 0 {
+            descent_checkpoint(cx)?;
+        }
+        if !component.is_finite() {
+            return Err(OptError::NonFinite {
+                what: "descent initial point component",
+                bits: component.to_bits(),
+            });
+        }
+    }
+    descent_checkpoint(cx)?;
+    manifold.validate_point_domain_with_checkpoint(x0, &mut || descent_checkpoint(cx))?;
     descent_checkpoint(cx)?;
     let mut x = x0.to_vec();
     let mut evals = 0u64;
@@ -914,7 +1055,7 @@ fn descend_fn_checked(
             let mut t = vec![0.0; pd];
             t[i] = opts.fd_h;
             descent_checkpoint(cx)?;
-            let xp = manifold.retract(&x, &t)?;
+            let xp = manifold.retract_with_cx(&x, &t, cx)?;
             descent_checkpoint(cx)?;
             let fp = f(
                 &xp,
@@ -927,7 +1068,7 @@ fn descend_fn_checked(
             evals += 1;
             descent_checkpoint(cx)?;
             t[i] = -opts.fd_h;
-            let xm = manifold.retract(&x, &t)?;
+            let xm = manifold.retract_with_cx(&x, &t, cx)?;
             descent_checkpoint(cx)?;
             let fm = f(
                 &xm,
@@ -947,7 +1088,7 @@ fn descend_fn_checked(
         descent_checkpoint(cx)?;
         let step: Vec<f64> = g.iter().map(|v| -opts.lr * v).collect();
         descent_checkpoint(cx)?;
-        x = manifold.retract(&x, &step)?;
+        x = manifold.retract_with_cx(&x, &step, cx)?;
         descent_checkpoint(cx)?;
         steps_taken += 1;
     }
@@ -1075,5 +1216,94 @@ mod runtime_shape_tests {
                 len: 1,
             })
         );
+    }
+
+    #[test]
+    fn retraction_checkpoint_adapter_preserves_bits_errors_and_poll_replay() {
+        let cases = [
+            (Manifold::Rn { dim: 2 }, vec![1.0, -2.0], vec![0.5, 0.25]),
+            (
+                Manifold::Sphere { ambient: 3 },
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 0.25, -0.125],
+            ),
+            (
+                Manifold::So3,
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.1, -0.2, 0.3],
+            ),
+            (
+                Manifold::Stiefel { n: 3, p: 2 },
+                vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                vec![0.0, 0.125, 0.0, -0.125, 0.0, 0.0],
+            ),
+        ];
+
+        for (manifold, point, step) in cases {
+            let public = manifold.retract(&point, &step).expect("public retraction");
+            let mut first_polls = 0usize;
+            let first = manifold
+                .retract_with_checkpoint(&point, &step, &mut || {
+                    first_polls += 1;
+                    Ok(())
+                })
+                .expect("checkpointed retraction");
+            let mut replay_polls = 0usize;
+            let replay = manifold
+                .retract_with_checkpoint(&point, &step, &mut || {
+                    replay_polls += 1;
+                    Ok(())
+                })
+                .expect("checkpointed replay");
+
+            let bits = |values: &[f64]| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                bits(&first),
+                bits(&public),
+                "{manifold:?} changed output bits"
+            );
+            assert_eq!(bits(&replay), bits(&first), "{manifold:?} replay drifted");
+            assert_eq!(replay_polls, first_polls, "{manifold:?} poll count drifted");
+
+            let mut invalid_step = step;
+            invalid_step[0] = f64::NAN;
+            assert_eq!(
+                manifold.retract_with_checkpoint(&point, &invalid_step, &mut || Ok(())),
+                manifold.retract(&point, &invalid_step),
+                "{manifold:?} changed typed error attribution"
+            );
+        }
+    }
+
+    #[test]
+    fn stiefel_retraction_work_is_checkpointed_before_and_inside_long_loops() {
+        let manifold = Manifold::Stiefel { n: 1024, p: 2 };
+        let mut point = vec![0.0; 2048];
+        point[0] = 1.0;
+        point[1024 + 1] = 1.0;
+        let step = vec![0.0; 2048];
+
+        // These deterministic ordinals land at first contact, point-domain
+        // validation, QR projection/update, and output revalidation. Each
+        // injected cancellation must abort without publishing a point.
+        for cancel_at in [1usize, 20, 85, 129] {
+            let calls = std::cell::Cell::new(0usize);
+            let result = manifold.retract_with_checkpoint(&point, &step, &mut || {
+                let next = calls.get() + 1;
+                calls.set(next);
+                if next == cancel_at {
+                    Err(OptError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result, Err(OptError::Cancelled));
+            assert_eq!(calls.get(), cancel_at);
+        }
     }
 }

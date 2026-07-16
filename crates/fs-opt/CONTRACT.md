@@ -348,6 +348,10 @@ exhaustion is a RECEIPT (`budget_stopped` in the report), not an error;
 the iterate remains valid, no partial gradient is spent, and `evals`
 never exceeds a `Limited` positive cap (P4). `Unlimited` installs no
 evaluation-count stop rule; it is an explicit variant, not a numeric sentinel.
+Initial-point membership and every descent retraction also poll before work and
+at most every 256 traversed scalar elements through finiteness scans, norm/Gram
+reductions, deterministic Stiefel QR projection/normalization, and output
+revalidation. Cancellation inside those loops returns no candidate point.
 
 Game admission polls before proportional scans, during bounded information,
 strategy-dependency, and composition traversal, and at identity publication.

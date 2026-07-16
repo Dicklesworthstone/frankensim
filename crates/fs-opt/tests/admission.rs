@@ -1273,6 +1273,44 @@ fn adm_019_descent_cancellation_boundaries() {
             pre_calls.set(pre_calls.get() + 1);
             x[0] * x[0]
         };
+        // Cheap metadata refusals remain deterministic even when cancellation
+        // is already pending; the first poll precedes only the potentially
+        // long point scans and objective work.
+        assert!(matches!(
+            fs_opt::descend_fn(
+                Manifold::Rn { dim: 0 },
+                &objective,
+                &[],
+                opts,
+                EvalLimit::Unlimited,
+                cx,
+            ),
+            Err(OptError::ManifoldInvalid { .. })
+        ));
+        assert!(matches!(
+            fs_opt::descend_fn(
+                Manifold::Rn { dim: 1 },
+                &objective,
+                &[],
+                opts,
+                EvalLimit::Unlimited,
+                cx,
+            ),
+            Err(OptError::BindingLen { .. })
+        ));
+        let mut invalid_options = opts;
+        invalid_options.fd_h = 0.0;
+        assert!(matches!(
+            fs_opt::descend_fn(
+                Manifold::Rn { dim: 1 },
+                &objective,
+                &[1.0],
+                invalid_options,
+                EvalLimit::Unlimited,
+                cx,
+            ),
+            Err(OptError::BadParam { .. })
+        ));
         assert!(matches!(
             fs_opt::descend_fn(
                 Manifold::Rn { dim: 1 },
