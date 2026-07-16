@@ -191,6 +191,7 @@ pub fn run_campaign(
         .map(|p| p.profile_error)
         .fold(f64::INFINITY, f64::min);
     let credibility_color = if all_accurate && stable_count == points.len() {
+        // declared-color-ok: demo credibility candidate derived from local profile-error bounds; admitted only at a consumer's authority boundary (6pf9)
         Color::Verified {
             lo: 0.0,
             hi: points.iter().map(|p| p.profile_error).fold(0.0, f64::max),

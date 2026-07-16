@@ -163,6 +163,7 @@ pub fn run_campaign(match_tol: f64, simplify_tol: f64) -> GrammarReport {
     ];
     let best_fab_ok = fab.satisfied(best.solution[0].min(best.solution[1]));
     let headline_color = if best_discrepancy <= match_tol && best_fab_ok && simplification_sound {
+        // declared-color-ok: demo headline candidate from local discrepancy/fabricability checks; admitted only at a consumer's authority boundary (6pf9)
         Color::Verified {
             lo: 0.0,
             hi: best_discrepancy,

@@ -120,6 +120,7 @@ pub fn run_campaign(n: usize, radii: &[f64]) -> MetamatReport {
         .all(|p| p.specific_stiffness <= c_solid + 1e-6 * c_solid.max(1.0));
 
     let stability_color = if all_stable && all_admissible {
+        // declared-color-ok: demo stability candidate from local frontier admissibility bounds; admitted only at a consumer's authority boundary (6pf9)
         Color::Verified {
             lo: frontier.iter().map(|p| p.c11).fold(f64::INFINITY, f64::min),
             hi: c_solid,

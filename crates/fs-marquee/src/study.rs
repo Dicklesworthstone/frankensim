@@ -298,6 +298,7 @@ pub fn run_study(
         // (estimated) ⊗ algebraic residual (estimated) — weakest wins.
         let color = compose(
             &compose(
+                // declared-color-ok: exact-arithmetic identity leaf inside a compose() whose weakest-input rule keeps the result estimated (6pf9)
                 &Color::Verified { lo: 0.0, hi: 0.0 },
                 &Color::Estimated {
                     estimator: "dwr(compliance)".to_string(),

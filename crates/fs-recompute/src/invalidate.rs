@@ -343,6 +343,7 @@ pub fn plan(
             Verdict::Skip { bound, slack_left } => {
                 // The skip claim is VERIFIED-color: the bound is an
                 // interval certificate over the perturbation.
+                // declared-color-ok: skip-claim candidate from the local interval certificate; admitted only at a consumer's authority boundary (6pf9)
                 let claim = Color::Verified {
                     lo: 0.0,
                     hi: *bound,

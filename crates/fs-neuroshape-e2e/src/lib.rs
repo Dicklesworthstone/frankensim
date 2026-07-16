@@ -158,6 +158,7 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
     // non-empty interior enclosed by the certified-positive boundary frame. The
     // certified containment is the frame's INNER edge `ring_r − w` (max-norm).
     let topology_color = if certified_inside && bounded {
+        // declared-color-ok: demo topology candidate from the local containment frame; admitted only at a consumer's authority boundary (6pf9)
         Color::Verified {
             lo: 0.0,
             hi: ring_r - w,

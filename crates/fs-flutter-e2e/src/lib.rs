@@ -164,6 +164,7 @@ pub fn run_campaign(lo: f64, hi: f64, steps: usize) -> FlutterReport {
         .iter()
         .find(|s| s.lyapunov_stable && !s.naive_converged && s.aitken_converged);
     let witness = witness_sample.map(|s| s.mu);
+    // declared-color-ok: demo witness candidate from the local Lyapunov certificate; admitted only at a consumer's authority boundary (6pf9)
     let witness_color = witness_sample.map(|s| Color::Verified {
         lo: s.spectral_abscissa,
         hi: 0.0,

@@ -243,6 +243,7 @@ impl ScalingPlan {
     #[must_use]
     pub fn color(&self) -> Color {
         if self.stable && self.tau_margin > 0.05 && self.mach < 0.5 * MACH_LIMIT {
+            // declared-color-ok: stability-report candidate from local tau/Mach margins; admitted only at a consumer's authority boundary (6pf9)
             Color::Verified {
                 lo: 0.0,
                 hi: self.tau_margin,
