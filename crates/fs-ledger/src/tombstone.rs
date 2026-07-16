@@ -16,7 +16,7 @@
 //! accumulate.
 
 use crate::{EventRow, Ledger, LedgerError};
-use fs_qty::QtyAny;
+use fs_qty::{Dims, QtyAny};
 use fs_regime::{Input, pi_groups};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -45,12 +45,23 @@ pub struct Descriptor {
     pub params: BTreeMap<String, QtyAny>,
 }
 
+/// π-comparison policy version (bead sj31i.30): v2 compares signatures
+/// only after exact semantic-basis compatibility (role names AND
+/// per-coordinate dimensions) or a verified crosswalk receipt — a
+/// matching dimension matrix alone is never sufficient to make two
+/// descriptors π-neighbors.
+pub const PI_COMPARE_POLICY_VERSION: u32 = 2;
+
 /// The π-space signature: exponent vectors over the (name-sorted)
-/// parameters plus the group's log10 value.
+/// parameters plus the group's log10 value, with each coordinate's
+/// semantic role name and exact dimensions retained so comparison can
+/// demand basis compatibility (bead sj31i.30).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PiSignature {
-    /// Parameter names in the order the exponents index.
+    /// Semantic role names (name-sorted) in the order the exponents index.
     pub basis: Vec<String>,
+    /// Each basis coordinate's exact dimensions, aligned with `basis`.
+    pub coordinate_dims: Vec<Dims>,
     /// (integer exponents, log10 of the group value) per group.
     pub groups: Vec<(Vec<i64>, f64)>,
 }
@@ -99,6 +110,7 @@ impl Descriptor {
         groups.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(PiSignature {
             basis: self.params.keys().cloned().collect(),
+            coordinate_dims: self.params.values().map(|qty| qty.dims).collect(),
             groups,
         })
     }
@@ -142,10 +154,18 @@ fn fs_obs_fnv(bytes: &[u8]) -> u64 {
 }
 
 /// π-space distance: sum over matched exponent vectors of |Δlog10|;
-/// `None` when the group structures differ (different physics — no
-/// collision claim either way).
+/// `None` when the signatures are not comparable — either the group
+/// structures differ, or (policy v2, bead sj31i.30) the SEMANTIC bases
+/// are incompatible: role names or per-coordinate dimensions disagree.
+/// Two descriptors whose dimension matrices happen to coincide make no
+/// collision claim in either direction; renamed-but-equivalent bases
+/// compare only through [`pi_distance_crosswalked`] with a verified
+/// receipt.
 #[must_use]
 pub fn pi_distance(a: &PiSignature, b: &PiSignature) -> Option<f64> {
+    if a.basis != b.basis || a.coordinate_dims != b.coordinate_dims {
+        return None;
+    }
     if a.groups.len() != b.groups.len() || a.groups.is_empty() {
         return None;
     }
@@ -157,6 +177,160 @@ pub fn pi_distance(a: &PiSignature, b: &PiSignature) -> Option<f64> {
         d += (va - vb).abs();
     }
     Some(d)
+}
+
+/// An explicit role-rename crosswalk between two semantic bases: the
+/// caller's CLAIM that `from` roles alias `to` roles. It grants nothing
+/// by itself — only [`BasisCrosswalk::verify`] mints a comparison-
+/// capable receipt, and only against the two exact signatures it will
+/// be used with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BasisCrosswalk {
+    /// Source basis schema label (provenance, retained in the receipt).
+    pub from_schema: String,
+    /// Target basis schema label.
+    pub to_schema: String,
+    /// Total role rename `from role → to role`.
+    pub map: BTreeMap<String, String>,
+}
+
+/// A verified crosswalk receipt: sealed fields (holding one means
+/// [`BasisCrosswalk::verify`] actually ran against these exact bases).
+/// Presenting it with any other signature refuses — a stale receipt
+/// (bases changed since minting) cannot be replayed, and the fields
+/// cannot be forged from outside the module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedCrosswalk {
+    from_schema: String,
+    to_schema: String,
+    from_basis: Vec<String>,
+    from_dims: Vec<Dims>,
+    to_basis: Vec<String>,
+    to_dims: Vec<Dims>,
+    /// `remap[i]` = index in the TO basis of FROM coordinate `i`.
+    remap: Vec<usize>,
+    policy_version: u32,
+}
+
+impl VerifiedCrosswalk {
+    /// The policy version the receipt was minted under.
+    #[must_use]
+    pub fn policy_version(&self) -> u32 {
+        self.policy_version
+    }
+
+    /// Schema labels `(from, to)` for evidence binding.
+    #[must_use]
+    pub fn schemas(&self) -> (&str, &str) {
+        (&self.from_schema, &self.to_schema)
+    }
+}
+
+impl BasisCrosswalk {
+    /// Verify this crosswalk against the two exact signatures it will
+    /// compare: the map must be TOTAL over the from-basis, injective
+    /// (no many-to-one), cover the whole to-basis (same arity — no
+    /// partial or ambiguous matches), and preserve every mapped
+    /// coordinate's exact dimensions.
+    ///
+    /// # Errors
+    /// [`LedgerError::Invalid`] naming the first violated rule.
+    pub fn verify(
+        &self,
+        from: &PiSignature,
+        to: &PiSignature,
+    ) -> Result<VerifiedCrosswalk, LedgerError> {
+        let invalid = |problem: String| LedgerError::Invalid {
+            field: "basis_crosswalk".to_string(),
+            problem,
+        };
+        if from.basis.len() != to.basis.len() {
+            return Err(invalid(format!(
+                "bases have different arity ({} vs {}) — no partial matches",
+                from.basis.len(),
+                to.basis.len()
+            )));
+        }
+        let mut remap = Vec::with_capacity(from.basis.len());
+        let mut used = vec![false; to.basis.len()];
+        for (i, role) in from.basis.iter().enumerate() {
+            let Some(target) = self.map.get(role) else {
+                return Err(invalid(format!(
+                    "map is not total: from-role `{role}` has no target"
+                )));
+            };
+            let Some(j) = to.basis.iter().position(|r| r == target) else {
+                return Err(invalid(format!(
+                    "target role `{target}` is not in the to-basis"
+                )));
+            };
+            if used[j] {
+                return Err(invalid(format!(
+                    "many-to-one: target role `{target}` is claimed twice"
+                )));
+            }
+            used[j] = true;
+            if from.coordinate_dims[i] != to.coordinate_dims[j] {
+                return Err(invalid(format!(
+                    "role `{role}` → `{target}` changes dimensions ({:?} vs {:?}) — an alias \
+                     must preserve exact dims",
+                    from.coordinate_dims[i].0, to.coordinate_dims[j].0
+                )));
+            }
+            remap.push(j);
+        }
+        Ok(VerifiedCrosswalk {
+            from_schema: self.from_schema.clone(),
+            to_schema: self.to_schema.clone(),
+            from_basis: from.basis.clone(),
+            from_dims: from.coordinate_dims.clone(),
+            to_basis: to.basis.clone(),
+            to_dims: to.coordinate_dims.clone(),
+            remap,
+            policy_version: PI_COMPARE_POLICY_VERSION,
+        })
+    }
+}
+
+/// π-space distance across a VERIFIED basis crosswalk: `a`'s
+/// coordinates are remapped into `b`'s basis order through the receipt,
+/// then compared exactly as [`pi_distance`] compares compatible bases.
+/// `None` when the receipt does not bind these exact signatures (stale
+/// or mismatched receipts make no claim) or the remapped group
+/// structures still differ.
+#[must_use]
+pub fn pi_distance_crosswalked(
+    a: &PiSignature,
+    b: &PiSignature,
+    receipt: &VerifiedCrosswalk,
+) -> Option<f64> {
+    if receipt.from_basis != a.basis
+        || receipt.from_dims != a.coordinate_dims
+        || receipt.to_basis != b.basis
+        || receipt.to_dims != b.coordinate_dims
+    {
+        return None;
+    }
+    // Remap every group's exponent vector into the to-basis order and
+    // restore the canonical group sort before comparison.
+    let mut remapped: Vec<(Vec<i64>, f64)> = a
+        .groups
+        .iter()
+        .map(|(exponents, value)| {
+            let mut out = vec![0i64; exponents.len()];
+            for (i, &e) in exponents.iter().enumerate() {
+                out[receipt.remap[i]] = e;
+            }
+            (out, *value)
+        })
+        .collect();
+    remapped.sort_by(|x, y| x.0.cmp(&y.0));
+    let translated = PiSignature {
+        basis: b.basis.clone(),
+        coordinate_dims: b.coordinate_dims.clone(),
+        groups: remapped,
+    };
+    pi_distance(&translated, b)
 }
 
 fn cosine(a: &[f64; EMBED_DIM], b: &[f64; EMBED_DIM]) -> f64 {
@@ -187,7 +361,7 @@ impl TombstoneRecord {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut s = format!(
-            "{{\"kind\":\"tombstone\",\"name\":{:?},\"evidence\":{:?},\"colors\":[",
+            "{{\"kind\":\"tombstone\",\"pi_policy\":{PI_COMPARE_POLICY_VERSION},\"name\":{:?},\"evidence\":{:?},\"colors\":[",
             self.descriptor.name, self.evidence
         );
         for (i, c) in self.colors.iter().enumerate() {

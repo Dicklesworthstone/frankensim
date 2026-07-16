@@ -30,7 +30,10 @@ fn bracket(name: &str, rho: f64, v: f64, l: f64, mu: f64) -> Descriptor {
         "velocity".to_string(),
         QtyAny::new(v, Dims([1, 0, -1, 0, 0, 0])),
     );
-    params.insert("length".to_string(), QtyAny::new(l, Dims([1, 0, 0, 0, 0, 0])));
+    params.insert(
+        "length".to_string(),
+        QtyAny::new(l, Dims([1, 0, 0, 0, 0, 0])),
+    );
     params.insert(
         "viscosity".to_string(),
         QtyAny::new(mu, Dims([-1, 1, -1, 0, 0, 0])),
@@ -250,5 +253,230 @@ fn tb_005_metrics_and_ledger_persistence() {
     verdict(
         "tb-005",
         "re-exploration rate exact; tombstone events persisted with full payloads",
+    );
+}
+
+/// Bead sj31i.30: π comparison demands SEMANTIC basis compatibility.
+/// Identical dimension matrices and group values under different role
+/// names make no collision claim; verified crosswalk receipts restore
+/// comparability for genuine aliases; partial/many-to-one/dims-changing
+/// crosswalks and stale receipts refuse.
+#[test]
+fn tb_010_semantic_basis_compatibility_gates_pi_comparison() {
+    use fs_ledger::tombstone::{
+        BasisCrosswalk, PI_COMPARE_POLICY_VERSION, pi_distance_crosswalked,
+    };
+
+    assert_eq!(PI_COMPARE_POLICY_VERSION, 2);
+
+    // A "speed"-named clone of the bracket basis: same dims matrix,
+    // same group values — dimension-only agreement.
+    let renamed = |name: &str, rho: f64, v: f64, l: f64, mu: f64| -> Descriptor {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "rho".to_string(),
+            QtyAny::new(rho, Dims([-3, 1, 0, 0, 0, 0])),
+        );
+        params.insert(
+            "speed".to_string(),
+            QtyAny::new(v, Dims([1, 0, -1, 0, 0, 0])),
+        );
+        params.insert(
+            "chord".to_string(),
+            QtyAny::new(l, Dims([1, 0, 0, 0, 0, 0])),
+        );
+        params.insert(
+            "mu".to_string(),
+            QtyAny::new(mu, Dims([-1, 1, -1, 0, 0, 0])),
+        );
+        Descriptor {
+            name: name.to_string(),
+            params,
+        }
+    };
+
+    let a = bracket("bracket", 1.225, 24.0, 0.12, 1.81e-5)
+        .pi_signature()
+        .expect("sig");
+    let b = renamed("alien schema", 1.225, 24.0, 0.12, 1.81e-5)
+        .pi_signature()
+        .expect("sig");
+
+    // Identical exponents and values — but incompatible semantics.
+    assert_eq!(
+        pi_distance(&a, &b),
+        None,
+        "a matching dimension matrix alone never makes π-neighbors"
+    );
+
+    // A dimension-only twin never becomes a PRIMARY neighbor in the
+    // index either; with distinct name tokens the gate stays Clear.
+    let mut index = TombstoneIndex::new();
+    index.record_falsification_kill(
+        bracket("bracket crossflow study", 1.225, 24.0, 0.12, 1.81e-5),
+        "{}",
+        vec!["estimated".to_string()],
+        100.0,
+        "2026-07-07",
+        "agent:a",
+    );
+    let probe = renamed("unrelated duct jig", 1.225, 24.0, 0.12, 1.81e-5);
+    assert!(
+        index.pi_neighbors(&probe).is_empty(),
+        "no π suppression across incompatible bases"
+    );
+    assert!(matches!(
+        index.pre_exploration_check(&probe),
+        ExplorationVerdict::Clear
+    ));
+
+    // The tombstone evidence payload binds the comparison policy.
+    let json = index.get(0).expect("row").to_json();
+    assert!(
+        json.contains("\"pi_policy\":2"),
+        "distance policy bound into evidence: {json}"
+    );
+
+    // An explicit, verified crosswalk restores comparability.
+    let mut map = BTreeMap::new();
+    map.insert("chord".to_string(), "length".to_string());
+    map.insert("mu".to_string(), "viscosity".to_string());
+    map.insert("rho".to_string(), "density".to_string());
+    map.insert("speed".to_string(), "velocity".to_string());
+    let crosswalk = BasisCrosswalk {
+        from_schema: "alien.v1".to_string(),
+        to_schema: "bracket.v1".to_string(),
+        map: map.clone(),
+    };
+    let receipt = crosswalk
+        .verify(&b, &a)
+        .expect("total bijective dims-preserving alias");
+    let d = pi_distance_crosswalked(&b, &a, &receipt).expect("crosswalked aliases are comparable");
+    assert!(d < 1e-12, "identical physics through the alias: {d}");
+
+    // Stale receipt: minted for (b, a), presented with a DIFFERENT
+    // from-signature — refuses, no claim.
+    let drifted = renamed("alien schema", 1.225, 240.0, 0.12, 1.81e-5)
+        .pi_signature()
+        .expect("sig");
+    assert!(
+        pi_distance_crosswalked(&drifted, &a, &receipt).is_some(),
+        "same basis, different values: still bound (values are the distance)"
+    );
+    let mut drifted_basis = renamed("alien schema", 1.225, 24.0, 0.12, 1.81e-5);
+    drifted_basis.params.insert(
+        "spin".to_string(),
+        QtyAny::new(1.0, Dims([0, 0, -1, 0, 0, 0])),
+    );
+    let drifted_basis = drifted_basis.pi_signature().expect("sig");
+    assert_eq!(
+        pi_distance_crosswalked(&drifted_basis, &a, &receipt),
+        None,
+        "a receipt does not bind a basis that changed since minting"
+    );
+
+    // Partial map refuses.
+    let mut partial = map.clone();
+    partial.remove("speed");
+    assert!(
+        BasisCrosswalk {
+            from_schema: "alien.v1".into(),
+            to_schema: "bracket.v1".into(),
+            map: partial,
+        }
+        .verify(&b, &a)
+        .is_err(),
+        "partial crosswalks refuse"
+    );
+
+    // Many-to-one refuses.
+    let mut collapsing = map.clone();
+    collapsing.insert("speed".to_string(), "density".to_string());
+    assert!(
+        BasisCrosswalk {
+            from_schema: "alien.v1".into(),
+            to_schema: "bracket.v1".into(),
+            map: collapsing,
+        }
+        .verify(&b, &a)
+        .is_err(),
+        "many-to-one crosswalks refuse"
+    );
+
+    // A dims-changing alias refuses even when names line up.
+    let mut swapped = map;
+    swapped.insert("speed".to_string(), "length".to_string());
+    swapped.insert("chord".to_string(), "velocity".to_string());
+    assert!(
+        BasisCrosswalk {
+            from_schema: "alien.v1".into(),
+            to_schema: "bracket.v1".into(),
+            map: swapped,
+        }
+        .verify(&b, &a)
+        .is_err(),
+        "an alias that changes coordinate dimensions refuses"
+    );
+
+    verdict(
+        "tb-010",
+        "dimension-only matches make no claim; verified crosswalks restore comparability; \
+         partial/many-to-one/dims-changing/stale receipts refuse",
+    );
+}
+
+/// Bead sj31i.30 metric laws: reordered parameter insertion is
+/// canonicalized, distance is symmetric, satisfies the triangle
+/// inequality, and shifts metamorphically by exactly the rescaling
+/// decade.
+#[test]
+fn tb_011_pi_distance_metric_laws_hold_on_compatible_bases() {
+    let a = bracket("a", 1.225, 10.0, 0.1, 1.8e-5)
+        .pi_signature()
+        .expect("sig");
+    let b = bracket("b", 1.225, 20.0, 0.1, 1.8e-5)
+        .pi_signature()
+        .expect("sig");
+    let c = bracket("c", 1.225, 80.0, 0.1, 1.8e-5)
+        .pi_signature()
+        .expect("sig");
+
+    // Reordered insertion canonicalizes to the same signature.
+    let mut reordered_params = BTreeMap::new();
+    for (key, qty) in bracket("a", 1.225, 10.0, 0.1, 1.8e-5)
+        .params
+        .into_iter()
+        .rev()
+    {
+        reordered_params.insert(key, qty);
+    }
+    let reordered = Descriptor {
+        name: "a".to_string(),
+        params: reordered_params,
+    }
+    .pi_signature()
+    .expect("sig");
+    assert_eq!(a, reordered, "insertion order cannot change the basis");
+
+    let dab = pi_distance(&a, &b).expect("compatible");
+    let dba = pi_distance(&b, &a).expect("compatible");
+    let dbc = pi_distance(&b, &c).expect("compatible");
+    let dac = pi_distance(&a, &c).expect("compatible");
+    assert_eq!(dab.to_bits(), dba.to_bits(), "symmetry");
+    assert!(dac <= dab + dbc + 1e-12, "triangle inequality");
+
+    // Metamorphic: velocity x10 shifts the Reynolds group by one decade.
+    let shifted = bracket("s", 1.225, 100.0, 0.1, 1.8e-5)
+        .pi_signature()
+        .expect("sig");
+    let base = bracket("s", 1.225, 10.0, 0.1, 1.8e-5)
+        .pi_signature()
+        .expect("sig");
+    let d = pi_distance(&base, &shifted).expect("compatible");
+    assert!((d - 1.0).abs() < 1e-9, "x10 velocity is one decade: {d}");
+
+    verdict(
+        "tb-011",
+        "canonical ordering, symmetry, triangle, and decade metamorphic all hold",
     );
 }
