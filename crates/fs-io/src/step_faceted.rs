@@ -1,17 +1,16 @@
 //! Strict native decoding for a triangle-only ISO 10303 faceted-B-rep subset.
 //!
 //! This module interprets only one caller-selected, root-reachable chain:
-//! `FACETED_BREP -> CLOSED_SHELL -> FACE -> FACE_OUTER_BOUND -> POLY_LOOP ->
-//! CARTESIAN_POINT`. Every face must contain one triangular outer loop. The
-//! resulting soup is still routed through [`crate::import_step_tessellation`],
-//! which owns repair, bounded mesh-integrity checks, evidence composition, and
-//! SDF sampling.
+//! `FACETED_BREP -> CLOSED_SHELL -> (FACE | FACE_SURFACE) -> FACE_OUTER_BOUND
+//! -> POLY_LOOP -> CARTESIAN_POINT`. A `FACE_SURFACE` must additionally resolve
+//! through `PLANE -> AXIS2_PLACEMENT_3D` to a 3-D location and optional 3-D
+//! directions. Every face must contain one triangular outer loop. Plane-backed
+//! faces are checked for coplanarity and orientation before the resulting soup
+//! is routed through [`crate::import_step_tessellation`], which owns repair,
+//! bounded mesh-integrity checks, evidence composition, and SDF sampling.
 //! A declared AP203/AP214-family schema is an admission label only; this module
 //! does not validate an EXPRESS schema, representation context, units, product
-//! linkage, or application-protocol global rules. In particular, v1 refuses
-//! plane-backed `FACE_SURFACE` records used by ordinary AP203/AP214 exchange;
-//! those require a pinned `PLANE`/placement/direction subset rather than being
-//! silently treated as bare resource `FACE` records.
+//! linkage, application-protocol global rules, or general surface geometry.
 
 use crate::step::{ParsedStep, StepEntity, StepInstance, StepValue};
 use crate::step_import::{
@@ -26,7 +25,7 @@ use fs_rep_mesh::Soup;
 use std::{cmp::Reverse, collections::BinaryHeap};
 
 /// Versioned meaning of the strict triangular faceted-B-rep decoder.
-pub const STEP_FACETED_DECODER_VERSION: &str = "step-triangular-faceted-brep-v1";
+pub const STEP_FACETED_DECODER_VERSION: &str = "step-triangular-faceted-brep-v2";
 /// Stable materializer name retained by the downstream STEP import receipt.
 pub const STEP_FACETED_MATERIALIZER_NAME: &str = "fs-io-native-faceted-brep";
 
@@ -34,7 +33,7 @@ const CANCELLATION_POLL_STRIDE: usize = 4_096;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// Exact schema declaration admitted by the v1 resource-entity decoder.
+/// Exact schema declaration admitted by the resource-entity decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepFacetedProfile {
     /// `CONFIG_CONTROL_DESIGN`, commonly associated with AP203.
@@ -57,7 +56,7 @@ impl StepFacetedProfile {
 /// Defensive bounds for native faceted-B-rep semantic materialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepFacetedLimits {
-    /// Maximum distinct reachable Cartesian points.
+    /// Maximum distinct reachable polygon `CARTESIAN_POINT` instances.
     pub max_vertices: usize,
     /// Maximum reachable triangular faces.
     pub max_triangles: usize,
@@ -187,8 +186,12 @@ pub struct StepFacetedReceipt {
     shell_id: u64,
     vertex_count: usize,
     triangle_count: usize,
+    bare_face_count: usize,
+    plane_face_count: usize,
     reversed_bounds: usize,
     coordinate_conversion: NumericalCertificate,
+    plane_consistency: NumericalCertificate,
+    materialization_deviation: NumericalCertificate,
     semantic_fingerprint: u64,
     limits: StepFacetedLimits,
 }
@@ -236,6 +239,18 @@ impl StepFacetedReceipt {
         self.triangle_count
     }
 
+    /// Reachable resource-level `FACE` count.
+    #[must_use]
+    pub const fn bare_face_count(&self) -> usize {
+        self.bare_face_count
+    }
+
+    /// Reachable plane-backed `FACE_SURFACE` count.
+    #[must_use]
+    pub const fn plane_face_count(&self) -> usize {
+        self.plane_face_count
+    }
+
     /// Face-bound orientations reversed while materializing loops.
     #[must_use]
     pub const fn reversed_bounds(&self) -> usize {
@@ -246,6 +261,18 @@ impl StepFacetedReceipt {
     #[must_use]
     pub const fn coordinate_conversion(&self) -> NumericalCertificate {
         self.coordinate_conversion
+    }
+
+    /// Estimated maximum accepted distance between a face vertex and its plane.
+    #[must_use]
+    pub const fn plane_consistency(&self) -> NumericalCertificate {
+        self.plane_consistency
+    }
+
+    /// Estimated spatial deviation handed to the downstream STEP importer.
+    #[must_use]
+    pub const fn materialization_deviation(&self) -> NumericalCertificate {
+        self.materialization_deviation
     }
 
     /// Deterministic non-cryptographic identity of the admitted closure and soup.
@@ -271,10 +298,13 @@ impl StepFacetedReceipt {
              \"canonical_layout_fingerprint_fnv1a64\":\"{:016x}\",\
              \"semantic_fingerprint_fnv1a64\":\"{:016x}\",\
              \"schema\":\"{}\",\"root_id\":{},\"shell_id\":{},\
-             \"vertices\":{},\"triangles\":{},\"reversed_bounds\":{},\
+             \"vertices\":{},\"triangles\":{},\"bare_faces\":{},\"plane_faces\":{},\
+             \"reversed_bounds\":{},\
              \"coordinate_conversion\":{{\"kind\":\"estimate\",\"lo\":{},\"hi\":{}}},\
+             \"plane_consistency\":{{\"kind\":\"estimate\",\"lo\":{},\"hi\":{}}},\
+             \"materialization_deviation\":{{\"kind\":\"estimate\",\"lo\":{},\"hi\":{}}},\
              \"limits\":{{\"vertices\":{},\"triangles\":{},\"auxiliary_bytes\":{}}},\
-             \"no_claim\":\"bare FACE resource subset only; no FACE_SURFACE or PLANE support; no full EXPRESS or AP conformance, unit-context correspondence, product linkage, self-intersection certificate, or topology authority\"}}",
+             \"no_claim\":\"pinned FACE and plane-backed FACE_SURFACE resource subset only; no full EXPRESS or AP conformance, representation/unit context, product linkage, general surfaces, self-intersection certificate, or topology authority\"}}",
             STEP_FACETED_DECODER_VERSION,
             crate::VERSION,
             self.source_fingerprint,
@@ -285,9 +315,15 @@ impl StepFacetedReceipt {
             self.shell_id,
             self.vertex_count,
             self.triangle_count,
+            self.bare_face_count,
+            self.plane_face_count,
             self.reversed_bounds,
             self.coordinate_conversion.lo,
             self.coordinate_conversion.hi,
+            self.plane_consistency.lo,
+            self.plane_consistency.hi,
+            self.materialization_deviation.lo,
+            self.materialization_deviation.hi,
             self.limits.max_vertices,
             self.limits.max_triangles,
             self.limits.max_auxiliary_bytes,
@@ -349,12 +385,26 @@ struct RawFace {
     bound_id: u64,
     loop_id: u64,
     point_ids: [u64; 3],
+    plane: Option<RawPlane>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RawPlane {
+    plane_id: u64,
+    placement_id: u64,
+    location_id: u64,
+    axis_id: Option<u64>,
+    ref_direction_id: Option<u64>,
+    location: Point3,
+    axis: [f64; 3],
+    ref_direction: Option<[f64; 3]>,
+    same_sense: bool,
 }
 
 /// Decode one caller-selected triangular `FACETED_BREP` closure.
 ///
-/// Reachable instances must use the strict six-entity subset documented at
-/// module scope. Unknown instances outside the selected closure are ignored.
+/// Reachable instances must use the strict entity closure documented at module
+/// scope. Unknown instances outside the selected closure are ignored.
 /// The result is a deterministic soup, not topology or application-protocol
 /// authority.
 ///
@@ -576,17 +626,53 @@ pub fn decode_faceted_brep_with_limits(
         "loop-uniqueness",
     )?;
     let mut reversed_bounds = 0usize;
+    let mut bare_face_count = 0usize;
+    let mut plane_face_count = 0usize;
+    let mut coordinate_upper = 0.0f64;
     for (face_offset, &face_id) in face_ids.iter().enumerate() {
         poll(cx, source_fingerprint, "face-traversal", face_offset)?;
-        let face = simple_entity(
+        let face = simple_entity_any(
             instances,
             &index,
             face_id,
-            "FACE",
             "root.outer.faces[]",
             source_fingerprint,
         )?;
-        require_shape(face, face_id, 2, "root.outer.faces[]", source_fingerprint)?;
+        let plane = match face.name.as_str() {
+            "FACE" => {
+                require_shape(face, face_id, 2, "root.outer.faces[]", source_fingerprint)?;
+                bare_face_count += 1;
+                None
+            }
+            "FACE_SURFACE" => {
+                require_shape(face, face_id, 4, "root.outer.faces[]", source_fingerprint)?;
+                let plane_id = require_reference(
+                    &face.parameters[2],
+                    face_id,
+                    "face_surface.face_geometry",
+                    source_fingerprint,
+                )?;
+                let same_sense = require_boolean(
+                    &face.parameters[3],
+                    face_id,
+                    "face_surface.same_sense",
+                    source_fingerprint,
+                )?;
+                let (plane, location_upper) =
+                    parse_raw_plane(instances, &index, plane_id, same_sense, source_fingerprint)?;
+                coordinate_upper = coordinate_upper.max(location_upper);
+                plane_face_count += 1;
+                Some(plane)
+            }
+            other => {
+                return Err(entity_refusal(
+                    source_fingerprint,
+                    face_id,
+                    "root.outer.faces[]",
+                    format!("expected FACE or FACE_SURFACE, found {other}"),
+                ));
+            }
+        };
         let bounds = require_aggregate(
             &face.parameters[1],
             face_id,
@@ -621,12 +707,13 @@ pub fn decode_faceted_brep_with_limits(
             "face.outer_bound.loop",
             source_fingerprint,
         )?;
-        let reverse = require_boolean(
+        let orientation = require_boolean(
             &bound.parameters[2],
             bound_id,
             "face.outer_bound.orientation",
             source_fingerprint,
         )?;
+        let reverse = !orientation;
         let poly_loop = simple_entity(
             instances,
             &index,
@@ -686,6 +773,7 @@ pub fn decode_faceted_brep_with_limits(
             bound_id,
             loop_id,
             point_ids,
+            plane,
         });
     }
 
@@ -775,7 +863,6 @@ pub fn decode_faceted_brep_with_limits(
         source_fingerprint,
         "point-materialization",
     )?;
-    let mut coordinate_upper = 0.0f64;
     for (point_offset, &point_id) in point_ids.iter().enumerate() {
         poll(
             cx,
@@ -783,73 +870,15 @@ pub fn decode_faceted_brep_with_limits(
             "point-materialization",
             point_offset,
         )?;
-        let point = simple_entity(
+        let (position, spatial_estimate) = parse_cartesian_point(
             instances,
             &index,
             point_id,
-            "CARTESIAN_POINT",
             "poly_loop.polygon[]",
             source_fingerprint,
         )?;
-        require_shape(point, point_id, 2, "cartesian_point", source_fingerprint)?;
-        let coordinates = require_aggregate(
-            &point.parameters[1],
-            point_id,
-            "cartesian_point.coordinates",
-            source_fingerprint,
-        )?;
-        if coordinates.len() != 3 {
-            return Err(entity_refusal(
-                source_fingerprint,
-                point_id,
-                "cartesian_point.coordinates",
-                format!(
-                    "3-D faceted subset requires exactly three coordinates; got {}",
-                    coordinates.len()
-                ),
-            ));
-        }
-        let mut values = [0.0f64; 3];
-        let mut point_ulp = 0.0f64;
-        for (axis, coordinate) in coordinates.iter().enumerate() {
-            let StepValue::Number(token) = coordinate else {
-                return Err(entity_refusal(
-                    source_fingerprint,
-                    point_id,
-                    "cartesian_point.coordinates[]",
-                    "coordinates must be decimal number tokens",
-                ));
-            };
-            let value = token.parse::<f64>().map_err(|error| {
-                entity_refusal(
-                    source_fingerprint,
-                    point_id,
-                    "cartesian_point.coordinates[]",
-                    format!("coordinate {token:?} does not convert to f64: {error}"),
-                )
-            })?;
-            if !value.is_finite() {
-                return Err(entity_refusal(
-                    source_fingerprint,
-                    point_id,
-                    "cartesian_point.coordinates[]",
-                    format!("coordinate {token:?} converts to non-finite f64"),
-                ));
-            }
-            values[axis] = value;
-            point_ulp = point_ulp.max(ulp_magnitude(value));
-        }
-        let spatial_estimate = point_ulp * 2.0;
-        if !spatial_estimate.is_finite() {
-            return Err(entity_refusal(
-                source_fingerprint,
-                point_id,
-                "cartesian_point.coordinates",
-                "finite coordinate has no finite conservative spatial conversion estimate",
-            ));
-        }
         coordinate_upper = coordinate_upper.max(spatial_estimate);
-        positions.push(Point3::new(values[0], values[1], values[2]));
+        positions.push(position);
     }
 
     let mut triangles = Vec::new();
@@ -859,6 +888,7 @@ pub fn decode_faceted_brep_with_limits(
         source_fingerprint,
         "triangle-materialization",
     )?;
+    let mut plane_consistency_upper = 0.0f64;
     for (face_offset, face) in raw_faces.iter().enumerate() {
         poll(
             cx,
@@ -884,8 +914,31 @@ pub fn decode_faceted_brep_with_limits(
                 )
             })?;
         }
+        if let Some(plane) = face.plane {
+            plane_consistency_upper = plane_consistency_upper.max(validate_plane_face(
+                face,
+                plane,
+                triangle,
+                &positions,
+                coordinate_upper,
+                source_fingerprint,
+            )?);
+        }
         triangles.push(triangle);
     }
+
+    let materialization_upper = if plane_face_count == 0 {
+        coordinate_upper
+    } else {
+        outward_nonnegative_sum(coordinate_upper, plane_consistency_upper).ok_or_else(|| {
+            entity_refusal(
+                source_fingerprint,
+                root_id,
+                "materialization-deviation",
+                "coordinate conversion and plane-consistency estimates do not have a finite sum",
+            )
+        })?
+    };
 
     let semantic_fingerprint = semantic_fingerprint(
         profile,
@@ -907,8 +960,12 @@ pub fn decode_faceted_brep_with_limits(
         shell_id,
         vertex_count: positions.len(),
         triangle_count: triangles.len(),
+        bare_face_count,
+        plane_face_count,
         reversed_bounds,
         coordinate_conversion: NumericalCertificate::estimate(0.0, coordinate_upper),
+        plane_consistency: NumericalCertificate::estimate(0.0, plane_consistency_upper),
+        materialization_deviation: NumericalCertificate::estimate(0.0, materialization_upper),
         semantic_fingerprint,
         limits,
     };
@@ -924,10 +981,11 @@ pub fn decode_faceted_brep_with_limits(
 /// Decode a strict triangular faceted B-rep and run the existing topology and
 /// estimated-SDF handoff.
 ///
-/// The caller supplies the unit because this v1 closure deliberately ignores
-/// representation context. Decimal-coordinate conversion is retained as an
-/// estimated materialization deviation. The returned decoder receipt remains
-/// separate from the existing topology/SDF receipt.
+/// The caller supplies the unit because this closure deliberately ignores
+/// representation context. Decimal-coordinate conversion and accepted
+/// face-plane residual are retained as an estimated materialization deviation.
+/// The returned decoder receipt remains separate from the existing topology/SDF
+/// receipt.
 ///
 /// # Errors
 /// [`StepFacetedImportRefusal`] for native decoding or downstream import refusal.
@@ -954,7 +1012,7 @@ pub fn import_faceted_brep(
             version: STEP_FACETED_DECODER_VERSION.to_string(),
             configuration_fingerprint,
         },
-        decoder_receipt.coordinate_conversion(),
+        decoder_receipt.materialization_deviation(),
         length_unit,
         target_h,
         cx,
@@ -1035,6 +1093,25 @@ fn simple_entity<'a>(
     relationship: &'static str,
     source_fingerprint: u64,
 ) -> Result<&'a StepEntity, StepFacetedRefusal> {
+    let entity = simple_entity_any(instances, index, id, relationship, source_fingerprint)?;
+    if entity.name != expected {
+        return Err(entity_refusal(
+            source_fingerprint,
+            id,
+            relationship,
+            format!("expected {expected}, found {}", entity.name),
+        ));
+    }
+    Ok(entity)
+}
+
+fn simple_entity_any<'a>(
+    instances: &'a [StepInstance],
+    index: &[(u64, usize)],
+    id: u64,
+    relationship: &'static str,
+    source_fingerprint: u64,
+) -> Result<&'a StepEntity, StepFacetedRefusal> {
     let offset = index
         .binary_search_by_key(&id, |entry| entry.0)
         .map(|position| index[position].1)
@@ -1043,7 +1120,7 @@ fn simple_entity<'a>(
                 source_fingerprint,
                 id,
                 relationship,
-                format!("referenced {expected} instance does not exist"),
+                "referenced instance does not exist",
             )
         })?;
     let instance = &instances[offset];
@@ -1053,20 +1130,12 @@ fn simple_entity<'a>(
             id,
             relationship,
             format!(
-                "reachable {expected} must be a simple instance; found {} complex components",
+                "reachable instance must be simple; found {} complex components",
                 instance.components.len()
             ),
         ));
     }
     let entity = &instance.components[0];
-    if entity.name != expected {
-        return Err(entity_refusal(
-            source_fingerprint,
-            id,
-            relationship,
-            format!("expected {expected}, found {}", entity.name),
-        ));
-    }
     Ok(entity)
 }
 
@@ -1118,6 +1187,24 @@ fn require_reference(
     }
 }
 
+fn require_optional_reference(
+    value: &StepValue,
+    owner_id: u64,
+    relationship: &'static str,
+    source_fingerprint: u64,
+) -> Result<Option<u64>, StepFacetedRefusal> {
+    match value {
+        StepValue::Omitted => Ok(None),
+        StepValue::Reference(id) => Ok(Some(*id)),
+        _ => Err(entity_refusal(
+            source_fingerprint,
+            owner_id,
+            relationship,
+            "expected an entity reference or omitted value ($)",
+        )),
+    }
+}
+
 fn require_aggregate<'a>(
     value: &'a StepValue,
     owner_id: u64,
@@ -1143,15 +1230,485 @@ fn require_boolean(
     source_fingerprint: u64,
 ) -> Result<bool, StepFacetedRefusal> {
     match value {
-        StepValue::Enumeration(value) if value == "T" => Ok(false),
-        StepValue::Enumeration(value) if value == "F" => Ok(true),
+        StepValue::Enumeration(value) if value == "T" => Ok(true),
+        StepValue::Enumeration(value) if value == "F" => Ok(false),
         _ => Err(entity_refusal(
             source_fingerprint,
             owner_id,
             relationship,
-            "orientation must be .T. or .F.",
+            "boolean value must be .T. or .F.",
         )),
     }
+}
+
+fn parse_raw_plane(
+    instances: &[StepInstance],
+    index: &[(u64, usize)],
+    plane_id: u64,
+    same_sense: bool,
+    source_fingerprint: u64,
+) -> Result<(RawPlane, f64), StepFacetedRefusal> {
+    let plane = simple_entity(
+        instances,
+        index,
+        plane_id,
+        "PLANE",
+        "face_surface.face_geometry",
+        source_fingerprint,
+    )?;
+    require_shape(
+        plane,
+        plane_id,
+        2,
+        "face_surface.face_geometry",
+        source_fingerprint,
+    )?;
+    let placement_id = require_reference(
+        &plane.parameters[1],
+        plane_id,
+        "plane.position",
+        source_fingerprint,
+    )?;
+    let placement = simple_entity(
+        instances,
+        index,
+        placement_id,
+        "AXIS2_PLACEMENT_3D",
+        "plane.position",
+        source_fingerprint,
+    )?;
+    require_shape(
+        placement,
+        placement_id,
+        4,
+        "plane.position",
+        source_fingerprint,
+    )?;
+    let location_id = require_reference(
+        &placement.parameters[1],
+        placement_id,
+        "plane.position.location",
+        source_fingerprint,
+    )?;
+    let axis_id = require_optional_reference(
+        &placement.parameters[2],
+        placement_id,
+        "plane.position.axis",
+        source_fingerprint,
+    )?;
+    let ref_direction_id = require_optional_reference(
+        &placement.parameters[3],
+        placement_id,
+        "plane.position.ref_direction",
+        source_fingerprint,
+    )?;
+    let (location, location_upper) = parse_cartesian_point(
+        instances,
+        index,
+        location_id,
+        "plane.position.location",
+        source_fingerprint,
+    )?;
+    let axis = match axis_id {
+        Some(id) => parse_direction(
+            instances,
+            index,
+            id,
+            "plane.position.axis",
+            source_fingerprint,
+        )?,
+        None => [0.0, 0.0, 1.0],
+    };
+    let ref_direction = match ref_direction_id {
+        Some(id) => Some(parse_direction(
+            instances,
+            index,
+            id,
+            "plane.position.ref_direction",
+            source_fingerprint,
+        )?),
+        None => None,
+    };
+    if axis_id.is_some() {
+        if let Some(reference) = ref_direction {
+            let separation = cross_norm(axis, reference);
+            if !separation.is_finite() || separation <= 256.0 * f64::EPSILON {
+                return Err(entity_refusal(
+                    source_fingerprint,
+                    placement_id,
+                    "plane.position",
+                    "explicit axis and ref_direction must be numerically non-parallel",
+                ));
+            }
+        }
+    }
+    Ok((
+        RawPlane {
+            plane_id,
+            placement_id,
+            location_id,
+            axis_id,
+            ref_direction_id,
+            location,
+            axis,
+            ref_direction,
+            same_sense,
+        },
+        location_upper,
+    ))
+}
+
+fn parse_cartesian_point(
+    instances: &[StepInstance],
+    index: &[(u64, usize)],
+    point_id: u64,
+    relationship: &'static str,
+    source_fingerprint: u64,
+) -> Result<(Point3, f64), StepFacetedRefusal> {
+    let point = simple_entity(
+        instances,
+        index,
+        point_id,
+        "CARTESIAN_POINT",
+        relationship,
+        source_fingerprint,
+    )?;
+    require_shape(point, point_id, 2, relationship, source_fingerprint)?;
+    let coordinates = require_aggregate(
+        &point.parameters[1],
+        point_id,
+        "cartesian_point.coordinates",
+        source_fingerprint,
+    )?;
+    let values = parse_finite_triplet(
+        coordinates,
+        point_id,
+        "cartesian_point.coordinates",
+        "coordinate",
+        source_fingerprint,
+    )?;
+    let point_ulp = values
+        .iter()
+        .fold(0.0f64, |upper, value| upper.max(ulp_magnitude(*value)));
+    let spatial_estimate = point_ulp * 2.0;
+    if !spatial_estimate.is_finite() {
+        return Err(entity_refusal(
+            source_fingerprint,
+            point_id,
+            "cartesian_point.coordinates",
+            "finite coordinate has no finite conservative spatial conversion estimate",
+        ));
+    }
+    Ok((
+        Point3::new(values[0], values[1], values[2]),
+        spatial_estimate,
+    ))
+}
+
+fn parse_direction(
+    instances: &[StepInstance],
+    index: &[(u64, usize)],
+    direction_id: u64,
+    relationship: &'static str,
+    source_fingerprint: u64,
+) -> Result<[f64; 3], StepFacetedRefusal> {
+    let direction = simple_entity(
+        instances,
+        index,
+        direction_id,
+        "DIRECTION",
+        relationship,
+        source_fingerprint,
+    )?;
+    require_shape(direction, direction_id, 2, relationship, source_fingerprint)?;
+    let ratios = require_aggregate(
+        &direction.parameters[1],
+        direction_id,
+        "direction.direction_ratios",
+        source_fingerprint,
+    )?;
+    let values = parse_finite_triplet(
+        ratios,
+        direction_id,
+        "direction.direction_ratios",
+        "direction ratio",
+        source_fingerprint,
+    )?;
+    normalize_direction(values).ok_or_else(|| {
+        entity_refusal(
+            source_fingerprint,
+            direction_id,
+            "direction.direction_ratios",
+            "3-D direction ratios must define a finite nonzero direction",
+        )
+    })
+}
+
+fn parse_finite_triplet(
+    values: &[StepValue],
+    owner_id: u64,
+    relationship: &'static str,
+    noun: &'static str,
+    source_fingerprint: u64,
+) -> Result<[f64; 3], StepFacetedRefusal> {
+    if values.len() != 3 {
+        return Err(entity_refusal(
+            source_fingerprint,
+            owner_id,
+            relationship,
+            format!(
+                "3-D faceted subset requires exactly three {noun}s; got {}",
+                values.len()
+            ),
+        ));
+    }
+    let mut parsed = [0.0f64; 3];
+    for (axis, value) in values.iter().enumerate() {
+        let StepValue::Number(token) = value else {
+            return Err(entity_refusal(
+                source_fingerprint,
+                owner_id,
+                relationship,
+                format!("{noun}s must be decimal number tokens"),
+            ));
+        };
+        let number = token.parse::<f64>().map_err(|error| {
+            entity_refusal(
+                source_fingerprint,
+                owner_id,
+                relationship,
+                format!("{noun} {token:?} does not convert to f64: {error}"),
+            )
+        })?;
+        if !number.is_finite() {
+            return Err(entity_refusal(
+                source_fingerprint,
+                owner_id,
+                relationship,
+                format!("{noun} {token:?} converts to non-finite f64"),
+            ));
+        }
+        parsed[axis] = number;
+    }
+    Ok(parsed)
+}
+
+fn normalize_direction(values: [f64; 3]) -> Option<[f64; 3]> {
+    let scale = values
+        .iter()
+        .fold(0.0f64, |largest, value| largest.max(value.abs()));
+    if !scale.is_finite() || scale == 0.0 {
+        return None;
+    }
+    let scaled = [values[0] / scale, values[1] / scale, values[2] / scale];
+    let magnitude = (scaled[0] * scaled[0] + scaled[1] * scaled[1] + scaled[2] * scaled[2]).sqrt();
+    if !magnitude.is_finite() || magnitude == 0.0 {
+        return None;
+    }
+    Some([
+        scaled[0] / magnitude,
+        scaled[1] / magnitude,
+        scaled[2] / magnitude,
+    ])
+}
+
+fn validate_plane_face(
+    face: &RawFace,
+    plane: RawPlane,
+    triangle: [u32; 3],
+    positions: &[Point3],
+    coordinate_upper: f64,
+    source_fingerprint: u64,
+) -> Result<f64, StepFacetedRefusal> {
+    let mut points = [Point3::new(0.0, 0.0, 0.0); 3];
+    for (corner, ordinal) in triangle.into_iter().enumerate() {
+        points[corner] = *positions.get(ordinal as usize).ok_or_else(|| {
+            entity_refusal(
+                source_fingerprint,
+                face.face_id,
+                "face_surface.bounds",
+                format!("materialized point ordinal {ordinal} is unavailable"),
+            )
+        })?;
+    }
+
+    let edge_a = [
+        points[1].x - points[0].x,
+        points[1].y - points[0].y,
+        points[1].z - points[0].z,
+    ];
+    let edge_b = [
+        points[2].x - points[0].x,
+        points[2].y - points[0].y,
+        points[2].z - points[0].z,
+    ];
+    let edge_scale = edge_a
+        .iter()
+        .chain(&edge_b)
+        .fold(0.0f64, |largest, value| largest.max(value.abs()));
+    if !edge_scale.is_finite() || edge_scale == 0.0 {
+        return Err(entity_refusal(
+            source_fingerprint,
+            face.face_id,
+            "face_surface.bounds",
+            "plane-backed triangle has no finite nonzero edge scale",
+        ));
+    }
+    let a = [
+        edge_a[0] / edge_scale,
+        edge_a[1] / edge_scale,
+        edge_a[2] / edge_scale,
+    ];
+    let b = [
+        edge_b[0] / edge_scale,
+        edge_b[1] / edge_scale,
+        edge_b[2] / edge_scale,
+    ];
+    let triangle_normal = cross(a, b);
+    let triangle_normal_magnitude = vector_norm(triangle_normal);
+    if !triangle_normal_magnitude.is_finite() || triangle_normal_magnitude <= 256.0 * f64::EPSILON {
+        return Err(entity_refusal(
+            source_fingerprint,
+            face.face_id,
+            "face_surface.bounds",
+            "plane-backed triangle is numerically degenerate",
+        ));
+    }
+    let expected_normal = if plane.same_sense {
+        plane.axis
+    } else {
+        [-plane.axis[0], -plane.axis[1], -plane.axis[2]]
+    };
+    let alignment = dot(triangle_normal, expected_normal);
+    let alignment_floor = 256.0 * f64::EPSILON * triangle_normal_magnitude;
+    if !alignment.is_finite() || alignment <= alignment_floor {
+        return Err(entity_refusal(
+            source_fingerprint,
+            face.face_id,
+            "face_surface.same_sense",
+            format!(
+                "triangle winding disagrees with PLANE #{} and same_sense",
+                plane.plane_id
+            ),
+        ));
+    }
+
+    let coordinate_scale = points.iter().fold(
+        plane
+            .location
+            .x
+            .abs()
+            .max(plane.location.y.abs())
+            .max(plane.location.z.abs())
+            .max(1.0),
+        |largest, point| {
+            largest
+                .max(point.x.abs())
+                .max(point.y.abs())
+                .max(point.z.abs())
+        },
+    );
+    let arithmetic_tolerance = 256.0 * f64::EPSILON * coordinate_scale;
+    let conversion_tolerance = coordinate_upper * 8.0;
+    let tolerance = outward_nonnegative_sum(arithmetic_tolerance, conversion_tolerance)
+        .ok_or_else(|| {
+            entity_refusal(
+                source_fingerprint,
+                plane.plane_id,
+                "plane.position",
+                "plane-consistency tolerance is not finite",
+            )
+        })?;
+    let mut accepted_upper = 0.0f64;
+    for point in points {
+        let residual =
+            point_plane_residual(point, plane.location, plane.axis).ok_or_else(|| {
+                entity_refusal(
+                    source_fingerprint,
+                    face.face_id,
+                    "face_surface.face_geometry",
+                    "point-to-plane residual is not finite",
+                )
+            })?;
+        if residual > tolerance {
+            return Err(entity_refusal(
+                source_fingerprint,
+                face.face_id,
+                "face_surface.face_geometry",
+                format!(
+                    "triangle vertex is {residual:e} from PLANE #{}; admitted tolerance is {tolerance:e}",
+                    plane.plane_id
+                ),
+            ));
+        }
+        let residual_upper =
+            outward_nonnegative_sum(residual, arithmetic_tolerance).ok_or_else(|| {
+                entity_refusal(
+                    source_fingerprint,
+                    face.face_id,
+                    "face_surface.face_geometry",
+                    "accepted point-to-plane estimate is not finite",
+                )
+            })?;
+        accepted_upper = accepted_upper.max(residual_upper);
+    }
+    Ok(accepted_upper)
+}
+
+fn point_plane_residual(point: Point3, location: Point3, normal: [f64; 3]) -> Option<f64> {
+    let delta = [
+        point.x - location.x,
+        point.y - location.y,
+        point.z - location.z,
+    ];
+    let scale = delta
+        .iter()
+        .fold(0.0f64, |largest, value| largest.max(value.abs()));
+    if !scale.is_finite() {
+        return None;
+    }
+    if scale == 0.0 {
+        return Some(0.0);
+    }
+    let scaled = [delta[0] / scale, delta[1] / scale, delta[2] / scale];
+    let residual = dot(scaled, normal).abs() * scale;
+    residual.is_finite().then_some(residual)
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn vector_norm(vector: [f64; 3]) -> f64 {
+    dot(vector, vector).sqrt()
+}
+
+fn cross_norm(a: [f64; 3], b: [f64; 3]) -> f64 {
+    vector_norm(cross(a, b))
+}
+
+fn outward_nonnegative_sum(a: f64, b: f64) -> Option<f64> {
+    if !a.is_finite() || !b.is_finite() || a < 0.0 || b < 0.0 {
+        return None;
+    }
+    let sum = a + b;
+    if !sum.is_finite() {
+        return None;
+    }
+    let rounded = if sum == 0.0 {
+        0.0
+    } else {
+        f64::from_bits(sum.to_bits() + 1)
+    };
+    rounded.is_finite().then_some(rounded)
 }
 
 fn reserve_exact<T>(
@@ -1365,8 +1922,45 @@ fn semantic_fingerprint(
         for vertex in triangle {
             hash = fnv1a64_update(hash, &vertex.to_le_bytes());
         }
+        match face.plane {
+            None => hash = fnv1a64_update(hash, &[0]),
+            Some(plane) => {
+                hash = fnv1a64_update(hash, &[1]);
+                hash = fnv1a64_update(hash, &plane.plane_id.to_le_bytes());
+                hash = fnv1a64_update(hash, &plane.placement_id.to_le_bytes());
+                hash = fnv1a64_update(hash, &plane.location_id.to_le_bytes());
+                hash = fingerprint_optional_id(hash, plane.axis_id);
+                hash = fingerprint_optional_id(hash, plane.ref_direction_id);
+                hash = fnv1a64_update(hash, &[u8::from(plane.same_sense)]);
+                for value in [plane.location.x, plane.location.y, plane.location.z] {
+                    hash = fnv1a64_update(hash, &value.to_bits().to_le_bytes());
+                }
+                for value in plane.axis {
+                    hash = fnv1a64_update(hash, &value.to_bits().to_le_bytes());
+                }
+                match plane.ref_direction {
+                    None => hash = fnv1a64_update(hash, &[0]),
+                    Some(reference) => {
+                        hash = fnv1a64_update(hash, &[1]);
+                        for value in reference {
+                            hash = fnv1a64_update(hash, &value.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(hash)
+}
+
+fn fingerprint_optional_id(mut hash: u64, id: Option<u64>) -> u64 {
+    match id {
+        None => fnv1a64_update(hash, &[0]),
+        Some(id) => {
+            hash = fnv1a64_update(hash, &[1]);
+            fnv1a64_update(hash, &id.to_le_bytes())
+        }
+    }
 }
 
 fn fnv1a64_update(mut hash: u64, bytes: &[u8]) -> u64 {

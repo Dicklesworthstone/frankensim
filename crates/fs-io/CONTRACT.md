@@ -80,16 +80,20 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   mesh-to-SDF numerical evidence, their outward-rounded combined estimate,
   repairs, quality counters, and adapter identity.
 - **Strict native STEP faceted decoding** (`step_faceted` module): materializes
-  one caller-selected, root-reachable `FACETED_BREP -> CLOSED_SHELL -> FACE ->
-  FACE_OUTER_BOUND -> POLY_LOOP -> CARTESIAN_POINT` closure. V1 admits exactly
-  one triangular outer loop per face, preserves loop order except for explicit
-  `.F.` bound reversal, canonicalizes EXPRESS `SET` face traversal by numeric
-  instance ID, and passes the resulting soup into the existing topology/SDF
-  handoff. A separate decoder receipt retains the exact admitted schema label,
-  root/shell IDs, syntax and semantic fingerprints, resource limits, and a
-  conservative decimal-to-f64 spatial estimate. This is bounded resource-entity
-  decoding, not AP203/AP214 conformance; callers supply the length unit because
-  the admitted closure deliberately excludes representation context.
+  one caller-selected, root-reachable `FACETED_BREP -> CLOSED_SHELL -> (FACE |
+  FACE_SURFACE) -> FACE_OUTER_BOUND -> POLY_LOOP -> CARTESIAN_POINT` closure.
+  Plane-backed faces must resolve through `PLANE -> AXIS2_PLACEMENT_3D` to a
+  3-D location and optional valid directions; the decoder checks triangle
+  coplanarity and winding against `same_sense`. It admits exactly one triangular
+  outer loop per face, preserves loop order except for explicit `.F.` bound
+  reversal, canonicalizes EXPRESS `SET` face traversal by numeric instance ID,
+  and passes the resulting soup into the existing topology/SDF handoff. A
+  separate decoder receipt retains the exact admitted schema label, root/shell
+  IDs, syntax and semantic fingerprints, face-profile counts, resource limits,
+  decimal-to-f64 conversion, plane-consistency, and their combined estimated
+  spatial deviation. This is bounded resource-entity decoding, not AP203/AP214
+  conformance; callers supply the length unit because the admitted closure
+  deliberately excludes representation context.
 
 ## Invariants
 
@@ -145,9 +149,12 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     receipt records these limits, crate versions, STEP-import semantics label,
     and tessellation-fingerprint domain.
 13. **Native faceted traversal is explicit and closed**: callers select a
-    positive `FACETED_BREP` root. Only its fixed-depth six-entity closure is
+    positive `FACETED_BREP` root. Only its fixed-depth pinned entity closure is
     interpreted; every reachable instance must be simple, exact-arity, and the
-    expected entity type. Unknown unrelated instances remain outside the claim.
+    expected entity type. `FACE_SURFACE` geometry is restricted to `PLANE` with
+    `AXIS2_PLACEMENT_3D`, a 3-D `CARTESIAN_POINT` location, and omitted or 3-D
+    finite nonzero `DIRECTION` values. Unknown unrelated instances remain
+    outside the claim.
 14. **No implicit triangulation or welding**: every `POLY_LOOP` has exactly
     three unique point references. Shared point IDs become shared soup vertices;
     distinct IDs with equal coordinates remain distinct. Holes, extra bounds,
@@ -157,15 +164,20 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     positions, and triangles are emitted in numeric instance-ID order. Shell
     `SET` permutation therefore preserves the soup and semantic fingerprint;
     source spelling remains separately fingerprinted. `.T.` preserves the
-    `POLY_LOOP` order and `.F.` reverses it.
-16. **Schema labels gate but do not certify**: v1 admits one exact declaration,
-    either `CONFIG_CONTROL_DESIGN` or `AUTOMOTIVE_DESIGN`. The declaration is
-    recorded as provenance, never promoted into EXPRESS or application-protocol
-    authority. Finite coordinate conversion carries a conservative `Estimate`,
-    and the existing zero-hole-fill handoff remains the sole owner of its
-    bounded edge-use, local vertex-link, and aggregate-orientation admission;
-    neither receipt claims global shell connectedness, component nesting, or
-    self-intersection certification.
+    `POLY_LOOP` order and `.F.` reverses it. Plane, placement, location,
+    direction, and `same_sense` semantics also move the semantic fingerprint
+    even when two closures materialize the same soup.
+16. **Schema labels gate but do not certify**: the decoder admits one exact
+    declaration, either `CONFIG_CONTROL_DESIGN` or `AUTOMOTIVE_DESIGN`. The
+    declaration is recorded as provenance, never promoted into EXPRESS or
+    application-protocol authority. Finite coordinate conversion and accepted
+    point-to-plane residuals carry conservative `Estimate` bands. Plane-backed
+    faces refuse non-coplanar vertices, numerically degenerate triangles,
+    direction drift, and winding inconsistent with `same_sense`. The existing
+    zero-hole-fill handoff remains the sole owner of its bounded edge-use, local
+    vertex-link, and aggregate-orientation admission; neither receipt claims
+    global shell connectedness, component nesting, or self-intersection
+    certification.
 17. **Decoder memory admission is portable and explicit**: the auxiliary cap
     covers checked logical element payloads for every simultaneously live
     decoder vector. Platform allocator rounding and container headers are not
@@ -253,12 +265,13 @@ require changed soup bits or deviation claims to move output provenance.
 
 `tests/step_faceted.rs` (G0/G3/G4): unsorted tetrahedron closure and canonical
 soup materialization; bound-orientation reversal; shell-`SET` permutation
-invariance; exact supported and refused schema declarations; explicit staged
-`FACE_SURFACE`, non-triangular, duplicate-point, non-finite-coordinate,
+invariance; exact supported and refused schema declarations; plane-backed
+`FACE_SURFACE` equivalence, default-axis handling, `same_sense` reversal, and
+plane-provenance binding; non-coplanar, misoriented, parallel-direction,
+short-direction, non-triangular, duplicate-point, non-finite-coordinate,
 vertex-cap, and auxiliary-memory refusals plus the independent triangle cap;
-pre-requested cancellation; and
-proof that the native bridge reaches
-the existing topology quarantine rather than laundering an open shell.
+pre-requested cancellation; and proof that the native bridge reaches the
+existing topology quarantine rather than laundering an open shell.
 
 ## PLY element order (bead wqd.25.1)
 
@@ -275,18 +288,20 @@ import identically in both ASCII and binary (conformance-tested).
 - **Full native STEP CAD semantics remain STAGED**: the syntax kernel does not
   load an EXPRESS schema or authorize AP203/AP214 conformance.
   `StepProfileHint` is label recognition only. The strict faceted decoder derives
-  a triangle soup from one bounded six-entity resource closure, but does not
+  a triangle soup from one bounded resource closure, but does not
   interpret products, assemblies, shape-representation linkage, units/context,
-  AP global rules, surfaces, voids, or general B-rep topology. External handoff
-  adapters remain responsible for their declared tessellation deviation. V1
-  deliberately refuses the plane-backed `FACE_SURFACE` records used by normal
-  AP203/AP214 faceted exchange; `PLANE`, placements, and directions need a
-  separately pinned semantic subset before that path can ship.
+  AP global rules, non-planar surfaces, voids, or general B-rep topology.
+  Plane-backed `FACE_SURFACE` support proves only the pinned `PLANE`, placement,
+  direction, coplanarity, and winding relationships. It does not parse or
+  certify `FACETED_BREP_SHAPE_REPRESENTATION`, product/context correspondence,
+  or the application protocol's global rules. External handoff adapters remain
+  responsible for any semantics outside this native closure.
 - **STEP-derived SDF authority is Estimate only**: the handoff does not certify
   component nesting, self-intersection freedom, generalized-winding sign, or
   full semantic correspondence between arbitrary Part-21 records and a
   tessellation. The native decoder claims correspondence only for its selected
-  admitted closure and records decimal-to-f64 conversion as an estimate.
+  admitted closure and records decimal-to-f64 conversion plus accepted
+  plane-consistency residual as an estimate.
   It does not fit NURBS, write a topological B-rep/solid, or establish
   manufacturing predicates.
 - **Part-21 encoded characters and binary literals are refused** in this
