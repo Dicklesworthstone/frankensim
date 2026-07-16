@@ -49,17 +49,36 @@ pub const MAX_CAMPAIGN_SENSORS: usize = 4_096;
 pub const MAX_CAMPAIGN_EVALUATIONS: usize = 10_500_000;
 
 /// Semantic version of the sealed SensorForge report estimator identities.
+// v7 (bead sj31i.62): the identity preimage additionally binds the
+// admitted byte plan and the byte-accounting policy version, so two
+// campaigns that agree on science but were admitted under different
+// byte envelopes carry distinct identities.
 // v6 (bead sj31i.62): the campaign canonicalizes candidate order at
 // admission, so the identity preimage binds the CANONICAL declaration
 // sequence — permuted caller menus now collapse to one identity where
 // v5 deliberately kept declaration order identity-semantic.
-pub const OED_REPORT_IDENTITY_VERSION: u64 = 6;
+pub const OED_REPORT_IDENTITY_VERSION: u64 = 7;
 
 const REPORT_ID_DOMAIN: &str = "org.frankensim.fs-oed-e2e.report.v5";
 const CAMPAIGN_PLANNING_POLICY_VERSION: u64 = 3;
 const CAMPAIGN_POLL_POLICY_VERSION: u64 = 2;
 const CAMPAIGN_RECORD_POLL_STRIDE: usize = 256;
 const CAMPAIGN_ACTION_POLL_STRIDE: usize = 1;
+// Byte-accounting policy (bead sj31i.62): every resource-driving
+// operation is charged in BYTE UNITS against a worst-case plan
+// preflighted at admission with checked arithmetic. A byte unit is a
+// deterministic accounting bound on bytes visited, compared, hashed,
+// or retained at one bounded seam — charges are formula-based upper
+// bounds evaluated on the actual shape, never measured allocator
+// traffic, so ledgers replay bit-identically across hosts.
+const CAMPAIGN_BYTE_POLICY_VERSION: u64 = 1;
+// One retained candidate/estimate/posterior record's fixed scalar
+// payload (means, variances, uncertainty components), name excluded.
+const RECORD_SCALAR_BYTE_UNITS: u128 = 32;
+// One EVPI/summary scan reads a mean and a total deviation per record.
+const SCAN_READ_BYTE_UNITS: u128 = 16;
+// `measure-` / `sensor-` identity prefixes added to candidate names.
+const ACTION_PREFIX_BYTE_UNITS: u128 = 8;
 
 // Nine-point Gauss-Hermite rule, transformed and normalized for expectations
 // under N(0, 1). The policy is deterministic and substantially more faithful
@@ -288,6 +307,30 @@ pub enum OedError {
         /// Worst-case work admitted before scientific execution.
         admitted_work_units: u128,
     },
+    /// The worst-case byte plan overflowed checked admission arithmetic.
+    BytePlanOverflow {
+        /// Candidate count.
+        candidates: usize,
+        /// Requested placement cap.
+        max_sensors: usize,
+    },
+    /// A byte charge at a bounded seam would exceed the admitted
+    /// worst-case byte plan. This is a fail-closed accounting defect
+    /// surface: admission upper-bounds every charging seam, so an
+    /// exceeded plan means a seam charges more than admission declared.
+    ByteBudgetExceeded {
+        /// Seam that attempted the charge.
+        at: &'static str,
+        /// Ledger total the charge would have reached.
+        charged_byte_units: u128,
+        /// Worst-case byte units admitted before scientific execution.
+        admitted_byte_units: u128,
+    },
+    /// A retained-output allocation was refused by the allocator.
+    OutputAllocationRefused {
+        /// Output whose reservation failed.
+        what: &'static str,
+    },
     /// The EVPI stop threshold must be finite and non-negative.
     InvalidThreshold,
     /// Candidate identities must be unique because actions address them by name.
@@ -391,6 +434,27 @@ impl fmt::Display for OedError {
                 "campaign work ledger mismatch: completed {completed_work_units}, \
                  realized {realized_work_units}, admitted {admitted_work_units}"
             ),
+            Self::BytePlanOverflow {
+                candidates,
+                max_sensors,
+            } => write!(
+                f,
+                "worst-case byte plan for {candidates} candidate(s) and \
+                 {max_sensors} placement(s) overflowed checked admission arithmetic"
+            ),
+            Self::ByteBudgetExceeded {
+                at,
+                charged_byte_units,
+                admitted_byte_units,
+            } => write!(
+                f,
+                "byte charge at `{at}` would reach {charged_byte_units} of \
+                 {admitted_byte_units} admitted byte units — a seam charges more \
+                 than admission declared"
+            ),
+            Self::OutputAllocationRefused { what } => {
+                write!(f, "retained-output allocation for {what} was refused")
+            }
             Self::InvalidThreshold => {
                 write!(f, "EVPI threshold must be finite and non-negative")
             }
@@ -487,6 +551,14 @@ pub struct OedReport {
     variance_color: Color,
     /// The EVPI color (`Estimated` — decision-theoretic).
     evpi_color: Color,
+    /// Worst-case byte units admitted before scientific work started.
+    admitted_byte_units: u128,
+    /// Deterministic byte units charged across every bounded seam. This
+    /// upper-bounds peak transient traffic; it is an accounting bound,
+    /// not measured allocator bytes.
+    consumed_byte_units: u128,
+    /// The charged subset that remains live in this published report.
+    retained_byte_units: u128,
 }
 
 impl OedReport {
@@ -578,6 +650,26 @@ impl OedReport {
     #[must_use]
     pub const fn evpi_color(&self) -> &Color {
         &self.evpi_color
+    }
+
+    /// Worst-case byte units admitted before scientific work started.
+    #[must_use]
+    pub const fn admitted_byte_units(&self) -> u128 {
+        self.admitted_byte_units
+    }
+
+    /// Deterministic byte units charged across every bounded seam
+    /// (an upper bound on peak transient traffic, not measured
+    /// allocator bytes).
+    #[must_use]
+    pub const fn consumed_byte_units(&self) -> u128 {
+        self.consumed_byte_units
+    }
+
+    /// The charged subset that remains live in this published report.
+    #[must_use]
+    pub const fn retained_byte_units(&self) -> u128 {
+        self.retained_byte_units
     }
 }
 
@@ -772,6 +864,259 @@ impl CampaignWorkPlan {
     }
 }
 
+/// The preflighted worst-case byte bound (bead sj31i.62). A byte unit
+/// is a deterministic upper bound on bytes visited, compared, hashed,
+/// or retained at one bounded seam. Seams charge formula-based bounds
+/// evaluated on the ACTUAL shape; admission evaluates the same
+/// formulas at the worst-case shape with checked arithmetic, so every
+/// seam charge is covered before scientific work starts and the
+/// in-flight ledger can exceed the plan only through an accounting
+/// defect — which refuses typed instead of publishing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CampaignBytePlan {
+    admission_byte_units: u128,
+    setup_byte_units: u128,
+    per_placement_byte_units: u128,
+    maximum_finalization_byte_units: u128,
+    admitted_byte_units: u128,
+}
+
+/// One canonical-menu rebuild: fresh estimate records (scalar payloads
+/// plus cloned names) and the O(n) strict-order window verification
+/// (two name reads per adjacent pair).
+fn menu_build_byte_units(n: u128, sum_name: u128, max_name: u128) -> Option<u128> {
+    n.checked_mul(RECORD_SCALAR_BYTE_UNITS)?
+        .checked_add(sum_name)?
+        .checked_add(n.saturating_sub(1).checked_mul(max_name.checked_mul(2)?)?)
+}
+
+/// The actual campaign shape's byte coefficients, computed once after
+/// admission so every seam charges the same deterministic formulas the
+/// admitted plan bounded. Saturation cannot launder an overflow: the
+/// checked plan already refused any shape whose formulas overflow, and
+/// a saturated charge exceeding the plan refuses typed at the seam.
+#[derive(Debug, Clone, Copy)]
+struct ByteShape {
+    n: u128,
+    sum_name: u128,
+    max_name: u128,
+}
+
+impl ByteShape {
+    fn of(candidates: &[Candidate]) -> Self {
+        Self {
+            n: candidates.len() as u128,
+            sum_name: candidates
+                .iter()
+                .map(|candidate| candidate.name.len() as u128)
+                .sum(),
+            max_name: candidates
+                .iter()
+                .map(|candidate| candidate.name.len() as u128)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// One record's fixed scalar payload per candidate.
+    fn records(self) -> u128 {
+        self.n.saturating_mul(RECORD_SCALAR_BYTE_UNITS)
+    }
+
+    /// One scalar read per candidate.
+    fn scalar_reads(self) -> u128 {
+        self.n.saturating_mul(8)
+    }
+
+    /// One EVPI/summary scan over the whole menu.
+    fn scan(self) -> u128 {
+        self.n.saturating_mul(SCAN_READ_BYTE_UNITS)
+    }
+
+    /// One canonical-menu rebuild including window verification.
+    fn menu_build(self) -> u128 {
+        menu_build_byte_units(self.n, self.sum_name, self.max_name).unwrap_or(u128::MAX)
+    }
+
+    /// One sensor-action construction sweep (records plus prefixed
+    /// action names).
+    fn action_construction(self) -> u128 {
+        self.n
+            .saturating_mul(RECORD_SCALAR_BYTE_UNITS.saturating_add(ACTION_PREFIX_BYTE_UNITS))
+            .saturating_add(self.sum_name)
+    }
+
+    /// One action's quadrature-view evaluation: the view construction
+    /// reads three scalars, then every expectation node scans the menu.
+    fn action_evaluation(self) -> u128 {
+        (ACTION_EVALUATION_FACTOR as u128)
+            .saturating_mul(self.scan())
+            .saturating_add(24)
+    }
+
+    /// The chosen-action linear lookup bound.
+    fn chosen_lookup(self) -> u128 {
+        self.n
+            .saturating_mul(self.max_name.saturating_add(ACTION_PREFIX_BYTE_UNITS))
+    }
+}
+
+impl CampaignBytePlan {
+    /// Never-undercounting comparison count for the one-time admission
+    /// sort: `n * bit_width(n) + n` dominates merge sort's worst case.
+    fn sort_comparison_bound(n: u128) -> Option<u128> {
+        let width = u128::from(u128::BITS - n.max(1).leading_zeros());
+        n.checked_mul(width)?.checked_add(n)
+    }
+
+    /// Worst-case one-identity preimage length: a fixed envelope for
+    /// version/mode/stream/budget/plan/policy/rule fields plus
+    /// length-prefixed candidate, placement, allocation, trace,
+    /// posterior, and color sequences at their maximum shapes. Every
+    /// term dominates the exact builder's contribution.
+    fn identity_preimage_bound(
+        n: u128,
+        placements: u128,
+        sum_name: u128,
+        max_name: u128,
+    ) -> Option<u128> {
+        let candidate_rows = n.checked_mul(48)?.checked_add(sum_name)?;
+        let placement_rows = placements.checked_mul(max_name.checked_add(8)?)?;
+        let allocation_rows = n.checked_mul(16)?.checked_add(sum_name)?;
+        let trace_rows = placements.checked_add(2)?.checked_mul(8)?;
+        let posterior_rows = n.checked_mul(24)?.checked_add(sum_name)?;
+        let color_rows = placements.checked_mul(256)?;
+        1024u128
+            .checked_add(candidate_rows)?
+            .checked_add(placement_rows)?
+            .checked_add(allocation_rows)?
+            .checked_add(trace_rows)?
+            .checked_add(posterior_rows)?
+            .checked_add(color_rows)?
+            .checked_add(max_name.checked_add(8)?)
+    }
+
+    fn checked(
+        candidates: usize,
+        max_sensors: usize,
+        sum_name: usize,
+        max_name: usize,
+    ) -> Result<Self, OedError> {
+        let overflow = OedError::BytePlanOverflow {
+            candidates,
+            max_sensors,
+        };
+        let n = candidates as u128;
+        let placements = max_sensors as u128;
+        let sum_name = sum_name as u128;
+        let max_name = max_name as u128;
+        let evaluation_factor = ACTION_EVALUATION_FACTOR as u128;
+
+        // Admission: the duplicate-identity scan reads every name once;
+        // the one-time canonical sort compares two names per comparison.
+        let admission_byte_units = (|| {
+            Self::sort_comparison_bound(n)?
+                .checked_mul(max_name.checked_mul(2)?)?
+                .checked_add(sum_name)
+        })()
+        .ok_or_else(|| overflow.clone())?;
+
+        // Setup mirrors the five admitted setup scans: belief records,
+        // prior-variance reads, the initial menu build, and the initial
+        // EVPI scan.
+        let setup_byte_units = (|| {
+            n.checked_mul(RECORD_SCALAR_BYTE_UNITS)?
+                .checked_add(n.checked_mul(8)?)?
+                .checked_add(menu_build_byte_units(n, sum_name, max_name)?)?
+                .checked_add(n.checked_mul(SCAN_READ_BYTE_UNITS)?)
+        })()
+        .ok_or_else(|| overflow.clone())?;
+
+        // One full placement round: action construction (records plus
+        // prefixed action names), the quadrature-view evaluation of
+        // every action (each evaluation scans the whole menu; view
+        // construction reads three scalars), the chosen-action lookup,
+        // the observation record, the committed posterior/color/
+        // placement/trace retention, and the menu + EVPI refreshes.
+        let per_placement_byte_units = (|| {
+            let action_construction = n
+                .checked_mul(RECORD_SCALAR_BYTE_UNITS.checked_add(ACTION_PREFIX_BYTE_UNITS)?)?
+                .checked_add(sum_name)?;
+            let action_evaluation = n.checked_mul(
+                evaluation_factor
+                    .checked_mul(n.checked_mul(SCAN_READ_BYTE_UNITS)?)?
+                    .checked_add(24)?,
+            )?;
+            let chosen_lookup = n.checked_mul(max_name.checked_add(ACTION_PREFIX_BYTE_UNITS)?)?;
+            let observation = ACTION_PREFIX_BYTE_UNITS
+                .checked_add(max_name)?
+                .checked_add(RECORD_SCALAR_BYTE_UNITS)?;
+            let commit_retention = RECORD_SCALAR_BYTE_UNITS
+                .checked_add(32)?
+                .checked_add(max_name)?
+                .checked_add(8)?;
+            action_construction
+                .checked_add(action_evaluation)?
+                .checked_add(chosen_lookup)?
+                .checked_add(observation)?
+                .checked_add(commit_retention)?
+                .checked_add(menu_build_byte_units(n, sum_name, max_name)?)?
+                .checked_add(n.checked_mul(SCAN_READ_BYTE_UNITS)?)
+        })()
+        .ok_or_else(|| overflow.clone())?;
+
+        // Finalization: final menu/EVPI/variance/chosen-design scans,
+        // the retained allocation and posterior summaries, and two
+        // report identities (preimage hash bytes plus the retained
+        // identity strings, bounded at 128 each).
+        let maximum_finalization_byte_units = (|| {
+            let scans = menu_build_byte_units(n, sum_name, max_name)?
+                .checked_add(n.checked_mul(SCAN_READ_BYTE_UNITS)?)?
+                .checked_add(n.checked_mul(8)?)?
+                .checked_add(n.checked_mul(max_name.checked_add(8)?)?)?
+                .checked_add(max_name)?;
+            let allocation = n
+                .checked_mul(SCAN_READ_BYTE_UNITS)?
+                .checked_add(n.checked_mul(max_name.checked_add(8)?)?)?;
+            let posteriors = n.checked_mul(max_name.checked_add(16)?)?;
+            let identities = Self::identity_preimage_bound(n, placements, sum_name, max_name)?
+                .checked_add(64)?
+                .checked_add(128)?
+                .checked_mul(2)?;
+            scans
+                .checked_add(allocation)?
+                .checked_add(posteriors)?
+                .checked_add(identities)
+        })()
+        .ok_or_else(|| overflow.clone())?;
+
+        let admitted_byte_units = per_placement_byte_units
+            .checked_mul(placements)
+            .and_then(|total| total.checked_add(admission_byte_units))
+            .and_then(|total| total.checked_add(setup_byte_units))
+            .and_then(|total| total.checked_add(maximum_finalization_byte_units))
+            .ok_or(overflow)?;
+
+        Ok(Self {
+            admission_byte_units,
+            setup_byte_units,
+            per_placement_byte_units,
+            maximum_finalization_byte_units,
+            admitted_byte_units,
+        })
+    }
+
+    const fn identity_fields(self) -> [u128; 5] {
+        [
+            self.admission_byte_units,
+            self.setup_byte_units,
+            self.per_placement_byte_units,
+            self.maximum_finalization_byte_units,
+            self.admitted_byte_units,
+        ]
+    }
+}
+
 #[derive(Debug)]
 struct CampaignProgress<'s> {
     completed_placements: usize,
@@ -780,21 +1125,73 @@ struct CampaignProgress<'s> {
     // assimilation transaction can decrease this value, and no caller can
     // replace it between campaign phases.
     polls_remaining: u32,
+    // Byte ledger (bead sj31i.62): deterministic seam charges against
+    // the admitted worst-case byte plan, with the retained subset
+    // tracked separately. Charges refuse typed instead of exceeding
+    // the plan.
+    byte_plan: CampaignBytePlan,
+    charged_byte_units: u128,
+    retained_byte_units: u128,
     // Ambient deadline/cost authority (bead sj31i.6); polls stay in the
     // raw ledger above because nested assimilation shares it.
     ambient: fs_exec::AdmittedBudget<'s>,
 }
 
 impl<'s> CampaignProgress<'s> {
-    fn admit(cx: &Cx<'s>, completed_work_units: u128, planned_cost: u64) -> Result<Self, OedError> {
+    fn admit(
+        cx: &Cx<'s>,
+        completed_work_units: u128,
+        planned_cost: u64,
+        byte_plan: CampaignBytePlan,
+    ) -> Result<Self, OedError> {
         let ambient = fs_exec::AdmittedBudget::admit_ambient(cx, planned_cost)
             .map_err(OedError::BudgetRefused)?;
-        Ok(Self {
+        let mut progress = Self {
             completed_placements: 0,
             completed_work_units,
             polls_remaining: cx.budget().poll_quota,
+            byte_plan,
+            charged_byte_units: 0,
+            retained_byte_units: 0,
             ambient,
-        })
+        };
+        // The admission scan and one-time canonical sort already ran;
+        // their declared bound is the ledger's opening charge.
+        progress.charge_bytes("campaign admission", byte_plan.admission_byte_units)?;
+        Ok(progress)
+    }
+
+    /// Charge one bounded seam's deterministic byte bound. Exceeding
+    /// the admitted plan is an accounting defect and refuses typed —
+    /// no partial report can be published past a refused charge.
+    fn charge_bytes(&mut self, at: &'static str, bytes: u128) -> Result<(), OedError> {
+        let charged =
+            self.charged_byte_units
+                .checked_add(bytes)
+                .ok_or(OedError::ByteBudgetExceeded {
+                    at,
+                    charged_byte_units: u128::MAX,
+                    admitted_byte_units: self.byte_plan.admitted_byte_units,
+                })?;
+        if charged > self.byte_plan.admitted_byte_units {
+            return Err(OedError::ByteBudgetExceeded {
+                at,
+                charged_byte_units: charged,
+                admitted_byte_units: self.byte_plan.admitted_byte_units,
+            });
+        }
+        self.charged_byte_units = charged;
+        Ok(())
+    }
+
+    /// Charge bytes that stay live in the published report.
+    fn retain_bytes(&mut self, at: &'static str, bytes: u128) -> Result<(), OedError> {
+        self.charge_bytes(at, bytes)?;
+        self.retained_byte_units = self
+            .retained_byte_units
+            .checked_add(bytes)
+            .expect("retained bytes are a subset of the checked charge ledger");
+        Ok(())
     }
 
     fn advance(&mut self, units: u128) {
@@ -1270,6 +1667,7 @@ struct ReportIdentitySource<'a> {
     max_sensors: usize,
     outputs: ReportIdentityOutputs<'a>,
     plan: CampaignWorkPlan,
+    byte_plan: CampaignBytePlan,
     realized: CampaignRealizedWorkPlan,
 }
 
@@ -1341,6 +1739,13 @@ fn report_identity_with_rule(
     for value in realized.identity_fields() {
         canonical.extend_from_slice(&value.to_le_bytes());
     }
+    // v7: the admitted byte envelope and its policy are identity-
+    // semantic — agreement on science under a different byte plan is a
+    // different admitted artifact.
+    for value in source.byte_plan.identity_fields() {
+        canonical.extend_from_slice(&value.to_le_bytes());
+    }
+    canonical.extend_from_slice(&CAMPAIGN_BYTE_POLICY_VERSION.to_le_bytes());
     canonical.extend_from_slice(&CAMPAIGN_PLANNING_POLICY_VERSION.to_le_bytes());
     canonical.extend_from_slice(&CAMPAIGN_POLL_POLICY_VERSION.to_le_bytes());
     canonical.extend_from_slice(&fs_voi::EVPI_SEMANTICS_VERSION.to_le_bytes());
@@ -1437,10 +1842,17 @@ fn report_identity_with_rule(
     );
     push_estimated_color_descriptor(&mut canonical, "evpi", outputs.evpi_color_dispersion);
     progress.checkpoint(cx, plan, "report identity hash")?;
+    // Hash bytes are charged at their exact deterministic preimage
+    // length plus the digest emission (bead sj31i.62).
+    progress.charge_bytes(
+        "report identity hash",
+        (canonical.len() as u128).saturating_add(64),
+    )?;
     let identity = format!(
         "sensorforge-{quantity}:v{OED_REPORT_IDENTITY_VERSION}:{}",
         fs_blake3::hash_domain(REPORT_ID_DOMAIN, &canonical)
     );
+    progress.retain_bytes("report identity hash", identity.len() as u128)?;
     progress.advance(1);
     debug_assert!(color_leaf_identity_reason(&identity).is_none());
     Ok(identity)
@@ -1450,7 +1862,7 @@ fn validate_campaign(
     candidates: &[Candidate],
     threshold: f64,
     max_sensors: usize,
-) -> Result<(f64, CampaignWorkPlan, Vec<Candidate>), OedError> {
+) -> Result<(f64, CampaignWorkPlan, CampaignBytePlan, Vec<Candidate>), OedError> {
     if candidates.is_empty() {
         return Err(OedError::NoCandidates);
     }
@@ -1471,22 +1883,37 @@ fn validate_campaign(
         return Err(OedError::InvalidThreshold);
     }
     let mut names = BTreeSet::new();
+    let mut sum_name = 0usize;
+    let mut max_name = 0usize;
     for candidate in candidates {
         if !names.insert(candidate.name.as_str()) {
             return Err(OedError::DuplicateCandidate {
                 name: candidate.name.clone(),
             });
         }
+        sum_name = sum_name.saturating_add(candidate.name.len());
+        max_name = max_name.max(candidate.name.len());
     }
+    // The byte envelope is preflighted from the ACTUAL validated names
+    // (bead sj31i.62): admission evaluates the same charge formulas
+    // every later seam uses, at the worst-case shape.
+    let byte_plan = CampaignBytePlan::checked(candidates.len(), max_sensors, sum_name, max_name)?;
     // Canonicalize unique candidate identity and order EXACTLY ONCE at
     // admission (bead sj31i.62); every derived belief/estimate/action
     // sequence inherits this order, so no later phase re-sorts. The
     // sort shares the validation scan's accounting unit — a unit is a
     // bounded record visit, not an instruction count, and the per-call
     // clone-and-sort work this replaces was never separately charged.
-    let mut canonical = candidates.to_vec();
+    // Its byte bound is the ledger's opening charge.
+    let mut canonical = Vec::new();
+    canonical.try_reserve_exact(candidates.len()).map_err(|_| {
+        OedError::OutputAllocationRefused {
+            what: "canonical candidate menu",
+        }
+    })?;
+    canonical.extend_from_slice(candidates);
     canonical.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok((canonicalize_zero(threshold), plan, canonical))
+    Ok((canonicalize_zero(threshold), plan, byte_plan, canonical))
 }
 
 struct CampaignState {
@@ -1504,6 +1931,7 @@ fn recommend_with_cancellation(
     current_evpi: f64,
     threshold: f64,
     plan: CampaignWorkPlan,
+    shape: ByteShape,
     progress: &mut CampaignProgress,
     cx: &Cx<'_>,
 ) -> Result<Recommendation, OedError> {
@@ -1518,6 +1946,7 @@ fn recommend_with_cancellation(
         progress.checkpoint(cx, plan, "action-value tile")?;
         let value = expected_sensor_action_value(menu, action, current_evpi)?;
         progress.advance((menu.len() as u128) * (ACTION_EVALUATION_FACTOR as u128) + 1);
+        progress.charge_bytes("action-value tile", shape.action_evaluation())?;
         if value.value <= 0.0 || value.value_per_cost <= 0.0 {
             continue;
         }
@@ -1554,12 +1983,29 @@ fn execute_placements(
     mut menu: CanonicalDesignMenu,
     initial_evpi: f64,
     plan: CampaignWorkPlan,
+    shape: ByteShape,
     progress: &mut CampaignProgress,
     cx: &Cx<'_>,
 ) -> Result<CampaignState, OedError> {
-    let mut placements = Vec::new();
-    let mut assimilation_colors = Vec::new();
-    let mut evpi_trace = vec![initial_evpi];
+    // Retained campaign outputs reserve their admitted capacity
+    // fallibly before any placement runs (bead sj31i.62).
+    let mut placements: Vec<String> = Vec::new();
+    placements
+        .try_reserve_exact(max_sensors)
+        .map_err(|_| OedError::OutputAllocationRefused {
+            what: "sensor placements",
+        })?;
+    let mut assimilation_colors: Vec<Color> = Vec::new();
+    assimilation_colors
+        .try_reserve_exact(max_sensors)
+        .map_err(|_| OedError::OutputAllocationRefused {
+            what: "assimilation colors",
+        })?;
+    let mut evpi_trace: Vec<f64> = Vec::new();
+    evpi_trace
+        .try_reserve_exact(max_sensors.saturating_add(1))
+        .map_err(|_| OedError::OutputAllocationRefused { what: "EVPI trace" })?;
+    evpi_trace.push(initial_evpi);
     let mut decision_robust = false;
     let mut action_rounds = 0;
     let mut current_evpi = initial_evpi;
@@ -1575,6 +2021,7 @@ fn execute_placements(
         progress.checkpoint(cx, plan, "action construction")?;
         let actions = sensor_actions(candidates, &beliefs)?;
         progress.advance(candidates.len() as u128);
+        progress.charge_bytes("action construction", shape.action_construction())?;
         progress.checkpoint(cx, plan, "action construction drain")?;
         let recommendation = recommend_with_cancellation(
             &menu,
@@ -1582,6 +2029,7 @@ fn execute_placements(
             current_evpi,
             threshold,
             plan,
+            shape,
             progress,
             cx,
         )?;
@@ -1595,6 +2043,7 @@ fn execute_placements(
             .position(|candidate| candidate.name == action)
             .ok_or(OedError::UnknownRecommendation { action })?;
         progress.advance(candidates.len() as u128);
+        progress.charge_bytes("chosen-action lookup", shape.chosen_lookup())?;
         let observation = point_sensor(
             0,
             1,
@@ -1607,6 +2056,12 @@ fn execute_placements(
             source,
         })?;
         progress.advance(1);
+        progress.charge_bytes(
+            "sensor observation",
+            ACTION_PREFIX_BYTE_UNITS
+                .saturating_add(candidates[idx].name.len() as u128)
+                .saturating_add(RECORD_SCALAR_BYTE_UNITS),
+        )?;
         let next_count = placements.len() + 1;
         let posterior = assimilate_colored_with_shared_poll_quota(
             &beliefs[idx],
@@ -1638,6 +2093,13 @@ fn execute_placements(
         // into campaign state until the lower-layer transaction has drained
         // and this deterministic commit boundary is still live.
         progress.checkpoint(cx, plan, "placement commit")?;
+        progress.charge_bytes("placement commit", RECORD_SCALAR_BYTE_UNITS)?;
+        progress.retain_bytes(
+            "placement commit",
+            32u128
+                .saturating_add(candidates[idx].name.len() as u128)
+                .saturating_add(8),
+        )?;
         beliefs[idx] = posterior.belief().clone();
         assimilation_colors.push(posterior.color().clone());
         placements.push(candidates[idx].name.clone());
@@ -1646,9 +2108,11 @@ fn execute_placements(
         progress.checkpoint(cx, plan, "posterior estimate refresh")?;
         menu = CanonicalDesignMenu::from_canonical(to_estimates(candidates, &beliefs)?)?;
         progress.advance(candidates.len() as u128);
+        progress.charge_bytes("posterior estimate refresh", shape.menu_build())?;
         progress.checkpoint(cx, plan, "posterior EVPI refresh")?;
         current_evpi = menu.evpi_checked()?;
         progress.advance(candidates.len() as u128);
+        progress.charge_bytes("posterior EVPI refresh", shape.scan())?;
         evpi_trace.push(current_evpi);
     }
 
@@ -1671,18 +2135,22 @@ fn finish_report(
     initial_evpi: f64,
     state: CampaignState,
     plan: CampaignWorkPlan,
+    shape: ByteShape,
     progress: &mut CampaignProgress,
     cx: &Cx<'_>,
 ) -> Result<OedReport, OedError> {
     progress.checkpoint(cx, plan, "final estimate summary")?;
     let menu = CanonicalDesignMenu::from_canonical(to_estimates(candidates, &state.beliefs)?)?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("final estimate summary", shape.menu_build())?;
     progress.checkpoint(cx, plan, "final EVPI")?;
     let final_evpi = menu.evpi_checked()?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("final EVPI", shape.scan())?;
     progress.checkpoint(cx, plan, "final variance")?;
     let posterior_total_variance = total_variance(&state.beliefs)?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("final variance", shape.scalar_reads())?;
     progress.checkpoint(cx, plan, "chosen-design reduction")?;
     let chosen_design = menu
         .estimates()
@@ -1693,24 +2161,41 @@ fn finish_report(
             quantity: "chosen design",
         })?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes(
+        "chosen-design reduction",
+        shape.n.saturating_mul(shape.max_name.saturating_add(8)),
+    )?;
+    progress.retain_bytes("chosen-design reduction", chosen_design.len() as u128)?;
     progress.checkpoint(cx, plan, "precision allocation")?;
     let (allocation, positive_prior_candidates) = precision_allocation(candidates)?;
     progress.advance((candidates.len() as u128) * 2 + (positive_prior_candidates as u128) * 5);
-    progress.checkpoint(cx, plan, "posterior summaries")?;
-    let posteriors = candidates
+    progress.charge_bytes("precision allocation", shape.scan())?;
+    let allocation_retained: u128 = allocation
         .iter()
-        .zip(&state.beliefs)
-        .map(|(candidate, belief)| {
-            Ok(PosteriorSummary {
-                name: candidate.name.clone(),
-                mean: belief
-                    .component_mean(0)
-                    .map_err(OedError::BeliefInvariant)?,
-                variance: belief.variance(0).map_err(OedError::BeliefInvariant)?,
-            })
-        })
-        .collect::<Result<Vec<_>, OedError>>()?;
+        .map(|(name, _)| (name.len() as u128).saturating_add(8))
+        .sum();
+    progress.retain_bytes("precision allocation", allocation_retained)?;
+    progress.checkpoint(cx, plan, "posterior summaries")?;
+    let mut posteriors: Vec<PosteriorSummary> = Vec::new();
+    posteriors
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| OedError::OutputAllocationRefused {
+            what: "posterior summaries",
+        })?;
+    for (candidate, belief) in candidates.iter().zip(&state.beliefs) {
+        posteriors.push(PosteriorSummary {
+            name: candidate.name.clone(),
+            mean: belief
+                .component_mean(0)
+                .map_err(OedError::BeliefInvariant)?,
+            variance: belief.variance(0).map_err(OedError::BeliefInvariant)?,
+        });
+    }
     progress.advance(candidates.len() as u128);
+    progress.retain_bytes(
+        "posterior summaries",
+        shape.sum_name.saturating_add(shape.n.saturating_mul(16)),
+    )?;
     let variance_reduction = if prior_total_variance == 0.0 {
         0.0
     } else {
@@ -1759,6 +2244,7 @@ fn finish_report(
                 evpi_color_dispersion,
             },
             plan,
+            byte_plan: progress.byte_plan,
             realized,
         };
         let variance_identity = report_identity("posterior-variance", &source, progress, cx)?;
@@ -1771,6 +2257,9 @@ fn finish_report(
     progress.finish(plan, realized)?;
 
     Ok(OedReport {
+        admitted_byte_units: progress.byte_plan.admitted_byte_units,
+        consumed_byte_units: progress.charged_byte_units,
+        retained_byte_units: progress.retained_byte_units,
         sensors_placed,
         placements: state.placements,
         prior_total_variance,
@@ -1813,12 +2302,15 @@ pub fn run_campaign(
     max_sensors: usize,
     cx: &Cx<'_>,
 ) -> Result<OedReport, OedError> {
-    let (threshold, plan, candidates) = validate_campaign(candidates, threshold, max_sensors)?;
+    let (threshold, plan, byte_plan, candidates) =
+        validate_campaign(candidates, threshold, max_sensors)?;
     let candidates = candidates.as_slice();
+    let shape = ByteShape::of(candidates);
     let mut progress = CampaignProgress::admit(
         cx,
         candidates.len() as u128,
         u64::try_from(plan.admitted_work_units).unwrap_or(u64::MAX),
+        byte_plan,
     )?;
     progress.checkpoint(cx, plan, "campaign admission")?;
     let beliefs: Vec<Belief> = candidates
@@ -1827,15 +2319,19 @@ pub fn run_campaign(
         .collect::<Result<Vec<_>, _>>()
         .map_err(OedError::BeliefInvariant)?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("prior beliefs", shape.records())?;
     progress.checkpoint(cx, plan, "prior variance")?;
     let prior_total_variance = total_variance(&beliefs)?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("prior variance", shape.scalar_reads())?;
     progress.checkpoint(cx, plan, "initial estimates")?;
     let menu = CanonicalDesignMenu::from_canonical(to_estimates(candidates, &beliefs)?)?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("initial estimates", shape.menu_build())?;
     progress.checkpoint(cx, plan, "initial EVPI")?;
     let initial_evpi = menu.evpi_checked()?;
     progress.advance(candidates.len() as u128);
+    progress.charge_bytes("initial EVPI", shape.scan())?;
     let state = execute_placements(
         candidates,
         threshold,
@@ -1844,6 +2340,7 @@ pub fn run_campaign(
         menu,
         initial_evpi,
         plan,
+        shape,
         &mut progress,
         cx,
     )?;
@@ -1855,6 +2352,7 @@ pub fn run_campaign(
         initial_evpi,
         state,
         plan,
+        shape,
         &mut progress,
         cx,
     )
@@ -1889,11 +2387,11 @@ pub fn demo_candidates() -> Result<Vec<Candidate>, CandidateError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAMPAIGN_PLANNING_POLICY_VERSION, CAMPAIGN_POLL_POLICY_VERSION, CampaignProgress,
-        CampaignRealizedWorkPlan, CampaignWorkPlan, Candidate, NORMAL_EXPECTATION_RULE,
-        OED_REPORT_IDENTITY_VERSION, PosteriorSummary, REPORT_ID_DOMAIN, ReportIdentityOutputs,
-        ReportIdentitySource, canonicalize_zero, demo_candidates, predicted_posterior_variance,
-        report_identity_with_rule,
+        CAMPAIGN_PLANNING_POLICY_VERSION, CAMPAIGN_POLL_POLICY_VERSION, CampaignBytePlan,
+        CampaignProgress, CampaignRealizedWorkPlan, CampaignWorkPlan, Candidate,
+        NORMAL_EXPECTATION_RULE, OED_REPORT_IDENTITY_VERSION, PosteriorSummary, REPORT_ID_DOMAIN,
+        ReportIdentityOutputs, ReportIdentitySource, canonicalize_zero, demo_candidates,
+        predicted_posterior_variance, report_identity_with_rule,
     };
     use fs_evidence::Color;
     use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -1991,8 +2489,25 @@ mod tests {
                 },
                 plan: CampaignWorkPlan::checked(self.candidates.len(), self.max_sensors)
                     .expect("fixture work plan"),
+                byte_plan: self.byte_plan(),
                 realized: self.realized,
             }
+        }
+
+        fn byte_plan(&self) -> CampaignBytePlan {
+            let sum_name: usize = self
+                .candidates
+                .iter()
+                .map(|candidate| candidate.name.len())
+                .sum();
+            let max_name = self
+                .candidates
+                .iter()
+                .map(|candidate| candidate.name.len())
+                .max()
+                .unwrap_or(0);
+            CampaignBytePlan::checked(self.candidates.len(), self.max_sensors, sum_name, max_name)
+                .expect("fixture byte plan")
         }
     }
 
@@ -2019,8 +2534,8 @@ mod tests {
     fn report_identities(fixture: &IdentityFixture, rule: &[(f64, f64)]) -> (String, String) {
         with_test_cx(|cx| {
             let source = fixture.source();
-            let mut progress =
-                CampaignProgress::admit(cx, 0, 0).expect("identity fixture budget admits");
+            let mut progress = CampaignProgress::admit(cx, 0, 0, fixture.byte_plan())
+                .expect("identity fixture budget admits");
             let variance =
                 report_identity_with_rule("posterior-variance", &source, rule, &mut progress, cx)
                     .expect("variance identity");
@@ -2063,10 +2578,13 @@ mod tests {
 
     #[test]
     fn report_identity_versions_and_final_work_shape_are_locked() {
-        assert_eq!(OED_REPORT_IDENTITY_VERSION, 6);
+        // v7 (bead sj31i.62): deliberate bump — the preimage now binds
+        // the admitted byte plan and the byte-accounting policy.
+        assert_eq!(OED_REPORT_IDENTITY_VERSION, 7);
         assert_eq!(REPORT_ID_DOMAIN, "org.frankensim.fs-oed-e2e.report.v5");
         assert_eq!(CAMPAIGN_PLANNING_POLICY_VERSION, 3);
         assert_eq!(CAMPAIGN_POLL_POLICY_VERSION, 2);
+        assert_eq!(super::CAMPAIGN_BYTE_POLICY_VERSION, 1);
         assert_eq!(fs_voi::EVPI_SEMANTICS_VERSION, 1);
 
         let plan = CampaignWorkPlan::checked(4, 12).expect("admitted work plan");
@@ -2095,9 +2613,9 @@ mod tests {
         assert!(
             identities
                 .0
-                .starts_with("sensorforge-posterior-variance:v6:")
+                .starts_with("sensorforge-posterior-variance:v7:")
         );
-        assert!(identities.1.starts_with("sensorforge-evpi:v6:"));
+        assert!(identities.1.starts_with("sensorforge-evpi:v7:"));
     }
 
     #[test]
@@ -2392,5 +2910,56 @@ mod tests {
                 admitted.uncertainty.model.to_bits()
             );
         }
+    }
+
+    #[test]
+    fn byte_plan_admission_arithmetic_is_checked() {
+        // A shape whose charge formulas overflow u128 refuses typed at
+        // admission instead of wrapping into a fictitious envelope.
+        assert!(matches!(
+            CampaignBytePlan::checked(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+            Err(super::OedError::BytePlanOverflow {
+                candidates: usize::MAX,
+                max_sensors: usize::MAX,
+            })
+        ));
+        // Real campaign bounds always admit: the worst legal shape.
+        let plan = CampaignBytePlan::checked(
+            super::MAX_CAMPAIGN_CANDIDATES,
+            super::MAX_CAMPAIGN_SENSORS,
+            super::MAX_CAMPAIGN_CANDIDATES * super::MAX_CANDIDATE_NAME_BYTES,
+            super::MAX_CANDIDATE_NAME_BYTES,
+        )
+        .expect("the maximum legal campaign shape has a checked byte envelope");
+        assert!(plan.admitted_byte_units > 0);
+    }
+
+    #[test]
+    fn byte_charges_refuse_typed_beyond_the_admitted_plan() {
+        with_test_cx(|cx| {
+            let plan = CampaignBytePlan::checked(2, 1, 2, 1).expect("tiny byte plan");
+            let mut progress =
+                CampaignProgress::admit(cx, 0, 0, plan).expect("tiny fixture admits");
+            let opening = progress.charged_byte_units;
+            assert_eq!(opening, plan.admission_byte_units);
+            // A charge past the admitted envelope refuses typed and
+            // leaves the ledger untouched — no partial accounting.
+            let refused = progress.charge_bytes("adversarial seam", u128::MAX);
+            assert!(matches!(
+                refused,
+                Err(super::OedError::ByteBudgetExceeded {
+                    at: "adversarial seam",
+                    ..
+                })
+            ));
+            assert_eq!(progress.charged_byte_units, opening);
+            assert_eq!(progress.retained_byte_units, 0);
+            // Retained charges land in both ledgers.
+            progress
+                .retain_bytes("retained seam", 8)
+                .expect("a covered retained charge is accepted");
+            assert_eq!(progress.charged_byte_units, opening + 8);
+            assert_eq!(progress.retained_byte_units, 8);
+        });
     }
 }

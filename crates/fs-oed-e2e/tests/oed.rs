@@ -91,6 +91,12 @@ fn estimator(color: &Color) -> &str {
 fn assert_same_non_identity_report(left: &OedReport, right: &OedReport) {
     assert_eq!(left.placements(), right.placements());
     assert_eq!(left.sensors_placed(), right.sensors_placed());
+    // Retained bytes are determined by the realized science (names,
+    // traces, summaries, identity strings); admitted/consumed byte
+    // units deliberately vary with the admitted shape and the budget
+    // encoding bound into the identity preimage, so identity-varying
+    // fixtures compare only the retained ledger here.
+    assert_eq!(left.retained_byte_units(), right.retained_byte_units());
     assert_eq!(
         left.prior_total_variance().to_bits(),
         right.prior_total_variance().to_bits()
@@ -519,8 +525,8 @@ fn evidence_identities_bind_unmeasured_inputs_and_realized_updates() {
     );
     assert!(color_leaf_identity_reason(estimator(report.variance_color())).is_none());
     assert!(color_leaf_identity_reason(estimator(report.evpi_color())).is_none());
-    assert!(estimator(report.variance_color()).starts_with("sensorforge-posterior-variance:v6:"));
-    assert!(estimator(report.evpi_color()).starts_with("sensorforge-evpi:v6:"));
+    assert!(estimator(report.variance_color()).starts_with("sensorforge-posterior-variance:v7:"));
+    assert!(estimator(report.evpi_color()).starts_with("sensorforge-evpi:v7:"));
 }
 
 #[test]
@@ -856,4 +862,81 @@ fn g4_hostile_maximum_work_shape_is_admitted_and_the_next_shape_refuses() {
             max_evaluations: MAX_CAMPAIGN_EVALUATIONS,
         })
     );
+}
+
+/// G0/G5 (bead sj31i.62): every bounded seam charges the deterministic
+/// byte ledger. The demo campaign's admitted envelope, consumed seam
+/// total, and retained subset are exact pinned values, ordered
+/// retained <= consumed <= admitted, and replay bit-identically.
+#[test]
+fn byte_ledger_is_admitted_charged_and_retained_exactly() {
+    let candidates = demo_candidates().expect("compiled demo candidates are valid");
+    let report = campaign(&candidates, 0.01, 12).expect("demo campaign succeeds");
+    assert!(report.retained_byte_units() <= report.consumed_byte_units());
+    assert!(report.consumed_byte_units() <= report.admitted_byte_units());
+    assert_eq!(report.admitted_byte_units(), 51_735);
+    assert_eq!(report.consumed_byte_units(), 33_221);
+    assert_eq!(report.retained_byte_units(), 615);
+    let replay = campaign(&candidates, 0.01, 12).expect("replay succeeds");
+    assert_eq!(replay.admitted_byte_units(), report.admitted_byte_units());
+    assert_eq!(replay.consumed_byte_units(), report.consumed_byte_units());
+    assert_eq!(replay.retained_byte_units(), report.retained_byte_units());
+}
+
+/// G4 (bead sj31i.62): sweep the poll quota from zero until the demo
+/// campaign completes. Every deterministic boundary — admission, the
+/// action-value tiles whose quadrature override views are constructed
+/// and read inside them, placement commit, the canonical-menu and EVPI
+/// refresh seams, finalization scans, both report identities, and
+/// publication — either refuses typed with a consistent work ledger or
+/// publishes the full deterministic report. No quota can publish a
+/// partial report, and quota sufficiency is monotone.
+#[test]
+fn g4_poll_quota_sweep_covers_every_boundary_without_partial_publication() {
+    let candidates = demo_candidates().expect("compiled demo candidates are valid");
+    let baseline = campaign(&candidates, 0.01, 12).expect("unbounded baseline succeeds");
+    let mut first_sufficient = None;
+    for quota in 0u32..=4_096 {
+        let budget = Budget::new().with_poll_quota(quota);
+        let outcome = with_cx(&CancelGate::new(), budget, ExecMode::Deterministic, |cx| {
+            run_campaign(&candidates, 0.01, 12, cx)
+        });
+        match outcome {
+            Ok(report) => {
+                assert_same_non_identity_report(&report, &baseline);
+                first_sufficient = Some(quota);
+                break;
+            }
+            Err(OedError::Cancelled {
+                completed_work_units,
+                admitted_work_units,
+                ..
+            }) => {
+                assert!(
+                    completed_work_units <= admitted_work_units,
+                    "quota {quota}: the refused ledger exceeded its admitted plan"
+                );
+            }
+            Err(OedError::AssimilationCancelled {
+                completed_work_units,
+                admitted_work_units,
+                ..
+            }) => {
+                assert!(
+                    completed_work_units <= admitted_work_units,
+                    "quota {quota}: the refused lower-layer ledger exceeded its plan"
+                );
+            }
+            Err(other) => panic!("quota {quota}: expected a typed cancellation, got {other:?}"),
+        }
+    }
+    let sufficient = first_sufficient.expect("the demo campaign completes within the sweep");
+    for margin in [1u32, 7, 64] {
+        let budget = Budget::new().with_poll_quota(sufficient + margin);
+        let replay = with_cx(&CancelGate::new(), budget, ExecMode::Deterministic, |cx| {
+            run_campaign(&candidates, 0.01, 12, cx)
+        })
+        .expect("a strictly larger poll quota cannot regress to refusal");
+        assert_same_non_identity_report(&replay, &baseline);
+    }
 }

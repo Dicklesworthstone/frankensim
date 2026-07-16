@@ -176,9 +176,24 @@ semantics; and sealed-output identity movement.
   cross-version or cross-ISA floating-point identity. As of identity v6 the
   report identity IS caller-menu-permutation-invariant (the preimage binds the
   canonical candidate sequence); v5 artifacts that bound a non-canonical
-  declaration order remain valid only under their own version prefix.
-- sj31i.62 remaining scope: byte-level charging of comparison/override/hash/log
-  work and fallible allocation admission for the campaign's retained outputs
-  are not yet implemented; the current work plan still counts bounded record
-  visits (now an HONEST count, since the uncharged clone-and-sort work was
-  eliminated rather than charged).
+  declaration order remain valid only under their own version prefix. As of
+  identity v7 the preimage additionally binds the admitted byte plan and the
+  byte-accounting policy version; v6 artifacts remain valid only under their
+  own version prefix.
+- Byte accounting (identity v7, byte policy v1): every bounded seam —
+  admission scan and one-time canonical sort, belief/estimate/menu builds and
+  their window verifications, EVPI scans, action construction, each
+  quadrature-view action evaluation (view construction reads plus per-node menu
+  scans), chosen-action lookup, observation, placement commit and retention,
+  finalization scans, allocation and posterior retention, and both report
+  identity preimages/digests — charges a deterministic formula-based BYTE
+  bound evaluated on the actual shape, with the worst-case envelope preflighted
+  at admission under checked arithmetic. Charges refuse typed
+  (`ByteBudgetExceeded`) rather than exceed the plan; a refused charge
+  publishes nothing. The consumed ledger is an accounting UPPER BOUND on bytes
+  visited/compared/hashed/retained, not measured allocator traffic, and the
+  retained subset is exactly the bytes live in the published report. Retained
+  campaign outputs (placements, colors, EVPI trace, posterior summaries, the
+  canonical candidate menu) reserve their admitted capacity fallibly
+  (`OutputAllocationRefused`) before scientific work; transient scratch keeps
+  ordinary infallible allocation and is covered by the charge ledger instead.
