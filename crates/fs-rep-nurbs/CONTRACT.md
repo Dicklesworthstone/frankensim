@@ -779,7 +779,17 @@ The borrowed sample matrix, allocator metadata/rounding, and spare capacity are
 outside the retained envelope; individual allocator calls are non-preemptible.
 This primitive does not consume a caller budget, factor or solve the matrix,
 migrate the refit pipeline, own drain/finalize, promise wall-time preemption, or
-grant conditioning or fit-quality authority. The SDF shell rejects malformed
+grant conditioning or fit-quality authority.
+`factor_refit_normal_with_cx` consumes one dense matrix after count-derived
+worst-case work admission and carries a single gate through square-shape,
+finite-value, and exact f64 symmetry validation; deterministic lower-triangle
+Cholesky factorization; and final publication, polling after at most 64 logical
+scalar operations. `RefitNormalFactorRun::Cancelled` exposes no partial factor
+and drops the transferred matrix. The primitive allocates no derived numerical
+payload; transferred storage, allocator metadata, and destructor latency are
+not caller-budgeted. It does not solve a right-hand side, prove conditioning,
+migrate `refit_radial`, consume a `Cx` budget, own drain/finalize, or promise
+wall-time preemption. The SDF shell rejects malformed
 point/tolerance input before surface planning, admits each immutable surface
 once per distance query, reuses that admission through closest and Gauss-Newton
 polish, and carries the winning admission into gradient, orientation, and

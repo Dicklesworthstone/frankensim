@@ -461,6 +461,23 @@ pub enum RefitNormalAssemblyRun {
     Cancelled,
 }
 
+/// Transactional outcome of cancellation-aware dense Cholesky factorization.
+///
+/// The primitive consumes its input matrix. Cancellation or error drops that
+/// storage; only a complete factor can be returned to the caller.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefitNormalFactorRun {
+    /// The complete lower-triangular factor is safe to publish. Entries above
+    /// the diagonal retain their input values and are not part of the factor.
+    Complete {
+        /// Dense storage containing the Cholesky factor in its lower triangle.
+        factor: Vec<Vec<f64>>,
+    },
+    /// Cancellation was observed before publication.
+    Cancelled,
+}
+
 fn validate_radial_projection_request(
     center: [f64; 3],
     dir: [f64; 3],
@@ -679,16 +696,109 @@ fn preflight_refit_normal_assembly(
     Ok(n)
 }
 
-/// Dense symmetric-positive-definite Cholesky factorization in place. The
-/// factor is shared across all three coordinate right-hand sides.
-fn cholesky_factor(a: &mut [Vec<f64>]) -> Result<(), NurbsError> {
-    let n = a.len();
+fn preflight_refit_normal_factor(n: usize) -> Result<(), NurbsError> {
+    if n == 0 {
+        return Err(refit_structure_error(
+            "refit normal factorization requires a nonempty square matrix",
+        ));
+    }
+    let n_work = n as u128;
+    let shape_work = n_work;
+    let value_and_symmetry_work =
+        checked_refit_work_product(&[n_work, n_work, 2], "normal factor validation")?;
+    let factor_work =
+        checked_refit_work_product(&[n_work, n_work, n_work], "normal factorization")?;
+    let total_work = checked_refit_work_sum(
+        &[shape_work, value_and_symmetry_work, factor_work, 1],
+        "normal factorization",
+    )?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit normal-factor work estimate {total_work} exceeds static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+    Ok(())
+}
+
+/// Factor a dense symmetric-positive-definite matrix with bounded
+/// cancellation polling.
+///
+/// Count-derived worst-case work refusal precedes the first checkpoint. One
+/// gate then spans square-shape, finite-value and exact-symmetry validation;
+/// deterministic lower-triangle factorization; and final publication. The
+/// primitive allocates no derived numerical payload and does not consume the
+/// `Cx` budget, solve a right-hand side, or make the full refit pipeline
+/// cancellation-aware.
+///
+/// # Errors
+/// Returns a structured [`NurbsError`] for an empty or non-square matrix,
+/// non-finite or asymmetric input, checked work refusal, or a non-positive or
+/// non-finite pivot.
+pub fn factor_refit_normal_with_cx(
+    matrix: Vec<Vec<f64>>,
+    cx: &Cx<'_>,
+) -> Result<RefitNormalFactorRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    factor_refit_normal_with_poll(matrix, &mut should_cancel)
+}
+
+#[allow(clippy::needless_range_loop)]
+fn factor_refit_normal_with_poll(
+    mut matrix: Vec<Vec<f64>>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitNormalFactorRun, NurbsError> {
+    let n = matrix.len();
+    preflight_refit_normal_factor(n)?;
+    if should_cancel() {
+        return Ok(RefitNormalFactorRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
+    for (row_index, row) in matrix.iter().enumerate() {
+        if row.len() != n {
+            return Err(refit_structure_error(format!(
+                "refit normal-factor row {row_index} has length {}, expected {n}",
+                row.len()
+            )));
+        }
+        if refit_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(RefitNormalFactorRun::Cancelled);
+        }
+    }
+    for (row_index, row) in matrix.iter().enumerate() {
+        for value in row {
+            if !value.is_finite() {
+                return Err(refit_structure_error(format!(
+                    "refit normal-factor row {row_index} contains a non-finite value"
+                )));
+            }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitNormalFactorRun::Cancelled);
+            }
+        }
+    }
+    for i in 0..n {
+        for j in 0..i {
+            if matrix[i][j] != matrix[j][i] {
+                return Err(refit_structure_error(format!(
+                    "refit normal-factor input is asymmetric at ({i}, {j})"
+                )));
+            }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitNormalFactorRun::Cancelled);
+            }
+        }
+    }
+
     for i in 0..n {
         for j in 0..=i {
-            let mut sum = a[i][j];
-            let (ri, rj) = (&a[i], &a[j]);
+            let mut sum = matrix[i][j];
+            let (ri, rj) = (&matrix[i], &matrix[j]);
             for (x, y) in ri[..j].iter().zip(&rj[..j]) {
                 sum -= x * y;
+                if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(RefitNormalFactorRun::Cancelled);
+                }
             }
             if i == j {
                 if !sum.is_finite() || sum <= 0.0 {
@@ -696,18 +806,36 @@ fn cholesky_factor(a: &mut [Vec<f64>]) -> Result<(), NurbsError> {
                         what: "normal equations not SPD (raise lambda or sample count)".to_string(),
                     });
                 }
-                a[i][i] = det::sqrt(sum);
+                matrix[i][i] = det::sqrt(sum);
             } else {
-                a[i][j] = sum / a[j][j];
-                if !a[i][j].is_finite() {
+                matrix[i][j] = sum / matrix[j][j];
+                if !matrix[i][j].is_finite() {
                     return Err(refit_structure_error(
                         "normal-equation factorization became non-finite",
                     ));
                 }
             }
+            if refit_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(RefitNormalFactorRun::Cancelled);
+            }
         }
     }
-    Ok(())
+    if should_cancel() {
+        return Ok(RefitNormalFactorRun::Cancelled);
+    }
+    Ok(RefitNormalFactorRun::Complete { factor: matrix })
+}
+
+/// Dense symmetric-positive-definite Cholesky factorization. The factor is
+/// shared across all three coordinate right-hand sides.
+fn cholesky_factor(matrix: Vec<Vec<f64>>) -> Result<Vec<Vec<f64>>, NurbsError> {
+    let mut never_cancel = || false;
+    match factor_refit_normal_with_poll(matrix, &mut never_cancel)? {
+        RefitNormalFactorRun::Complete { factor } => Ok(factor),
+        RefitNormalFactorRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit normal factorization observed cancellation",
+        )),
+    }
 }
 
 /// Solve one right-hand side using a factor produced by
@@ -1061,8 +1189,7 @@ pub fn refit_radial(
     // Assemble and factor once, then solve the three coordinate right-hand
     // sides against the same deterministic factor.
     let mut net = try_filled_matrix(nu, nv, [0.0f64; 3], "refit control net")?;
-    let mut factor = assemble_normal(&rows_b, nu, nv, config.lambda)?;
-    cholesky_factor(&mut factor)?;
+    let factor = cholesky_factor(assemble_normal(&rows_b, nu, nv, config.lambda)?)?;
     for axis in 0..3 {
         let mut rhs = try_filled_vec(control_points, 0.0f64, "refit right-hand side")?;
         for (row, t) in rows_b.iter().zip(&targets) {
@@ -1537,6 +1664,91 @@ mod tests {
                 RefitNormalAssemblyRun::Cancelled
             );
         });
+    }
+
+    // G0/G5: the transactional factor preserves the legacy deterministic
+    // lower-triangle Cholesky arithmetic and leaves the unused upper triangle.
+    #[test]
+    fn normal_factor_with_cx_matches_the_known_spd_factor() {
+        let matrix = vec![vec![4.0, 2.0], vec![2.0, 5.0]];
+        let expected = vec![vec![2.0, 2.0], vec![1.0, 2.0]];
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                factor_refit_normal_with_cx(matrix.clone(), cx)
+                    .expect("cancellable normal factorization"),
+                RefitNormalFactorRun::Complete {
+                    factor: expected.clone(),
+                }
+            );
+        });
+        assert_eq!(
+            cholesky_factor(matrix).expect("legacy normal factorization"),
+            expected
+        );
+    }
+
+    // G4/G5: the same checkpoint ordinal cancels factorization during source
+    // validation, arithmetic, or final publication without exposing mutation.
+    #[test]
+    fn normal_factor_polling_is_bounded_and_transactional() {
+        let mut matrix = vec![vec![0.0; 16]; 16];
+        for (index, row) in matrix.iter_mut().enumerate() {
+            row[index] = 1.0;
+        }
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let outcome = factor_refit_normal_with_poll(matrix.clone(), &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("valid normal factorization");
+            (outcome, polls.get())
+        };
+
+        let (complete, healthy_polls) = run(None);
+        assert!(matches!(complete, RefitNormalFactorRun::Complete { .. }));
+        assert!(healthy_polls > 4);
+        assert_eq!(run(Some(1)), (RefitNormalFactorRun::Cancelled, 1));
+        let middle_poll = healthy_polls / 2;
+        assert_eq!(
+            run(Some(middle_poll)),
+            (RefitNormalFactorRun::Cancelled, middle_poll)
+        );
+        assert_eq!(
+            run(Some(healthy_polls)),
+            (RefitNormalFactorRun::Cancelled, healthy_polls)
+        );
+    }
+
+    // G4: constant/count refusals beat cancellation, and traversed structural
+    // refusals remain typed inside the gate.
+    #[test]
+    fn normal_factor_refusals_are_typed_and_preflighted() {
+        let work_error = preflight_refit_normal_factor(1_000)
+            .expect_err("cubic work above the process cap must be refused");
+        assert!(work_error.to_string().contains("work estimate"));
+
+        let polls = Cell::new(0usize);
+        let empty = factor_refit_normal_with_poll(Vec::new(), &mut || {
+            polls.set(polls.get() + 1);
+            true
+        })
+        .expect_err("empty input must refuse before cancellation");
+        assert!(empty.to_string().contains("nonempty square matrix"));
+        assert_eq!(polls.get(), 0);
+
+        let malformed = factor_refit_normal_with_poll(vec![vec![1.0], vec![0.0, 1.0]], &mut || {
+            polls.set(polls.get() + 1);
+            false
+        })
+        .expect_err("non-square input must be refused");
+        assert!(malformed.to_string().contains("length 1, expected 2"));
+        assert_eq!(polls.get(), 1);
+
+        let asymmetric =
+            factor_refit_normal_with_poll(vec![vec![1.0, 0.0], vec![1.0, 1.0]], &mut || false)
+                .expect_err("asymmetric input must not be factored as SPD");
+        assert!(asymmetric.to_string().contains("asymmetric at (1, 0)"));
     }
 
     #[test]
