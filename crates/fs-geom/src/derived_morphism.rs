@@ -16,7 +16,10 @@
 //! many-to-many relations over exact local-presentation families without
 //! declaring semantic or physical agreement. A final structural assembly binds
 //! those sealed children into one role-complete, common-selector packet without
-//! promoting it to an equivalence. This module deliberately cannot mint a
+//! promoting it to an equivalence. A standalone chart-transition packet can
+//! retain two oppositely oriented direct declared chart maps and nominal
+//! round-trip declarations without executing either map or promoting the pair
+//! to an inverse. This module deliberately cannot mint a
 //! non-identity equivalence: a witness digest is data, not a proof of an inverse,
 //! quasi-isomorphism, refinement theorem, or physical crosswalk.
 
@@ -47,6 +50,8 @@ pub const DERIVED_STRATUM_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
 pub const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for standalone declared span-correspondence receipts.
 pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for direct chart-transition inverse-law candidate receipts.
+pub const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for fixed-resolution quasi-isomorphism candidate receipts.
 pub const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for exhaustive local-presentation relation candidates.
@@ -62,6 +67,8 @@ const DERIVED_STRATUM_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 9, 1 << 11, 4096);
 const DERIVED_EXHAUSTIVE_STRATIFIED_MAP_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 8, 1 << 11, 4096);
+const DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
+    CanonicalLimits::new(1 << 17, 1 << 16, 10, 1 << 11, 4096);
 const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
 const DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
@@ -161,6 +168,34 @@ impl CanonicalSchema for DerivedSpanCorrespondenceIdentitySchemaV1 {
 
 /// Typed identity of one admitted standalone span `source <- apex -> target`.
 pub type DerivedSpanCorrespondenceIdV1 = EvidenceNodeId<DerivedSpanCorrespondenceIdentitySchemaV1>;
+
+static DERIVED_MORPHISM_CHILD_V1: ChildSpec = ChildSpec::for_identity::<DerivedMorphismIdV1>();
+
+/// Domain-separated identity for one structural direct chart-transition pair.
+pub enum DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.chart-transition-inverse-law-candidate.v1";
+    const NAME: &'static str = "direct-chart-transition-inverse-law-candidate";
+    const VERSION: u32 = DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact reversed geometry and chart endpoints, one common nominal overlap, two exact sealed direct declared chart-map children, two nominal round-trip declarations, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::required("source-chart", WireType::Bytes),
+        FieldSpec::required("target-chart", WireType::Bytes),
+        FieldSpec::required("overlap", WireType::Bytes),
+        FieldSpec::child_of("forward-chart-map", &DERIVED_MORPHISM_CHILD_V1),
+        FieldSpec::child_of("reverse-chart-map", &DERIVED_MORPHISM_CHILD_V1),
+        FieldSpec::required("source-round-trip-declaration", WireType::Bytes),
+        FieldSpec::required("target-round-trip-declaration", WireType::Bytes),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one direct chart-transition inverse-law candidate.
+pub type DerivedChartTransitionInverseLawCandidateIdV1 =
+    EvidenceNodeId<DerivedChartTransitionInverseLawCandidateIdentitySchemaV1>;
 
 /// Domain-separated semantic identity for one structurally admitted
 /// fixed-resolution quasi-isomorphism candidate.
@@ -297,6 +332,27 @@ pub struct DerivedChartOverlapIdV1([u8; 32]);
 
 impl DerivedChartOverlapIdV1 {
     /// Construct a nominal overlap-scope identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nominal declaration that one ordered chart-map composite is the identity.
+///
+/// The declaration is retained for a later independent checker; RD.1b never
+/// executes the maps or treats these bytes as an inverse-law proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedChartRoundTripDeclarationIdV1([u8; 32]);
+
+impl DerivedChartRoundTripDeclarationIdV1 {
+    /// Construct a nominal round-trip declaration from exact bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -902,6 +958,28 @@ pub struct DerivedSpanCorrespondenceIrV1 {
     pub no_claim: DerivedNoClaimIdV1,
 }
 
+/// Versioned structural candidate for a direct chart-transition inverse pair.
+///
+/// Both children must be exact sealed, single-primitive declared chart maps.
+/// Admission checks only that their geometry and chart endpoints are reversed
+/// and their nominal overlap selector is identical. The round-trip declarations
+/// are not executed, authenticated, or promoted to inverse/equivalence authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedChartTransitionInverseLawCandidateIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact sealed forward direct chart map.
+    pub forward: DerivedMorphismIdV1,
+    /// Exact sealed reverse direct chart map.
+    pub reverse: DerivedMorphismIdV1,
+    /// Nominal declaration for `reverse ∘ forward = id_source`.
+    pub source_round_trip: DerivedChartRoundTripDeclarationIdV1,
+    /// Nominal declaration for `forward ∘ reverse = id_target`.
+    pub target_round_trip: DerivedChartRoundTripDeclarationIdV1,
+    /// Explicit denial of inverse, equivalence, execution, and evidence authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
 /// Versioned declaration of one fixed-resolution quasi-isomorphism candidate.
 ///
 /// The exact supplied refinement path is the only directed map. The theorem,
@@ -1371,6 +1449,58 @@ impl fmt::Display for DerivedSpanCorrespondenceErrorV1 {
 }
 
 impl core::error::Error for DerivedSpanCorrespondenceErrorV1 {}
+
+/// Structured refusal from direct chart-transition inverse-law candidate admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedChartTransitionInverseLawCandidateErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required declaration or no-authority artifact used the all-zero sentinel.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw child ID does not name the supplied sealed morphism.
+    ChildIdentityMismatch {
+        /// Stable forward/reverse child field.
+        field: &'static str,
+    },
+    /// A supplied child is not one direct declared chart-map primitive.
+    DirectChartMapRequired {
+        /// Stable forward/reverse child field.
+        field: &'static str,
+    },
+    /// Forward and reverse geometry or chart endpoints are not exact opposites.
+    EndpointMismatch {
+        /// Stable failed reversed-endpoint relation.
+        field: &'static str,
+    },
+    /// Forward and reverse primitives do not name the exact same overlap artifact.
+    OverlapMismatch,
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedChartTransitionInverseLawCandidateErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "chart-transition inverse-law candidate refused: {self:?}"
+        )
+    }
+}
+
+impl core::error::Error for DerivedChartTransitionInverseLawCandidateErrorV1 {}
 
 /// Structured refusal from fixed-resolution quasi-isomorphism candidate admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1913,6 +2043,117 @@ impl AdmittedDerivedSpanCorrespondenceV1 {
     /// Canonical receipt and construction limits.
     #[must_use]
     pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedSpanCorrespondenceIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed structural candidate for two direct chart maps to satisfy inverse laws.
+///
+/// The token binds exact reversed geometry/chart endpoints and a shared nominal
+/// overlap. It exposes the two map artifacts and nominal round-trip declarations
+/// for independent checking, but no inverse, composition, equivalence,
+/// coordinate-execution, or evidence-transport capability.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedChartTransitionInverseLawCandidateV1 {
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_chart: ConfigurationChartIdV1,
+    target_chart: ConfigurationChartIdV1,
+    overlap: DerivedChartOverlapIdV1,
+    forward: DerivedMorphismIdV1,
+    reverse: DerivedMorphismIdV1,
+    forward_map: DerivedChartMapIdV1,
+    reverse_map: DerivedChartMapIdV1,
+    source_round_trip: DerivedChartRoundTripDeclarationIdV1,
+    target_round_trip: DerivedChartRoundTripDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedChartTransitionInverseLawCandidateIdV1>,
+}
+
+impl AdmittedDerivedChartTransitionInverseLawCandidateV1 {
+    /// Exact source geometry of the forward transition.
+    #[must_use]
+    pub const fn source_geometry(&self) -> DerivedGeometryIdV1 {
+        self.source_geometry
+    }
+
+    /// Exact target geometry of the forward transition.
+    #[must_use]
+    pub const fn target_geometry(&self) -> DerivedGeometryIdV1 {
+        self.target_geometry
+    }
+
+    /// Exact source chart of the forward transition.
+    #[must_use]
+    pub const fn source_chart(&self) -> ConfigurationChartIdV1 {
+        self.source_chart
+    }
+
+    /// Exact target chart of the forward transition.
+    #[must_use]
+    pub const fn target_chart(&self) -> ConfigurationChartIdV1 {
+        self.target_chart
+    }
+
+    /// Exact common nominal overlap retained by both transitions.
+    #[must_use]
+    pub const fn overlap(&self) -> DerivedChartOverlapIdV1 {
+        self.overlap
+    }
+
+    /// Exact sealed forward declared chart-map child.
+    #[must_use]
+    pub const fn forward(&self) -> DerivedMorphismIdV1 {
+        self.forward
+    }
+
+    /// Exact sealed reverse declared chart-map child.
+    #[must_use]
+    pub const fn reverse(&self) -> DerivedMorphismIdV1 {
+        self.reverse
+    }
+
+    /// Nominal forward coordinate-map artifact.
+    #[must_use]
+    pub const fn forward_map(&self) -> DerivedChartMapIdV1 {
+        self.forward_map
+    }
+
+    /// Nominal reverse coordinate-map artifact.
+    #[must_use]
+    pub const fn reverse_map(&self) -> DerivedChartMapIdV1 {
+        self.reverse_map
+    }
+
+    /// Nominal declaration for `reverse ∘ forward = id_source`.
+    #[must_use]
+    pub const fn source_round_trip(&self) -> DerivedChartRoundTripDeclarationIdV1 {
+        self.source_round_trip
+    }
+
+    /// Nominal declaration for `forward ∘ reverse = id_target`.
+    #[must_use]
+    pub const fn target_round_trip(&self) -> DerivedChartRoundTripDeclarationIdV1 {
+        self.target_round_trip
+    }
+
+    /// Explicit artifact denying inverse/equivalence/transport authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed structural candidate identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedChartTransitionInverseLawCandidateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedChartTransitionInverseLawCandidateIdV1> {
         self.receipt
     }
 }
@@ -4566,6 +4807,256 @@ pub fn admit_derived_span_correspondence_v1(
     })
 }
 
+fn direct_declared_chart_map(
+    field: &'static str,
+    morphism: &AdmittedDerivedMorphismV1,
+) -> Result<DeclaredChartMapPrimitiveV1, DerivedChartTransitionInverseLawCandidateErrorV1> {
+    match (
+        morphism.class(),
+        morphism.primitive_path(),
+        morphism.declared_chart_maps(),
+        morphism.primitive_factors(),
+    ) {
+        (
+            AdmittedDerivedMorphismClassV1::DeclaredChartMapPath,
+            [AdmittedDerivedPrimitiveV1::DeclaredChartMap(typed)],
+            [declared],
+            [_],
+        ) if typed == declared => Ok(*typed),
+        _ => {
+            Err(DerivedChartTransitionInverseLawCandidateErrorV1::DirectChartMapRequired { field })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChartTransitionInverseLawBindingV1 {
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_chart: ConfigurationChartIdV1,
+    target_chart: ConfigurationChartIdV1,
+    overlap: DerivedChartOverlapIdV1,
+    forward: DerivedMorphismIdV1,
+    reverse: DerivedMorphismIdV1,
+    forward_map: DerivedChartMapIdV1,
+    reverse_map: DerivedChartMapIdV1,
+    source_round_trip: DerivedChartRoundTripDeclarationIdV1,
+    target_round_trip: DerivedChartRoundTripDeclarationIdV1,
+    no_authority: DerivedNoClaimIdV1,
+}
+
+fn validate_chart_transition_inverse_law_candidate(
+    ir: &DerivedChartTransitionInverseLawCandidateIrV1,
+    forward: &AdmittedDerivedMorphismV1,
+    reverse: &AdmittedDerivedMorphismV1,
+) -> Result<ChartTransitionInverseLawBindingV1, DerivedChartTransitionInverseLawCandidateErrorV1> {
+    if ir.schema_version != DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1 {
+        return Err(
+            DerivedChartTransitionInverseLawCandidateErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.forward.as_bytes(), "forward-chart-map"),
+        (ir.reverse.as_bytes(), "reverse-chart-map"),
+        (
+            ir.source_round_trip.as_bytes(),
+            "source-round-trip-declaration",
+        ),
+        (
+            ir.target_round_trip.as_bytes(),
+            "target-round-trip-declaration",
+        ),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(
+                DerivedChartTransitionInverseLawCandidateErrorV1::MissingIdentity { field },
+            );
+        }
+    }
+    for (matches, field) in [
+        (ir.forward == forward.id(), "forward-chart-map"),
+        (ir.reverse == reverse.id(), "reverse-chart-map"),
+    ] {
+        if !matches {
+            return Err(
+                DerivedChartTransitionInverseLawCandidateErrorV1::ChildIdentityMismatch { field },
+            );
+        }
+    }
+
+    let forward_primitive = direct_declared_chart_map("forward-chart-map", forward)?;
+    let reverse_primitive = direct_declared_chart_map("reverse-chart-map", reverse)?;
+    for (matches, field) in [
+        (
+            forward_primitive.source_geometry == reverse_primitive.target_geometry,
+            "reverse-target-geometry",
+        ),
+        (
+            forward_primitive.target_geometry == reverse_primitive.source_geometry,
+            "reverse-source-geometry",
+        ),
+        (
+            forward_primitive.source_chart == reverse_primitive.target_chart,
+            "reverse-target-chart",
+        ),
+        (
+            forward_primitive.target_chart == reverse_primitive.source_chart,
+            "reverse-source-chart",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedChartTransitionInverseLawCandidateErrorV1::EndpointMismatch { field },
+            );
+        }
+    }
+    if forward_primitive.overlap != reverse_primitive.overlap {
+        return Err(DerivedChartTransitionInverseLawCandidateErrorV1::OverlapMismatch);
+    }
+
+    Ok(ChartTransitionInverseLawBindingV1 {
+        source_geometry: forward_primitive.source_geometry,
+        target_geometry: forward_primitive.target_geometry,
+        source_chart: forward_primitive.source_chart,
+        target_chart: forward_primitive.target_chart,
+        overlap: forward_primitive.overlap,
+        forward: ir.forward,
+        reverse: ir.reverse,
+        forward_map: forward_primitive.map,
+        reverse_map: reverse_primitive.map,
+        source_round_trip: ir.source_round_trip,
+        target_round_trip: ir.target_round_trip,
+        no_authority: ir.no_authority,
+    })
+}
+
+fn chart_transition_inverse_law_candidate_receipt(
+    binding: ChartTransitionInverseLawBindingV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedChartTransitionInverseLawCandidateIdV1>,
+    DerivedChartTransitionInverseLawCandidateErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedChartTransitionInverseLawCandidateErrorV1::Cancelled {
+                stage: "chart-transition-inverse-law-identity",
+            }
+        }
+        other => DerivedChartTransitionInverseLawCandidateErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedChartTransitionInverseLawCandidateIdV1, _>::new(
+        DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "source-geometry"),
+        binding.source_geometry.as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "target-geometry"),
+            binding.target_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "source-chart"),
+            binding.source_chart.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "target-chart"),
+            binding.target_chart.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.bytes(Field::new(4, "overlap"), binding.overlap.as_bytes()))
+    .and_then(|encoder| encoder.child(Field::new(5, "forward-chart-map"), binding.forward))
+    .and_then(|encoder| encoder.child(Field::new(6, "reverse-chart-map"), binding.reverse))
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(7, "source-round-trip-declaration"),
+            binding.source_round_trip.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(8, "target-round-trip-declaration"),
+            binding.target_round_trip.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(9, "no-authority"),
+            binding.no_authority.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Seal two oppositely oriented direct chart maps as an inverse-law candidate.
+///
+/// This admission checks only exact sealed child identity, direct single-map
+/// shape, reversed geometry/chart endpoints, one identical overlap selector,
+/// nonzero nominal round-trip declarations, and a nonzero no-authority artifact.
+/// It does not execute either coordinate map or check either ordered composite.
+/// A later independent checker must validate both composites against exact
+/// identity maps and mint a distinct authority-bearing receipt if justified.
+///
+/// # Errors
+/// Returns a typed refusal for schema, zero identity, raw/sealed child mismatch,
+/// non-direct or non-chart children, non-reversed endpoints, unequal overlap,
+/// cancellation, or canonical identity defects. No partial token escapes.
+#[must_use = "a chart-transition pair has no inverse or equivalence authority"]
+pub fn admit_derived_chart_transition_inverse_law_candidate_v1(
+    ir: &DerivedChartTransitionInverseLawCandidateIrV1,
+    forward: &AdmittedDerivedMorphismV1,
+    reverse: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedChartTransitionInverseLawCandidateV1,
+    DerivedChartTransitionInverseLawCandidateErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedChartTransitionInverseLawCandidateErrorV1::Cancelled {
+                stage: "chart-transition-inverse-law-entry",
+            },
+        );
+    }
+    let binding = validate_chart_transition_inverse_law_candidate(ir, forward, reverse)?;
+    let receipt = chart_transition_inverse_law_candidate_receipt(binding, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedChartTransitionInverseLawCandidateErrorV1::Cancelled {
+                stage: "chart-transition-inverse-law-publication",
+            },
+        );
+    }
+    Ok(AdmittedDerivedChartTransitionInverseLawCandidateV1 {
+        source_geometry: binding.source_geometry,
+        target_geometry: binding.target_geometry,
+        source_chart: binding.source_chart,
+        target_chart: binding.target_chart,
+        overlap: binding.overlap,
+        forward: binding.forward,
+        reverse: binding.reverse,
+        forward_map: binding.forward_map,
+        reverse_map: binding.reverse_map,
+        source_round_trip: binding.source_round_trip,
+        target_round_trip: binding.target_round_trip,
+        no_authority: binding.no_authority,
+        receipt,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FixedResolutionQuasiIsomorphismCandidateBindingV1 {
     refinement_path: DerivedMorphismIdV1,
@@ -6370,6 +6861,36 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn chart_map_ir_with_artifacts(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        source_chart: ConfigurationChartIdV1,
+        target_chart: ConfigurationChartIdV1,
+        declaration_seed: u8,
+        overlap: DerivedChartOverlapIdV1,
+        map: DerivedChartMapIdV1,
+        input_rank: ColorRank,
+        output_rank: ColorRank,
+    ) -> DerivedMorphismIrV1 {
+        let mut ir = chart_map_ir(
+            source,
+            target,
+            source_chart,
+            target_chart,
+            declaration_seed,
+            input_rank,
+            output_rank,
+        );
+        ir.kind = DerivedMorphismKindV1::DeclaredChartMap {
+            source_chart,
+            target_chart,
+            overlap,
+            map,
+        };
+        ir
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn complex_refinement_ir(
         source: GeometryEndpointV1<'_>,
         target: GeometryEndpointV1<'_>,
@@ -6426,6 +6947,25 @@ mod tests {
             left_leg: left_leg.id(),
             right_leg: right_leg.id(),
             no_claim: DerivedNoClaimIdV1::from_bytes([no_claim_seed; 32]),
+        }
+    }
+
+    fn chart_transition_inverse_law_ir(
+        forward: &AdmittedDerivedMorphismV1,
+        reverse: &AdmittedDerivedMorphismV1,
+        declaration_seed: u8,
+    ) -> DerivedChartTransitionInverseLawCandidateIrV1 {
+        DerivedChartTransitionInverseLawCandidateIrV1 {
+            schema_version: DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1,
+            forward: forward.id(),
+            reverse: reverse.id(),
+            source_round_trip: DerivedChartRoundTripDeclarationIdV1::from_bytes(
+                [declaration_seed; 32],
+            ),
+            target_round_trip: DerivedChartRoundTripDeclarationIdV1::from_bytes(
+                [declaration_seed.wrapping_add(1); 32],
+            ),
+            no_authority: DerivedNoClaimIdV1::from_bytes([declaration_seed.wrapping_add(2); 32]),
         }
     }
 
@@ -6491,6 +7031,71 @@ mod tests {
             cx,
         )
         .expect("valid declared chart map")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_chart_map_with_artifacts(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        source_chart: ConfigurationChartIdV1,
+        target_chart: ConfigurationChartIdV1,
+        declaration_seed: u8,
+        overlap: DerivedChartOverlapIdV1,
+        map: DerivedChartMapIdV1,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedMorphismV1 {
+        admit_between_endpoints(
+            chart_map_ir_with_artifacts(
+                source,
+                target,
+                source_chart,
+                target_chart,
+                declaration_seed,
+                overlap,
+                map,
+                ColorRank::Verified,
+                ColorRank::Validated,
+            ),
+            source,
+            target,
+            cx,
+        )
+        .expect("valid direct declared chart map")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_chart_transition_pair(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        source_chart: ConfigurationChartIdV1,
+        target_chart: ConfigurationChartIdV1,
+        overlap: DerivedChartOverlapIdV1,
+        forward_map: DerivedChartMapIdV1,
+        reverse_map: DerivedChartMapIdV1,
+        cx: &Cx<'_>,
+    ) -> (AdmittedDerivedMorphismV1, AdmittedDerivedMorphismV1) {
+        (
+            admit_chart_map_with_artifacts(
+                source,
+                target,
+                source_chart,
+                target_chart,
+                231,
+                overlap,
+                forward_map,
+                cx,
+            ),
+            admit_chart_map_with_artifacts(
+                target,
+                source,
+                target_chart,
+                source_chart,
+                232,
+                overlap,
+                reverse_map,
+                cx,
+            ),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8465,6 +9070,510 @@ mod tests {
             assert_eq!(
                 compose_derived_morphisms_v1(&identity, &f, cx).expect("identity then f"),
                 f
+            );
+        });
+    }
+
+    #[test]
+    fn direct_chart_transition_inverse_law_candidates_are_structural_only() {
+        assert_ne!(
+            <DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 as CanonicalSchema>::DOMAIN,
+            <DerivedMorphismIdentitySchemaV1 as CanonicalSchema>::DOMAIN
+        );
+        assert_eq!(
+            <DerivedChartTransitionInverseLawCandidateIdentitySchemaV1 as CanonicalSchema>::FIELDS
+                .len(),
+            10
+        );
+        assert_eq!(
+            DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1.max_fields(),
+            10
+        );
+
+        with_cx(false, |cx| {
+            let source_charts = [chart(180, 2, 2, 18, 1.0)];
+            let target_charts = [chart(181, 2, 2, 18, 1.0)];
+            let source = endpoint_with_charts(182, &source_charts);
+            let target = endpoint_with_charts(183, &target_charts);
+            let overlap = DerivedChartOverlapIdV1::from_bytes([184; 32]);
+            let forward_map = DerivedChartMapIdV1::from_bytes([185; 32]);
+            let reverse_map = DerivedChartMapIdV1::from_bytes([186; 32]);
+            let (forward, reverse) = admit_chart_transition_pair(
+                source,
+                target,
+                source_charts[0].id,
+                target_charts[0].id,
+                overlap,
+                forward_map,
+                reverse_map,
+                cx,
+            );
+            let ir = chart_transition_inverse_law_ir(&forward, &reverse, 187);
+            let first = admit_derived_chart_transition_inverse_law_candidate_v1(
+                &ir, &forward, &reverse, cx,
+            )
+            .expect("valid structural inverse-law candidate");
+            let replay = admit_derived_chart_transition_inverse_law_candidate_v1(
+                &ir, &forward, &reverse, cx,
+            )
+            .expect("deterministic structural candidate replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.source_geometry(), source.id);
+            assert_eq!(first.target_geometry(), target.id);
+            assert_eq!(first.source_chart(), source_charts[0].id);
+            assert_eq!(first.target_chart(), target_charts[0].id);
+            assert_eq!(first.overlap(), overlap);
+            assert_eq!(first.forward(), forward.id());
+            assert_eq!(first.reverse(), reverse.id());
+            assert_eq!(first.forward_map(), forward_map);
+            assert_eq!(first.reverse_map(), reverse_map);
+            assert_eq!(first.source_round_trip(), ir.source_round_trip);
+            assert_eq!(first.target_round_trip(), ir.target_round_trip);
+            assert_eq!(first.no_authority(), ir.no_authority);
+            assert_eq!(first.id(), first.identity_receipt().id());
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exact ten-field and typed-child identity contract.
+    fn direct_chart_transition_candidate_receipt_binds_every_ordered_field() {
+        with_cx(false, |cx| {
+            let source_charts = [chart(188, 2, 2, 19, 1.0)];
+            let target_charts = [chart(189, 2, 2, 19, 1.0)];
+            let source = endpoint_with_charts(190, &source_charts);
+            let target = endpoint_with_charts(191, &target_charts);
+            let (forward, reverse) = admit_chart_transition_pair(
+                source,
+                target,
+                source_charts[0].id,
+                target_charts[0].id,
+                DerivedChartOverlapIdV1::from_bytes([192; 32]),
+                DerivedChartMapIdV1::from_bytes([193; 32]),
+                DerivedChartMapIdV1::from_bytes([194; 32]),
+                cx,
+            );
+            let ir = chart_transition_inverse_law_ir(&forward, &reverse, 195);
+            let binding = validate_chart_transition_inverse_law_candidate(&ir, &forward, &reverse)
+                .expect("valid candidate binding");
+            let baseline = chart_transition_inverse_law_candidate_receipt(binding, cx)
+                .expect("candidate receipt")
+                .id();
+
+            macro_rules! assert_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = binding;
+                    changed.$field = $value;
+                    let changed = chart_transition_inverse_law_candidate_receipt(changed, cx)
+                        .expect("mutated candidate receipt")
+                        .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_field_moves_identity!(source_geometry, geometry_id(196));
+            assert_field_moves_identity!(target_geometry, geometry_id(197));
+            assert_field_moves_identity!(source_chart, chart_id(198));
+            assert_field_moves_identity!(target_chart, chart_id(199));
+            assert_field_moves_identity!(overlap, DerivedChartOverlapIdV1::from_bytes([200; 32]));
+            assert_field_moves_identity!(
+                forward,
+                DerivedMorphismIdV1::parse_slice(&[201; 32])
+                    .expect("nonzero forward morphism identity")
+            );
+            assert_field_moves_identity!(
+                reverse,
+                DerivedMorphismIdV1::parse_slice(&[202; 32])
+                    .expect("nonzero reverse morphism identity")
+            );
+            assert_field_moves_identity!(
+                source_round_trip,
+                DerivedChartRoundTripDeclarationIdV1::from_bytes([203; 32])
+            );
+            assert_field_moves_identity!(
+                target_round_trip,
+                DerivedChartRoundTripDeclarationIdV1::from_bytes([204; 32])
+            );
+            assert_field_moves_identity!(no_authority, DerivedNoClaimIdV1::from_bytes([205; 32]));
+
+            for field in &DerivedChartTransitionInverseLawCandidateIdentitySchemaV1::FIELDS[5..7] {
+                assert_eq!(field.wire_type(), WireType::Child);
+                assert!(field.child_spec().is_some());
+            }
+            let wrong_child_schema = CanonicalEncoder::<
+                DerivedChartTransitionInverseLawCandidateIdV1,
+                _,
+            >::new(
+                DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_IDENTITY_LIMITS_V1,
+                || cx.checkpoint().is_err(),
+            )
+            .expect("valid chart-transition candidate encoder")
+            .bytes(
+                Field::new(0, "source-geometry"),
+                binding.source_geometry.as_bytes(),
+            )
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(1, "target-geometry"),
+                    binding.target_geometry.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(2, "source-chart"),
+                    binding.source_chart.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(3, "target-chart"),
+                    binding.target_chart.as_bytes(),
+                )
+            })
+            .and_then(|encoder| encoder.bytes(Field::new(4, "overlap"), binding.overlap.as_bytes()))
+            .and_then(|encoder| {
+                encoder.child(
+                    Field::new(5, "forward-chart-map"),
+                    DerivedSpanCorrespondenceIdV1::parse_slice(&[206; 32])
+                        .expect("nonzero wrong-schema child"),
+                )
+            });
+            assert!(matches!(
+                wrong_child_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "forward-chart-map",
+                    what: "child schema domain",
+                })
+            ));
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exhaustive typed refusal matrix for this structural seam.
+    fn direct_chart_transition_candidates_refuse_unbound_or_noninverse_shapes() {
+        let (forward, reverse, ir) = with_cx(false, |cx| {
+            let source_charts = [chart(206, 2, 2, 20, 1.0), chart(207, 2, 2, 20, 1.0)];
+            let target_charts = [chart(208, 2, 2, 20, 1.0), chart(224, 2, 2, 20, 1.0)];
+            let source = endpoint_with_charts(209, &source_charts);
+            let target = endpoint_with_charts(210, &target_charts);
+            let overlap = DerivedChartOverlapIdV1::from_bytes([211; 32]);
+            let (forward, reverse) = admit_chart_transition_pair(
+                source,
+                target,
+                source_charts[0].id,
+                target_charts[0].id,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([212; 32]),
+                DerivedChartMapIdV1::from_bytes([213; 32]),
+                cx,
+            );
+            let ir = chart_transition_inverse_law_ir(&forward, &reverse, 214);
+
+            let mut bad_schema = ir;
+            bad_schema.schema_version = 2;
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &bad_schema,
+                    &forward,
+                    &reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::UnsupportedSchemaVersion {
+                        found: 2,
+                        supported: DERIVED_CHART_TRANSITION_INVERSE_LAW_CANDIDATE_SCHEMA_VERSION_V1,
+                    }
+                )
+            );
+
+            for (field, changed_ir) in [
+                (
+                    "forward-chart-map",
+                    DerivedChartTransitionInverseLawCandidateIrV1 {
+                        forward: DerivedMorphismIdV1::parse_slice(&[0; 32])
+                            .expect("zero sentinel remains representable"),
+                        ..ir
+                    },
+                ),
+                (
+                    "reverse-chart-map",
+                    DerivedChartTransitionInverseLawCandidateIrV1 {
+                        reverse: DerivedMorphismIdV1::parse_slice(&[0; 32])
+                            .expect("zero sentinel remains representable"),
+                        ..ir
+                    },
+                ),
+                (
+                    "source-round-trip-declaration",
+                    DerivedChartTransitionInverseLawCandidateIrV1 {
+                        source_round_trip: DerivedChartRoundTripDeclarationIdV1::from_bytes(
+                            [0; 32],
+                        ),
+                        ..ir
+                    },
+                ),
+                (
+                    "target-round-trip-declaration",
+                    DerivedChartTransitionInverseLawCandidateIrV1 {
+                        target_round_trip: DerivedChartRoundTripDeclarationIdV1::from_bytes(
+                            [0; 32],
+                        ),
+                        ..ir
+                    },
+                ),
+                (
+                    "no-authority",
+                    DerivedChartTransitionInverseLawCandidateIrV1 {
+                        no_authority: DerivedNoClaimIdV1::from_bytes([0; 32]),
+                        ..ir
+                    },
+                ),
+            ] {
+                assert!(matches!(
+                    admit_derived_chart_transition_inverse_law_candidate_v1(
+                        &changed_ir,
+                        &forward,
+                        &reverse,
+                        cx,
+                    ),
+                    Err(DerivedChartTransitionInverseLawCandidateErrorV1::MissingIdentity {
+                        field: found,
+                    }) if found == field
+                ));
+            }
+
+            let mut wrong_child = ir;
+            wrong_child.forward = reverse.id();
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_child,
+                    &forward,
+                    &reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::ChildIdentityMismatch {
+                        field: "forward-chart-map",
+                    }
+                )
+            );
+
+            let mut wrong_reverse_child = ir;
+            wrong_reverse_child.reverse = forward.id();
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_reverse_child,
+                    &forward,
+                    &reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::ChildIdentityMismatch {
+                        field: "reverse-chart-map",
+                    }
+                )
+            );
+
+            let strict = admit_strict(
+                source,
+                target,
+                215,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let strict_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                forward: strict.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &strict_ir, &strict, &reverse, cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::DirectChartMapRequired {
+                        field: "forward-chart-map",
+                    }
+                )
+            );
+
+            let strict_reverse = admit_strict(
+                target,
+                source,
+                225,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let strict_reverse_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                reverse: strict_reverse.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &strict_reverse_ir,
+                    &forward,
+                    &strict_reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::DirectChartMapRequired {
+                        field: "reverse-chart-map",
+                    }
+                )
+            );
+
+            let wrong_geometry_target = endpoint_with_charts(216, &source_charts);
+            let wrong_geometry_reverse = admit_chart_map_with_artifacts(
+                target,
+                wrong_geometry_target,
+                target_charts[0].id,
+                source_charts[0].id,
+                217,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([218; 32]),
+                cx,
+            );
+            let wrong_geometry_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                reverse: wrong_geometry_reverse.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_geometry_ir,
+                    &forward,
+                    &wrong_geometry_reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EndpointMismatch {
+                        field: "reverse-target-geometry",
+                    }
+                )
+            );
+
+            let wrong_geometry_source = endpoint_with_charts(226, &target_charts);
+            let wrong_source_geometry_reverse = admit_chart_map_with_artifacts(
+                wrong_geometry_source,
+                source,
+                target_charts[0].id,
+                source_charts[0].id,
+                227,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([228; 32]),
+                cx,
+            );
+            let wrong_source_geometry_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                reverse: wrong_source_geometry_reverse.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_source_geometry_ir,
+                    &forward,
+                    &wrong_source_geometry_reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EndpointMismatch {
+                        field: "reverse-source-geometry",
+                    }
+                )
+            );
+
+            let wrong_chart_reverse = admit_chart_map_with_artifacts(
+                target,
+                source,
+                target_charts[0].id,
+                source_charts[1].id,
+                219,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([220; 32]),
+                cx,
+            );
+            let wrong_chart_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                reverse: wrong_chart_reverse.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_chart_ir,
+                    &forward,
+                    &wrong_chart_reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EndpointMismatch {
+                        field: "reverse-target-chart",
+                    }
+                )
+            );
+
+            let wrong_source_chart_reverse = admit_chart_map_with_artifacts(
+                target,
+                source,
+                target_charts[1].id,
+                source_charts[0].id,
+                229,
+                overlap,
+                DerivedChartMapIdV1::from_bytes([230; 32]),
+                cx,
+            );
+            let wrong_source_chart_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                reverse: wrong_source_chart_reverse.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_source_chart_ir,
+                    &forward,
+                    &wrong_source_chart_reverse,
+                    cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::EndpointMismatch {
+                        field: "reverse-source-chart",
+                    }
+                )
+            );
+
+            let wrong_overlap_reverse = admit_chart_map_with_artifacts(
+                target,
+                source,
+                target_charts[0].id,
+                source_charts[0].id,
+                221,
+                DerivedChartOverlapIdV1::from_bytes([222; 32]),
+                DerivedChartMapIdV1::from_bytes([223; 32]),
+                cx,
+            );
+            let wrong_overlap_ir = DerivedChartTransitionInverseLawCandidateIrV1 {
+                reverse: wrong_overlap_reverse.id(),
+                ..ir
+            };
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &wrong_overlap_ir,
+                    &forward,
+                    &wrong_overlap_reverse,
+                    cx,
+                ),
+                Err(DerivedChartTransitionInverseLawCandidateErrorV1::OverlapMismatch)
+            );
+
+            (forward, reverse, ir)
+        });
+
+        with_cx(true, |cx| {
+            assert_eq!(
+                admit_derived_chart_transition_inverse_law_candidate_v1(
+                    &ir, &forward, &reverse, cx,
+                ),
+                Err(
+                    DerivedChartTransitionInverseLawCandidateErrorV1::Cancelled {
+                        stage: "chart-transition-inverse-law-entry",
+                    }
+                )
             );
         });
     }
