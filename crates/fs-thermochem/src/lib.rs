@@ -5,13 +5,15 @@
 //! These first slices deliberately reuse `fs-qty`'s exact chemistry artifacts
 //! instead of creating a second species or conservation system. They add a
 //! provenance-bound NASA-9 standard-state evaluator and a bounded,
-//! frozen-composition ideal-gas mixture evaluator, plus the positive-state
-//! mechanical ideal-gas `p`-`rho`-`T` closure. Derived identities remain scoped
-//! to explicit ideal-gas conventions. This crate owns no transport solver,
-//! evolving state, phase-equilibrium solve, kinetics integrator, or L3 protocol.
+//! frozen-composition ideal-gas mixture evaluator, the positive-state
+//! mechanical ideal-gas `p`-`rho`-`T` closure, and a bounded Wilke dilute-gas
+//! viscosity mixing closure. Derived identities remain scoped to explicit
+//! ideal-gas conventions. This crate owns no transport solver, evolving state,
+//! phase-equilibrium solve, kinetics integrator, or L3 protocol.
 
 pub mod eos;
 pub mod mixture;
+pub mod transport;
 
 use core::fmt;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError};

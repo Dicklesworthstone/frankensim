@@ -3,8 +3,9 @@
 > Status: ACTIVE, CODE-FIRST SLICES. This contract covers typed,
 > provenance-bound NASA-9 ideal-gas standard-state evaluation and bounded
 > frozen-composition ideal-gas mixture evaluation, plus a positive-state
-> mechanical ideal-gas EOS rung. Central batch compilation and test execution
-> are pending; the parent thermochemistry bead remains in progress.
+> mechanical ideal-gas EOS rung and a bounded Wilke dilute-gas viscosity
+> mixing closure. Central batch compilation and test execution for the newest
+> slice are pending; the parent thermochemistry bead remains in progress.
 
 ## Purpose and layer
 
@@ -19,7 +20,9 @@ explicit gas/ideal-gas/reference-pressure/elemental-reference convention. The
 second combines up to 128 strictly positive, canonically ordered components
 into frozen ideal-gas molar and mass-specific properties. The third supplies
 the typed mechanical closure from positive finite temperature, pressure, and
-molar mass to density, molar volume, specific gas constant, and `Z = 1`.
+molar mass to density, molar volume, specific gas constant, and `Z = 1`. The
+fourth combines up to 128 positive caller-supplied pure-species viscosities by
+Wilke's dilute-gas rule at one explicitly declared common temperature.
 
 Direct runtime dependencies are L1 or lower: `fs-qty`, `fs-matdb`, and
 `fs-math`. The direct `fs-evidence` edge is development-only so conformance
@@ -80,6 +83,21 @@ behavior.
   `MechanicalEquationOfStateV1::IdealGas` rung, gas-constant bits, all input
   bits, and all output bits. The receipt does not authenticate species, phase,
   molar mass, or material identity.
+- `WilkeGasViscosityComponentV1` binds one canonical `SpeciesId`, positive
+  finite typed molar mass, and positive finite typed dynamic viscosity. The
+  component is an immutable caller declaration; it does not authenticate a
+  pure-species transport law or the state at which that law was evaluated.
+- `WilkeGasViscosityMixtureV1` admits at most 128 active components, moves
+  fractions with components into canonical species order, requires exact-one
+  active composition, converts mass fractions to mole fractions through typed
+  molar masses, and refuses volume fractions. Its one retained positive finite
+  temperature is the caller's common-state declaration.
+- `WilkeGasViscosityEvaluationV1` contains one typed mixed dynamic viscosity
+  and an immutable `WilkeGasViscosityReceiptV1`. The receipt binds the
+  operation-tree/math/quantity versions, explicit `Wilke` rule, temperature,
+  both composition bases and exact sums, canonical species, molar masses,
+  supplied viscosities, fractions, every outer-component denominator, and the
+  final result.
 
 ## NASA-9 operation tree
 
@@ -174,6 +192,35 @@ Every exposed derived scalar must be strictly positive and finite. A zero or
 non-finite intermediate/result refuses without a partial evaluation. This is a
 mechanical ideal-gas model-domain check, not a physical phase-stability test.
 
+## Wilke dilute-gas viscosity operation tree
+
+For positive mole fractions `x_i`, pure-species dynamic viscosities `mu_i`,
+and molar masses `M_i`, version 1 evaluates canonical `(i, j)` pairs in this
+fixed binary64 tree:
+
+```text
+r_mu       = mu_i / mu_j
+r_M_rev    = M_j / M_i
+q_M        = sqrt(sqrt(r_M_rev))
+root_prod  = sqrt(r_mu) * q_M
+n_base     = 1 + root_prod
+numerator  = n_base * n_base
+r_M_fwd    = M_i / M_j
+d_rad      = 8 * (1 + r_M_fwd)
+Phi_ij     = numerator / sqrt(d_rad)
+D_i        = sum_j(x_j * Phi_ij)
+mu_mix     = sum_i(x_i * (mu_i / D_i))
+```
+
+This is the usual Wilke expression in an explicitly pinned, algebraically
+equivalent operation order. `fs_math::det::sqrt` supplies every square root;
+the evaluator neither calls platform libm nor retains an `N x N` interaction
+matrix. Every intermediate and fixed-order partial sum must remain strictly
+positive and finite. Cantera's `GasTransport` documentation is retained as a
+development cross-reference for the rule and units, never as a runtime
+dependency:
+<https://cantera.org/3.1/cxx/d8/d58/classCantera_1_1GasTransport.html>.
+
 ## Invariants
 
 - ONE CHEMISTRY AUTHORITY: exact bookkeeping and conservation come from
@@ -214,6 +261,17 @@ mechanical ideal-gas model-domain check, not a physical phase-stability test.
 - POSITIVE IDEAL EOS DOMAIN: `M`, `T`, and `p`, plus every exposed mechanical
   EOS output, are strictly positive and finite. `Z` is exactly one by model
   definition; this does not prove a real fluid is stable or ideal.
+- BOUNDED QUADRATIC TRANSPORT WORK: Wilke count and composition-length gates
+  run before component scanning, sorting, or `O(N^2)` pair work. `N <= 128`,
+  canonical sorting uses no auxiliary interaction matrix, and every evaluator
+  vector reservation is fallible before publication.
+- ACTIVE WILKE COMPOSITION: zero fractions refuse instead of retaining inert
+  receipt entries. Canonical declared and converted mole fractions must each
+  sum to bit-exact one. Species duplicates refuse after canonical sorting.
+- WILKE VALUES ARE CONDITIONAL: positive finite component values and a common
+  caller-declared temperature are structural prerequisites, not proof that the
+  values share a state or that a gas is dilute, single-phase, or described by
+  Wilke's empirical approximation.
 
 ## Error model
 
@@ -234,6 +292,13 @@ species-evaluation failure, and non-finite mixture fields.
 and the first zero, negative, or non-finite EOS output/intermediate in fixed
 operation-tree order. Float-bearing refusals retain exact IEEE-754 bits.
 
+`WilkeGasViscosityErrorV1` separately names count and length gates, shared
+composition failures, invalid component scalars and temperature, duplicate or
+zero active species, non-exact declared or converted composition, mass-to-mole
+underflow, bounded allocation stage, and the first failed pair/outer component
+plus operation-tree intermediate. Float-bearing refusals retain exact IEEE-754
+bits and no partial viscosity or receipt escapes.
+
 ## Determinism class
 
 Version 1 is fixed-order deterministic for identical inputs under the same
@@ -250,6 +315,12 @@ same model, properties, and exact-field receipt.
 
 The mechanical EOS is one fixed allocation-free scalar tree. Repeated
 same-target evaluation is expected to return bit-identical outputs and receipt.
+
+The Wilke evaluator canonicalizes by `SpeciesId`, then executes fixed nested
+`(i, j)` loops and fixed-order sums. Caller permutation cannot change the model,
+result, denominator trace, or receipt. `fs_math::det::sqrt` and the explicit
+evaluator version bind the elementary-math dialect; repeated evaluation on one
+target is expected to be bit-identical.
 
 Cross-ISA bit identity is not claimed until the central Gauntlet runs retain
 evidence for both reference ISA families. NASA/mixture receipts record their
@@ -278,6 +349,14 @@ semantics before landing.
 Mechanical ideal-gas construction and evaluation are fixed-size scalar work
 with no useful cancellation tile. They neither consume a `Cx` budget nor own
 request-drain-finalize behavior.
+
+Wilke admission performs bounded `N <= 128` sorting and basis conversion;
+evaluation performs at most 16,384 pair interactions and fixed-size receipt
+work. This first L1 closure therefore has a hard defensive work ceiling and no
+useful asynchronous `Cx` tile. It does not claim caller-budget consumption,
+deadline preemption inside scalar arithmetic, or request-drain-finalize
+ownership. Larger or iterative transport closures require explicit budgets and
+cancellation semantics.
 
 ## Unsafe boundary
 
@@ -330,10 +409,22 @@ Inline tests in `src/eos.rs` add:
 - G5 bit-identical replay, exact assertions for every receipt field, and
   controlled state/output mutation coverage.
 
-These tests are code-first and batch-verification pending. A sourced external
-NASA/Cantera numerical oracle battery, adversarial source-card mutation battery,
-and retained cross-ISA evidence are required follow-ups; the synthetic
-algebraic fixtures do not substitute for them.
+Inline tests in `src/transport.rs` add:
+
+- G0 exact pure-species and equal-property limits, a binary independent Wilke
+  expression, typed mass-to-mole basis conversion, and the exact 128-component
+  admission boundary;
+- G3 canonical permutation invariance, common viscosity scaling, count/length,
+  invalid scalar/temperature, duplicate/zero/nonexact/volume composition, and
+  mass-to-mole underflow and extreme-ratio arithmetic refusals;
+- G5 bit-identical replay, exact assertions over every receipt field, and a
+  supplied-viscosity mutation that changes the receipt.
+
+The newest tests are code-first and batch-verification pending. A sourced
+external NASA/Cantera numerical oracle battery, an independently tabulated
+Wilke battery, adversarial source-card mutation battery, and retained cross-ISA
+evidence are required follow-ups; the synthetic algebraic fixtures do not
+substitute for them.
 
 ## No-claim boundaries
 
@@ -351,7 +442,11 @@ This slice does **not** claim:
   functions, cubic/tabular real-gas or multiphase EOS behavior;
 - a physical phase-stability verdict from the positive ideal-gas model-domain
   check, flash calculations, chemical equilibrium, reaction rates,
-  kinetics integration, transport coefficients, or transport solves;
+  kinetics integration, thermal conductivity, diffusion coefficients, or
+  transport solves;
+- authenticity or same-state consistency of caller-supplied pure-species
+  viscosities, viscosity-law validity outside their source domains, dense-gas
+  corrections, or physical applicability/accuracy of the Wilke approximation;
 - uncertainty propagation, interval enclosure, rounding-error certification,
   or validity outside the exact admitted temperature regions;
 - cross-ISA bit stability before retained G5 evidence exists;
