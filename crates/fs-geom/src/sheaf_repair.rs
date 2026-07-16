@@ -713,8 +713,68 @@ pub struct SheafRepairUsage {
     pub admitted_work_items: usize,
     /// Conservative scalar-slot envelope admitted before work began.
     pub admitted_scalar_slots: usize,
-    /// Enforced ambient deadline, poll, and cost-budget consumption.
+    /// Enforced ambient deadline, poll, and cost-budget consumption for the
+    /// latest attempt. Single-attempt callers retain their historical
+    /// interpretation; resumed callers receive a separate ordered history.
     pub ambient_budget: BudgetConsumption,
+}
+
+/// Maximum number of same-process attempts retained by one sheaf checkpoint.
+///
+/// A fixed array keeps interruption packaging allocation-free after an
+/// ambient refusal. Attempt nine is refused before the checkpoint is moved.
+pub const SHEAF_NUMERICS_MAX_ATTEMPTS_V1: usize = 8;
+
+/// Allocation-free ordered ambient-budget history for one numerical session.
+///
+/// Entries are deliberately not summed: deadlines, quotas, refusals, and
+/// planned costs belong to distinct [`Cx`] values and remain independently
+/// auditable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheafBudgetAttemptHistory {
+    len: u8,
+    entries: [Option<BudgetConsumption>; SHEAF_NUMERICS_MAX_ATTEMPTS_V1],
+}
+
+impl SheafBudgetAttemptHistory {
+    const fn empty() -> Self {
+        Self {
+            len: 0,
+            entries: [None; SHEAF_NUMERICS_MAX_ATTEMPTS_V1],
+        }
+    }
+
+    fn push(&mut self, attempt: BudgetConsumption) -> bool {
+        let index = usize::from(self.len);
+        if index >= SHEAF_NUMERICS_MAX_ATTEMPTS_V1 {
+            return false;
+        }
+        self.entries[index] = Some(attempt);
+        self.len += 1;
+        true
+    }
+
+    /// Number of admitted attempts retained in order.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether no attempt has been retained.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// One attempt receipt by zero-based execution order.
+    #[must_use]
+    pub const fn get(&self, index: usize) -> Option<BudgetConsumption> {
+        if index < self.len as usize {
+            self.entries[index]
+        } else {
+            None
+        }
+    }
 }
 
 /// A bounded diagnostic plus its resource consumption.
@@ -1078,8 +1138,9 @@ enum SheafSweepCheckpointState {
 /// The retained solver vectors are deliberately private and have no public
 /// candidate accessors. This token proves only that the opt-in assessment
 /// sealed a rollback point. It does not grant a decomposition, residual,
-/// spectrum, topology, repair, or publication claim, and this first slice does
-/// not yet provide a resume operation.
+/// spectrum, topology, repair, or publication claim. It can only be consumed
+/// by the same-process bounded resume entry point; it is not cloneable,
+/// serializable, migratable, or forkable.
 pub struct SheafSweepCheckpoint {
     source: SheafNumericsSource,
     relative_tolerance: f64,
@@ -1089,7 +1150,9 @@ pub struct SheafSweepCheckpoint {
     exact_sweeps_completed: usize,
     coexact_sweeps_completed: usize,
     budget: SheafRepairBudget,
+    admission: RepairAdmission,
     usage: SheafRepairUsage,
+    attempts: SheafBudgetAttemptHistory,
     state: SheafSweepCheckpointState,
 }
 
@@ -1119,6 +1182,7 @@ impl core::fmt::Debug for SheafSweepCheckpoint {
             }
         }
         let _ = self.max_degree;
+        let _ = self.admission;
         f.debug_struct("SheafSweepCheckpoint")
             .field("source_patches", &self.source.n_patches)
             .field("source_edges", &self.source.edges.len())
@@ -1130,6 +1194,7 @@ impl core::fmt::Debug for SheafSweepCheckpoint {
             .field("coexact_sweeps_completed", &self.coexact_sweeps_completed)
             .field("budget", &self.budget)
             .field("usage", &self.usage)
+            .field("attempts", &self.attempts.len())
             .field("state", &"<opaque>")
             .finish()
     }
@@ -1184,6 +1249,12 @@ impl SheafSweepCheckpoint {
     pub const fn usage(&self) -> SheafRepairUsage {
         self.usage
     }
+
+    /// Ordered ambient receipts for every admitted attempt so far.
+    #[must_use]
+    pub const fn attempts(&self) -> &SheafBudgetAttemptHistory {
+        &self.attempts
+    }
 }
 
 /// Runtime interruption paired with one opaque last-complete-sweep checkpoint.
@@ -1226,6 +1297,63 @@ pub enum RetainedSheafNumericsOutcome {
     /// Cancellation or an ambient deadline/poll/cost refusal occurred only
     /// after at least one deterministic projection sweep was sealed.
     Interrupted(InterruptedSheafNumerics),
+}
+
+/// Why a fresh resume attempt did not consume its checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheafResumeAdmissionError {
+    /// The fixed attempt-history capacity is already full.
+    AttemptLimitReached {
+        /// Maximum admitted attempts, including the original attempt.
+        cap: usize,
+    },
+    /// Checked remaining-work or fresh ambient admission refused.
+    Repair(SheafRepairError),
+}
+
+/// A resume refusal that preserves sole ownership of the original checkpoint.
+#[derive(Debug)]
+pub struct UnadmittedSheafNumericsResume {
+    reason: SheafResumeAdmissionError,
+    checkpoint: SheafSweepCheckpoint,
+}
+
+impl UnadmittedSheafNumericsResume {
+    /// Exact admission refusal observed before checkpoint consumption.
+    #[must_use]
+    pub const fn reason(&self) -> SheafResumeAdmissionError {
+        self.reason
+    }
+
+    /// Borrow the logically unchanged checkpoint.
+    #[must_use]
+    pub const fn checkpoint(&self) -> &SheafSweepCheckpoint {
+        &self.checkpoint
+    }
+
+    /// Recover sole ownership for a later attempt.
+    #[must_use]
+    pub fn into_checkpoint(self) -> SheafSweepCheckpoint {
+        self.checkpoint
+    }
+}
+
+/// Result of consuming one opaque same-process checkpoint for continuation.
+// Boxing either checkpoint-bearing variant would allocate after refusal.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum ResumedSheafNumericsOutcome {
+    /// The resumed state machine completed or failed after admission.
+    Finished {
+        /// Terminal numerical outcome.
+        outcome: SheafNumericsOutcome,
+        /// Ordered ambient receipts, including the terminal attempt.
+        attempts: SheafBudgetAttemptHistory,
+    },
+    /// The admitted attempt stopped and returned an updated checkpoint.
+    Interrupted(InterruptedSheafNumerics),
+    /// No work admitted; the exact input checkpoint remains reusable.
+    NotAdmitted(UnadmittedSheafNumericsResume),
 }
 
 /// Additional output-allocation limits for bounded repair planning.
@@ -1454,6 +1582,9 @@ pub(super) struct RepairAccountant<'a, 'cx> {
     operator_evaluations: usize,
     completed_sweeps: usize,
     work_items: usize,
+    operator_limit: usize,
+    work_limit: usize,
+    attempt_history: SheafBudgetAttemptHistory,
     plan_memory_cap: usize,
     reserved_plan_bytes: usize,
     action_bytes_cap: usize,
@@ -1483,9 +1614,55 @@ impl<'a, 'cx> RepairAccountant<'a, 'cx> {
             operator_evaluations: 0,
             completed_sweeps: 0,
             work_items: 0,
+            operator_limit: budget.max_operator_evaluations,
+            work_limit: budget.max_work_items,
+            attempt_history: SheafBudgetAttemptHistory::empty(),
             plan_memory_cap,
             reserved_plan_bytes: 0,
             action_bytes_cap,
+            action_bytes: 0,
+        })
+    }
+
+    fn resume(
+        cx: &'a Cx<'cx>,
+        budget: SheafRepairBudget,
+        planned_cost: u64,
+        prior: SheafRepairUsage,
+        attempt_history: SheafBudgetAttemptHistory,
+        operator_limit: usize,
+        work_limit: usize,
+    ) -> Result<Self, SheafRepairError> {
+        let ambient = AdmittedBudget::admit_ambient(cx, planned_cost).map_err(|refusal| {
+            if matches!(refusal, BudgetRefusal::Cancelled { .. }) {
+                SheafRepairError::Cancelled {
+                    stage: "numerics-resume-admission",
+                    completed_sweeps: prior.completed_sweeps,
+                    operator_evaluations: prior.operator_evaluations,
+                    work_items: prior.work_items,
+                }
+            } else {
+                SheafRepairError::AmbientBudgetRefused {
+                    refusal,
+                    completed_sweeps: prior.completed_sweeps,
+                    operator_evaluations: prior.operator_evaluations,
+                    work_items: prior.work_items,
+                }
+            }
+        })?;
+        Ok(Self {
+            cx,
+            budget,
+            ambient,
+            operator_evaluations: prior.operator_evaluations,
+            completed_sweeps: prior.completed_sweeps,
+            work_items: prior.work_items,
+            operator_limit,
+            work_limit,
+            attempt_history,
+            plan_memory_cap: 0,
+            reserved_plan_bytes: 0,
+            action_bytes_cap: 0,
             action_bytes: 0,
         })
     }
@@ -1514,10 +1691,10 @@ impl<'a, 'cx> RepairAccountant<'a, 'cx> {
     }
 
     fn begin_operator(&mut self, stage: &'static str) -> Result<(), SheafRepairError> {
-        if self.operator_evaluations >= self.budget.max_operator_evaluations {
+        if self.operator_evaluations >= self.operator_limit {
             return Err(SheafRepairError::WorkBudgetExceeded {
                 required: self.operator_evaluations as u128 + 1,
-                cap: self.budget.max_operator_evaluations,
+                cap: self.operator_limit,
             });
         }
         self.checkpoint(stage)?;
@@ -1525,11 +1702,11 @@ impl<'a, 'cx> RepairAccountant<'a, 'cx> {
     }
 
     pub(super) fn consume_item(&mut self, stage: &'static str) -> Result<(), SheafRepairError> {
-        if self.work_items >= self.budget.max_work_items {
+        if self.work_items >= self.work_limit {
             return Err(SheafRepairError::WorkItemBudgetExceeded {
                 stage,
                 required: self.work_items as u128 + 1,
-                cap: self.budget.max_work_items,
+                cap: self.work_limit,
             });
         }
         if self.work_items.is_multiple_of(self.budget.poll_stride) {
@@ -1627,19 +1804,23 @@ impl<'a, 'cx> RepairAccountant<'a, 'cx> {
         Ok(())
     }
 
-    pub(super) fn usage(
-        &self,
-        admitted_scalar_slots: usize,
-        admitted_work_items: usize,
-    ) -> SheafRepairUsage {
+    pub(super) fn usage(&self, admission: RepairAdmission) -> SheafRepairUsage {
+        let ambient_budget = self.ambient.consumption();
         SheafRepairUsage {
             completed_sweeps: self.completed_sweeps,
             operator_evaluations: self.operator_evaluations,
             work_items: self.work_items,
-            admitted_work_items,
-            admitted_scalar_slots,
-            ambient_budget: self.ambient.consumption(),
+            admitted_work_items: admission.work_items,
+            admitted_scalar_slots: admission.scalar_slots,
+            ambient_budget,
         }
+    }
+
+    fn attempts_with_current(&self) -> SheafBudgetAttemptHistory {
+        let mut attempts = self.attempt_history;
+        let appended = attempts.push(self.ambient.consumption());
+        debug_assert!(appended, "attempt capacity is admitted before execution");
+        attempts
     }
 
     pub(super) const fn reserved_plan_bytes(&self) -> usize {
@@ -2510,6 +2691,126 @@ fn least_squares_retaining_sweeps(
     })
 }
 
+/// Continue an already sealed projection prefix without replaying committed
+/// sweeps. Setup scratch is reconstructed under the fresh attempt budget; an
+/// ambient interruption during that reconstruction retains the input iterate.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn least_squares_resuming_sweeps(
+    skeleton: &AdmittedSheafSkeleton,
+    m: &[f64],
+    n_unknowns: usize,
+    kind: ProjectionKind,
+    pinned_indices: &[usize],
+    stage: &'static str,
+    committed: Vec<f64>,
+    completed_sweeps: usize,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<RetainedProjectionOutcome, SheafRepairError> {
+    if committed.len() != n_unknowns || completed_sweeps > accountant.budget.sweeps {
+        return Err(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "resume-projection-state",
+        });
+    }
+    if completed_sweeps == accountant.budget.sweeps {
+        return Ok(RetainedProjectionOutcome::Completed {
+            solution: committed,
+            completed_sweeps,
+        });
+    }
+
+    let setup = (|| -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), SheafRepairError> {
+        let rhs = apply_projection_transpose(kind, skeleton, m, stage, accountant)?;
+        let mut diag =
+            zeroed_output_bounded(n_unknowns, "least-squares-resume-diagonal", accountant)?;
+        for (i, diagonal) in diag.iter_mut().enumerate() {
+            let mut basis =
+                zeroed_output_bounded(n_unknowns, "least-squares-resume-basis", accountant)?;
+            basis[i] = 1.0;
+            let image = apply_projection(kind, skeleton, &basis, stage, accountant)?;
+            *diagonal = checked_norm2(&image, "least-squares-resume-diagonal", accountant)?;
+        }
+        let working =
+            zeroed_output_bounded(n_unknowns, "least-squares-resume-working", accountant)?;
+        Ok((rhs, diag, working))
+    })();
+    let (rhs, diag, mut working) = match setup {
+        Ok(setup) => setup,
+        Err(reason) if is_retainable_numerics_interruption(&reason) => {
+            return Ok(RetainedProjectionOutcome::Interrupted {
+                reason,
+                solution: committed,
+                completed_sweeps,
+            });
+        }
+        Err(reason) => return Err(reason),
+    };
+    let mut committed = committed;
+    let mut completed_sweeps = completed_sweeps;
+    for _ in completed_sweeps..accountant.budget.sweeps {
+        let sweep_result = (|| -> Result<(), SheafRepairError> {
+            for (target, value) in working.iter_mut().zip(&committed) {
+                accountant.consume_item(stage)?;
+                *target = *value;
+            }
+            for i in 0..n_unknowns {
+                if pinned_indices.binary_search(&i).is_ok() || diag[i] <= 0.0 {
+                    continue;
+                }
+                accountant.consume_item(stage)?;
+                let image = apply_projection(kind, skeleton, &working, stage, accountant)?;
+                let normal_image =
+                    apply_projection_transpose(kind, skeleton, &image, stage, accountant)?;
+                let gradient = normal_image[i] - rhs[i];
+                let step = gradient / diag[i];
+                let next = working[i] - step;
+                if !(gradient.is_finite() && step.is_finite() && next.is_finite()) {
+                    return Err(SheafRepairError::NumericalOverflow { stage });
+                }
+                working[i] = next;
+            }
+            Ok(())
+        })();
+        if let Err(reason) = sweep_result {
+            if is_retainable_numerics_interruption(&reason) {
+                return Ok(RetainedProjectionOutcome::Interrupted {
+                    reason,
+                    solution: committed,
+                    completed_sweeps,
+                });
+            }
+            return Err(reason);
+        }
+
+        core::mem::swap(&mut committed, &mut working);
+        match accountant.complete_sweep(stage) {
+            Ok(()) => {
+                completed_sweeps = completed_sweeps.checked_add(1).ok_or(
+                    SheafRepairError::BudgetArithmeticOverflow {
+                        stage: "resumed-projection-sweeps",
+                    },
+                )?;
+            }
+            Err(reason) if is_retainable_numerics_interruption(&reason) => {
+                completed_sweeps = completed_sweeps.checked_add(1).ok_or(
+                    SheafRepairError::BudgetArithmeticOverflow {
+                        stage: "resumed-projection-sweeps",
+                    },
+                )?;
+                return Ok(RetainedProjectionOutcome::Interrupted {
+                    reason,
+                    solution: committed,
+                    completed_sweeps,
+                });
+            }
+            Err(reason) => return Err(reason),
+        }
+    }
+    Ok(RetainedProjectionOutcome::Completed {
+        solution: committed,
+        completed_sweeps,
+    })
+}
+
 // Merge compatibility promises the legacy diagnostic's exact published bits,
 // while the separate convergence-assessment lane must survive extreme finite
 // magnitudes. Keep those arithmetic contracts explicit instead of letting one
@@ -2642,7 +2943,7 @@ pub fn hodge_decompose_bounded(
     accountant.checkpoint("admission")?;
     let split = hodge_decompose_accounted(skeleton, mismatch, &mut accountant)?;
     accountant.checkpoint("publication")?;
-    let usage = accountant.usage(admission.scalar_slots, admission.work_items);
+    let usage = accountant.usage(admission);
     Ok(BoundedHodgeSplit {
         split,
         budget,
@@ -3205,7 +3506,7 @@ fn assess_hodge_decomposition_inner(
     };
     let source = retain_numerics_source(skeleton, mismatch, &mut accountant)?;
     accountant.checkpoint("numerics-publication")?;
-    let usage = accountant.usage(admission.scalar_slots, admission.work_items);
+    let usage = accountant.usage(admission);
     let nullity = component_partition.roots.len();
     let normalization_scale = component_partition
         .max_degree
@@ -3447,6 +3748,10 @@ fn retained_numerics_interruption(
     accountant: &RepairAccountant<'_, '_>,
 ) -> RetainedSheafNumericsOutcome {
     debug_assert!(exact_sweeps_completed > 0);
+    let usage = accountant.usage(admission);
+    let mut attempts = SheafBudgetAttemptHistory::empty();
+    let appended = attempts.push(usage.ambient_budget);
+    debug_assert!(appended);
     RetainedSheafNumericsOutcome::Interrupted(InterruptedSheafNumerics {
         reason,
         checkpoint: SheafSweepCheckpoint {
@@ -3458,7 +3763,9 @@ fn retained_numerics_interruption(
             exact_sweeps_completed,
             coexact_sweeps_completed,
             budget,
-            usage: accountant.usage(admission.scalar_slots, admission.work_items),
+            admission,
+            usage,
+            attempts,
             state,
         },
     })
@@ -3468,6 +3775,302 @@ fn retained_numerics_refusal(reason: SheafRepairError) -> RetainedSheafNumericsO
     RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Refused(reason))
 }
 
+struct ResumedNumericsSource {
+    skeleton: AdmittedSheafSkeleton,
+    mismatch: Vec<f64>,
+}
+
+impl ResumedNumericsSource {
+    fn from_retained(source: SheafNumericsSource) -> Self {
+        Self {
+            skeleton: AdmittedSheafSkeleton {
+                n_patches: source.n_patches,
+                edges: source.edges,
+                triangles: source.triangles,
+            },
+            mismatch: source.mismatch,
+        }
+    }
+
+    fn into_retained(self) -> SheafNumericsSource {
+        SheafNumericsSource {
+            n_patches: self.skeleton.n_patches,
+            edges: self.skeleton.edges,
+            triangles: self.skeleton.triangles,
+            mismatch: self.mismatch,
+        }
+    }
+}
+
+fn resume_not_admitted(
+    reason: SheafResumeAdmissionError,
+    checkpoint: SheafSweepCheckpoint,
+) -> ResumedSheafNumericsOutcome {
+    ResumedSheafNumericsOutcome::NotAdmitted(UnadmittedSheafNumericsResume { reason, checkpoint })
+}
+
+fn validate_resume_cursor(checkpoint: &SheafSweepCheckpoint) -> Result<(), SheafRepairError> {
+    let sweeps = checkpoint.budget.sweeps;
+    let has_triangles = !checkpoint.source.triangles.is_empty();
+    let projection_state = match &checkpoint.state {
+        SheafSweepCheckpointState::Projection {
+            triangle_potential, ..
+        } => Some(triangle_potential.is_some()),
+        SheafSweepCheckpointState::Verification { .. } => None,
+    };
+    let valid = match checkpoint.phase {
+        SheafNumericsPhase::ExactProjection => {
+            projection_state == Some(false)
+                && (1..=sweeps).contains(&checkpoint.exact_sweeps_completed)
+                && checkpoint.coexact_sweeps_completed == 0
+        }
+        SheafNumericsPhase::CoexactProjection => {
+            has_triangles
+                && projection_state.is_some()
+                && checkpoint.exact_sweeps_completed == sweeps
+                && checkpoint.coexact_sweeps_completed <= sweeps
+                && (checkpoint.coexact_sweeps_completed == 0 || projection_state == Some(true))
+        }
+        SheafNumericsPhase::Verification => {
+            checkpoint.exact_sweeps_completed == sweeps
+                && checkpoint.coexact_sweeps_completed == if has_triangles { sweeps } else { 0 }
+                && match projection_state {
+                    Some(has_triangle_potential) => has_triangle_potential == has_triangles,
+                    None => true,
+                }
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "resume-checkpoint-cursor",
+        })
+    }
+}
+
+fn resume_admission(
+    checkpoint: &SheafSweepCheckpoint,
+) -> Result<(RepairAdmission, usize, usize), SheafRepairError> {
+    validate_resume_cursor(checkpoint)?;
+    let operator_limit = checkpoint
+        .usage
+        .operator_evaluations
+        .checked_add(checkpoint.admission.operator_evaluations)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "resume-operator-envelope",
+        })?;
+    if operator_limit > checkpoint.budget.max_operator_evaluations {
+        return Err(SheafRepairError::WorkBudgetExceeded {
+            required: operator_limit as u128,
+            cap: checkpoint.budget.max_operator_evaluations,
+        });
+    }
+    let work_limit = checkpoint
+        .usage
+        .work_items
+        .checked_add(checkpoint.admission.work_items)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "resume-work-envelope",
+        })?;
+    if work_limit > checkpoint.budget.max_work_items {
+        return Err(SheafRepairError::WorkItemBudgetExceeded {
+            stage: "resume-work-preflight",
+            required: work_limit as u128,
+            cap: checkpoint.budget.max_work_items,
+        });
+    }
+    Ok((
+        RepairAdmission {
+            scalar_slots: checkpoint.admission.scalar_slots,
+            operator_evaluations: operator_limit,
+            work_items: work_limit,
+        },
+        operator_limit,
+        work_limit,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resumed_numerics_interruption(
+    reason: SheafRepairError,
+    source: ResumedNumericsSource,
+    relative_tolerance: f64,
+    component_partition: BoundedComponentPartition,
+    phase: SheafNumericsPhase,
+    exact_sweeps_completed: usize,
+    coexact_sweeps_completed: usize,
+    budget: SheafRepairBudget,
+    checkpoint_admission: RepairAdmission,
+    usage_admission: RepairAdmission,
+    state: SheafSweepCheckpointState,
+    accountant: &RepairAccountant<'_, '_>,
+) -> ResumedSheafNumericsOutcome {
+    ResumedSheafNumericsOutcome::Interrupted(InterruptedSheafNumerics {
+        reason,
+        checkpoint: SheafSweepCheckpoint {
+            source: source.into_retained(),
+            relative_tolerance,
+            component_roots: component_partition.roots,
+            max_degree: component_partition.max_degree,
+            phase,
+            exact_sweeps_completed,
+            coexact_sweeps_completed,
+            budget,
+            admission: checkpoint_admission,
+            usage: accountant.usage(usage_admission),
+            attempts: accountant.attempts_with_current(),
+            state,
+        },
+    })
+}
+
+fn resumed_numerics_refusal(
+    reason: SheafRepairError,
+    accountant: &RepairAccountant<'_, '_>,
+) -> ResumedSheafNumericsOutcome {
+    ResumedSheafNumericsOutcome::Finished {
+        outcome: SheafNumericsOutcome::Refused(reason),
+        attempts: accountant.attempts_with_current(),
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn finish_resumed_numerics(
+    source: ResumedNumericsSource,
+    relative_tolerance: f64,
+    component_partition: BoundedComponentPartition,
+    exact_sweeps_completed: usize,
+    coexact_sweeps_completed: usize,
+    budget: SheafRepairBudget,
+    checkpoint_admission: RepairAdmission,
+    usage_admission: RepairAdmission,
+    split: HodgeSplit,
+    triangle_potential: Option<Vec<f64>>,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> ResumedSheafNumericsOutcome {
+    let evidence = match retained_numerics_evidence(
+        &source.skeleton,
+        &source.mismatch,
+        &split,
+        relative_tolerance,
+        accountant,
+    ) {
+        Ok(evidence) => evidence,
+        Err(reason) if is_retainable_numerics_interruption(&reason) => {
+            return resumed_numerics_interruption(
+                reason,
+                source,
+                relative_tolerance,
+                component_partition,
+                SheafNumericsPhase::Verification,
+                exact_sweeps_completed,
+                coexact_sweeps_completed,
+                budget,
+                checkpoint_admission,
+                usage_admission,
+                SheafSweepCheckpointState::Verification {
+                    split,
+                    triangle_potential,
+                },
+                accountant,
+            );
+        }
+        Err(reason) => return resumed_numerics_refusal(reason, accountant),
+    };
+    if let Err(reason) = accountant.checkpoint("numerics-publication") {
+        if is_retainable_numerics_interruption(&reason) {
+            return resumed_numerics_interruption(
+                reason,
+                source,
+                relative_tolerance,
+                component_partition,
+                SheafNumericsPhase::Verification,
+                exact_sweeps_completed,
+                coexact_sweeps_completed,
+                budget,
+                checkpoint_admission,
+                usage_admission,
+                SheafSweepCheckpointState::Verification {
+                    split,
+                    triangle_potential,
+                },
+                accountant,
+            );
+        }
+        return resumed_numerics_refusal(reason, accountant);
+    }
+
+    let usage = accountant.usage(usage_admission);
+    let attempts = accountant.attempts_with_current();
+    let nullity = component_partition.roots.len();
+    let normalization_scale = match component_partition.max_degree.checked_mul(2) {
+        Some(scale) => scale.max(1) as f64,
+        None => {
+            return resumed_numerics_refusal(
+                SheafRepairError::BudgetArithmeticOverflow {
+                    stage: "spectrum-normalization-scale",
+                },
+                accountant,
+            );
+        }
+    };
+    let converged = evidence.converged;
+    let receipt = SheafNumericsReceipt {
+        source: source.into_retained(),
+        normalization_id: SHEAF_NUMERICS_NORMALIZATION_V1,
+        relative_tolerance,
+        primal_normal_equation: evidence.primal_normal_equation,
+        dual_normal_equation: evidence.dual_normal_equation,
+        remainder_exact_orthogonality: evidence.remainder_exact_orthogonality,
+        coboundary_triangle_orthogonality: evidence.coboundary_triangle_orthogonality,
+        coboundary_remainder_orthogonality: evidence.coboundary_remainder_orthogonality,
+        triangle_remainder_orthogonality: evidence.triangle_remainder_orthogonality,
+        reconstruction: evidence.reconstruction,
+        stopping_reason: evidence.stopping_reason,
+        spectrum: SheafSpectrumScope::Unknown(SheafSpectrumReportV1 {
+            operator_id: "fs-geom/delta0-transpose-delta0/unweighted/v1",
+            normalization_id: SHEAF_SPECTRUM_NORMALIZATION_V1,
+            normalization_scale,
+            nullspace: SheafNullspaceBounds {
+                lower: nullity,
+                upper: nullity,
+                component_roots: component_partition.roots,
+            },
+            structural_zero_cluster: SheafStructuralEigenCluster {
+                normalized_hull: Interval::point(0.0),
+                multiplicity_lower: nullity,
+                multiplicity_upper: nullity,
+            },
+            candidate_clusters: Vec::new(),
+            requested_range: None,
+            covered_range: None,
+            unresolved_modes: split.potential.len(),
+            reason: "no fs-spectral coverage receipt was supplied",
+        }),
+        primal_witness: evidence.primal_witness,
+        dual_witness: evidence.dual_witness,
+        remainder_exact_witness: evidence.remainder_exact_witness,
+        reconstruction_witness: evidence.reconstruction_witness,
+    };
+    let report = PartialSheafNumericsReport {
+        coboundary_candidate: split.exact,
+        patch_potential_candidate: split.potential,
+        triangle_adjoint_candidate: split.coexact,
+        remainder_candidate: split.harmonic,
+        candidate_energy_ratios: split.fractions,
+        receipt,
+        budget,
+        usage,
+    };
+    let outcome = if converged {
+        SheafNumericsOutcome::Converged(ConvergedSheafDecomposition { report })
+    } else {
+        SheafNumericsOutcome::Indeterminate(report)
+    };
+    ResumedSheafNumericsOutcome::Finished { outcome, attempts }
+}
+
 /// Assess one admitted decomposition while retaining an opaque rollback point
 /// when cancellation or the ambient deadline/poll/cost budget interrupts a
 /// completed projection schedule.
@@ -3475,8 +4078,9 @@ fn retained_numerics_refusal(reason: SheafRepairError) -> RetainedSheafNumericsO
 /// This is an additive opt-in lane. The established
 /// [`assess_hodge_decomposition_bounded`] path, including its exact accounting
 /// and checkpoint order, is unchanged. A returned checkpoint exposes no
-/// candidate vectors or numerical authority, and no resume operation is
-/// claimed by this first retained-state slice.
+/// candidate vectors or numerical authority. Its only consumer is the
+/// same-process [`resume_hodge_decomposition_retaining_sweeps_bounded`] path;
+/// serialization, migration, and fork remain explicit no-claims.
 #[must_use]
 #[allow(clippy::too_many_lines)] // One ordered retained-checkpoint state machine.
 pub fn assess_hodge_decomposition_retaining_sweeps_bounded(
@@ -3833,7 +4437,7 @@ pub fn assess_hodge_decomposition_retaining_sweeps_bounded(
         return retained_numerics_refusal(reason);
     }
 
-    let usage = accountant.usage(admission.scalar_slots, admission.work_items);
+    let usage = accountant.usage(admission);
     let nullity = component_partition.roots.len();
     let normalization_scale = match component_partition.max_degree.checked_mul(2) {
         Some(scale) => scale.max(1) as f64,
@@ -3897,6 +4501,410 @@ pub fn assess_hodge_decomposition_retaining_sweeps_bounded(
         SheafNumericsOutcome::Indeterminate(report)
     };
     RetainedSheafNumericsOutcome::Finished(outcome)
+}
+
+/// Continue one opaque in-memory sweep checkpoint under a fresh ambient
+/// context without replaying its committed projection sweeps.
+///
+/// The checkpoint is a linear capability: no replacement source, tolerance,
+/// or local budget is accepted. Attempt-history exhaustion, cumulative local
+/// cap refusal, and fresh ambient admission refusal return `NotAdmitted` with
+/// the exact owned checkpoint still reusable. Once admission succeeds, all
+/// setup, discarded partial-sweep, verification, and publication work remains
+/// charged cumulatively. This same-process API makes no serialization,
+/// migration, fork, loaded-image, or cross-ISA claim.
+#[must_use]
+#[allow(clippy::too_many_lines)] // Explicit phase-preserving resume state machine.
+pub fn resume_hodge_decomposition_retaining_sweeps_bounded(
+    checkpoint: SheafSweepCheckpoint,
+    cx: &Cx<'_>,
+) -> ResumedSheafNumericsOutcome {
+    if checkpoint.attempts.len() >= SHEAF_NUMERICS_MAX_ATTEMPTS_V1 {
+        return resume_not_admitted(
+            SheafResumeAdmissionError::AttemptLimitReached {
+                cap: SHEAF_NUMERICS_MAX_ATTEMPTS_V1,
+            },
+            checkpoint,
+        );
+    }
+    let (usage_admission, operator_limit, work_limit) = match resume_admission(&checkpoint) {
+        Ok(admission) => admission,
+        Err(reason) => {
+            return resume_not_admitted(SheafResumeAdmissionError::Repair(reason), checkpoint);
+        }
+    };
+    let attempt_cost = match planned_cost(checkpoint.admission) {
+        Ok(cost) => cost,
+        Err(reason) => {
+            return resume_not_admitted(SheafResumeAdmissionError::Repair(reason), checkpoint);
+        }
+    };
+    let mut accountant = match RepairAccountant::resume(
+        cx,
+        checkpoint.budget,
+        attempt_cost,
+        checkpoint.usage,
+        checkpoint.attempts,
+        operator_limit,
+        work_limit,
+    ) {
+        Ok(accountant) => accountant,
+        Err(reason) => {
+            return resume_not_admitted(SheafResumeAdmissionError::Repair(reason), checkpoint);
+        }
+    };
+    if let Err(reason) = accountant.checkpoint("numerics-resume-admission") {
+        return resume_not_admitted(SheafResumeAdmissionError::Repair(reason), checkpoint);
+    }
+
+    let SheafSweepCheckpoint {
+        source,
+        relative_tolerance,
+        component_roots,
+        max_degree,
+        phase,
+        mut exact_sweeps_completed,
+        mut coexact_sweeps_completed,
+        budget,
+        admission: checkpoint_admission,
+        usage: _,
+        attempts: _,
+        state,
+    } = checkpoint;
+    let source = ResumedNumericsSource::from_retained(source);
+    let component_partition = BoundedComponentPartition {
+        roots: component_roots,
+        max_degree,
+    };
+
+    let (mut patch_potential, mut triangle_potential) = match state {
+        SheafSweepCheckpointState::Verification {
+            split,
+            triangle_potential,
+        } => {
+            return finish_resumed_numerics(
+                source,
+                relative_tolerance,
+                component_partition,
+                exact_sweeps_completed,
+                coexact_sweeps_completed,
+                budget,
+                checkpoint_admission,
+                usage_admission,
+                split,
+                triangle_potential,
+                &mut accountant,
+            );
+        }
+        SheafSweepCheckpointState::Projection {
+            patch_potential,
+            triangle_potential,
+        } => (patch_potential, triangle_potential),
+    };
+
+    if phase == SheafNumericsPhase::ExactProjection {
+        match least_squares_resuming_sweeps(
+            &source.skeleton,
+            &source.mismatch,
+            source.skeleton.n_patches,
+            ProjectionKind::Exact,
+            &component_partition.roots,
+            "exact-projection",
+            patch_potential,
+            exact_sweeps_completed,
+            &mut accountant,
+        ) {
+            Ok(RetainedProjectionOutcome::Completed {
+                solution,
+                completed_sweeps,
+            }) => {
+                patch_potential = solution;
+                exact_sweeps_completed = completed_sweeps;
+            }
+            Ok(RetainedProjectionOutcome::Interrupted {
+                reason,
+                solution,
+                completed_sweeps,
+            }) => {
+                return resumed_numerics_interruption(
+                    reason,
+                    source,
+                    relative_tolerance,
+                    component_partition,
+                    SheafNumericsPhase::ExactProjection,
+                    completed_sweeps,
+                    0,
+                    budget,
+                    checkpoint_admission,
+                    usage_admission,
+                    SheafSweepCheckpointState::Projection {
+                        patch_potential: solution,
+                        triangle_potential: None,
+                    },
+                    &accountant,
+                );
+            }
+            Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+        }
+    }
+
+    let exact = match bounded_d0(
+        &source.skeleton,
+        &patch_potential,
+        "exact-publication",
+        &mut accountant,
+    ) {
+        Ok(exact) => exact,
+        Err(reason) if is_retainable_numerics_interruption(&reason) => {
+            return resumed_numerics_interruption(
+                reason,
+                source,
+                relative_tolerance,
+                component_partition,
+                phase,
+                exact_sweeps_completed,
+                coexact_sweeps_completed,
+                budget,
+                checkpoint_admission,
+                usage_admission,
+                SheafSweepCheckpointState::Projection {
+                    patch_potential,
+                    triangle_potential,
+                },
+                &accountant,
+            );
+        }
+        Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+    };
+    let first_residual =
+        match checked_difference(&source.mismatch, &exact, "exact-residual", &mut accountant) {
+            Ok(residual) => residual,
+            Err(reason) if is_retainable_numerics_interruption(&reason) => {
+                return resumed_numerics_interruption(
+                    reason,
+                    source,
+                    relative_tolerance,
+                    component_partition,
+                    phase,
+                    exact_sweeps_completed,
+                    coexact_sweeps_completed,
+                    budget,
+                    checkpoint_admission,
+                    usage_admission,
+                    SheafSweepCheckpointState::Projection {
+                        patch_potential,
+                        triangle_potential,
+                    },
+                    &accountant,
+                );
+            }
+            Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+        };
+
+    let active_coexact_phase = if phase == SheafNumericsPhase::Verification {
+        SheafNumericsPhase::Verification
+    } else {
+        SheafNumericsPhase::CoexactProjection
+    };
+    let coexact = if source.skeleton.triangles.is_empty() {
+        match zeroed_output_bounded(source.mismatch.len(), "empty-coexact", &mut accountant) {
+            Ok(coexact) => coexact,
+            Err(reason) if is_retainable_numerics_interruption(&reason) => {
+                return resumed_numerics_interruption(
+                    reason,
+                    source,
+                    relative_tolerance,
+                    component_partition,
+                    SheafNumericsPhase::Verification,
+                    exact_sweeps_completed,
+                    0,
+                    budget,
+                    checkpoint_admission,
+                    usage_admission,
+                    SheafSweepCheckpointState::Projection {
+                        patch_potential,
+                        triangle_potential: None,
+                    },
+                    &accountant,
+                );
+            }
+            Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+        }
+    } else {
+        let initial_triangle = match triangle_potential.take() {
+            Some(potential) => potential,
+            None => match zeroed_output_bounded(
+                source.skeleton.triangles.len(),
+                "least-squares-resume-solution",
+                &mut accountant,
+            ) {
+                Ok(potential) => potential,
+                Err(reason) if is_retainable_numerics_interruption(&reason) => {
+                    return resumed_numerics_interruption(
+                        reason,
+                        source,
+                        relative_tolerance,
+                        component_partition,
+                        SheafNumericsPhase::CoexactProjection,
+                        exact_sweeps_completed,
+                        coexact_sweeps_completed,
+                        budget,
+                        checkpoint_admission,
+                        usage_admission,
+                        SheafSweepCheckpointState::Projection {
+                            patch_potential,
+                            triangle_potential: None,
+                        },
+                        &accountant,
+                    );
+                }
+                Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+            },
+        };
+        let completed_triangle = match least_squares_resuming_sweeps(
+            &source.skeleton,
+            &first_residual,
+            source.skeleton.triangles.len(),
+            ProjectionKind::Coexact,
+            &[],
+            "coexact-projection",
+            initial_triangle,
+            coexact_sweeps_completed,
+            &mut accountant,
+        ) {
+            Ok(RetainedProjectionOutcome::Completed {
+                solution,
+                completed_sweeps,
+            }) => {
+                coexact_sweeps_completed = completed_sweeps;
+                solution
+            }
+            Ok(RetainedProjectionOutcome::Interrupted {
+                reason,
+                solution,
+                completed_sweeps,
+            }) => {
+                return resumed_numerics_interruption(
+                    reason,
+                    source,
+                    relative_tolerance,
+                    component_partition,
+                    SheafNumericsPhase::CoexactProjection,
+                    exact_sweeps_completed,
+                    completed_sweeps,
+                    budget,
+                    checkpoint_admission,
+                    usage_admission,
+                    SheafSweepCheckpointState::Projection {
+                        patch_potential,
+                        triangle_potential: Some(solution),
+                    },
+                    &accountant,
+                );
+            }
+            Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+        };
+        let coexact = match bounded_d1t(
+            &source.skeleton,
+            &completed_triangle,
+            "coexact-publication",
+            &mut accountant,
+        ) {
+            Ok(coexact) => coexact,
+            Err(reason) if is_retainable_numerics_interruption(&reason) => {
+                return resumed_numerics_interruption(
+                    reason,
+                    source,
+                    relative_tolerance,
+                    component_partition,
+                    active_coexact_phase,
+                    exact_sweeps_completed,
+                    coexact_sweeps_completed,
+                    budget,
+                    checkpoint_admission,
+                    usage_admission,
+                    SheafSweepCheckpointState::Projection {
+                        patch_potential,
+                        triangle_potential: Some(completed_triangle),
+                    },
+                    &accountant,
+                );
+            }
+            Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+        };
+        triangle_potential = Some(completed_triangle);
+        coexact
+    };
+
+    let split_result = (|| -> Result<(Vec<f64>, (f64, f64, f64)), SheafRepairError> {
+        let harmonic = checked_difference(
+            &first_residual,
+            &coexact,
+            "harmonic-residual",
+            &mut accountant,
+        )?;
+        let total = checked_scaled_l2(&source.mismatch, "input-norm", &mut accountant)?;
+        let fractions = if total.scale == 0.0 {
+            (0.0, 0.0, 0.0)
+        } else {
+            (
+                checked_energy_ratio(&exact, total, "exact-norm", &mut accountant)?,
+                checked_energy_ratio(&coexact, total, "coexact-norm", &mut accountant)?,
+                checked_energy_ratio(&harmonic, total, "harmonic-norm", &mut accountant)?,
+            )
+        };
+        if [fractions.0, fractions.1, fractions.2]
+            .into_iter()
+            .any(|fraction| !fraction.is_finite())
+        {
+            return Err(SheafRepairError::NumericalOverflow {
+                stage: "component-fractions",
+            });
+        }
+        Ok((harmonic, fractions))
+    })();
+    let (harmonic, fractions) = match split_result {
+        Ok(result) => result,
+        Err(reason) if is_retainable_numerics_interruption(&reason) => {
+            return resumed_numerics_interruption(
+                reason,
+                source,
+                relative_tolerance,
+                component_partition,
+                SheafNumericsPhase::Verification,
+                exact_sweeps_completed,
+                coexact_sweeps_completed,
+                budget,
+                checkpoint_admission,
+                usage_admission,
+                SheafSweepCheckpointState::Projection {
+                    patch_potential,
+                    triangle_potential,
+                },
+                &accountant,
+            );
+        }
+        Err(reason) => return resumed_numerics_refusal(reason, &accountant),
+    };
+    finish_resumed_numerics(
+        source,
+        relative_tolerance,
+        component_partition,
+        exact_sweeps_completed,
+        coexact_sweeps_completed,
+        budget,
+        checkpoint_admission,
+        usage_admission,
+        HodgeSplit {
+            exact,
+            potential: patch_potential,
+            coexact,
+            harmonic,
+            fractions,
+        },
+        triangle_potential,
+        &mut accountant,
+    )
 }
 
 fn apply_raw_projection(
@@ -4896,7 +5904,7 @@ pub fn plan_repair_bounded(
     }
     sort_bounded_proposals(&mut proposals, &mut accountant)?;
     accountant.checkpoint("plan-publication")?;
-    let repair_usage = accountant.usage(admission.scalar_slots, admission.work_items);
+    let repair_usage = accountant.usage(admission);
     let usage = SheafRepairPlanUsage {
         repair: repair_usage,
         plan_memory_envelope,

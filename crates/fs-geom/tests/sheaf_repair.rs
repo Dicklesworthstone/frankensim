@@ -15,12 +15,14 @@ use fs_exec::{BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::router::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
 use fs_geom::sheaf::{Interface, SheafComplex};
 use fs_geom::sheaf_repair::{
-    AdmittedSheafSkeleton, COMPONENT_FLOOR, RetainedSheafNumericsOutcome,
-    SHEAF_NUMERICS_NORMALIZATION_V1, SHEAF_SPECTRUM_NORMALIZATION_V1, SheafNumericsOutcome,
-    SheafNumericsPhase, SheafNumericsStoppingReason, SheafRepairBudget, SheafRepairError,
-    SheafRepairPlanBudget, SheafSkeleton, SheafSkeletonError, SheafSpectrumScope, apply_gauge,
+    AdmittedSheafSkeleton, COMPONENT_FLOOR, ResumedSheafNumericsOutcome,
+    RetainedSheafNumericsOutcome, SHEAF_NUMERICS_MAX_ATTEMPTS_V1, SHEAF_NUMERICS_NORMALIZATION_V1,
+    SHEAF_SPECTRUM_NORMALIZATION_V1, SheafNumericsOutcome, SheafNumericsPhase,
+    SheafNumericsStoppingReason, SheafRepairBudget, SheafRepairError, SheafRepairPlanBudget,
+    SheafResumeAdmissionError, SheafSkeleton, SheafSkeletonError, SheafSpectrumScope, apply_gauge,
     assess_hodge_decomposition_bounded, assess_hodge_decomposition_retaining_sweeps_bounded,
-    hodge_decompose, hodge_decompose_bounded, plan_repair, plan_repair_bounded, try_apply_gauge,
+    hodge_decompose, hodge_decompose_bounded, plan_repair, plan_repair_bounded,
+    resume_hodge_decomposition_retaining_sweeps_bounded, try_apply_gauge,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -2579,5 +2581,576 @@ fn sr_023_retained_coexact_interruption_counts_only_sealed_sweeps() {
     verdict(
         "sr-023",
         "coexact ambient interruption retains only a redacted complete-sweep checkpoint and keeps rolled-back physical work distinct from committed sweep counts",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Interruption discovery, token refusal, and parity transaction.
+fn sr_024_exact_checkpoint_resumes_without_replaying_committed_sweeps() {
+    let path =
+        AdmittedSheafSkeleton::try_new(3, vec![(0, 1), (1, 2)], Vec::new()).expect("path admits");
+    let repair_budget = numerics_budget(4);
+    let generous = Budget {
+        deadline: None,
+        poll_quota: 100_000,
+        cost_quota: None,
+        priority: 0,
+    };
+    let baseline = with_budget_cx(generous, |cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &path,
+            &[1.0, 1.0],
+            0.0,
+            repair_budget,
+            cx,
+        )
+    });
+    let RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Indeterminate(baseline)) =
+        baseline
+    else {
+        panic!("healthy retained path must finish indeterminate: {baseline:?}");
+    };
+    let (exact_poll_quota, checkpoint) = (1..baseline.usage().ambient_budget.polls_used)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    assess_hodge_decomposition_retaining_sweeps_bounded(
+                        &path,
+                        &[1.0, 1.0],
+                        0.0,
+                        repair_budget,
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                RetainedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase() == SheafNumericsPhase::ExactProjection
+                        && interruption.checkpoint().exact_sweeps_completed() > 0
+                        && interruption.checkpoint().exact_sweeps_completed()
+                            < repair_budget.sweeps - 1 =>
+                {
+                    Some((poll_quota, interruption.into_checkpoint()))
+                }
+                _ => None,
+            }
+        })
+        .expect("an exact checkpoint must be reachable");
+    assert_eq!(checkpoint.attempts().len(), 1);
+    let first_attempt = checkpoint.attempts().get(0).expect("original attempt");
+    assert!(first_attempt.planned_cost > 0);
+    let original_usage = checkpoint.usage();
+    let original_sweeps = checkpoint.exact_sweeps_completed();
+    let original_debug = format!("{checkpoint:?}");
+    let original_source_bits = checkpoint
+        .source()
+        .mismatch()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+
+    let tight_budget = SheafRepairBudget {
+        max_work_items: baseline.usage().admitted_work_items,
+        ..repair_budget
+    };
+    let tight_checkpoint = with_budget_cx(
+        Budget {
+            poll_quota: exact_poll_quota,
+            ..generous
+        },
+        |cx| {
+            assess_hodge_decomposition_retaining_sweeps_bounded(
+                &path,
+                &[1.0, 1.0],
+                0.0,
+                tight_budget,
+                cx,
+            )
+        },
+    );
+    let RetainedSheafNumericsOutcome::Interrupted(tight_interruption) = tight_checkpoint else {
+        panic!("tight local cap must still admit the original exact attempt: {tight_checkpoint:?}");
+    };
+    let tight_checkpoint = tight_interruption.into_checkpoint();
+    let tight_usage = tight_checkpoint.usage();
+    let tight_history = *tight_checkpoint.attempts();
+    let tight_debug = format!("{tight_checkpoint:?}");
+    let tight_phase = tight_checkpoint.phase();
+    let tight_components = tight_checkpoint.component_count();
+    let tight_exact_sweeps = tight_checkpoint.exact_sweeps_completed();
+    let tight_coexact_sweeps = tight_checkpoint.coexact_sweeps_completed();
+    let tight_source_bits = tight_checkpoint
+        .source()
+        .mismatch()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    let tight_refusal = with_budget_cx(generous, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(tight_checkpoint, cx)
+    });
+    let ResumedSheafNumericsOutcome::NotAdmitted(tight_refusal) = tight_refusal else {
+        panic!("cumulative local cap must preserve its token: {tight_refusal:?}");
+    };
+    assert!(matches!(
+        tight_refusal.reason(),
+        SheafResumeAdmissionError::Repair(SheafRepairError::WorkItemBudgetExceeded {
+            stage: "resume-work-preflight",
+            required,
+            cap,
+        }) if required > cap as u128 && cap == tight_budget.max_work_items
+    ));
+    assert_eq!(tight_refusal.checkpoint().usage(), tight_usage);
+    assert_eq!(*tight_refusal.checkpoint().attempts(), tight_history);
+    assert_eq!(format!("{:?}", tight_refusal.checkpoint()), tight_debug);
+    assert_eq!(tight_refusal.checkpoint().phase(), tight_phase);
+    assert_eq!(
+        tight_refusal.checkpoint().component_count(),
+        tight_components
+    );
+    assert_eq!(tight_refusal.checkpoint().budget(), tight_budget);
+    assert_eq!(
+        tight_refusal.checkpoint().exact_sweeps_completed(),
+        tight_exact_sweeps
+    );
+    assert_eq!(
+        tight_refusal.checkpoint().coexact_sweeps_completed(),
+        tight_coexact_sweeps
+    );
+    assert_eq!(
+        tight_refusal
+            .checkpoint()
+            .source()
+            .mismatch()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        tight_source_bits
+    );
+    let tight_refusal_again = with_budget_cx(generous, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(tight_refusal.into_checkpoint(), cx)
+    });
+    let ResumedSheafNumericsOutcome::NotAdmitted(tight_refusal_again) = tight_refusal_again else {
+        panic!("recovered local-cap token must remain reusable: {tight_refusal_again:?}");
+    };
+    assert_eq!(tight_refusal_again.checkpoint().usage(), tight_usage);
+    assert_eq!(*tight_refusal_again.checkpoint().attempts(), tight_history);
+    assert_eq!(
+        tight_refusal_again
+            .checkpoint()
+            .source()
+            .mismatch()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        tight_source_bits
+    );
+
+    let recover_exact_checkpoint = || {
+        let outcome = with_budget_cx(
+            Budget {
+                poll_quota: exact_poll_quota,
+                ..generous
+            },
+            |cx| {
+                assess_hodge_decomposition_retaining_sweeps_bounded(
+                    &path,
+                    &[1.0, 1.0],
+                    0.0,
+                    repair_budget,
+                    cx,
+                )
+            },
+        );
+        let RetainedSheafNumericsOutcome::Interrupted(interruption) = outcome else {
+            panic!("saved exact poll quota must reproduce its checkpoint: {outcome:?}");
+        };
+        interruption.into_checkpoint()
+    };
+    let one_more_sweep = (1..baseline.usage().ambient_budget.polls_used)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    resume_hodge_decomposition_retaining_sweeps_bounded(
+                        recover_exact_checkpoint(),
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                ResumedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase() == SheafNumericsPhase::ExactProjection
+                        && interruption.checkpoint().exact_sweeps_completed()
+                            == original_sweeps + 1 =>
+                {
+                    Some(interruption.into_checkpoint())
+                }
+                _ => None,
+            }
+        })
+        .expect("a resumed exact attempt must stop after exactly one additional sealed sweep");
+    assert_eq!(one_more_sweep.exact_sweeps_completed(), original_sweeps + 1);
+    assert_eq!(one_more_sweep.coexact_sweeps_completed(), 0);
+    assert_eq!(
+        one_more_sweep.usage().completed_sweeps,
+        original_usage.completed_sweeps + 1
+    );
+    assert!(one_more_sweep.usage().work_items > original_usage.work_items);
+    let one_more_finished = with_budget_cx(generous, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(one_more_sweep, cx)
+    });
+    let ResumedSheafNumericsOutcome::Finished {
+        outcome: one_more_outcome,
+        attempts: one_more_attempts,
+    } = one_more_finished
+    else {
+        panic!("one-sweep checkpoint must remain terminally resumable: {one_more_finished:?}");
+    };
+    let SheafNumericsOutcome::Indeterminate(one_more_report) = one_more_outcome else {
+        panic!("one-sweep continuation must retain baseline state: {one_more_outcome:?}");
+    };
+    assert_eq!(one_more_attempts.len(), 3);
+    assert_eq!(one_more_attempts.get(0), Some(first_attempt));
+    assert!(
+        one_more_attempts
+            .get(1)
+            .expect("bounded attempt")
+            .refusal
+            .is_some()
+    );
+    assert_eq!(
+        one_more_attempts.get(2).expect("terminal attempt").refusal,
+        None
+    );
+    assert_eq!(one_more_report.receipt(), baseline.receipt());
+    assert_eq!(
+        one_more_report.coboundary_candidate(),
+        baseline.coboundary_candidate()
+    );
+    assert_eq!(
+        one_more_report.patch_potential_candidate(),
+        baseline.patch_potential_candidate()
+    );
+    assert_eq!(
+        one_more_report.remainder_candidate(),
+        baseline.remainder_candidate()
+    );
+
+    let gate = CancelGate::new();
+    gate.request();
+    let not_admitted = with_gate_cx(&gate, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(checkpoint, cx)
+    });
+    let ResumedSheafNumericsOutcome::NotAdmitted(not_admitted) = not_admitted else {
+        panic!("pre-cancelled resume must preserve its token: {not_admitted:?}");
+    };
+    assert!(matches!(
+        not_admitted.reason(),
+        SheafResumeAdmissionError::Repair(SheafRepairError::Cancelled {
+            stage: "numerics-resume-admission",
+            completed_sweeps,
+            ..
+        }) if completed_sweeps == original_usage.completed_sweeps
+    ));
+    assert_eq!(not_admitted.checkpoint().usage(), original_usage);
+    assert_eq!(not_admitted.checkpoint().attempts().len(), 1);
+    assert_eq!(
+        not_admitted.checkpoint().attempts().get(0),
+        Some(first_attempt)
+    );
+    assert_eq!(format!("{:?}", not_admitted.checkpoint()), original_debug);
+    assert_eq!(
+        not_admitted
+            .checkpoint()
+            .source()
+            .mismatch()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        original_source_bits
+    );
+
+    let checkpoint = not_admitted.into_checkpoint();
+    let cost_debug = format!("{checkpoint:?}");
+    let cost_refusal = with_budget_cx(
+        Budget {
+            cost_quota: Some(first_attempt.planned_cost - 1),
+            ..generous
+        },
+        |cx| resume_hodge_decomposition_retaining_sweeps_bounded(checkpoint, cx),
+    );
+    let ResumedSheafNumericsOutcome::NotAdmitted(cost_refusal) = cost_refusal else {
+        panic!("fresh ambient cost refusal must preserve its token: {cost_refusal:?}");
+    };
+    assert!(matches!(
+        cost_refusal.reason(),
+        SheafResumeAdmissionError::Repair(SheafRepairError::AmbientBudgetRefused {
+            refusal: BudgetRefusal::CostPlanExceedsQuota { planned, quota },
+            completed_sweeps,
+            operator_evaluations,
+            work_items,
+        }) if planned == first_attempt.planned_cost
+            && quota == first_attempt.planned_cost - 1
+            && completed_sweeps == original_usage.completed_sweeps
+            && operator_evaluations == original_usage.operator_evaluations
+            && work_items == original_usage.work_items
+    ));
+    assert_eq!(cost_refusal.checkpoint().usage(), original_usage);
+    assert_eq!(cost_refusal.checkpoint().attempts().len(), 1);
+    assert_eq!(
+        cost_refusal.checkpoint().attempts().get(0),
+        Some(first_attempt)
+    );
+    assert_eq!(format!("{:?}", cost_refusal.checkpoint()), cost_debug);
+
+    let resumed = with_budget_cx(generous, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(cost_refusal.into_checkpoint(), cx)
+    });
+    let ResumedSheafNumericsOutcome::Finished { outcome, attempts } = resumed else {
+        panic!("generous exact continuation must finish: {resumed:?}");
+    };
+    let SheafNumericsOutcome::Indeterminate(resumed) = outcome else {
+        panic!("path continuation must retain the baseline state: {outcome:?}");
+    };
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts.get(0), Some(first_attempt));
+    assert_eq!(attempts.get(1).expect("terminal attempt").refusal, None);
+    assert_eq!(resumed.receipt(), baseline.receipt());
+    assert_eq!(
+        resumed.coboundary_candidate(),
+        baseline.coboundary_candidate()
+    );
+    assert_eq!(
+        resumed.patch_potential_candidate(),
+        baseline.patch_potential_candidate()
+    );
+    assert_eq!(
+        resumed.remainder_candidate(),
+        baseline.remainder_candidate()
+    );
+    assert_eq!(resumed.usage().completed_sweeps, repair_budget.sweeps);
+    assert!(resumed.usage().work_items > original_usage.work_items);
+    assert!(resumed.usage().operator_evaluations >= original_usage.operator_evaluations);
+    assert!(original_sweeps < resumed.usage().completed_sweeps);
+    verdict(
+        "sr-024",
+        "pre-cancel, fresh ambient, and cumulative local-cap refusal preserve the opaque token; an exact resume seals one new sweep without replay and terminally reproduces uninterrupted science",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Coexact interruption discovery and full receipt parity.
+fn sr_025_coexact_checkpoint_resume_matches_uninterrupted_science() {
+    let triangle = admitted_triangle();
+    let mismatch = triangle
+        .d1t(&[2.0])
+        .expect("manufactured coexact basis is finite");
+    let repair_budget = numerics_budget(4);
+    let generous = Budget {
+        deadline: None,
+        poll_quota: 100_000,
+        cost_quota: None,
+        priority: 0,
+    };
+    let baseline = with_budget_cx(generous, |cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &triangle,
+            &mismatch,
+            1e-12,
+            repair_budget,
+            cx,
+        )
+    });
+    let RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Converged(baseline)) =
+        baseline
+    else {
+        panic!("manufactured coexact baseline must converge: {baseline:?}");
+    };
+    let baseline = baseline.into_partial();
+    let checkpoint = (1..baseline.usage().ambient_budget.polls_used)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    assess_hodge_decomposition_retaining_sweeps_bounded(
+                        &triangle,
+                        &mismatch,
+                        1e-12,
+                        repair_budget,
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                RetainedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase()
+                        == SheafNumericsPhase::CoexactProjection
+                        && interruption.checkpoint().coexact_sweeps_completed() > 0
+                        && interruption.checkpoint().coexact_sweeps_completed()
+                            < repair_budget.sweeps =>
+                {
+                    Some(interruption.into_checkpoint())
+                }
+                _ => None,
+            }
+        })
+        .expect("a coexact checkpoint must be reachable");
+    let original_usage = checkpoint.usage();
+    let first_attempt = checkpoint.attempts().get(0).expect("original attempt");
+    let resumed = with_budget_cx(generous, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(checkpoint, cx)
+    });
+    let ResumedSheafNumericsOutcome::Finished { outcome, attempts } = resumed else {
+        panic!("generous coexact continuation must finish: {resumed:?}");
+    };
+    let SheafNumericsOutcome::Converged(resumed) = outcome else {
+        panic!("coexact continuation must retain convergence: {outcome:?}");
+    };
+    let resumed = resumed.into_partial();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts.get(0), Some(first_attempt));
+    assert_eq!(resumed.receipt(), baseline.receipt());
+    assert_eq!(
+        resumed.coboundary_candidate(),
+        baseline.coboundary_candidate()
+    );
+    assert_eq!(
+        resumed.triangle_adjoint_candidate(),
+        baseline.triangle_adjoint_candidate()
+    );
+    assert_eq!(
+        resumed.remainder_candidate(),
+        baseline.remainder_candidate()
+    );
+    assert_eq!(resumed.usage().completed_sweeps, repair_budget.sweeps * 2);
+    assert!(resumed.usage().work_items > original_usage.work_items);
+    verdict(
+        "sr-025",
+        "a coexact checkpoint resumes from its sealed triangle potential, preserves cumulative physical accounting, and reproduces the uninterrupted converged receipt",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Repeated fresh-Cx attempts exercise the fixed history boundary.
+fn sr_026_verification_retry_history_is_bounded_and_fail_closed() {
+    let path =
+        AdmittedSheafSkeleton::try_new(3, vec![(0, 1), (1, 2)], Vec::new()).expect("path admits");
+    let repair_budget = numerics_budget(4);
+    let generous = Budget {
+        deadline: None,
+        poll_quota: 100_000,
+        cost_quota: None,
+        priority: 0,
+    };
+    let baseline = with_budget_cx(generous, |cx| {
+        assess_hodge_decomposition_retaining_sweeps_bounded(
+            &path,
+            &[1.0, 1.0],
+            0.0,
+            repair_budget,
+            cx,
+        )
+    });
+    let RetainedSheafNumericsOutcome::Finished(SheafNumericsOutcome::Indeterminate(baseline)) =
+        baseline
+    else {
+        panic!("healthy path must finish indeterminate: {baseline:?}");
+    };
+    let mut checkpoint = (1..baseline.usage().ambient_budget.polls_used)
+        .find_map(|poll_quota| {
+            let outcome = with_budget_cx(
+                Budget {
+                    poll_quota,
+                    ..generous
+                },
+                |cx| {
+                    assess_hodge_decomposition_retaining_sweeps_bounded(
+                        &path,
+                        &[1.0, 1.0],
+                        0.0,
+                        repair_budget,
+                        cx,
+                    )
+                },
+            );
+            match outcome {
+                RetainedSheafNumericsOutcome::Interrupted(interruption)
+                    if interruption.checkpoint().phase() == SheafNumericsPhase::Verification
+                        && matches!(
+                            interruption.reason(),
+                            SheafRepairError::AmbientBudgetRefused {
+                                refusal: BudgetRefusal::PollsExhausted {
+                                    phase: "numerics-publication",
+                                    ..
+                                },
+                                ..
+                            }
+                        ) =>
+                {
+                    Some(interruption.into_checkpoint())
+                }
+                _ => None,
+            }
+        })
+        .expect("a verification checkpoint must be reachable");
+    while checkpoint.attempts().len() < SHEAF_NUMERICS_MAX_ATTEMPTS_V1 {
+        let prior = checkpoint.usage();
+        let prior_attempts = checkpoint.attempts().len();
+        let outcome = with_budget_cx(
+            Budget {
+                poll_quota: 3,
+                ..generous
+            },
+            |cx| resume_hodge_decomposition_retaining_sweeps_bounded(checkpoint, cx),
+        );
+        let ResumedSheafNumericsOutcome::Interrupted(interruption) = outcome else {
+            panic!("bounded verification retry must retain its token: {outcome:?}");
+        };
+        checkpoint = interruption.into_checkpoint();
+        assert_eq!(checkpoint.phase(), SheafNumericsPhase::Verification);
+        assert_eq!(checkpoint.attempts().len(), prior_attempts + 1);
+        assert!(matches!(
+            checkpoint
+                .attempts()
+                .get(prior_attempts)
+                .expect("new retry receipt")
+                .refusal,
+            Some(BudgetRefusal::PollsExhausted { phase, quota: 3 })
+                if phase != "numerics-resume-admission"
+        ));
+        assert!(checkpoint.usage().work_items > prior.work_items);
+        assert!(checkpoint.usage().operator_evaluations >= prior.operator_evaluations);
+    }
+    let full_history = *checkpoint.attempts();
+    let full_usage = checkpoint.usage();
+    let full_debug = format!("{checkpoint:?}");
+    let refused = with_budget_cx(generous, |cx| {
+        resume_hodge_decomposition_retaining_sweeps_bounded(checkpoint, cx)
+    });
+    let ResumedSheafNumericsOutcome::NotAdmitted(refused) = refused else {
+        panic!("attempt cap + 1 must preserve its token: {refused:?}");
+    };
+    assert_eq!(
+        refused.reason(),
+        SheafResumeAdmissionError::AttemptLimitReached {
+            cap: SHEAF_NUMERICS_MAX_ATTEMPTS_V1
+        }
+    );
+    assert_eq!(*refused.checkpoint().attempts(), full_history);
+    assert_eq!(refused.checkpoint().usage(), full_usage);
+    assert_eq!(format!("{:?}", refused.checkpoint()), full_debug);
+    verdict(
+        "sr-026",
+        "verification retries retain distinct ambient receipts in a fixed array and attempt cap plus one returns the exact checkpoint without executing",
     );
 }

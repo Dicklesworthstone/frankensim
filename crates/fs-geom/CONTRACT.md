@@ -587,14 +587,29 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   refusal may return `Interrupted` with an opaque in-memory
   `SheafSweepCheckpoint`. Public checkpoint metadata is limited to source,
   tolerance, typed phase, component count, original budget, measured usage,
-  and committed exact/coexact sweep counts. Solver vectors remain private;
-  the token grants no candidate, residual, convergence, spectrum, topology,
-  repair, or publication authority. Invalid input, admission failure, local
-  cap failure, allocation failure, and numerical/arithmetic failure remain
-  ordinary `Finished(Refused)` outcomes. This first retained-state slice has no
-  resume, serialization, migration, fork, or cross-ISA claim; a linearly
-  consumed resume API with bounded multi-attempt accounting is still required
-  before the full 43.2 Gauntlet closes.
+  ordered ambient-attempt history, and committed exact/coexact sweep counts.
+  Solver vectors remain private; the token grants no candidate, residual,
+  convergence, spectrum, topology, repair, or publication authority. Invalid
+  input, admission failure, local cap failure, allocation failure, and
+  numerical/arithmetic failure remain ordinary `Finished(Refused)` outcomes.
+  The additive
+  `resume_hodge_decomposition_retaining_sweeps_bounded` entry point linearly
+  consumes that opaque token under a fresh `Cx` and accepts no replacement
+  source, tolerance, or local budget. It reconstructs only deterministic
+  scratch, continues unsealed exact/coexact sweeps from the last committed
+  vectors, and restarts verification from a private completed split when one
+  exists. Local sweep/operator/work counters remain cumulative across attempts,
+  including discarded partial-sweep and reconstructed-scratch work, while each
+  ambient `BudgetConsumption` remains a distinct ordered entry in a fixed
+  allocation-free attempt history. Pre-cancellation, fresh ambient admission
+  refusal, cumulative local-cap refusal, or attempt-cap-plus-one returns
+  `NotAdmitted` with the exact owned checkpoint logically unchanged; only a
+  successfully admitted attempt may move its source or solver state. The
+  resumed terminal report must reproduce uninterrupted candidate/receipt bits
+  while committing each projection sweep exactly once. This is a same-process
+  rollback/resume slice only: checkpoints still have no clone, serialization,
+  migration, fork, loaded-image, durable-ledger, or cross-ISA authority, so the
+  full P7/G4 checkpoint program remains open.
   Its INTERPRETATION CONTRACT is: fitted exact
   component → a sampled-mismatch 0-cochain correction candidate
   ONLY when every per-patch offset fits that chart's declared error
