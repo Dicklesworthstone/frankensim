@@ -35,6 +35,7 @@ mod interface;
 mod model_pack;
 mod pack;
 mod query;
+mod species_pack;
 
 pub use cards::{
     CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
@@ -55,6 +56,11 @@ pub use pack::{
 pub use query::{
     EvaluationDecision, MATDB_EVALUATOR_VERSION, MaterialAnswer, PropertySample,
     PropertyUsageReceipt, QueryPoint, SelectionPolicy,
+};
+pub use species_pack::{
+    NormalizedSpeciesPack, SPECIES_MOLAR_MASS_DIMS, SPECIES_PACK_SCHEMA_VERSION,
+    SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS, SpeciesAssociation,
+    SpeciesNormalizationReceipt, SpeciesNormalizationTarget,
 };
 
 /// Hash domain for property-claim canonical identity.

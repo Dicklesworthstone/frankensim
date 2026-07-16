@@ -2,12 +2,11 @@
 //!
 //! This tool boundary owns source-format and redistribution decisions. The
 //! runtime fs-matdb crate only admits the normalized artifact. The material
-//! profile emits [`NormalizedPack`]. The NASA-9 and kinetics profiles emit a
-//! separate [`NormalizedModelPack`] whose pack id is exactly one validated
-//! species or reaction id. The generic runtime artifact does not authenticate
-//! either source association or supply a thermochemical convention, kinetics
-//! executor, reaction mechanism, or conservation proof. Standalone species
-//! metadata still refuses until its owning runtime codec exists.
+//! profile emits [`NormalizedPack`]. NASA-9 and kinetics emit a separate
+//! [`NormalizedModelPack`], while species-v1 emits [`NormalizedSpeciesPack`]
+//! with the explicit source-declared thermochemical association that generic
+//! model cards cannot carry. None of these artifacts authenticates chemistry,
+//! supplies an evaluator, or proves a reaction mechanism or conservation law.
 //!
 //! The bounded manifest is tab-separated: one pack_id, redistribution,
 //! citation, and license record, followed by source records containing logical
@@ -19,6 +18,10 @@
 //! plus `pre_exponential` and `activation_temperature`, representing only the
 //! immutable coefficient schema `k(T) = A exp(-T_a / T)` with `A` in `s^-1`
 //! and `T_a` in kelvin. No evaluator, stoichiometry, or mechanism is inferred.
+//! A species-v1 source contains exactly one `species` record with, in order,
+//! canonical `SpeciesId`, molar-mass value/unit, standard-state phase,
+//! reference EOS, reference-pressure value/unit, and an opaque elemental-
+//! reference convention id. Version 1 admits only gas/ideal-gas associations.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -34,8 +37,11 @@ use fs_matdb::{
     ClaimId, ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy,
     JointStatistics, LawId, LawParameter, MATDB_PACK_TARGET_BASIS, MODEL_PACK_TARGET_BASIS,
     ModelNormalizationReceipt, ModelNormalizationTarget, NormalizationReceipt, NormalizationTarget,
-    NormalizedModelPack, NormalizedPack, ObservationDataset, ObservationId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, StatisticMember, UncertaintyModel, ValidityBoundSide,
+    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, ObservationDataset, ObservationId,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, SPECIES_MOLAR_MASS_DIMS,
+    SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS, SpeciesAssociation,
+    SpeciesNormalizationReceipt, SpeciesNormalizationTarget, StatisticMember, UncertaintyModel,
+    ValidityBoundSide,
 };
 use fs_qty::Dims;
 use fs_qty::chemistry::{ReactionId, SpeciesId};
@@ -44,6 +50,7 @@ use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
+const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Semantic contract version for normalized material-pack compilation.
 ///
 /// Bump this whenever parsing, admission, normalization, or provenance
@@ -54,9 +61,11 @@ const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const KINETICS_SOURCE_HEADER: &str = "frankensim.kinetics-source.v1";
+const SPECIES_SOURCE_HEADER: &str = "frankensim.species-source.v1";
 const MATERIAL_PROFILE: &str = "material-tsv-v1";
 const NASA9_PROFILE: &str = "nasa9-v1";
 const KINETICS_PROFILE: &str = "kinetics-v1";
+const SPECIES_PROFILE: &str = "species-v1";
 const NASA9_LAW_ID: &str = "nasa9-standard-state";
 const NASA9_LAW_VERSION: u32 = 1;
 const NASA9_STATE_SCHEMA_VERSION: u32 = 0;
@@ -230,6 +239,7 @@ struct CompileOutput {
 enum CompiledPack {
     Material(NormalizedPack),
     Model(NormalizedModelPack),
+    Species(NormalizedSpeciesPack),
 }
 
 impl CompiledPack {
@@ -237,6 +247,7 @@ impl CompiledPack {
         match self {
             Self::Material(pack) => pack.source_artifact(),
             Self::Model(pack) => pack.source_artifact(),
+            Self::Species(pack) => pack.source_artifact(),
         }
     }
 
@@ -244,6 +255,7 @@ impl CompiledPack {
         match self {
             Self::Material(pack) => pack.content_hash(),
             Self::Model(pack) => pack.content_hash(),
+            Self::Species(pack) => pack.content_hash(),
         }
     }
 
@@ -253,6 +265,9 @@ impl CompiledPack {
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
             Self::Model(_) => NormalizedModelPack::from_bytes_verified(expected, bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Self::Species(_) => NormalizedSpeciesPack::from_bytes_verified(expected, bytes)
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
         }
@@ -273,6 +288,14 @@ impl CompiledPack {
         };
         pack
     }
+
+    #[cfg(test)]
+    fn species(&self) -> &NormalizedSpeciesPack {
+        let Self::Species(pack) = self else {
+            panic!("expected a species pack");
+        };
+        pack
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +303,7 @@ enum SourceProfile {
     Material,
     Nasa9,
     Kinetics,
+    Species,
 }
 
 #[derive(Debug)]
@@ -460,6 +484,28 @@ struct RawKineticsParameter {
 struct RawKineticsDatabase {
     reactions: BTreeMap<ReactionId, RawKineticsReaction>,
     parameters: BTreeMap<(ReactionId, String), RawKineticsParameter>,
+    decisions: Vec<Decision>,
+    records: usize,
+}
+
+#[derive(Debug)]
+struct RawSpeciesAssociation {
+    species: SpeciesId,
+    molar_mass: String,
+    molar_mass_unit: String,
+    standard_state_phase: String,
+    reference_eos: String,
+    reference_pressure: String,
+    reference_pressure_unit: String,
+    elemental_reference: String,
+    source_id: String,
+    source_hash: ContentHash,
+    record_hash: ContentHash,
+}
+
+#[derive(Debug, Default)]
+struct RawSpeciesDatabase {
+    association: Option<RawSpeciesAssociation>,
     decisions: Vec<Decision>,
     records: usize,
 }
@@ -832,11 +878,12 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
         MATERIAL_PROFILE => Ok(SourceProfile::Material),
         NASA9_PROFILE => Ok(SourceProfile::Nasa9),
         KINETICS_PROFILE => Ok(SourceProfile::Kinetics),
+        SPECIES_PROFILE => Ok(SourceProfile::Species),
         _ => Err(CompileError::new(
             "unsupported_source_profile",
             format!("source:{}", first.id),
             format!(
-                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?}, {NASA9_PROFILE:?}, and {KINETICS_PROFILE:?}",
+                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?}, {NASA9_PROFILE:?}, {KINETICS_PROFILE:?}, and {SPECIES_PROFILE:?}",
                 first.profile
             ),
         )),
@@ -1395,7 +1442,7 @@ fn parse_source(source: &LoadedSource, raw: &mut RawDatabase) -> Result<(), Comp
                 return Err(CompileError::new(
                     "unsupported_source_record",
                     subject,
-                    "material-tsv-v1 admits only material records; NASA-9 data must use nasa9-v1, kinetics data must use kinetics-v1, and standalone species metadata remains unavailable",
+                    "material-tsv-v1 admits only material records; species metadata must use species-v1, NASA-9 data must use nasa9-v1, and kinetics data must use kinetics-v1",
                 ));
             }
             Some(other) => {
@@ -1435,6 +1482,114 @@ fn parse_reaction_id(raw: &str, subject: &str) -> Result<ReactionId, CompileErro
             format!("fs-qty refused the canonical reaction id: {error}"),
         )
     })
+}
+
+fn require_elemental_reference(raw: &str, subject: &str) -> Result<String, CompileError> {
+    if raw.is_empty() || raw.len() > MAX_IDENTIFIER_BYTES {
+        return Err(CompileError::new(
+            "invalid_elemental_reference",
+            subject,
+            format!("elemental-reference id must contain 1..={MAX_IDENTIFIER_BYTES} bytes"),
+        ));
+    }
+    let bytes = raw.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric()
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+        })
+    {
+        return Err(CompileError::new(
+            "invalid_elemental_reference",
+            subject,
+            "elemental-reference id must use compact ASCII without whitespace",
+        ));
+    }
+    Ok(raw.to_string())
+}
+
+fn parse_species_source(
+    source: &LoadedSource,
+    raw: &mut RawSpeciesDatabase,
+) -> Result<(), CompileError> {
+    if source.text.as_bytes().contains(&0) {
+        return Err(CompileError::new(
+            "invalid_source_encoding",
+            format!("source:{}", source.spec.id),
+            "NUL bytes are forbidden",
+        ));
+    }
+    let mut lines = source.text.lines();
+    if lines.next() != Some(SPECIES_SOURCE_HEADER) {
+        return Err(CompileError::new(
+            "unsupported_source_schema",
+            format!("source:{}", source.spec.id),
+            format!("first line must be {SPECIES_SOURCE_HEADER:?}"),
+        ));
+    }
+    for (offset, line) in lines.enumerate() {
+        let line_number = offset + 2;
+        let subject = format!("source:{}:line:{line_number}", source.spec.id);
+        if line.len() > MAX_LINE_BYTES {
+            return Err(CompileError::new(
+                "resource_limit",
+                subject,
+                "line exceeds the public byte budget",
+            ));
+        }
+        if line.is_empty() {
+            return Err(CompileError::new(
+                "invalid_source_record",
+                subject,
+                "blank records are forbidden",
+            ));
+        }
+        raw.records = raw.records.checked_add(1).ok_or_else(|| {
+            CompileError::new("resource_limit", "records", "record count overflowed")
+        })?;
+        if raw.records > 1 {
+            return Err(CompileError::new(
+                "duplicate_species_association",
+                subject,
+                "species-v1 admits exactly one complete species association record",
+            ));
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.first().copied() != Some("species") {
+            return Err(CompileError::new(
+                "unknown_source_record",
+                subject,
+                "species-v1 expects exactly one 'species' record",
+            ));
+        }
+        require_field_count(&fields, 9, &source.spec.id, line_number)?;
+        let association = RawSpeciesAssociation {
+            species: parse_species_id(fields[1], &subject)?,
+            molar_mass: require_number_token(fields[2], "molar mass", &subject)?,
+            molar_mass_unit: require_unit(fields[3], "molar-mass unit", &subject)?,
+            standard_state_phase: require_identifier(fields[4], "standard-state phase", &subject)?,
+            reference_eos: require_identifier(fields[5], "reference EOS", &subject)?,
+            reference_pressure: require_number_token(fields[6], "reference pressure", &subject)?,
+            reference_pressure_unit: require_unit(fields[7], "reference-pressure unit", &subject)?,
+            elemental_reference: require_elemental_reference(fields[8], &subject)?,
+            source_id: source.spec.id.clone(),
+            source_hash: source.hash,
+            record_hash: hash_domain(SOURCE_RECORD_DOMAIN, line.as_bytes()),
+        };
+        if raw.association.replace(association).is_some() {
+            return Err(CompileError::new(
+                "duplicate_species_association",
+                subject,
+                "species-v1 admits exactly one complete species association record",
+            ));
+        }
+    }
+    raw.decisions.push(Decision::admit(
+        format!("source:{}", source.spec.id),
+        "source_schema_admitted",
+        "bounded species-v1 source parsed with explicit units and thermochemical convention fields",
+        Some(source.hash),
+    ));
+    Ok(())
 }
 
 fn parse_nasa9_source(
@@ -2200,6 +2355,254 @@ fn model_normalization(
     )
 }
 
+fn parse_species_linear_quantity(
+    number: &str,
+    unit: &str,
+    subject: &str,
+) -> Result<ParsedQuantity, CompileError> {
+    let (_, _, offset) = unit_transform(unit, subject)?;
+    if offset != 0.0 {
+        return Err(CompileError::new(
+            "affine_species_unit",
+            subject,
+            "molar mass and reference pressure require linear units",
+        ));
+    }
+    parse_linear_quantity(number, unit, subject)
+}
+
+fn species_normalization(
+    target: SpeciesNormalizationTarget,
+    quantity: &ParsedQuantity,
+) -> SpeciesNormalizationReceipt {
+    SpeciesNormalizationReceipt::new(
+        target,
+        quantity.literal_hash,
+        quantity.dims,
+        quantity.scale,
+        quantity.offset,
+        quantity.unit.clone(),
+        SPECIES_PACK_TARGET_BASIS,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // Ordered source-to-runtime admission is intentionally auditable.
+fn compile_species_manifest(
+    manifest: Manifest,
+    sources: &[LoadedSource],
+    source_artifact: ContentHash,
+) -> Result<CompileOutput, CompileError> {
+    if sources.len() != 1 {
+        return Err(CompileError::new(
+            "species_source_count",
+            "sources",
+            "species-v1 requires exactly one source file containing one complete association",
+        )
+        .with_input_hash(source_artifact));
+    }
+    let mut raw = RawSpeciesDatabase::default();
+    for source in sources {
+        if let Err(error) = parse_species_source(source, &mut raw) {
+            return Err(error
+                .with_input_hash(source_artifact)
+                .with_prior_decisions(std::mem::take(&mut raw.decisions)));
+        }
+    }
+    let mut decisions = std::mem::take(&mut raw.decisions);
+    let result = (|| -> Result<CompileOutput, CompileError> {
+        let association = raw.association.ok_or_else(|| {
+            CompileError::new(
+                "missing_species_association",
+                "sources",
+                "species-v1 requires exactly one complete species record",
+            )
+        })?;
+        if manifest.pack_id != association.species.as_str() {
+            return Err(CompileError::new(
+                "species_pack_id_mismatch",
+                "manifest:pack_id",
+                format!(
+                    "species-v1 requires pack_id {:?} to equal canonical SpeciesId {:?}",
+                    manifest.pack_id,
+                    association.species.as_str()
+                ),
+            ));
+        }
+        if association.standard_state_phase != "gas" {
+            return Err(CompileError::new(
+                "unsupported_species_phase",
+                format!("species:{}", association.species),
+                "species-v1 admits exactly the explicit gas standard-state phase",
+            ));
+        }
+        if association.reference_eos != "ideal-gas" {
+            return Err(CompileError::new(
+                "unsupported_species_reference_eos",
+                format!("species:{}", association.species),
+                "species-v1 admits exactly the explicit ideal-gas reference EOS",
+            ));
+        }
+
+        let subject = format!("species:{}", association.species);
+        let molar_mass = parse_species_linear_quantity(
+            &association.molar_mass,
+            &association.molar_mass_unit,
+            &format!("{subject}:molar_mass"),
+        )?;
+        if molar_mass.dims != SPECIES_MOLAR_MASS_DIMS {
+            return Err(CompileError::new(
+                "species_molar_mass_dims_mismatch",
+                &subject,
+                format!(
+                    "molar mass has dimensions {:?}, expected {:?}",
+                    molar_mass.dims, SPECIES_MOLAR_MASS_DIMS
+                ),
+            ));
+        }
+        if molar_mass.value <= 0.0 {
+            return Err(CompileError::new(
+                "invalid_species_molar_mass",
+                &subject,
+                "normalized molar mass must be positive",
+            ));
+        }
+        let reference_pressure = parse_species_linear_quantity(
+            &association.reference_pressure,
+            &association.reference_pressure_unit,
+            &format!("{subject}:reference_pressure"),
+        )?;
+        if reference_pressure.dims != SPECIES_REFERENCE_PRESSURE_DIMS {
+            return Err(CompileError::new(
+                "species_reference_pressure_dims_mismatch",
+                &subject,
+                format!(
+                    "reference pressure has dimensions {:?}, expected {:?}",
+                    reference_pressure.dims, SPECIES_REFERENCE_PRESSURE_DIMS
+                ),
+            ));
+        }
+        if reference_pressure.value <= 0.0 {
+            return Err(CompileError::new(
+                "invalid_species_reference_pressure",
+                &subject,
+                "normalized reference pressure must be positive",
+            ));
+        }
+
+        decisions.push(Decision::admit(
+            "manifest:redistribution",
+            "redistribution_permitted",
+            "explicit permitted policy and nonblank retained terms admitted before compilation",
+            Some(source_artifact),
+        ));
+        decisions.push(Decision::admit(
+            "manifest:provenance",
+            "licensed_citation_admitted",
+            "nonblank source citation and license attached to the emitted species association",
+            Some(source_artifact),
+        ));
+        decisions.push(Decision::admit(
+            &subject,
+            "species_pack_id_bound",
+            "manifest pack_id exactly matches the fs-qty-validated SpeciesId; this is a source association, not chemical authentication",
+            Some(association.record_hash),
+        ));
+
+        let source_id = association.source_id.clone();
+        let source_hash = association.source_hash;
+        let record_hash = association.record_hash;
+        let runtime_association = SpeciesAssociation::new(
+            association.species,
+            molar_mass.value,
+            association.standard_state_phase,
+            association.reference_eos,
+            reference_pressure.value,
+            association.elemental_reference,
+            vec![source_hash, record_hash],
+            Provenance {
+                source: format!(
+                    "{} [source:{}] [species-association]",
+                    manifest.citation, source_id
+                ),
+                license: manifest.license.clone(),
+                artifact: Some(source_hash),
+            },
+        )
+        .map_err(|error| {
+            CompileError::new(
+                "species_association_refused",
+                &subject,
+                format!("fs-matdb refused the source association: {error}"),
+            )
+        })?;
+        let normalizations = vec![
+            species_normalization(SpeciesNormalizationTarget::MolarMass, &molar_mass),
+            species_normalization(
+                SpeciesNormalizationTarget::ReferencePressure,
+                &reference_pressure,
+            ),
+        ];
+        let pack = NormalizedSpeciesPack::new(
+            manifest.pack_id,
+            SPECIES_COMPILER_ID,
+            source_artifact,
+            manifest.redistribution_terms,
+            runtime_association,
+            normalizations,
+        )
+        .map_err(|error| {
+            CompileError::new(
+                "normalized_species_pack_refused",
+                "pack",
+                format!("runtime species-pack admission refused the compiled artifact: {error}"),
+            )
+        })?;
+        let bytes = pack.to_bytes();
+        let pack_hash = pack.content_hash();
+        let decoded =
+            NormalizedSpeciesPack::from_bytes_verified(pack_hash, &bytes).map_err(|error| {
+                CompileError::new(
+                    "self_verification_failed",
+                    "pack",
+                    format!("fresh species artifact failed verified runtime decode: {error}"),
+                )
+            })?;
+        if decoded.to_bytes() != bytes {
+            return Err(CompileError::new(
+                "self_verification_failed",
+                "pack",
+                "verified runtime decode did not reproduce canonical species-pack bytes",
+            ));
+        }
+        decisions.push(Decision::admit(
+            &subject,
+            "species_association_normalized",
+            "molar mass and the explicit gas/ideal-gas standard-state convention compiled with complete numeric normalization receipts",
+            Some(record_hash),
+        ));
+        decisions.push(Decision::admit(
+            "pack",
+            "runtime_species_pack_self_verified",
+            "canonical FSSPCPK bytes decoded under their externally pinned content hash",
+            Some(source_artifact),
+        ));
+        for decision in &mut decisions {
+            decision.pack_hash = Some(pack_hash);
+        }
+        sort_decisions(&mut decisions);
+        Ok(CompileOutput {
+            pack: CompiledPack::Species(pack),
+            bytes,
+            decisions: std::mem::take(&mut decisions),
+        })
+    })();
+    result.map_err(|error| {
+        error
+            .with_input_hash(source_artifact)
+            .with_prior_decisions(decisions)
+    })
+}
+
 #[allow(clippy::too_many_lines)] // The NASA-9 admission pipeline is intentionally auditable in order.
 fn compile_nasa9_manifest(
     manifest: Manifest,
@@ -2888,6 +3291,9 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         }
         SourceProfile::Kinetics => {
             return compile_kinetics_manifest(manifest, &sources, source_artifact);
+        }
+        SourceProfile::Species => {
+            return compile_species_manifest(manifest, &sources, source_artifact);
         }
         SourceProfile::Material => {}
     }
@@ -4175,6 +4581,11 @@ mod tests {
         "parameter\twater-formation\tpre_exponential\t2.5e7\ts^-1\n",
     );
 
+    const SPECIES_SOURCE: &str = concat!(
+        "frankensim.species-source.v1\n",
+        "species\tN2\t28.0134\tg/mol\tgas\tideal-gas\t100\tkPa\tNASA-TP-2002-211556\n",
+    );
+
     fn fixture_dir() -> PathBuf {
         loop {
             let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -4225,6 +4636,17 @@ mod tests {
              citation\tfixture first-order kinetics table\n\
              license\tCC-BY-4.0\n\
              source\tprimary\tsource.tsv\t{KINETICS_PROFILE}\n"
+        )
+    }
+
+    fn species_manifest(pack_id: &str) -> String {
+        format!(
+            "{MANIFEST_HEADER}\n\
+             pack_id\t{pack_id}\n\
+             redistribution\tpermitted\tCC-BY-4.0 redistribution with attribution\n\
+             citation\tfixture licensed species metadata\n\
+             license\tCC-BY-4.0\n\
+             source\tprimary\tsource.tsv\t{SPECIES_PROFILE}\n"
         )
     }
 
@@ -4697,13 +5119,119 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_species_profile_is_a_typed_refusal() {
-        let (manifest_path, _) = write_fixture(&manifest("species-v1", true), SOURCE);
-        let error =
-            compile_manifest(&manifest_path).expect_err("standalone species codec does not exist");
+    fn compiles_species_association_into_a_verified_species_pack() {
+        let (manifest_path, _) = write_fixture(&species_manifest("N2"), SPECIES_SOURCE);
+        let first = compile_manifest(&manifest_path).expect("species fixture compiles");
+        let second = compile_manifest(&manifest_path).expect("independent repeat compiles");
+
+        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(first.decisions, second.decisions);
+        assert_eq!(first.pack.content_hash(), second.pack.content_hash());
+        let pack = first.pack.species();
+        assert_eq!(pack.pack_id(), "N2");
+        assert_eq!(pack.compiler(), SPECIES_COMPILER_ID);
+        assert_eq!(pack.association().species().as_str(), "N2");
+        assert_eq!(
+            pack.association().molar_mass().to_bits(),
+            0.028_013_4f64.to_bits()
+        );
+        assert_eq!(pack.association().standard_state_phase(), "gas");
+        assert_eq!(pack.association().reference_eos(), "ideal-gas");
+        assert_eq!(
+            pack.association().reference_pressure().to_bits(),
+            100_000.0f64.to_bits()
+        );
+        assert_eq!(
+            pack.association().elemental_reference(),
+            "NASA-TP-2002-211556"
+        );
+        assert_eq!(pack.association().sources().len(), 2);
+        assert_eq!(pack.normalizations().len(), 2);
+        assert_eq!(
+            pack.normalizations()[0].target(),
+            SpeciesNormalizationTarget::MolarMass
+        );
+        assert_eq!(pack.normalizations()[0].dims(), SPECIES_MOLAR_MASS_DIMS);
+        assert_eq!(pack.normalizations()[0].source_basis(), "g/mol");
+        assert_eq!(
+            pack.normalizations()[1].target(),
+            SpeciesNormalizationTarget::ReferencePressure
+        );
+        assert_eq!(
+            pack.normalizations()[1].dims(),
+            SPECIES_REFERENCE_PRESSURE_DIMS
+        );
+        assert_eq!(pack.normalizations()[1].source_basis(), "kPa");
+
+        let decoded = NormalizedSpeciesPack::from_bytes_verified(pack.content_hash(), &first.bytes)
+            .expect("verified species pack decodes");
+        assert_eq!(&decoded, pack);
+        assert_eq!(decoded.to_bytes(), first.bytes);
+        assert!(first.decisions.iter().all(|decision| {
+            decision.verdict == "admit" && decision.pack_hash == Some(pack.content_hash())
+        }));
+    }
+
+    #[test]
+    fn unknown_source_profile_remains_a_typed_refusal() {
+        let (manifest_path, _) = write_fixture(&manifest("unknown-v1", true), SOURCE);
+        let error = compile_manifest(&manifest_path).expect_err("unknown profile refuses");
 
         assert_eq!(error.code, "unsupported_source_profile");
         assert_eq!(error.subject, "source:primary");
+    }
+
+    #[test]
+    fn malformed_species_associations_refuse_without_inference() {
+        let cases = [
+            (
+                SPECIES_SOURCE.replacen("28.0134\tg/mol", "28.0134\tkg", 1),
+                "species_molar_mass_dims_mismatch",
+            ),
+            (
+                SPECIES_SOURCE.replacen("\tgas\t", "\tliquid\t", 1),
+                "unsupported_species_phase",
+            ),
+            (
+                SPECIES_SOURCE.replacen("\tideal-gas\t", "\tcubic\t", 1),
+                "unsupported_species_reference_eos",
+            ),
+            (
+                SPECIES_SOURCE.replacen("28.0134\tg/mol", "0\tg/mol", 1),
+                "invalid_species_molar_mass",
+            ),
+            (
+                SPECIES_SOURCE.replacen("100\tkPa", "100\tdegC", 1),
+                "affine_species_unit",
+            ),
+            (
+                SPECIES_SOURCE.replacen("NASA-TP-2002-211556", "bad reference", 1),
+                "invalid_elemental_reference",
+            ),
+            (
+                SPECIES_SOURCE.replacen(
+                    "species\tN2\t28.0134\tg/mol\tgas\tideal-gas\t100\tkPa\tNASA-TP-2002-211556\n",
+                    "",
+                    1,
+                ),
+                "missing_species_association",
+            ),
+            (
+                format!(
+                    "{SPECIES_SOURCE}species\tN2\t28.0134\tg/mol\tgas\tideal-gas\t100\tkPa\tNASA-TP-2002-211556\n"
+                ),
+                "duplicate_species_association",
+            ),
+        ];
+        for (source, code) in cases {
+            let (manifest_path, _) = write_fixture(&species_manifest("N2"), &source);
+            let error = compile_manifest(&manifest_path).expect_err("malformed species refuses");
+            assert_eq!(error.code, code);
+        }
+
+        let (manifest_path, _) = write_fixture(&species_manifest("O2"), SPECIES_SOURCE);
+        let error = compile_manifest(&manifest_path).expect_err("pack id binds species");
+        assert_eq!(error.code, "species_pack_id_mismatch");
     }
 
     #[test]

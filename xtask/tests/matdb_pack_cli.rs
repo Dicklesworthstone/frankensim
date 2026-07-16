@@ -5,7 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs_matdb::{NormalizedModelPack, NormalizedPack, PropertyValue};
+use fs_matdb::{
+    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, PropertyValue,
+    SPECIES_MOLAR_MASS_DIMS, SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS,
+    SpeciesNormalizationTarget,
+};
 use fs_qty::Dims;
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -132,6 +136,20 @@ const KINETICS_SOURCE: &str = concat!(
     "parameter\twater-formation\tpre_exponential\t2.5e7\ts^-1\n",
 );
 
+const SPECIES_MANIFEST: &str = concat!(
+    "frankensim.matdb-manifest.v1\n",
+    "pack_id\tN2\n",
+    "redistribution\tpermitted\tCC-BY-4.0 redistribution with attribution\n",
+    "citation\tfixture licensed species metadata\n",
+    "license\tCC-BY-4.0\n",
+    "source\tprimary\tspecies.tsv\tspecies-v1\n",
+);
+
+const SPECIES_SOURCE: &str = concat!(
+    "frankensim.species-source.v1\n",
+    "species\tN2\t28.0134\tg/mol\tgas\tideal-gas\t100\tkPa\tNASA-TP-2002-211556\n",
+);
+
 fn fixture_dir() -> PathBuf {
     loop {
         let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -184,6 +202,14 @@ fn write_kinetics_fixture() -> (PathBuf, PathBuf) {
     fs::write(&manifest, KINETICS_MANIFEST).expect("write kinetics manifest fixture");
     fs::write(directory.join("kinetics.tsv"), KINETICS_SOURCE)
         .expect("write kinetics source fixture");
+    (directory, manifest)
+}
+
+fn write_species_fixture(source: &str) -> (PathBuf, PathBuf) {
+    let directory = fixture_dir();
+    let manifest = directory.join("manifest.tsv");
+    fs::write(&manifest, SPECIES_MANIFEST).expect("write species manifest fixture");
+    fs::write(directory.join("species.tsv"), source).expect("write species source fixture");
     (directory, manifest)
 }
 
@@ -433,28 +459,119 @@ fn g3_cli_compiles_first_order_kinetics_into_an_identical_verified_model_pack() 
 }
 
 #[test]
-fn g3_cli_refuses_standalone_species_without_a_runtime_codec() {
-    let manifest_text = MANIFEST.replacen("material-tsv-v1", "species-v1", 1);
-    assert_ne!(manifest_text, MANIFEST);
-    let directory = fixture_dir();
-    let manifest = directory.join("manifest.tsv");
-    let output = directory.join("species-v1.fsmatpk");
-    fs::write(&manifest, manifest_text).expect("write unsupported-profile manifest");
-    fs::write(directory.join("source.tsv"), SOURCE).expect("write source fixture");
+#[allow(clippy::too_many_lines)] // The end-to-end receipt audit is clearer as one ordered assertion path.
+fn g3_cli_compiles_species_association_into_identical_verified_species_packs() {
+    let (directory, manifest) = write_species_fixture(SPECIES_SOURCE);
+    let first_path = directory.join("species-first.fsspcpk");
+    let second_path = directory.join("species-second.fsspcpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first species compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second species compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout, "species decision stream moved");
+
+    let first_bytes = fs::read(first_path).expect("read first species pack");
+    let second_bytes = fs::read(second_path).expect("read second species pack");
+    assert_eq!(first_bytes, second_bytes, "species pack bytes moved");
+    let decoded = NormalizedSpeciesPack::from_bytes(&first_bytes).expect("decode species pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedSpeciesPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verified species pack");
+    assert_eq!(decoded.pack_id(), "N2");
+    assert_eq!(
+        decoded.compiler(),
+        "frankensim-matdb-species-pack-compiler-v1"
+    );
+    let association = decoded.association();
+    assert_eq!(association.species().as_str(), "N2");
+    assert_eq!(association.molar_mass().to_bits(), 0.028_013_4f64.to_bits());
+    assert_eq!(association.standard_state_phase(), "gas");
+    assert_eq!(association.reference_eos(), "ideal-gas");
+    assert_eq!(
+        association.reference_pressure().to_bits(),
+        100_000.0f64.to_bits()
+    );
+    assert_eq!(association.elemental_reference(), "NASA-TP-2002-211556");
+    assert_eq!(association.sources().len(), 2);
+    assert_eq!(association.provenance().license.as_str(), "CC-BY-4.0");
+    assert!(
+        association
+            .provenance()
+            .artifact
+            .is_some_and(|artifact| association.sources().contains(&artifact))
+    );
+    assert_eq!(decoded.normalizations().len(), 2);
+    assert_eq!(
+        decoded.normalizations()[0].target(),
+        SpeciesNormalizationTarget::MolarMass
+    );
+    assert_eq!(decoded.normalizations()[0].dims(), SPECIES_MOLAR_MASS_DIMS);
+    assert_eq!(
+        decoded.normalizations()[0].scale().to_bits(),
+        0.001f64.to_bits()
+    );
+    assert_eq!(
+        decoded.normalizations()[0].offset().to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(decoded.normalizations()[0].source_basis(), "g/mol");
+    assert_eq!(
+        decoded.normalizations()[0].target_basis(),
+        SPECIES_PACK_TARGET_BASIS
+    );
+    assert_eq!(
+        decoded.normalizations()[1].target(),
+        SpeciesNormalizationTarget::ReferencePressure
+    );
+    assert_eq!(
+        decoded.normalizations()[1].dims(),
+        SPECIES_REFERENCE_PRESSURE_DIMS
+    );
+    assert_eq!(
+        decoded.normalizations()[1].scale().to_bits(),
+        1_000.0f64.to_bits()
+    );
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"species_pack_id_bound\""));
+    assert!(decisions.contains("\"reason_code\":\"species_association_normalized\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_species_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_refuses_malformed_species_without_publishing() {
+    let malformed = SPECIES_SOURCE.replacen("28.0134\tg/mol", "28.0134\tkg", 1);
+    assert_ne!(malformed, SPECIES_SOURCE);
+    let (directory, manifest) = write_species_fixture(&malformed);
+    let output = directory.join("refused-species.fsspcpk");
 
     let refused = run_compiler(&manifest, &output);
     assert!(
         !refused.status.success(),
-        "species-v1 unexpectedly compiled"
+        "invalid species unexpectedly compiled"
     );
-    assert!(!output.exists(), "species-v1 refusal published an output");
+    assert!(!output.exists(), "species refusal published an output");
     let decisions = String::from_utf8(refused.stdout).expect("decision stream is UTF-8");
     assert_eq!(decisions.matches("\"verdict\":\"refuse\"").count(), 1);
-    assert!(decisions.contains("\"reason_code\":\"unsupported_source_profile\""));
-    assert!(decisions.contains("\"subject\":\"source:primary\""));
+    assert!(decisions.contains("\"reason_code\":\"species_molar_mass_dims_mismatch\""));
+    assert!(decisions.contains("\"subject\":\"species:N2\""));
     assert!(
         String::from_utf8_lossy(&refused.stderr)
-            .contains("error: matdb pack refused [unsupported_source_profile]")
+            .contains("error: matdb pack refused [species_molar_mass_dims_mismatch]")
     );
 }
 

@@ -77,6 +77,16 @@ persistence.
   decoding, while each serialized card identity must independently reproduce.
   A downstream law adapter (for example the NASA-9 adapter in
   `fs-thermochem`) must still validate the exact law-specific schema.
+- `NormalizedSpeciesPack` — a separate bounded `FSSPCPK` v1 transport for one
+  source-declared thermochemical association. Its pack id is exactly the
+  `fs_qty::chemistry::SpeciesId`; v1 retains a positive coherent-SI molar mass,
+  the exact `gas`/`ideal-gas` standard-state convention, positive reference
+  pressure, an opaque elemental-reference convention id, source hashes, and
+  provenance. Exactly one `SpeciesNormalizationReceipt` for molar mass and one
+  for reference pressure retain the source literal hash and linear SI transform.
+  Canonical decode re-runs every runtime structural admission gate and
+  byte-reproduces the stream; `from_bytes_verified` first pins the whole-pack
+  identity.
 - `JointStatistics` — a named, explicitly ordered component block for one
   observed dataset. `StatisticMember` addresses a scalar claim or one curve
   knot's abscissa/ordinate, so multiple knots never collapse into one random
@@ -181,6 +191,11 @@ persistence.
   or endpoint-transform-incoherent receipts refuse. The model pack does not
   infer a law schema from parameter names; validity-axis dimensions remain
   compiler-declared because the shared validity type does not store them.
+- SPECIES-PACK CANONICALITY: one pack carries exactly one species association;
+  its id, positive molar mass, exact v1 phase/EOS, reference pressure, elemental
+  convention, sorted unique source hashes, and provenance are identity-bearing.
+  Both numeric fields have exactly one dimension-matched, positive-scale,
+  positive-zero-offset receipt targeting the explicit six-base SI basis.
 - JOINT STATISTICS STAY JOINT: covariance/correlation are never collapsed into
   nominal values or caveat text. Member order and every lower-triangle entry
   are identity-bearing normalized bytes.
@@ -283,6 +298,11 @@ validity-endpoint transform coherence, portable positive-zero/source/provenance
 gates, nested card-identity tampering, whole-pack tampering, and trailing-byte
 refusals.
 
+`tests/species_pack.rs`: G0 source/receipt permutation canonicalization and
+verified exact binary round-trip; G3 phase/EOS/positive-value/provenance gates,
+complete dimension-linked receipt coverage, pack/species identity binding,
+whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
+
 ## No-claim boundaries
 
 - Storing a claim asserts NOTHING about its truth: fs-matdb records who
@@ -307,7 +327,11 @@ refusals.
 - The model-pack codec proves transport integrity and generic card admission,
   not that an arbitrary card is NASA-9, Arrhenius kinetics, or any other named
   physical law. Executable consumers retain that law-specific validation
-  obligation; no kinetics executor or species-to-card association is claimed.
+  obligation; no kinetics executor or model-card/species linkage is claimed.
+- A species pack preserves an explicit source association; it does not
+  authenticate chemical identity, validate the molar mass or elemental
+  convention against an independent authority, link a NASA/kinetics card, or
+  supply thermodynamic, kinetic, equilibrium, or transport evaluation.
 - Joint statistics are preserved and validated but are not yet selected or
   propagated by `PropertyUsageReceipt`; no query result may claim correlated
   uncertainty until that later authority surface binds the exact block.
