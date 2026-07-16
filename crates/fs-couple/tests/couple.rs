@@ -2,18 +2,18 @@
 //! ports, the Dirac interconnection's exact power conservation, the energy
 //! audit (passivity measured, not assumed), the Aitken relaxation factor, and
 //! the load-bearing added-mass comparison: naive staggering diverges where
-//! Aitken-relaxed coupling stays stable. The PortSchema v2 PR-1 battery also
-//! pins the scalar migration and the four distinct thermodynamic primitives.
+//! Aitken-relaxed coupling stays stable. The PortSchema v2 PR-1/PR-2 battery
+//! pins scalar migration, four thermodynamic primitives, and extended kinds.
 
 use core::num::NonZeroUsize;
 
 use fs_couple::{
     AccountingBoundary, AitkenRelaxation, BoundaryTreatment, ConservationRole,
     ConservativeJunction, CoordinateBinding, CoupleError, DissipationEvidence, DissipationLaw,
-    DissipativeRelation, EnergyAudit, FsiResult, PORT_SCHEMA_VERSION, Port, PortKind,
-    PortOrientation, PortPrimitive, PortSchema, PortTimestamp, PortValueShape, PowerPairing,
-    SourceClass, SourceOrReservoir, StableId, StorageElement, StoragePotential, interconnect,
-    interface_power, iterate_aitken, iterate_fixed_relaxation,
+    DissipativeRelation, EnergyAudit, FieldMeasureSide, FsiResult, PORT_SCHEMA_VERSION, Port,
+    PortKind, PortOrientation, PortPrimitive, PortSchema, PortTimestamp, PortValueShape,
+    PortVariable, PowerPairing, SourceClass, SourceOrReservoir, StableId, StorageElement,
+    StoragePotential, interconnect, interface_power, iterate_aitken, iterate_fixed_relaxation,
 };
 use fs_iface::SpaceType;
 use fs_qty::{Area, Dims, Force, Power, Pressure, Temperature, Velocity, VolumetricFlowRate};
@@ -54,20 +54,25 @@ fn port_schema_v2_scalar_seed_migration_goldens() {
             PortKind::MechanicalForceVelocity,
             Force::DIMS,
             Velocity::DIMS,
+            &[ConservationRole::Energy][..],
         ),
         (
             PortKind::FluidPressureFlux,
             Pressure::DIMS,
             VolumetricFlowRate::DIMS,
+            &[ConservationRole::Energy][..],
         ),
         (
             PortKind::ThermalTemperatureEntropy,
             Temperature::DIMS,
             Dims([2, 1, -3, -1, 0, 0]),
+            &[ConservationRole::Energy][..],
         ),
     ];
 
-    for (index, (kind, effort_dimensions, flow_dimensions)) in cases.into_iter().enumerate() {
+    for (index, (kind, effort_dimensions, flow_dimensions, expected_roles)) in
+        cases.into_iter().enumerate()
+    {
         let a = scalar_schema(
             kind,
             &format!("port/scalar-{index}-a"),
@@ -102,7 +107,7 @@ fn port_schema_v2_scalar_seed_migration_goldens() {
         );
         assert_eq!(a.timestamp().clock().as_str(), "clock/coupling-window");
         assert_eq!(a.timestamp().tick(), 17);
-        assert_eq!(a.conservation_roles(), &[ConservationRole::Energy]);
+        assert_eq!(a.conservation_roles(), expected_roles);
 
         let junction = ConservativeJunction::new(stable(&format!("junction/scalar-{index}")), a, b)
             .unwrap_or_else(|error| panic!("typed junction refused: {error:?}"));
@@ -113,14 +118,20 @@ fn port_schema_v2_scalar_seed_migration_goldens() {
 
         assert_eq!(
             typed.port_a.effort().to_bits(),
-            legacy.port_a.effort.to_bits()
+            legacy.port_a.effort().to_bits()
         );
-        assert_eq!(typed.port_a.flow().to_bits(), legacy.port_a.flow.to_bits());
+        assert_eq!(
+            typed.port_a.flow().to_bits(),
+            legacy.port_a.flow().to_bits()
+        );
         assert_eq!(
             typed.port_b.effort().to_bits(),
-            legacy.port_b.effort.to_bits()
+            legacy.port_b.effort().to_bits()
         );
-        assert_eq!(typed.port_b.flow().to_bits(), legacy.port_b.flow.to_bits());
+        assert_eq!(
+            typed.port_b.flow().to_bits(),
+            legacy.port_b.flow().to_bits()
+        );
         assert_eq!(
             typed.interface_power.to_bits(),
             legacy.interface_power.to_bits()
@@ -131,6 +142,222 @@ fn port_schema_v2_scalar_seed_migration_goldens() {
             "junction={junction:#?}"
         );
     }
+}
+
+#[test]
+fn extended_port_kinds_have_watt_pairings_and_kind_identity() {
+    let cases = [
+        (
+            PortKind::RotationalTorqueAngularVelocity,
+            Dims([2, 1, -2, 0, 0, 0]),
+            Dims([0, 0, -1, 0, 0, 0]),
+            &[ConservationRole::Energy, ConservationRole::AngularMomentum][..],
+        ),
+        (
+            PortKind::ElectricalVoltageCurrent,
+            Dims([2, 1, -3, 0, -1, 0]),
+            Dims([0, 0, 0, 0, 1, 0]),
+            &[ConservationRole::Energy, ConservationRole::ElectricCharge][..],
+        ),
+        (
+            PortKind::MagneticMmfFluxRate,
+            Dims([0, 0, 0, 0, 1, 0]),
+            Dims([2, 1, -3, 0, -1, 0]),
+            &[ConservationRole::Energy][..],
+        ),
+        (
+            PortKind::ChemicalPotentialAmountFlow,
+            Dims([2, 1, -2, 0, 0, -1]),
+            Dims([0, 0, -1, 0, 0, 1]),
+            &[ConservationRole::Energy, ConservationRole::Amount][..],
+        ),
+    ];
+
+    for (index, (kind, effort, flow, expected_roles)) in cases.into_iter().enumerate() {
+        let schema = scalar_schema(
+            kind,
+            &format!("port/extended-{index}"),
+            "frame/extended",
+            PortOrientation::OutwardFromOwner,
+            52,
+        );
+        assert_eq!(schema.effort_dimensions(), effort, "schema={schema:#?}");
+        assert_eq!(schema.flow_dimensions(), flow, "schema={schema:#?}");
+        assert_eq!(
+            effort.checked_plus(flow),
+            Some(Power::DIMS),
+            "schema={schema:#?}"
+        );
+        assert_eq!(schema.conservation_roles(), expected_roles);
+    }
+
+    let chemical_vector = PortSchema::try_new(
+        stable("port/chemical-vector"),
+        PortKind::ChemicalPotentialAmountFlow,
+        PortKind::ChemicalPotentialAmountFlow.canonical_effort_dimensions(),
+        PortKind::ChemicalPotentialAmountFlow.canonical_flow_dimensions(),
+        PortValueShape::vector(4).unwrap(),
+        CoordinateBinding::new(
+            stable("basis/species-order-v1"),
+            stable("frame/reactor"),
+            PortOrientation::OutwardFromOwner,
+        ),
+        PowerPairing::EuclideanDot,
+        PortTimestamp::new(stable("clock/reaction-window"), 52),
+        [ConservationRole::Energy, ConservationRole::Amount],
+    )
+    .unwrap();
+    assert!(matches!(
+        chemical_vector.shape(),
+        PortValueShape::Vector(components) if components.get() == 4
+    ));
+}
+
+#[test]
+fn extended_port_kinds_fail_closed_without_schema_admission() {
+    let extended_kinds = [
+        PortKind::RotationalTorqueAngularVelocity,
+        PortKind::ElectricalVoltageCurrent,
+        PortKind::MagneticMmfFluxRate,
+        PortKind::ChemicalPotentialAmountFlow,
+    ];
+    for kind in extended_kinds {
+        let raw_a = Port::new(1.0, 2.0, kind);
+        let raw_b = Port::new(1.0, -2.0, kind);
+        assert!(!raw_a.conjugate_to(&raw_b));
+        assert_eq!(
+            interconnect(kind, kind, 1.0, 2.0),
+            Err(CoupleError::LegacyInterconnectRequiresSeedKind { kind })
+        );
+    }
+
+    let wrong_kind = PortSchema::try_new(
+        stable("port/electrical-with-mechanical-dimensions"),
+        PortKind::ElectricalVoltageCurrent,
+        Force::DIMS,
+        Velocity::DIMS,
+        PortValueShape::Scalar,
+        CoordinateBinding::new(
+            stable("basis/si-scalar"),
+            stable("frame/electrical"),
+            PortOrientation::OutwardFromOwner,
+        ),
+        PowerPairing::ScalarProduct,
+        PortTimestamp::new(stable("clock/electrical"), 52),
+        [ConservationRole::Energy],
+    );
+    assert!(matches!(
+        wrong_kind,
+        Err(CoupleError::PortKindDimensionMismatch {
+            kind: PortKind::ElectricalVoltageCurrent,
+            side: PortVariable::Effort,
+            expected: Dims([2, 1, -3, 0, -1, 0]),
+            actual: Dims([1, 1, -2, 0, 0, 0]),
+        })
+    ));
+
+    let missing_charge = PortSchema::try_new(
+        stable("port/electrical-missing-charge-role"),
+        PortKind::ElectricalVoltageCurrent,
+        PortKind::ElectricalVoltageCurrent.canonical_effort_dimensions(),
+        PortKind::ElectricalVoltageCurrent.canonical_flow_dimensions(),
+        PortValueShape::Scalar,
+        CoordinateBinding::new(
+            stable("basis/si-scalar"),
+            stable("frame/electrical"),
+            PortOrientation::OutwardFromOwner,
+        ),
+        PowerPairing::ScalarProduct,
+        PortTimestamp::new(stable("clock/electrical"), 52),
+        [ConservationRole::Energy],
+    );
+    assert_eq!(
+        missing_charge,
+        Err(CoupleError::MissingPortKindConservationRole {
+            kind: PortKind::ElectricalVoltageCurrent,
+            role: ConservationRole::ElectricCharge,
+        })
+    );
+}
+
+#[test]
+fn field_measure_side_preserves_generalized_kind_dimensions() {
+    let entropy_flux_density = Dims([0, 1, -3, -1, 0, 0]);
+    let coordinates = CoordinateBinding::new(
+        stable("basis/thermal-trace"),
+        stable("frame/thermal-surface"),
+        PortOrientation::OutwardFromOwner,
+    );
+    let timestamp = PortTimestamp::new(stable("clock/thermal-surface"), 61);
+    let thermal_field = PortSchema::try_new(
+        stable("port/thermal-surface"),
+        PortKind::ThermalTemperatureEntropy,
+        Temperature::DIMS,
+        entropy_flux_density,
+        PortValueShape::field(1, SpaceType::HGrad, SpaceType::HDiv).unwrap(),
+        coordinates.clone(),
+        PowerPairing::FieldDuality {
+            measure_dimensions: Area::DIMS,
+            measure_side: FieldMeasureSide::Flow,
+        },
+        timestamp.clone(),
+        [ConservationRole::Energy, ConservationRole::Entropy],
+    )
+    .unwrap();
+    assert_eq!(
+        thermal_field.flow_dimensions(),
+        entropy_flux_density,
+        "schema={thermal_field:#?}"
+    );
+
+    let wrong_side = PortSchema::try_new(
+        stable("port/thermal-surface-wrong-side"),
+        PortKind::ThermalTemperatureEntropy,
+        Temperature::DIMS,
+        entropy_flux_density,
+        PortValueShape::field(1, SpaceType::HGrad, SpaceType::HDiv).unwrap(),
+        coordinates,
+        PowerPairing::FieldDuality {
+            measure_dimensions: Area::DIMS,
+            measure_side: FieldMeasureSide::Effort,
+        },
+        timestamp,
+        [ConservationRole::Energy, ConservationRole::Entropy],
+    );
+    assert!(matches!(
+        wrong_side,
+        Err(CoupleError::PortKindDimensionMismatch {
+            kind: PortKind::ThermalTemperatureEntropy,
+            side: PortVariable::Effort,
+            ..
+        })
+    ));
+
+    let measure_application_overflow = PortSchema::try_new(
+        stable("port/measure-application-overflow"),
+        PortKind::MechanicalForceVelocity,
+        Dims([127, 0, 0, 0, 0, 0]),
+        Dims([-127, 0, 0, 0, 0, 0]),
+        PortValueShape::field(1, SpaceType::HDiv, SpaceType::HGrad).unwrap(),
+        CoordinateBinding::new(
+            stable("basis/overflow"),
+            stable("frame/overflow"),
+            PortOrientation::OutwardFromOwner,
+        ),
+        PowerPairing::FieldDuality {
+            measure_dimensions: Power::DIMS,
+            measure_side: FieldMeasureSide::Effort,
+        },
+        PortTimestamp::new(stable("clock/overflow"), 61),
+        [ConservationRole::Energy],
+    );
+    assert!(matches!(
+        measure_application_overflow,
+        Err(CoupleError::PortMeasureApplicationOverflow {
+            side: PortVariable::Effort,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -193,6 +420,10 @@ fn added_mass_fixture_is_a_bitwise_v2_schema_migration_golden() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-closed matrix keeps shared metadata and error precedence visible"
+)]
 fn port_schema_v2_fails_closed_on_malformed_metadata() {
     assert!(matches!(
         StableId::new("contains whitespace"),
@@ -411,12 +642,13 @@ fn non_scalar_schema_is_typed_but_not_silently_run_by_scalar_seed() {
         })
     ));
 
-    let field = PortValueShape::field(3, SpaceType::HDiv).unwrap();
+    let field = PortValueShape::field(3, SpaceType::HDiv, SpaceType::HGrad).unwrap();
     assert!(matches!(
         field,
         PortValueShape::Field {
             components,
-            space: SpaceType::HDiv
+            effort_space: SpaceType::HDiv,
+            flow_space: SpaceType::HGrad,
         } if components.get() == 3
     ));
 
@@ -429,6 +661,7 @@ fn non_scalar_schema_is_typed_but_not_silently_run_by_scalar_seed() {
         coordinates.clone(),
         PowerPairing::FieldDuality {
             measure_dimensions: Area::DIMS,
+            measure_side: FieldMeasureSide::Effort,
         },
         timestamp.clone(),
         [ConservationRole::Energy, ConservationRole::LinearMomentum],
@@ -437,7 +670,8 @@ fn non_scalar_schema_is_typed_but_not_silently_run_by_scalar_seed() {
     assert_eq!(
         field_schema.power_pairing(),
         PowerPairing::FieldDuality {
-            measure_dimensions: Area::DIMS
+            measure_dimensions: Area::DIMS,
+            measure_side: FieldMeasureSide::Effort,
         }
     );
 
@@ -450,6 +684,7 @@ fn non_scalar_schema_is_typed_but_not_silently_run_by_scalar_seed() {
         coordinates,
         PowerPairing::FieldDuality {
             measure_dimensions: Dims::NONE,
+            measure_side: FieldMeasureSide::Effort,
         },
         timestamp,
         [ConservationRole::Energy, ConservationRole::LinearMomentum],
@@ -461,6 +696,10 @@ fn non_scalar_schema_is_typed_but_not_silently_run_by_scalar_seed() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one primitive matrix keeps the four thermodynamic claims directly comparable"
+)]
 fn four_port_thermodynamic_primitives_keep_claims_separate() {
     let port = scalar_schema(
         PortKind::ThermalTemperatureEntropy,
@@ -687,8 +926,8 @@ fn the_dirac_interconnection_conserves_interface_power_exactly() {
     .unwrap();
     // shared effort, opposite flow -> net interface power is exactly zero (G0).
     assert!(c.interface_power.abs() < 1e-15);
-    assert!((c.port_a.effort - c.port_b.effort).abs() < 1e-15);
-    assert!((c.port_a.flow + c.port_b.flow).abs() < 1e-15);
+    assert!((c.port_a.effort() - c.port_b.effort()).abs() < 1e-15);
+    assert!((c.port_a.flow() + c.port_b.flow()).abs() < 1e-15);
     // incompatible ports are refused at composition time.
     assert!(matches!(
         interconnect(

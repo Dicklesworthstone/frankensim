@@ -40,34 +40,98 @@ pub enum PortKind {
     FluidPressureFlux,
     /// Thermal: temperature (effort) × entropy flow.
     ThermalTemperatureEntropy,
+    /// Rotational: torque × angular velocity.
+    RotationalTorqueAngularVelocity,
+    /// Electrical: voltage × current.
+    ElectricalVoltageCurrent,
+    /// Magnetic: magnetomotive force × magnetic-flux rate.
+    MagneticMmfFluxRate,
+    /// Chemical: electrochemical potential × amount flow.
+    ChemicalPotentialAmountFlow,
 }
 
 impl PortKind {
-    /// The effort dimension of the three scalar seed port kinds.
+    /// Whether this kind belongs to the retained raw scalar migration oracle.
+    const fn is_legacy_scalar_seed(self) -> bool {
+        matches!(
+            self,
+            Self::MechanicalForceVelocity
+                | Self::FluidPressureFlux
+                | Self::ThermalTemperatureEntropy
+        )
+    }
+
+    /// Canonical generalized effort dimensions for this physical kind.
     #[must_use]
-    pub const fn scalar_effort_dimensions(self) -> Dims {
+    pub const fn canonical_effort_dimensions(self) -> Dims {
         match self {
             Self::MechanicalForceVelocity => Force::DIMS,
             Self::FluidPressureFlux => Pressure::DIMS,
             Self::ThermalTemperatureEntropy => Temperature::DIMS,
+            // Torque is N·m. Its dimensions match energy, while its semantic
+            // kind remains distinct.
+            Self::RotationalTorqueAngularVelocity => Dims([2, 1, -2, 0, 0, 0]),
+            // Voltage is W/A.
+            Self::ElectricalVoltageCurrent => Dims([2, 1, -3, 0, -1, 0]),
+            // Magnetomotive force is ampere-turn; turn is dimensionless.
+            Self::MagneticMmfFluxRate => Dims([0, 0, 0, 0, 1, 0]),
+            // Electrochemical potential is J/mol.
+            Self::ChemicalPotentialAmountFlow => Dims([2, 1, -2, 0, 0, -1]),
         }
     }
 
-    /// The flow dimension of the three scalar seed port kinds.
+    /// Canonical generalized flow dimensions for this physical kind.
     #[must_use]
-    pub const fn scalar_flow_dimensions(self) -> Dims {
+    pub const fn canonical_flow_dimensions(self) -> Dims {
         match self {
             Self::MechanicalForceVelocity => Velocity::DIMS,
             Self::FluidPressureFlux => VolumetricFlowRate::DIMS,
             // Entropy flow is W/K.
             Self::ThermalTemperatureEntropy => Dims([2, 1, -3, -1, 0, 0]),
+            // Angular velocity is rad/s; radian is dimensionless.
+            Self::RotationalTorqueAngularVelocity => Dims([0, 0, -1, 0, 0, 0]),
+            Self::ElectricalVoltageCurrent => Dims([0, 0, 0, 0, 1, 0]),
+            // Magnetic-flux rate is Wb/s.
+            Self::MagneticMmfFluxRate => Dims([2, 1, -3, 0, -1, 0]),
+            // Amount flow is mol/s.
+            Self::ChemicalPotentialAmountFlow => Dims([0, 0, -1, 0, 0, 1]),
         }
     }
 
-    /// Migrate one legacy scalar kind into an explicit v2 schema.
+    /// Minimum conservation roles admitted at this staged schema version.
     ///
-    /// Identity, coordinates, and time remain caller supplied: the migration
-    /// must not invent any of the Five Explicits.
+    /// Energy is universal. PR-2 schema-only kinds whose flow is itself the
+    /// rate of a named conserved quantity must also declare that quantity;
+    /// dimensional compatibility alone is not enough. The original three
+    /// scalar seeds retain their PR-1 Energy-only role vectors as migration
+    /// goldens; PR-4 owns stronger closed-window transport audits.
+    #[must_use]
+    pub fn required_conservation_roles(self) -> &'static [ConservationRole] {
+        match self {
+            Self::MechanicalForceVelocity
+            | Self::FluidPressureFlux
+            | Self::ThermalTemperatureEntropy
+            | Self::MagneticMmfFluxRate => &[ConservationRole::Energy],
+            Self::RotationalTorqueAngularVelocity => {
+                &[ConservationRole::Energy, ConservationRole::AngularMomentum]
+            }
+            Self::ElectricalVoltageCurrent => {
+                &[ConservationRole::Energy, ConservationRole::ElectricCharge]
+            }
+            Self::ChemicalPotentialAmountFlow => {
+                &[ConservationRole::Energy, ConservationRole::Amount]
+            }
+        }
+    }
+
+    /// Construct one canonical scalar member of this port kind.
+    ///
+    /// Identity, coordinates, and time remain caller supplied: schema
+    /// construction must not invent any of the Five Explicits. Chemical ports
+    /// use this for a single species coordinate; multi-species ports use
+    /// [`PortValueShape::Vector`] with the same per-component dimensions.
+    /// Chemical affinity/reaction-extent pairs are a distinct vocabulary and
+    /// are not represented by this kind.
     ///
     /// # Errors
     ///
@@ -82,13 +146,13 @@ impl PortKind {
         PortSchema::try_new(
             id,
             self,
-            self.scalar_effort_dimensions(),
-            self.scalar_flow_dimensions(),
+            self.canonical_effort_dimensions(),
+            self.canonical_flow_dimensions(),
             PortValueShape::Scalar,
             coordinates,
             PowerPairing::ScalarProduct,
             timestamp,
-            [ConservationRole::Energy],
+            self.required_conservation_roles().iter().copied(),
         )
     }
 }
@@ -140,12 +204,15 @@ pub enum PortValueShape {
         /// Column count.
         columns: NonZeroUsize,
     },
-    /// A field trace in a neutral function-space role.
+    /// A field pairing with separate neutral function-space roles for effort
+    /// and flow.
     Field {
         /// Component count at each field point.
         components: NonZeroUsize,
-        /// FEEC/interface function-space role.
-        space: SpaceType,
+        /// FEEC/interface function-space role of the effort coordinate.
+        effort_space: SpaceType,
+        /// FEEC/interface function-space role of the flow coordinate.
+        flow_space: SpaceType,
     },
 }
 
@@ -174,9 +241,17 @@ impl PortValueShape {
     ///
     /// # Errors
     /// [`CoupleError::EmptyPortShape`] when `components == 0`.
-    pub fn field(components: usize, space: SpaceType) -> Result<Self, CoupleError> {
+    pub fn field(
+        components: usize,
+        effort_space: SpaceType,
+        flow_space: SpaceType,
+    ) -> Result<Self, CoupleError> {
         let components = NonZeroUsize::new(components).ok_or(CoupleError::EmptyPortShape)?;
-        Ok(Self::Field { components, space })
+        Ok(Self::Field {
+            components,
+            effort_space,
+            flow_space,
+        })
     }
 }
 
@@ -269,6 +344,26 @@ impl PortTimestamp {
     }
 }
 
+/// Which pointwise field variable receives the integration measure when it is
+/// compared with the generalized dimensions of its [`PortKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldMeasureSide {
+    /// The effort is a density, such as traction; effort × measure is force.
+    Effort,
+    /// The flow is a density, such as entropy flux; flow × measure is entropy
+    /// flow.
+    Flow,
+}
+
+/// Effort or flow, used by localized dimension diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortVariable {
+    /// Effort coordinate.
+    Effort,
+    /// Flow coordinate.
+    Flow,
+}
+
 /// How effort and flow coordinates are contracted into instantaneous power.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerPairing {
@@ -281,6 +376,9 @@ pub enum PowerPairing {
     FieldDuality {
         /// Dimensions contributed by the integration measure.
         measure_dimensions: Dims,
+        /// Which pointwise variable is promoted to generalized dimensions by
+        /// that measure.
+        measure_side: FieldMeasureSide,
     },
 }
 
@@ -321,16 +419,16 @@ pub struct PortSchema {
 impl PortSchema {
     /// Construct and structurally admit a v2 port schema.
     ///
-    /// This PR-1 admission proves only that the shape/pairing agree and that
-    /// effort × flow (plus the declared measure for field duality) has
-    /// dimensions of power. Port-kind-specific semantic dimension vocabularies
-    /// are the PR-2 gate.
+    /// Admission proves that the shape/pairing agree, effort × flow (plus the
+    /// declared measure for field duality) has dimensions of power, and the
+    /// measure-adjusted generalized coordinates match the declared port kind.
+    /// It does not prove the downstream constitutive law or adapter.
     ///
     /// # Errors
     ///
     /// Returns a structured error for dimension overflow, a non-power
-    /// dimension product, an incompatible shape/pairing, or omission of the
-    /// mandatory energy conservation role.
+    /// dimension product, kind-specific dimension mismatch, an incompatible
+    /// shape/pairing, or omission of a kind-required conservation role.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         id: StableId,
@@ -360,34 +458,18 @@ impl PortSchema {
             });
         }
 
-        let pointwise_product = effort_dimensions.checked_plus(flow_dimensions).ok_or(
-            CoupleError::PortDimensionOverflow {
-                effort: effort_dimensions,
-                flow: flow_dimensions,
-            },
-        )?;
-        let product = match power_pairing {
-            PowerPairing::FieldDuality { measure_dimensions } => pointwise_product
-                .checked_plus(measure_dimensions)
-                .ok_or(CoupleError::PortMeasureDimensionOverflow {
-                    pointwise_product,
-                    measure: measure_dimensions,
-                })?,
-            PowerPairing::ScalarProduct | PowerPairing::EuclideanDot => pointwise_product,
-        };
-        if product != Power::DIMS {
-            return Err(CoupleError::PortPowerDimensionMismatch {
-                effort: effort_dimensions,
-                flow: flow_dimensions,
-                product,
-            });
-        }
+        admit_port_dimensions(kind, effort_dimensions, flow_dimensions, power_pairing)?;
 
         let mut conservation_roles: Vec<_> = conservation_roles.into_iter().collect();
         conservation_roles.sort_unstable();
         conservation_roles.dedup();
         if !conservation_roles.contains(&ConservationRole::Energy) {
             return Err(CoupleError::MissingEnergyConservationRole);
+        }
+        for &role in kind.required_conservation_roles() {
+            if !conservation_roles.contains(&role) {
+                return Err(CoupleError::MissingPortKindConservationRole { kind, role });
+            }
         }
 
         Ok(Self {
@@ -506,22 +588,144 @@ impl PortSchema {
     }
 }
 
-/// A power port: an effort/flow pair. `power = effort × flow`.
+fn admit_port_dimensions(
+    kind: PortKind,
+    effort_dimensions: Dims,
+    flow_dimensions: Dims,
+    power_pairing: PowerPairing,
+) -> Result<(), CoupleError> {
+    admit_power_dimensions(effort_dimensions, flow_dimensions, power_pairing)?;
+    let (generalized_effort, generalized_flow) =
+        generalized_port_dimensions(effort_dimensions, flow_dimensions, power_pairing)?;
+    let expected_effort = kind.canonical_effort_dimensions();
+    if generalized_effort != expected_effort {
+        return Err(CoupleError::PortKindDimensionMismatch {
+            kind,
+            side: PortVariable::Effort,
+            expected: expected_effort,
+            actual: generalized_effort,
+        });
+    }
+    let expected_flow = kind.canonical_flow_dimensions();
+    if generalized_flow != expected_flow {
+        return Err(CoupleError::PortKindDimensionMismatch {
+            kind,
+            side: PortVariable::Flow,
+            expected: expected_flow,
+            actual: generalized_flow,
+        });
+    }
+    Ok(())
+}
+
+fn admit_power_dimensions(
+    effort_dimensions: Dims,
+    flow_dimensions: Dims,
+    power_pairing: PowerPairing,
+) -> Result<(), CoupleError> {
+    let pointwise_product = effort_dimensions.checked_plus(flow_dimensions).ok_or(
+        CoupleError::PortDimensionOverflow {
+            effort: effort_dimensions,
+            flow: flow_dimensions,
+        },
+    )?;
+    let product = match power_pairing {
+        PowerPairing::FieldDuality {
+            measure_dimensions, ..
+        } => pointwise_product.checked_plus(measure_dimensions).ok_or(
+            CoupleError::PortMeasureDimensionOverflow {
+                pointwise_product,
+                measure: measure_dimensions,
+            },
+        )?,
+        PowerPairing::ScalarProduct | PowerPairing::EuclideanDot => pointwise_product,
+    };
+    if product != Power::DIMS {
+        return Err(CoupleError::PortPowerDimensionMismatch {
+            effort: effort_dimensions,
+            flow: flow_dimensions,
+            product,
+        });
+    }
+    Ok(())
+}
+
+fn generalized_port_dimensions(
+    effort_dimensions: Dims,
+    flow_dimensions: Dims,
+    power_pairing: PowerPairing,
+) -> Result<(Dims, Dims), CoupleError> {
+    match power_pairing {
+        PowerPairing::FieldDuality {
+            measure_dimensions,
+            measure_side: FieldMeasureSide::Effort,
+        } => Ok((
+            effort_dimensions.checked_plus(measure_dimensions).ok_or(
+                CoupleError::PortMeasureApplicationOverflow {
+                    side: PortVariable::Effort,
+                    dimensions: effort_dimensions,
+                    measure: measure_dimensions,
+                },
+            )?,
+            flow_dimensions,
+        )),
+        PowerPairing::FieldDuality {
+            measure_dimensions,
+            measure_side: FieldMeasureSide::Flow,
+        } => Ok((
+            effort_dimensions,
+            flow_dimensions.checked_plus(measure_dimensions).ok_or(
+                CoupleError::PortMeasureApplicationOverflow {
+                    side: PortVariable::Flow,
+                    dimensions: flow_dimensions,
+                    measure: measure_dimensions,
+                },
+            )?,
+        )),
+        PowerPairing::ScalarProduct | PowerPairing::EuclideanDot => {
+            Ok((effort_dimensions, flow_dimensions))
+        }
+    }
+}
+
+/// A raw scalar power-coordinate container retained for migration.
+///
+/// Construction performs no schema admission. New rotational, electrical,
+/// magnetic, and chemical kinds must use [`PortSchema`] before composition;
+/// [`Port::conjugate_to`] and [`interconnect`] deliberately refuse them here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Port {
-    /// The effort variable (force / pressure / temperature).
+    /// The raw effort coordinate.
     pub effort: f64,
-    /// The flow variable (velocity / flux / entropy flow).
+    /// The raw flow coordinate.
     pub flow: f64,
-    /// The physical type.
+    /// The declared physical kind; not schema-admitted by this container.
     pub kind: PortKind,
 }
 
 impl Port {
-    /// A port.
+    /// Construct an unadmitted raw scalar container.
     #[must_use]
-    pub fn new(effort: f64, flow: f64, kind: PortKind) -> Port {
-        Port { effort, flow, kind }
+    pub fn new(effort: f64, flow: f64, kind: PortKind) -> Self {
+        Self { effort, flow, kind }
+    }
+
+    /// Raw effort coordinate.
+    #[must_use]
+    pub fn effort(&self) -> f64 {
+        self.effort
+    }
+
+    /// Raw flow coordinate.
+    #[must_use]
+    pub fn flow(&self) -> f64 {
+        self.flow
+    }
+
+    /// Declared raw physical kind.
+    #[must_use]
+    pub fn kind(&self) -> PortKind {
+        self.kind
     }
 
     /// The instantaneous power `effort × flow`.
@@ -530,11 +734,11 @@ impl Port {
         self.effort * self.flow
     }
 
-    /// Are two ports POWER-CONJUGATE (composable) — the same physical
-    /// effort/flow type? (The composition-time type discipline.)
+    /// Whether two raw ports are composable by the retained three-kind scalar
+    /// migration oracle.
     #[must_use]
     pub fn conjugate_to(&self, other: &Port) -> bool {
-        self.kind == other.kind
+        self.kind.is_legacy_scalar_seed() && self.kind == other.kind
     }
 }
 
@@ -1160,6 +1364,15 @@ pub enum CoupleError {
         /// Integration-measure dimensions.
         measure: Dims,
     },
+    /// Applying a field measure to its declared density side overflowed.
+    PortMeasureApplicationOverflow {
+        /// Density side receiving the measure.
+        side: PortVariable,
+        /// Pointwise dimensions on that side.
+        dimensions: Dims,
+        /// Integration-measure dimensions.
+        measure: Dims,
+    },
     /// Effort × flow did not have watt dimensions.
     PortPowerDimensionMismatch {
         /// Effort dimensions.
@@ -1168,6 +1381,17 @@ pub enum CoupleError {
         flow: Dims,
         /// Checked product dimensions.
         product: Dims,
+    },
+    /// A watt-dimensional pair used dimensions belonging to another port kind.
+    PortKindDimensionMismatch {
+        /// Declared physical kind.
+        kind: PortKind,
+        /// Effort or flow mismatch.
+        side: PortVariable,
+        /// Canonical generalized dimensions for the kind.
+        expected: Dims,
+        /// Declared generalized dimensions after field measure application.
+        actual: Dims,
     },
     /// The declared contraction cannot consume the declared shape.
     PairingShapeMismatch {
@@ -1178,6 +1402,19 @@ pub enum CoupleError {
     },
     /// Every power port must declare energy as a conservation role.
     MissingEnergyConservationRole,
+    /// A physical port kind omitted the conserved quantity implied by its
+    /// effort/flow semantics.
+    MissingPortKindConservationRole {
+        /// Declared physical kind.
+        kind: PortKind,
+        /// Required but absent role.
+        role: ConservationRole,
+    },
+    /// The raw scalar interconnection oracle received a v2 schema-only kind.
+    LegacyInterconnectRequiresSeedKind {
+        /// Rejected physical kind.
+        kind: PortKind,
+    },
     /// Two port schemas disagree on a localized conjugacy field.
     IncompatiblePortSchemas {
         /// First port ID.
@@ -1234,7 +1471,9 @@ pub struct Interconnection {
 /// structure (effort continuity + flow balance).
 ///
 /// # Errors
-/// [`CoupleError::IncompatiblePorts`] if the ports are not power-conjugate.
+/// [`CoupleError::IncompatiblePorts`] if the ports are not power-conjugate, or
+/// [`CoupleError::LegacyInterconnectRequiresSeedKind`] if a v2 schema-only kind is
+/// passed to this migration oracle.
 pub fn interconnect(
     kind_a: PortKind,
     kind_b: PortKind,
@@ -1246,6 +1485,9 @@ pub fn interconnect(
             a: kind_a,
             b: kind_b,
         });
+    }
+    if !kind_a.is_legacy_scalar_seed() {
+        return Err(CoupleError::LegacyInterconnectRequiresSeedKind { kind: kind_a });
     }
     let port_a = Port::new(effort, flow, kind_a);
     let port_b = Port::new(effort, -flow, kind_b);

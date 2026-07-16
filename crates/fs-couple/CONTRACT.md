@@ -14,19 +14,30 @@ function-space roles. No domain solver is a dependency.
 
 - `PORT_SCHEMA_VERSION = 2`; `StableId` admits a canonical transport-safe ID.
 - `PortValueShape` distinguishes scalar, non-empty vector/tensor, and field
-  values (`fs-iface::SpaceType`); `PowerPairing` distinguishes scalar product,
-  Euclidean dot product, and field duality with explicit integration-measure
-  dimensions.
+  values; field shapes carry separate neutral `fs-iface::SpaceType` roles for
+  effort and flow. `PowerPairing` distinguishes scalar product, Euclidean dot
+  product, and field duality with explicit integration-measure dimensions plus
+  `FieldMeasureSide` (effort-density or flow-density).
+- `PortKind` covers mechanical translation, rotational torque/angular velocity,
+  fluid pressure/volume flow, thermal temperature/entropy flow, electrical
+  voltage/current, magnetic mmf/flux rate, and chemical electrochemical
+  potential/amount flow. Each kind owns canonical generalized effort/flow
+  dimensions; semantic kind identity remains distinct even when dimensions
+  coincide (for example torque and energy).
 - `CoordinateBinding` makes basis, frame, and positive orientation explicit;
   `PortTimestamp` carries a named logical clock and tick;
   `ConservationRole` is canonicalized into a sorted, duplicate-free list.
 - `PortSchema::try_new` binds stable ID, legacy/current `PortKind`, six-base
   effort/flow dimensions, value/field shape, coordinates, power pairing,
-  timestamp, and conservation roles. PR-1 admission checks that the contraction
+  timestamp, and conservation roles. V2 admission checks that the contraction
   matches the shape, effort × flow has watt dimensions without exponent
-  overflow, and energy is named as a conservation role.
-- `PortKind::scalar_seed_schema` migrates the existing mechanical, fluid, and
-  thermal scalar seeds without inventing identity, frame/basis, or clock data.
+  overflow, the measure-adjusted generalized dimensions match the declared
+  `PortKind`, and PR-2 schema-only kinds name their non-energy conserved flow
+  where one exists. The original three seed schemas retain their PR-1
+  Energy-only role vectors exactly.
+- `PortKind::scalar_seed_schema` constructs one canonical scalar coordinate of
+  any kind without inventing identity, frame/basis, or clock data; retained
+  goldens use it to migrate the existing mechanical, fluid, and thermal seeds.
 - `ConservativeJunction::iterate_added_mass_fixed` /
   `iterate_added_mass_aitken` are schema-bound migration bridges for the
   retained mechanical scalar fixture; they must remain bitwise equal to the
@@ -42,9 +53,11 @@ function-space roles. No domain solver is a dependency.
   evidence reference; and `SourceOrReservoir` with an explicit signed
   `AccountingBoundary` carrying the same basis/frame/orientation as its port
   plus included-source/external-reservoir treatment.
-- The legacy scalar `PortKind`/`Port`/`interconnect` surface remains as the
-  migration oracle: `Port { effort, flow, kind }` has `power` = effort × flow
-  and `conjugate_to` checks the same scalar kind.
+- The raw scalar `Port` remains a backwards-compatible, non-admitting numeric
+  container. The legacy `conjugate_to`/`interconnect` migration oracle composes
+  only the original mechanical, fluid, and thermal seed kinds and refuses all
+  schema-only kinds; raw construction or arithmetic alone carries no
+  dimensional, coordinate, clock, identity, or conservation certificate.
 - `interconnect(kind_a, kind_b, effort, flow) -> Result<Interconnection,
   CoupleError>` — a Dirac structure (shared effort, opposite flow) whose
   `interface_power` is `0` exactly (power-conserving by construction); refuses
@@ -64,8 +77,13 @@ function-space roles. No domain solver is a dependency.
 - The Dirac interconnection conserves interface power EXACTLY (to roundoff) —
   the G0 law; incompatible ports are refused.
 - Every admitted v2 schema has a shape-compatible power contraction, a checked
-  watt-dimensional effort/flow product, and an explicit energy role. Field
-  duality includes its integration-measure dimensions in that checked product.
+  watt-dimensional effort/flow product, and energy. Rotational, electrical,
+  and chemical PR-2 kinds additionally require angular momentum, electric
+  charge, and amount respectively; legacy seed role vectors remain unchanged.
+  Field duality records separate effort/flow function-space roles,
+  includes its integration-measure dimensions in the checked product, and
+  explicitly assigns the measure to the density side before kind-specific
+  dimension comparison.
 - Stable relation IDs cannot alias their owned port/boundary IDs. A
   conservative pair requires distinct port IDs, matching physical metadata and
   clock/timestamp, plus outward-from-owner conventions on both sides. PR-1
@@ -85,10 +103,11 @@ function-space roles. No domain solver is a dependency.
 
 Structured `CoupleError`; no panics. In addition to legacy incompatible kinds,
 errors cover invalid IDs/empty shapes, pointwise or field-measure dimension
-overflow, non-power products, shape/pairing mismatch, missing energy role,
-localized schema conjugacy mismatch, identity aliasing, accounting-boundary
-coordinate mismatch, scalar/non-scalar misuse, wrong added-mass port kind, and
-non-finite schema-bound values.
+overflow, non-power products, kind-specific or shape/pairing mismatch, missing
+kind-required conservation roles, schema-only kinds sent through the raw
+interconnection oracle, localized schema conjugacy mismatch, identity aliasing,
+accounting-boundary coordinate mismatch, scalar/non-scalar misuse, wrong
+added-mass port kind, and non-finite schema-bound values.
 
 ## Determinism class
 
@@ -110,11 +129,15 @@ None.
 
 ## Conformance tests
 
-`tests/couple.rs` (16 cases): v2 scalar-seed migration goldens for all three
+`tests/couple.rs` (19 cases): v2 scalar-seed migration goldens for all three
 legacy kinds and bitwise whole-result migration of the added-mass fixture;
-schema fail-closed metadata; localized junction mismatch; non-scalar refusal
-by the scalar evaluator; field-duality measure dimensions; all four primitive
-descriptors and identity-alias refusals;
+rotational/electrical/magnetic/chemical watt-dimensional goldens, required-role
+admission, raw-oracle refusal, and semantic kind mismatch refusal; schema
+fail-closed metadata; localized junction mismatch; non-scalar refusal by the
+scalar evaluator; field-duality measure dimensions, density-side assignment,
+measure-application overflow, and distinct effort/flow spaces; all four
+primitive descriptors and
+identity-alias refusals;
 legacy power-conjugate ports; exact interface power conservation and
 incompatible-port refusal; energy-audit imbalance and non-finite alarms; the
 Aitken Δ² factor; naive staggering diverges where Aitken stays stable; Aitken
@@ -128,9 +151,12 @@ determinism.
   nonlinear FSI solve over real fluid/structure subsystems is the consumer.
 - `AitkenRelaxation` is the scalar Δ² relaxer; the vector INTERFACE
   QUASI-NEWTON (IQN-ILS) accelerator and MULTIRATE co-simulation are staged.
-- PR-1 proves generic effort × flow power dimensions and preserves only the
-  three scalar seed kinds. PR-2 owns the rotational/electrical/magnetic/
-  chemical vocabulary and kind-specific dimensional admission.
+- PR-2 admits the rotational/electrical/magnetic/chemical vocabulary and
+  kind-specific generalized dimensions. It does not by itself prove causality,
+  DAE index, source closure, a constitutive law, or a physical port adapter.
+- `ChemicalPotentialAmountFlow` describes species electrochemical potential
+  and species amount flow. Reaction affinity/extent rate requires an explicit
+  stoichiometric crosswalk and is not represented by that kind.
 - The scalar evaluator does not execute vector/tensor/field or general
   multi-port Stokes–Dirac operators. `StorageElement` and
   `DissipativeRelation` carry durable public operator/evidence references; this
@@ -146,9 +172,10 @@ determinism.
   PR-4 owns closed-window first-law, mass/element/charge, entropy-generation,
   and optional exergy audits. An `AccountingBoundary` descriptor is not one of
   those audits.
-- `fs-iface::SpaceType` records a neutral field role; it does not supply a
-  mortar/Nitsche/harmonic transfer operator or prove inf-sup compatibility for
-  a particular domain adapter.
+- The two `fs-iface::SpaceType` entries record neutral effort/flow field roles;
+  they do not supply a mortar/Nitsche/harmonic transfer operator, certify that
+  the declared pair is dual, or prove inf-sup compatibility for a particular
+  domain adapter.
 - The energy audit's balances are supplied by the caller each exchange; wiring
   them onto the ledger is the coupling driver's integration.
 - Dirac interface losslessness does not establish passivity of component
