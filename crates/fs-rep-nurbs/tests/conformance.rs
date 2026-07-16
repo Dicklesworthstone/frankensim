@@ -198,8 +198,8 @@ fn nb_000_sealed_representations_bind_validate_once_views() {
     assert_eq!(patch.max_subdivision(), 7);
     assert_eq!(patch.admit().expect("admitted patch").loops().len(), 1);
 
-    let large_lo = Rat::int(i128::MAX - 10);
-    let large_hi = Rat::int(i128::MAX - 1);
+    let large_lo = Rat::new(i128::MAX - 10, 1);
+    let large_hi = Rat::new(i128::MAX - 1, 1);
     let large_domain_loop = TrimLoop::new(
         NurbsCurve::new(
             KnotVector::new(vec![large_lo, large_lo, large_hi, large_hi], 1)
