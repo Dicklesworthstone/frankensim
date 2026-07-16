@@ -19,6 +19,7 @@
 //! - `check-citable-producers` — exhaustively inventory authority-gated `citation_eligible` sinks.
 //! - `check-all`      — all of the above; non-zero exit on any violation.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
+//! - `matdb-pack`     — compile strict licensed material TSV sources into a normalized pack.
 //!
 //! Output is JSON-lines (one verdict object per check per crate) so agents parse
 //! outcomes without scraping; a human-readable summary goes to stderr.
@@ -36,6 +37,7 @@ mod constellation_cleanliness;
 mod depgraph;
 mod identities;
 mod manifest_fixture;
+mod matdb_pack;
 
 use bootstrap_provenance::{
     BootstrapProvenanceRow, bootstrap_provenance_support_preflight, provenance_path_text,
@@ -3237,6 +3239,16 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "matdb-pack" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return match matdb_pack::cmd_matdb_pack(&root, &rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         _ => {}
     }
     let manifests = match load_workspace(&root) {
@@ -3311,7 +3323,7 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-terminology|check-goldens|check-claims|check-closures|\
                  check-identities|check-manifest-fixture|check-citable-producers|check-all|generate-identities|\
-                 lock-constellation|check-constellation"
+                 lock-constellation|check-constellation|depgraph-receipt|matdb-pack"
             );
             return ExitCode::FAILURE;
         }

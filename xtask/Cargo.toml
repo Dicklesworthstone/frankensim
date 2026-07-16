@@ -10,6 +10,9 @@ layer = "TOOL"
 
 [dependencies]
 fs-blake3 = { path = "../crates/fs-blake3" }
+fs-evidence = { path = "../crates/fs-evidence" }
+fs-matdb = { path = "../crates/fs-matdb" }
+fs-qty = { path = "../crates/fs-qty" }
 
 [lints]
 workspace = true
