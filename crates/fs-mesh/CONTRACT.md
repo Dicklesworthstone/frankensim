@@ -10,6 +10,10 @@ fs-ivl's exact predicates, with ghost tets carrying the hull, plus
 radius-edge quality refinement — and SURFACE REMESHING: the
 Botsch–Kobbelt split/collapse/flip/smooth loop measured in a Riemannian
 metric (isotropic = identity metric), chart-projected, feature-locked.
+The goal-oriented adaptivity seam additionally publishes bounded,
+declaration-only accounting receipts over opaque retained L3/L6 identities;
+it does not introduce an upward crate dependency or recreate the authority of
+the estimator or Machine-IR lineage record it names.
 Everything the crate claims about its output, it re-checks (`audit`,
 half-edge round-trips, closed-manifold audits).
 
@@ -58,6 +62,20 @@ half-edge round-trips, closed-manifold audits).
 - `MetricField` / `UniformMetric`: the SPD tensor input — isotropic
   remeshing IS `UniformMetric`; anisotropic fields (ultimately FLUX's
   DWR error metric) reuse the identical op set.
+- `AdaptivityReceipt::admit`: dependency-clean accounting seam for dynamic
+  h/p and anisotropic mesh evolution. It binds a typed action and
+  contact/wear/fracture/moving-mesh/goal-oriented trigger; explicit declared
+  connectivity, physical-topology, and gradient-discontinuity effects; opaque
+  source and target mesh-state plus lineage-record identities; state-bound
+  before/after QoI-evidence identities; separate estimator and
+  representation-conversion upper bounds; a retained remap-invariant identity
+  (quantity, units, and balance convention), remap-evidence identity, signed
+  balance defect, declared tolerance, and projection error; and a strict
+  `Decreased`/`Unchanged`/`Increased` QoI-bound result. Effects are retained
+  rather than inferred from a coarse action name. The only constructible
+  authority is `DeclarationOnly`: `fs-mesh` validates complete accounting but
+  cannot certify caller-supplied DWR, conversion, conservation, or lineage
+  claims. Canonical JSON is available for an owning ledger to hash.
 
 - `hexdom` module (plan §7.5, bead wqd.18; [F], behind
   `frontier-hexmesh`, OFF the critical path): hex-dominant meshing via
@@ -114,6 +132,18 @@ half-edge round-trips, closed-manifold audits).
     physically stretched equator-aligned layer elements, and a MEASURED
     interpolation-residual win over isotropic at comparable element
     count — the adaptivity loop's value, demonstrated (tmesh-010).
+11. An adaptivity receipt names one declared QoI on both sides, retains exact
+    source/target/evidence/lineage digest bytes, rejects non-finite or negative
+    bound components and non-finite composed totals, and reports a strict
+    QoI-bound trend without treating unchanged or regressed steps as
+    successful. An error-free two-sum rounds outward only when the computed
+    sum rounded down, so moving an identical error total between estimator and
+    conversion-ledger components cannot change the trend. Signed zero is
+    canonicalized for replay-stable JSON (G0/G3).
+12. Before/after QoI snapshots must name the lineage source/target states.
+    Declared effects refuse physical-topology change without connectivity,
+    cannot suppress the gradient-discontinuity flag without a future evidence
+    path, and must match the fixed semantics of h, p, and untangle actions.
 
 ## Error model
 
@@ -122,6 +152,12 @@ all-coplanar detection, says to triangulate in 2D instead),
 `Cancelled`. Kernel internals hold invariants by construction (no
 flat tets: every created tet's apex is strictly visible); the audit
 exists so any regression is LOUD rather than silently non-Delaunay.
+`AdaptivityError` refuses a source state reused as its own target, before/after
+QoI or source/target-state mismatch, contradictory action/effect declarations,
+an unbacked continuous-gradient claim, non-finite or negative accounting, and
+non-finite bound composition before any receipt is published. Digest parsing
+deliberately adds no authority and accepts every 32-byte value, matching the
+upstream identity adapter boundary.
 
 ## Determinism class
 
@@ -147,6 +183,9 @@ width is STRUCTURAL (~6 at window 256: Hilbert-ordered windows form
 mutually-overlapping chains, one color per chain element); strided
 sampling would widen batches but reorders ties — rejected; the read
 phase parallelizes independently of width.
+Adaptivity accounting is a pure fixed-order operation. It canonicalizes signed
+zero, preserves exact retained ID bytes, uses a strict total-bound comparison,
+and serializes fields in one schema-fixed order (G3).
 
 ## Cancellation behavior
 
@@ -154,6 +193,8 @@ phase parallelizes independently of width.
 polls per round; `remesh` polls per iteration. Cancellation returns `MeshError::Cancelled` between
 insertions (request → drain → finalize; no torn mesh states escape
 since the error consumes the builder).
+Adaptivity receipt admission is fixed-size synchronous metadata work and does
+not accept a `Cx`; it publishes only after every input check completes.
 
 ## Unsafe boundary
 
@@ -170,6 +211,9 @@ None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
 verdicts, seeded LCG randomness, fs-obs Custom events for kernel
 stats, refinement stats, and scale/walk-locality stats. Any
 reimplementation must pass the suite unchanged.
+`tests/adaptivity.rs` adds G0/G3 admission, QoI-regression visibility,
+state/lineage/accounting retention, effect and trigger coverage, a byte-pinned
+schema-v1 JSON fixture, and exact replay tests for the adaptivity receipt seam.
 
 ### Addendum (bead uee3, partial): policy floor, hull-split evidence, exudation
 
@@ -245,6 +289,14 @@ reimplementation must pass the suite unchanged.
   join with FLUX's estimator bead; the functional-pass architecture
   trades throughput for auditability until the perf lane says
   otherwise.
+- Adaptivity receipts are accounting artifacts, not DWR, conversion-error,
+  conservation, topology, or gradient certificates. They do not yet execute
+  marked-cell refinement, conservative field remap, mesh untangling, or
+  dependent invalidation; those algorithms must retain their own evidence and
+  feed this seam rather than infer authority from it. Effect booleans are
+  explicitly caller-declared and do not prove the named outcome. Opaque
+  32-byte IDs are one-way adapter boundaries for lower/higher-layer identity
+  types, not a new competing identity scheme.
 - `orient3d_sos` is a projection cascade, not the full 3D
   Edelsbrunner–Mücke ladder (fs-ivl's documented no-claim); it is used
   only for walk routing here, never for conflict decisions.

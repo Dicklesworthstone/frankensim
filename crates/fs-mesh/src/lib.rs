@@ -26,6 +26,7 @@
 //! quality remain successor scope — recorded as CONTRACT no-claims,
 //! not silently absent.
 
+mod adaptivity;
 mod delaunay;
 mod exude;
 #[cfg(feature = "frontier-hexmesh")]
@@ -35,6 +36,12 @@ mod recovery;
 mod refine;
 mod remesh;
 
+pub use adaptivity::{
+    ADAPTIVITY_RECEIPT_SCHEMA_V1, AdaptivityAction, AdaptivityEffects, AdaptivityError,
+    AdaptivityReceipt, AdaptivityReceiptAuthority, AdaptivityTrigger, BalanceStatus,
+    LineageRecordId, MeshStateId, QoiBoundSnapshot, QoiBoundTrend, QoiEvidenceId, QoiId,
+    RemapAccounting, RemapEvidenceId, RemapInvariantId, TopologyLineage,
+};
 pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
 pub use exude::{ExudeOptions, ExudeStats, exude};
 pub use parallel::{ColoredStats, delaunay_colored, delaunay_colored_reversed};
