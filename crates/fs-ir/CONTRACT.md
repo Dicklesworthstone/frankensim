@@ -76,7 +76,7 @@ derived-geometry boundary.
   versions, a raw geometry ID that does not name the supplied sealed object,
   and every redundant selector mismatch. The token is structural lineage only:
   it does not bind or inspect an admitted Machine-IR graph.
-- `machine` (Machine-IR E0 PR-1/PR-2, [S]) — six nominally distinct durable entity
+- `machine` (Machine-IR E0 PR-1/PR-2/PR-3, [S]) — six nominally distinct durable entity
   types (`BodyId`, `SurfacePatchId`, `ContactFeatureId`, `TerminalId`,
   `PortId`, `StateSlotId`) use `fs-blake3::identity::EntityId` under six
   different static schemas. Their bounded, human-auditable hierarchical keys
@@ -120,6 +120,40 @@ derived-geometry boundary.
   conflicting interfaces. `MachineGraphAdmissionDecision` retains submitted
   collection counts plus the admitted graph or complete refusal and prints
   nothing.
+- `machine::semantics::MachineBehaviorDraft::admit_against` is the PR-3
+  behavior overlay and binds one exact admitted `MachineGraphIdV1` without
+  modifying the already-published graph-v1 identity grammar. It gives every
+  owned state slot an exact quantity/shape/clock/frame contract and exactly one
+  initial source, gives every `ExternalInput` terminal exactly one matching
+  boundary source, and gives every owned body an explicit static or prescribed
+  motion. Conditions may name fixed values, distributions, or histories whose
+  discontinuities are tied to durable event IDs; lower-layer PDE boundary kinds
+  are deliberately not part of this graph language.
+- Events use durable IDs, event-driven clocks, explicit state/terminal guard
+  dependencies, oriented crossing semantics, and deterministic, set-valued,
+  terminal, or honest-unknown reset relations. Reset writes are closed over
+  owned states. Potential simultaneity is never resolved by collection order:
+  every event on one clock participates in one coherent policy consisting of
+  either unique superdense microsteps or one externally identified set-valued
+  group with at least two members.
+- Tolerances bind durable graph targets and nominal parameter artifacts to exact
+  quantity/shape declarations. Bounded envelopes retain canonical asymmetric
+  finite widths; random tolerances retain a positive scale plus exact law and
+  marginal references. V1 admits at most one tolerance ID/law for each exact
+  target-parameter pair; composition requires a future explicit relation.
+  Every distribution-valued condition and random
+  tolerance appears exactly once in one global mutual-independence or joint
+  correlation declaration, while fixed/history conditions and bounded-only
+  tolerances appear in none. The canonical member list is the correlation
+  artifact's declared axis order. Correlation models are nominal, versioned
+  external references: behavior admission proves membership closure, not
+  covariance validity, PSD, or manufacturing-population representativeness.
+- Behavior admission checks public collection limits before deeper traversal,
+  canonicalizes every outer collection and nested event/reset/dependence set,
+  accumulates sorted duplicate-free `MachineBehaviorFinding`s, and publishes no
+  `MachineBehaviorIdV1` on refusal. `MachineBehaviorAdmissionDecision` retains
+  submitted counts plus the outcome for structured tracing; it is not a replay
+  digest of refused input.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
@@ -528,6 +562,15 @@ and explicit-policy cycle breaking; and independent graph-identity movement by
 model version, clock period, terminal semantic kind, solve policy, and external
 material/interface card digests.
 
+`tests/machine_semantics.rs` (Machine-IR E0 PR-3, G0/G3): fully populated
+behavior-overlay admission; complete state/initial/boundary/body-motion closure;
+quantity, shape, clock, frame, causality, event-history, guard-dependency,
+event-clock, reset-write, tolerance, and dependence refusals; canonical
+signed-zero scalar handling; public-resource refusal before graph work;
+collection and nested-set permutation invariance; refusal permutation
+invariance; role-separated event/tolerance IDs; and identity movement by base
+graph, guard artifact, and adjacent finite tolerance values.
+
 ## No-claim boundaries
 
 - No operator catalog or per-operator semantic versions — gp3.6; the
@@ -543,6 +586,16 @@ material/interface card digests.
   with the operator registry.
 - Chart requirements are supplied by lowering/callers; admission does not
   yet derive them from raw study text.
+- Machine behavior admission is structural. Opaque condition, motion, guard,
+  reset, distribution, tolerance, correlation, witness, and no-claim references
+  are bound exactly but neither authenticated nor executed here. Admission does
+  not prove state-model compatibility, PDE/DAE well-posedness, swept geometry,
+  true-flow event coverage, root completeness, reset regularity, saltation
+  derivatives, absence of grazing/simultaneous/Zeno ambiguity, covariance PSD,
+  cross-clock simultaneity/synchronization, or physical/statistical validity.
+  Domain execution and one-way lowering into `fs-scenario`, motion, time, and
+  UQ artifacts remain PR-5 work. PR-4 sensors/experiments, hazards/faults,
+  ContextOfUse, accounting, and fidelity/escalation policy remain absent.
 - Router certification is currently a validated declaration on
   `ConverterSpec`, not an authenticated checker/ledger receipt. Admission
   refuses explicitly estimated routes, but full opaque admitted-converter

@@ -182,7 +182,7 @@ FrankenSim is organized as layered Rust crates. The names below are crates prese
 | Crate | What is implemented |
 |-------|---------------------|
 | `fs-ledger` | Versioned Design Ledger schema (currently v8) on FrankenSQLite, immutable persisted ledger identity, dual-index fail-closed discovery and durable session-mutation receipts, content-addressed artifacts, operations, event streams, lineage, metrics, tune cache, extension rows, integrity/lint checks, and time-travel queries |
-| `fs-ir` | FrankenScript typed AST with spans, isomorphic s-expression and JSON syntaxes, shape comparison, study recognition, lowering, structured IR errors, durable Machine-IR entity/topology lineage, and dependency-neutral machine-graph admission with typed terminals, clocks, ports, relations, material/interface bindings, and canonical semantic identity |
+| `fs-ir` | FrankenScript typed AST with spans, isomorphic s-expression and JSON syntaxes, shape comparison, study recognition, lowering, structured IR errors, durable Machine-IR entity/topology lineage, dependency-neutral machine-graph admission, and a separately admitted behavior overlay for typed state/IC/BC closure, explicit motion, event/reset ordering, tolerances, and declared dependence |
 | `fs-plan` | Cost model types, error and time ledgers, plan-cost oracle, and cost-model construction from tune records |
 | `fs-roofline` | Machine-axis probing, protected historical baselines, kernel registry, measurement receipts, baseline-bound ledger recording, and staleness checks |
 | `fs-img` | LUMEN image pipeline crate with deterministic PNG/OpenEXR subset plumbing, film/display transforms, bias-labeled denoising, and conformance tests |

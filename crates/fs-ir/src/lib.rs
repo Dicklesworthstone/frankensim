@@ -13,8 +13,8 @@
 //!   ([`lower::lower`]) — progressive disclosure with nothing hidden.
 //! - [`study::Study`] recognizes the Appendix C study forms and extracts
 //!   the Five Explicits' pillars (validity POLICY is the admission bead's).
-//! - [`machine`] provides the default `[S]` durable entity-ID and fail-closed
-//!   topology-lineage kernel; the broader machine graph remains staged work.
+//! - [`machine`] provides the default `[S]` durable entity/topology-lineage
+//!   kernel, admitted machine graph, and separately identified behavior overlay.
 //!
 //! Layer: L6 (HELM). Production dependencies and feature-gated deltas are
 //! declared explicitly in `Cargo.toml`.

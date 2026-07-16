@@ -5,11 +5,16 @@
 //! topology change may rebind an attachment only when its source has one
 //! unambiguous target. PR-2 adds a dependency-neutral, versioned machine graph
 //! whose subsystem, clock, terminal, port, relation, material, and interface
-//! declarations are admitted before a semantic identity is published.
+//! declarations are admitted before a semantic identity is published. PR-3's
+//! [`semantics`] module admits a separate behavior overlay for state contracts,
+//! conditions, motion, events/resets, tolerances, and dependence declarations
+//! without changing the already-published graph-v1 identity grammar.
 //!
 //! Runtime coupling, executable material/interface cards, controllers,
-//! initial/boundary conditions, events, resets, hazards, accounting policy,
-//! and scenario lowering remain outside this module's current authority.
+//! hazards, accounting policy, and scenario lowering remain outside this
+//! module's current authority.
+
+pub mod semantics;
 
 use core::fmt;
 use core::hash::{Hash, Hasher};
