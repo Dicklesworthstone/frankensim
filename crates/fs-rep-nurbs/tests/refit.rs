@@ -12,9 +12,11 @@
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Chart, ChartSample, Point3, SheafComplex, SheafVerdict};
-use fs_rep_nurbs::refit::{RefitConfig, refit_radial};
+use fs_rep_nurbs::refit::{RadialProjectionRun, RefitConfig, project_radial_with_cx, refit_radial};
 use fs_rep_nurbs::sdf::{Orientation, ShellSdf, ShellSdfChart};
-use fs_rep_nurbs::{KnotVector, NurbsSurface};
+use fs_rep_nurbs::{
+    ClosestPointRun, CurveAdmissionRun, CurveBezierRun, KnotVector, NurbsCurve, NurbsSurface,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn verdict(case: &str, detail: &str) {
@@ -403,4 +405,166 @@ fn rf_006_probe_work_is_admitted_before_calling_the_field() {
         "rf-006",
         "degree-sensitive dense-probe work refuses before the first field call",
     );
+}
+
+#[test]
+fn rf_007_real_primitive_handoff_emits_bounded_schema_v1_evidence() {
+    const CLOSEST_SPLIT_BUDGET: u32 = 32;
+    const SDF_SPLIT_BUDGET: u32 = 8;
+    const MAX_LOG_BYTES: usize = 4_096;
+
+    with_cx(|cx| {
+        let source = NurbsCurve::<f64, 3>::new(
+            KnotVector::new(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0], 2).expect("handoff knots"),
+            &[
+                [0.0, 0.0, 0.0],
+                [0.3, 0.8, 0.0],
+                [0.7, 0.8, 0.0],
+                [1.0, 0.0, 0.0],
+            ],
+            &[1.0; 4],
+        )
+        .expect("handoff source curve");
+        let admitted = match source.admit_with_cx(cx).expect("source admission") {
+            CurveAdmissionRun::Complete { admitted } => admitted,
+            CurveAdmissionRun::Cancelled => panic!("live handoff source admission cancelled"),
+        };
+        let source_degree = admitted.knots().degree();
+        let source_knots = admitted.knots().knots().len();
+        let source_controls = admitted.homogeneous_control_points().len();
+
+        let bezier = match admitted
+            .to_bezier_form_with_cx(cx)
+            .expect("exact Bezier conversion")
+        {
+            CurveBezierRun::Complete { curve } => curve,
+            CurveBezierRun::Cancelled => panic!("live Bezier conversion cancelled"),
+        };
+        let bezier_admitted = match bezier.admit_with_cx(cx).expect("Bezier admission") {
+            CurveAdmissionRun::Complete { admitted } => admitted,
+            CurveAdmissionRun::Cancelled => panic!("live Bezier admission cancelled"),
+        };
+        let bezier_knots = bezier_admitted.knots().knots().len();
+        let bezier_controls = bezier_admitted.homogeneous_control_points().len();
+        assert!(
+            bezier_controls > source_controls,
+            "fixture must force a real derived Bezier generation"
+        );
+        let closest = match bezier_admitted
+            .closest_point_with_cx([0.5, 0.25, 0.0], 1.0e-6, CLOSEST_SPLIT_BUDGET, cx)
+            .expect("measured closest primitive")
+        {
+            ClosestPointRun::Complete { estimate } => estimate,
+            ClosestPointRun::Cancelled => panic!("live closest primitive cancelled"),
+        };
+        assert!(closest.lower.is_finite() && closest.upper.is_finite());
+        assert!(closest.lower <= closest.upper);
+
+        let shell =
+            ShellSdf::new(vec![sphere_nurbs()], vec![None], Orientation::Outward).expect("shell");
+        let sdf_query = shell
+            .distance([1.25, 0.0, 0.0], 1.0e-4, SDF_SPLIT_BUDGET)
+            .expect("real shell SDF query");
+        assert!(sdf_query.lower.is_finite() && sdf_query.upper.is_finite());
+        assert!(sdf_query.lower <= sdf_query.upper);
+
+        let field_calls = AtomicUsize::new(0);
+        let measured_shell_field = |q: [f64; 3]| {
+            field_calls.fetch_add(1, Ordering::Relaxed);
+            let query = shell
+                .distance(q, 1.0e-4, SDF_SPLIT_BUDGET)
+                .expect("nested shell SDF query");
+            let unsigned = f64::midpoint(query.lower, query.upper);
+            let radius = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            if radius < 1.0 { -unsigned } else { unsigned }
+        };
+        let projected_radius = match project_radial_with_cx(
+            &measured_shell_field,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            2.0,
+            cx,
+        )
+        .expect("Cx-aware refit projection primitive")
+        {
+            RadialProjectionRun::Complete { radius } => radius,
+            RadialProjectionRun::Cancelled => panic!("live refit projection cancelled"),
+        };
+        assert!(projected_radius.is_finite());
+
+        let refit_config = RefitConfig {
+            nu: 4,
+            nv: 4,
+            degree: 2,
+            lambda: 1.0e-3,
+            samples_u: 4,
+            samples_v: 4,
+            warn_residual: 0.1,
+            probe: 1,
+        };
+        let refit = refit_radial(&measured_shell_field, [0.0, 0.0, 0.0], 2.0, &refit_config)
+            .expect("real shell SDF to NURBS refit handoff");
+        let refit_controls = refit
+            .surface
+            .homogeneous_control_net()
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        assert_eq!(refit_controls, refit_config.nu * refit_config.nv);
+        let effective_probe_axis = refit_config.probe.max(
+            refit_config
+                .samples_u
+                .max(refit_config.samples_v)
+                .checked_mul(2)
+                .expect("fixed probe axis"),
+        );
+        let refit_field_calls = field_calls.load(Ordering::Relaxed);
+
+        let log = format!(
+            concat!(
+                "{{\"schema_id\":\"fs-rep-nurbs/primitive-handoff\",",
+                "\"schema_version\":1,\"case\":\"rf-007\",\"log_bytes_max\":{MAX_LOG_BYTES},",
+                "\"source\":{{\"kind\":\"nurbs-curve\",\"generation_scope\":\"evidence-local-ordinal\",",
+                "\"generation\":0,\"authority\":\"sealed-owner+lifetime-admitted-view\",",
+                "\"degree\":{source_degree},\"knots\":{source_knots},\"controls\":{source_controls}}},",
+                "\"derived\":{{\"kind\":\"exact-bezier-curve\",\"generation\":1,",
+                "\"authority\":\"sealed-derived-owner+lifetime-admitted-view\",",
+                "\"knots\":{bezier_knots},\"controls\":{bezier_controls}}},",
+                "\"primitive_budget\":{{\"closest_max_splits\":{CLOSEST_SPLIT_BUDGET},",
+                "\"sdf_max_splits\":{SDF_SPLIT_BUDGET},\"refit_controls\":{refit_controls},",
+                "\"refit_samples\":{refit_samples},\"refit_probe_axis\":{effective_probe_axis},",
+                "\"work_owner\":\"primitive-static-cap\",\"memory_owner\":\"primitive-static-cap\"}},",
+                "\"primitive_consumption\":{{\"bezier_inserted_controls\":{inserted_controls},",
+                "\"closest_splits\":{closest_splits},\"sdf_splits\":{sdf_splits},",
+                "\"refit_field_calls\":{refit_field_calls},\"refit_warnings\":{refit_warnings},",
+                "\"unexposed\":[\"work-units\",\"allocator-metadata\",\"peak-resident-bytes\"]}},",
+                "\"allocation_stages\":[\"bezier-derived-generation\",\"closest-frontier\",",
+                "\"sdf-shell-frontier\",\"refit-sample-matrix\",\"refit-control-net\"],",
+                "\"publication\":{{\"terminal\":\"complete\",\"partial_artifacts\":0}},",
+                "\"cancellation\":{{\"context\":\"borrowed-cx\",\"request_observed\":false,",
+                "\"drain_owner\":\"caller\",\"finalize_owner\":\"caller\"}},",
+                "\"downstream_obligations\":{{\"sdf_query_cx\":\"frankensim-sj31i.59\",",
+                "\"refit_orchestration\":\"frankensim-sj31i.53\",",
+                "\"distance_sign_certification\":\"frankensim-sj31i.57\"}},",
+                "\"no_claim\":{{\"closest\":\"measured-f64\",\"sdf\":\"measured-f64\",",
+                "\"refit\":\"sampled-field-and-spacing\",\"continuum_certificate\":false}}}}"
+            ),
+            refit_samples = refit_config.samples_u * refit_config.samples_v,
+            inserted_controls = bezier_controls - source_controls,
+            closest_splits = closest.iterations,
+            sdf_splits = sdf_query.splits,
+            refit_warnings = refit.report.warnings.len(),
+        );
+        assert!(
+            log.len() <= MAX_LOG_BYTES,
+            "handoff evidence must stay bounded: {} bytes",
+            log.len()
+        );
+        assert!(!log.contains('\n'), "handoff evidence is one JSONL record");
+        println!("{log}");
+        verdict(
+            "rf-007",
+            "real admitted Bezier/closest and shell-SDF/refit handoffs emitted bounded schema-v1 no-claim evidence",
+        );
+    });
 }
