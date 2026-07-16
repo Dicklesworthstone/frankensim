@@ -38,7 +38,7 @@ const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 1;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 2;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const MATERIAL_PROFILE: &str = "material-tsv-v1";
@@ -67,6 +67,7 @@ struct CompileError {
     subject: String,
     detail: String,
     input_hash: Option<ContentHash>,
+    prior_decisions: Vec<Decision>,
 }
 
 impl CompileError {
@@ -76,6 +77,7 @@ impl CompileError {
             subject: subject.into(),
             detail: detail.into(),
             input_hash: None,
+            prior_decisions: Vec::new(),
         }
     }
 
@@ -83,6 +85,15 @@ impl CompileError {
         if self.input_hash.is_none() {
             self.input_hash = Some(input_hash);
         }
+        self
+    }
+
+    fn with_prior_decisions(mut self, mut decisions: Vec<Decision>) -> Self {
+        if !self.prior_decisions.is_empty() {
+            decisions.append(&mut self.prior_decisions);
+        }
+        sort_decisions(&mut decisions);
+        self.prior_decisions = decisions;
         self
     }
 }
@@ -165,6 +176,19 @@ impl Decision {
             push_part(&mut bytes, hash.as_bytes());
         }
         bytes
+    }
+}
+
+fn refusal_decisions(error: &CompileError, input_hash: Option<ContentHash>) -> Vec<Decision> {
+    let mut decisions = error.prior_decisions.clone();
+    decisions.push(Decision::refusal(error, input_hash));
+    sort_decisions(&mut decisions);
+    decisions
+}
+
+fn print_refusal_decisions(error: &CompileError, input_hash: Option<ContentHash>) {
+    for decision in refusal_decisions(error, input_hash) {
+        println!("{}", render_decision(&decision));
     }
 }
 
@@ -329,30 +353,21 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
     let (manifest_path, output_path) = match parse_cli(root, args) {
         Ok(paths) => paths,
         Err(error) => {
-            println!(
-                "{}",
-                render_decision(&Decision::refusal(&error, Some(cli_input_hash(args))))
-            );
+            print_refusal_decisions(&error, Some(cli_input_hash(args)));
             return Err(error.to_string());
         }
     };
     let mut first = match compile_manifest(&manifest_path) {
         Ok(output) => output,
         Err(error) => {
-            println!(
-                "{}",
-                render_decision(&Decision::refusal(&error, error.input_hash,))
-            );
+            print_refusal_decisions(&error, error.input_hash);
             return Err(error.to_string());
         }
     };
     let second = match compile_manifest(&manifest_path) {
         Ok(output) => output,
         Err(error) => {
-            println!(
-                "{}",
-                render_decision(&Decision::refusal(&error, error.input_hash,))
-            );
+            print_refusal_decisions(&error, error.input_hash);
             return Err(format!("second deterministic pass failed: {error}"));
         }
     };
@@ -1633,11 +1648,16 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let sources = load_sources(manifest_path, &manifest)
         .map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let source_artifact = source_envelope_hash(&manifest, &sources);
-    let result = (|| -> Result<CompileOutput, CompileError> {
-        let mut raw = RawDatabase::default();
-        for source in &sources {
-            parse_source(source, &mut raw)?;
+    let mut raw = RawDatabase::default();
+    for source in &sources {
+        if let Err(error) = parse_source(source, &mut raw) {
+            return Err(error
+                .with_input_hash(source_artifact)
+                .with_prior_decisions(std::mem::take(&mut raw.decisions)));
         }
+    }
+    let mut decisions = std::mem::take(&mut raw.decisions);
+    let result = (|| -> Result<CompileOutput, CompileError> {
         validate_raw_references(&raw)?;
         preflight_provenance_budget(&manifest, &raw)?;
         preflight_normalization_budget(&raw)?;
@@ -1646,7 +1666,6 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         let mut observation_ids = BTreeMap::new();
         let mut components = BTreeMap::new();
         let mut normalizations = Vec::new();
-        let mut decisions = raw.decisions;
         decisions.push(Decision::admit(
             "manifest:redistribution",
             "redistribution_permitted",
@@ -1938,10 +1957,14 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         Ok(CompileOutput {
             pack,
             bytes,
-            decisions,
+            decisions: std::mem::take(&mut decisions),
         })
     })();
-    result.map_err(|error| error.with_input_hash(source_artifact))
+    result.map_err(|error| {
+        error
+            .with_input_hash(source_artifact)
+            .with_prior_decisions(decisions)
+    })
 }
 
 fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> ContentHash {
@@ -3456,6 +3479,54 @@ mod tests {
         let second = Decision::refusal(&second_error, Some(second_hash));
         assert_ne!(first.canonical_preimage(), second.canonical_preimage());
         assert!(render_decision(&first).contains(&first_hash.to_hex()));
+    }
+
+    #[test]
+    fn later_refusal_retains_prior_admission_decisions_deterministically() {
+        let rejected_source = SOURCE.replacen(
+            "uncertainty\tmodulus\trelative\t2\t%\t0.95\t1\n",
+            "uncertainty\tmodulus\tabsolute\t2\tkg\t0.95\t1\n",
+            1,
+        );
+        let (manifest_path, _) = write_fixture(&manifest(MATERIAL_PROFILE, true), &rejected_source);
+        let first = compile_manifest(&manifest_path).expect_err("later claim must refuse");
+        let second = compile_manifest(&manifest_path).expect_err("repeat must refuse identically");
+
+        assert_eq!(first, second);
+        assert_eq!(first.code, "uncertainty_dims_mismatch");
+        assert_eq!(first.subject, "claim:modulus:uncertainty");
+        assert!(
+            first
+                .prior_decisions
+                .iter()
+                .all(|row| row.verdict == "admit")
+        );
+        assert!(
+            first
+                .prior_decisions
+                .iter()
+                .all(|row| row.pack_hash.is_none())
+        );
+        for (subject, reason_code) in [
+            ("source:primary", "source_schema_admitted"),
+            ("manifest:redistribution", "redistribution_permitted"),
+            ("observation:coupon", "observation_normalized"),
+            ("claim:density", "claim_normalized"),
+        ] {
+            assert!(
+                first
+                    .prior_decisions
+                    .iter()
+                    .any(|row| row.subject == subject && row.reason_code == reason_code),
+                "missing prior admission {reason_code} for {subject}"
+            );
+        }
+
+        let rows = refusal_decisions(&first, first.input_hash);
+        let terminal: Vec<_> = rows.iter().filter(|row| row.verdict == "refuse").collect();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0].reason_code, "uncertainty_dims_mismatch");
+        assert_eq!(terminal[0].source_hash, first.input_hash);
     }
 
     #[test]
