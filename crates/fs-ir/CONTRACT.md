@@ -258,6 +258,21 @@ admitted derived-geometry boundary.
   IDs, complete opaque row framing, canonical scenario parse/reprint, and
   scenario hash binding without reconstructing authority-bearing domain
   artifacts or claiming that row bodies are canonical.
+- `machine::interop` is the additive E7 workflow/interchange seed. A
+  `MachineWorkflowDraftV1` must bind one exact admitted Machine graph and the
+  ten plan-7.9 engineering stages exactly once in canonical order. Every stage
+  retains a bounded, nonzero, versioned content-hash coordinate, and
+  `MachineWorkflowIdV1` binds the current `IR_VERSION`, graph identity, stage
+  tags, and complete ordered artifact coordinates.
+- `ForeignExecutionDraftV1::admit_against` records a bounded FMI 3.0.2 or SSP
+  2.0 boundary against one exact admitted workflow and Machine graph. It binds
+  caller-supplied model-description, adapter, isolation-receipt, and opaque
+  output-artifact coordinates; closes every output over a declared terminal or
+  state slot; rejects duplicate names or targets; and canonicalizes output
+  order. Foreign results are sealed at `ColorRank::Estimated` with infinite
+  dispersion and a mandatory no-native-authority policy marker. Requests for
+  `Validated` or `Verified` rank refuse instead of being demoted or promoted,
+  and the admitted type exposes neither `Color` nor `AdmittedColor`.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
@@ -455,6 +470,17 @@ admitted derived-geometry boundary.
   directed causality. Its aligned/opposed declaration
   governs relation-orientation compatibility; it does not synthesize an
   implicit relation or silently close an input.
+- A version-one admitted engineering workflow has exactly ten steps in the
+  declared plan order and is inseparable from its exact Machine graph. Stage
+  tags and every artifact namespace, schema version, and content hash are
+  identity-semantic; no partial workflow publishes a receipt.
+- A foreign execution receipt is inseparable from its graph, workflow,
+  standard version, model-description, adapter, isolation coordinate,
+  no-authority policy, color-algebra version, and complete output bindings.
+  Output names and associated targets are unique, targets must exist in the
+  graph, and caller output order is non-semantic. Its only representable
+  evidence rank is `Estimated`; no foreign output inherits native certificate
+  authority.
 
 1. Isomorphism: `parse(print(x))` has the same shape as `x`, per syntax
    and across syntaxes (property-tested on generated programs and the
@@ -501,6 +527,13 @@ from prose.
 rule vocabulary and typed offending/related subjects are directly suitable for
 structured logs. Canonical identity errors are retained only on the identity
 rule; no admitted receipt escapes any refusal.
+`InteropReferenceErrorV1`, `MachineWorkflowRefusalV1`, and
+`ForeignExecutionRefusalV1` preserve stable rule codes and deterministic repair
+hints for malformed coordinates, graph/workflow rebinding, incomplete or
+reordered stages, empty/oversized/ambiguous outputs, unknown targets, evidence
+laundering, and canonical-identity failure. Public collection limits are
+checked before per-output validation, and no admitted workflow or foreign
+receipt escapes a refusal.
 
 Syntax/study/lowering APIs return `IrError` (span, stable
 `IrErrorKind::code()`, detail, hint). Feature-gated planner/anytime APIs return
@@ -527,6 +560,10 @@ non-semantic. Model/card/policy namespace, schema version, semantic digest,
 clock declaration, terminal kind/form/dimensions/shape/frame/orientation,
 causality, relation endpoint/mode, state slot, port energy role, material
 target, and oriented interface endpoint are semantic and move the graph ID.
+Workflow replay is bit-stable for the same schema/IR version, graph, stages,
+and artifact coordinates; stage order is semantic. Foreign-output caller order
+is normalized by canonical name/target order, while every standard, artifact,
+target, policy, and output coordinate is semantic and moves the receipt.
 
 Parsing, printing, and lowering are pure functions of their input text.
 Planner replay is deterministic for the same family, query, ladders, cache
@@ -555,6 +592,10 @@ target endpoints; graph at most 1,024 clocks/subsystems, 4,096 terminals,
 2,048 ports/interfaces, 8,192 relations, 4,096 material bindings, and 16,384
 owned elements). They use explicit collection and canonical byte/item
 envelopes and do not claim cancellable long-running work.
+Workflow and foreign-output admission are likewise synchronous bounded
+metadata operations: ten workflow stages and at most 4,096 opaque output
+bindings. They execute no adapter or FMU and make no cancellation-latency claim
+beyond these fixed public envelopes.
 
 ## Unsafe boundary
 
@@ -701,6 +742,13 @@ their separate domains rather than conflated. Hard scenario-record admission,
 empty external selectors, structured decision counts/codes, and outer/nested
 portable framing tamper are covered directly.
 
+`tests/workflow_interop.rs` (Machine-IR E7 workflow/interchange seed,
+G0/G3/G5): exact ten-stage ordering and graph closure; repeatable workflow and
+foreign-execution identities; identity movement by stage artifact, standard,
+and output artifact; output-order normalization; bounded reference and output
+sets; duplicate/unknown target refusal; and explicit refusal of foreign
+`Validated` or `Verified` authority.
+
 ## No-claim boundaries
 
 - No operator catalog or per-operator semantic versions — gp3.6; the
@@ -749,6 +797,19 @@ portable framing tamper are covered directly.
   external law/artifact nor proves semantic equivalence, physical fidelity,
   inverse reconstruction, crosswalk commutation, execution correctness, or
   evidence-color promotion.
+- The workflow/interchange seed is structural receipt binding only. It does
+  not parse or export XML/archives, inspect an embedded FMI/SSP edition, claim
+  FMI 3.0.2 or SSP 2.0 profile conformance, execute an FMU, enforce an OS
+  sandbox, authenticate adapter/isolation coordinates, or recompute a supplied
+  content hash from source bytes. It does not establish unit closure, model or
+  output validity, physical fidelity, semantic equivalence, third-party
+  acceptance, deterministic wire export, or native V&V, safety, regulatory,
+  `Validated`, or `Verified` status. Stage artifact coordinates bind the
+  caller's assertions but do not perform stage-specific semantic validation;
+  this seed also does not yet bind an admitted PR-5 domain lowering or prove
+  the full FrankenScript-to-package round trip. Foreign outputs are opaque
+  artifact coordinates rather than decoded numeric values. Parser/export,
+  isolated execution, and full round-trip batteries remain follow-on work.
 - The current FrankenScript codec covers admitted Machine graph, behavior, and
   assurance syntax, including both assurance base-identity bindings. Assurance
   receipt rows are only exact transport commitments: callers must retain and

@@ -16,6 +16,8 @@
 //! validated `fs-scenario` artifact plus exact externally owned domain
 //! artifacts and a complete stable-ID crosswalk. It deliberately does not
 //! infer executable meaning from the opaque references admitted by PR-2--4.
+//! The additive [`interop`] boundary binds the ordered engineering workflow
+//! and quarantines FMI/SSP foreign outputs at Estimated evidence strength.
 //!
 //! Runtime coupling, executable material/interface cards, controllers,
 //! safety adjudication, physical validation, balance proofs, adaptive routing,
@@ -24,6 +26,7 @@
 pub mod assurance;
 pub mod assurance_codec;
 pub mod codec;
+pub mod interop;
 pub mod lowering;
 pub mod semantics;
 
