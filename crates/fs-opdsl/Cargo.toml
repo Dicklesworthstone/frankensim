@@ -10,6 +10,12 @@ description = "Typed operator IR: physics operators defined once, lowered to res
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# I01.2 (bead i94v.1.1.2, ambition [F]): canonical ConstitutiveGraph
+# adaptation stays default-off until it beats its declared baseline on
+# the preregistered deck.
+constitutive-graph = []
+
 [dependencies]
 fs-feec = { path = "../fs-feec" }
 fs-la = { path = "../fs-la" }
@@ -24,6 +30,8 @@ fs-tilelang = { path = "../fs-tilelang" }
 
 [dev-dependencies]
 fs-ad = { path = "../fs-ad" }
+fs-evidence = { path = "../fs-evidence" }
+fs-matdb = { path = "../fs-matdb" }
 fs-rand = { path = "../fs-rand" }
 
 [lints]

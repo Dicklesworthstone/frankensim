@@ -25,6 +25,8 @@
 //! visible.
 
 pub mod atoms;
+#[cfg(feature = "constitutive-graph")]
+pub mod constitutive;
 pub mod expr;
 pub mod fixtures;
 pub mod kernels;
