@@ -800,7 +800,18 @@ with at most 64 logical scalar operations between polls.
 the transferred right-hand side without modifying the factor. It allocates no
 derived numerical payload and does not prove conditioning, consume the `Cx`
 budget, migrate the pipeline, own drain/finalize, promise wall-time preemption,
-or cover destructor latency. The SDF shell rejects malformed
+or cover destructor latency.
+`estimate_refit_surface_lipschitz_with_cx` consumes an already admitted surface
+view, preserves count-derived control-traversal work refusal before its first
+checkpoint, and carries one gate through the complete U/V hodograph-hull scan,
+finite projection/norm/coefficient checks, and final tuple publication. It
+polls after at most 64 control visits and allocates no numerical payload;
+`RefitLipschitzEstimateRun::Cancelled` publishes neither directional value.
+The ordinary-f64 outputs remain measured estimates rather than outward
+enclosures and grant no field regularity, certified Lipschitz, distance,
+sphere-tracing, or no-tunneling authority. The primitive does not consume a
+caller budget, migrate the report/refit pipeline, own drain/finalize, or promise
+wall-time preemption. The SDF shell rejects malformed
 point/tolerance input before surface planning, admits each immutable surface
 once per distance query, reuses that admission through closest and Gauss-Newton
 polish, and carries the winning admission into gradient, orientation, and

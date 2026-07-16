@@ -495,6 +495,25 @@ pub enum RefitNormalSolveRun {
     Cancelled,
 }
 
+/// Transactional outcome of a cancellation-aware measured surface Lipschitz
+/// estimate.
+///
+/// The returned directional values use ordinary `f64` arithmetic. They are
+/// measured estimates, not outward enclosures or certified Lipschitz bounds.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RefitLipschitzEstimateRun {
+    /// The complete U/V control-hodograph traversal is safe to publish.
+    Complete {
+        /// Estimated U-direction derivative magnitude ceiling.
+        u_estimate: f64,
+        /// Estimated V-direction derivative magnitude ceiling.
+        v_estimate: f64,
+    },
+    /// Cancellation was observed before publication.
+    Cancelled,
+}
+
 fn validate_radial_projection_request(
     center: [f64; 3],
     dir: [f64; 3],
@@ -1050,6 +1069,27 @@ fn basis_row(kv: AdmittedKnotVector<'_, f64>, t: f64) -> Result<Vec<f64>, NurbsE
     Ok(row)
 }
 
+fn preflight_refit_lipschitz_estimate(rows: usize, cols: usize) -> Result<(), NurbsError> {
+    if rows == 0 || cols == 0 {
+        return Err(refit_structure_error(
+            "refit Lipschitz estimate requires a nonempty control net",
+        ));
+    }
+    let controls =
+        checked_refit_work_product(&[rows as u128, cols as u128], "Lipschitz control traversal")?;
+    // Each visit performs at most two three-coordinate projections,
+    // differences/norms, span divisions, and maxima. This intentionally
+    // overprices the fixed f64 scalar work.
+    let traversal_work = checked_refit_work_product(&[controls, 32], "Lipschitz estimate")?;
+    let total_work = checked_refit_work_sum(&[traversal_work, 2], "Lipschitz estimate")?;
+    if total_work > REFIT_MAX_WORK_UNITS {
+        return Err(refit_structure_error(format!(
+            "refit Lipschitz work estimate {total_work} exceeds static cap {REFIT_MAX_WORK_UNITS}"
+        )));
+    }
+    Ok(())
+}
+
 /// Analytic spline Lipschitz formula from the hodograph hull. The derivative
 /// curve `S'(u) = Σ Dᵢ Nᵢ,ₚ₋₁(u)` has control points
 /// `Dᵢ = p·ΔCᵢ / (u_{i+p+1} − u_{i+1})`, and B-spline bases are a nonnegative
@@ -1062,28 +1102,65 @@ fn basis_row(kv: AdmittedKnotVector<'_, f64>, t: f64) -> Result<Vec<f64>, NurbsE
 /// the closed form UNDER-bounds by up to a factor `p` when the largest control
 /// difference sits near the clamp, which would make the estimate too tight.
 /// The implementation uses ordinary f64 arithmetic and therefore returns an
-/// estimate, not an outward-rounded enclosure. Returns (L_u, L_v).
-fn lipschitz_estimate(surface: AdmittedNurbsSurface<'_, f64>) -> (f64, f64) {
-    let surface = surface.source();
+/// estimate, not an outward-rounded enclosure.
+///
+/// Count-derived traversal-work refusal precedes the first checkpoint. One
+/// gate then spans the complete admitted control-hodograph traversal,
+/// finite-arithmetic checks, and final publication, polling after at most 64
+/// control visits. The primitive allocates no numerical payload and does not
+/// consume the `Cx` budget or grant distance, field, or no-tunneling authority.
+///
+/// # Errors
+/// Returns a structured [`NurbsError`] for checked work refusal or non-finite
+/// projection, norm, or coefficient arithmetic.
+pub fn estimate_refit_surface_lipschitz_with_cx(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    cx: &Cx<'_>,
+) -> Result<RefitLipschitzEstimateRun, NurbsError> {
+    let mut should_cancel = || cx.checkpoint().is_err();
+    estimate_refit_surface_lipschitz_with_poll(surface, &mut should_cancel)
+}
+
+fn estimate_refit_surface_lipschitz_with_poll(
+    admitted: AdmittedNurbsSurface<'_, f64>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RefitLipschitzEstimateRun, NurbsError> {
+    let surface = admitted.source();
+    let rows = surface.cpw.len();
+    let cols = surface.cpw[0].len();
+    preflight_refit_lipschitz_estimate(rows, cols)?;
+    if should_cancel() {
+        return Ok(RefitLipschitzEstimateRun::Cancelled);
+    }
+
     let p_u = surface.knots_u.degree;
     let p_v = surface.knots_v.degree;
     let ku = &surface.knots_u.knots;
     let kv = &surface.knots_v.knots;
     let cart = |h: &[f64; 4]| [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
     let dist = |a: [f64; 3], b: [f64; 3]| -> f64 { norm3([a[0] - b[0], a[1] - b[1], a[2] - b[2]]) };
-    let rows = surface.cpw.len();
-    let cols = surface.cpw[0].len();
     let mut lu = 0.0f64;
     let mut lv = 0.0f64;
+    let mut controls_since_poll = 0usize;
     for i in 0..rows {
         for j in 0..cols {
             let c = cart(&surface.cpw[i][j]);
+            if c.iter().any(|coordinate| !coordinate.is_finite()) {
+                return Err(refit_structure_error(
+                    "refit Lipschitz control projection became non-finite",
+                ));
+            }
             if i + 1 < rows {
                 let dc = dist(cart(&surface.cpw[i + 1][j]), c);
                 let span = ku[i + p_u + 1] - ku[i + 1];
                 if span > 0.0 {
                     #[allow(clippy::cast_precision_loss)]
                     let coef = p_u as f64 * dc / span;
+                    if !coef.is_finite() {
+                        return Err(refit_structure_error(
+                            "refit U Lipschitz estimate became non-finite",
+                        ));
+                    }
                     lu = lu.max(coef);
                 }
             }
@@ -1093,12 +1170,39 @@ fn lipschitz_estimate(surface: AdmittedNurbsSurface<'_, f64>) -> (f64, f64) {
                 if span > 0.0 {
                     #[allow(clippy::cast_precision_loss)]
                     let coef = p_v as f64 * dc / span;
+                    if !coef.is_finite() {
+                        return Err(refit_structure_error(
+                            "refit V Lipschitz estimate became non-finite",
+                        ));
+                    }
                     lv = lv.max(coef);
                 }
             }
+            if refit_poll_due(&mut controls_since_poll, should_cancel) {
+                return Ok(RefitLipschitzEstimateRun::Cancelled);
+            }
         }
     }
-    (lu, lv)
+    if should_cancel() {
+        return Ok(RefitLipschitzEstimateRun::Cancelled);
+    }
+    Ok(RefitLipschitzEstimateRun::Complete {
+        u_estimate: lu,
+        v_estimate: lv,
+    })
+}
+
+fn lipschitz_estimate(surface: AdmittedNurbsSurface<'_, f64>) -> Result<(f64, f64), NurbsError> {
+    let mut never_cancel = || false;
+    match estimate_refit_surface_lipschitz_with_poll(surface, &mut never_cancel)? {
+        RefitLipschitzEstimateRun::Complete {
+            u_estimate,
+            v_estimate,
+        } => Ok((u_estimate, v_estimate)),
+        RefitLipschitzEstimateRun::Cancelled => Err(refit_structure_error(
+            "non-cancellable refit Lipschitz estimate observed cancellation",
+        )),
+    }
 }
 
 /// Fit one scalar/vector LSQ system: `(BᵀB + λ LᵀL) c = Bᵀy` where `L`
@@ -1428,7 +1532,7 @@ pub fn refit_radial(
         }
     }
     let coverage = max_res;
-    let (lip_u, lip_v) = lipschitz_estimate(report_surface);
+    let (lip_u, lip_v) = lipschitz_estimate(report_surface)?;
     let lip = lip_u + lip_v;
     #[allow(clippy::cast_precision_loss)]
     let probe_param_radius = 0.5 / probe as f64;
@@ -2133,7 +2237,18 @@ mod tests {
             .collect();
         let weights = vec![vec![1.0, 1.0]; n];
         let surface = NurbsSurface::new(ku, kv, &net, &weights).expect("surface");
-        let (lu, _lv) = lipschitz_estimate(surface.admit().expect("admitted surface"));
+        let admitted = surface.admit().expect("admitted surface");
+        let (lu, lv) = lipschitz_estimate(admitted).expect("measured Lipschitz estimate");
+        with_refit_cx(false, |cx| {
+            assert_eq!(
+                estimate_refit_surface_lipschitz_with_cx(admitted, cx)
+                    .expect("cancellable measured estimate"),
+                RefitLipschitzEstimateRun::Complete {
+                    u_estimate: lu,
+                    v_estimate: lv,
+                }
+            );
+        });
         // Analytic formula: p · jump / (1/(n−p)) = p·(n−p)·jump.
         let expected = p as f64 * (n - p) as f64 * jump;
         let closed_form = (n - p) as f64 * jump; // the old factor-p under-estimate
@@ -2145,6 +2260,77 @@ mod tests {
         assert!(
             lu > closed_form + 1e-9,
             "the per-span estimate must exceed the closed-form under-estimate ({lu} vs {closed_form})"
+        );
+    }
+
+    // G4/G5: the control traversal and tuple publication share replayable
+    // checkpoints, and cancellation never publishes one directional estimate.
+    #[test]
+    fn lipschitz_estimate_polling_is_bounded_and_transactional() {
+        let knots = open_uniform_knots(9, 1).expect("linear knots");
+        let net: Vec<Vec<[f64; 3]>> = (0_u32..9)
+            .map(|i| {
+                (0_u32..9)
+                    .map(|j| [f64::from(i), f64::from(j), f64::from(i + j) * 0.125])
+                    .collect()
+            })
+            .collect();
+        let weights = vec![vec![1.0; 9]; 9];
+        let surface = NurbsSurface::new(knots.clone(), knots, &net, &weights).expect("surface");
+        let admitted = surface.admit().expect("admitted surface");
+        let run = |cancel_at: Option<usize>| {
+            let polls = Cell::new(0usize);
+            let outcome = estimate_refit_surface_lipschitz_with_poll(admitted, &mut || {
+                polls.set(polls.get() + 1);
+                cancel_at == Some(polls.get())
+            })
+            .expect("finite measured estimate");
+            (outcome, polls.get())
+        };
+
+        let (complete, healthy_polls) = run(None);
+        assert!(matches!(
+            complete,
+            RefitLipschitzEstimateRun::Complete { .. }
+        ));
+        assert_eq!(healthy_polls, 3, "entry, 64-control stride, publication");
+        assert_eq!(run(Some(1)), (RefitLipschitzEstimateRun::Cancelled, 1));
+        assert_eq!(run(Some(2)), (RefitLipschitzEstimateRun::Cancelled, 2));
+        assert_eq!(run(Some(3)), (RefitLipschitzEstimateRun::Cancelled, 3));
+        with_refit_cx(true, |cx| {
+            assert_eq!(
+                estimate_refit_surface_lipschitz_with_cx(admitted, cx)
+                    .expect("pre-cancellation is terminal"),
+                RefitLipschitzEstimateRun::Cancelled
+            );
+        });
+    }
+
+    // G0/G4: hostile counts refuse before traversal, and finite admitted
+    // controls cannot silently publish an infinite measured coefficient.
+    #[test]
+    fn lipschitz_estimate_refuses_unbounded_or_nonfinite_arithmetic() {
+        let work_error = preflight_refit_lipschitz_estimate(usize::MAX, 2)
+            .expect_err("unbounded traversal work must be refused");
+        assert!(work_error.to_string().contains("work estimate"));
+
+        let knots = open_uniform_knots(2, 1).expect("linear knots");
+        let net = vec![
+            vec![[-f64::MAX, 0.0, 0.0]; 2],
+            vec![[f64::MAX, 0.0, 0.0]; 2],
+        ];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(knots.clone(), knots, &net, &weights)
+            .expect("finite extreme surface");
+        let error = estimate_refit_surface_lipschitz_with_poll(
+            surface.admit().expect("admitted extreme surface"),
+            &mut || false,
+        )
+        .expect_err("overflowed coefficient must not publish");
+        assert!(
+            error
+                .to_string()
+                .contains("Lipschitz estimate became non-finite")
         );
     }
 
