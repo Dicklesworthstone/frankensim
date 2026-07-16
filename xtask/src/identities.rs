@@ -80,6 +80,7 @@ const REQUIRED_IDENTITY_IDS: &[&str] = &[
     "fs-recompute:artifact-content",
     "fs-recompute:node-record",
     "fs-roofline:baseline-record",
+    "fs-roofline:dependency-authority-policy",
     "fs-roofline:executable-build",
     "fs-roofline:execution-binding",
     "fs-roofline:finalized-run",

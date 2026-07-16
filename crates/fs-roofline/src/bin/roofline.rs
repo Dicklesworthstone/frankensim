@@ -4,6 +4,7 @@
 //!   roofline [--n <elements>] [--warmup <k>] [--reps <k>] [--ledger <db>]
 //!            [--baseline <jsonl>] [--firmware <identity>]
 //!            [--authority-policy <tsv>] [--retained-receipts <txt>]
+//!            [--dependency-authority-policy <lowerhex-lines>]
 //!   roofline promote --store <jsonl> --firmware <identity>
 //!            --operator <name> --justification <text>
 //!            [--probes <k≥3>] [--age-days <d>]
@@ -15,7 +16,10 @@
 
 use fs_roofline::authority::ConfiguredPromotionAuthority;
 use fs_roofline::production::{
-    ProductionProbe, ProductionRun, ProductionRunConfig, ReportOnlyProductionRun,
+    ConfiguredDependencyReceiptAuthority, DependencyReceiptAuthority, FreshProductionEvidence,
+    MAX_DEPENDENCY_AUTHORITY_POLICY_BYTES, ProductionFreshnessContext, ProductionFreshnessError,
+    ProductionProbe, ProductionRun, ProductionRunConfig, RecordedProductionRun,
+    ReportOnlyProductionRun,
 };
 use fs_roofline::{
     AttestedAxisBaselinePolicy, AttestedBaselineStore, AxisBaselinePolicy, BaselineAxes,
@@ -79,6 +83,7 @@ struct CliArgs {
     firmware: Option<String>,
     authority_policy_path: Option<String>,
     retained_receipts_path: Option<String>,
+    dependency_authority_policy_path: Option<String>,
 }
 
 impl Default for CliArgs {
@@ -92,6 +97,7 @@ impl Default for CliArgs {
             firmware: None,
             authority_policy_path: None,
             retained_receipts_path: None,
+            dependency_authority_policy_path: None,
         }
     }
 }
@@ -578,6 +584,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
                 | "--firmware"
                 | "--authority-policy"
                 | "--retained-receipts"
+                | "--dependency-authority-policy"
         ) {
             return Err(format!("unknown roofline argument {flag:?}"));
         }
@@ -600,6 +607,9 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--firmware" => parsed.firmware = Some(value.clone()),
             "--authority-policy" => parsed.authority_policy_path = Some(value.clone()),
             "--retained-receipts" => parsed.retained_receipts_path = Some(value.clone()),
+            "--dependency-authority-policy" => {
+                parsed.dependency_authority_policy_path = Some(value.clone());
+            }
             _ => return Err(format!("unknown roofline argument {flag:?}")),
         }
     }
@@ -703,6 +713,25 @@ impl BaselineInputs {
             ),
         }
     }
+
+    fn freshness_context<'a>(
+        &'a self,
+        dependency_authority: &'a dyn DependencyReceiptAuthority,
+    ) -> Result<ProductionFreshnessContext<'a>, String> {
+        let BaselineSource::Attested(store) = &self.source else {
+            return Err(
+                "no attested baseline store is available for live revalidation".to_string(),
+            );
+        };
+        let authority = self.authority.as_ref().map_err(Clone::clone)?;
+        let retained_receipts = self.retained_receipts.as_ref().map_err(Clone::clone)?;
+        Ok(ProductionFreshnessContext::new(
+            store,
+            authority,
+            retained_receipts,
+            dependency_authority,
+        ))
+    }
 }
 
 fn read_bounded_utf8(
@@ -799,6 +828,21 @@ fn parse_retained_receipts(
     Ok(receipts)
 }
 
+fn load_dependency_authority(
+    args: &CliArgs,
+) -> Result<ConfiguredDependencyReceiptAuthority, String> {
+    let path = args
+        .dependency_authority_policy_path
+        .as_deref()
+        .ok_or_else(|| "--dependency-authority-policy was not supplied".to_string())?;
+    let text = read_bounded_path(
+        path,
+        "dependency-authority policy",
+        MAX_DEPENDENCY_AUTHORITY_POLICY_BYTES,
+    )?;
+    ConfiguredDependencyReceiptAuthority::from_text(&text)
+}
+
 fn load_baseline_inputs(args: &CliArgs, axes: &MachineAxes) -> Result<BaselineInputs, String> {
     let declared_firmware = args.firmware.as_deref();
     let mut preliminary_refusal = declared_firmware
@@ -873,6 +917,31 @@ enum CliProductionRun {
     ReportOnly(ReportOnlyProductionRun),
 }
 
+enum CliRecordedRun {
+    Attested(RecordedProductionRun),
+    ReportOnly(i64),
+}
+
+impl CliRecordedRun {
+    fn op_id(&self) -> i64 {
+        match self {
+            Self::Attested(recorded) => recorded.op_id(),
+            Self::ReportOnly(op) => *op,
+        }
+    }
+
+    fn revalidate(
+        &self,
+        ledger: &fs_ledger::Ledger,
+        current: &ProductionFreshnessContext<'_>,
+    ) -> Result<FreshProductionEvidence, ProductionFreshnessError> {
+        match self {
+            Self::Attested(recorded) => recorded.revalidate(ledger, current),
+            Self::ReportOnly(_) => Err(ProductionFreshnessError::RecordedRefusal),
+        }
+    }
+}
+
 impl CliProductionRun {
     fn axes(&self) -> &MachineAxes {
         match self {
@@ -926,10 +995,10 @@ impl CliProductionRun {
         }
     }
 
-    fn record(self, ledger: &fs_ledger::Ledger) -> Result<i64, fs_ledger::LedgerError> {
+    fn record(self, ledger: &fs_ledger::Ledger) -> Result<CliRecordedRun, fs_ledger::LedgerError> {
         match self {
-            Self::Attested(run) => run.record(ledger),
-            Self::ReportOnly(run) => run.record(ledger),
+            Self::Attested(run) => run.record(ledger).map(CliRecordedRun::Attested),
+            Self::ReportOnly(run) => run.record(ledger).map(CliRecordedRun::ReportOnly),
         }
     }
 }
@@ -1006,8 +1075,8 @@ fn main() -> std::process::ExitCode {
         );
     }
 
-    if let Some(db) = args.ledger_path {
-        let ledger = match fs_ledger::Ledger::open(&db) {
+    if let Some(db) = args.ledger_path.as_deref() {
+        let ledger = match fs_ledger::Ledger::open(db) {
             Ok(l) => l,
             Err(e) => return fail(&e.to_string()),
         };
@@ -1019,33 +1088,61 @@ fn main() -> std::process::ExitCode {
             .collect();
         let baseline_hash = run.baseline_hash();
         let protocol = run.protocol();
-        let op = match run.record(&ledger) {
-            Ok(op) => op,
+        let recorded = match run.record(&ledger) {
+            Ok(recorded) => recorded,
             Err(e) => return fail(&e.to_string()),
         };
-        let mut citable = citation_eligible;
+        let op = recorded.op_id();
         for (kernel, version) in &kernel_ids {
             match staleness(&ledger, kernel, version, fingerprint, baseline_hash) {
                 Ok(s) => {
-                    citable &= s == fs_roofline::Staleness::Fresh;
                     println!(
-                        "{{\"kernel\":\"{}\",\"staleness\":\"{s:?}\",\"max_age_ns\":{STALENESS_MAX_AGE_NS}}}",
+                        "{{\"kernel\":\"{}\",\"row_staleness\":\"{s:?}\",\"citation_state\":\"row-only\",\"max_age_ns\":{STALENESS_MAX_AGE_NS}}}",
                         json_escape(kernel),
                     );
                 }
                 Err(e) => return fail(&e.to_string()),
             }
         }
+        let dependency_authority = load_dependency_authority(&args);
+        let freshness = dependency_authority
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|dependency_authority| {
+                baseline_inputs.freshness_context(dependency_authority)
+            })
+            .and_then(|current| {
+                recorded
+                    .revalidate(&ledger, &current)
+                    .map_err(|error| error.to_string())
+            });
+        let revalidated_fresh = freshness.is_ok();
+        let citable = citation_eligible && revalidated_fresh;
         let reason = if citable {
-            "null"
-        } else if citation_eligible {
-            "\"post_commit_validation_failed\""
+            "null".to_string()
+        } else if !citation_eligible {
+            "\"admission_refused\"".to_string()
         } else {
-            "\"admission_refused\""
+            format!(
+                "\"{}\"",
+                json_escape(
+                    freshness
+                        .as_ref()
+                        .expect_err("non-citable admitted evidence has a freshness refusal")
+                )
+            )
         };
+        let fresh_receipt = freshness.as_ref().map_or_else(
+            |_| "null".to_string(),
+            |fresh| format!("\"{}\"", fresh.run_receipt()),
+        );
+        let dependency_policy_receipt = freshness.as_ref().map_or_else(
+            |_| "null".to_string(),
+            |fresh| format!("\"{}\"", fresh.dependency_authority_fingerprint()),
+        );
         println!(
-            "{{\"schema\":\"fs-roofline-recorded-evidence-v1\",\"ledgered\":true,\"citation_eligible\":{citation_eligible},\"citable\":{citable},\"reason\":{reason},\"protocol\":\"{protocol}\",\"op\":{op},\"db\":\"{}\"}}",
-            json_escape(&db)
+            "{{\"schema\":\"fs-roofline-recorded-evidence-v2\",\"measured\":true,\"recorded\":true,\"revalidated_fresh\":{revalidated_fresh},\"citation_eligible\":{citation_eligible},\"citable\":{citable},\"fresh_run_receipt\":{fresh_receipt},\"dependency_authority_policy_receipt\":{dependency_policy_receipt},\"reason\":{reason},\"protocol\":\"{protocol}\",\"op\":{op},\"db\":\"{}\"}}",
+            json_escape(db)
         );
     }
     std::process::ExitCode::SUCCESS
@@ -1055,13 +1152,16 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::{
         BaselineInputs, BaselineSource, MAX_BASELINE_AGE_DAYS, MAX_PROMOTION_PROBES,
-        RunBaselinePolicy, evidence_admission_json, json_escape, load_baseline_inputs, parse_args,
-        parse_baseline_source, parse_bounded_baseline_store, parse_promote_args,
-        parse_retained_receipts, promotion_lock_path, sidecar_path,
+        RunBaselinePolicy, evidence_admission_json, json_escape, load_baseline_inputs,
+        load_dependency_authority, parse_args, parse_baseline_source, parse_bounded_baseline_store,
+        parse_promote_args, parse_retained_receipts, promotion_lock_path, sidecar_path,
     };
     #[cfg(unix)]
     use super::{open_promotion_store, promotion_staging_path};
     use fs_roofline::authority::{ConfiguredPromotionAuthority, PromotionAttestation};
+    use fs_roofline::production::{
+        ConfiguredDependencyReceiptAuthority, DependencyReceiptAuthority, DependencyReceiptVerdict,
+    };
     use fs_roofline::{
         AttestedBaselineStore, AxisAdmissionSnapshot, BaselineCandidate, BaselineIdentity,
         MachineAxes, days_since_epoch_now, promote_baseline,
@@ -1367,6 +1467,8 @@ mod tests {
         assert!(defaults.ledger_path.is_none());
         assert!(defaults.authority_policy_path.is_none());
         assert!(defaults.retained_receipts_path.is_none());
+        assert!(defaults.dependency_authority_policy_path.is_none());
+        assert!(load_dependency_authority(&defaults).is_err());
 
         let parsed = parse_args(&args(&[
             "roofline",
@@ -1386,6 +1488,8 @@ mod tests {
             "authority.tsv",
             "--retained-receipts",
             "receipts.txt",
+            "--dependency-authority-policy",
+            "dependency-revocations.txt",
         ]))
         .expect("complete argv");
         assert_eq!(parsed.n, 8);
@@ -1402,6 +1506,52 @@ mod tests {
             parsed.retained_receipts_path.as_deref(),
             Some("receipts.txt")
         );
+        assert_eq!(
+            parsed.dependency_authority_policy_path.as_deref(),
+            Some("dependency-revocations.txt")
+        );
+    }
+
+    #[test]
+    fn dependency_authority_policy_revokes_exact_digests_and_receipts_rotation() {
+        let digest = fs_blake3::hash_domain(
+            "fs-roofline.cli-dependency-policy-test.v1",
+            b"dependency-receipt",
+        );
+        let artifact = fs_blake3::hash_domain(
+            "fs-roofline.cli-dependency-policy-artifact-test.v1",
+            b"dependency-artifact",
+        );
+        let open = ConfiguredDependencyReceiptAuthority::from_text("")
+            .expect("an empty file is an explicit no-revocations policy");
+        let open_decision = open.verify(digest, artifact);
+        assert_eq!(
+            open_decision.verdict(),
+            DependencyReceiptVerdict::Authorized
+        );
+        assert_eq!(open_decision.policy_receipt(), open.policy_receipt());
+
+        let revoked_text = format!("{digest}\n");
+        let revoked = ConfiguredDependencyReceiptAuthority::from_text(&revoked_text)
+            .expect("one canonical revoked digest");
+        let revoked_decision = revoked.verify(digest, artifact);
+        assert_eq!(
+            revoked_decision.verdict(),
+            DependencyReceiptVerdict::Revoked
+        );
+        assert_eq!(revoked_decision.policy_receipt(), revoked.policy_receipt());
+        assert_ne!(open.policy_receipt(), revoked.policy_receipt());
+
+        for malformed in [
+            "\n".to_string(),
+            digest.to_string(),
+            format!("{digest}\n{digest}\n"),
+        ] {
+            assert!(
+                ConfiguredDependencyReceiptAuthority::from_text(&malformed).is_err(),
+                "non-canonical dependency policy {malformed:?} must fail closed"
+            );
+        }
     }
 
     #[test]

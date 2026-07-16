@@ -58,6 +58,7 @@
 {"id":"fs-recompute:artifact-content"},
 {"id":"fs-recompute:node-record"},
 {"id":"fs-roofline:baseline-record"},
+{"id":"fs-roofline:dependency-authority-policy"},
 {"id":"fs-roofline:executable-build"},
 {"id":"fs-roofline:execution-binding"},
 {"id":"fs-roofline:finalized-run"},

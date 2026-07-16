@@ -9,7 +9,7 @@
 //! exploration, but everything it records is stamped
 //! `"protocol":"custom-registry"` and is explicitly NON-CITABLE.
 //!
-//! The protocol is two opaque stages:
+//! The protocol is three opaque stages:
 //!
 //! 1. [`ProductionProbe::observe`] performs the pre-run axis probe and mints
 //!    the per-run nonce. The caller may READ the observed axes (baseline
@@ -17,10 +17,14 @@
 //! 2. [`ProductionProbe::run`] owns production registry selection, timed
 //!    warmup/repetitions, the post-run axis probe (observed strictly after
 //!    the timed loop), aggregate admission, and tune finalization, yielding
-//!    a [`ProductionRun`]. [`ProductionRun::record`] commits atomically and
-//!    consumes the run; the operation `ir` carries
+//!    a [`ProductionRun`].
+//! 3. [`ProductionRun::record`] commits atomically and consumes the run,
+//!    yielding neutral [`RecordedProductionRun`]. Its operation `ir` carries
 //!    `"protocol":"production-v3"`, the nonce, content hashes of both
 //!    observed axis receipts, and the retained dependency-receipt binding.
+//!    Only [`RecordedProductionRun::revalidate`] can add current authority,
+//!    dependency, build, clock, and exact-ledger proof and mint
+//!    [`FreshProductionEvidence`].
 //!
 //! Trust model: the nonce is a process-unique challenge, not cryptographic
 //! proof. Type opacity prevents ordinary API consumers from constructing a
@@ -29,6 +33,8 @@
 //! consistent rows. External authentication of the ledger/package is a
 //! separate proof obligation; this crate detects corruption inside that
 //! trusted-writer boundary and makes no cryptographic-authority claim.
+
+use std::collections::BTreeSet;
 
 use fs_ledger::{Ledger, LedgerError};
 
@@ -47,6 +53,45 @@ pub const PRODUCTION_AXES_RECEIPT_IDENTITY_VERSION: u32 = 1;
 /// BLAKE3 derive-key domain for a production machine-axis observation receipt.
 pub const PRODUCTION_AXES_RECEIPT_DOMAIN: &str =
     "org.frankensim.fs-roofline.production-axes-receipt.v1";
+/// Semantic version of a live dependency-authority policy receipt.
+pub const DEPENDENCY_AUTHORITY_POLICY_IDENTITY_VERSION: u32 = 1;
+/// Domain for the exact dependency-authority policy sampled by revalidation.
+pub const DEPENDENCY_AUTHORITY_POLICY_DOMAIN: &str =
+    "frankensim.fs-roofline.dependency-authority-policy.v1";
+/// Maximum accepted size of a configured dependency-authority policy.
+pub const MAX_DEPENDENCY_AUTHORITY_POLICY_BYTES: usize = 1024 * 1024;
+
+/// Owner-local dependency-authority declaration consumed by
+/// `xtask check-identities`.
+#[allow(dead_code)]
+pub const DEPENDENCY_AUTHORITY_POLICY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-roofline:dependency-authority-policy",
+    "version_const=DEPENDENCY_AUTHORITY_POLICY_IDENTITY_VERSION",
+    "version=1",
+    "domain=frankensim.fs-roofline.dependency-authority-policy.v1",
+    "domain_const=DEPENDENCY_AUTHORITY_POLICY_DOMAIN",
+    "encoder=dependency_authority_policy_receipt",
+    "encoder_helpers=dependency_authority_policy_receipt_with_domain",
+    "schema_constants=DEPENDENCY_AUTHORITY_POLICY_IDENTITY_VERSION,DEPENDENCY_AUTHORITY_POLICY_DOMAIN,MAX_DEPENDENCY_AUTHORITY_POLICY_BYTES",
+    "schema_functions=ConfiguredDependencyReceiptAuthority::from_text,ConfiguredDependencyReceiptAuthority::policy_receipt,ConfiguredDependencyReceiptAuthority::verify,DependencyReceiptDecision::new,DependencyReceiptDecision::policy_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=canonical-transport-exact-bits",
+    "sources=DependencyAuthorityPolicyIdentityInput",
+    "source_fields=DependencyAuthorityPolicyIdentityInput.canonical_bytes:semantic",
+    "source_bindings=DependencyAuthorityPolicyIdentityInput.canonical_bytes>canonical-policy-bytes",
+    "external_semantic_fields=digest-domain,identity-version",
+    "semantic_fields=digest-domain,identity-version,canonical-policy-bytes",
+    "excluded_fields=none",
+    "consumers=ConfiguredDependencyReceiptAuthority::from_text,ConfiguredDependencyReceiptAuthority::verify,RecordedProductionRun::revalidate,FreshProductionEvidence::dependency_authority_fingerprint,crates/fs-roofline/src/bin/roofline.rs#load_dependency_authority",
+    "mutations=digest-domain:crates/fs-roofline/src/production.rs#dependency_authority_policy_identity_fields_move_independently,identity-version:crates/fs-roofline/src/production.rs#dependency_authority_policy_identity_versions_fail_closed,canonical-policy-bytes:crates/fs-roofline/src/production.rs#dependency_authority_policy_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_dependency_authority_policy_identity_fields",
+    "transport_guard=ConfiguredDependencyReceiptAuthority::from_text",
+    "version_guard=crates/fs-roofline/src/production.rs#dependency_authority_policy_identity_versions_fail_closed",
+    "coupling_surface=fs-roofline:dependency-authority-policy",
+];
 
 /// Owner-local production-axis declaration consumed by `xtask check-identities`.
 #[allow(dead_code)]
@@ -125,6 +170,31 @@ fn classify_production_axes_receipt_identity_fields(input: &ProductionAxesReceip
         peak_all_core_bits,
     );
 }
+
+struct DependencyAuthorityPolicyIdentityInput<'a> {
+    canonical_bytes: &'a [u8],
+}
+
+fn dependency_authority_policy_receipt(canonical_bytes: &[u8]) -> fs_blake3::ContentHash {
+    dependency_authority_policy_receipt_with_domain(
+        DEPENDENCY_AUTHORITY_POLICY_DOMAIN,
+        &DependencyAuthorityPolicyIdentityInput { canonical_bytes },
+    )
+}
+
+fn dependency_authority_policy_receipt_with_domain(
+    domain: &str,
+    input: &DependencyAuthorityPolicyIdentityInput<'_>,
+) -> fs_blake3::ContentHash {
+    fs_blake3::hash_domain(domain, input.canonical_bytes)
+}
+
+#[allow(dead_code)]
+fn classify_dependency_authority_policy_identity_fields(
+    input: &DependencyAuthorityPolicyIdentityInput<'_>,
+) {
+    let DependencyAuthorityPolicyIdentityInput { canonical_bytes: _ } = input;
+}
 #[cfg(test)]
 const DEVELOPMENT_SALT_REFUSAL: &str = "dependency graph uses the development equivalence salt; production citation requires an exact operator-observed normal/build receipt";
 
@@ -158,6 +228,592 @@ impl CitationAuthority {
             Self::Receipt(binding) => Some(binding),
             Self::Refused(_) => None,
         }
+    }
+}
+
+/// Explicit live trust roots used to revalidate one recorded production run:
+/// the baseline/promotion policy, source-retention inventory, and independent
+/// dependency-receipt revocation authority.
+/// Construction does no verification; [`RecordedProductionRun::revalidate`]
+/// samples the authority exactly once after authenticating the exact ledgered
+/// operation and manifest.
+pub struct ProductionFreshnessContext<'a> {
+    baselines: &'a crate::AttestedBaselineStore,
+    authority: &'a dyn crate::PromotionAuthorityVerifier,
+    retained_sources: &'a BTreeSet<fs_blake3::ContentHash>,
+    dependency_authority: &'a dyn DependencyReceiptAuthority,
+}
+
+impl<'a> ProductionFreshnessContext<'a> {
+    /// Pin the current baseline store, promotion authority, and retained
+    /// source inventory for one named revalidation boundary.
+    #[must_use]
+    pub const fn new(
+        baselines: &'a crate::AttestedBaselineStore,
+        authority: &'a dyn crate::PromotionAuthorityVerifier,
+        retained_sources: &'a BTreeSet<fs_blake3::ContentHash>,
+        dependency_authority: &'a dyn DependencyReceiptAuthority,
+    ) -> Self {
+        Self {
+            baselines,
+            authority,
+            retained_sources,
+            dependency_authority,
+        }
+    }
+}
+
+/// Live operator verdict for the exact dependency receipt compiled into the
+/// executable asking for freshness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyReceiptVerdict {
+    /// The receipt remains authorized for production citation.
+    Authorized,
+    /// The operator revoked the receipt even though its retained bytes remain
+    /// structurally valid.
+    Revoked,
+}
+
+/// One atomic answer from a dependency-receipt authority. The verdict and
+/// exact policy receipt travel together so a caller cannot mix a decision
+/// sampled under one revocation policy with another policy's identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyReceiptDecision {
+    verdict: DependencyReceiptVerdict,
+    policy_receipt: fs_blake3::ContentHash,
+}
+
+impl DependencyReceiptDecision {
+    /// Bind `verdict` to the exact live authority policy that produced it.
+    #[must_use]
+    pub const fn new(
+        verdict: DependencyReceiptVerdict,
+        policy_receipt: fs_blake3::ContentHash,
+    ) -> Self {
+        Self {
+            verdict,
+            policy_receipt,
+        }
+    }
+
+    /// Typed live authority verdict.
+    #[must_use]
+    pub const fn verdict(self) -> DependencyReceiptVerdict {
+        self.verdict
+    }
+
+    /// Content identity of the exact revocation policy used for the verdict.
+    #[must_use]
+    pub const fn policy_receipt(self) -> fs_blake3::ContentHash {
+        self.policy_receipt
+    }
+}
+
+/// Injected live authority for dependency-receipt revocation.
+pub trait DependencyReceiptAuthority {
+    /// Judge the exact domain digest and artifact identity retained by the
+    /// recorded operation. Revalidation calls this once per named boundary.
+    #[must_use]
+    fn verify(
+        &self,
+        digest: fs_blake3::ContentHash,
+        artifact: fs_blake3::ContentHash,
+    ) -> DependencyReceiptDecision;
+}
+
+/// Bounded operator policy for dependency-receipt revocation.
+///
+/// The canonical format is a strictly ascending list of 64-character
+/// lowercase dependency-receipt digests, one per newline-terminated line. An
+/// empty file is the explicit no-revocations policy. The exact canonical bytes
+/// are hashed into every [`DependencyReceiptDecision`]; listed digests return
+/// [`DependencyReceiptVerdict::Revoked`] and every other structurally verified
+/// digest returns [`DependencyReceiptVerdict::Authorized`].
+#[derive(Debug)]
+pub struct ConfiguredDependencyReceiptAuthority {
+    revoked_digests: BTreeSet<fs_blake3::ContentHash>,
+    policy_receipt: fs_blake3::ContentHash,
+}
+
+impl ConfiguredDependencyReceiptAuthority {
+    /// Parse one immutable canonical revocation policy.
+    ///
+    /// # Errors
+    /// Refuses oversized, non-canonical, duplicated, unsorted, or malformed
+    /// input.
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        if text.len() > MAX_DEPENDENCY_AUTHORITY_POLICY_BYTES {
+            return Err(format!(
+                "dependency-authority policy exceeds the {MAX_DEPENDENCY_AUTHORITY_POLICY_BYTES}-byte bound"
+            ));
+        }
+        let mut revoked_digests = BTreeSet::new();
+        if !text.is_empty() {
+            let body = text.strip_suffix('\n').ok_or_else(|| {
+                "dependency-authority policy must be canonical newline-terminated lowercase hex"
+                    .to_string()
+            })?;
+            if body.is_empty() {
+                return Err(
+                    "dependency-authority policy uses an empty file, not a blank line, for no revocations"
+                        .to_string(),
+                );
+            }
+            let mut previous = None;
+            for (index, line) in body.split('\n').enumerate() {
+                if line.len() != 64
+                    || !line
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(format!(
+                        "dependency-authority policy line {} must be exactly 64 lowercase hexadecimal bytes",
+                        index + 1
+                    ));
+                }
+                let digest = fs_blake3::ContentHash::from_hex(line).ok_or_else(|| {
+                    format!(
+                        "dependency-authority policy line {} is not a content hash",
+                        index + 1
+                    )
+                })?;
+                if previous.is_some_and(|prior| digest <= prior) {
+                    return Err(format!(
+                        "dependency-authority policy line {} is not in strict ascending order",
+                        index + 1
+                    ));
+                }
+                previous = Some(digest);
+                let inserted = revoked_digests.insert(digest);
+                debug_assert!(inserted);
+            }
+        }
+        Ok(Self {
+            revoked_digests,
+            policy_receipt: dependency_authority_policy_receipt(text.as_bytes()),
+        })
+    }
+
+    /// Content identity of the exact canonical policy bytes.
+    #[must_use]
+    pub const fn policy_receipt(&self) -> fs_blake3::ContentHash {
+        self.policy_receipt
+    }
+}
+
+impl DependencyReceiptAuthority for ConfiguredDependencyReceiptAuthority {
+    fn verify(
+        &self,
+        digest: fs_blake3::ContentHash,
+        _artifact: fs_blake3::ContentHash,
+    ) -> DependencyReceiptDecision {
+        let verdict = if self.revoked_digests.contains(&digest) {
+            DependencyReceiptVerdict::Revoked
+        } else {
+            DependencyReceiptVerdict::Authorized
+        };
+        DependencyReceiptDecision::new(verdict, self.policy_receipt())
+    }
+}
+
+/// Why an opaque recorded receipt could not mint current positive evidence.
+#[derive(Debug)]
+pub enum ProductionFreshnessError {
+    /// The sealed run durably recorded an admission refusal, not evidence.
+    RecordedRefusal,
+    /// The exact operation, manifest, rows, artifacts, or typed receipt no
+    /// longer agree.
+    CorruptRecordedEvidence,
+    /// The observation clock predates the operation completion receipt.
+    ClockRollback {
+        /// Completion time authenticated from the recorded operation.
+        recorded_at_ns: i64,
+        /// Live wall-clock observation used for revalidation.
+        observed_ns: i64,
+    },
+    /// The exact evidence is older than the supported freshness window.
+    Expired {
+        /// Non-negative live age of the recorded operation.
+        age_ns: i64,
+    },
+    /// The current attested store has no baseline for the recorded machine.
+    BaselineUnavailable,
+    /// The current store replaced the exact baseline record.
+    BaselineReplaced,
+    /// The current store replaced or removed the recorded attestation.
+    PromotionAttestationChanged,
+    /// A recorded source receipt is absent from the current retention set.
+    SourceReceiptUnavailable(
+        /// Missing source receipt identity.
+        fs_blake3::ContentHash,
+    ),
+    /// The current promotion authority refused the recorded attestation.
+    PromotionAuthorityRefused {
+        /// Exact live authority verdict.
+        verdict: crate::KeyVerdict,
+    },
+    /// The verifier's exact current policy differs from the recorded policy.
+    PromotionPolicyChanged,
+    /// No current operator-observed dependency receipt is available.
+    DependencyAuthorityUnavailable,
+    /// The current dependency receipt differs from the recorded one.
+    DependencyAuthorityChanged,
+    /// The live dependency authority explicitly revoked the exact receipt.
+    DependencyAuthorityRevoked,
+    /// The executable asking for freshness differs from the recorded build.
+    BuildDrift,
+    /// Durable ledger access failed.
+    Ledger(
+        /// Underlying durable-ledger failure.
+        LedgerError,
+    ),
+}
+
+impl core::fmt::Display for ProductionFreshnessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RecordedRefusal => write!(f, "recorded roofline run was refused at admission"),
+            Self::CorruptRecordedEvidence => {
+                write!(f, "recorded roofline operation or typed receipt is corrupt")
+            }
+            Self::ClockRollback {
+                recorded_at_ns,
+                observed_ns,
+            } => write!(
+                f,
+                "roofline freshness clock rolled back: recorded at {recorded_at_ns}, observed {observed_ns}"
+            ),
+            Self::Expired { age_ns } => {
+                write!(f, "recorded roofline evidence expired at age {age_ns} ns")
+            }
+            Self::BaselineUnavailable => {
+                write!(f, "current attested baseline is unavailable")
+            }
+            Self::BaselineReplaced => write!(f, "current baseline replaced the recorded baseline"),
+            Self::PromotionAttestationChanged => write!(
+                f,
+                "current baseline attestation differs from the recorded attestation"
+            ),
+            Self::SourceReceiptUnavailable(receipt) => {
+                write!(
+                    f,
+                    "recorded baseline source receipt {receipt} is unavailable"
+                )
+            }
+            Self::PromotionAuthorityRefused { verdict } => write!(
+                f,
+                "current promotion authority refused the recorded attestation: {}",
+                verdict.name()
+            ),
+            Self::PromotionPolicyChanged => {
+                write!(
+                    f,
+                    "current promotion-authority policy differs from the recorded policy"
+                )
+            }
+            Self::DependencyAuthorityUnavailable => {
+                write!(f, "current dependency receipt authority is unavailable")
+            }
+            Self::DependencyAuthorityChanged => {
+                write!(
+                    f,
+                    "current dependency receipt differs from the recorded receipt"
+                )
+            }
+            Self::DependencyAuthorityRevoked => {
+                write!(f, "live dependency authority revoked the recorded receipt")
+            }
+            Self::BuildDrift => write!(f, "current executable differs from the recorded build"),
+            Self::Ledger(error) => write!(f, "roofline freshness ledger failure: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for ProductionFreshnessError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Ledger(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<LedgerError> for ProductionFreshnessError {
+    fn from(error: LedgerError) -> Self {
+        Self::Ledger(error)
+    }
+}
+
+/// Neutral proof that one sealed production operation committed. Recording is
+/// not freshness: only [`Self::revalidate`] can mint
+/// [`FreshProductionEvidence`]. Fields are private and the type has no
+/// conversion from a bare operation id.
+#[derive(Debug)]
+pub struct RecordedProductionRun {
+    op: i64,
+    run_receipt: fs_blake3::ContentHash,
+    baseline_hash: Option<fs_blake3::ContentHash>,
+    promotion_policy_receipt: Option<fs_blake3::ContentHash>,
+    dependency_receipt_digest: Option<fs_blake3::ContentHash>,
+    dependency_receipt_artifact: Option<fs_blake3::ContentHash>,
+    recorded_at_ns: i64,
+    admitted: bool,
+}
+
+impl RecordedProductionRun {
+    /// Ledger operation id, retained for diagnostics and lineage only.
+    #[must_use]
+    pub const fn op_id(&self) -> i64 {
+        self.op
+    }
+
+    /// Finalized identity of the exact baseline receipt and ordered results.
+    #[must_use]
+    pub const fn run_receipt(&self) -> fs_blake3::ContentHash {
+        self.run_receipt
+    }
+
+    /// Exact baseline selected by the frozen admission, when present.
+    #[must_use]
+    pub const fn baseline_hash(&self) -> Option<fs_blake3::ContentHash> {
+        self.baseline_hash
+    }
+
+    /// Exact promotion-policy fingerprint frozen into admission.
+    #[must_use]
+    pub const fn baseline_authority_fingerprint(&self) -> Option<fs_blake3::ContentHash> {
+        self.promotion_policy_receipt
+    }
+
+    /// Exact dependency receipt digest retained by the operation. This is
+    /// evidence identity, not the live authority-policy identity.
+    #[must_use]
+    pub const fn dependency_receipt_digest(&self) -> Option<fs_blake3::ContentHash> {
+        self.dependency_receipt_digest
+    }
+
+    /// Operation completion time committed in the ledger.
+    #[must_use]
+    pub const fn recorded_at_ns(&self) -> i64 {
+        self.recorded_at_ns
+    }
+
+    /// Reconstruct a typed receipt for an already-recorded, successfully
+    /// admitted sealed production operation. Refusal operations remain
+    /// durable diagnostics but are intentionally outside this positive-capable
+    /// loader.
+    ///
+    /// # Errors
+    /// Returns a typed corruption refusal when the operation or any exact
+    /// manifest member fails authentication, and propagates ledger failures.
+    pub fn load(ledger: &Ledger, op: i64) -> Result<Self, ProductionFreshnessError> {
+        let Some(validated) = crate::validate_recorded_production_run(ledger, op, None)? else {
+            return Err(ProductionFreshnessError::CorruptRecordedEvidence);
+        };
+        Ok(Self {
+            op: validated.op,
+            run_receipt: validated.run_receipt,
+            baseline_hash: Some(validated.baseline.content_hash()),
+            promotion_policy_receipt: Some(validated.promotion_policy_receipt),
+            dependency_receipt_digest: Some(validated.dependency_receipt_digest),
+            dependency_receipt_artifact: Some(validated.dependency_receipt_artifact),
+            recorded_at_ns: validated.recorded_at_ns,
+            admitted: true,
+        })
+    }
+
+    /// Authenticate this exact operation, then perform one named live
+    /// promotion-authority recheck and mint the only positive evidence type.
+    ///
+    /// # Errors
+    /// Returns a specific freshness refusal for revocation, authority or
+    /// dependency drift, tamper, build drift, rollback, or expiry; ledger
+    /// failures are preserved as [`ProductionFreshnessError::Ledger`].
+    pub fn revalidate(
+        &self,
+        ledger: &Ledger,
+        current: &ProductionFreshnessContext<'_>,
+    ) -> Result<FreshProductionEvidence, ProductionFreshnessError> {
+        if !self.admitted {
+            return Err(ProductionFreshnessError::RecordedRefusal);
+        }
+        let dependency = DependencyReceiptBinding::current()
+            .map_err(|_| ProductionFreshnessError::DependencyAuthorityUnavailable)?;
+        self.revalidate_at_with_dependency(ledger, current, fs_ledger::now_wall_ns(), dependency)
+    }
+
+    fn revalidate_at_with_dependency(
+        &self,
+        ledger: &Ledger,
+        current: &ProductionFreshnessContext<'_>,
+        observed_ns: i64,
+        dependency: DependencyReceiptBinding,
+    ) -> Result<FreshProductionEvidence, ProductionFreshnessError> {
+        if !self.admitted {
+            return Err(ProductionFreshnessError::RecordedRefusal);
+        }
+        if self.dependency_receipt_digest != Some(dependency.domain_digest)
+            || self.dependency_receipt_artifact != Some(dependency.artifact_hash)
+        {
+            return Err(ProductionFreshnessError::DependencyAuthorityChanged);
+        }
+        let Some(validated) =
+            crate::validate_recorded_production_run(ledger, self.op, Some(dependency))?
+        else {
+            return Err(ProductionFreshnessError::CorruptRecordedEvidence);
+        };
+        if validated.op != self.op
+            || validated.run_receipt != self.run_receipt
+            || Some(validated.baseline.content_hash()) != self.baseline_hash
+            || Some(validated.promotion_policy_receipt) != self.promotion_policy_receipt
+            || Some(validated.dependency_receipt_digest) != self.dependency_receipt_digest
+            || Some(validated.dependency_receipt_artifact) != self.dependency_receipt_artifact
+            || validated.recorded_at_ns != self.recorded_at_ns
+        {
+            return Err(ProductionFreshnessError::CorruptRecordedEvidence);
+        }
+        let dependency_decision = current.dependency_authority.verify(
+            validated.dependency_receipt_digest,
+            validated.dependency_receipt_artifact,
+        );
+        if dependency_decision.verdict() != DependencyReceiptVerdict::Authorized {
+            return Err(ProductionFreshnessError::DependencyAuthorityRevoked);
+        }
+        let current_build = crate::executable_build_identity()?;
+        if validated.build_identity != current_build {
+            return Err(ProductionFreshnessError::BuildDrift);
+        }
+        let fingerprint = validated.baseline.identity().fingerprint();
+        let Some(current_baseline) = current.baselines.for_fingerprint(fingerprint) else {
+            return Err(ProductionFreshnessError::BaselineUnavailable);
+        };
+        let Some(current_attestation) = current.baselines.attestation_for(fingerprint) else {
+            return Err(ProductionFreshnessError::PromotionAttestationChanged);
+        };
+        if current_baseline != &validated.baseline {
+            return Err(ProductionFreshnessError::BaselineReplaced);
+        }
+        if current_attestation != &validated.attestation {
+            return Err(ProductionFreshnessError::PromotionAttestationChanged);
+        }
+        if let Some(missing) = validated
+            .baseline
+            .provenance()
+            .source_receipts()
+            .iter()
+            .find(|receipt| !current.retained_sources.contains(receipt))
+        {
+            return Err(ProductionFreshnessError::SourceReceiptUnavailable(*missing));
+        }
+        let decision = validated
+            .baseline
+            .authority_verdict(Some(&validated.attestation), current.authority);
+        if decision.verdict() != crate::KeyVerdict::Authorized {
+            return Err(ProductionFreshnessError::PromotionAuthorityRefused {
+                verdict: decision.verdict(),
+            });
+        }
+        if decision.policy_receipt() != validated.promotion_policy_receipt {
+            return Err(ProductionFreshnessError::PromotionPolicyChanged);
+        }
+        if observed_ns < validated.recorded_at_ns {
+            return Err(ProductionFreshnessError::ClockRollback {
+                recorded_at_ns: validated.recorded_at_ns,
+                observed_ns,
+            });
+        }
+        let age_ns = observed_ns.saturating_sub(validated.recorded_at_ns);
+        if age_ns > crate::STALENESS_MAX_AGE_NS {
+            return Err(ProductionFreshnessError::Expired { age_ns });
+        }
+        Ok(FreshProductionEvidence {
+            op: validated.op,
+            run_receipt: validated.run_receipt,
+            baseline_authority_fingerprint: validated.promotion_policy_receipt,
+            dependency_authority_fingerprint: dependency_decision.policy_receipt(),
+            recorded_at_ns: validated.recorded_at_ns,
+            revalidated_at_ns: observed_ns,
+        })
+    }
+
+    #[cfg(test)]
+    fn revalidate_at_for_test(
+        &self,
+        ledger: &Ledger,
+        current: &ProductionFreshnessContext<'_>,
+        observed_ns: i64,
+        dependency: DependencyReceiptBinding,
+    ) -> Result<FreshProductionEvidence, ProductionFreshnessError> {
+        self.revalidate_at_with_dependency(ledger, current, observed_ns, dependency)
+    }
+}
+
+/// Positive exact-operation production evidence that was fresh at
+/// [`Self::revalidated_at_ns`]. This is a point-in-time receipt, not a lease:
+/// later citation must revalidate again so intervening revocation or expiry is
+/// observed. There is no public constructor and the type is deliberately
+/// neither `Clone` nor `Copy`.
+/// A committed operation id (or even a [`RecordedProductionRun`]) cannot stand
+/// in for the positive type:
+///
+/// ```compile_fail
+/// use fs_roofline::production::FreshProductionEvidence;
+/// let bare_operation_id: i64 = 7;
+/// let _: FreshProductionEvidence = bare_operation_id;
+/// ```
+///
+/// ```compile_fail
+/// use fs_roofline::production::{FreshProductionEvidence, RecordedProductionRun};
+/// fn cite(_: &FreshProductionEvidence) {}
+/// fn recorded_is_not_fresh(recorded: &RecordedProductionRun) {
+///     cite(recorded);
+/// }
+/// ```
+#[derive(Debug)]
+pub struct FreshProductionEvidence {
+    op: i64,
+    run_receipt: fs_blake3::ContentHash,
+    baseline_authority_fingerprint: fs_blake3::ContentHash,
+    dependency_authority_fingerprint: fs_blake3::ContentHash,
+    recorded_at_ns: i64,
+    revalidated_at_ns: i64,
+}
+
+impl FreshProductionEvidence {
+    /// Exact successful production operation proved by this value.
+    #[must_use]
+    pub const fn op_id(&self) -> i64 {
+        self.op
+    }
+
+    /// Finalized identity of the exact baseline and ordered result manifest.
+    #[must_use]
+    pub const fn run_receipt(&self) -> fs_blake3::ContentHash {
+        self.run_receipt
+    }
+
+    /// Promotion-policy fingerprint sampled by the live revalidation.
+    #[must_use]
+    pub const fn baseline_authority_fingerprint(&self) -> fs_blake3::ContentHash {
+        self.baseline_authority_fingerprint
+    }
+
+    /// Dependency-policy fingerprint sampled by the live revalidation.
+    #[must_use]
+    pub const fn dependency_authority_fingerprint(&self) -> fs_blake3::ContentHash {
+        self.dependency_authority_fingerprint
+    }
+
+    /// Ledgered completion time authenticated from the exact operation.
+    #[must_use]
+    pub const fn recorded_at_ns(&self) -> i64 {
+        self.recorded_at_ns
+    }
+
+    /// Live wall-clock observation used for rollback and expiry admission.
+    #[must_use]
+    pub const fn revalidated_at_ns(&self) -> i64 {
+        self.revalidated_at_ns
     }
 }
 
@@ -537,15 +1193,22 @@ impl ProductionRun {
         self.admission.baseline_hash()
     }
 
-    /// Record the run atomically, consuming it. The operation `ir` carries
+    /// Record the run atomically, consuming it, and return a neutral typed
+    /// receipt. The operation `ir` carries
     /// `"protocol":"production-v3"`, the per-run nonce, content hashes of
-    /// both observed axis receipts, and dependency-receipt provenance.
+    /// both observed axis receipts, and dependency-receipt provenance. This
+    /// does not claim freshness; callers must explicitly invoke
+    /// [`RecordedProductionRun::revalidate`].
     ///
     /// # Errors
     /// Ledger errors propagate and roll back the whole write set; the run is
     /// consumed either way (a failed transaction cannot be replayed into a
     /// different ledger with edited results).
-    pub fn record(mut self, ledger: &Ledger) -> Result<i64, LedgerError> {
+    pub fn record(mut self, ledger: &Ledger) -> Result<RecordedProductionRun, LedgerError> {
+        let run_receipt = self.finalized.receipt_identity();
+        let baseline_hash = self.admission.baseline_hash();
+        let promotion_policy_receipt = self.admission.authority_policy_receipt();
+        let dependency = self.citation_authority.receipt();
         let protocol_fields = match self.citation_authority {
             CitationAuthority::Receipt(binding) => format!(
                 "{PRODUCTION_PROTOCOL_FIELD},\"run_nonce\":\"{}\",\"pre_axes_receipt\":\"{}\",\"post_axes_receipt\":\"{}\",\"dependency_graph_evidence\":\"operator-observed-receipt\",\"dependency_receipt_digest\":\"{}\",\"dependency_receipt_artifact\":\"{}\"",
@@ -563,7 +1226,7 @@ impl ProductionRun {
                 json_escape(reason),
             ),
         };
-        record_run_with_protocol(
+        let recorded = record_run_with_protocol(
             ledger,
             &self.axes,
             &self.post_axes,
@@ -575,7 +1238,17 @@ impl ProductionRun {
             self.citation_authority.refusal(),
             crate::EvidenceNamespace::Production,
             Some(self.build_identity),
-        )
+        )?;
+        Ok(RecordedProductionRun {
+            op: recorded.op,
+            run_receipt,
+            baseline_hash,
+            promotion_policy_receipt,
+            dependency_receipt_digest: dependency.map(|binding| binding.domain_digest),
+            dependency_receipt_artifact: dependency.map(|binding| binding.artifact_hash),
+            recorded_at_ns: recorded.recorded_at_ns,
+            admitted: recorded.admitted,
+        })
     }
 }
 
@@ -738,6 +1411,7 @@ impl ReportOnlyProductionRun {
             crate::EvidenceNamespace::Custom,
             Some(self.build_identity),
         )
+        .map(|recorded| recorded.op)
     }
 }
 
@@ -796,6 +1470,7 @@ fn mint_nonce(axes: &MachineAxes) -> fs_blake3::ContentHash {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::BTreeSet;
     use std::rc::Rc;
 
     use super::*;
@@ -885,6 +1560,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dependency_authority_policy_identity_fields_move_independently() {
+        let input = DependencyAuthorityPolicyIdentityInput {
+            canonical_bytes: b"",
+        };
+        let current = dependency_authority_policy_receipt(input.canonical_bytes);
+        let changed_domain = dependency_authority_policy_receipt_with_domain(
+            "frankensim.fs-roofline.dependency-authority-policy-shadow.v1",
+            &input,
+        );
+        let changed_bytes = dependency_authority_policy_receipt(b"builtin\trevoked\n");
+        assert_ne!(current, changed_domain, "the digest domain is semantic");
+        assert_ne!(
+            current, changed_bytes,
+            "the exact policy bytes are semantic"
+        );
+    }
+
+    #[test]
+    fn dependency_authority_policy_identity_versions_fail_closed() {
+        assert_eq!(DEPENDENCY_AUTHORITY_POLICY_IDENTITY_VERSION, 1);
+        assert!(DEPENDENCY_AUTHORITY_POLICY_DOMAIN.ends_with(".v1"));
+        let input = DependencyAuthorityPolicyIdentityInput {
+            canonical_bytes: b"",
+        };
+        let current = dependency_authority_policy_receipt(input.canonical_bytes);
+        let future = dependency_authority_policy_receipt_with_domain(
+            "frankensim.fs-roofline.dependency-authority-policy.v2",
+            &input,
+        );
+        let configured = ConfiguredDependencyReceiptAuthority::from_text("")
+            .expect("empty no-revocations policy is canonical");
+        assert_eq!(configured.policy_receipt(), current);
+        assert_ne!(configured.policy_receipt(), future);
+    }
+
     fn trusted_baseline(axes: &MachineAxes) -> (BaselineAxes, BaselineIdentity) {
         let identity =
             BaselineIdentity::current(axes, "test-firmware").expect("valid synthetic identity");
@@ -924,10 +1635,7 @@ mod tests {
         identity: &BaselineIdentity,
         now_day: u64,
     ) -> AttestedAxisBaselinePolicy {
-        let policy_receipt = fs_blake3::hash_domain(
-            "fs-roofline.test-promotion-policy.v1",
-            baseline.content_hash().as_bytes(),
-        );
+        let policy_receipt = test_promotion_policy_receipt(baseline);
         AttestedAxisBaselinePolicy::from_verified(
             baseline.clone(),
             identity.clone(),
@@ -936,6 +1644,98 @@ mod tests {
             baseline.provenance().source_receipts().to_vec(),
             crate::PromotionAuthorityDecision::new(crate::KeyVerdict::Authorized, policy_receipt),
         )
+    }
+
+    fn test_promotion_policy_receipt(baseline: &BaselineAxes) -> fs_blake3::ContentHash {
+        fs_blake3::hash_domain(
+            "fs-roofline.test-promotion-policy.v1",
+            baseline.content_hash().as_bytes(),
+        )
+    }
+
+    struct LiveTestAuthority {
+        calls: Cell<usize>,
+        verdict: crate::KeyVerdict,
+        policy_receipt: fs_blake3::ContentHash,
+    }
+
+    struct FlippingTestAuthority {
+        calls: Cell<usize>,
+        admitted_policy: fs_blake3::ContentHash,
+        revoked_policy: fs_blake3::ContentHash,
+    }
+
+    impl crate::PromotionAuthorityVerifier for FlippingTestAuthority {
+        fn verify(
+            &self,
+            _key_id: &str,
+            _signature: &str,
+            _message: &[u8],
+        ) -> crate::PromotionAuthorityDecision {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if call == 0 {
+                crate::PromotionAuthorityDecision::new(
+                    crate::KeyVerdict::Authorized,
+                    self.admitted_policy,
+                )
+            } else {
+                crate::PromotionAuthorityDecision::new(
+                    crate::KeyVerdict::RevokedKey,
+                    self.revoked_policy,
+                )
+            }
+        }
+    }
+
+    impl LiveTestAuthority {
+        fn new(verdict: crate::KeyVerdict, policy_receipt: fs_blake3::ContentHash) -> Self {
+            Self {
+                calls: Cell::new(0),
+                verdict,
+                policy_receipt,
+            }
+        }
+    }
+
+    impl crate::PromotionAuthorityVerifier for LiveTestAuthority {
+        fn verify(
+            &self,
+            _key_id: &str,
+            _signature: &str,
+            _message: &[u8],
+        ) -> crate::PromotionAuthorityDecision {
+            self.calls.set(self.calls.get() + 1);
+            crate::PromotionAuthorityDecision::new(self.verdict, self.policy_receipt)
+        }
+    }
+
+    fn live_baseline_store(
+        baseline: &BaselineAxes,
+    ) -> (
+        crate::AttestedBaselineStore,
+        BTreeSet<fs_blake3::ContentHash>,
+    ) {
+        let retained: BTreeSet<_> = baseline
+            .provenance()
+            .source_receipts()
+            .iter()
+            .copied()
+            .collect();
+        let authority = LiveTestAuthority::new(
+            crate::KeyVerdict::Authorized,
+            test_promotion_policy_receipt(baseline),
+        );
+        let mut store = crate::AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                crate::PromotionAttestation::new("test-authority", "test-signature"),
+                &authority,
+                &retained,
+            )
+            .expect("authorized live baseline fixture");
+        (store, retained)
     }
 
     fn test_day() -> u64 {
@@ -962,6 +1762,49 @@ mod tests {
 
     const TEST_DEPGRAPH_RECEIPT: &str = "{\"schema\":\"fs-roofline-synthetic-dependency-receipt-v1\",\"purpose\":\"unit-test-only\"}";
     const SUBSTITUTE_DEPGRAPH_RECEIPT: &str = "{\"schema\":\"fs-roofline-synthetic-dependency-receipt-v1\",\"purpose\":\"substitution-attack\"}";
+    static TEST_DEPENDENCY_AUTHORITY: TestDependencyAuthority = TestDependencyAuthority;
+
+    struct TestDependencyAuthority;
+
+    impl DependencyReceiptAuthority for TestDependencyAuthority {
+        fn verify(
+            &self,
+            _digest: fs_blake3::ContentHash,
+            _artifact: fs_blake3::ContentHash,
+        ) -> DependencyReceiptDecision {
+            DependencyReceiptDecision::new(
+                DependencyReceiptVerdict::Authorized,
+                dependency_authority_policy_receipt(b"test\tallow-all\n"),
+            )
+        }
+    }
+
+    struct LiveTestDependencyAuthority {
+        calls: Cell<usize>,
+        verdict: DependencyReceiptVerdict,
+        policy_receipt: fs_blake3::ContentHash,
+    }
+
+    impl LiveTestDependencyAuthority {
+        fn new(verdict: DependencyReceiptVerdict, policy_receipt: fs_blake3::ContentHash) -> Self {
+            Self {
+                calls: Cell::new(0),
+                verdict,
+                policy_receipt,
+            }
+        }
+    }
+
+    impl DependencyReceiptAuthority for LiveTestDependencyAuthority {
+        fn verify(
+            &self,
+            _digest: fs_blake3::ContentHash,
+            _artifact: fs_blake3::ContentHash,
+        ) -> DependencyReceiptDecision {
+            self.calls.set(self.calls.get() + 1);
+            DependencyReceiptDecision::new(self.verdict, self.policy_receipt)
+        }
+    }
 
     fn test_receipt_binding() -> DependencyReceiptBinding {
         let digest = fs_blake3::hash_domain(
@@ -1407,10 +2250,31 @@ mod tests {
         let version = run.results()[0].version.clone();
         let fingerprint = run.axes().fingerprint;
         let baseline_hash = Some(baseline.content_hash());
-        let op = run.record(&ledger).expect("record rejection");
+        let recorded = run.record(&ledger).expect("record rejection");
+        let op = recorded.op_id();
         let ir = ledger.op(op).unwrap().expect("op row").ir;
         assert!(ir.contains("\"protocol\":\"production-v3\""));
         assert!(ir.contains("\"admitted\":false"));
+        let (store, retained) = live_baseline_store(&baseline);
+        let authority = LiveTestAuthority::new(
+            crate::KeyVerdict::Authorized,
+            test_promotion_policy_receipt(&baseline),
+        );
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &authority,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            recorded.revalidate_at_for_test(
+                &ledger,
+                &current,
+                recorded.recorded_at_ns() + 1,
+                test_receipt_binding(),
+            ),
+            Err(ProductionFreshnessError::RecordedRefusal)
+        ));
         // A rejected run publishes no tune evidence.
         assert_eq!(
             staleness_at(&ledger, &kernel, &version, fingerprint, baseline_hash, 1)
@@ -1473,7 +2337,8 @@ mod tests {
 
         let db = temp_db("salt-refusal");
         let ledger = Ledger::open(&db).expect("open ledger");
-        let op = run.record(&ledger).expect("record structured refusal");
+        let recorded = run.record(&ledger).expect("record structured refusal");
+        let op = recorded.op_id();
         let row = ledger.op(op).unwrap().expect("refusal op");
         assert!(row.ir.contains("\"measurement_admitted\":true"));
         assert!(row.ir.contains("\"admitted\":false"));
@@ -1532,6 +2397,10 @@ mod tests {
         assert!(row.ir.contains("\"measurement_admitted\":true"));
         assert!(row.ir.contains("\"admitted\":false"));
         assert_eq!(row.outcome.as_deref(), Some("error"));
+        assert!(matches!(
+            RecordedProductionRun::load(&ledger, op),
+            Err(ProductionFreshnessError::CorruptRecordedEvidence)
+        ));
         assert!(
             row.diag
                 .as_deref()
@@ -1670,7 +2539,8 @@ mod tests {
         );
 
         let ledger = Ledger::open(":memory:").expect("in-memory ledger");
-        let op = run.record(&ledger).expect("record exact snapshot");
+        let recorded = run.record(&ledger).expect("record exact snapshot");
+        let op = recorded.op_id();
         assert_eq!(authority.calls.get(), 1, "recording never reverify");
         let ir = ledger.op(op).unwrap().expect("production op").ir;
         assert!(
@@ -1712,9 +2582,10 @@ mod tests {
         };
 
         let ledger = Ledger::open(":memory:").expect("in-memory ledger");
-        let op = run
+        let recorded = run
             .record(&ledger)
             .expect("record delayed structured refusal");
+        let op = recorded.op_id();
         let row = ledger.op(op).unwrap().expect("delayed refusal op");
         assert!(row.ir.contains("\"measurement_admitted\":false"));
         assert!(row.ir.contains("\"admitted\":false"));
@@ -1814,7 +2685,8 @@ mod tests {
         let ledger = Ledger::open(&db).expect("open ledger");
         let kernel = run.results()[0].kernel.clone();
         let version = run.results()[0].version.clone();
-        let op = run.record(&ledger).expect("record production run");
+        let recorded = run.record(&ledger).expect("record production run");
+        let op = recorded.op_id();
         let row = ledger.op(op).unwrap().expect("op row");
         let recorded_at = row.t_end.expect("finished op");
         assert!(row.ir.contains("\"protocol\":\"production-v3\""));
@@ -1966,6 +2838,7 @@ mod tests {
     struct RecordedManifestRun {
         ledger: Ledger,
         baseline: BaselineAxes,
+        recorded: RecordedProductionRun,
         kernels: Vec<(String, String)>,
         recorded_at: i64,
         dependency: DependencyReceiptBinding,
@@ -1993,7 +2866,8 @@ mod tests {
             .iter()
             .map(|result| (result.kernel.clone(), result.version.clone()))
             .collect();
-        let op = run.record(&ledger).expect("record sealed manifest fixture");
+        let recorded = run.record(&ledger).expect("record sealed manifest fixture");
+        let op = recorded.op_id();
         let recorded_at = ledger
             .op(op)
             .unwrap()
@@ -2003,10 +2877,416 @@ mod tests {
         RecordedManifestRun {
             ledger,
             baseline,
+            recorded,
             kernels,
             recorded_at,
             dependency: test_receipt_binding(),
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One table-like live-authority refusal matrix shares one sealed fixture.
+    fn typed_record_requires_exact_live_authority_before_it_becomes_fresh() {
+        let db = temp_db("typed-live-authority");
+        let run = recorded_manifest_run(&db);
+        let (store, retained) = live_baseline_store(&run.baseline);
+        let policy_receipt = test_promotion_policy_receipt(&run.baseline);
+
+        let loaded = RecordedProductionRun::load(&run.ledger, run.recorded.op_id())
+            .expect("existing sealed operation reconstructs a typed receipt");
+        assert_eq!(loaded.op_id(), run.recorded.op_id());
+        assert_eq!(loaded.run_receipt(), run.recorded.run_receipt());
+        assert_eq!(
+            loaded.baseline_authority_fingerprint(),
+            Some(policy_receipt)
+        );
+        assert_eq!(
+            loaded.dependency_receipt_digest(),
+            Some(run.dependency.domain_digest)
+        );
+        assert_eq!(loaded.recorded_at_ns(), run.recorded_at);
+
+        let authority = LiveTestAuthority::new(crate::KeyVerdict::Authorized, policy_receipt);
+        let dependency_policy_receipt =
+            fs_blake3::hash_domain("fs-roofline.test-live-dependency-policy.v1", b"authorized");
+        let dependency_authority = LiveTestDependencyAuthority::new(
+            DependencyReceiptVerdict::Authorized,
+            dependency_policy_receipt,
+        );
+        let current =
+            ProductionFreshnessContext::new(&store, &authority, &retained, &dependency_authority);
+        let fresh: FreshProductionEvidence = run
+            .recorded
+            .revalidate_at_for_test(&run.ledger, &current, run.recorded_at + 1, run.dependency)
+            .expect("one exact live recheck mints positive evidence");
+        assert_eq!(authority.calls.get(), 1, "one named live authority sample");
+        assert_eq!(
+            dependency_authority.calls.get(),
+            1,
+            "one named dependency-authority sample"
+        );
+        assert_eq!(fresh.op_id(), run.recorded.op_id());
+        assert_eq!(fresh.run_receipt(), run.recorded.run_receipt());
+        assert_eq!(fresh.baseline_authority_fingerprint(), policy_receipt);
+        assert_eq!(
+            fresh.dependency_authority_fingerprint(),
+            dependency_policy_receipt
+        );
+        assert_ne!(
+            fresh.dependency_authority_fingerprint(),
+            run.dependency.domain_digest,
+            "live authority identity must not be confused with evidence identity"
+        );
+        assert_eq!(fresh.recorded_at_ns(), run.recorded_at);
+        assert_eq!(fresh.revalidated_at_ns(), run.recorded_at + 1);
+
+        let revoked = LiveTestAuthority::new(crate::KeyVerdict::RevokedKey, policy_receipt);
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &revoked,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::PromotionAuthorityRefused {
+                verdict: crate::KeyVerdict::RevokedKey
+            })
+        ));
+        assert_eq!(revoked.calls.get(), 1, "revocation is sampled once");
+
+        let rotated_policy = fs_blake3::hash_domain(
+            "fs-roofline.test-promotion-policy.v2",
+            run.baseline.content_hash().as_bytes(),
+        );
+        let rotated = LiveTestAuthority::new(crate::KeyVerdict::Authorized, rotated_policy);
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &rotated,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::PromotionPolicyChanged)
+        ));
+        assert_eq!(rotated.calls.get(), 1, "policy rotation is sampled once");
+
+        let authority = LiveTestAuthority::new(crate::KeyVerdict::Authorized, policy_receipt);
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &authority,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at - 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::ClockRollback { .. })
+        ));
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + crate::STALENESS_MAX_AGE_NS + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::Expired { .. })
+        ));
+
+        let substitute_digest = fs_blake3::hash_domain(
+            fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN,
+            SUBSTITUTE_DEPGRAPH_RECEIPT.as_bytes(),
+        );
+        let substitute =
+            DependencyReceiptBinding::from_parts(SUBSTITUTE_DEPGRAPH_RECEIPT, substitute_digest)
+                .expect("substitute dependency receipt is internally consistent");
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                substitute,
+            ),
+            Err(ProductionFreshnessError::DependencyAuthorityChanged)
+        ));
+
+        let revoked_dependency = LiveTestDependencyAuthority::new(
+            DependencyReceiptVerdict::Revoked,
+            fs_blake3::hash_domain("fs-roofline.test-live-dependency-policy.v1", b"revoked"),
+        );
+        let current =
+            ProductionFreshnessContext::new(&store, &authority, &retained, &revoked_dependency);
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::DependencyAuthorityRevoked)
+        ));
+        assert_eq!(
+            revoked_dependency.calls.get(),
+            1,
+            "dependency revocation is sampled exactly once"
+        );
+
+        let missing_source = *retained.iter().next().expect("fixture retains sources");
+        let mut incomplete_retention = retained.clone();
+        assert!(incomplete_retention.remove(&missing_source));
+        let authority = LiveTestAuthority::new(crate::KeyVerdict::Authorized, policy_receipt);
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &authority,
+            &incomplete_retention,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::SourceReceiptUnavailable(receipt))
+                if receipt == missing_source
+        ));
+
+        let mut replacement_axes = synthetic_axes(0xBEEF);
+        replacement_axes.bandwidth_single_gbs *= 0.99;
+        let (replacement, _) = trusted_baseline(&replacement_axes);
+        assert_ne!(replacement.content_hash(), run.baseline.content_hash());
+        let (replacement_store, replacement_retained) = live_baseline_store(&replacement);
+        let replacement_authority = LiveTestAuthority::new(
+            crate::KeyVerdict::Authorized,
+            test_promotion_policy_receipt(&replacement),
+        );
+        let current = ProductionFreshnessContext::new(
+            &replacement_store,
+            &replacement_authority,
+            &replacement_retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::BaselineReplaced)
+        ));
+        cleanup_db(&db);
+    }
+
+    #[test]
+    fn exact_typed_receipt_refuses_manifest_tamper_even_with_other_fresh_history() {
+        let db = temp_db("typed-manifest-tamper");
+        let run = recorded_manifest_run(&db);
+        let other = recorded_manifest_run(&db);
+        assert_ne!(run.recorded.op_id(), other.recorded.op_id());
+        let (store, retained) = live_baseline_store(&run.baseline);
+        let authority = LiveTestAuthority::new(
+            crate::KeyVerdict::Authorized,
+            test_promotion_policy_receipt(&run.baseline),
+        );
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &authority,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        let row = run
+            .ledger
+            .tune_rows(&run.kernels[0].0)
+            .expect("read both exact-op rows")
+            .into_iter()
+            .find(|row| {
+                crate::parse_roofline_row_params(&row.params)
+                    .is_some_and(|params| params.op == run.recorded.op_id())
+            })
+            .expect("find the row owned by the receipt under attack");
+        run.ledger
+            .tune_put(
+                &row.kernel,
+                &row.shape_class,
+                &row.machine,
+                &row.params,
+                "{}",
+            )
+            .expect("inject manifest-member payload tamper");
+        assert!(matches!(
+            run.recorded.revalidate_at_for_test(
+                &run.ledger,
+                &current,
+                run.recorded_at + 1,
+                run.dependency,
+            ),
+            Err(ProductionFreshnessError::CorruptRecordedEvidence)
+        ));
+        assert_eq!(
+            authority.calls.get(),
+            0,
+            "corrupt exact evidence fails before consulting live authority"
+        );
+        assert_eq!(
+            manifest_probe(&other, &other.kernels[0].0, &other.kernels[0].1),
+            Staleness::Fresh,
+            "the sibling honest operation remains fresh but cannot cover the damaged receipt"
+        );
+        cleanup_db(&db);
+    }
+
+    #[test]
+    fn mutable_authority_is_sampled_once_per_admission_and_named_revalidation() {
+        let db = temp_db("flipping-live-authority");
+        let ledger = Ledger::open(&db).expect("open flipping-authority ledger");
+        let axes = synthetic_axes(0xF11F);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let (store, retained) = live_baseline_store(&baseline);
+        let admitted_policy = test_promotion_policy_receipt(&baseline);
+        let authority = FlippingTestAuthority {
+            calls: Cell::new(0),
+            admitted_policy,
+            revoked_policy: fs_blake3::hash_domain(
+                "fs-roofline.test-revoked-policy.v1",
+                baseline.content_hash().as_bytes(),
+            ),
+        };
+        let policy = store
+            .policy_for_run_at(&identity, test_day(), &authority, &retained)
+            .expect("first atomic authority sample admits the run");
+        assert_eq!(authority.calls.get(), 1);
+        let post = axes.clone();
+        let run = ProductionProbe::from_observed(axes)
+            .run_with_parts_and_authority(
+                CONFIG,
+                policy,
+                default_registry(1 << 10).expect("bounded registry fixture"),
+                move || post,
+                test_receipt_authority(),
+            )
+            .expect("sealed run reuses the immutable authority snapshot");
+        assert_eq!(
+            authority.calls.get(),
+            1,
+            "measurement/finalization never reverify"
+        );
+        let recorded = run
+            .record(&ledger)
+            .expect("record frozen authority receipt");
+        assert_eq!(authority.calls.get(), 1, "recording never reverify");
+        let current = ProductionFreshnessContext::new(
+            &store,
+            &authority,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            recorded.revalidate_at_for_test(
+                &ledger,
+                &current,
+                recorded.recorded_at_ns() + 1,
+                test_receipt_binding(),
+            ),
+            Err(ProductionFreshnessError::PromotionAuthorityRefused {
+                verdict: crate::KeyVerdict::RevokedKey
+            })
+        ));
+        assert_eq!(
+            authority.calls.get(),
+            2,
+            "the only second sample is the explicitly named live revalidation"
+        );
+        cleanup_db(&db);
+    }
+
+    #[test]
+    fn key_rotation_recovers_only_after_new_attestation_and_new_recording() {
+        let db = temp_db("authority-rotation-repromotion");
+        let old = recorded_manifest_run(&db);
+        let rotated_policy = fs_blake3::hash_domain(
+            "fs-roofline.test-rotated-authority-policy.v1",
+            old.baseline.content_hash().as_bytes(),
+        );
+        let rotated_authority =
+            LiveTestAuthority::new(crate::KeyVerdict::Authorized, rotated_policy);
+        let retained: BTreeSet<_> = old
+            .baseline
+            .provenance()
+            .source_receipts()
+            .iter()
+            .copied()
+            .collect();
+        let mut rotated_store = crate::AttestedBaselineStore::new();
+        rotated_store
+            .admit_verified(
+                old.baseline.clone(),
+                crate::PromotionAttestation::new("rotated-authority", "rotated-signature"),
+                &rotated_authority,
+                &retained,
+            )
+            .expect("same immutable baseline is re-endorsed under the rotated authority");
+        let rotated_current = ProductionFreshnessContext::new(
+            &rotated_store,
+            &rotated_authority,
+            &retained,
+            &TEST_DEPENDENCY_AUTHORITY,
+        );
+        assert!(matches!(
+            old.recorded.revalidate_at_for_test(
+                &old.ledger,
+                &rotated_current,
+                old.recorded_at + 1,
+                old.dependency,
+            ),
+            Err(ProductionFreshnessError::PromotionAttestationChanged)
+        ));
+
+        let identity = old.baseline.identity().clone();
+        let policy = rotated_store
+            .policy_for_run_at(&identity, test_day(), &rotated_authority, &retained)
+            .expect("rotated authority mints a new one-run policy");
+        let axes = synthetic_axes(0xBEEF);
+        let post = axes.clone();
+        let run = ProductionProbe::from_observed(axes)
+            .run_with_parts_and_authority(
+                CONFIG,
+                policy,
+                default_registry(1 << 10).expect("bounded registry fixture"),
+                move || post,
+                test_receipt_authority(),
+            )
+            .expect("new run freezes the rotated authority decision");
+        let recorded = run
+            .record(&old.ledger)
+            .expect("new run records under the rotated authority");
+        let fresh = recorded
+            .revalidate_at_for_test(
+                &old.ledger,
+                &rotated_current,
+                recorded.recorded_at_ns() + 1,
+                test_receipt_binding(),
+            )
+            .expect("newly attested and newly recorded evidence becomes Fresh");
+        assert_eq!(fresh.op_id(), recorded.op_id());
+        assert_eq!(fresh.baseline_authority_fingerprint(), rotated_policy);
+        cleanup_db(&db);
     }
 
     #[test]
@@ -2433,7 +3713,8 @@ mod tests {
                 test_receipt_authority(),
             )
             .expect("second sealed run");
-        let second_op = run.record(&first.ledger).expect("record second run");
+        let second = run.record(&first.ledger).expect("record second run");
+        let second_op = second.op_id();
         let rerecorded_at = first
             .ledger
             .op(second_op)

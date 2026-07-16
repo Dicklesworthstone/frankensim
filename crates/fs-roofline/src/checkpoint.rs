@@ -1846,7 +1846,8 @@ mod tests {
             .iter()
             .map(|result| (result.kernel.clone(), result.version.clone()))
             .collect();
-        let op = run.record(ledger).expect("record checkpoint fixture");
+        let recorded = run.record(ledger).expect("record checkpoint fixture");
+        let op = recorded.op_id();
         let recorded_at = ledger
             .op(op)
             .unwrap()

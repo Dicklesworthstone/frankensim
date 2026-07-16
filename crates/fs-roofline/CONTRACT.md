@@ -228,6 +228,11 @@ crates plus `std`.
   Freshness and retains the now-vacuous historical attacks as ignored source.
   Pre-manifest/dependency-receipt rows cannot prove current membership and are
   retired the same way; identical honest reruns stay `Fresh`.
+  `ProductionRun::record` now returns an opaque `RecordedProductionRun`, not a
+  bare operation id. Its exact-operation revalidator authenticates this one
+  op and every manifest member before sampling current trust roots; a different
+  fresh historical row cannot cover a damaged recorded receipt. Only that
+  named revalidation can mint opaque `FreshProductionEvidence`.
 - `kernels::default_registry` — the stable test/meta registry: fs-simd
   axpy/dot/sum (report-only bands in v0). `SeededSlowKernel` is the separate
   meta-test kernel claiming a band it cannot meet. Every built-in constructor
@@ -257,7 +262,14 @@ crates plus `std`.
 - `roofline` CLI bin — axes line, per-kernel JSONL, §14.1 coverage table,
   optional `--baseline <jsonl>`, `--firmware <identity>`,
   `--authority-policy <tsv>`, `--retained-receipts <lowerhex-lines>`, and
-  optional `--ledger` recording + composite staleness report. Plain stores are
+  `--dependency-authority-policy <strictly-sorted-lowerhex-lines>` (the exact
+  revoked dependency-receipt digests; an empty file explicitly means none), plus
+  optional `--ledger` recording + composite staleness report. Its final
+  receipt distinguishes `measured`, `recorded`, `revalidated_fresh`, and
+  `citable`, and names the exact dependency-authority policy receipt used by
+  Fresh evidence; row-level `Staleness::Fresh` is diagnostic and never alone
+  sets `citable:true`. A missing, malformed, or matching revocation policy
+  makes the final recorded receipt non-citable. Plain stores are
   auto-detected and always call `run_report_only`. An attested envelope calls
   `run` only when both strict, bounded configuration files parse and
   `policy_for_run` admits the exact machine. Missing, partial, malformed,
@@ -389,6 +401,18 @@ crates plus `std`.
     to one operation and projected by its lane-qualified diagnostic event. Any
     validation, write, re-read, edge, event receipt/count, operation, commit,
     or same-day revalidation failure is one atomic refusal.
+13. Recording, row freshness, and citable production evidence are distinct
+    states. `RecordedProductionRun::revalidate` pins the current attested
+    baseline store, promotion-authority verifier, retained-source inventory,
+    dependency receipt plus injected revocation authority, executable identity,
+    and live clock. It re-verifies
+    the recorded attestation exactly once, requires the original promotion
+    policy receipt, and obtains one atomic dependency verdict plus the exact
+    live revocation-policy receipt. Revocation, policy/key rotation, baseline or attestation
+    replacement, missing sources, dependency drift, build drift, rollback,
+    expiry, or exact-op tamper cannot construct `FreshProductionEvidence`.
+    Re-promotion recovers only through a newly admitted and newly recorded run;
+    it never launders an old receipt.
 
 ## Error model
 
@@ -533,12 +557,19 @@ store unchanged.
   and mints one owned policy. Missing records, edited envelopes, wrong authorization,
   unknown or revoked keys, missing sources, and identity drift are refusals.
   The resulting admission receipt freezes baseline, attestation, sources,
-  authority verdict, policy receipt, and probe pair. This snapshot proves the
-  decision made for that run; it does not provide later live revocation or
-  post-record freshness. The mint and consumed decision each read the system
-  epoch day; clock failure or a day-boundary mismatch freezes an unauthorized
-  snapshot. `AxisBaselinePolicy` stays structurally `candidate`
-  and never carries positive authority.
+  authority verdict, policy receipt, and probe pair. The snapshot alone proves
+  only the decision made for that run. Sealed production recording preserves
+  those exact bytes in `RecordedProductionRun`; its explicit revalidation
+  boundary adds later live revocation, policy, retained-source, dependency,
+  build, clock, and exact-ledger checks before minting positive evidence. The
+  dependency authority returns its verdict and policy receipt atomically; the
+  shipped CLI obtains that authority from a bounded canonical revocation-list
+  file, so deleting a digest re-authorizes it only through an auditable policy
+  rotation and adding the digest immediately refuses Fresh evidence.
+  mint and consumed decision each read the system epoch day; clock failure or
+  a day-boundary mismatch freezes an unauthorized snapshot.
+  `AxisBaselinePolicy` stays structurally `candidate` and never carries
+  positive authority.
 - The retained-source input is a protected operator declaration of hash
   membership, not a source-artifact reader. `fs-roofline` does not fetch or
   rehash the named bytes at admission time and makes no independent claim that

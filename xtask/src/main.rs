@@ -1294,15 +1294,18 @@ const CITABLE_PRODUCER_ALLOWLIST: &[CitableProducerSpec] = &[
     CitableProducerSpec {
         path: "crates/fs-roofline/src/bin/roofline.rs",
         owner: "main",
-        anchor: "fs-roofline-recorded-evidence-v1",
+        anchor: "fs-roofline-recorded-evidence-v2",
         mode: CitationFieldMode::PositiveCapable,
         authority_markers: &[
             concat!(
                 "let (citation_",
                 "eligible, admission_error) = run.evidence_admission();"
             ),
-            "let op = match run.record(&ledger)",
-            concat!("let mut citable = citation_", "eligible;"),
+            "let recorded = match run.record(&ledger)",
+            "let dependency_authority = load_dependency_authority(&args);",
+            ".revalidate(&ledger, &current)",
+            "dependency_authority_policy_receipt",
+            concat!("let citable = citation_", "eligible && revalidated_fresh;"),
         ],
         report_only_markers: &["Self::ReportOnly(run) => (false, run.admission_error())"],
     },

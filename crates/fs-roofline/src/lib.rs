@@ -449,6 +449,7 @@ pub struct AxisAdmissionSnapshot {
     tier: AxisAdmissionTier,
     receipt: String,
     baseline_hash: Option<fs_blake3::ContentHash>,
+    authority_policy_receipt: Option<fs_blake3::ContentHash>,
     verdict: BaselineVerdict,
     authority_admitted: bool,
     decision_day: Option<u64>,
@@ -484,6 +485,7 @@ impl AxisAdmissionSnapshot {
             tier: AxisAdmissionTier::Candidate,
             receipt,
             baseline_hash,
+            authority_policy_receipt: None,
             verdict,
             authority_admitted: false,
             decision_day: None,
@@ -528,6 +530,7 @@ impl AxisAdmissionSnapshot {
             tier: AxisAdmissionTier::Attested,
             receipt,
             baseline_hash: Some(baseline_hash),
+            authority_policy_receipt: Some(authority_decision.policy_receipt()),
             verdict,
             authority_admitted,
             decision_day,
@@ -550,6 +553,14 @@ impl AxisAdmissionSnapshot {
     #[must_use]
     pub fn baseline_hash(&self) -> Option<fs_blake3::ContentHash> {
         self.baseline_hash
+    }
+
+    /// Exact immutable promotion-policy identity frozen into this admission.
+    /// Candidate snapshots have no promotion authority and therefore return
+    /// `None`.
+    #[must_use]
+    pub fn authority_policy_receipt(&self) -> Option<fs_blake3::ContentHash> {
+        self.authority_policy_receipt
     }
 
     /// True only when an attested tier carried a well-formed attestation, an
@@ -3207,6 +3218,16 @@ pub fn record_run(
         EvidenceNamespace::Custom,
         None,
     )
+    .map(|recorded| recorded.op)
+}
+
+/// Exact outcome retained from the all-or-nothing ledger transaction.
+/// Returning the completion time directly avoids a fallible read after a
+/// durable commit when the sealed production wrapper mints its typed receipt.
+pub(crate) struct RecordedRunCommit {
+    pub(crate) op: i64,
+    pub(crate) recorded_at_ns: i64,
+    pub(crate) admitted: bool,
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one auditable all-or-nothing evidence transaction
@@ -3222,7 +3243,7 @@ pub(crate) fn record_run_with_protocol(
     citation_refusal: Option<&str>,
     evidence_namespace: EvidenceNamespace,
     captured_build_identity: Option<fs_blake3::ContentHash>,
-) -> Result<i64, LedgerError> {
+) -> Result<RecordedRunCommit, LedgerError> {
     let live_day_error = admission.live_day_error();
     let measurement_error = run_admission_error_for_snapshot_with_live_error(
         axes,
@@ -3287,7 +3308,7 @@ pub(crate) fn record_run_with_protocol(
         run_result_manifest_json(results),
     );
     ledger.begin()?;
-    let write_result: Result<i64, LedgerError> = (|| {
+    let write_result: Result<RecordedRunCommit, LedgerError> = (|| {
         let op = ledger.begin_op(Some(b"roofline"), &ir, &explicits, now_wall_ns())?;
         if run_valid && let Some(binding) = dependency_receipt {
             let stored = ledger.put_artifact(
@@ -3420,6 +3441,11 @@ pub(crate) fn record_run_with_protocol(
                 });
             }
             ledger.finish_op(op, OpOutcome::Ok, None, completed_at)?;
+            Ok(RecordedRunCommit {
+                op,
+                recorded_at_ns: completed_at,
+                admitted: true,
+            })
         } else {
             let reason = admission_error
                 .as_deref()
@@ -3438,18 +3464,23 @@ pub(crate) fn record_run_with_protocol(
                 "{{\"code\":\"roofline_evidence_rejected\",\"reason\":\"{}\"}}",
                 json_escape(reason)
             );
-            ledger.finish_op(op, OpOutcome::Error, Some(&diagnostic), now_wall_ns())?;
+            let completed_at = now_wall_ns();
+            ledger.finish_op(op, OpOutcome::Error, Some(&diagnostic), completed_at)?;
+            Ok(RecordedRunCommit {
+                op,
+                recorded_at_ns: completed_at,
+                admitted: false,
+            })
         }
-        Ok(op)
     })();
     match write_result {
-        Ok(op) => match ledger.commit() {
+        Ok(recorded) => match ledger.commit() {
             Ok(()) => {
                 finalized.consumed = true;
                 for result in results.iter_mut() {
                     result.pending_tune_publication = None;
                 }
-                Ok(op)
+                Ok(recorded)
             }
             Err(error) => {
                 let _ = ledger.rollback();
@@ -3855,7 +3886,9 @@ struct BaselineReceiptView<'a> {
     post: &'a str,
     baseline_hash: fs_blake3::ContentHash,
     baseline: &'a str,
+    attestation: &'a str,
     required_sources: Vec<fs_blake3::ContentHash>,
+    authority_policy_receipt: fs_blake3::ContentHash,
 }
 
 fn parse_baseline_receipt_view(text: &str) -> Option<BaselineReceiptView<'_>> {
@@ -3951,7 +3984,9 @@ fn parse_baseline_receipt_view(text: &str) -> Option<BaselineReceiptView<'_>> {
         post,
         baseline_hash: parsed_baseline_hash,
         baseline,
+        attestation,
         required_sources: parsed_sources,
+        authority_policy_receipt: parsed_policy_receipt,
     })
 }
 
@@ -4230,6 +4265,137 @@ fn validate_roofline_row(
         ),
         dependency_receipt_digest: protocol.dependency_receipt_digest,
         dependency_receipt_artifact: protocol.dependency_receipt_artifact,
+    }))
+}
+
+/// Fully reconstructed binding for one exact sealed production operation.
+/// This is deliberately crate-private: only the opaque production receipt can
+/// turn it into public positive evidence.
+pub(crate) struct ValidatedRecordedProductionRun {
+    pub(crate) op: i64,
+    pub(crate) run_receipt: fs_blake3::ContentHash,
+    pub(crate) baseline: BaselineAxes,
+    pub(crate) attestation: PromotionAttestation,
+    pub(crate) promotion_policy_receipt: fs_blake3::ContentHash,
+    pub(crate) dependency_receipt_digest: fs_blake3::ContentHash,
+    pub(crate) dependency_receipt_artifact: fs_blake3::ContentHash,
+    pub(crate) recorded_at_ns: i64,
+    pub(crate) build_identity: fs_blake3::ContentHash,
+}
+
+/// Re-read and authenticate this exact production operation and every member
+/// of its ordered result manifest. Unlike the history-level staleness query,
+/// another honest row cannot satisfy this check on behalf of `op_id`.
+#[allow(clippy::too_many_lines)] // One fail-closed exact-op authentication pipeline is auditable in order.
+pub(crate) fn validate_recorded_production_run(
+    ledger: &Ledger,
+    op_id: i64,
+    expected_dependency: Option<DependencyReceiptBinding>,
+) -> Result<Option<ValidatedRecordedProductionRun>, LedgerError> {
+    let op = match ledger.op(op_id) {
+        Ok(Some(op)) => op,
+        Ok(None) | Err(LedgerError::OpCorrupt { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(recorded_at_ns) = op.t_end else {
+        return Ok(None);
+    };
+    let Some(protocol) = parse_canonical_production_op(&op.ir) else {
+        return Ok(None);
+    };
+    let Some(baseline_view) = parse_baseline_receipt_view(&protocol.baseline_admission) else {
+        return Ok(None);
+    };
+    let transport = format!(
+        "{{\"record\":{},\"attestation\":{}}}\n",
+        baseline_view.baseline, baseline_view.attestation
+    );
+    let Ok(attested_store) = AttestedBaselineStore::from_jsonl(&transport) else {
+        return Ok(None);
+    };
+    let Some(baseline) = attested_store
+        .for_fingerprint(protocol.fingerprint)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let Some(attestation) = attested_store
+        .attestation_for(protocol.fingerprint)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let Some(validated_axes) =
+        validate_protocol_axes(&protocol, protocol.fingerprint, baseline.content_hash())
+    else {
+        return Ok(None);
+    };
+    if op.id != op_id
+        || wall_ns_day(recorded_at_ns) != Some(validated_axes.decision_day)
+        || baseline_view.baseline_hash != baseline.content_hash()
+        || baseline_view.required_sources.as_slice() != baseline.provenance().source_receipts()
+        || !dependency_receipt_is_structurally_valid(ledger, op_id, &protocol)?
+    {
+        return Ok(None);
+    }
+    if expected_dependency.is_some()
+        && !dependency_receipt_matches_binding(&protocol, expected_dependency)
+    {
+        return Ok(None);
+    }
+    let Some(entries) = parse_result_manifest(&protocol.result_manifest) else {
+        return Ok(None);
+    };
+    if entries.is_empty() || u64::try_from(entries.len()).ok() != Some(protocol.kernel_count) {
+        return Ok(None);
+    }
+    let machine_key = roofline_machine_key(protocol.fingerprint, baseline.content_hash());
+    let mut build_identity = None;
+    for entry in &entries {
+        let shape =
+            tune_measurement_shape_class(&entry.version, protocol.finalized_run_receipt, op_id);
+        let Some(row) = ledger.tune_get(&entry.kernel, &shape, &machine_key)? else {
+            return Ok(None);
+        };
+        let Some(params) = parse_roofline_row_params(&row.params) else {
+            return Ok(None);
+        };
+        if params.op != op_id || params.payload_artifact != entry.payload {
+            return Ok(None);
+        }
+        let Some(validated) = validate_roofline_row(
+            ledger,
+            &row,
+            &entry.kernel,
+            &entry.version,
+            protocol.fingerprint,
+            baseline.content_hash(),
+            expected_dependency,
+        )?
+        else {
+            return Ok(None);
+        };
+        if validated.recorded_at_ns != recorded_at_ns
+            || (expected_dependency.is_some() && !validated.dependency_matches_current)
+            || build_identity.is_some_and(|retained| retained != validated.build_identity)
+        {
+            return Ok(None);
+        }
+        build_identity = Some(validated.build_identity);
+    }
+    let Some(build_identity) = build_identity else {
+        return Ok(None);
+    };
+    Ok(Some(ValidatedRecordedProductionRun {
+        op: op_id,
+        run_receipt: protocol.finalized_run_receipt,
+        baseline,
+        attestation,
+        promotion_policy_receipt: baseline_view.authority_policy_receipt,
+        dependency_receipt_digest: protocol.dependency_receipt_digest,
+        dependency_receipt_artifact: protocol.dependency_receipt_artifact,
+        recorded_at_ns,
+        build_identity,
     }))
 }
 
@@ -5864,7 +6030,8 @@ mod tests {
         )
         .expect("exact-cap dependency receipt agrees with its digest");
         let ledger = Ledger::open(":memory:").expect("in-memory ledger");
-        let op = run.record(&ledger).expect("record production evidence");
+        let recorded = run.record(&ledger).expect("record production evidence");
+        let op = recorded.op_id();
         let recorded_at = ledger
             .op(op)
             .expect("query exact-cap op")
@@ -5933,9 +6100,10 @@ mod tests {
         )
         .expect("over-cap fixture still agrees with its retained digest");
         let ledger = Ledger::open(":memory:").expect("in-memory ledger");
-        let op = run
+        let recorded = run
             .record(&ledger)
             .expect("retain hostile dependency receipt");
+        let op = recorded.op_id();
         let recorded_at = ledger
             .op(op)
             .expect("query hostile receipt op")
@@ -6022,7 +6190,8 @@ mod tests {
         let kernel = run.results()[0].kernel.clone();
         let version = run.results()[0].version.clone();
         let ledger = Ledger::open(":memory:").expect("in-memory ledger");
-        let op = run.record(&ledger).expect("record fixture");
+        let recorded = run.record(&ledger).expect("record fixture");
+        let op = recorded.op_id();
         let recorded_at = ledger
             .op(op)
             .expect("query op")
