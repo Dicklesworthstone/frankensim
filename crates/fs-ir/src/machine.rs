@@ -19,7 +19,9 @@
 //! The additive [`interop`] boundary binds the ordered engineering workflow
 //! and quarantines FMI/SSP foreign outputs at Estimated evidence strength.
 //! The additive [`manufacturing`] boundary binds durable-body process,
-//! microstructure, residual-stress, property, and correlation-model lineage.
+//! microstructure, residual-stress, property, and correlation-model lineage;
+//! its tolerance-axis adapter binds exact `fs-toleralloc` receipts without
+//! granting them unit, population, or nonlinear-reliability authority.
 //!
 //! Runtime coupling, executable material/interface cards, controllers,
 //! safety adjudication, physical validation, balance proofs, adaptive routing,
@@ -678,6 +680,8 @@ pub enum DependentKind {
     Adjoint = 4,
     /// As-built manufacturing process/material-state history.
     ManufacturingState = 5,
+    /// Correlated manufacturing-tolerance axis attached to one durable body.
+    ManufacturingToleranceAxis = 6,
 }
 
 impl DependentKind {
@@ -696,6 +700,7 @@ impl DependentKind {
             Self::Winding => "winding",
             Self::Adjoint => "adjoint",
             Self::ManufacturingState => "manufacturing-state",
+            Self::ManufacturingToleranceAxis => "manufacturing-tolerance-axis",
         }
     }
 }

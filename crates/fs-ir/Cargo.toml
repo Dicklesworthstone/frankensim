@@ -19,6 +19,7 @@ fs-plan = { path = "../fs-plan" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
 fs-scenario = { path = "../fs-scenario" }
+fs-toleralloc = { path = "../fs-toleralloc" }
 fs-verify = { path = "../fs-verify", features = ["certified-speculation"], optional = true }
 
 [dev-dependencies]

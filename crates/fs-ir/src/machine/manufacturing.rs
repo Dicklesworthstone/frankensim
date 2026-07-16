@@ -32,6 +32,10 @@ use super::{
     AdmittedMachineGraph, BodyId, DependentBinding, DependentKind, MachineGraphIdV1, MachineIdError,
 };
 
+/// Exact positional binding from Machine-IR tolerance axes to an admitted
+/// `fs-toleralloc` correlated-stack receipt.
+pub mod tolerance_axis;
+
 /// Identity-schema version for graph-bound manufacturing state.
 pub const MACHINE_MANUFACTURING_SCHEMA_VERSION_V1: u32 = 1;
 /// Maximum process steps retained by one manufacturing-state receipt.

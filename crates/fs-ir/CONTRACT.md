@@ -291,6 +291,23 @@ admitted derived-geometry boundary.
   transports the complete process history across a unique one-to-one body
   morphism and returns a complete `LineageInvalidation` on an ambiguous split
   or remesh instead of choosing a descendant.
+- `machine::manufacturing::tolerance_axis` is the additive one-way L6 bridge to
+  `fs-toleralloc`. It binds one exact admitted behavior and manufacturing-state
+  identity to the complete non-forgeable `CorrelatedStackReceipt`: external
+  model namespace/version/digest, dimension, every lower-factor binary64 bit,
+  row-norm defect, every ordered term/name/sensitivity/color/standard-deviation
+  bit, and all five published first-order moment bits. Machine dependence order
+  is authoritative; every positional term label must exactly equal its durable
+  `ToleranceId` key. V1 admits only tolerance-only correlated groups whose
+  retained specifications are random, scalar, body-targeted, and attached to a
+  body with manufacturing process history. It rejects mixed random conditions,
+  vector/tensor axes, subsystem/surface/feature targets, and missing history
+  rather than inventing a projection, component basis, or owner-to-body map.
+- Manufacturing correlation references are content coordinates while the
+  `fs-toleralloc` model carries a caller-supplied semantic digest. The crosswalk
+  does not equate those 32-byte domains. It retains a separate nonzero,
+  versioned `correlation-coordinate-link` artifact naming the caller's explicit
+  mapping policy, and makes that policy identity-semantic.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
@@ -506,6 +523,16 @@ admitted derived-geometry boundary.
   graph-owned `BodyId`; its predecessor must name exactly one earlier step on
   that same body. Manufacturing dependents obey the same unique-rebind/
   ambiguous-invalidate law as other durable Machine attachments.
+- A manufacturing-tolerance crosswalk is inseparable from its graph, behavior,
+  manufacturing state, explicit correlation-coordinate link, exact factor and
+  stack receipt, and ordered `(full model position, ToleranceId, BodyId)` rows.
+  Every bound body has retained manufacturing history. Generic lineage records
+  move or invalidate its `ManufacturingToleranceAxis` attachments; they do not
+  mutate the crosswalk or mint a successor. Every graph/body/behavior/
+  manufacturing transition requires explicit crosswalk readmission. Partial
+  ambiguity invalidates only attachments on ambiguous source bodies, but the
+  old aggregate receipt remains bound to its original endpoints and cannot be
+  reused as a successor.
 
 1. Isomorphism: `parse(print(x))` has the same shape as `x`, per syntax
    and across syntaxes (property-tested on generated programs and the
@@ -785,6 +812,16 @@ manufacturing-history `(key, source, target)` rebinding across one-to-one wear
 versus exact fail-closed invalidation across an ambiguous body split; and the
 4,096-step/128-byte-key identity boundary plus limit-plus-one refusal.
 
+`tests/machine_manufacturing_tolerance.rs` (Machine-IR/fs-toleralloc as-built
+axis bridge, G0/G3/G5): exact graph/behavior/manufacturing/coordinate-link
+closure; complete factor, term, color, and first-order-moment identity movement;
+deterministic replay; deliberate Machine-scale/stack-sigma inequality; exact
+body-axis attachment rebind versus ambiguous invalidation; multi-body partial
+ambiguity with only affected attachments invalidated; structured refusal of
+graph, dependence, model, dimension, mixed-condition, non-scalar, non-body,
+missing-history, and positional-name gaps; and the owner's exact 128-axis
+boundary without widening it.
+
 ## No-claim boundaries
 
 - No operator catalog or per-operator semantic versions — gp3.6; the
@@ -846,15 +883,22 @@ versus exact fail-closed invalidation across an ambiguous body split; and the
   the full FrankenScript-to-package round trip. Foreign outputs are opaque
   artifact coordinates rather than decoded numeric values. Parser/export,
   isolated execution, and full round-trip batteries remain follow-on work.
-- The manufacturing seed is structural lineage binding only. It does not parse
+- The manufacturing process seed and tolerance crosswalk are structural lineage
+  binding only. They do not parse
   GD&T, datum, fit, texture, process, microstructure, residual-stress, property,
   or measurement artifact bytes; authenticate their producer; prove that a
-  process ran; validate a correlation population; propagate tolerance axes;
+  process ran; validate a correlation population or semantic/content coordinate
+  link; prove that a Machine random `scale` is a stack standard deviation;
+  establish axis/QoI unit or vector-component closure; derive or validate a
+  supplied sensitivity; or promote its evidence color. The crosswalk retains
+  the exact already-propagated first-order stack receipt but does not itself
+  perform numerical propagation. Neither lane can
   establish physical causality, assembly feasibility, joint/preload/weld/
-  adhesive behavior, surface evolution, or material-property correctness; or
-  promote evidence. Version one is body-level linear process history, not the
-  complete datum/GD&T/assembly schema, an `fs-toleralloc` axis crosswalk, a
-  nonlinear or mode-switching reliability model, or a gear/backlash consumer.
+  adhesive behavior, surface evolution, or material-property correctness.
+  Version one is body-level linear process history, not the
+  complete datum/GD&T/assembly schema, a nonlinear/hierarchical/mode-switching
+  reliability or tail/quantile model, a population-calibration proof, or a
+  gear/backlash consumer.
 - The current FrankenScript codec covers admitted Machine graph, behavior, and
   assurance syntax, including both assurance base-identity bindings. Assurance
   receipt rows are only exact transport commitments: callers must retain and
