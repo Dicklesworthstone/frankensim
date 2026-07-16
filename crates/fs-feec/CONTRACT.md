@@ -214,7 +214,11 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   name the component owned by their phase.
   Relative boundary and real/integral coboundary use the canonical phase-local
   quotient basis; integral accumulation and chain/cochain evaluation are exact
-  and refuse publication overflow.
+  and refuse publication overflow. If the admitted relative subcomplex equals
+  the conductor, every corresponding quotient basis is empty: zero chains and
+  cochains remain valid typed values, their maps remain empty, and their exact
+  pairing is zero. This is a zero quotient-chain-complex statement, not a
+  computed claim about homology.
 - A signed relabel is bound to exact source and target pair identities. Its
   canonical identity is independent of input row order; inverse/composition and
   integral chain/cochain/representative transport retain exact cell signs,
@@ -430,7 +434,10 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   declaration-only target physical-map rebuilding for both realization
   families. Sequential-versus-direct map redeclarations use separately
   transported/redeclared target objects and pin pair/phase/sector checks before
-  fresh map ID/artifact checks, with invalid twins for each boundary.
+  fresh map ID/artifact checks, with invalid twins for each boundary. A fully
+  relative interval fixture pins empty quotient-basis algebra and zero winding
+  replay, while schema-version, canonical-preimage, relative-support, port-time,
+  and presented MachineGraph-version mutations pin the identity boundary.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 

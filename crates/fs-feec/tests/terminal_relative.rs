@@ -15,10 +15,11 @@ use fs_feec::terminal_relative::{
     ConductorComponentId, ConversionMapId, DeclaredPhysicalMap, DeclaredPhysicalMapKind,
     DistributedCurrent, FiniteCellComplex, GeometricCoil, IncidenceSign, IntegralRelativeChain,
     IntegralRelativeCochain, IntegralWindingRepresentative, MachineBindingStatus,
-    OrientationMapSign, PhaseCurrentSign, PhaseId, PhaseRelabelEntry, PhysicalObjectId,
-    PhysicalObjectIdentity, PhysicalObjectKind, PhysicalObjectRef, PhysicalTerminal,
-    PhysicalTerminalId, PresentedMachinePortRef, RealCurrentAmplitude, RealRelativeCochain,
-    SignedCellRelabelEntry, TerminalOrientation, TerminalPortCoordinate,
+    OrientationMapSign, PRESENTED_MACHINE_GRAPH_DOMAIN, PRESENTED_MACHINE_GRAPH_SCHEMA_VERSION,
+    PhaseCurrentSign, PhaseId, PhaseRelabelEntry, PhysicalObjectId, PhysicalObjectIdentity,
+    PhysicalObjectKind, PhysicalObjectRef, PhysicalTerminal, PhysicalTerminalId,
+    PresentedMachinePortRef, RealCurrentAmplitude, RealRelativeCochain, SignedCellRelabelEntry,
+    TERMINAL_RELATIVE_SCHEMA_VERSION, TerminalOrientation, TerminalPortCoordinate,
     TerminalPortTrivialization, TerminalRelabelEntry, TerminalRelativeCoefficientDomain,
     TerminalRelativeError, TerminalRelativePair, TerminalRelativePhysicalRelabel,
     TerminalRelativePhysicalRelabelError, TerminalRelativeSemanticPermutation,
@@ -170,6 +171,18 @@ fn terminal_for_with_current_reference(
 }
 
 fn pair(tick: u64, reverse_declarations: bool) -> TerminalRelativePair {
+    interval_pair(tick, reverse_declarations, false)
+}
+
+fn fully_relative_interval_pair(tick: u64, reverse_declarations: bool) -> TerminalRelativePair {
+    interval_pair(tick, reverse_declarations, true)
+}
+
+fn interval_pair(
+    tick: u64,
+    reverse_declarations: bool,
+    relative_is_conductor: bool,
+) -> TerminalRelativePair {
     let complex = interval_complex();
     let conductor = subcomplex(
         &complex,
@@ -177,11 +190,12 @@ fn pair(tick: u64, reverse_declarations: bool) -> TerminalRelativePair {
         [CellRef::new(0, 0), CellRef::new(0, 1), CellRef::new(1, 0)],
     );
     let insulation = subcomplex(&complex, "support/insulation-empty", []);
-    let relative = subcomplex(
-        &complex,
-        "support/terminal-relative",
-        [CellRef::new(0, 0), CellRef::new(0, 1)],
-    );
+    let relative_cells = if relative_is_conductor {
+        vec![CellRef::new(0, 0), CellRef::new(0, 1), CellRef::new(1, 0)]
+    } else {
+        vec![CellRef::new(0, 0), CellRef::new(0, 1)]
+    };
+    let relative = subcomplex(&complex, "support/terminal-relative", relative_cells);
     let component = ConductorComponent::new(
         ConductorComponentId::new("component/winding").expect("component id"),
         subcomplex(
@@ -4011,5 +4025,148 @@ fn i13_2a_033_physical_map_redeclaration_allows_corresponding_identity_reuse_but
                 id: expected_debug,
             }
         ))
+    );
+}
+
+#[test]
+fn i13_2a_034_fully_relative_interval_has_zero_quotient_in_every_degree() {
+    let pair = fully_relative_interval_pair(97, false);
+    let replay = fully_relative_interval_pair(97, true);
+    let phase = PhaseId::new("phase/a").unwrap();
+
+    assert_eq!(pair.relative().cells(), pair.conductor().cells());
+    assert_eq!(pair.identity(), replay.identity());
+    for degree in 0..=pair.complex().dimension() {
+        assert!(pair.relative_basis(degree).is_empty());
+        assert!(
+            pair.phase_relative_basis(&phase, degree)
+                .unwrap()
+                .is_empty()
+        );
+
+        let chain = IntegralRelativeChain::try_new(&pair, phase.clone(), degree, Vec::new())
+            .expect("empty integral chain on zero quotient basis");
+        let cochain = IntegralRelativeCochain::try_new(&pair, phase.clone(), degree, Vec::new())
+            .expect("empty integral cochain on zero quotient basis");
+        let real =
+            RealRelativeCochain::try_new(&pair, phase.clone(), degree, Dims::NONE, Vec::new())
+                .expect("empty finite-real cochain on zero quotient basis");
+        assert!(chain.coefficients().is_empty());
+        assert!(cochain.coefficients().is_empty());
+        assert!(real.values().is_empty());
+        assert_eq!(pair.integral_pairing(&cochain, &chain), Ok(0));
+    }
+
+    let one_chain = IntegralRelativeChain::try_new(&pair, phase.clone(), 1, Vec::new()).unwrap();
+    let boundary = pair.boundary(&one_chain).expect("empty exact boundary");
+    assert_eq!(boundary.degree(), 0);
+    assert!(boundary.coefficients().is_empty());
+
+    let zero_cochain =
+        IntegralRelativeCochain::try_new(&pair, phase.clone(), 0, Vec::new()).unwrap();
+    let integral_coboundary = pair
+        .integral_coboundary(&zero_cochain)
+        .expect("empty exact integral coboundary");
+    assert_eq!(integral_coboundary.degree(), 1);
+    assert!(integral_coboundary.coefficients().is_empty());
+
+    let real_zero =
+        RealRelativeCochain::try_new(&pair, phase.clone(), 0, Current::DIMS, Vec::new()).unwrap();
+    let real_coboundary = pair
+        .coboundary(&real_zero)
+        .expect("empty exact real coboundary");
+    assert_eq!(real_coboundary.degree(), 1);
+    assert_eq!(real_coboundary.units(), Current::DIMS);
+    assert!(real_coboundary.values().is_empty());
+
+    let zero_winding = IntegralWindingRepresentative::try_new(&pair, phase.clone(), Vec::new())
+        .expect("zero winding representative on zero quotient basis");
+    let replay_winding = IntegralWindingRepresentative::try_new(&replay, phase.clone(), Vec::new())
+        .expect("declaration-order replay of zero winding representative");
+    assert!(zero_winding.chain().coefficients().is_empty());
+    assert_eq!(zero_winding.identity(), replay_winding.identity());
+
+    let arity_error = TerminalRelativeError::CoefficientArity {
+        expected: 0,
+        actual: 1,
+    };
+    assert_eq!(
+        IntegralRelativeChain::try_new(&pair, phase.clone(), 1, vec![1]),
+        Err(arity_error.clone())
+    );
+    assert_eq!(
+        IntegralRelativeCochain::try_new(&pair, phase.clone(), 0, vec![1]),
+        Err(arity_error.clone())
+    );
+    assert_eq!(
+        RealRelativeCochain::try_new(&pair, phase.clone(), 1, Current::DIMS, vec![1.0]),
+        Err(arity_error.clone())
+    );
+    assert_eq!(
+        IntegralWindingRepresentative::try_new(&pair, phase, vec![1]),
+        Err(arity_error)
+    );
+}
+
+#[test]
+fn i13_2a_035_canonical_preimage_and_schema_versions_kill_semantic_mutations() {
+    assert_eq!(TERMINAL_RELATIVE_SCHEMA_VERSION, 1);
+    assert_eq!(PRESENTED_MACHINE_GRAPH_SCHEMA_VERSION, 1);
+
+    let canonical = fully_relative_interval_pair(101, false);
+    let replay = fully_relative_interval_pair(101, true);
+    let relative_set_mutation = pair(101, false);
+    let timestamp_mutation = fully_relative_interval_pair(102, false);
+    let canonical_receipt = canonical.complex_receipt().identity_receipt();
+    let replay_receipt = replay.complex_receipt().identity_receipt();
+
+    assert_eq!(
+        canonical.complex_receipt().schema_version(),
+        TERMINAL_RELATIVE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        canonical_receipt.canonical_preimage(),
+        replay_receipt.canonical_preimage()
+    );
+    assert_eq!(
+        canonical_receipt.canonical_bytes(),
+        replay_receipt.canonical_bytes()
+    );
+    assert_eq!(
+        canonical.canonical_bytes(),
+        canonical_receipt.canonical_bytes()
+    );
+    assert_ne!(
+        canonical_receipt.canonical_preimage(),
+        relative_set_mutation
+            .complex_receipt()
+            .identity_receipt()
+            .canonical_preimage()
+    );
+    assert_ne!(
+        canonical_receipt.canonical_preimage(),
+        timestamp_mutation
+            .complex_receipt()
+            .identity_receipt()
+            .canonical_preimage()
+    );
+
+    let wrong_version = PRESENTED_MACHINE_GRAPH_SCHEMA_VERSION + 1;
+    assert_eq!(
+        PresentedMachinePortRef::try_new(
+            stable(PRESENTED_MACHINE_GRAPH_DOMAIN),
+            wrong_version,
+            [0x5e; 32],
+            stable("machine-owner/version-mutation"),
+            stable("port/version-mutation"),
+            stable("machine-terminal/version-mutation-voltage"),
+            stable("machine-terminal/version-mutation-current"),
+        ),
+        Err(TerminalRelativeError::MachineGraphSchemaMismatch {
+            expected_domain: PRESENTED_MACHINE_GRAPH_DOMAIN,
+            expected_version: PRESENTED_MACHINE_GRAPH_SCHEMA_VERSION,
+            actual_domain: PRESENTED_MACHINE_GRAPH_DOMAIN.to_owned(),
+            actual_version: wrong_version,
+        })
     );
 }
