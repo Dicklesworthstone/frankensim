@@ -668,14 +668,14 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fnp-dtype"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "half",
 ]
 
 [[package]]
 name = "fnp-linalg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fnp-ndarray",
  "rayon",
@@ -683,15 +683,15 @@ dependencies = [
 
 [[package]]
 name = "fnp-ndarray"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "fnp-runtime"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "fnp-ufunc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fnp-dtype",
  "fnp-linalg",
@@ -1402,7 +1402,9 @@ name = "fs-material"
 version = "0.0.1"
 dependencies = [
  "fs-ad",
+ "fs-blake3",
  "fs-evidence",
+ "fs-matdb",
  "fs-math",
  "fs-qty",
 ]
@@ -1920,6 +1922,16 @@ dependencies = [
 [[package]]
 name = "fs-symmetry"
 version = "0.0.1"
+
+[[package]]
+name = "fs-thermochem"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-matdb",
+ "fs-math",
+ "fs-qty",
+]
 
 [[package]]
 name = "fs-thrust-e2e"
@@ -3934,6 +3946,9 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-evidence",
+ "fs-matdb",
+ "fs-qty",
 ]
 
 [[package]]
