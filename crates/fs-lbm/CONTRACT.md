@@ -281,11 +281,14 @@ determinism, and pre-step mask refusal for D2Q9 momentum exchange; an
 independently enumerable moving-wall link that pins bounce correction,
 boundary-relative force, torque, work, and moving-mass balance; exact
 zero-velocity compatibility with the stationary API; moving-step bit replay;
-and fail-closed moving-field admission. Linear curved-wall fixtures independently
-pin both BFL branches, off-lattice torque arms, full receipt balance, exact
-halfway compatibility, replay, checked link construction, exhaustive geometry,
-far-donor requirements, finite-population admission, and atomic refusal. A
-separate topology-transition fixture
+and fail-closed moving-field admission. A periodic-x, two-moving-wall Couette
+deck checks the manufactured linear relative-velocity profile, exact replay,
+separate top/bottom impulse and receipt balance, and a measured common-boost
+profile/force residual inside one low-Mach lattice envelope. Linear curved-wall
+fixtures independently pin both BFL branches, off-lattice torque arms, full
+receipt balance, exact halfway compatibility, replay, checked link construction,
+exhaustive geometry, far-donor requirements, finite-population admission, and
+atomic refusal. A separate topology-transition fixture
 pins unique-donor fresh-cell initialization, exact covered/fresh counts,
 mass/momentum delta closure, replay, idempotence, and atomic no-donor/mixed-domain
 refusal. The file also covers regularized x-face moment/stress reconstruction,
@@ -395,8 +398,10 @@ redistributed.
   path additionally has no quadratic/multireflection option or measured curved-
   geometry convergence deck. Therefore this is not yet the Re=100 cylinder
   Cd/St validation. Boundary-relative exchange improves the force receipt's
-  frame behavior; it is not by itself a proof that the full bounce-back solver
-  is Galilean invariant.
+  frame behavior. The moving-Couette conformance deck now measures relative-
+  profile and shear-impulse residuals for one flat, periodic-x, steady, low-Mach
+  common-boost pair; it does not prove Galilean invariance for curved walls,
+  topology changes, transients, finite-Re bodies, or the full coupled solver.
 - D2Q9 `transition_wall_topology` consumes an already-discretized next wall
   mask; it does not integrate geometry motion, infer covered cells, or couple a
   rigid-body state. Equal-weight one-ring population averaging is a

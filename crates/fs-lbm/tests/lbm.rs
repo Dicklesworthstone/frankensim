@@ -73,6 +73,130 @@ fn d2q9_curved_wall_links(
     links
 }
 
+const MOVING_COUETTE_NX: usize = 8;
+const MOVING_COUETTE_NY: usize = 10;
+const MOVING_COUETTE_SHEAR_SPEED: f64 = 0.04;
+
+#[derive(Debug, Clone, PartialEq)]
+struct MovingCouetteObservation {
+    relative_profile: Vec<f64>,
+    normalized_profile_error: f64,
+    normalized_transverse_velocity: f64,
+    top: MovingWallMomentumExchange2,
+    bottom: MovingWallMomentumExchange2,
+}
+
+fn moving_couette_eta(y: usize) -> f64 {
+    (y as f64 - 0.5) / (MOVING_COUETTE_NY - 2) as f64
+}
+
+#[allow(clippy::too_many_lines)]
+fn observe_moving_couette(frame_speed: f64) -> MovingCouetteObservation {
+    let mut grid = Grid::uniform(MOVING_COUETTE_NX, MOVING_COUETTE_NY, 0.8);
+    grid.periodic_x = true;
+    grid.periodic_y = false;
+
+    let mut wall_velocities = vec![[0.0; 2]; MOVING_COUETTE_NX * MOVING_COUETTE_NY];
+    let mut both_walls = vec![false; wall_velocities.len()];
+    let mut top_wall = vec![false; wall_velocities.len()];
+    let mut bottom_wall = vec![false; wall_velocities.len()];
+    for x in 0..MOVING_COUETTE_NX {
+        let bottom = grid.idx(x, 0);
+        let top = grid.idx(x, MOVING_COUETTE_NY - 1);
+        grid.flags[bottom] = Cell::Wall;
+        grid.flags[top] = Cell::Wall;
+        wall_velocities[bottom] = [frame_speed, 0.0];
+        wall_velocities[top] = [frame_speed + MOVING_COUETTE_SHEAR_SPEED, 0.0];
+        both_walls[bottom] = true;
+        both_walls[top] = true;
+        bottom_wall[bottom] = true;
+        top_wall[top] = true;
+    }
+
+    // Start from the analytic linear velocity field. Its missing viscous
+    // nonequilibrium relaxes during the warm-up; the observation is taken only
+    // after more than six momentum-diffusion times across the fluid height.
+    for y in 1..MOVING_COUETTE_NY - 1 {
+        let velocity = frame_speed + MOVING_COUETTE_SHEAR_SPEED * moving_couette_eta(y);
+        for x in 0..MOVING_COUETTE_NX {
+            let cell = grid.idx(x, y);
+            grid.f[cell] = equilibrium(1.0, velocity, 0.0);
+        }
+    }
+
+    let mut scratch = Vec::new();
+    let origin = [
+        0.5 * (MOVING_COUETTE_NX - 1) as f64,
+        0.5 * (MOVING_COUETTE_NY - 1) as f64,
+    ];
+    for _ in 0..4_000 {
+        let _receipt = grid.step_with_moving_wall_momentum(
+            &mut scratch,
+            &both_walls,
+            &wall_velocities,
+            origin,
+        );
+    }
+
+    let mut relative_profile = Vec::with_capacity(MOVING_COUETTE_NY - 2);
+    let mut normalized_profile_error = 0.0_f64;
+    let mut normalized_transverse_velocity = 0.0_f64;
+    for y in 1..MOVING_COUETTE_NY - 1 {
+        let mut mean_velocity = [0.0; 2];
+        for x in 0..MOVING_COUETTE_NX {
+            let velocity = grid.moments(grid.idx(x, y)).u;
+            mean_velocity[0] += velocity[0];
+            mean_velocity[1] += velocity[1];
+        }
+        mean_velocity[0] /= MOVING_COUETTE_NX as f64;
+        mean_velocity[1] /= MOVING_COUETTE_NX as f64;
+        let relative_velocity = mean_velocity[0] - frame_speed;
+        let analytic = MOVING_COUETTE_SHEAR_SPEED * moving_couette_eta(y);
+        normalized_profile_error = normalized_profile_error
+            .max((relative_velocity - analytic).abs() / MOVING_COUETTE_SHEAR_SPEED);
+        normalized_transverse_velocity =
+            normalized_transverse_velocity.max(mean_velocity[1].abs() / MOVING_COUETTE_SHEAR_SPEED);
+        relative_profile.push(relative_velocity);
+    }
+
+    // Probe both walls from one identical post-collision state so differences
+    // are selection effects only, not consecutive time-step drift.
+    let mut post = Vec::new();
+    grid.collide_into(&mut post);
+    let mut top_probe = grid.clone();
+    let top =
+        top_probe.stream_from_with_moving_wall_momentum(&post, &top_wall, &wall_velocities, origin);
+    let mut bottom_probe = grid;
+    let bottom = bottom_probe.stream_from_with_moving_wall_momentum(
+        &post,
+        &bottom_wall,
+        &wall_velocities,
+        origin,
+    );
+
+    MovingCouetteObservation {
+        relative_profile,
+        normalized_profile_error,
+        normalized_transverse_velocity,
+        top,
+        bottom,
+    }
+}
+
+fn moving_wall_receipt_balance_error(receipt: &MovingWallMomentumExchange2) -> f64 {
+    (0..2).fold(0.0_f64, |error, axis| {
+        error.max(
+            (receipt.wall_impulse[axis] + receipt.fluid_population_impulse[axis]
+                - receipt.wall_velocity_mass_impulse[axis])
+                .abs(),
+        )
+    })
+}
+
+fn normalized_pair_residual(left: f64, right: f64) -> f64 {
+    (left - right).abs() / left.abs().max(right.abs())
+}
+
 #[test]
 fn the_equilibrium_recovers_its_moments() {
     let (rho, ux, uy) = (1.0, 0.05, -0.02);
@@ -340,6 +464,118 @@ fn d2q9_moving_wall_exchange_pins_relative_force_torque_work_and_balance() {
         - origin_shift[0] * receipt.wall_impulse[1]
         + origin_shift[1] * receipt.wall_impulse[0];
     assert!((shifted.wall_angular_impulse - translated_torque).abs() < 1e-15);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn d2q9_moving_couette_measures_common_boost_residual() {
+    // G1/G3/G5: this is one deliberately narrow, low-Mach envelope. It checks
+    // a manufactured linear Couette profile, compares two inertial frames,
+    // and retains separate top/bottom exchange receipts. It is not a general
+    // Galilean-invariance claim for arbitrary geometry or transient motion.
+    let reference = observe_moving_couette(-0.01);
+    let boosted = observe_moving_couette(0.01);
+    let replay = observe_moving_couette(-0.01);
+    assert_eq!(reference, replay, "fixed-frame deck must replay exactly");
+
+    for observation in [&reference, &boosted] {
+        assert!(
+            observation.normalized_profile_error < 0.03,
+            "linear Couette profile residual exceeded 3% of wall-speed difference: {}",
+            observation.normalized_profile_error
+        );
+        assert!(
+            observation.normalized_transverse_velocity < 1.0e-10,
+            "transverse velocity exceeded the symmetric-channel roundoff band: {}",
+            observation.normalized_transverse_velocity
+        );
+        assert_eq!(
+            observation.top.measured_links,
+            3 * MOVING_COUETTE_NX,
+            "top wall must contribute one normal and two diagonal links per column"
+        );
+        assert_eq!(
+            observation.bottom.measured_links,
+            3 * MOVING_COUETTE_NX,
+            "bottom wall must contribute one normal and two diagonal links per column"
+        );
+        assert!(
+            moving_wall_receipt_balance_error(&observation.top) < 1.0e-12,
+            "top moving-wall receipt violated its discrete momentum balance"
+        );
+        assert!(
+            moving_wall_receipt_balance_error(&observation.bottom) < 1.0e-12,
+            "bottom moving-wall receipt violated its discrete momentum balance"
+        );
+
+        let shear_force_scale = observation.top.wall_impulse[0]
+            .abs()
+            .max(observation.bottom.wall_impulse[0].abs());
+        assert!(
+            shear_force_scale > 1.0e-8,
+            "Couette deck must resolve nonzero wall shear"
+        );
+        let shear_balance = (observation.top.wall_impulse[0] + observation.bottom.wall_impulse[0])
+            .abs()
+            / shear_force_scale;
+        assert!(
+            shear_balance < 0.03,
+            "top and bottom shear impulses failed to balance within 3%: {shear_balance}"
+        );
+
+        let normal_force_scale = observation.top.wall_impulse[1]
+            .abs()
+            .max(observation.bottom.wall_impulse[1].abs());
+        assert!(
+            normal_force_scale > 0.0,
+            "wall pressure impulse must be nonzero"
+        );
+        let normal_balance = (observation.top.wall_impulse[1] + observation.bottom.wall_impulse[1])
+            .abs()
+            / normal_force_scale;
+        assert!(
+            normal_balance < 1.0e-12,
+            "symmetric wall-pressure impulses failed to cancel: {normal_balance}"
+        );
+    }
+
+    let profile_frame_residual = reference
+        .relative_profile
+        .iter()
+        .zip(&boosted.relative_profile)
+        .fold(0.0_f64, |residual, (&reference_u, &boosted_u)| {
+            residual.max((reference_u - boosted_u).abs() / MOVING_COUETTE_SHEAR_SPEED)
+        });
+    let top_impulse_frame_residual =
+        normalized_pair_residual(reference.top.wall_impulse[0], boosted.top.wall_impulse[0]);
+    let bottom_impulse_frame_residual = normalized_pair_residual(
+        reference.bottom.wall_impulse[0],
+        boosted.bottom.wall_impulse[0],
+    );
+    let impulse_frame_residual = top_impulse_frame_residual.max(bottom_impulse_frame_residual);
+
+    assert!(
+        profile_frame_residual < 0.03,
+        "common boost changed the relative Couette profile by at least 3%: {profile_frame_residual}"
+    );
+    assert!(
+        impulse_frame_residual < 0.03,
+        "common boost changed the boundary-relative shear impulse by at least 3%: \
+         {impulse_frame_residual}"
+    );
+
+    println!(
+        concat!(
+            "{{\"deck\":\"d2q9-moving-couette-common-boost\",",
+            "\"common_boost\":0.02,\"profile_residual\":{profile_frame_residual:.17e},",
+            "\"wall_impulse_residual\":{impulse_frame_residual:.17e},",
+            "\"reference_profile_error\":{:.17e},\"boosted_profile_error\":{:.17e},",
+            "\"links_per_wall\":{}}}"
+        ),
+        reference.normalized_profile_error,
+        boosted.normalized_profile_error,
+        reference.top.measured_links
+    );
 }
 
 #[test]
