@@ -14,15 +14,17 @@
 //! *candidate* to an exact refinement path and exact local presentations,
 //! without granting theorem authority. Another candidate retains exhaustive
 //! many-to-many relations over exact local-presentation families without
-//! declaring semantic or physical agreement. This module deliberately cannot
-//! mint a non-identity equivalence: a witness digest is data, not a proof of an
-//! inverse, quasi-isomorphism, refinement theorem, or physical crosswalk.
+//! declaring semantic or physical agreement. A final structural assembly binds
+//! those sealed children into one role-complete, common-selector packet without
+//! promoting it to an equivalence. This module deliberately cannot mint a
+//! non-identity equivalence: a witness digest is data, not a proof of an inverse,
+//! quasi-isomorphism, refinement theorem, or physical crosswalk.
 
 use core::fmt;
 
 use fs_blake3::identity::{
-    CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, EvidenceNodeId, Field,
-    FieldSpec, IdentityReceipt, StrongIdentity, WireType,
+    CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, ChildSpec, EvidenceNodeId,
+    Field, FieldSpec, IdentityReceipt, StrongIdentity, WireType,
 };
 use fs_evidence::ColorRank;
 use fs_exec::Cx;
@@ -49,6 +51,8 @@ pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 pub const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
 /// Current schema for exhaustive local-presentation relation candidates.
 pub const DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for scoped presentation-equivalence candidate assemblies.
+pub const DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_SCHEMA_VERSION_V1: u32 = 1;
 /// Maximum primitive nonidentity factors retained in one flattened composition.
 pub const DERIVED_MORPHISM_MAX_FACTORS_V1: usize = 1024;
 const DERIVED_MORPHISM_CANCELLATION_STRIDE_V1: usize = 64;
@@ -62,6 +66,9 @@ const DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_IDENTITY_LIMITS_V1: C
     CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
 const DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_IDENTITY_LIMITS_V1: CanonicalLimits =
     CanonicalLimits::new(1 << 17, 1 << 17, 10, 1 << 11, 4096);
+// Recursive validation must admit the 16-field quasi-isomorphism child schema.
+const DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_IDENTITY_LIMITS_V1:
+    CanonicalLimits = CanonicalLimits::new(1 << 17, 1 << 16, 16, 1 << 11, 4096);
 
 /// Domain-separated semantic identity for one admitted structural morphism.
 pub enum DerivedMorphismIdentitySchemaV1 {}
@@ -216,6 +223,55 @@ impl CanonicalSchema for DerivedLocalPresentationCorrespondenceCandidateIdentity
 /// Typed identity of one exhaustive local-presentation relation candidate.
 pub type DerivedLocalPresentationCorrespondenceCandidateIdV1 =
     EvidenceNodeId<DerivedLocalPresentationCorrespondenceCandidateIdentitySchemaV1>;
+
+static DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedFixedResolutionQuasiIsomorphismCandidateIdV1>();
+static DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<DerivedLocalPresentationCorrespondenceCandidateIdV1>();
+
+/// Domain-separated semantic identity for one structural packet of scoped
+/// presentation-equivalence candidates.
+pub enum DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1 {
+    const DOMAIN: &'static str =
+        "org.frankensim.fs-geom.scoped-presentation-equivalence-candidate-assembly.v1";
+    const NAME: &'static str = "scoped-presentation-equivalence-candidate-assembly";
+    const VERSION: u32 =
+        DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "exact endpoint geometries and local presentations, one exact fixed-resolution quasi-isomorphism candidate for each derived-complex role, one exact exhaustive local-presentation correspondence candidate, common finite-resolution selector and scope-witness IDs, and an explicit no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source-geometry", WireType::Bytes),
+        FieldSpec::required("target-geometry", WireType::Bytes),
+        FieldSpec::required("source-local-model", WireType::Bytes),
+        FieldSpec::required("target-local-model", WireType::Bytes),
+        FieldSpec::required("source-resolution", WireType::Bytes),
+        FieldSpec::required("target-resolution", WireType::Bytes),
+        FieldSpec::required("source-scope-witness", WireType::Bytes),
+        FieldSpec::required("target-scope-witness", WireType::Bytes),
+        FieldSpec::child_of(
+            "tangent-quasi-isomorphism-candidate",
+            &DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of(
+            "cotangent-quasi-isomorphism-candidate",
+            &DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of(
+            "deformation-obstruction-quasi-isomorphism-candidate",
+            &DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::child_of(
+            "local-presentation-correspondence-candidate",
+            &DERIVED_LOCAL_PRESENTATION_CORRESPONDENCE_CANDIDATE_CHILD_V1,
+        ),
+        FieldSpec::required("no-authority", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one scoped presentation-equivalence candidate assembly.
+pub type DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1 =
+    EvidenceNodeId<DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1>;
 
 /// Nominal artifact implementing one declared chart map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -974,6 +1030,36 @@ pub struct DerivedLocalPresentationCorrespondenceCandidateIrV1 {
     pub no_authority: DerivedNoClaimIdV1,
 }
 
+/// Versioned structural assembly for one scoped presentation-equivalence candidate.
+///
+/// The four child identities must name the exact supplied sealed candidate
+/// tokens. This packet establishes role completeness and one shared finite
+/// presentation selector pair only; it is neither an equivalence nor evidence
+/// for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact admitted source geometry retained by every child candidate.
+    pub source_geometry: DerivedGeometryIdV1,
+    /// Exact admitted target geometry retained by every child candidate.
+    pub target_geometry: DerivedGeometryIdV1,
+    /// Exact source local presentation retained by every child candidate.
+    pub source_local_model: DerivedLocalModelIdV1,
+    /// Exact target local presentation retained by every child candidate.
+    pub target_local_model: DerivedLocalModelIdV1,
+    /// Exact sealed tangent-complex quasi-isomorphism candidate.
+    pub tangent_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    /// Exact sealed cotangent-complex quasi-isomorphism candidate.
+    pub cotangent_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    /// Exact sealed deformation-obstruction-complex quasi-isomorphism candidate.
+    pub deformation_obstruction_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    /// Exact sealed exhaustive local-presentation correspondence candidate.
+    pub local_presentation_correspondence: DerivedLocalPresentationCorrespondenceCandidateIdV1,
+    /// Explicit denial of equivalence and evidence authority.
+    pub no_authority: DerivedNoClaimIdV1,
+}
+
 /// Structured refusal from RD.1b structural morphism admission/composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedMorphismErrorV1 {
@@ -1469,6 +1555,68 @@ impl fmt::Display for DerivedLocalPresentationCorrespondenceCandidateErrorV1 {
 }
 
 impl core::error::Error for DerivedLocalPresentationCorrespondenceCandidateErrorV1 {}
+
+/// Structured refusal from scoped presentation-equivalence candidate assembly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// A required opaque identity used the all-zero sentinel.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw child ID does not name the supplied sealed child token.
+    CandidateIdentityMismatch {
+        /// Stable child-candidate field.
+        field: &'static str,
+    },
+    /// A supplied quasi-isomorphism candidate does not have its required role.
+    CandidateRoleMismatch {
+        /// Stable child-candidate field.
+        field: &'static str,
+        /// Actual sealed role.
+        found: DerivedComplexRoleV1,
+    },
+    /// A raw or child geometry endpoint differs from the assembly endpoint.
+    EndpointMismatch {
+        /// Stable failed endpoint relation.
+        field: &'static str,
+    },
+    /// A raw or child local-model selector differs from the assembly selector.
+    LocalModelMismatch {
+        /// Stable failed local-model relation.
+        field: &'static str,
+    },
+    /// The three role candidates do not retain common finite-scope selectors.
+    ResolutionScopeMismatch {
+        /// Stable failed resolution or scope-witness relation.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "scoped presentation-equivalence candidate assembly refused: {self:?}"
+        )
+    }
+}
+
+impl core::error::Error for DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1 {}
 
 /// Sealed, content-addressed structural morphism.
 #[derive(Debug, PartialEq, Eq)]
@@ -1999,6 +2147,130 @@ impl AdmittedDerivedLocalPresentationCorrespondenceCandidateV1 {
     pub const fn identity_receipt(
         &self,
     ) -> IdentityReceipt<DerivedLocalPresentationCorrespondenceCandidateIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed structural packet for one scoped presentation-equivalence candidate.
+///
+/// This token binds exactly one already sealed quasi-isomorphism candidate for
+/// each derived-complex role plus one already sealed local-presentation
+/// correspondence candidate under one exact resolution/scope-witness selector
+/// pair. It exposes no
+/// equivalence, inverse, zigzag, homotopy, composition, transport, or authority
+/// capability.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedScopedPresentationEquivalenceCandidateAssemblyV1 {
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_local_model: DerivedLocalModelIdV1,
+    target_local_model: DerivedLocalModelIdV1,
+    source_resolution: DerivedResolutionIdV1,
+    target_resolution: DerivedResolutionIdV1,
+    source_scope_witness: DerivedWitnessIdV1,
+    target_scope_witness: DerivedWitnessIdV1,
+    tangent_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    cotangent_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    deformation_obstruction_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    local_presentation_correspondence: DerivedLocalPresentationCorrespondenceCandidateIdV1,
+    no_authority: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1>,
+}
+
+impl AdmittedDerivedScopedPresentationEquivalenceCandidateAssemblyV1 {
+    /// Exact source geometry shared by every child candidate.
+    #[must_use]
+    pub const fn source_geometry(&self) -> DerivedGeometryIdV1 {
+        self.source_geometry
+    }
+
+    /// Exact target geometry shared by every child candidate.
+    #[must_use]
+    pub const fn target_geometry(&self) -> DerivedGeometryIdV1 {
+        self.target_geometry
+    }
+
+    /// Exact source local presentation shared by every child candidate.
+    #[must_use]
+    pub const fn source_local_model(&self) -> DerivedLocalModelIdV1 {
+        self.source_local_model
+    }
+
+    /// Exact target local presentation shared by every child candidate.
+    #[must_use]
+    pub const fn target_local_model(&self) -> DerivedLocalModelIdV1 {
+        self.target_local_model
+    }
+
+    /// Common source finite-resolution selector derived from the sealed children.
+    #[must_use]
+    pub const fn source_resolution(&self) -> DerivedResolutionIdV1 {
+        self.source_resolution
+    }
+
+    /// Common target finite-resolution selector derived from the sealed children.
+    #[must_use]
+    pub const fn target_resolution(&self) -> DerivedResolutionIdV1 {
+        self.target_resolution
+    }
+
+    /// Common source scope witness derived from the sealed role candidates.
+    #[must_use]
+    pub const fn source_scope_witness(&self) -> DerivedWitnessIdV1 {
+        self.source_scope_witness
+    }
+
+    /// Common target scope witness derived from the sealed role candidates.
+    #[must_use]
+    pub const fn target_scope_witness(&self) -> DerivedWitnessIdV1 {
+        self.target_scope_witness
+    }
+
+    /// Exact sealed tangent-complex candidate.
+    #[must_use]
+    pub const fn tangent_candidate(&self) -> DerivedFixedResolutionQuasiIsomorphismCandidateIdV1 {
+        self.tangent_candidate
+    }
+
+    /// Exact sealed cotangent-complex candidate.
+    #[must_use]
+    pub const fn cotangent_candidate(&self) -> DerivedFixedResolutionQuasiIsomorphismCandidateIdV1 {
+        self.cotangent_candidate
+    }
+
+    /// Exact sealed deformation-obstruction-complex candidate.
+    #[must_use]
+    pub const fn deformation_obstruction_candidate(
+        &self,
+    ) -> DerivedFixedResolutionQuasiIsomorphismCandidateIdV1 {
+        self.deformation_obstruction_candidate
+    }
+
+    /// Exact sealed exhaustive local-presentation relation candidate.
+    #[must_use]
+    pub const fn local_presentation_correspondence(
+        &self,
+    ) -> DerivedLocalPresentationCorrespondenceCandidateIdV1 {
+        self.local_presentation_correspondence
+    }
+
+    /// Explicit artifact denying equivalence and evidence authority.
+    #[must_use]
+    pub const fn no_authority(&self) -> DerivedNoClaimIdV1 {
+        self.no_authority
+    }
+
+    /// Typed assembly identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(
+        &self,
+    ) -> IdentityReceipt<DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1> {
         self.receipt
     }
 }
@@ -5435,6 +5707,424 @@ pub fn admit_derived_local_presentation_correspondence_candidate_v1(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopedPresentationEquivalenceCandidateAssemblyBindingV1 {
+    source_geometry: DerivedGeometryIdV1,
+    target_geometry: DerivedGeometryIdV1,
+    source_local_model: DerivedLocalModelIdV1,
+    target_local_model: DerivedLocalModelIdV1,
+    source_resolution: DerivedResolutionIdV1,
+    target_resolution: DerivedResolutionIdV1,
+    source_scope_witness: DerivedWitnessIdV1,
+    target_scope_witness: DerivedWitnessIdV1,
+    tangent_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    cotangent_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    deformation_obstruction_candidate: DerivedFixedResolutionQuasiIsomorphismCandidateIdV1,
+    local_presentation_correspondence: DerivedLocalPresentationCorrespondenceCandidateIdV1,
+    no_authority: DerivedNoClaimIdV1,
+}
+
+#[allow(clippy::too_many_lines)] // Exhaustive child-endpoint and common-selector seam matrix.
+fn scoped_presentation_equivalence_candidate_assembly_binding(
+    ir: &DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1,
+    tangent: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    cotangent: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    deformation_obstruction: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    correspondence: &AdmittedDerivedLocalPresentationCorrespondenceCandidateV1,
+    cx: &Cx<'_>,
+) -> Result<
+    ScopedPresentationEquivalenceCandidateAssemblyBindingV1,
+    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1,
+> {
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::Cancelled {
+                stage: "presentation-equivalence-assembly-admission-entry",
+            },
+        );
+    }
+    if ir.schema_version
+        != DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_SCHEMA_VERSION_V1
+    {
+        return Err(
+            DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::UnsupportedSchemaVersion {
+                found: ir.schema_version,
+                supported: DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_SCHEMA_VERSION_V1,
+            },
+        );
+    }
+    for (bytes, field) in [
+        (ir.source_local_model.as_bytes(), "source-local-model"),
+        (ir.target_local_model.as_bytes(), "target-local-model"),
+        (ir.no_authority.as_bytes(), "no-authority"),
+    ] {
+        if is_zero(bytes) {
+            return Err(
+                DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::MissingIdentity {
+                    field,
+                },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            ir.tangent_candidate == tangent.id(),
+            "tangent-quasi-isomorphism-candidate",
+        ),
+        (
+            ir.cotangent_candidate == cotangent.id(),
+            "cotangent-quasi-isomorphism-candidate",
+        ),
+        (
+            ir.deformation_obstruction_candidate == deformation_obstruction.id(),
+            "deformation-obstruction-quasi-isomorphism-candidate",
+        ),
+        (
+            ir.local_presentation_correspondence == correspondence.id(),
+            "local-presentation-correspondence-candidate",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::CandidateIdentityMismatch {
+                    field,
+                },
+            );
+        }
+    }
+    for (found, expected, field) in [
+        (
+            tangent.complex_role(),
+            DerivedComplexRoleV1::Tangent,
+            "tangent-quasi-isomorphism-candidate",
+        ),
+        (
+            cotangent.complex_role(),
+            DerivedComplexRoleV1::Cotangent,
+            "cotangent-quasi-isomorphism-candidate",
+        ),
+        (
+            deformation_obstruction.complex_role(),
+            DerivedComplexRoleV1::DeformationObstruction,
+            "deformation-obstruction-quasi-isomorphism-candidate",
+        ),
+    ] {
+        if found != expected {
+            return Err(
+                DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::CandidateRoleMismatch {
+                    field,
+                    found,
+                },
+            );
+        }
+    }
+
+    let source_geometry = tangent.source_geometry();
+    let target_geometry = tangent.target_geometry();
+    let source_local_model = tangent.source_local_model();
+    let target_local_model = tangent.target_local_model();
+    for (matches, field) in [
+        (ir.source_geometry == source_geometry, "source-geometry"),
+        (ir.target_geometry == target_geometry, "target-geometry"),
+        (
+            cotangent.source_geometry() == source_geometry,
+            "cotangent-source-geometry",
+        ),
+        (
+            cotangent.target_geometry() == target_geometry,
+            "cotangent-target-geometry",
+        ),
+        (
+            deformation_obstruction.source_geometry() == source_geometry,
+            "deformation-obstruction-source-geometry",
+        ),
+        (
+            deformation_obstruction.target_geometry() == target_geometry,
+            "deformation-obstruction-target-geometry",
+        ),
+        (
+            correspondence.source_geometry() == source_geometry,
+            "correspondence-source-geometry",
+        ),
+        (
+            correspondence.target_geometry() == target_geometry,
+            "correspondence-target-geometry",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::EndpointMismatch {
+                    field,
+                },
+            );
+        }
+    }
+    for (matches, field) in [
+        (
+            ir.source_local_model == source_local_model,
+            "source-local-model",
+        ),
+        (
+            ir.target_local_model == target_local_model,
+            "target-local-model",
+        ),
+        (
+            cotangent.source_local_model() == source_local_model,
+            "cotangent-source-local-model",
+        ),
+        (
+            cotangent.target_local_model() == target_local_model,
+            "cotangent-target-local-model",
+        ),
+        (
+            deformation_obstruction.source_local_model() == source_local_model,
+            "deformation-obstruction-source-local-model",
+        ),
+        (
+            deformation_obstruction.target_local_model() == target_local_model,
+            "deformation-obstruction-target-local-model",
+        ),
+        (
+            correspondence.source_local_model() == source_local_model,
+            "correspondence-source-local-model",
+        ),
+        (
+            correspondence.target_local_model() == target_local_model,
+            "correspondence-target-local-model",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::LocalModelMismatch {
+                    field,
+                },
+            );
+        }
+    }
+
+    let source_resolution = tangent.source_resolution();
+    let target_resolution = tangent.target_resolution();
+    let source_scope_witness = tangent.source_scope_witness();
+    let target_scope_witness = tangent.target_scope_witness();
+    for (matches, field) in [
+        (
+            cotangent.source_resolution() == source_resolution,
+            "cotangent-source-resolution",
+        ),
+        (
+            cotangent.target_resolution() == target_resolution,
+            "cotangent-target-resolution",
+        ),
+        (
+            cotangent.source_scope_witness() == source_scope_witness,
+            "cotangent-source-scope-witness",
+        ),
+        (
+            cotangent.target_scope_witness() == target_scope_witness,
+            "cotangent-target-scope-witness",
+        ),
+        (
+            deformation_obstruction.source_resolution() == source_resolution,
+            "deformation-obstruction-source-resolution",
+        ),
+        (
+            deformation_obstruction.target_resolution() == target_resolution,
+            "deformation-obstruction-target-resolution",
+        ),
+        (
+            deformation_obstruction.source_scope_witness() == source_scope_witness,
+            "deformation-obstruction-source-scope-witness",
+        ),
+        (
+            deformation_obstruction.target_scope_witness() == target_scope_witness,
+            "deformation-obstruction-target-scope-witness",
+        ),
+    ] {
+        if !matches {
+            return Err(
+                DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::ResolutionScopeMismatch {
+                    field,
+                },
+            );
+        }
+    }
+
+    Ok(ScopedPresentationEquivalenceCandidateAssemblyBindingV1 {
+        source_geometry,
+        target_geometry,
+        source_local_model,
+        target_local_model,
+        source_resolution,
+        target_resolution,
+        source_scope_witness,
+        target_scope_witness,
+        tangent_candidate: tangent.id(),
+        cotangent_candidate: cotangent.id(),
+        deformation_obstruction_candidate: deformation_obstruction.id(),
+        local_presentation_correspondence: correspondence.id(),
+        no_authority: ir.no_authority,
+    })
+}
+
+fn scoped_presentation_equivalence_candidate_assembly_receipt(
+    binding: &ScopedPresentationEquivalenceCandidateAssemblyBindingV1,
+    cx: &Cx<'_>,
+) -> Result<
+    IdentityReceipt<DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1>,
+    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1,
+> {
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => {
+            DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::Cancelled {
+                stage: "presentation-equivalence-assembly-identity",
+            }
+        }
+        other => DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1, _>::new(
+        DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(
+        Field::new(0, "source-geometry"),
+        binding.source_geometry.as_bytes(),
+    )
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(1, "target-geometry"),
+            binding.target_geometry.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(2, "source-local-model"),
+            binding.source_local_model.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(3, "target-local-model"),
+            binding.target_local_model.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(4, "source-resolution"),
+            binding.source_resolution.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(5, "target-resolution"),
+            binding.target_resolution.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(6, "source-scope-witness"),
+            binding.source_scope_witness.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(7, "target-scope-witness"),
+            binding.target_scope_witness.as_bytes(),
+        )
+    })
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(8, "tangent-quasi-isomorphism-candidate"),
+            binding.tangent_candidate,
+        )
+    })
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(9, "cotangent-quasi-isomorphism-candidate"),
+            binding.cotangent_candidate,
+        )
+    })
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(10, "deformation-obstruction-quasi-isomorphism-candidate"),
+            binding.deformation_obstruction_candidate,
+        )
+    })
+    .and_then(|encoder| {
+        encoder.child(
+            Field::new(11, "local-presentation-correspondence-candidate"),
+            binding.local_presentation_correspondence,
+        )
+    })
+    .and_then(|encoder| {
+        encoder.bytes(
+            Field::new(12, "no-authority"),
+            binding.no_authority.as_bytes(),
+        )
+    })
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Assemble exact sealed children into one scoped presentation-equivalence candidate packet.
+///
+/// Admission derives common resolution and scope-witness selectors from the
+/// sealed role candidates. It validates only exact identity, role completeness,
+/// endpoint/model agreement, and common resolution/scope-witness selector IDs.
+/// No child theorem, relation, or artifact is executed or promoted, and the returned token has no equivalence,
+/// inverse, zigzag, homotopy, naturality, evidence-transport, or composition API.
+///
+/// # Errors
+/// Returns a typed refusal for schema, raw/sealed identity, role, endpoint,
+/// local-model, common-selector, cancellation, or canonical-identity defects.
+#[must_use = "a raw candidate packet has no equivalence or evidence authority"]
+pub fn admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+    ir: &DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1,
+    tangent: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    cotangent: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    deformation_obstruction: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    correspondence: &AdmittedDerivedLocalPresentationCorrespondenceCandidateV1,
+    cx: &Cx<'_>,
+) -> Result<
+    AdmittedDerivedScopedPresentationEquivalenceCandidateAssemblyV1,
+    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1,
+> {
+    let binding = scoped_presentation_equivalence_candidate_assembly_binding(
+        ir,
+        tangent,
+        cotangent,
+        deformation_obstruction,
+        correspondence,
+        cx,
+    )?;
+    let receipt = scoped_presentation_equivalence_candidate_assembly_receipt(&binding, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(
+            DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::Cancelled {
+                stage: "presentation-equivalence-assembly-publication",
+            },
+        );
+    }
+    Ok(
+        AdmittedDerivedScopedPresentationEquivalenceCandidateAssemblyV1 {
+            source_geometry: binding.source_geometry,
+            target_geometry: binding.target_geometry,
+            source_local_model: binding.source_local_model,
+            target_local_model: binding.target_local_model,
+            source_resolution: binding.source_resolution,
+            target_resolution: binding.target_resolution,
+            source_scope_witness: binding.source_scope_witness,
+            target_scope_witness: binding.target_scope_witness,
+            tangent_candidate: binding.tangent_candidate,
+            cotangent_candidate: binding.cotangent_candidate,
+            deformation_obstruction_candidate: binding.deformation_obstruction_candidate,
+            local_presentation_correspondence: binding.local_presentation_correspondence,
+            no_authority: binding.no_authority,
+            receipt,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6366,6 +7056,251 @@ mod tests {
             no_authority: DerivedNoClaimIdV1::from_bytes([107; 32]),
         };
         (source, target, path, ir)
+    }
+
+    struct ScopedPresentationEquivalenceCandidateAssemblyFixtureV1 {
+        source: AdmittedDerivedGeometryV1,
+        target: AdmittedDerivedGeometryV1,
+        tangent: AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+        cotangent: AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+        deformation_obstruction: AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+        correspondence: AdmittedDerivedLocalPresentationCorrespondenceCandidateV1,
+        ir: DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1,
+    }
+
+    #[allow(clippy::too_many_lines)] // Full sealed path-to-candidate fixture for one role.
+    fn admit_fixed_resolution_role_candidate(
+        source: &AdmittedDerivedGeometryV1,
+        target: &AdmittedDerivedGeometryV1,
+        role: DerivedComplexRoleV1,
+        artifact_seed: u8,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
+        let source_model = source
+            .ir()
+            .local_models
+            .iter()
+            .find(|model| model.id == DerivedLocalModelIdV1::from_bytes([90; 32]))
+            .expect("source assembly local model");
+        let target_model = target
+            .ir()
+            .local_models
+            .iter()
+            .find(|model| model.id == DerivedLocalModelIdV1::from_bytes([93; 32]))
+            .expect("target assembly local model");
+        let source_complex_id = local_model_complex_for_role(source_model, role);
+        let target_complex_id = local_model_complex_for_role(target_model, role);
+        let source_complex = source
+            .ir()
+            .complexes
+            .iter()
+            .find(|complex| complex.id == source_complex_id)
+            .expect("source assembly role complex");
+        let target_complex = target
+            .ir()
+            .complexes
+            .iter()
+            .find(|complex| complex.id == target_complex_id)
+            .expect("target assembly role complex");
+        let path = admit_derived_morphism_v1(
+            DerivedMorphismIrV1 {
+                schema_version: DERIVED_MORPHISM_SCHEMA_VERSION_V1,
+                source: source.id(),
+                target: target.id(),
+                kind: DerivedMorphismKindV1::DeclaredComplexRefinement {
+                    source_complex: source_complex.id,
+                    target_complex: target_complex.id,
+                    source_resolution: source_complex.resolution.id,
+                    target_resolution: target_complex.resolution.id,
+                    prolongation: DerivedComplexRefinementMapIdV1::from_bytes([artifact_seed; 32]),
+                    commutation: DerivedWitnessIdV1::from_bytes(
+                        [artifact_seed.wrapping_add(1); 32],
+                    ),
+                },
+                evidence: DerivedEvidenceTransportV1::BalanceCorestrictionCovariant {
+                    input_geometry: source.id(),
+                    output_geometry: target.id(),
+                    input_evidence: evidence_id(source.id()),
+                    output_evidence: evidence_id(target.id()),
+                    input_rank: ColorRank::Validated,
+                    output_rank: ColorRank::Estimated,
+                },
+                equivalence: DerivedEquivalenceBoundaryV1::NoClaim {
+                    artifact: DerivedNoClaimIdV1::from_bytes([artifact_seed.wrapping_add(2); 32]),
+                },
+            },
+            source,
+            target,
+            cx,
+        )
+        .expect("valid role-specific assembly refinement");
+        admit_derived_fixed_resolution_quasi_isomorphism_candidate_v1(
+            &DerivedFixedResolutionQuasiIsomorphismCandidateIrV1 {
+                schema_version:
+                    DERIVED_FIXED_RESOLUTION_QUASI_ISOMORPHISM_CANDIDATE_SCHEMA_VERSION_V1,
+                source_geometry: source.id(),
+                target_geometry: target.id(),
+                source_local_model: source_model.id,
+                target_local_model: target_model.id,
+                complex_role: role,
+                source_complex: source_complex.id,
+                target_complex: target_complex.id,
+                source_resolution: source_complex.resolution.id,
+                target_resolution: target_complex.resolution.id,
+                refinement_path: path.id(),
+                nominal_theorem: DerivedTheoremIdV1::from_bytes(
+                    [artifact_seed.wrapping_add(3); 32],
+                ),
+                nominal_checker: DerivedCheckerIdV1::from_bytes(
+                    [artifact_seed.wrapping_add(4); 32],
+                ),
+                nominal_check_receipt: DerivedWitnessIdV1::from_bytes(
+                    [artifact_seed.wrapping_add(5); 32],
+                ),
+                no_authority: DerivedNoClaimIdV1::from_bytes([artifact_seed.wrapping_add(6); 32]),
+            },
+            source,
+            target,
+            &path,
+            cx,
+        )
+        .expect("valid role-specific structural quasi-isomorphism candidate")
+    }
+
+    fn scoped_presentation_equivalence_candidate_assembly_fixture(
+        cx: &Cx<'_>,
+    ) -> ScopedPresentationEquivalenceCandidateAssemblyFixtureV1 {
+        let mut source_ir = local_presentation_geometry_ir(70, 80, 90, 130);
+        let source_resolution = source_ir.complexes[0].resolution;
+        for complex in &mut source_ir.complexes {
+            complex.resolution = source_resolution;
+        }
+        let mut target_ir = local_presentation_geometry_ir(73, 83, 93, 150);
+        for complex in &mut target_ir.complexes {
+            complex.spaces[0].dimension += 1;
+        }
+        let mut target_resolution = target_ir.complexes[0].resolution;
+        target_resolution.max_basis_dimension = target_ir
+            .complexes
+            .iter()
+            .flat_map(|complex| &complex.spaces)
+            .map(|space| space.dimension)
+            .max()
+            .expect("nonempty role complexes");
+        for complex in &mut target_ir.complexes {
+            complex.resolution = target_resolution;
+        }
+        assert!(
+            source_ir
+                .complexes
+                .windows(2)
+                .all(|pair| pair[0].resolution == pair[1].resolution),
+            "source role complexes share one exact resolution record",
+        );
+        assert!(
+            target_ir
+                .complexes
+                .windows(2)
+                .all(|pair| pair[0].resolution == pair[1].resolution),
+            "target role complexes share one exact resolution record",
+        );
+        let source = admit_derived_geometry_v1(source_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid common-selector source presentation");
+        let target = admit_derived_geometry_v1(target_ir, DerivedAdmissionBudgetV1::STANDARD, cx)
+            .expect("valid common-selector target presentation");
+        let tangent = admit_fixed_resolution_role_candidate(
+            &source,
+            &target,
+            DerivedComplexRoleV1::Tangent,
+            210,
+            cx,
+        );
+        let cotangent = admit_fixed_resolution_role_candidate(
+            &source,
+            &target,
+            DerivedComplexRoleV1::Cotangent,
+            220,
+            cx,
+        );
+        let deformation_obstruction = admit_fixed_resolution_role_candidate(
+            &source,
+            &target,
+            DerivedComplexRoleV1::DeformationObstruction,
+            230,
+            cx,
+        );
+        let correspondence_ir = local_presentation_candidate_ir(&source, &target);
+        let correspondence = admit_derived_local_presentation_correspondence_candidate_v1(
+            &correspondence_ir,
+            &source,
+            &target,
+            cx,
+        )
+        .expect("valid assembly presentation relation");
+        let ir = DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+            schema_version:
+                DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_SCHEMA_VERSION_V1,
+            source_geometry: source.id(),
+            target_geometry: target.id(),
+            source_local_model: DerivedLocalModelIdV1::from_bytes([90; 32]),
+            target_local_model: DerivedLocalModelIdV1::from_bytes([93; 32]),
+            tangent_candidate: tangent.id(),
+            cotangent_candidate: cotangent.id(),
+            deformation_obstruction_candidate: deformation_obstruction.id(),
+            local_presentation_correspondence: correspondence.id(),
+            no_authority: DerivedNoClaimIdV1::from_bytes([240; 32]),
+        };
+        ScopedPresentationEquivalenceCandidateAssemblyFixtureV1 {
+            source,
+            target,
+            tangent,
+            cotangent,
+            deformation_obstruction,
+            correspondence,
+            ir,
+        }
+    }
+
+    fn copy_fixed_resolution_candidate_for_defensive_test(
+        candidate: &AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1,
+    ) -> AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
+        AdmittedDerivedFixedResolutionQuasiIsomorphismCandidateV1 {
+            refinement_path: candidate.refinement_path(),
+            source_geometry: candidate.source_geometry(),
+            target_geometry: candidate.target_geometry(),
+            source_local_model: candidate.source_local_model(),
+            target_local_model: candidate.target_local_model(),
+            complex_role: candidate.complex_role(),
+            source_complex: candidate.source_complex(),
+            target_complex: candidate.target_complex(),
+            source_resolution: candidate.source_resolution(),
+            target_resolution: candidate.target_resolution(),
+            source_scope_witness: candidate.source_scope_witness(),
+            target_scope_witness: candidate.target_scope_witness(),
+            nominal_theorem: candidate.nominal_theorem(),
+            nominal_checker: candidate.nominal_checker(),
+            nominal_check_receipt: candidate.nominal_check_receipt(),
+            no_authority: candidate.no_authority(),
+            receipt: candidate.identity_receipt(),
+        }
+    }
+
+    fn copy_local_presentation_correspondence_for_defensive_test(
+        candidate: &AdmittedDerivedLocalPresentationCorrespondenceCandidateV1,
+    ) -> AdmittedDerivedLocalPresentationCorrespondenceCandidateV1 {
+        AdmittedDerivedLocalPresentationCorrespondenceCandidateV1 {
+            source_geometry: candidate.source_geometry(),
+            target_geometry: candidate.target_geometry(),
+            source_local_model: candidate.source_local_model(),
+            target_local_model: candidate.target_local_model(),
+            equality_relations: candidate.equality_relations().to_vec(),
+            active_inequality_relations: candidate.active_inequality_relations().to_vec(),
+            active_contact_relations: candidate.active_contact_relations().to_vec(),
+            constitutive_relations: candidate.constitutive_relations().to_vec(),
+            nominal_correspondence: candidate.nominal_correspondence(),
+            no_authority: candidate.no_authority(),
+            receipt: candidate.identity_receipt(),
+        }
     }
 
     fn admitted_fixed_resolution_geometry(
@@ -10610,6 +11545,524 @@ mod tests {
             changed = ir.clone();
             changed.no_authority = DerivedNoClaimIdV1::from_bytes([215; 32]);
             assert_ne!(encoded(&changed), base);
+        });
+    }
+
+    #[test]
+    fn scoped_presentation_candidate_assembly_replays_and_exposes_no_authority() {
+        assert_ne!(
+            DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1::DOMAIN,
+            DerivedFixedResolutionQuasiIsomorphismCandidateIdentitySchemaV1::DOMAIN,
+        );
+        assert_ne!(
+            DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1::DOMAIN,
+            DerivedLocalPresentationCorrespondenceCandidateIdentitySchemaV1::DOMAIN,
+        );
+        assert_eq!(
+            DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1::FIELDS.len(),
+            13,
+        );
+        assert_eq!(
+            DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_IDENTITY_LIMITS_V1
+                .max_fields(),
+            16,
+        );
+
+        with_cx(false, |cx| {
+            let fixture = scoped_presentation_equivalence_candidate_assembly_fixture(cx);
+            let first = admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                &fixture.ir,
+                &fixture.tangent,
+                &fixture.cotangent,
+                &fixture.deformation_obstruction,
+                &fixture.correspondence,
+                cx,
+            )
+            .expect("valid scoped candidate assembly");
+            let replay = admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                &fixture.ir,
+                &fixture.tangent,
+                &fixture.cotangent,
+                &fixture.deformation_obstruction,
+                &fixture.correspondence,
+                cx,
+            )
+            .expect("deterministic scoped candidate assembly replay");
+
+            assert_eq!(first, replay);
+            assert_eq!(first.source_geometry(), fixture.source.id());
+            assert_eq!(first.target_geometry(), fixture.target.id());
+            assert_eq!(first.source_local_model(), fixture.ir.source_local_model);
+            assert_eq!(first.target_local_model(), fixture.ir.target_local_model);
+            assert_eq!(first.source_resolution(), resolution_id(80));
+            assert_eq!(first.target_resolution(), resolution_id(83));
+            assert_eq!(
+                first.source_scope_witness(),
+                DerivedWitnessIdV1::from_bytes([112; 32]),
+            );
+            assert_eq!(
+                first.target_scope_witness(),
+                DerivedWitnessIdV1::from_bytes([115; 32]),
+            );
+            assert_eq!(first.tangent_candidate(), fixture.tangent.id());
+            assert_eq!(first.cotangent_candidate(), fixture.cotangent.id());
+            assert_eq!(
+                first.deformation_obstruction_candidate(),
+                fixture.deformation_obstruction.id(),
+            );
+            assert_eq!(
+                first.local_presentation_correspondence(),
+                fixture.correspondence.id(),
+            );
+            assert_eq!(first.no_authority(), fixture.ir.no_authority);
+        });
+    }
+
+    #[test]
+    fn scoped_presentation_candidate_assembly_receipt_binds_all_thirteen_fields() {
+        with_cx(false, |cx| {
+            let fixture = scoped_presentation_equivalence_candidate_assembly_fixture(cx);
+            let binding = scoped_presentation_equivalence_candidate_assembly_binding(
+                &fixture.ir,
+                &fixture.tangent,
+                &fixture.cotangent,
+                &fixture.deformation_obstruction,
+                &fixture.correspondence,
+                cx,
+            )
+            .expect("valid scoped candidate assembly binding");
+            let baseline = scoped_presentation_equivalence_candidate_assembly_receipt(&binding, cx)
+                .expect("valid scoped candidate assembly receipt")
+                .id();
+
+            macro_rules! assert_assembly_field_moves_identity {
+                ($field:ident, $value:expr) => {{
+                    let mut changed = binding;
+                    changed.$field = $value;
+                    let changed =
+                        scoped_presentation_equivalence_candidate_assembly_receipt(&changed, cx)
+                            .expect("mutated scoped candidate assembly receipt")
+                            .id();
+                    assert_ne!(baseline, changed, stringify!($field));
+                }};
+            }
+
+            assert_assembly_field_moves_identity!(source_geometry, geometry_id(241));
+            assert_assembly_field_moves_identity!(target_geometry, geometry_id(242));
+            assert_assembly_field_moves_identity!(
+                source_local_model,
+                DerivedLocalModelIdV1::from_bytes([243; 32])
+            );
+            assert_assembly_field_moves_identity!(
+                target_local_model,
+                DerivedLocalModelIdV1::from_bytes([244; 32])
+            );
+            assert_assembly_field_moves_identity!(source_resolution, resolution_id(245));
+            assert_assembly_field_moves_identity!(target_resolution, resolution_id(246));
+            assert_assembly_field_moves_identity!(
+                source_scope_witness,
+                DerivedWitnessIdV1::from_bytes([247; 32])
+            );
+            assert_assembly_field_moves_identity!(
+                target_scope_witness,
+                DerivedWitnessIdV1::from_bytes([248; 32])
+            );
+            assert_assembly_field_moves_identity!(
+                tangent_candidate,
+                DerivedFixedResolutionQuasiIsomorphismCandidateIdV1::parse_slice(&[249; 32])
+                    .expect("nonzero candidate identity")
+            );
+            assert_assembly_field_moves_identity!(
+                cotangent_candidate,
+                DerivedFixedResolutionQuasiIsomorphismCandidateIdV1::parse_slice(&[250; 32])
+                    .expect("nonzero candidate identity")
+            );
+            assert_assembly_field_moves_identity!(
+                deformation_obstruction_candidate,
+                DerivedFixedResolutionQuasiIsomorphismCandidateIdV1::parse_slice(&[251; 32])
+                    .expect("nonzero candidate identity")
+            );
+            assert_assembly_field_moves_identity!(
+                local_presentation_correspondence,
+                DerivedLocalPresentationCorrespondenceCandidateIdV1::parse_slice(&[252; 32])
+                    .expect("nonzero correspondence identity")
+            );
+            assert_assembly_field_moves_identity!(
+                no_authority,
+                DerivedNoClaimIdV1::from_bytes([253; 32])
+            );
+
+            for field in
+                &DerivedScopedPresentationEquivalenceCandidateAssemblyIdentitySchemaV1::FIELDS
+                    [8..12]
+            {
+                assert_eq!(field.wire_type(), WireType::Child);
+                assert!(field.child_spec().is_some());
+            }
+            let wrong_child_schema = CanonicalEncoder::<
+                DerivedScopedPresentationEquivalenceCandidateAssemblyIdV1,
+                _,
+            >::new(
+                DERIVED_SCOPED_PRESENTATION_EQUIVALENCE_CANDIDATE_ASSEMBLY_IDENTITY_LIMITS_V1,
+                || cx.checkpoint().is_err(),
+            )
+            .expect("valid assembly encoder")
+            .bytes(
+                Field::new(0, "source-geometry"),
+                binding.source_geometry.as_bytes(),
+            )
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(1, "target-geometry"),
+                    binding.target_geometry.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(2, "source-local-model"),
+                    binding.source_local_model.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(3, "target-local-model"),
+                    binding.target_local_model.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(4, "source-resolution"),
+                    binding.source_resolution.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(5, "target-resolution"),
+                    binding.target_resolution.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(6, "source-scope-witness"),
+                    binding.source_scope_witness.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.bytes(
+                    Field::new(7, "target-scope-witness"),
+                    binding.target_scope_witness.as_bytes(),
+                )
+            })
+            .and_then(|encoder| {
+                encoder.child(
+                    Field::new(8, "tangent-quasi-isomorphism-candidate"),
+                    fixture.correspondence.id(),
+                )
+            });
+            assert!(matches!(
+                wrong_child_schema,
+                Err(CanonicalError::ChildBindingMismatch {
+                    field: "tangent-quasi-isomorphism-candidate",
+                    what: "child schema domain",
+                })
+            ));
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exact raw/sealed child and shared-scope seams.
+    fn scoped_presentation_candidate_assembly_refuses_identity_role_and_scope_defects() {
+        with_cx(false, |cx| {
+            let fixture = scoped_presentation_equivalence_candidate_assembly_fixture(cx);
+
+            let mut malformed = fixture.ir;
+            malformed.schema_version += 1;
+            assert!(matches!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &malformed,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::UnsupportedSchemaVersion { .. })
+            ));
+
+            for (field, mut malformed) in [
+                ("source-local-model", fixture.ir),
+                ("target-local-model", fixture.ir),
+                ("no-authority", fixture.ir),
+            ] {
+                match field {
+                    "source-local-model" => {
+                        malformed.source_local_model = DerivedLocalModelIdV1::from_bytes([0; 32]);
+                    }
+                    "target-local-model" => {
+                        malformed.target_local_model = DerivedLocalModelIdV1::from_bytes([0; 32]);
+                    }
+                    "no-authority" => {
+                        malformed.no_authority = DerivedNoClaimIdV1::from_bytes([0; 32]);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                        &malformed,
+                        &fixture.tangent,
+                        &fixture.cotangent,
+                        &fixture.deformation_obstruction,
+                        &fixture.correspondence,
+                        cx,
+                    ),
+                    Err(
+                        DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::MissingIdentity {
+                            field,
+                        }
+                    ),
+                );
+            }
+
+            for (field, malformed) in [
+                (
+                    "tangent-quasi-isomorphism-candidate",
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                        tangent_candidate: fixture.cotangent.id(),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "cotangent-quasi-isomorphism-candidate",
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                        cotangent_candidate: fixture.tangent.id(),
+                        ..fixture.ir
+                    },
+                ),
+                (
+                    "deformation-obstruction-quasi-isomorphism-candidate",
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                        deformation_obstruction_candidate: fixture.tangent.id(),
+                        ..fixture.ir
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                        &malformed,
+                        &fixture.tangent,
+                        &fixture.cotangent,
+                        &fixture.deformation_obstruction,
+                        &fixture.correspondence,
+                        cx,
+                    ),
+                    Err(
+                        DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::CandidateIdentityMismatch {
+                            field,
+                        }
+                    ),
+                );
+            }
+            let malformed = DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                local_presentation_correspondence:
+                    DerivedLocalPresentationCorrespondenceCandidateIdV1::parse_slice(&[241; 32])
+                        .expect("nonzero correspondence identity"),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &malformed,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::CandidateIdentityMismatch {
+                        field: "local-presentation-correspondence-candidate",
+                    }
+                ),
+            );
+
+            let duplicated = DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                cotangent_candidate: fixture.tangent.id(),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &duplicated,
+                    &fixture.tangent,
+                    &fixture.tangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::CandidateRoleMismatch {
+                        field: "cotangent-quasi-isomorphism-candidate",
+                        found: DerivedComplexRoleV1::Tangent,
+                    }
+                ),
+            );
+
+            let wrong_endpoint = DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                source_geometry: geometry_id(241),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &wrong_endpoint,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::EndpointMismatch {
+                        field: "source-geometry",
+                    }
+                ),
+            );
+            let wrong_model = DerivedScopedPresentationEquivalenceCandidateAssemblyIrV1 {
+                target_local_model: DerivedLocalModelIdV1::from_bytes([241; 32]),
+                ..fixture.ir
+            };
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &wrong_model,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::LocalModelMismatch {
+                        field: "target-local-model",
+                    }
+                ),
+            );
+
+            let mut forged_cotangent_endpoint =
+                copy_fixed_resolution_candidate_for_defensive_test(&fixture.cotangent);
+            forged_cotangent_endpoint.source_geometry = geometry_id(242);
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &fixture.ir,
+                    &fixture.tangent,
+                    &forged_cotangent_endpoint,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::EndpointMismatch {
+                        field: "cotangent-source-geometry",
+                    }
+                ),
+            );
+            let mut forged_deformation_model = copy_fixed_resolution_candidate_for_defensive_test(
+                &fixture.deformation_obstruction,
+            );
+            forged_deformation_model.target_local_model =
+                DerivedLocalModelIdV1::from_bytes([242; 32]);
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &fixture.ir,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &forged_deformation_model,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::LocalModelMismatch {
+                        field: "deformation-obstruction-target-local-model",
+                    }
+                ),
+            );
+            let mut forged_correspondence =
+                copy_local_presentation_correspondence_for_defensive_test(&fixture.correspondence);
+            forged_correspondence.target_geometry = geometry_id(242);
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &fixture.ir,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &fixture.deformation_obstruction,
+                    &forged_correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::EndpointMismatch {
+                        field: "correspondence-target-geometry",
+                    }
+                ),
+            );
+
+            let mut forged_cotangent =
+                copy_fixed_resolution_candidate_for_defensive_test(&fixture.cotangent);
+            forged_cotangent.source_resolution = resolution_id(241);
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &fixture.ir,
+                    &fixture.tangent,
+                    &forged_cotangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::ResolutionScopeMismatch {
+                        field: "cotangent-source-resolution",
+                    }
+                ),
+            );
+            let mut forged_deformation = copy_fixed_resolution_candidate_for_defensive_test(
+                &fixture.deformation_obstruction,
+            );
+            forged_deformation.target_scope_witness = DerivedWitnessIdV1::from_bytes([242; 32]);
+            assert_eq!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &fixture.ir,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &forged_deformation,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::ResolutionScopeMismatch {
+                        field: "deformation-obstruction-target-scope-witness",
+                    }
+                ),
+            );
+        });
+    }
+
+    #[test]
+    fn scoped_presentation_candidate_assembly_entry_cancellation_fails_closed() {
+        let fixture = with_cx(
+            false,
+            scoped_presentation_equivalence_candidate_assembly_fixture,
+        );
+        with_cx(true, |cx| {
+            assert!(matches!(
+                admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
+                    &fixture.ir,
+                    &fixture.tangent,
+                    &fixture.cotangent,
+                    &fixture.deformation_obstruction,
+                    &fixture.correspondence,
+                    cx,
+                ),
+                Err(
+                    DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1::Cancelled {
+                        stage: "presentation-equivalence-assembly-admission-entry",
+                    }
+                )
+            ));
         });
     }
 

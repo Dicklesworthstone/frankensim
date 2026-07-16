@@ -626,6 +626,15 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    refuse, and caller ordering is nonsemantic. Repeated sources and targets are
    admitted explicitly, so coverage cannot be mistaken for functionality or a
    bijection.
+14. Scoped presentation-equivalence candidate assemblies bind exact sealed
+   child IDs for the tangent, cotangent, and deformation-obstruction fixed-
+   resolution quasi-isomorphism candidate roles plus one exhaustive local-
+   presentation correspondence candidate. Every child must retain the exact
+   declared geometry and local-model endpoints. The three role candidates must
+   retain identical source/target resolution IDs and fixed-scope witnesses;
+   those four selectors are derived from sealed children, not supplied by the
+   caller. The assembly requires a nonzero no-authority artifact and grants no
+   equivalence, inverse, homotopy, composition, or evidence-transport API.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -676,6 +685,18 @@ endpoint/path/selector, local-model ownership, role/complex/chart/locality,
 fixed-resolution scope, nominal identity, cancellation, and canonical-identity
 defects. Refusal publishes no candidate token and cannot affect the supplied
 sealed morphism.
+Local-presentation correspondence candidate admission uses
+`DerivedLocalPresentationCorrespondenceCandidateErrorV1` for schema, endpoint
+and local-model ownership, geometry conventions, exact chart/locality,
+relation-member ownership, two-sided family coverage, duplicate source/target
+pairs, nominal identities, aggregate resource/allocation limits, cancellation,
+and canonical-identity defects. Refusal publishes no relation candidate.
+Scoped presentation-equivalence candidate assembly uses
+`DerivedScopedPresentationEquivalenceCandidateAssemblyErrorV1` for schema,
+nonzero local-model/no-authority identities, raw/sealed child identity, exact
+role slots, endpoint and local-model agreement, common resolution/scope-
+witness selectors, cancellation, and canonical-identity defects. Refusal
+publishes no assembly and cannot promote or mutate any supplied sealed child.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -727,6 +748,20 @@ local-model, complex, and resolution IDs; the selected complex role; both
 endpoint scope witnesses; nominal theorem/checker/check-receipt IDs; and the
 no-authority artifact. Exact replay is stable, while moving any retained field
 changes identity without authenticating its payload.
+Local-presentation correspondence candidate receipts use a separate domain and
+encode exact endpoint geometry/local-model IDs; four independently sorted
+canonical sets of complete typed relation edges; the nominal aggregate ID; and
+the no-authority artifact. Permuting a relation collection is identity-neutral;
+moving a member, edge artifact, aggregate, endpoint, or authority field changes
+identity without authenticating relation semantics.
+Scoped presentation-equivalence candidate assembly receipts use another
+separate domain and exactly 13 ordered fields: geometry and local-model
+endpoints; source/target resolution IDs and scope witnesses derived from sealed
+children; the tangent, cotangent, deformation-obstruction, and correspondence
+candidate receipts as recursively schema-bound typed children; and the
+no-authority artifact. Exact replay is stable, child schema/version/context is
+part of the parent schema identity, and moving any one field changes identity
+without promoting any child claim.
 
 ## Cancellation behavior
 Chart evaluation and production sampling paths take `&Cx`.
@@ -768,6 +803,14 @@ Fixed-resolution quasi-isomorphism candidate admission additionally polls while
 scanning the bounded typed refinement path, before and inside identity encoding,
 and immediately before publication. Cancellation exposes no partial candidate
 token.
+Local-presentation correspondence candidate admission polls at entry; before
+and after each canonical relation sort; at fixed strides during membership,
+two-sided coverage, and relation encoding; inside canonical identity encoding;
+and immediately before publication. Cancellation exposes no partial relation
+candidate.
+Scoped presentation-equivalence candidate assembly polls at entry, inside its
+bounded 13-field identity encoder, and immediately before publication. It
+allocates no child collection and cancellation exposes no partial assembly.
 RD.X1 statement admission polls before validation, once for every derived
 theorem-lattice node, before identity construction, and inside the streaming
 encoder. Its falsifier set and truncation lattice have hard versioned caps;
@@ -856,6 +899,15 @@ refusal, exact endpoint/model/version/locality binding, nominal semantic and
 physical non-authority, aggregate capacity, every receipt field, and entry
 cancellation. Exact-scope cases also cover every geometry convention and full
 admitted-chart semantics rather than trusting a reused nominal chart ID.
+The scoped presentation-equivalence candidate assembly suite covers its
+separate 13-field schema/domain, deterministic replay and every accessor,
+identity movement for every retained field, exact raw/sealed binding for all
+four children, duplicate/wrong role refusal, raw and child endpoint/model
+seams, common resolution/scope-witness refusal, the nonzero no-authority
+selector, and already-requested entry cancellation. Its fixture supplies all
+three roles
+under one fixed-resolution presentation scope without asserting any promoted
+equivalence theorem.
 It also covers declared chart-map ownership, missing IDs, dimension/frame/unit/
 quantity/scale mutations, typed-ID-bound receipt replay and public primitive
 retention, homogeneous associativity, exact chart seams, identity neutrality,
@@ -1004,6 +1056,27 @@ claim those stronger G4/G5 results.
   and semantically check every relation edge and combine any promoted result
   with the required role-specific quasi-isomorphisms and inverse/zigzag/homotopy
   evidence in a new authority receipt.
+- `AdmittedDerivedScopedPresentationEquivalenceCandidateAssemblyV1` proves only
+  that exact sealed child IDs were supplied for the tangent, cotangent, and
+  deformation-obstruction fixed-resolution quasi-isomorphism candidate roles
+  and for one exhaustive local-presentation correspondence candidate; that all
+  four children retain the exact declared geometry/local-model endpoints; and
+  that the three role candidates retain identical source/target resolution-ID
+  and fixed-scope-witness selectors. Those selectors are derived from sealed
+  children rather than accepted from the caller. The assembly does not compare
+  the per-complex `FiniteResolutionV1` envelopes behind equal nominal selectors;
+  equal selector IDs therefore do not prove equal rank, degree, truncation, or
+  remainder envelopes. This assembly also does not
+  execute or authenticate any child theorem, checker, path, relation, or
+  artifact and does not establish chain-map laws, cohomology isomorphism,
+  generator or constraint semantics, an inverse, a zigzag, a homotopy,
+  coherence, naturality across refinements, evidence preservation, coordinate
+  equivalence, or physical equivalence. It intentionally has no conversion to
+  `DerivedEquivalenceBoundaryV1`, composition, inverse, or transport API. RD.1c
+  must independently resolve and validate every child and then bind explicit
+  inverse-or-zigzag plus homotopy/coherence evidence in a new authority-bearing
+  receipt; the RD.1b assembly identity itself is only a deterministic structural
+  packet and its `no_authority` artifact remains mandatory.
 - `DeclaredInclusion` is a typed whole-object inclusion declaration, not a
   containment certificate. It proves no actual subset or validity-domain
   inclusion; map execution or payload truth; injectivity, monicity, embedding,
