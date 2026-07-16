@@ -233,7 +233,7 @@ fn committed_checkpoint_prefix_survives_kill_and_real_file_reopen() {
         .load_state_checkpoint(last_expected.content_hash(), bumped)
         .expect_err("recovered checkpoint must refuse bumped state schema");
     let rendered_refusal = refusal.to_string();
-    assert!(rendered_refusal.contains("state bytes withheld"));
+    assert!(rendered_refusal.contains("state bytes were withheld"));
     let LedgerError::UnknownStateSemantics {
         stored_law,
         stored_law_version,
@@ -379,7 +379,7 @@ fn semantic_mismatches_are_typed_and_precede_state_materialization() {
         .expect_err("bumped state schema must refuse replay");
     assert_eq!(error.code(), "LedgerUnknownStateSemantics");
     let rendered = error.to_string();
-    assert!(rendered.contains("state bytes withheld"));
+    assert!(rendered.contains("state bytes were withheld"));
     assert!(rendered.contains("state_schema_version"));
     let LedgerError::UnknownStateSemantics {
         stored_law,
