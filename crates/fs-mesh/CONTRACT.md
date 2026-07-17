@@ -303,6 +303,24 @@ failure record, validates and prints the wire row, and only then performs its
 terminal assertion. The target's central proof must explicitly enable
 `frontier-hexmesh`; a default-feature workspace pass does not exercise it.
 
+`tests/perf_lane.rs` remains an explicitly ignored ladder intended for the
+documented release invocation. Each executed rung emits one failure-linted,
+wire-validated `Custom` event under session `fs-mesh/perf-lane` at the dynamic
+scope `mesh-perf/n-{n}/measurement`, so the 10⁴, 10⁵, 10⁶, and optional
+10⁷ rows cannot reuse a sequence-zero identity. A compound row retains the
+wall seconds, points/s, tet count, audit mode, actual build profile, escaped
+machine label, and its FNV-1a-64 label fingerprint. It records cloud input seed
+`0xBEAD5EED` separately from the Cx execution provenance (seed 41, kernel 77,
+tile 0, iteration 0). The wall-clock values are finite-safe and explicitly
+non-replayable, scoped only to that run and machine; `Custom` is intentional
+because `BenchmarkResult` cannot bind the compound audit and provenance
+receipt in one row. Without `FS_MESH_PERF_FULL=1`, the 10⁷ cloud, execution,
+timing, and audit do not run; a Warn event instead records normalized status
+`skipped`, the human instruction, null input/execution provenance, and the
+configured seed at the distinct `mesh-perf/n-10000000/skip` identity. Event
+emission remains at the old output boundaries, before the same throughput
+assertions.
+
 ### Addendum (bead uee3, partial): policy floor, hull-split evidence, exudation
 
 - `RefineOptions` gains `min_edge_factor` (the SMALL-INPUT-ANGLE
@@ -367,8 +385,9 @@ terminal assertion. The target's central proof must explicitly enable
   points/s, 67.6M tets, throughput near-FLAT across the ladder
   (10⁴: 116k, 10⁵: 115k, 10⁶: 105k, 10⁷: 100k pts/s — BRIO locality
   holding over three decades), exact structural audit clean at every
-  rung (full insphere certification at 10⁴). Ledger rows in
-  `tests/perf_lane.rs` output and bead uee3. tmesh-006 pins 10⁴-scale
+  rung (full insphere certification at 10⁴). The historical ledger rows
+  remain in bead uee3; current runs emit canonical fs-obs evidence from
+  `tests/perf_lane.rs`. tmesh-006 pins 10⁴-scale
   behavior in CI; the nightly perf-CI cadence belongs to fz2.4.
 - Remeshing no-claims: curved creases round under midpoint projection
   (straight creases are exact); boundary loops are locked, not

@@ -16,6 +16,11 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::Point3;
 use fs_mesh::delaunay;
 
+const SESSION: &str = "fs-mesh/perf-lane";
+const CLOUD_INPUT_SEED: u64 = 0xbead_5eed;
+const CX_EXECUTION_SEED: u64 = 41;
+const CX_KERNEL_ID: u64 = 77;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -24,8 +29,8 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 41,
-                kernel_id: 77,
+                seed: CX_EXECUTION_SEED,
+                kernel_id: CX_KERNEL_ID,
                 tile: 0,
                 iteration: 0,
             },
@@ -68,8 +73,57 @@ fn machine_fingerprint() -> String {
     )
 }
 
+fn emit_custom(identity: &str, severity: fs_obs::Severity, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SESSION, identity);
+    let event = emitter.emit(
+        severity,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event)
+        .expect("mesh perf-lane row must satisfy the failure-record lint");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("mesh perf-lane row must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64, precision: usize) -> String {
+    if value.is_finite() {
+        format!("{value:.precision$}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn json_string(value: &str) -> String {
+    use core::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn run_rung(n: usize, full_insphere_audit: bool) -> (f64, usize) {
-    let points = cloud(n, 0xbead_5eed);
+    let points = cloud(n, CLOUD_INPUT_SEED);
     let start = std::time::Instant::now();
     let tetra = with_cx(|cx| delaunay(&points, cx).expect("delaunay"));
     let secs = start.elapsed().as_secs_f64();
@@ -78,19 +132,49 @@ fn run_rung(n: usize, full_insphere_audit: bool) -> (f64, usize) {
     let tets = tetra.tets().len();
     #[allow(clippy::cast_precision_loss)]
     let rate = n as f64 / secs;
-    println!(
-        "{{\"metric\":\"mesh-perf\",\"n\":{n},\"secs\":{secs:.3},\
-         \"points_per_s\":{rate:.0},\"tets\":{tets},\
-         \"insphere_audit\":{full_insphere_audit},\
-         \"build\":\"{}\",\"machine\":\"{}\"}}",
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
-        machine_fingerprint()
+    let build = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let machine = machine_fingerprint();
+    let machine_id = fs_obs::fnv1a64(machine.as_bytes());
+    emit_custom(
+        &format!("mesh-perf/n-{n}/measurement"),
+        fs_obs::Severity::Info,
+        "mesh-perf-rung",
+        format!(
+            "{{\"metric\":\"mesh-perf\",\"n\":{n},\"secs\":{},\
+             \"points_per_s\":{},\"tets\":{tets},\
+             \"insphere_audit\":{full_insphere_audit},\"build\":{build_json},\
+             \"machine\":{machine_json},\"machine_fingerprint\":{machine_id},\
+             \"machine_fingerprint_domain\":\"fnv1a64(os-arch-hw.model-label)\",\
+             \"input_seed\":{CLOUD_INPUT_SEED},\
+             \"cx_execution_seed\":{CX_EXECUTION_SEED},\
+             \"cx_kernel_id\":{CX_KERNEL_ID},\"cx_tile\":0,\"cx_iteration\":0,\
+             \"timing_replayable\":false,\"claim_scope\":\"this-run-this-machine\"}}",
+            finite_json(secs, 3),
+            finite_json(rate, 0),
+            build_json = json_string(build),
+            machine_json = json_string(&machine),
+        ),
     );
     (rate, tets)
+}
+
+fn emit_full_rung_skip() {
+    emit_custom(
+        "mesh-perf/n-10000000/skip",
+        fs_obs::Severity::Warn,
+        "mesh-perf-skip",
+        format!(
+            "{{\"metric\":\"mesh-perf\",\"n\":10000000,\"status\":\"skipped\",\
+             \"display\":\"SKIPPED (set FS_MESH_PERF_FULL=1)\",\
+             \"required_env\":\"FS_MESH_PERF_FULL=1\",\"input_seed\":null,\
+             \"configured_input_seed\":{CLOUD_INPUT_SEED},\"execution_stream\":null,\
+             \"timing_replayable\":false}}"
+        ),
+    );
 }
 
 #[test]
@@ -117,9 +201,6 @@ fn perf_lane_ladder() {
             "the 1e7 rung holds within 4x of 1e6: {rate7:.0} vs {rate6:.0}"
         );
     } else {
-        println!(
-            "{{\"metric\":\"mesh-perf\",\"n\":10000000,\
-             \"status\":\"SKIPPED (set FS_MESH_PERF_FULL=1)\"}}"
-        );
+        emit_full_rung_skip();
     }
 }
