@@ -4,8 +4,9 @@
 > provenance-bound NASA-9 ideal-gas standard-state evaluation and bounded
 > frozen-composition ideal-gas mixture evaluation, plus a positive-state
 > mechanical ideal-gas EOS rung and a bounded Wilke dilute-gas viscosity
-> mixing closure. Central batch compilation and test execution for the newest
-> slice are pending; the parent thermochemistry bead remains in progress.
+> mixing closure, plus bounded standard-state ideal-gas reaction equilibrium.
+> Central batch compilation and test execution for the newest slice are
+> pending; the parent thermochemistry bead remains in progress.
 
 ## Purpose and layer
 
@@ -22,7 +23,10 @@ into frozen ideal-gas molar and mass-specific properties. The third supplies
 the typed mechanical closure from positive finite temperature, pressure, and
 molar mass to density, molar volume, specific gas constant, and `Z = 1`. The
 fourth combines up to 128 positive caller-supplied pure-species viscosities by
-Wilke's dilute-gas rule at one explicitly declared common temperature.
+Wilke's dilute-gas rule at one explicitly declared common temperature. The
+fifth combines one exactly conserved `fs-qty` stoichiometric column with all
+and only its active NASA-9 models to evaluate standard reaction Gibbs energy,
+`ln(K_p)`, and `K_p` when directly representable.
 
 Direct runtime dependencies are L1 or lower: `fs-qty`, `fs-matdb`, and
 `fs-math`. The direct `fs-evidence` edge is development-only so conformance
@@ -98,6 +102,25 @@ behavior.
   both composition bases and exact sums, canonical species, molar masses,
   supplied viscosities, fractions, every outer-component denominator, and the
   final result.
+- `IdealGasReactionEquilibriumV1` retains one bounded
+  `StoichiometricMatrix`, an existing matching `ConservationCertificate`, one
+  selected `ReactionId`, every nonzero exact coefficient, and all and only the
+  corresponding NASA-9 models in canonical species order. It requires at
+  least one reactant and product, coefficients exactly representable in
+  binary64, and one exact phase/EOS/reference-pressure/elemental-reference
+  convention across all active species.
+- `IdealGasReactionEquilibriumEvaluationV1` carries typed standard reaction
+  Gibbs energy, finite dimensionless `ln(K_p)`, a positive finite direct `K_p`
+  when exponentiation stays representable, and an exact-field receipt. A
+  finite log result survives direct-constant overflow/underflow under an
+  explicit `EquilibriumConstantStatusV1`; zero or infinity is never published
+  as a physical equilibrium constant.
+- `IdealGasReactionEquilibriumReceiptV1` binds the evaluator/math/quantity
+  versions, exact gas constant, reaction and canonical column, stoichiometric
+  and conservation-certificate identities, temperature, common convention,
+  every coefficient/Gibbs/contribution bit pattern, every nested NASA-9
+  receipt, standard reaction Gibbs energy, log constant, and direct-constant
+  representation state.
 
 ## NASA-9 operation tree
 
@@ -221,6 +244,28 @@ development cross-reference for the rule and units, never as a runtime
 dependency:
 <https://cantera.org/3.1/cxx/d8/d58/classCantera_1_1GasTransport.html>.
 
+## Standard-state reaction-equilibrium operation tree
+
+For one exactly conserved reaction column with negative reactant and positive
+product coefficients `nu_i`, common ideal-gas standard-state models, and
+absolute temperature `T`, version 1 evaluates active species once in canonical
+`SpeciesId` order:
+
+```text
+term_i   = binary64_exact(nu_i) * g_i^0(T)
+delta_g  = fixed_order_sum_i(term_i)
+R_T      = R * T
+ln(K_p)  = -delta_g / R_T
+K_p      = deterministic_exp(ln(K_p)) when positive finite
+```
+
+`K_p` is dimensionless because each ideal-gas activity is `p_i / p0`; all
+active models must bind the same exact `p0`. Coefficients outside
+`[-2^53, 2^53]` refuse because conversion would lose their exact integer
+identity. Finite `ln(K_p)` remains the successful representation when direct
+exponentiation overflows or underflows. This operation tree evaluates a
+standard-state constant only; it does not solve for equilibrium composition.
+
 ## Invariants
 
 - ONE CHEMISTRY AUTHORITY: exact bookkeeping and conservation come from
@@ -272,6 +317,18 @@ dependency:
   caller-declared temperature are structural prerequisites, not proof that the
   values share a state or that a gas is dilute, single-phase, or described by
   Wilke's empirical approximation.
+- ONE CONSERVATION PROOF OWNER: reaction equilibrium accepts only an existing
+  `fs-qty` certificate whose exact stoichiometric identity matches. It neither
+  reconstructs nor weakens `A N = 0` or `z^T N = 0` authority.
+- BOUNDED REACTION WORK: matrix axes are each capped at 128, the admitted
+  matrix identity at 16,384 cells, and one selected reaction at 128 active
+  terms. All retained vectors reserve fallibly before publication.
+- CANONICAL REACTION ORDER: supplied NASA-9 model order is irrelevant; active
+  terms and fixed-order sums follow the canonical stoichiometric species axis.
+  Missing, duplicate, inactive, or convention-incompatible models refuse.
+- LOG AUTHORITY SURVIVES RANGE LOSS: every successful `ln(K_p)` is finite.
+  Direct `K_p` is optional and appears only when deterministic exponentiation
+  is strictly positive and finite; range loss is explicit, not clamped.
 
 ## Error model
 
@@ -299,6 +356,13 @@ underflow, bounded allocation stage, and the first failed pair/outer component
 plus operation-tree intermediate. Float-bearing refusals retain exact IEEE-754
 bits and no partial viscosity or receipt escapes.
 
+`ReactionEquilibriumErrorV1` separately names matrix/cell/model bounds,
+certificate drift, unknown/zero/one-sided reactions, unavailable matrix
+entries, inexact integer-to-binary64 coefficients, duplicate/missing/inactive
+models, convention drift, bounded allocation stage, nested species evaluation,
+and the first non-finite term/sum/`R T`/log value. No partial reaction result or
+receipt escapes.
+
 ## Determinism class
 
 Version 1 is fixed-order deterministic for identical inputs under the same
@@ -322,6 +386,13 @@ result, denominator trace, or receipt. `fs_math::det::sqrt` and the explicit
 evaluator version bind the elementary-math dialect; repeated evaluation on one
 target is expected to be bit-identical.
 
+Reaction equilibrium canonicalizes models to the exact stoichiometric species
+axis, evaluates each active species once, and uses one fixed reduction and
+`fs_math::det::exp`. Caller model permutation cannot change the admitted model,
+standard reaction Gibbs energy, log/direct constant, or receipt. Forward and
+exactly reversed columns retain opposite Gibbs/log values under the same
+models.
+
 Cross-ISA bit identity is not claimed until the central Gauntlet runs retain
 evidence for both reference ISA families. NASA/mixture receipts record their
 evaluator and `fs-math` versions; the allocation-free EOS receipt records its
@@ -342,9 +413,9 @@ untrusted bulk ingestion.
 
 Frozen-mixture construction sorts at most 128 components and evaluation makes
 one canonical pass whose nested species work is bounded by 16 regions each;
-there is no useful `Cx` tile boundary. Future equilibrium, kinetics, or
-database operations require explicit work budgets and cancellation/drain
-semantics before landing.
+there is no useful `Cx` tile boundary. Future composition-equilibrium,
+mechanism-wide kinetics, or database operations require explicit work budgets
+and cancellation/drain semantics before landing.
 
 Mechanical ideal-gas construction and evaluation are fixed-size scalar work
 with no useful cancellation tile. They neither consume a `Cx` budget nor own
@@ -357,6 +428,13 @@ useful asynchronous `Cx` tile. It does not claim caller-budget consumption,
 deadline preemption inside scalar arithmetic, or request-drain-finalize
 ownership. Larger or iterative transport closures require explicit budgets and
 cancellation semantics.
+
+Standard-state reaction admission hashes at most 16,384 already-constructed
+stoichiometric cells and binds at most 128 active models; evaluation performs
+at most 128 bounded NASA-9 evaluations and one canonical reduction. This first
+closure therefore has a hard work ceiling and no useful asynchronous `Cx` tile.
+Composition-equilibrium iterations, mechanism-wide kinetics, or larger sparse
+reaction systems require explicit budgets and request-drain-finalize semantics.
 
 ## Unsafe boundary
 
@@ -420,6 +498,18 @@ Inline tests in `src/transport.rs` add:
 - G5 bit-identical replay, exact assertions over every receipt field, and a
   supplied-viscosity mutation that changes the receipt.
 
+Inline tests in `src/equilibrium.rs` add:
+
+- G0 exact conserved-water reaction binding, canonical active terms, an
+  independently assembled fixed-order Gibbs/log result, and complete nested
+  stoichiometric/conservation receipt identities;
+- G3 unknown, zero, and one-sided columns; certificate drift; missing species
+  model; reference-pressure mismatch; maximum exact coefficient with both
+  log-only overflow and underflow retention; and first inexact coefficient
+  refusal;
+- G5 model-order replay plus forward/reverse standard Gibbs and log-constant
+  polarity and reciprocal direct constants.
+
 The newest tests are code-first and batch-verification pending. A sourced
 external NASA/Cantera numerical oracle battery, an independently tabulated
 Wilke battery, adversarial source-card mutation battery, and retained cross-ISA
@@ -438,12 +528,16 @@ This slice does **not** claim:
   this schema and must not be treated as authority for `u = h - R T`;
 - an external numerical-oracle match or any evidence-color promotion;
 - reacting/equilibrium composition derivatives, chemical potentials,
-  activities beyond the aggregate ideal-mixture law, fugacity, departure
-  functions, cubic/tabular real-gas or multiphase EOS behavior;
+  activities beyond the retained ideal-gas `p_i/p0` standard-state convention,
+  fugacity, departure functions, cubic/tabular real-gas or multiphase EOS
+  behavior;
 - a physical phase-stability verdict from the positive ideal-gas model-domain
-  check, flash calculations, chemical equilibrium, reaction rates,
+  check, flash calculations, equilibrium-composition solves, reaction rates,
   kinetics integration, thermal conductivity, diffusion coefficients, or
   transport solves;
+- chemical meaningfulness, reversibility, kinetic accessibility, detailed
+  balance, or reverse-rate authority from exact bookkeeping and a computed
+  standard-state `K_p` alone;
 - authenticity or same-state consistency of caller-supplied pure-species
   viscosities, viscosity-law validity outside their source domains, dense-gas
   corrections, or physical applicability/accuracy of the Wilke approximation;
