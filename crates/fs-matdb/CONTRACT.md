@@ -338,7 +338,10 @@ NIST displayed-precision agreement checks.
   total-acid-number claims while refusing the source's unitless viscosity
   numbers. The named Rheolube 2000 bearing-grease pack adds one NLGI
   named-scale reading, one exact-temperature density, and one time/temperature-
-  bound oil-separation fraction. The first
+  bound oil-separation fraction. The named Pennzane SHF X-2000 bearing-oil pack
+  adds three exact-temperature kinematic-viscosity values, one viscosity-index
+  scale reading, flash and pour points, and one exact-temperature density. The
+  first
   pinned gray-iron tranche adds nine reported composition/carbon-equivalent
   values, four quantified microstructure fields, and two low-precision
   graph-digitized room-state properties.
@@ -381,7 +384,11 @@ NIST displayed-precision agreement checks.
   cards. The Rheolube 2000 pack binds its Pennzane base-oil association,
   thickener identity, and three typical source values, but refuses approximate,
   unitless, extrapolated, or test-system rows as exact bulk claims. It supplies
-  no generic bearing-life or service-envelope authority. The gray-
+  no generic bearing-life or service-envelope authority. The Pennzane oil pack
+  similarly binds one named MAC base fluid and seven typical properties while
+  refusing the unrepresentable Celsius-interval coefficient, system wear scar,
+  and ambiguous extracted vapor-pressure exponents. It supplies no formulated-
+  oil, continuous-curve, or bearing-life authority. The gray-
   iron claims bind Wang et al.'s S2-S charge, chemistry, Sr-FeSi inoculation,
   EN-1561 Type II mould, and fully pearlitic/type-A-graphite state. Its Figure 8
   strength and conductivity centers retain only graph-supported precision;

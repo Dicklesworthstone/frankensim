@@ -40,6 +40,8 @@ const NAPC_PE_5_L_1307_1553_GEAR_OIL_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/napc-pe-5-l-1307-1553-gear-oil/manifest.tsv";
 const RHEOLUBE_2000_PENNZANE_GREASE_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/rheolube-2000-pennzane-grease/manifest.tsv";
+const PENNZANE_SHF_X_2000_BEARING_OIL_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/pennzane-shf-x-2000-bearing-oil/manifest.tsv";
 const GRAY_CAST_IRON_S2_S_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/gray-cast-iron-s2-s/manifest.tsv";
 const NASA_SEED_LICENSE: &str = "Work-of-the-US-Government-Public-Use-Permitted";
@@ -2138,6 +2140,200 @@ fn g3_cli_compiles_committed_rheolube_2000_bearing_grease_seed() {
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "Rheolube 2000 {refused_property} crossed the no-claim boundary"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_pennzane_shf_x_2000_bearing_oil_seed() {
+    let manifest = workspace_path(PENNZANE_SHF_X_2000_BEARING_OIL_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed Pennzane SHF X-2000 bearing-oil seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("pennzane-shf-x-2000-first.fsmatpk");
+    let second_path = directory.join("pennzane-shf-x-2000-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Pennzane SHF X-2000 seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Pennzane SHF X-2000 seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Pennzane SHF X-2000 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Pennzane SHF X-2000 pack");
+    let second_bytes = fs::read(second_path).expect("read second Pennzane SHF X-2000 pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "Pennzane SHF X-2000 pack bytes moved"
+    );
+    let decoded =
+        NormalizedPack::from_bytes(&first_bytes).expect("decode Pennzane SHF X-2000 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Pennzane SHF X-2000 pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "pennzane-shf-x-2000-mac-aerospace-bearing-oil"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("public use permitted")
+    );
+    assert_eq!(decoded.claims().claim_count(), 7);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let kinematic_viscosity_dims = Dims([2, 0, -1, 0, 0, 0]);
+    let viscosity_claims = decoded.claims().claims_for("kinematic_viscosity");
+    assert_eq!(viscosity_claims.len(), 3);
+    let mut shared_observation = None;
+    for (source_temperature_c, source_mm2_per_s) in
+        [(100.0, 14.3), (40.0, 107.0), (-40.0, 80_500.0)]
+    {
+        let temperature_k = source_temperature_c + 273.15;
+        let mut matches = viscosity_claims.iter().copied().filter(|(_, claim)| {
+            claim.validity.bound("temperature") == Some((temperature_k, temperature_k))
+        });
+        let (id, claim) = matches
+            .next()
+            .unwrap_or_else(|| panic!("missing Pennzane viscosity at {source_temperature_c} degC"));
+        assert!(matches.next().is_none());
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Pennzane viscosity at {source_temperature_c} degC was not scalar");
+        };
+        assert_eq!(*dims, kinematic_viscosity_dims);
+        let expected_m2_per_s = source_mm2_per_s * 1.0e-6;
+        let relative_error = (*value - expected_m2_per_s).abs() / expected_m2_per_s;
+        assert!(relative_error <= 2.0e-15);
+        assert_eq!(claim.validity.bounds().len(), 1);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(
+            claim.interpolation,
+            InterpolationPolicy::ConstantWithinValidity
+        );
+        assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+        assert!(claim.provenance.source.contains("NASA-CP-3350"));
+        assert_eq!(claim.observations.len(), 1);
+        match shared_observation {
+            Some(observation) => assert_eq!(claim.observations[0], observation),
+            None => shared_observation = Some(claim.observations[0]),
+        }
+        assert_eq!(id.0, claim.content_hash());
+    }
+
+    let dimensionless = Dims([0, 0, 0, 0, 0, 0]);
+    let temperature_dims = Dims([0, 0, 0, 1, 0, 0]);
+    let density_dims = Dims([-3, 1, 0, 0, 0, 0]);
+    let expected = [
+        ("viscosity_index_scale_reading", 137.0, dimensionless, None),
+        (
+            "flash_point_temperature",
+            300.0 + 273.15,
+            temperature_dims,
+            None,
+        ),
+        (
+            "pour_point_temperature",
+            -55.0 + 273.15,
+            temperature_dims,
+            None,
+        ),
+        ("density", 0.84 * 1_000.0, density_dims, Some(298.15)),
+    ];
+
+    for (property, expected_value, expected_dims, validity_temperature) in expected {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "expected one Pennzane {property} claim");
+        let (id, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Pennzane {property} was not scalar");
+        };
+        assert_eq!(*dims, expected_dims);
+        let relative_error = (*value - expected_value).abs() / expected_value.abs().max(1.0);
+        assert!(relative_error <= 2.0e-15);
+        match validity_temperature {
+            Some(temperature_k) => {
+                assert_eq!(
+                    claim.validity.bound("temperature"),
+                    Some((temperature_k, temperature_k))
+                );
+                assert_eq!(claim.validity.bounds().len(), 1);
+            }
+            None => assert!(claim.validity.bounds().is_empty()),
+        }
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+        assert_eq!(claim.observations.len(), 1);
+        assert_eq!(
+            claim.observations[0],
+            shared_observation.expect("shared observation")
+        );
+        assert_eq!(id.0, claim.content_hash());
+    }
+
+    let observation_id = shared_observation.expect("Pennzane observation id");
+    let observation = decoded
+        .claims()
+        .observation(observation_id)
+        .expect("Pennzane observation remains linked");
+    assert_eq!(
+        observation.specimen,
+        "Pennzane-SHF-X-2000-multiply-alkylated-cyclopentane-aerospace-bearing-oil"
+    );
+    assert!(observation.method.contains("Bessette Table 6"));
+    assert!(observation.method.contains("typical Pennzane properties"));
+    assert!(
+        observation
+            .caveats
+            .contains("Tris(2-octyldodecyl) cyclopentane")
+    );
+    assert!(
+        observation
+            .caveats
+            .contains("approximate molecular weight 910 g/mol")
+    );
+    assert!(observation.caveats.contains("labels results typical"));
+    assert!(
+        observation
+            .caveats
+            .contains("no temperature-interval degree-Celsius token")
+    );
+    assert!(observation.caveats.contains("tribometer-system result"));
+    assert!(observation.caveats.contains("not unambiguous"));
+    assert_eq!(observation_id.0, observation.content_hash());
+
+    for refused_property in [
+        "volumetric_thermal_expansion_coefficient",
+        "wear_scar_diameter",
+        "vapor_pressure",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "Pennzane {refused_property} crossed the no-claim boundary"
         );
     }
 

@@ -336,6 +336,37 @@ Rheolube 2000 reference:
 - <https://ntrs.nasa.gov/citations/19970021613>
 - <https://ntrs.nasa.gov/api/citations/19970021613/downloads/19970021613.pdf>
 
+## Pennzane SHF X-2000 aerospace bearing-oil tranche
+
+`pennzane-shf-x-2000-bearing-oil/` pins the multiply alkylated cyclopentane
+fluid behind the Rheolube grease to its public Pennzane SHF X-2000 identity.
+Bessette identifies it chemically as Tris(2-octyldodecyl) cyclopentane with an
+approximate molecular weight of `910 g/mol` and discusses the fluid as an
+aerospace lubricant compatible with antioxidant and boundary-lubricant
+additives.
+
+Table 6 contributes three exact-temperature kinematic-viscosity points:
+`80,500 mm2/s` at `-40 degC`, `107 mm2/s` at `40 degC`, and `14.3 mm2/s` at
+`100 degC`. It also supplies viscosity-index scale reading `137`, flash point
+`300 degC`, pour point `-55 degC`, and density `0.84 g/mL` at `25 degC`.
+Viscosity index is retained as a named empirical scale reading. The table calls
+these typical properties and provides no lot, additive state, measurement
+standards, replicates, dispersion, or confidence metadata, so all seven claims
+carry `Unstated` uncertainty and no continuous viscosity curve is inferred.
+
+The printed `8e-4 cc/cc/degC` expansion coefficient remains observation-only
+because the source-unit grammar has no degree-Celsius interval token; silently
+substituting affine `degC` would be dimensionally wrong. The conditioned
+`0.34 mm` wear scar is a tribometer-system outcome, not a bulk property. Table
+5 vapor pressures remain excluded because they are lot-specific and the
+retained PDF text extraction does not preserve their superscript exponents
+unambiguously.
+
+Pennzane SHF X-2000 reference:
+
+- <https://ntrs.nasa.gov/citations/19970021613>
+- <https://ntrs.nasa.gov/api/citations/19970021613/downloads/19970021613.pdf>
+
 ## S2-S pearlitic gray-cast-iron tranche
 
 `gray-cast-iron-s2-s/` retains one engine-relevant experimental ingot from
@@ -426,6 +457,10 @@ cargo run -p xtask -- matdb-pack \
   --out /path/to/rheolube-2000-pennzane-shf-x-2000-bearing-grease.fsmatpk
 
 cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/pennzane-shf-x-2000-bearing-oil/manifest.tsv \
+  --out /path/to/pennzane-shf-x-2000-mac-aerospace-bearing-oil.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/gray-cast-iron-s2-s/manifest.tsv \
   --out /path/to/pearlitic-gray-cast-iron-s2-s-sr-fesi.fsmatpk
 ```
@@ -514,6 +549,16 @@ vacuum-hardening state, contamination state, compatibility, or service
 temperature range. NLGI grade is retained as an ordinal named-scale reading.
 Application admission still requires the actual bearing, load, speed,
 temperature, atmosphere, preparation, and life-test evidence.
+
+The Pennzane SHF X-2000 tranche is not a complete formulated bearing oil or a
+generic aerospace-lubricant allowable. It binds one named MAC base fluid and
+seven typical source values, but supplies no lot identity, additive package,
+continuous viscosity law, pressure-viscosity behavior, volatility claim,
+thermal-expansion claim, wear/friction law, oxidation life, material
+compatibility, contamination state, or bearing-life authority. Flash and pour
+points are characteristic test temperatures, not a certified operating range.
+Application admission still requires the actual bearing system and its
+environmental/life evidence.
 
 The S2-S gray-iron tranche applies only to the reported charge, composition,
 Sr-FeSi inoculation, mould, and fully pearlitic/type-A-graphite state. Its
