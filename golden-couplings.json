@@ -115,6 +115,7 @@
 {"id":"xtask:matdb-pack-compiler","file":"xtask/src/matdb_pack.rs","const":"MATDB_PACK_COMPILER_SEMANTICS_VERSION","version":4},
 {"id":"fs-la:factor-bits","file":"crates/fs-la/src/factor.rs","const":"FACTOR_BIT_SEMANTICS_VERSION","version":1},
 {"id":"fs-la:gemm-bits","file":"crates/fs-la/src/gemm.rs","const":"GEMM_BIT_SEMANTICS_VERSION","version":1},
+{"id":"fs-la:gemm-scalar-bits","file":"crates/fs-la/src/gemm.rs","const":"GEMM_SCALAR_SEMANTICS_VERSION","version":1},
 {"id":"fs-flagship-e2e:metric-stream-encoding","file":"crates/fs-flagship-e2e/src/lib.rs","const":"METRIC_STREAM_ENCODING_VERSION","version":2},
 {"id":"fs-bem:panel-bits","file":"crates/fs-bem/src/panel2d.rs","const":"PANEL_BIT_SEMANTICS_VERSION","version":1},
 {"id":"fs-la:batched-f64-bits","file":"crates/fs-la/src/batched.rs","const":"BATCHED_F64_BIT_SEMANTICS_VERSION","version":1},

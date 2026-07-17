@@ -21,6 +21,12 @@
 /// deliberately re-frozen.
 pub const GEMM_BIT_SEMANTICS_VERSION: u32 = 1;
 
+/// Bit/operation-order version of [`gemm_scalar_checked`].
+///
+/// Bump when its `i, j, k` traversal, scalar `mul_add` ordering, exact-zero
+/// policy, or transactional shape-refusal semantics change.
+pub const GEMM_SCALAR_SEMANTICS_VERSION: u32 = 1;
+
 /// Micro-tile rows (A panel height). Pre-autotuner default.
 const MR: usize = 8;
 /// Micro-tile cols (B panel width). Pre-autotuner default.
@@ -355,6 +361,193 @@ fn assert_contiguous_shapes<T, U>(m: usize, n: usize, k: usize, a: &[T], b: &[T]
     assert_eq!(a.len(), a_len, "a must be m*k = {a_len}");
     assert_eq!(b.len(), b_len, "b must be k*n = {b_len}");
     assert_eq!(c.len(), c_len, "c must be m*n = {c_len}");
+}
+
+/// Scalar operations required by the fixed-order reference GEMM.
+///
+/// This trait is deliberately owned by `fs-la`: higher-layer scalar types can
+/// implement it without making `fs-la` depend on those crates. `is_exact_zero`
+/// is structural rather than primal-only so derivative-bearing zero-primal
+/// values are never mistaken for an algebraic zero and short-circuited.
+pub trait GemmScalar: Copy {
+    /// Additive identity with every auxiliary lane cleared.
+    #[must_use]
+    fn zero() -> Self;
+
+    /// Whether the complete scalar, including auxiliary lanes, is zero.
+    #[must_use]
+    fn is_exact_zero(self) -> bool;
+
+    /// Fixed scalar operation `self * multiplier + addend`.
+    #[must_use]
+    fn mul_add(self, multiplier: Self, addend: Self) -> Self;
+}
+
+impl GemmScalar for f64 {
+    fn zero() -> Self {
+        0.0
+    }
+
+    fn is_exact_zero(self) -> bool {
+        self.to_bits() << 1 == 0
+    }
+
+    fn mul_add(self, multiplier: Self, addend: Self) -> Self {
+        f64::mul_add(self, multiplier, addend)
+    }
+}
+
+/// Shape refusal from [`gemm_scalar_checked`].
+///
+/// Every shape is preflighted before `C` is read or written, so callers may
+/// safely retain and inspect the original output after a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GemmShapeError {
+    /// A row/column product cannot be represented as `usize`.
+    ExtentOverflow {
+        /// Matrix whose contiguous extent overflowed.
+        operand: &'static str,
+        /// Logical row count.
+        rows: usize,
+        /// Logical column count.
+        cols: usize,
+    },
+    /// A supplied slice does not match its checked contiguous extent.
+    LengthMismatch {
+        /// Matrix whose slice length is wrong.
+        operand: &'static str,
+        /// Required number of scalar elements.
+        expected: usize,
+        /// Supplied number of scalar elements.
+        actual: usize,
+    },
+}
+
+impl core::fmt::Display for GemmShapeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ExtentOverflow {
+                operand,
+                rows,
+                cols,
+            } => write!(
+                f,
+                "{operand} contiguous extent overflow: {rows} * {cols}; output not touched"
+            ),
+            Self::LengthMismatch {
+                operand,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{operand} length mismatch: expected {expected}, got {actual}; output not touched"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for GemmShapeError {}
+
+fn scalar_gemm_extent(
+    operand: &'static str,
+    rows: usize,
+    cols: usize,
+) -> Result<usize, GemmShapeError> {
+    rows.checked_mul(cols)
+        .ok_or(GemmShapeError::ExtentOverflow {
+            operand,
+            rows,
+            cols,
+        })
+}
+
+fn preflight_scalar_gemm<S>(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[S],
+    b: &[S],
+    c: &[S],
+) -> Result<(), GemmShapeError> {
+    for (operand, expected, actual) in [
+        ("a", scalar_gemm_extent("a", m, k)?, a.len()),
+        ("b", scalar_gemm_extent("b", k, n)?, b.len()),
+        ("c", scalar_gemm_extent("c", m, n)?, c.len()),
+    ] {
+        if actual != expected {
+            return Err(GemmShapeError::LengthMismatch {
+                operand,
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Fixed-order scalar-generic GEMM reference kernel.
+///
+/// Computes `C[m x n] = alpha * A[m x k] * B[k x n] + beta * C` over
+/// contiguous row-major slices. Every output uses the same `i, j, k` order.
+/// The optimized [`gemm_f64`] path remains the production performance kernel;
+/// this surface exists so derivative and other structured scalars can execute
+/// the same dense algebra without a reverse dependency from `fs-la`.
+///
+/// Exact-zero `alpha` skips every element read from `A` and `B`. Exact-zero
+/// `beta` overwrites `C` without reading its old contents. Implementations of
+/// [`GemmScalar::is_exact_zero`] must therefore include every auxiliary lane:
+/// a zero primal carrying a nonzero derivative is real work, not a no-op.
+///
+/// # Errors
+///
+/// Returns [`GemmShapeError`] on extent overflow or a slice-length mismatch.
+/// All shapes are checked before any caller-visible mutation.
+#[must_use]
+#[allow(clippy::too_many_arguments)] // BLAS-shape signature: m,n,k,alpha,a,b,beta,c
+pub fn gemm_scalar_checked<S: GemmScalar>(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: S,
+    a: &[S],
+    b: &[S],
+    beta: S,
+    c: &mut [S],
+) -> Result<(), GemmShapeError> {
+    preflight_scalar_gemm(m, n, k, a, b, c)?;
+    let alpha_is_zero = alpha.is_exact_zero();
+    let beta_is_zero = beta.is_exact_zero();
+
+    if m == 0 || n == 0 {
+        return Ok(());
+    }
+    if alpha_is_zero || k == 0 {
+        if beta_is_zero {
+            c.fill(S::zero());
+        } else {
+            for value in c {
+                *value = beta.mul_add(*value, S::zero());
+            }
+        }
+        return Ok(());
+    }
+
+    for i in 0..m {
+        for j in 0..n {
+            let mut product = S::zero();
+            for p in 0..k {
+                product = a[i * k + p].mul_add(b[p * n + j], product);
+            }
+            product = alpha.mul_add(product, S::zero());
+            let output = &mut c[i * n + j];
+            if beta_is_zero {
+                *output = product;
+            } else {
+                *output = beta.mul_add(*output, product);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[track_caller]

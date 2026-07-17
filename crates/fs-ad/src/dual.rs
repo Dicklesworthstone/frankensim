@@ -275,6 +275,31 @@ impl<T: Real, const N: usize> Real for Dual<T, N> {
     }
 }
 
+impl<T, const N: usize> fs_la::GemmScalar for Dual<T, N>
+where
+    T: Real + fs_la::GemmScalar,
+{
+    fn zero() -> Self {
+        let zero = <T as fs_la::GemmScalar>::zero();
+        Dual {
+            re: zero,
+            eps: [zero; N],
+        }
+    }
+
+    fn is_exact_zero(self) -> bool {
+        <T as fs_la::GemmScalar>::is_exact_zero(self.re)
+            && self
+                .eps
+                .into_iter()
+                .all(<T as fs_la::GemmScalar>::is_exact_zero)
+    }
+
+    fn mul_add(self, multiplier: Self, addend: Self) -> Self {
+        <Self as Real>::mul_add(self, multiplier, addend)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seeding and extraction helpers.
 // ---------------------------------------------------------------------------

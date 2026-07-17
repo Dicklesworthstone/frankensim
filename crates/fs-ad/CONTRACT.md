@@ -73,7 +73,11 @@ Layer: L1.
   scopes panic loudly); use outside a scope panics loudly.
 - `Dual<T: Real, const N: usize> { re, eps: [T; N] }` — implements `Real`,
   so NESTED duals give higher-order derivatives from one implementation.
-  `Dual64<N>` alias.
+  `Dual64<N>` alias. It also implements fs-la's `GemmScalar` recursively when
+  `T` does, which admits packed and nested dual values to the public
+  `gemm_scalar_checked` reference kernel without making fs-la depend on fs-ad.
+  Structural exact-zero checks include the primal and every derivative lane;
+  a zero primal with a live sensitivity is never short-circuited.
 - Helpers: `gradient` (N-lane seeding), `jvp` (directional), and
   `second_directional` (nested duals → exact vᵀHv).
 
@@ -83,6 +87,10 @@ Layer: L1.
   bitwise on 2000 random composite evaluations). A gradient check can never
   be confounded by primal drift.
 - Packed lanes ≡ single lanes bitwise (Dual<4> vs 4×Dual<1>, tested).
+- In fs-la's scalar-generic GEMM, packed `Dual64<2>` lanes are bitwise equal to
+  two `Dual64<1>` executions and the packed primal is bitwise equal to the
+  optimized f64 result on the fixed dyadic bridge fixture. Nested duals execute
+  through the same recursive `GemmScalar` implementation.
 - Comparison convention: PartialEq/PartialOrd compare the primal ONLY
   (branching-on-values; kinks give per-branch one-sided derivatives —
   documented forward-AD semantics).
@@ -94,7 +102,9 @@ Layer: L1.
   represented honestly, never clamped or wrapped.
 
 ## Error model
-Total functions; derivative singularities produce inf/NaN honestly.
+Dual arithmetic is total; derivative singularities produce inf/NaN honestly.
+The fs-la bridge retains fs-la's typed `GemmShapeError` and transactional
+output guarantee for invalid extents or lengths.
 
 ## Determinism class
 Deterministic CROSS-ISA (inherits fs-math strict + pure IEEE arithmetic).
@@ -128,6 +138,15 @@ no torch-bridge, spill-store, binomial, IFT, or gradcheck claim, no performance
 claim, and no fresh dual-ISA execution proof; it remains central-package-proof
 pending.
 
+`tests/la_dual_bridge_casebook.rs` is the literal fs-ad/fs-la cross-crate G0
+entrypoint. It drives `Dual64<2>` and nested Dual values through
+`gemm_scalar_checked`, pins exact primal/derivative bits against single-lane and
+optimized-f64 references, and exercises full-scalar α/β zero semantics plus
+typed preflight refusal with unchanged C. Seed `0xF5A1_0000` flips one expected
+derivative bit and must yield one replay-identical red record rejected by
+`assert_green`. This proves the reference integration seam, not optimized
+dual-SIMD performance or fresh cross-ISA execution.
+
 Gradient-vs-central-FD on 500 random points of a 3-deep composite (rel
 < 5e-9); primal bitwise fidelity battery; analytic first+second derivatives
 (sin x²); JVP ≡ grad·v; GENERIC NEWTON differentiated through convergence
@@ -145,6 +164,9 @@ second derivatives through nested duals, honest endpoints (asin′(1) =
 - Sparsity-aware Jacobian seeding (graph coloring) — consumer-driven.
 - Explicit SIMD for eps arrays (autovectorized today; measured lanes when a
   consumer profiles it).
+- fs-la's scalar-generic GEMM is the correctness/reference seam; packed
+  microkernels, parallel scheduling, cancellation polling, and performance
+  evidence for Dual values remain unclaimed.
 - powf/general pow (needs fs-math extensions).
 - Matrix-free ADJOINT solves (one solve for MANY parameters): needs
   Jᵀ·v over VECTOR residuals, i.e. reverse mode through F itself —

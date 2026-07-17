@@ -12,6 +12,16 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   garbage in C are ignored — the uninitialized-output convention).
   `gemm_mixed` is f32 STORAGE with f64 ACCUMULATION (exact widening; the
   bandwidth-vs-accuracy mode the plan uses throughout).
+- `gemm::{GemmScalar, gemm_scalar_checked, GemmShapeError}` — the fixed-order
+  scalar-generic reference seam. `GemmScalar` is owned by fs-la so a dependent
+  crate can implement it for its own structured scalar without a reverse
+  dependency. `gemm_scalar_checked` traverses each row-major output in fixed
+  `i,j,k` order, preflights every checked extent and slice length before
+  mutation, and returns `ExtentOverflow` / `LengthMismatch` as typed data.
+  `is_exact_zero` covers the complete scalar: zero-primal values with nonzero
+  derivative or auxiliary lanes execute normally. Exact-zero α does not read
+  A/B; exact-zero β does not read old C. The public bit/policy identity is
+  `GEMM_SCALAR_SEMANTICS_VERSION = 1`.
 - `gemm_f64_op(..., lda, Trans, ..., ldb, Trans, ..., ldc)` — the live f64
   transposed/strided view entry point. `Trans::{N,T}` and each leading
   dimension describe the stored operand without copying; packing absorbs the
@@ -252,10 +262,16 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
    no-claim: it cannot recover accuracy already lost when b was rounded
    to f64 — ground truth is A⁻¹·fl(b), not the user's pre-rounding
    intent.
+10. The scalar-generic GEMM validates all A/B/C extents before mutation. Its
+    α/β fast paths consult full-scalar structural zero, so derivative-bearing
+    zero primals cannot lose sensitivities and β = exact zero overwrites
+    poisoned output without observing it.
 
 ## Error model
-Slice-length/shape mismatches panic with structured messages (programmer
-errors). DATA conditions in factorizations return `FactorError` with the
+Legacy specialized slice-length/shape mismatches panic with structured
+messages (programmer errors). `gemm_scalar_checked` instead returns
+`GemmShapeError` and leaves C unchanged after any extent/length refusal. DATA
+conditions in factorizations return `FactorError` with the
 offending index: non-SPD pivots, exactly-singular columns. LU `growth`
 exposes the pivot-growth statistic for ledgering. Pool GEMM returns
 `GemmRunError::MemoryRefused` when its checked plan exceeds the caller envelope
@@ -305,6 +321,11 @@ fixed-order product chain. Contract rule, sibling of the platform-libm
 rule above: NO `f64::powi` with a variable or >3 exponent in any path
 that feeds golden bits (tracked workspace-wide in bead
 frankensim-powi-build-mode-determinism-4xnt).
+The generic GEMM has fixed `i,j,k` traversal and delegates each arithmetic
+step to `GemmScalar::mul_add`; its determinism is therefore conditional on the
+scalar implementation. The in-tree f64 and fs-ad Dual implementations inherit
+the deterministic fused arithmetic contracts above. This statement is a
+construction claim, not fresh dual-ISA execution evidence for the new bridge.
 
 ## Cancellation behavior
 `gemm_f64_parallel_with_pool` implements request → drain → finalize under an
@@ -326,6 +347,9 @@ finalize step; a later request applies to the next operation.
 Batched kernels remain bounded synchronous loops; chunking a large batch
 to tile quanta (and Cx poll points between chunks) is the fs-exec driver's
 job.
+`gemm_scalar_checked` is likewise a synchronous, allocation-free reference
+loop with no poll points; callers must keep each invocation within their tile
+work bound.
 
 ## Unsafe boundary
 None. `unsafe_code` is denied workspace-wide; any future capsule must be
@@ -353,6 +377,13 @@ one structured red record plus `assert_green` refusal. This Casebook tranche is
 portable G0 evidence; it preserves the larger batteries and makes no new
 performance or dual-ISA execution claim. The structured tranche remains
 central-package-proof pending.
+`fs-ad/tests/la_dual_bridge_casebook.rs` is the cross-crate G0 seam for the
+generic reference kernel. It runs a literal `Dual64<2>` 2x2 product inside
+fs-la, pins both derivative lanes, compares them bitwise with two `Dual64<1>`
+runs and the optimized f64 primal, exercises a nested Dual, and proves
+full-scalar zero plus transactional shape-refusal policy. A disclosed
+one-bit reference corruption must produce one replay-identical red record and
+make the Casebook merge assertion refuse it.
 `tests/gemm_suite.rs` additionally runs bead 4nh8's 600-case shrink-armed
 adjoint-consistency property (seed `0x1A_4A48_0001`) over generated 1×1 through
 4×4 dense matrices and vectors. It exercises `gemm_f64` for `Av` and the live
@@ -421,6 +452,11 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   no-claim run. Successor design notes remain in bead 9ekv.
 
 ## No-claim boundaries
+- `gemm_scalar_checked` is a correctness/reference and integration surface,
+  not the optimized packed microkernel. It claims no dual SIMD packing,
+  roofline attainment, parallel scheduling, cancellation latency, or
+  performance parity with `gemm_f64`; arbitrary third-party `GemmScalar`
+  implementations retain responsibility for their own arithmetic semantics.
 - `FRANKENSIM_DEPGRAPH_RECEIPT` is supplied by the build environment. Strict
   canonical parsing prevents malformed/ambiguous receipt shapes, and
   `--verify` detects later drift under the same declared selection, but neither
