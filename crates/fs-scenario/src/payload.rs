@@ -2154,7 +2154,10 @@ fn validate_composition_samples(
         return Ok(());
     };
     validate_source(source, |sample, _| {
-        let mut fractions = Vec::new();
+        // Type pin (batch triage): with the receiver uninferred here, both
+        // `Extend::extend` and `PayloadByteSink::extend for Vec<u8>` are
+        // method candidates (E0034); Composition::new fixes f64 anyway.
+        let mut fractions: Vec<f64> = Vec::new();
         fractions
             .try_reserve_exact(sample.len())
             .map_err(|_| PayloadError::AllocationRefused {
