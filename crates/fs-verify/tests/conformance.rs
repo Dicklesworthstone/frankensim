@@ -3,8 +3,11 @@
 //! perturbed candidates (the untrusted-proposer case), effectivity
 //! bands, interval soundness + fail-closed, G5 determinism, the
 //! certify-the-certifiers injection, the estimator-family falsifier,
-//! and the nonlinear warm-start fallback with ledger rows. JSON-line
-//! verdicts; seeded cases carry seeds.
+//! and the nonlinear warm-start fallback with ledger rows. Completed
+//! aggregate cases emit canonical fs-obs verdicts. The one randomized
+//! case carries its literal input-generation seed; fixed cases use zero.
+//! Assertions and expectations reached before an aggregate verdict remain
+//! ordinary Rust test diagnostics.
 
 use fs_verify::estimator::{
     EstimatorFamily, VerifierCheckpointKind, VerifierPhase, VerifierProgress, VerifierRefusal,
@@ -16,6 +19,9 @@ use fs_verify::fem1d::{
     Fem1dError, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS, MmsProblem, Poly,
     solve_p1 as try_solve_p1, true_energy_error as try_true_energy_error,
 };
+
+const DETERMINISTIC_SEED: u64 = 0;
+const VER_001_INPUT_SEED: u64 = 0x1001_2026_0707_0091;
 
 fn poly(coefficients: Vec<f64>) -> Poly {
     Poly::new(coefficients).expect("valid conformance polynomial")
@@ -53,12 +59,27 @@ fn warm_start(
     try_warm_start(problem, candidate, max_iter).expect("conformance warm start must converge")
 }
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-verify/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-verify/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-verify/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("verifier verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("verifier verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -463,7 +484,7 @@ fn g4_verifier_publication_is_distinct_when_final_work_hits_a_boundary() {
 /// nonnegative and is not falsely rejected.
 #[test]
 fn ver_001_upper_bound_property() {
-    let mut rng = Lcg(0x1001_2026_0707_0091);
+    let mut rng = Lcg(VER_001_INPUT_SEED);
     let mut checks = 0u32;
     let mut violations = 0u32;
     for (name, u) in mms_zoo() {
@@ -507,8 +528,9 @@ fn ver_001_upper_bound_property() {
              perturbed candidates}} — Prager-Synge holds for ANY conforming \
              candidate, which is exactly what makes untrusted proposers safe; the \
              exact-zero input accepts with a verified color; \
-             seed 0x1001_2026_0707_0091"
+             input seed {VER_001_INPUT_SEED:#018x}"
         ),
+        VER_001_INPUT_SEED,
     );
 }
 
@@ -565,6 +587,7 @@ fn ver_002_effectivity_band() {
              over {} Galerkin cases",
             effs.len()
         ),
+        DETERMINISTIC_SEED,
     );
 }
 
@@ -604,6 +627,7 @@ fn ver_003_interval_soundness_fail_closed() {
              candidates FAIL CLOSED (reject, no color — never a badge without a \
              bound), and a 1e12 spike stays finite and rejected"
         ),
+        DETERMINISTIC_SEED,
     );
 }
 
@@ -639,6 +663,7 @@ fn ver_004_determinism_and_boundaries() {
         "verdicts, bound endpoints, and flux hashes are BITWISE reproducible; \
          accepting on exact bound==tolerance is sound by domination; single- and \
          zero-interior-DOF meshes still bound truthfully",
+        DETERMINISTIC_SEED,
     );
 }
 
@@ -686,6 +711,7 @@ fn ver_005_certify_the_certifiers() {
             EstimatorFamily::Hierarchical.id(),
             ratios.len()
         ),
+        DETERMINISTIC_SEED,
     );
 }
 
@@ -734,6 +760,7 @@ fn ver_006_warm_start_and_ledger() {
              boundary); the ledger row carries every review-round-3 field: {row}",
             saves, ws.cold_iterations, ws.warm_iterations
         ),
+        DETERMINISTIC_SEED,
     );
 }
 
@@ -908,9 +935,11 @@ fn ver_007_hostile_public_inputs_fail_closed() {
         )
         .to_jsonl();
     fs_obs::validate_line(&line).expect("structured refusal row is valid JSON");
+    println!("{line}");
     verdict(
         "ver-007",
         true,
         "canonical construction refuses malformed classes/meshes before a problem exists; verifier candidate/tolerance faults still refuse without color; signed/trailing zeros normalize and semantic identity changes remain observable",
+        DETERMINISTIC_SEED,
     );
 }

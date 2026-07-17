@@ -342,9 +342,15 @@ independently mutates producer domain/version, every class transport field,
 both nested problem bindings, and mesh bytes; a one-ULP exact-solution change
 with identical six-digit display still moves the root. It locks the v2 class
 root `0x959a77719f308c27` at 281 bytes and problem root
-`0x7148ea04d6605664` at 490 bytes, and refuses stale/future receipts. JSON-line verdicts,
-seeded LCG randomness, fs-obs events for the effectivity table and
-ledger rows. Any reimplementation must pass the suite unchanged.
+`0x7148ea04d6605664` at 490 bytes, and refuses stale/future receipts. Each
+completed aggregate case emits a canonical fs-obs `ConformanceCase`: the
+randomized ver-001 battery records its literal LCG input seed
+`0x1001_2026_0707_0091`, while fixed ver-002..ver-007 cases record zero.
+Existing fs-obs companion events retain the effectivity table, ledger row, and
+structured refusal row. Assertions and expectations that abort during setup or
+per-input checking precede aggregate verdict emission and remain ordinary Rust
+test diagnostics; the suite does not claim a canonical aggregate record for
+those early exits. Any reimplementation must pass the suite unchanged.
 The G4 additions specifically cover exact work-plan formulas, sparse callback
 traces, legacy equivalence, invocation-global boundaries, refusal progress,
 callback errors, and publication distinct from a boundary at the same count.
