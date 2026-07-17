@@ -1296,6 +1296,7 @@ name = "fs-img"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+ "fs-obs",
 ]
 
 [[package]]

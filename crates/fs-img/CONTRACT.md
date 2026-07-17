@@ -92,7 +92,28 @@ None.
 
 ## Conformance tests
 
-`tests/conformance.rs` (JSON verdict lines, suite `fs-img/conformance`):
+`tests/conformance.rs` emits canonical `fs_obs::EventKind::ConformanceCase`
+aggregate verdicts under suite `fs-img/conformance`. Passing cases use `Info`,
+failures use `Error`; every reached verdict passes the failure-record lint,
+serializes through `to_jsonl`, validates against the fs-obs wire schema, and
+prints before its final assertion. Fixed-input cases im-001/002 record seed
+zero. The randomized fixtures record their literal root input seeds:
+`0x5EED_D401_5E00_0003` for im-003 and `0x5EED_F077_0000_0004` for im-004.
+There is no execution seed in this suite.
+
+When `sips` is unavailable, im-002 emits a validated `Warn` `Custom` capability
+row under the same suite/case identity and returns without fabricating an
+aggregate verdict. Im-003 emits a validated `Info` `Custom` MSE companion under
+the distinct `im-003/measurement` scope; finite measurements remain JSON
+numbers, non-finite measurements are represented as `null`, and the companion
+carries the same root input seed. The scope and Custom name distinguish
+supplemental evidence from the aggregate decision without reusing its sequence
+identity.
+
+Fixture construction and intermediate `unwrap`/`expect`/assertion operations
+remain outside the aggregate boundary. If one aborts before `verdict`, no
+aggregate event is fabricated; absence of a verdict means the case did not
+complete, never that it passed.
 
 - **im-001** — PNG8/PNG16/EXR encodes are byte-identical across repeated
   calls; PNG round-trips samples exactly; EXR AOV set (FLOAT + on-grid
@@ -103,8 +124,9 @@ None.
   JSON note** when `sips` is absent (Linux CI).
 - **im-003** — the denoiser reduces MSE by >2× on a seeded noisy-gradient
   fixture and the output carries `BiasedDenoised { iterations: 3 }`.
-- **im-004** — 4000 seeded junk buffers are all rejected by both readers;
-  a valid PNG truncated at **every** prefix length is rejected.
+- **im-004** — 2000 seeded junk buffers produce 4000 PNG/EXR reader attempts,
+  all of which are rejected; a valid PNG truncated at **every** prefix length
+  is rejected.
 
 Unit tests additionally pin CRC-32/Adler-32 known-answer vectors, PNG
 signature/chunk structure, the exhaustive f16 round-trip, film-transform

@@ -3,6 +3,10 @@
 //! validation of PNG/EXR outputs (dev-only oracle: macOS `sips`, skipped
 //! with a note where absent); the denoiser improves MSE on a fixture
 //! while the bias label propagates; fuzzed readers reject structurally.
+//! Completed aggregate cases emit canonical fs-obs verdicts. Randomized
+//! inputs carry their literal root seeds, while fixed inputs use zero;
+//! there is no execution seed in this suite. Assertions and expectations
+//! reached before a verdict remain ordinary Rust test diagnostics.
 
 use fs_img::{
     Channel, DenoiseParams, ExrAttribute, LabeledPlane, PixelProvenance, PixelType, PngColor,
@@ -10,11 +14,58 @@ use fs_img::{
     write_exr_with_attributes, write_png8, write_png16,
 };
 
-fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-img/conformance\",\"case\":\"{case}\",\"verdict\":\"pass\",\
-         \"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-img/conformance";
+const FIXED_INPUT_SEED: u64 = 0;
+const IM_003_INPUT_SEED: u64 = 0x5EED_D401_5E00_0003;
+const IM_004_INPUT_SEED: u64 = 0x5EED_F077_0000_0004;
+
+fn print_event(event: fs_obs::Event) {
+    fs_obs::lint_failure_record(&event).expect("fs-img event must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("fs-img event must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    print_event(event);
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn custom_event(scope: &str, severity: fs_obs::Severity, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, scope);
+    let event = emitter.emit(
+        severity,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    print_event(event);
+}
+
+fn finite_json_number(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6}")
+    } else {
+        "null".to_string()
+    }
 }
 
 fn lcg(seed: &mut u64) -> f64 {
@@ -72,7 +123,9 @@ fn im_001_encodes_are_bit_exact_and_round_trip() {
     );
     verdict(
         "im-001",
+        true,
         "PNG8/PNG16/EXR byte-deterministic; AOV and source-hash metadata round-trip lossless",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -87,9 +140,15 @@ fn im_002_external_oracle_validates_outputs_when_available() {
         .status()
         .is_ok_and(|s| s.success())
     {
-        println!(
-            "{{\"suite\":\"fs-img/conformance\",\"case\":\"im-002\",\"verdict\":\"skip\",\
-             \"detail\":\"sips oracle not present on this machine\"}}"
+        custom_event(
+            "im-002",
+            fs_obs::Severity::Warn,
+            "image-oracle-skip",
+            format!(
+                "{{\"oracle\":\"sips\",\"available\":false,\"status\":\"skipped\",\
+                 \"reason\":\"sips oracle not present on this machine\",\
+                 \"input_seed\":{FIXED_INPUT_SEED}}}"
+            ),
         );
         return;
     }
@@ -126,7 +185,9 @@ fn im_002_external_oracle_validates_outputs_when_available() {
     let _ = std::fs::remove_file(&exr_path);
     verdict(
         "im-002",
+        true,
         "sips (CoreImage) parsed our PNG and EXR with correct dimensions",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -138,7 +199,7 @@ fn im_003_denoiser_improves_mse_and_label_propagates() {
     let clean: Vec<f32> = (0..w * h)
         .map(|i| f32::midpoint((i % w) as f32 / w as f32, (i / w) as f32 / h as f32))
         .collect();
-    let mut seed = 0x5EED_D401_5E00_0003u64;
+    let mut seed = IM_003_INPUT_SEED;
     let noisy_data: Vec<f32> = clean
         .iter()
         .map(|&c| c + 0.1 * (lcg(&mut seed) as f32 - 0.5))
@@ -164,19 +225,28 @@ fn im_003_denoiser_improves_mse_and_label_propagates() {
         "bias label must propagate: {:?}",
         out.provenance
     );
-    println!(
-        "{{\"suite\":\"fs-img/conformance\",\"metric\":\"denoise_mse\",\"before\":{before:.6},\
-         \"after\":{after:.6},\"bias_label\":\"BiasedDenoised\"}}"
+    custom_event(
+        "im-003/measurement",
+        fs_obs::Severity::Info,
+        "image-denoise-mse",
+        format!(
+            "{{\"before\":{},\"after\":{},\"bias_label\":\"BiasedDenoised\",\
+             \"iterations\":3,\"input_seed\":{IM_003_INPUT_SEED}}}",
+            finite_json_number(before),
+            finite_json_number(after),
+        ),
     );
     verdict(
         "im-003",
+        true,
         &format!("MSE {before:.5} -> {after:.5}; output labeled biased"),
+        IM_003_INPUT_SEED,
     );
 }
 
 #[test]
 fn im_004_readers_reject_garbage_structurally() {
-    let mut seed = 0x5EED_F077_0000_0004u64;
+    let mut seed = IM_004_INPUT_SEED;
     let mut rejected = 0usize;
     for _ in 0..2000 {
         let len = (lcg(&mut seed) * 64.0) as usize;
@@ -188,9 +258,9 @@ fn im_004_readers_reject_garbage_structurally() {
             rejected += 1;
         }
     }
-    assert!(
-        rejected >= 3999,
-        "random junk must essentially never decode: {rejected}/4000"
+    assert_eq!(
+        rejected, 4000,
+        "all 4000 seeded reader attempts must reject random junk"
     );
     // Truncation of a valid file is caught at every prefix length.
     let px = vec![9u8; 27];
@@ -203,6 +273,8 @@ fn im_004_readers_reject_garbage_structurally() {
     }
     verdict(
         "im-004",
-        "4000 junk parses + every truncation prefix rejected structurally",
+        true,
+        "2000 seeded junk buffers produced 4000 rejected reader attempts; every truncation prefix rejected structurally",
+        IM_004_INPUT_SEED,
     );
 }
