@@ -3314,8 +3314,10 @@ fn verify_canonical_diagonal(
         if zero_seen {
             return Err(IntegralTopologyError::NonzeroAfterZero { index, value });
         }
+        // i128::is_multiple_of is unavailable on the pinned nightly; this
+        // is its exact semantics (value != 0 on this path).
         if let Some(previous) = invariant_factors.last().copied()
-            && !value.is_multiple_of(previous)
+            && (previous == 0 || value % previous != 0)
         {
             return Err(IntegralTopologyError::InvariantFactorDivisibility {
                 index,
