@@ -4447,8 +4447,12 @@ impl Governor {
         Ok(receipt)
     }
 
-    /// Register a session's token (issuance). Session ids are single-use for
-    /// the lifetime of this governor; duplicate registration fails closed.
+    /// Register a session's CALLER-DECLARED token (bead aeq7: the name
+    /// makes the unaudited path visible at every call site — no issuer
+    /// policy vouched for this authority; the grant-backed path is
+    /// [`Governor::open_session_granted`]). Session ids are single-use
+    /// for the lifetime of this governor; duplicate registration fails
+    /// closed.
     ///
     /// # Errors
     /// - [`SessionError::InvalidLedgerScope`] when the token's namespace is not
@@ -4462,7 +4466,7 @@ impl Governor {
     ///
     /// Integer memory/core grants are structurally bounded. Rejection happens
     /// before any session state is mutated.
-    pub fn open_session(
+    pub fn open_session_declared(
         &self,
         open_id: SessionOpenId,
         token: CapabilityToken,
@@ -4481,8 +4485,8 @@ impl Governor {
     /// [`SessionError::InvalidResource`],
     /// [`SessionError::SessionAlreadyOpen`], and
     /// [`SessionError::LimitExceeded`] refusals as
-    /// [`Governor::open_session`].
-    pub fn open_session_gated(
+    /// [`Governor::open_session_declared`].
+    pub fn open_session_declared_gated(
         &self,
         open_id: SessionOpenId,
         token: CapabilityToken,
@@ -4505,7 +4509,7 @@ impl Governor {
     /// # Errors
     /// [`SessionError::GrantForged`]/[`SessionError::GrantExpired`]/
     /// [`SessionError::GrantRevoked`] from freshness verification, then
-    /// the same refusals as [`Governor::open_session`].
+    /// the same refusals as [`Governor::open_session_declared`].
     pub fn open_session_granted(
         &self,
         open_id: SessionOpenId,
@@ -4519,11 +4523,11 @@ impl Governor {
 
     /// [`Governor::open_session_granted`] WITH the session's
     /// cancellation capability (the gp3.13 gate semantics of
-    /// [`Governor::open_session_gated`]).
+    /// [`Governor::open_session_declared_gated`]).
     ///
     /// # Errors
     /// The union of [`Governor::open_session_granted`] and
-    /// [`Governor::open_session_gated`] refusals.
+    /// [`Governor::open_session_declared_gated`] refusals.
     pub fn open_session_granted_gated(
         &self,
         open_id: SessionOpenId,
@@ -5732,7 +5736,7 @@ impl Governor {
     /// falsely mark their subsystem effects complete. The
     /// `PauseSerializeResume` step requests
     /// cancellation on the session's OWN gate, resolved by `SessionId`
-    /// from the binding made at [`Governor::open_session_gated`] — no
+    /// from the binding made at [`Governor::open_session_declared_gated`] — no
     /// gate crosses this API, so pausing a different session's work is
     /// unrepresentable (bead gp3.13). The request event is phase
     /// `Requested`; it becomes `Complete` only through
@@ -8136,16 +8140,16 @@ mod tests {
             format!("legacy-test-{kind}-{}-{ordinal}", session.0)
         }
 
-        fn open_session(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
+        fn open_session_declared(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
             let open_id = self
                 .governor
                 .session_open_id(token.session, &self.next_key("open", token.session))?;
             self.governor
-                .open_session(open_id, token)
+                .open_session_declared(open_id, token)
                 .map(|receipt| receipt.flush_permit())
         }
 
-        fn open_session_gated(
+        fn open_session_declared_gated(
             &self,
             token: CapabilityToken,
             gate: Arc<CancelGate>,
@@ -8154,7 +8158,7 @@ mod tests {
                 .governor
                 .session_open_id(token.session, &self.next_key("open", token.session))?;
             self.governor
-                .open_session_gated(open_id, token, gate)
+                .open_session_declared_gated(open_id, token, gate)
                 .map(|receipt| receipt.flush_permit())
         }
 
@@ -8318,7 +8322,7 @@ mod tests {
             .session_open_id(historical_session, "historical-open")
             .expect("historical authority");
         let permit = governor
-            .open_session(historical_open, historical_token.clone())
+            .open_session_declared(historical_open, historical_token.clone())
             .expect("empty authenticated history admits fresh open")
             .flush_permit();
         governor
@@ -8348,7 +8352,7 @@ mod tests {
             .session_open_id(fresh_session, "fresh-open")
             .expect("fresh authority");
         assert!(matches!(
-            governor.open_session(
+            governor.open_session_declared(
                 fresh_open,
                 test_token(fresh_session.0, "membership-fence")
             ),
@@ -8375,7 +8379,7 @@ mod tests {
                 ));
         }
         assert!(matches!(
-            governor.open_session(
+            governor.open_session_declared(
                 fresh_open,
                 test_token(fresh_session.0, "membership-fence")
             ),
@@ -8417,7 +8421,7 @@ mod tests {
             "duplicate recovery preserves the verified fast path"
         );
         governor
-            .open_session(fresh_open, test_token(fresh_session.0, "membership-fence"))
+            .open_session_declared(fresh_open, test_token(fresh_session.0, "membership-fence"))
             .expect("exact recovered membership satisfies the fence");
     }
 
@@ -8433,7 +8437,7 @@ mod tests {
             .session_open_id(session, "post-snapshot-open")
             .expect("open authority");
         let permit = governor
-            .open_session(open_id, token.clone())
+            .open_session_declared(open_id, token.clone())
             .expect("empty snapshot admits open")
             .flush_permit();
         governor
@@ -8471,7 +8475,7 @@ mod tests {
             .session_open_id(later_session, "later-open")
             .expect("later authority");
         governor
-            .open_session(
+            .open_session_declared(
                 later_open,
                 test_token(later_session.0, "post-snapshot-replay"),
             )
@@ -8486,7 +8490,7 @@ mod tests {
             .session_open_id(session, "payload-open")
             .expect("open authority");
         governor
-            .open_session(open_id, test_token(session.0, "payload-authority"))
+            .open_session_declared(open_id, test_token(session.0, "payload-authority"))
             .expect("fixture session");
 
         let success_id = governor
@@ -8602,7 +8606,7 @@ mod tests {
             cores: 1,
             ledger_scope,
         };
-        governor.open_session(token).expect("valid bounded token");
+        governor.open_session_declared(token).expect("valid bounded token");
 
         let inner = governor.inner.lock().expect("governor lock");
         let stored = &inner.tokens[&88];
@@ -8615,7 +8619,7 @@ mod tests {
     fn retained_byte_budget_refuses_before_caller_work() {
         let governor = Governor::new();
         governor
-            .open_session(test_token(89, "retained-budget"))
+            .open_session_declared(test_token(89, "retained-budget"))
             .expect("fixture session");
         let key = "budget-key";
         let reservation = SUBMISSION_REQUEST_RETAINED_BYTES
@@ -8654,7 +8658,7 @@ mod tests {
         let governor = Governor::new();
         let gate = Arc::new(CancelGate::new());
         governor
-            .open_session_gated(test_token(90, "pause-byte-budget"), Arc::clone(&gate))
+            .open_session_declared_gated(test_token(90, "pause-byte-budget"), Arc::clone(&gate))
             .expect("gated fixture session");
         {
             let mut inner = governor.inner.lock().expect("governor lock");
@@ -8686,7 +8690,7 @@ mod tests {
         let governor = Governor::new();
         let gate = Arc::new(CancelGate::new());
         governor
-            .open_session_gated(test_token(91, "missing-gate-phase"), Arc::clone(&gate))
+            .open_session_declared_gated(test_token(91, "missing-gate-phase"), Arc::clone(&gate))
             .expect("gated fixture session");
         governor
             .inner
@@ -8711,7 +8715,7 @@ mod tests {
         let governor = Governor::new();
         let gate = Arc::new(CancelGate::new());
         governor
-            .open_session_gated(test_token(93, "external-cancel"), Arc::clone(&gate))
+            .open_session_declared_gated(test_token(93, "external-cancel"), Arc::clone(&gate))
             .expect("gated fixture session");
         gate.request();
 
@@ -8738,7 +8742,7 @@ mod tests {
         let governor = Governor::new();
         let gate = Arc::new(CancelGate::new());
         governor
-            .open_session_gated(
+            .open_session_declared_gated(
                 test_token(92, "gate-generation-overflow"),
                 Arc::clone(&gate),
             )
@@ -8810,7 +8814,7 @@ mod tests {
     fn event_and_ordinal_caps_refuse_before_mutation() {
         let governor = Governor::new();
         let permit = governor
-            .open_session(test_token(1, "bounded"))
+            .open_session_declared(test_token(1, "bounded"))
             .expect("fixture session");
         let fixture = DegradationEvent {
             session: SessionId(1),
@@ -8871,7 +8875,7 @@ mod tests {
 
         let ordinal_governor = Governor::new();
         ordinal_governor
-            .open_session(test_token(2, "ordinal"))
+            .open_session_declared(test_token(2, "ordinal"))
             .expect("ordinal fixture session");
         {
             let mut inner = ordinal_governor.inner.lock().expect("governor lock");
@@ -8908,10 +8912,10 @@ mod tests {
         let governor = Governor::new();
         let gate = Arc::new(CancelGate::new());
         governor
-            .open_session_gated(test_token(9, "pause-capacity"), Arc::clone(&gate))
+            .open_session_declared_gated(test_token(9, "pause-capacity"), Arc::clone(&gate))
             .expect("gated fixture session");
         governor
-            .open_session(test_token(10, "pause-capacity"))
+            .open_session_declared(test_token(10, "pause-capacity"))
             .expect("competing fixture session in the same scope");
         let fixture = DegradationEvent {
             session: SessionId(9),
@@ -8969,10 +8973,10 @@ mod tests {
     fn level_three_reserves_its_mandatory_completion_ordinal() {
         let governor = Governor::new();
         governor
-            .open_session_gated(test_token(10, "pause-ordinal"), Arc::new(CancelGate::new()))
+            .open_session_declared_gated(test_token(10, "pause-ordinal"), Arc::new(CancelGate::new()))
             .expect("gated fixture session");
         governor
-            .open_session(test_token(11, "pause-ordinal"))
+            .open_session_declared(test_token(11, "pause-ordinal"))
             .expect("interleaving fixture session");
         {
             let mut inner = governor.inner.lock().expect("governor lock");
@@ -9012,7 +9016,7 @@ mod tests {
     fn identical_pause_acknowledgements_commit_once_and_replay() {
         let governor = Governor::new();
         governor
-            .open_session_gated(test_token(12, "pause-replay"), Arc::new(CancelGate::new()))
+            .open_session_declared_gated(test_token(12, "pause-replay"), Arc::new(CancelGate::new()))
             .expect("gated fixture session");
         let request_id = governor
             .apply_memory_pressure(SessionId(12), 3)
@@ -9050,7 +9054,7 @@ mod tests {
     fn altered_pause_acknowledgement_cannot_activate_resume() {
         let governor = Governor::new();
         governor
-            .open_session_gated(
+            .open_session_declared_gated(
                 test_token(15, "pause-ack-integrity"),
                 Arc::new(CancelGate::new()),
             )
@@ -9084,7 +9088,7 @@ mod tests {
         let mut requests = Vec::new();
         for session in [13, 14] {
             governor
-                .open_session_gated(
+                .open_session_declared_gated(
                     test_token(session, "parallel-pauses"),
                     Arc::new(CancelGate::new()),
                 )
@@ -9125,7 +9129,7 @@ mod tests {
     fn same_scope_flush_reservation_refuses_a_race() {
         let governor = Governor::new();
         let permit = governor
-            .open_session(test_token(3, "reserved"))
+            .open_session_declared(test_token(3, "reserved"))
             .expect("fixture session");
         {
             let mut inner = governor.inner.lock().expect("governor lock");
@@ -9150,10 +9154,10 @@ mod tests {
     fn maximum_page_and_flush_materialize_without_holding_the_governor_lock() {
         let page_governor = Arc::new(Governor::new());
         let page_permit = page_governor
-            .open_session(test_token(1, "materialize-page"))
+            .open_session_declared(test_token(1, "materialize-page"))
             .expect("page fixture session");
         page_governor
-            .open_session(test_token(2, "materialize-page-hot"))
+            .open_session_declared(test_token(2, "materialize-page-hot"))
             .expect("unrelated page hot-path session");
         let evidence = RetainedEvidence::capture(&"e".repeat(MAX_RETAINED_EVIDENCE_BYTES));
         let event = Arc::new(DegradationEvent {
@@ -9217,7 +9221,7 @@ mod tests {
         let mut flush_permit = None;
         for session in 0..MAX_SESSIONS_PER_SCOPE {
             let permit = flush_governor
-                .open_session(test_token(
+                .open_session_declared(test_token(
                     u64::try_from(session).expect("fixture id fits"),
                     "materialize-flush",
                 ))
@@ -9225,7 +9229,7 @@ mod tests {
             flush_permit.get_or_insert(permit);
         }
         flush_governor
-            .open_session(test_token(10_000, "materialize-flush-hot"))
+            .open_session_declared(test_token(10_000, "materialize-flush-hot"))
             .expect("unrelated flush hot-path session");
         let flush_barrier = Arc::new(std::sync::Barrier::new(2));
         flush_governor.set_materialization_barrier(Some(Arc::clone(&flush_barrier)));
@@ -9274,7 +9278,7 @@ mod tests {
         let mut permit = None;
         for session in 0..MAX_SESSIONS_PER_SCOPE {
             let opened = governor
-                .open_session(test_token(
+                .open_session_declared(test_token(
                     u64::try_from(session).expect("fixture id fits"),
                     "fair",
                 ))
@@ -9351,7 +9355,7 @@ mod tests {
     fn dirty_open_receipt_precedes_rotated_dependent_causal_rows() {
         let governor = Governor::new();
         let permit = governor
-            .open_session(test_token(20, "open-prerequisite"))
+            .open_session_declared(test_token(20, "open-prerequisite"))
             .expect("first fixture session");
         let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
         let first = governor
@@ -9365,7 +9369,7 @@ mod tests {
         }
 
         governor
-            .open_session(test_token(21, "open-prerequisite"))
+            .open_session_declared(test_token(21, "open-prerequisite"))
             .expect("later session with a dirty open receipt");
         for _ in 0..MAX_FLUSH_ROWS {
             governor
@@ -9403,7 +9407,7 @@ mod tests {
             .session_open_id(session, "pause-predecessor-open")
             .expect("open authority");
         let open_receipt = governor
-            .open_session_gated(open_id, token, Arc::new(CancelGate::new()))
+            .open_session_declared_gated(open_id, token, Arc::new(CancelGate::new()))
             .expect("gated session");
         let permit = open_receipt.flush_permit();
         governor
@@ -9481,7 +9485,7 @@ mod tests {
             .expect("open authority");
         let gate = Arc::new(CancelGate::new());
         governor
-            .open_session_gated(
+            .open_session_declared_gated(
                 open_id,
                 test_token(93, "internal-replay"),
                 Arc::clone(&gate),
@@ -9577,7 +9581,7 @@ mod tests {
             .session_open_id(session, "cap-open")
             .expect("open authority");
         governor
-            .open_session(open_id, test_token(94, "typed-caps"))
+            .open_session_declared(open_id, test_token(94, "typed-caps"))
             .expect("open session");
 
         let charge = Charge {
@@ -9730,7 +9734,7 @@ mod tests {
             .session_open_id(session, "durable-open")
             .expect("open authority");
         let open_receipt = governor
-            .open_session(open_id, token.clone())
+            .open_session_declared(open_id, token.clone())
             .expect("open session");
         governor
             .flush_scope_to_ledger(&open_receipt.flush_permit(), &ledger)
@@ -9835,7 +9839,7 @@ mod tests {
             .session_open_id(session, "durable-open")
             .expect("open authority");
         let open_receipt = governor
-            .open_session_gated(open_id, token.clone(), Arc::new(CancelGate::new()))
+            .open_session_declared_gated(open_id, token.clone(), Arc::new(CancelGate::new()))
             .expect("gated open");
         let permit = open_receipt.flush_permit();
         governor
@@ -9916,7 +9920,7 @@ mod tests {
             .session_open_id(session, "codec-open")
             .expect("open authority");
         let open_receipt = governor
-            .open_session(open_id, token.clone())
+            .open_session_declared(open_id, token.clone())
             .expect("open session");
         governor
             .flush_scope_to_ledger(&open_receipt.flush_permit(), &ledger)
@@ -10013,7 +10017,7 @@ mod tests {
             .session_open_id(session, "durable-open")
             .expect("open authority");
         let open_receipt = governor
-            .open_session(open_id, token.clone())
+            .open_session_declared(open_id, token.clone())
             .expect("open session");
         let permit = open_receipt.flush_permit();
         governor
@@ -10297,11 +10301,11 @@ mod tests {
             .session_open_id(session_b, "open-b")
             .expect("open B authority");
         let permit = governor
-            .open_session(open_a, token_a.clone())
+            .open_session_declared(open_a, token_a.clone())
             .expect("open A")
             .flush_permit();
         governor
-            .open_session(open_b, token_b.clone())
+            .open_session_declared(open_b, token_b.clone())
             .expect("open B");
         governor
             .flush_scope_to_ledger(&permit, &ledger)
@@ -10376,7 +10380,7 @@ mod tests {
             .session_open_id(session, "open")
             .expect("open authority");
         let permit = governor
-            .open_session(open_id, token.clone())
+            .open_session_declared(open_id, token.clone())
             .expect("open session")
             .flush_permit();
         governor

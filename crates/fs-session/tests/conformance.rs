@@ -55,16 +55,16 @@ impl Governor {
         SessionGovernor::idempotency_key(agent_key, program_text)
     }
 
-    fn open_session(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
+    fn open_session_declared(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
         let open_id = self
             .inner
             .session_open_id(token.session, &self.next_key("open", token.session))?;
         self.inner
-            .open_session(open_id, token)
+            .open_session_declared(open_id, token)
             .map(|receipt| receipt.flush_permit())
     }
 
-    fn open_session_gated(
+    fn open_session_declared_gated(
         &self,
         token: CapabilityToken,
         gate: Arc<CancelGate>,
@@ -73,7 +73,7 @@ impl Governor {
             .inner
             .session_open_id(token.session, &self.next_key("open", token.session))?;
         self.inner
-            .open_session_gated(open_id, token, gate)
+            .open_session_declared_gated(open_id, token, gate)
             .map(|receipt| receipt.flush_permit())
     }
 
@@ -297,7 +297,7 @@ fn ss_001_token_bridges_into_static_admission() {
 #[test]
 fn ss_002_enforcement_throttles_then_pauses_never_kills() {
     let gov = Governor::new();
-    gov.open_session(token(7, 100.0, 1e9)).expect("valid token");
+    gov.open_session_declared(token(7, 100.0, 1e9)).expect("valid token");
     // Under the grant: Ok.
     let e1 = gov
         .charge(
@@ -377,7 +377,7 @@ fn ss_002a_memory_enforcement_is_exact_above_f64_integer_precision() {
     let gov = Governor::new();
     let mut below = token(70, f64::MAX, f64::MAX);
     below.mem_bytes = GRANT;
-    gov.open_session(below).expect("valid exact-byte token");
+    gov.open_session_declared(below).expect("valid exact-byte token");
     assert_eq!(
         gov.charge(
             SessionId(70),
@@ -411,7 +411,7 @@ fn ss_002a_memory_enforcement_is_exact_above_f64_integer_precision() {
     let mut at_hard_token = token(72, f64::MAX, f64::MAX);
     at_hard_token.mem_bytes = GRANT;
     at_hard
-        .open_session(at_hard_token)
+        .open_session_declared(at_hard_token)
         .expect("valid exact-byte token");
     assert!(matches!(
         at_hard
@@ -433,7 +433,7 @@ fn ss_002a_memory_enforcement_is_exact_above_f64_integer_precision() {
     let mut past_hard_token = token(73, f64::MAX, f64::MAX);
     past_hard_token.mem_bytes = GRANT;
     past_hard
-        .open_session(past_hard_token)
+        .open_session_declared(past_hard_token)
         .expect("valid exact-byte token");
     assert!(matches!(
         past_hard
@@ -458,7 +458,7 @@ fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
     let original_gate = Arc::new(CancelGate::new());
     let replacement_gate = Arc::new(CancelGate::new());
     let original = token(71, 100.0, 1_000.0);
-    gov.open_session_gated(original.clone(), Arc::clone(&original_gate))
+    gov.open_session_declared_gated(original.clone(), Arc::clone(&original_gate))
         .expect("original session");
     let charge = Charge {
         core_s: 7.0,
@@ -484,11 +484,11 @@ fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
     replacement.cores = 1;
     replacement.ledger_scope = "replacement-scope".to_string();
     assert_eq!(
-        gov.open_session(replacement.clone()),
+        gov.open_session_declared(replacement.clone()),
         Err(SessionError::SessionAlreadyOpen { id: 71 })
     );
     assert_eq!(
-        gov.open_session_gated(replacement, Arc::clone(&replacement_gate)),
+        gov.open_session_declared_gated(replacement, Arc::clone(&replacement_gate)),
         Err(SessionError::SessionAlreadyOpen { id: 71 })
     );
 
@@ -527,7 +527,7 @@ fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
 #[test]
 fn ss_003_idempotency_races_execute_exactly_once() {
     let gov = Arc::new(Governor::new());
-    gov.open_session(token(3, 1e9, 1e9)).expect("valid token");
+    gov.open_session_declared(token(3, 1e9, 1e9)).expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
     let key = Governor::idempotency_key("agent-a", SPOUT).expect("bounded canonical key");
     let mut handles = Vec::new();
@@ -605,7 +605,7 @@ fn ss_003_idempotency_races_execute_exactly_once() {
 #[test]
 fn ss_003a_same_thread_reentrant_duplicate_returns_in_flight() {
     let gov = Governor::new();
-    gov.open_session(token(30, 1e9, 1e9))
+    gov.open_session_declared(token(30, 1e9, 1e9))
         .expect("reentrant fixture session");
     let executions = AtomicU32::new(0);
     let key = "same-thread-reentrant";
@@ -638,8 +638,8 @@ fn ss_003a_same_thread_reentrant_duplicate_returns_in_flight() {
 #[test]
 fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
     let gov = Governor::new();
-    gov.open_session(token(31, 1e9, 1e9)).expect("session 31");
-    gov.open_session(token(32, 1e9, 1e9)).expect("session 32");
+    gov.open_session_declared(token(31, 1e9, 1e9)).expect("session 31");
+    gov.open_session_declared(token(32, 1e9, 1e9)).expect("session 32");
     let key =
         Governor::idempotency_key("agent:alpha", "program:beta").expect("bounded canonical key");
     assert!(key.starts_with("fs-session-idem-v3:"));
@@ -713,7 +713,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     fn opened(core_s: f64) -> Governor {
         let governor = Governor::new();
         governor
-            .open_session(token(33, core_s, 1e9))
+            .open_session_declared(token(33, core_s, 1e9))
             .expect("valid receipt-test token");
         governor
     }
@@ -821,7 +821,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     let ledger = fs_ledger::Ledger::open(&throttled_path).expect("receipt ledger");
     let throttled = Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0xC3; 32]));
     let throttled_permit = throttled
-        .open_session(token(33, 1.0, 1e9))
+        .open_session_declared(token(33, 1.0, 1e9))
         .expect("valid receipt-test token");
     // Durable prerequisite: the session-open terminal must be recorded
     // before durable submissions may run (RecoveryRequired otherwise).
@@ -888,7 +888,7 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
     let ledger = fs_ledger::Ledger::open(&path).expect("flush ledger");
     let gov = Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0xD4; 32]));
     let permit = gov
-        .open_session(token(34, 1e9, 1e9))
+        .open_session_declared(token(34, 1e9, 1e9))
         .expect("flush-test session");
     gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("open prerequisite terminal");
@@ -986,7 +986,7 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
         open_workers.push(std::thread::spawn(move || {
             open_barrier.wait();
             governor
-                .open_session(open_id, capability)
+                .open_session_declared(open_id, capability)
                 .expect("commit or replay open")
         }));
     }
@@ -996,13 +996,13 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
     assert_eq!(opened, replayed);
     assert_eq!(
         governor
-            .open_session(open_id, capability.clone())
+            .open_session_declared(open_id, capability.clone())
             .expect("lost open response replays"),
         opened
     );
     let foreign = SessionGovernor::new();
     assert!(matches!(
-        foreign.open_session(open_id, capability.clone()),
+        foreign.open_session_declared(open_id, capability.clone()),
         Err(SessionError::MutationAuthorityMismatch {
             kind: "session-open",
             ..
@@ -1011,7 +1011,7 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
     let mut altered = capability;
     altered.core_s = 99.0;
     assert!(matches!(
-        governor.open_session(open_id, altered),
+        governor.open_session_declared(open_id, altered),
         Err(SessionError::MutationConflict {
             kind: "session-open",
             ..
@@ -1109,7 +1109,7 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
         gated_workers.push(std::thread::spawn(move || {
             gated_barrier.wait();
             gated
-                .open_session_gated(gated_id, gated_token, gate)
+                .open_session_declared_gated(gated_id, gated_token, gate)
                 .expect("commit or replay gated open")
         }));
     }
@@ -1121,14 +1121,14 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
     );
     let foreign_gated = SessionGovernor::new();
     assert!(matches!(
-        foreign_gated.open_session_gated(gated_id, gated_token.clone(), Arc::clone(&gate),),
+        foreign_gated.open_session_declared_gated(gated_id, gated_token.clone(), Arc::clone(&gate),),
         Err(SessionError::MutationAuthorityMismatch {
             kind: "session-open",
             ..
         })
     ));
     assert!(matches!(
-        gated.open_session_gated(gated_id, gated_token.clone(), Arc::new(CancelGate::new())),
+        gated.open_session_declared_gated(gated_id, gated_token.clone(), Arc::new(CancelGate::new())),
         Err(SessionError::MutationConflict {
             kind: "session-open",
             ..
@@ -1140,7 +1140,7 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
     gate.request();
     assert_eq!(
         gated
-            .open_session_gated(gated_id, gated_token, Arc::clone(&gate))
+            .open_session_declared_gated(gated_id, gated_token, Arc::clone(&gate))
             .expect("exact replay precedes stale gate validation"),
         gated_receipt
     );
@@ -1163,7 +1163,7 @@ fn ss_003n_pressure_action_replays_across_pause_lifecycle_and_refuses_stale_ids(
         .expect("open authority");
     let gate = Arc::new(CancelGate::new());
     let permit = governor
-        .open_session_gated(open_id, capability, Arc::clone(&gate))
+        .open_session_declared_gated(open_id, capability, Arc::clone(&gate))
         .expect("gated open")
         .flush_permit();
     let action_id = governor
@@ -1299,7 +1299,7 @@ fn ss_003n_pressure_action_replays_across_pause_lifecycle_and_refuses_stale_ids(
         .session_open_id(low_session, "low-pressure-open")
         .expect("low-pressure open authority");
     low_pressure
-        .open_session(low_open, token(137, 1e9, 1e9))
+        .open_session_declared(low_open, token(137, 1e9, 1e9))
         .expect("ungated low-pressure session");
     for level in 1..=2 {
         let action = low_pressure
@@ -1331,7 +1331,7 @@ fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
         .session_open_id(session, "causal-open")
         .expect("open authority");
     let open_receipt = governor
-        .open_session(open_id, session_token.clone())
+        .open_session_declared(open_id, session_token.clone())
         .expect("open session");
     let permit = open_receipt.flush_permit();
     let open_flush = governor
@@ -1581,7 +1581,7 @@ fn ss_003p_pause_acknowledgement_waits_for_pending_submission_meter_commit() {
         .session_open_id(session, "drain-open")
         .expect("open authority");
     governor
-        .open_session_gated(open_id, token(39, 100.0, 1e9), Arc::clone(&gate))
+        .open_session_declared_gated(open_id, token(39, 100.0, 1e9), Arc::clone(&gate))
         .expect("gated session");
     let request = governor
         .submission_request_id(session, "draining-caller", "draining-program")
@@ -1688,7 +1688,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
         (43, "máin"),
     ] {
         assert!(matches!(
-            gov.open_session(token_in_scope(id, invalid_scope)),
+            gov.open_session_declared(token_in_scope(id, invalid_scope)),
             Err(SessionError::InvalidLedgerScope { .. })
         ));
         assert!(matches!(
@@ -1697,7 +1697,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
         ));
     }
     let oversized = "a".repeat(MAX_LEDGER_SCOPE_BYTES + 1);
-    match gov.open_session(token_in_scope(44, &oversized)) {
+    match gov.open_session_declared(token_in_scope(44, &oversized)) {
         Err(SessionError::InvalidLedgerScope {
             scope_preview,
             scope_bytes,
@@ -1709,7 +1709,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
         other => panic!("expected bounded oversized-scope refusal, got {other:?}"),
     }
     let split_boundary = format!("{}é", "a".repeat(MAX_LEDGER_SCOPE_BYTES - 1));
-    match gov.open_session(token_in_scope(47, &split_boundary)) {
+    match gov.open_session_declared(token_in_scope(47, &split_boundary)) {
         Err(SessionError::InvalidLedgerScope {
             scope_preview,
             scope_bytes,
@@ -1722,27 +1722,27 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     }
     let boundary = "a".repeat(MAX_LEDGER_SCOPE_BYTES);
     let boundary_permit = gov
-        .open_session(token_in_scope(44, &boundary))
+        .open_session_declared(token_in_scope(44, &boundary))
         .expect("the exact scope-length boundary is admitted after refusal");
 
     let mut invalid_ops = token_in_scope(49, "ops-invalid");
     invalid_ops.ops = vec!["bad operator".to_string()];
     assert!(matches!(
-        gov.open_session(invalid_ops),
+        gov.open_session_declared(invalid_ops),
         Err(SessionError::InvalidOperatorGrant { index: 0, .. })
     ));
     for (session, malformed) in [(54, "*"), (55, "flux*"), (56, ".flux"), (57, "flux..solve")] {
         let mut malformed_token = token_in_scope(session, "ops-malformed-wildcard");
         malformed_token.ops = vec![malformed.to_string()];
         assert!(matches!(
-            gov.open_session(malformed_token),
+            gov.open_session_declared(malformed_token),
             Err(SessionError::InvalidOperatorGrant { index: 0, .. })
         ));
     }
     let mut duplicate_ops = token_in_scope(50, "ops-duplicate");
     duplicate_ops.ops = vec!["flux.*".to_string(), "flux.*".to_string()];
     assert!(matches!(
-        gov.open_session(duplicate_ops),
+        gov.open_session_declared(duplicate_ops),
         Err(SessionError::DuplicateOperatorGrant { .. })
     ));
     let mut too_many_ops = token_in_scope(51, "ops-count");
@@ -1750,7 +1750,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
         .map(|index| format!("op-{index}"))
         .collect();
     assert!(matches!(
-        gov.open_session(too_many_ops),
+        gov.open_session_declared(too_many_ops),
         Err(SessionError::LimitExceeded {
             resource: "capability_operator_grants",
             ..
@@ -1759,7 +1759,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     let mut long_op = token_in_scope(52, "ops-bytes");
     long_op.ops = vec!["x".repeat(MAX_CAPABILITY_OP_BYTES + 1)];
     assert!(matches!(
-        gov.open_session(long_op),
+        gov.open_session_declared(long_op),
         Err(SessionError::InvalidOperatorGrant { .. })
     ));
     let mut too_many_op_bytes = token_in_scope(58, "ops-total-bytes");
@@ -1767,7 +1767,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
         .map(|index| format!("namespace{index:03}.{}", "x".repeat(110)))
         .collect();
     assert!(matches!(
-        gov.open_session(too_many_op_bytes),
+        gov.open_session_declared(too_many_op_bytes),
         Err(SessionError::LimitExceeded {
             resource: "capability_operator_bytes",
             ..
@@ -1776,7 +1776,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     let requested_gate = Arc::new(CancelGate::new());
     requested_gate.request();
     assert!(matches!(
-        gov.open_session_gated(
+        gov.open_session_declared_gated(
             token_in_scope(53, "pre-requested-gate"),
             Arc::clone(&requested_gate),
         ),
@@ -1786,7 +1786,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     // Reuse an id rejected above: invalid scope admission must not reserve or
     // partially initialize the session.
     let main_permit = gov
-        .open_session(token_in_scope(40, "main"))
+        .open_session_declared(token_in_scope(40, "main"))
         .expect("valid scope after atomic refusal");
     gov.charge(
         SessionId(40),
@@ -1799,7 +1799,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     let ledger = fs_ledger::Ledger::open(":memory:").expect("scope ledger");
     let foreign_governor = Governor::new();
     let foreign_permit = foreign_governor
-        .open_session(token_in_scope(48, "main"))
+        .open_session_declared(token_in_scope(48, "main"))
         .expect("foreign permit fixture");
     assert!(matches!(
         gov.flush_scope_to_ledger(&foreign_permit, &ledger),
@@ -1848,10 +1848,10 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
     let alpha_ledger = fs_ledger::Ledger::open(&alpha_path).expect("alpha ledger");
     let gov = Governor::new_durable(&alpha_ledger, DurableGovernorNonce::from_bytes([0xF5; 32]));
     let alpha_permit = gov
-        .open_session(token_in_scope(45, ALPHA))
+        .open_session_declared(token_in_scope(45, ALPHA))
         .expect("canonical JSON-hostile alpha scope");
     let beta_permit = gov
-        .open_session(token_in_scope(46, BETA))
+        .open_session_declared(token_in_scope(46, BETA))
         .expect("canonical beta scope");
     gov.flush_scope_to_ledger(&alpha_permit, &alpha_ledger)
         .expect("alpha open prerequisite terminal");
@@ -1954,7 +1954,7 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
 fn ss_003g_sink_binding_uses_move_stable_ledger_identity() {
     let gov = Governor::new();
     let permit = gov
-        .open_session(token(49, 1e9, 1e9))
+        .open_session_declared(token(49, 1e9, 1e9))
         .expect("identity fixture session");
     let ledger = fs_ledger::Ledger::open(":memory:").expect("identity fixture ledger");
     let identity = ledger.instance_id();
@@ -1997,7 +1997,7 @@ fn ss_003h_bounded_flush_drains_multiple_atomic_chunks_without_duplicates() {
     let ledger = fs_ledger::Ledger::open(&path).expect("chunk fixture ledger");
     let gov = Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0xA7; 32]));
     let permit = gov
-        .open_session(token(50, 1e9, 1e9))
+        .open_session_declared(token(50, 1e9, 1e9))
         .expect("chunk fixture session");
     gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("open prerequisite terminal");
@@ -2312,7 +2312,7 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
     let gov = Governor::new();
     let gate = Arc::new(CancelGate::new());
     let permit = gov
-        .open_session_gated(token(5, 1e9, 1e9), Arc::clone(&gate))
+        .open_session_declared_gated(token(5, 1e9, 1e9), Arc::clone(&gate))
         .expect("valid token");
     // Level 1: only the spill step fires.
     let l1 = gov.apply_memory_pressure(SessionId(5), 1).expect("session");
@@ -2365,11 +2365,11 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     let gate_a = Arc::new(CancelGate::new());
     let gate_b = Arc::new(CancelGate::new());
     let permit_a = gov
-        .open_session_gated(token(41, 1e9, 1e9), Arc::clone(&gate_a))
+        .open_session_declared_gated(token(41, 1e9, 1e9), Arc::clone(&gate_a))
         .expect("valid token");
-    gov.open_session_gated(token(42, 1e9, 1e9), Arc::clone(&gate_b))
+    gov.open_session_declared_gated(token(42, 1e9, 1e9), Arc::clone(&gate_b))
         .expect("valid token");
-    gov.open_session(token(43, 1e9, 1e9)).expect("valid token"); // ungated
+    gov.open_session_declared(token(43, 1e9, 1e9)).expect("valid token"); // ungated
 
     // (a) Levels 0 and > 3 are REFUSED, never clamped, nothing ledgered.
     for bad in [0u8, 4, 200] {
@@ -2511,7 +2511,7 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     // (f) Cross-session, foreign-ledger, and cross-governor authorities fail closed.
     let foreign = Governor::new();
     foreign
-        .open_session_gated(token(42, 1e9, 1e9), Arc::new(CancelGate::new()))
+        .open_session_declared_gated(token(42, 1e9, 1e9), Arc::new(CancelGate::new()))
         .expect("foreign fixture session");
     let foreign_request = foreign
         .apply_memory_pressure(SessionId(42), 3)
@@ -2772,7 +2772,7 @@ fn ss_007_governor_storm_structured_outcomes_only() {
     for id in 0..8u64 {
         // Adversarial: tiny grants on odd sessions.
         let grant = if id % 2 == 0 { 1e6 } else { 20.0 };
-        gov.open_session(token(id, grant, 1e9))
+        gov.open_session_declared(token(id, grant, 1e9))
             .expect("valid token");
     }
     let mut handles = Vec::new();
@@ -2833,7 +2833,7 @@ fn ss_007_governor_storm_structured_outcomes_only() {
 fn ss_008_panicking_submission_is_non_blocking_and_terminal() {
     const WAITERS: usize = 8;
     let gov = Arc::new(Governor::new());
-    gov.open_session(token(80, 1e9, 1e9)).expect("valid token");
+    gov.open_session_declared(token(80, 1e9, 1e9)).expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2942,7 +2942,7 @@ fn ss_009_invalid_resources_fail_closed_without_poisoning_meters() {
                 _ => unreachable!(),
             }
             assert!(matches!(
-                gov.open_session(bad),
+                gov.open_session_declared(bad),
                 Err(SessionError::InvalidResource { .. })
             ));
             assert!(
@@ -2955,7 +2955,7 @@ fn ss_009_invalid_resources_fail_closed_without_poisoning_meters() {
         }
     }
 
-    gov.open_session(token(102, 100.0, 1_000.0))
+    gov.open_session_declared(token(102, 100.0, 1_000.0))
         .expect("valid token");
     let before = gov.consumption(SessionId(102)).expect("meters");
     for value in invalid {
@@ -2990,7 +2990,7 @@ fn ss_009_invalid_resources_fail_closed_without_poisoning_meters() {
 #[test]
 fn ss_010_exact_grant_throttles_and_accumulated_overflow_is_atomic() {
     let gov = Governor::new();
-    gov.open_session(token(102, 100.0, 1_000.0))
+    gov.open_session_declared(token(102, 100.0, 1_000.0))
         .expect("valid token");
     let at_grant = gov
         .charge(
@@ -3032,7 +3032,7 @@ fn ss_010_exact_grant_throttles_and_accumulated_overflow_is_atomic() {
         Enforcement::Paused { .. }
     ));
 
-    gov.open_session(token(103, f64::MAX, f64::MAX))
+    gov.open_session_declared(token(103, f64::MAX, f64::MAX))
         .expect("finite maximum grants are valid");
     let _ = gov
         .charge(
@@ -3069,7 +3069,7 @@ fn ss_012_session_and_idempotency_collection_caps_are_exact_and_atomic() {
     let sessions = Governor::new();
     for id in 0..MAX_SESSIONS_PER_SCOPE {
         sessions
-            .open_session(token_in_scope(
+            .open_session_declared(token_in_scope(
                 u64::try_from(id).expect("fixture id fits"),
                 "crowded",
             ))
@@ -3077,7 +3077,7 @@ fn ss_012_session_and_idempotency_collection_caps_are_exact_and_atomic() {
     }
     let refused_id = u64::try_from(MAX_SESSIONS_PER_SCOPE).expect("fixture id fits");
     assert!(matches!(
-        sessions.open_session(token_in_scope(refused_id, "crowded")),
+        sessions.open_session_declared(token_in_scope(refused_id, "crowded")),
         Err(SessionError::LimitExceeded {
             resource: "sessions_per_scope",
             limit: MAX_SESSIONS_PER_SCOPE,
@@ -3092,12 +3092,12 @@ fn ss_012_session_and_idempotency_collection_caps_are_exact_and_atomic() {
     for id in MAX_SESSIONS_PER_SCOPE..MAX_SESSIONS_PER_GOVERNOR {
         let id = u64::try_from(id).expect("fixture id fits");
         sessions
-            .open_session(token_in_scope(id, &format!("scope-{id}")))
+            .open_session_declared(token_in_scope(id, &format!("scope-{id}")))
             .expect("fill exact governor boundary");
     }
     let governor_overflow = u64::try_from(MAX_SESSIONS_PER_GOVERNOR).expect("fixture id fits");
     assert!(matches!(
-        sessions.open_session(token_in_scope(governor_overflow, "overflow")),
+        sessions.open_session_declared(token_in_scope(governor_overflow, "overflow")),
         Err(SessionError::LimitExceeded {
             resource: "sessions_per_governor",
             limit: MAX_SESSIONS_PER_GOVERNOR,
@@ -3106,7 +3106,7 @@ fn ss_012_session_and_idempotency_collection_caps_are_exact_and_atomic() {
     ));
 
     let keys = Governor::new();
-    keys.open_session(token(9_000, 1e9, 1e9))
+    keys.open_session_declared(token(9_000, 1e9, 1e9))
         .expect("key-cap fixture session");
     for index in 0..MAX_IDEMPOTENCY_KEYS_PER_SESSION {
         assert!(matches!(
@@ -3155,7 +3155,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .session_open_id(session, "durable-lifecycle-open")
         .expect("open authority");
     let open_receipt = governor
-        .open_session_gated(open_id, token.clone(), Arc::clone(&initial_gate))
+        .open_session_declared_gated(open_id, token.clone(), Arc::clone(&initial_gate))
         .expect("gated open");
     let companion_session = SessionId(9_014);
     let companion_token = token_in_scope(companion_session.0, "durable-lifecycle");
@@ -3163,7 +3163,7 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .session_open_id(companion_session, "durable-companion-open")
         .expect("companion open authority");
     governor
-        .open_session(companion_open_id, companion_token.clone())
+        .open_session_declared(companion_open_id, companion_token.clone())
         .expect("companion open");
     let permit = open_receipt.flush_permit();
     governor

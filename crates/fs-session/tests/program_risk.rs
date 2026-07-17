@@ -139,7 +139,7 @@ fn g0_tripped_risk_is_automatically_artifacted_rooted_and_surfaced_once() {
         .session_open_id(session, "program-risk-open")
         .expect("open authority");
     let open = governor
-        .open_session(open_id, token(session, "program-risk"))
+        .open_session_declared(open_id, token(session, "program-risk"))
         .expect("session open");
     let open_flush = governor
         .flush_scope_to_ledger(&open.flush_permit(), &ledger)
@@ -269,7 +269,7 @@ fn g3_sealed_report_refuses_a_second_producer_before_replay() {
         .session_open_id(session, "program-risk-multiple-producers")
         .expect("open authority");
     let open = governor
-        .open_session(open_id, token(session, "program-risk-multiple-producers"))
+        .open_session_declared(open_id, token(session, "program-risk-multiple-producers"))
         .expect("session open");
     governor
         .flush_scope_to_ledger(&open.flush_permit(), &ledger)
@@ -320,7 +320,7 @@ fn g3_sealed_lineage_refuses_a_third_edge_before_replay() {
         .session_open_id(session, "program-risk-extra-edge")
         .expect("open authority");
     let open = governor
-        .open_session(open_id, token(session, "program-risk-extra-edge"))
+        .open_session_declared(open_id, token(session, "program-risk-extra-edge"))
         .expect("session open");
     governor
         .flush_scope_to_ledger(&open.flush_permit(), &ledger)
@@ -366,7 +366,7 @@ fn g0_report_refuses_unflushed_foreign_and_wrong_sink_contexts() {
         .session_open_id(session, "context-open")
         .expect("open authority");
     let open = governor
-        .open_session(open_id, token(session, "context"))
+        .open_session_declared(open_id, token(session, "context"))
         .expect("session open");
     let observations = all_clear_observations();
 
@@ -392,7 +392,7 @@ fn g0_report_refuses_unflushed_foreign_and_wrong_sink_contexts() {
         .session_open_id(foreign_session, "foreign-open")
         .expect("foreign open authority");
     let foreign_open = foreign
-        .open_session(foreign_id, token(foreign_session, "foreign"))
+        .open_session_declared(foreign_id, token(foreign_session, "foreign"))
         .expect("foreign open");
     assert!(matches!(
         governor.write_program_risk_session_end_report(&ledger, &foreign_open, 1, &observations),
@@ -413,7 +413,7 @@ fn g3_exact_replay_retains_the_original_generation_after_lifecycle_progress() {
         .session_open_id(session, "generation-open")
         .expect("open authority");
     let open = governor
-        .open_session_gated(open_id, token(session, "generation"), Arc::clone(&gate))
+        .open_session_declared_gated(open_id, token(session, "generation"), Arc::clone(&gate))
         .expect("gated session open");
     governor
         .flush_scope_to_ledger(&open.flush_permit(), &ledger)
@@ -467,7 +467,7 @@ fn g3_durable_reopen_requires_typed_report_recovery_and_changes_no_rows() {
         .session_open_id(session, "durable-program-risk-open")
         .expect("open authority");
     let open = governor
-        .open_session(open_id, capability.clone())
+        .open_session_declared(open_id, capability.clone())
         .expect("durable open");
     governor
         .flush_scope_to_ledger(&open.flush_permit(), &ledger)
@@ -525,7 +525,7 @@ fn g3_report_recovery_waits_for_its_pause_resume_generation() {
         .session_open_id(session, "durable-program-risk-generation-open")
         .expect("open authority");
     let open = governor
-        .open_session_gated(open_id, capability.clone(), Arc::clone(&initial_gate))
+        .open_session_declared_gated(open_id, capability.clone(), Arc::clone(&initial_gate))
         .expect("durable gated open");
     governor
         .flush_scope_to_ledger(&open.flush_permit(), &ledger)

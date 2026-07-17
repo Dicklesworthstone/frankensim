@@ -52,7 +52,7 @@ pub struct CapabilityToken {
     /// Cores the session may occupy at once.
     pub cores: u64,
     /// Canonical ledger scope (exact branch/namespace this session may write).
-    /// [`crate::Governor::open_session`] validates it before registration.
+    /// [`crate::Governor::open_session_declared`] validates it before registration.
     pub ledger_scope: String,
 }
 

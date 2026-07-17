@@ -2182,7 +2182,7 @@ mod identity_tests {
             .session_open_id(session, "migrated-v8-replay-open")
             .expect("open authority");
         let open = governor
-            .open_session(open_id, legacy_token(session, "migrated-v8-replay"))
+            .open_session_declared(open_id, legacy_token(session, "migrated-v8-replay"))
             .expect("open session");
         governor
             .flush_scope_to_ledger(&open.flush_permit(), &ledger)
@@ -2225,7 +2225,7 @@ mod identity_tests {
             .session_open_id(session, "migrated-v8-recovery-open")
             .expect("open authority");
         let open = governor
-            .open_session(open_id, capability.clone())
+            .open_session_declared(open_id, capability.clone())
             .expect("open durable session");
         governor
             .flush_scope_to_ledger(&open.flush_permit(), &ledger)
