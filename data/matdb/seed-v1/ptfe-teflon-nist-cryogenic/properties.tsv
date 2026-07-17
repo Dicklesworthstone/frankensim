@@ -1,0 +1,15 @@
+frankensim.matdb-source.v1
+observation	nist-k-fit	ptfe-teflon-source-grade-and-process-unspecified	NIST Teflon thermal-conductivity polynomial evaluated into exact-temperature derived scalars	log10(y)=sum(a_i*log10(T)^i); a..i=2.7380,-30.677,89.430,-136.99,124.69,-69.556,23.320,-4.3135,0.33829; data and equation range 4-300 K; NIST reports 5 percent curve-fit error relative to data without a confidence level or degrees of freedom; source uses the Teflon label but does not identify resin grade, crystallinity, filler, processing history, density, or supplier
+observation	nist-cp-fit	ptfe-teflon-source-grade-and-process-unspecified	NIST Teflon specific-heat polynomial evaluated into exact-temperature derived scalars	log10(y)=sum(a_i*log10(T)^i); a..i=31.88256,-166.51949,352.01879,-393.44232,259.98072,-104.61429,24.99276,-3.20792,0.16503; data and equation range 4-300 K; NIST reports 1.5 percent curve-fit error relative to data without a confidence level or degrees of freedom; source uses the Teflon label but does not identify resin grade, crystallinity, filler, processing history, density, or supplier
+scalar	thermal-conductivity-77K	nist-k-fit	thermal_conductivity	0.232391801023681	W/m/K	constant
+uncertainty	thermal-conductivity-77K	unstated	-	-	-	-
+validity	thermal-conductivity-77K	temperature	77	77	K
+scalar	specific-heat-capacity-77K	nist-cp-fit	specific_heat_capacity	301.115701345352	J/kg/K	constant
+uncertainty	specific-heat-capacity-77K	unstated	-	-	-	-
+validity	specific-heat-capacity-77K	temperature	77	77	K
+scalar	thermal-conductivity-293K	nist-k-fit	thermal_conductivity	0.272587209362470	W/m/K	constant
+uncertainty	thermal-conductivity-293K	unstated	-	-	-	-
+validity	thermal-conductivity-293K	temperature	293	293	K
+scalar	specific-heat-capacity-293K	nist-cp-fit	specific_heat_capacity	1015.65681789637	J/kg/K	constant
+uncertainty	specific-heat-capacity-293K	unstated	-	-	-	-
+validity	specific-heat-capacity-293K	temperature	293	293	K

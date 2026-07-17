@@ -125,6 +125,37 @@ OFHC Copper references:
 - <https://ntrs.nasa.gov/citations/19750021165>
 - <https://ntrs.nasa.gov/api/citations/19750021165/downloads/19750021165.pdf>
 
+## PTFE/Teflon cryogenic exact-point tranche
+
+`ptfe-teflon-nist-cryogenic/` retains the material identity at exactly the
+specificity published by NIST: the page is headed `Teflon`, while the index
+places it among solid materials from cryogenic to room temperatures. The
+source does not identify a resin grade, crystallinity, filler, processing
+history, density, or supplier, so the observation names those omissions rather
+than silently treating every PTFE formulation as interchangeable.
+
+The tranche evaluates NIST's displayed thermal-conductivity and specific-heat
+polynomials at exactly `77 K` and `293 K`. The resulting four scalars use
+degenerate temperature validity intervals and therefore do not expose the
+underlying polynomial as a continuous constitutive curve. NIST states a
+`4..300 K` data and equation range and reports curve-fit errors relative to the
+data of `5%` for thermal conductivity and `1.5%` for specific heat. Because the
+page supplies no confidence level or degrees of freedom, those figures remain
+observation caveats and every runtime uncertainty is explicitly `Unstated`.
+
+The page also publishes Young's-modulus and linear-expansion correlations.
+They are deliberately excluded from this first PTFE slice: the rendered page
+does not expose the Young's-modulus coefficient table, and linear expansion is
+a reference-length-relative quantity rather than the linear-expansion-
+coefficient property needed by most thermal models. No value is reconstructed
+from an unavailable plot or relabeled into a different physical quantity.
+
+PTFE/Teflon references:
+
+- <https://trc.nist.gov/cryogenics/materials/Teflon/Teflon_rev.htm>
+- <https://trc.nist.gov/cryogenics/materials/materialproperties.htm>
+- <https://www.nist.gov/copyrights-disclaimers>
+
 ## AISI 4140 Rockwell C33 low-temperature tranche
 
 `aisi-4140-rc33/` is a condition-pinned structural-steel tranche from
@@ -429,6 +460,10 @@ cargo run -p xtask -- matdb-pack \
   --out /path/to/ofhc-copper-cryogenic.fsmatpk
 
 cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/ptfe-teflon-nist-cryogenic/manifest.tsv \
+  --out /path/to/ptfe-teflon-nist-cryogenic.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv \
   --out /path/to/aisi-4140-qq-s-624-rc33.fsmatpk
 
@@ -491,6 +526,14 @@ define electrical resistivity, density, mechanical strength, temper, grain
 state, purity beyond the source's OFHC class, or a continuous-temperature
 model. Only its conductivity claims bind `RRR = 100`; the source leaves RRR
 unstated for specific heat, and the stored observation preserves that gap.
+
+The PTFE/Teflon tranche is not a generic PTFE design card or a seal,
+tribology, dielectric, radiation, outgassing, chemical-compatibility, creep,
+strength, or lifetime model. It binds only NIST's source label and four
+polynomial-derived exact-temperature points; it does not select a resin grade,
+crystallinity, filler, processing state, supplier, or density. The published
+fit errors are not confidence intervals, and no interpolation, extrapolation,
+Young's-modulus, or thermal-expansion-coefficient claim is admitted.
 
 The AISI 4140 tranche applies only to the exact NASA heat/process/hardness/bar
 condition above and the two retained temperatures. It does not provide a

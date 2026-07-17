@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	ptfe-teflon-nist-cryogenic
+redistribution	permitted	NIST Teflon material-property page is unmarked as copyrighted; NIST Copyrights & Disclaimers treats unmarked site information as public information that may be distributed or copied; NIST attribution retained
+citation	National Institute of Standards and Technology, Material Properties: Teflon, cryogenic thermal-conductivity and specific-heat polynomial coefficients, 4-300 K equation ranges, and curve-fit errors, accessed 2026-07-16
+license	NIST-Public-Information-Attribution-Requested
+source	nist-ptfe-fit	properties.tsv	material-tsv-v1

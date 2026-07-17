@@ -326,8 +326,10 @@ NIST displayed-precision agreement checks.
 - No complete seed dataset ships in this crate. The repository's first
   `data/matdb/seed-v1` tranches contain raw, offline-compiled gas-species
   associations, six exact-temperature Aluminum 6061-T6 scalar claims, and
-  four exact-temperature OFHC Copper scalar claims, plus fourteen
-  exact-temperature AISI 4140 mechanical-property claims and three
+  four exact-temperature OFHC Copper scalar claims. The first PTFE/Teflon
+  tranche adds four polynomial-derived exact-temperature thermal claims while
+  retaining the source's missing grade and process identity. These sit beside
+  fourteen exact-temperature AISI 4140 mechanical-property claims and three
   small-sample AISI 1045 tensile claims. The first pinned AISI 52100
   bearing-steel tranche adds six actual-composition claims, five Rockwell C
   scale readings, and four exact retained-austenite fractions. The first
@@ -354,7 +356,10 @@ NIST displayed-precision agreement checks.
   pins RRR=100, while its specific-heat observation preserves the source's
   unstated RRR rather than laundering that condition across properties. The
   combined NIST source scope also does not select between UNS C10100 and
-  C10200. The 4140 claims bind NASA's QQ-S-624 heat 137M186, one-inch bar,
+  C10200. The PTFE/Teflon claims bind only NIST's source label and exact
+  temperature points; no resin grade, crystallinity, filler, processing state,
+  density, continuous constitutive law, or application-specific authority is
+  inferred. The 4140 claims bind NASA's QQ-S-624 heat 137M186, one-inch bar,
   normalize/harden/oil-quench/temper schedule, and Rockwell C33 condition;
   they are not generic values for the grade or its separately reported C44
   branch. The 1045 claims bind one cold-drawn bar and ASTM E8 specimen series;
