@@ -24,9 +24,49 @@ const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 const METHANE_SEED_MANIFEST: &str = "data/matdb/seed-v1/methane/manifest.tsv";
-const METHANE_SEED_LICENSE: &str = "Work-of-the-US-Government-Public-Use-Permitted";
+const NASA_SEED_LICENSE: &str = "Work-of-the-US-Government-Public-Use-Permitted";
 const NIST_SRD69_METHANE_MOLAR_MASS_KG_PER_MOL: f64 = 0.016_042_5;
 const NIST_SRD69_DISPLAY_ROUNDING_HALF_WIDTH_KG_PER_MOL: f64 = 0.000_000_05;
+
+#[derive(Clone, Copy)]
+struct CommittedSpeciesSeed {
+    manifest: &'static str,
+    species: &'static str,
+    nasa_molar_mass_g_per_mol: f64,
+    nist_molar_mass_g_per_mol: f64,
+    nist_display_rounding_half_width_g_per_mol: f64,
+}
+
+const AIR_EXHAUST_SPECIES_SEEDS: [CommittedSpeciesSeed; 4] = [
+    CommittedSpeciesSeed {
+        manifest: "data/matdb/seed-v1/nitrogen/manifest.tsv",
+        species: "N2",
+        nasa_molar_mass_g_per_mol: 28.013_40,
+        nist_molar_mass_g_per_mol: 28.013_4,
+        nist_display_rounding_half_width_g_per_mol: 0.000_05,
+    },
+    CommittedSpeciesSeed {
+        manifest: "data/matdb/seed-v1/oxygen/manifest.tsv",
+        species: "O2",
+        nasa_molar_mass_g_per_mol: 31.998_80,
+        nist_molar_mass_g_per_mol: 31.998_8,
+        nist_display_rounding_half_width_g_per_mol: 0.000_05,
+    },
+    CommittedSpeciesSeed {
+        manifest: "data/matdb/seed-v1/argon/manifest.tsv",
+        species: "Ar",
+        nasa_molar_mass_g_per_mol: 39.948_00,
+        nist_molar_mass_g_per_mol: 39.948,
+        nist_display_rounding_half_width_g_per_mol: 0.000_5,
+    },
+    CommittedSpeciesSeed {
+        manifest: "data/matdb/seed-v1/carbon-dioxide/manifest.tsv",
+        species: "CO2",
+        nasa_molar_mass_g_per_mol: 44.009_50,
+        nist_molar_mass_g_per_mol: 44.009_5,
+        nist_display_rounding_half_width_g_per_mol: 0.000_05,
+    },
+];
 
 const MANIFEST: &str = concat!(
     "frankensim.matdb-manifest.v1\n",
@@ -637,10 +677,7 @@ fn g3_cli_compiles_committed_methane_seed_and_records_independent_agreement() {
         association.elemental_reference(),
         "NASA-TP-2002-211556-reference-elements-298.15K-1bar"
     );
-    assert_eq!(
-        association.provenance().license.as_str(),
-        METHANE_SEED_LICENSE
-    );
+    assert_eq!(association.provenance().license.as_str(), NASA_SEED_LICENSE);
     assert!(
         association
             .provenance()
@@ -655,6 +692,93 @@ fn g3_cli_compiles_committed_methane_seed_and_records_independent_agreement() {
         independent_difference <= NIST_SRD69_DISPLAY_ROUNDING_HALF_WIDTH_KG_PER_MOL,
         "NASA seed and NIST SRD 69 display disagree beyond the recorded rounding band: {independent_difference:e} kg/mol"
     );
+}
+
+#[test]
+fn g3_cli_compiles_committed_air_exhaust_constituents_without_inventing_a_mixture() {
+    for seed in AIR_EXHAUST_SPECIES_SEEDS {
+        let manifest = workspace_path(seed.manifest);
+        assert!(
+            manifest.is_file(),
+            "committed {} seed manifest is missing",
+            seed.species
+        );
+        let directory = fixture_dir();
+        let first_path = directory.join(format!("{}-first.fsspcpk", seed.species));
+        let second_path = directory.join(format!("{}-second.fsspcpk", seed.species));
+
+        let first = run_compiler(&manifest, &first_path);
+        let second = run_compiler(&manifest, &second_path);
+        assert!(
+            first.status.success(),
+            "first {} seed compilation failed: {}",
+            seed.species,
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert!(
+            second.status.success(),
+            "second {} seed compilation failed: {}",
+            seed.species,
+            String::from_utf8_lossy(&second.stderr)
+        );
+        assert_eq!(
+            first.stdout, second.stdout,
+            "{} decision stream moved",
+            seed.species
+        );
+        assert_decision_compiler(&first, SPECIES_COMPILER_ID);
+
+        let first_bytes = fs::read(first_path).expect("read first constituent pack");
+        let second_bytes = fs::read(second_path).expect("read second constituent pack");
+        assert_eq!(
+            first_bytes, second_bytes,
+            "{} pack bytes moved",
+            seed.species
+        );
+        let decoded =
+            NormalizedSpeciesPack::from_bytes(&first_bytes).expect("decode constituent pack");
+        let pack_hash = decoded.content_hash();
+        let decoded = NormalizedSpeciesPack::from_bytes_verified(pack_hash, &first_bytes)
+            .expect("verify constituent pack identity");
+
+        assert_eq!(decoded.pack_id(), seed.species);
+        assert!(
+            decoded
+                .redistribution_terms()
+                .contains("public use permitted")
+        );
+        let association = decoded.association();
+        assert_eq!(association.species().as_str(), seed.species);
+        assert_eq!(
+            association.molar_mass().to_bits(),
+            (seed.nasa_molar_mass_g_per_mol * 0.001).to_bits()
+        );
+        assert_eq!(association.standard_state_phase(), "gas");
+        assert_eq!(association.reference_eos(), "ideal-gas");
+        assert_eq!(
+            association.reference_pressure().to_bits(),
+            100_000.0f64.to_bits()
+        );
+        assert_eq!(
+            association.elemental_reference(),
+            "NASA-TP-2002-211556-reference-elements-298.15K-1bar"
+        );
+        assert_eq!(association.provenance().license.as_str(), NASA_SEED_LICENSE);
+        assert!(
+            association
+                .provenance()
+                .source
+                .contains("NASA/TP-2002-211556")
+        );
+
+        let independent_difference_g_per_mol =
+            (association.molar_mass() * 1_000.0 - seed.nist_molar_mass_g_per_mol).abs();
+        assert!(
+            independent_difference_g_per_mol <= seed.nist_display_rounding_half_width_g_per_mol,
+            "NASA {} seed and NIST SRD 69 display disagree beyond the recorded rounding band: {independent_difference_g_per_mol:e} g/mol",
+            seed.species
+        );
+    }
 }
 
 #[test]
