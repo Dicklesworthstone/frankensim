@@ -54,6 +54,21 @@ fn hash(label: &str) -> ContentHash {
     hash_domain(TEST_HASH_DOMAIN, label.as_bytes())
 }
 
+fn case_physics_hash(domain: &str, label: &str) -> ContentHash {
+    hash_domain(domain, label.as_bytes())
+}
+
+fn case_physics_source(value: &str, kind: SourceKind, domain: &str) -> SourceRef {
+    SourceRef::try_new(
+        source_key(value),
+        kind,
+        case_physics_hash(domain, value),
+        domain,
+        CASE_PHYSICS_SOURCE_CONTRACT_VERSION,
+    )
+    .expect("case-physics source fixture")
+}
+
 fn artifact(value: &str) -> ArtifactId {
     ArtifactId::try_new(value).expect("fixture artifact token")
 }
@@ -80,6 +95,21 @@ fn case_id(value: &str) -> CaseId {
 
 fn source_key(value: &str) -> SourceKey {
     SourceKey::try_new(value).expect("fixture source key")
+}
+
+fn external_trust(label: &str, subject: &SourceRef) -> AuthorityDisposition {
+    AuthorityDisposition::ExternalTrustReceipt {
+        trust_receipt: TrustReceiptRef::try_new(
+            source(
+                "fixture-trust-receipt",
+                SourceKind::EvidenceReceipt,
+                hash(label),
+            ),
+            subject.clone(),
+            TrustAuthentication::Unauthenticated,
+        )
+        .expect("typed external trust receipt fixture"),
+    }
 }
 
 fn channel(value: &str) -> ObservationChannelId {
@@ -146,7 +176,10 @@ fn read_text<'a>(bytes: &'a [u8], at: &mut usize, field: &str) -> &'a str {
 fn assert_identity_header_layout(bytes: &[u8], magic: &[u8], header: &ArtifactHeader) -> usize {
     assert!(bytes.starts_with(magic), "identity wire magic moved");
     let mut at = magic.len();
-    assert_eq!(read_u32_le(bytes, &mut at, "schema version"), 1);
+    assert_eq!(
+        read_u32_le(bytes, &mut at, "schema version"),
+        IDENTIFIABILITY_AUTHORITY_SCHEMA_VERSION,
+    );
     assert_eq!(
         bytes.get(at),
         Some(&0),
@@ -338,6 +371,8 @@ fn source(value: &str, kind: SourceKind, content: ContentHash) -> SourceRef {
         SourceKind::ConstitutiveModelCard => {
             (CONSTITUTIVE_MODEL_CARD_SOURCE_DOMAIN, MATDB_SCHEMA_VERSION)
         }
+        SourceKind::Parser => (TEST_HASH_DOMAIN, 2),
+        SourceKind::ObservationOperator => (TEST_HASH_DOMAIN, 4),
         _ => (TEST_HASH_DOMAIN, 1),
     };
     SourceRef::try_new(source_key(value), kind, content, domain, version)
@@ -345,34 +380,41 @@ fn source(value: &str, kind: SourceKind, content: ContentHash) -> SourceRef {
 }
 
 fn frame(case: &str) -> FrameBinding {
+    let label = format!("frame-transform-{case}");
     FrameBinding::try_new(
         artifact(&format!("frame-{case}")),
-        hash(&format!("frame-transform-{case}")),
+        case_physics_hash(FRAME_TRANSFORM_SOURCE_DOMAIN, &label),
         "right-handed-cartesian",
     )
     .expect("frame fixture")
 }
 
 fn protocol(case: &str) -> ProtocolBinding {
+    let load = format!("load-path-{case}");
+    let environment = format!("environment-path-{case}");
+    let time = format!("time-grid-{case}");
     ProtocolBinding::try_new(
         artifact(&format!("protocol-{case}")),
         7,
         2,
         3,
-        hash(&format!("load-path-{case}")),
-        hash(&format!("environment-path-{case}")),
-        hash(&format!("time-grid-{case}")),
+        case_physics_hash(LOAD_PATH_SOURCE_DOMAIN, &load),
+        case_physics_hash(ENVIRONMENT_PATH_SOURCE_DOMAIN, &environment),
+        case_physics_hash(TIME_GRID_SOURCE_DOMAIN, &time),
         artifact(&format!("clock-{case}")),
     )
     .expect("protocol fixture")
 }
 
 fn specimen(case: &str, frame: FrameBinding) -> SpecimenBinding {
+    let geometry = format!("geometry-{case}");
+    let process = format!("process-{case}");
+    let preparation = format!("preparation-{case}");
     SpecimenBinding::try_new(
         artifact(&format!("specimen-{case}")),
-        hash(&format!("geometry-{case}")),
-        hash(&format!("process-{case}")),
-        hash(&format!("preparation-{case}")),
+        case_physics_hash(SPECIMEN_GEOMETRY_SOURCE_DOMAIN, &geometry),
+        case_physics_hash(SPECIMEN_PROCESS_SOURCE_DOMAIN, &process),
+        case_physics_hash(SPECIMEN_PREPARATION_SOURCE_DOMAIN, &preparation),
         frame,
     )
     .expect("specimen fixture")
@@ -383,12 +425,17 @@ fn parameter(
     treatment: ParameterTreatment,
     coverage: InfluenceCoverage,
     prior_version: u32,
+    domain_override: Option<ParameterDomain>,
+    prior_absent: bool,
+    scope: ParameterScopeBinding,
 ) -> StudyParameter {
-    let domain = if name == "yield_stress" {
-        ParameterDomain::try_new(1.0e6, 1.0e9).expect("yield domain")
-    } else {
-        ParameterDomain::try_new(1.0e7, 5.0e9).expect("hardening domain")
-    };
+    let domain = domain_override.unwrap_or_else(|| {
+        if name == "yield_stress" {
+            ParameterDomain::try_new(1.0e6, 1.0e9).expect("yield domain")
+        } else {
+            ParameterDomain::try_new(1.0e7, 5.0e9).expect("hardening domain")
+        }
+    });
     StudyParameter::try_new(
         role(name),
         QuantitySpec::dimensional(STRESS),
@@ -400,11 +447,17 @@ fn parameter(
         },
         treatment,
         ParameterOwnerBinding::ConstitutiveModel,
-        ParameterScopeBinding::Global,
-        PriorPolicy::Distribution(ParameterPrior::Uniform {
-            version: prior_version,
-            domain,
-        }),
+        scope,
+        if prior_absent {
+            PriorPolicy::Absent {
+                reason: "no probability measure has been declared for this estimand".to_string(),
+            }
+        } else {
+            PriorPolicy::Distribution(ParameterPrior::Uniform {
+                version: prior_version,
+                domain,
+            })
+        },
         coverage,
     )
     .expect("study parameter fixture")
@@ -425,14 +478,27 @@ struct ProblemOptions {
     self_correlation: bool,
     alternate_graph_domain: bool,
     context_contract_mutation: u8,
+    observation_contract_mutation: u8,
+    blind_prospective_case: bool,
     second_case_complementary: bool,
-    claim_domain_in_problem: bool,
+    claim_strata_in_problem: bool,
     parameter_prior_version: u32,
     valid_constraint: bool,
+    ordered_constraint_case: u8,
     yield_log_scale: bool,
     one_gauge: bool,
     external_noise: bool,
     alternate_sharing_justification: bool,
+    yield_prior_absent: bool,
+    yield_case_a_only: bool,
+    case_physics_mutation: u8,
+    modeled_discrepancy_case: u8,
+    composite_influence_chain: bool,
+    gauge_case: u8,
+    yield_influence_case_b: bool,
+    joint_prior_choice: u8,
+    declared_gauge_composition: bool,
+    independent_gauge_composition: bool,
 }
 
 struct ProblemFixture {
@@ -459,9 +525,18 @@ fn make_case(
     bounded_noise: bool,
     retrospective: bool,
     experiment_key: &str,
+    observation_contract_mutation: u8,
 ) -> StudyCaseDocument {
     let frame = frame(name);
     let protocol = protocol(name);
+    let (observation_clock, observation_protocol_version, observation_refinement_version) =
+        match observation_contract_mutation {
+            0 => (protocol.clock().clone(), 7, 3),
+            1 => (protocol.clock().clone(), 8, 3),
+            2 => (protocol.clock().clone(), 7, 4),
+            3 => (artifact(&format!("wrong-clock-{name}")), 7, 3),
+            other => panic!("unsupported observation-contract mutation {other}"),
+        };
     let rows = if retrospective {
         ObservationRows::Retrospective(BTreeSet::from([ObservationId::try_new(format!(
             "row-{name}"
@@ -475,6 +550,7 @@ fn make_case(
         qoi(qoi_name),
         unit("Pa"),
         QuantitySpec::dimensional(STRESS),
+        source_key("unit-pa"),
         frame.clone(),
         format!("node-{name}"),
         "stress-output",
@@ -490,7 +566,8 @@ fn make_case(
         }),
         source_key(if name == "a" { "sensor-a" } else { "sensor-b" }),
         artifact(&format!("instrument-{name}")),
-        artifact(&format!("clock-{name}")),
+        artifact(&format!("acquisition-{name}")),
+        observation_clock,
         4,
         if bounded_noise {
             MarginalNoiseSpec::Bounded { half_width: 1.0 }
@@ -503,8 +580,8 @@ fn make_case(
             reason: "missingness has not yet been characterized".to_string(),
         },
         None,
-        7,
-        3,
+        observation_protocol_version,
+        observation_refinement_version,
         rows,
     )
     .expect("observation fixture");
@@ -526,6 +603,16 @@ fn make_case(
         InitialStateBinding::Zero { schema_version: 2 },
         specimen(name, frame),
         protocol,
+        CasePhysicsSources::new(
+            source_key(&format!("frame-transform-{name}")),
+            source_key(&format!("geometry-{name}")),
+            source_key(&format!("process-{name}")),
+            source_key(&format!("preparation-{name}")),
+            source_key(&format!("load-path-{name}")),
+            source_key(&format!("environment-path-{name}")),
+            source_key(&format!("time-grid-{name}")),
+            None,
+        ),
         source_key(if name == "a" {
             "forward-a"
         } else {
@@ -539,8 +626,381 @@ fn make_case(
                 reason: "no discrepancy family is admitted for this channel".to_string(),
             },
         )],
+        Vec::new(),
     )
     .expect("case fixture")
+}
+
+fn retrospective_artifacts(
+    origin: ExperimentOrigin,
+) -> (ExperimentArtifact, CalibrationSplit, CalibrationSplit) {
+    let source_bytes_hash = hash("retrospective-origin-source-bytes");
+    let instrument_a = artifact("instrument-a");
+    let instrument_b = artifact("instrument-b");
+    let clock_a = artifact("clock-a");
+    let clock_b = artifact("clock-b");
+    let rows = [
+        ("row-a", "stress", instrument_a.clone(), clock_a.clone()),
+        ("row-b", "tangent", instrument_b.clone(), clock_b.clone()),
+        (
+            "row-validation",
+            "stress",
+            instrument_a.clone(),
+            clock_a.clone(),
+        ),
+        (
+            "row-blind",
+            "tangent",
+            instrument_b.clone(),
+            clock_b.clone(),
+        ),
+    ];
+    let manifest = ObservationManifest::try_new(
+        rows.iter()
+            .map(|(row, qoi_id, instrument, clock)| {
+                (
+                    ObservationId::try_new(*row).expect("retrospective row id"),
+                    ObservationManifestRow::try_new(
+                        ObservationSourceRef::try_new(
+                            source_bytes_hash,
+                            TEST_HASH_DOMAIN,
+                            1,
+                            hash(&format!("locator-{row}")),
+                            hash(&format!("extraction-{row}")),
+                        )
+                        .expect("retrospective row source"),
+                        qoi(qoi_id),
+                        instrument.clone(),
+                        artifact(match *row {
+                            "row-a" => "acquisition-a",
+                            "row-b" => "acquisition-b",
+                            "row-validation" => "acquisition-validation",
+                            "row-blind" => "acquisition-blind",
+                            _ => unreachable!("bounded retrospective row fixture"),
+                        }),
+                        clock.clone(),
+                    )
+                    .expect("retrospective manifest row"),
+                )
+            })
+            .collect(),
+    )
+    .expect("retrospective manifest");
+    let experiment = ExperimentArtifact::try_new(
+        header("experiment-shared", "fixture.experiment"),
+        artifact("dataset-shared"),
+        origin,
+        vec![qoi("stress"), qoi("tangent")],
+        manifest,
+        vec![
+            InstrumentCalibration::new(instrument_a, hash("calibration-a"), true),
+            InstrumentCalibration::new(instrument_b, hash("calibration-b"), true),
+        ],
+        ClockSynchronization::synchronized(
+            vec![clock_a, clock_b],
+            "fixture-synchronized-clocks",
+            1.0e-9,
+            hash("clock-synchronization"),
+        )
+        .expect("retrospective clock topology"),
+        RepeatabilitySummary::try_new(
+            3,
+            CovarianceMatrix::try_new(2, vec![1.0, 0.0, 1.0]).expect("retrospective covariance"),
+        )
+        .expect("retrospective repeatability"),
+        DataAuthenticity::new(source_bytes_hash, hash("retrospective-custody"), true),
+    )
+    .expect("retrospective experiment");
+    let experiment_hash = experiment.content_hash().expect("experiment content hash");
+    let split = |id: &str| {
+        CalibrationSplit::try_new(
+            header(id, "fixture.split"),
+            ArtifactRef::new(
+                ArtifactKind::ExperimentArtifact,
+                experiment.id().clone(),
+                experiment_hash,
+            ),
+            hash(&format!("preregistration-{id}")),
+            vec![
+                ObservationId::try_new("row-a").expect("row-a"),
+                ObservationId::try_new("row-b").expect("row-b"),
+            ],
+            vec![ObservationId::try_new("row-validation").expect("validation row")],
+            vec![(
+                ObservationId::try_new("row-blind").expect("blind row"),
+                hash("locator-row-blind"),
+            )],
+        )
+        .expect("retrospective split")
+    };
+    (experiment, split("split-a"), split("split-b"))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DiscrepancyOriginFixture {
+    Physical,
+    DeclaredSynthetic {
+        declared_producer: &'static str,
+        stale_forward_binding: bool,
+        production_binding_key: &'static str,
+    },
+    Uncharacterized,
+}
+
+struct RetrospectiveOriginFixture {
+    problem: ProblemFixture,
+    experiment: ExperimentArtifact,
+    split_a: CalibrationSplit,
+    split_b: CalibrationSplit,
+}
+
+fn retrospective_origin_fixture(
+    origin: ExperimentOrigin,
+    purpose: CasePurpose,
+    discrepancy: DiscrepancyOriginFixture,
+) -> RetrospectiveOriginFixture {
+    retrospective_origin_fixture_with_options(
+        origin,
+        purpose,
+        discrepancy,
+        ProblemOptions::default(),
+    )
+}
+
+fn retrospective_origin_fixture_with_options(
+    origin: ExperimentOrigin,
+    purpose: CasePurpose,
+    discrepancy: DiscrepancyOriginFixture,
+    options: ProblemOptions,
+) -> RetrospectiveOriginFixture {
+    let (experiment, split_a, split_b) = retrospective_artifacts(origin);
+    let base = problem_fixture(ProblemOptions {
+        retrospective_reuse: true,
+        declared_sharing: true,
+        ..options
+    });
+    let document = base.document.expect("retrospective structural document");
+    let mut sources = document.sources().values().cloned().collect::<Vec<_>>();
+    for source in &mut sources {
+        *source = match source.key().as_str() {
+            "experiment-shared" => SourceRef::experiment(source.key().clone(), &experiment)
+                .expect("typed experiment source"),
+            "split-a" => SourceRef::calibration_split(source.key().clone(), &split_a)
+                .expect("typed split-a source"),
+            "split-b" => SourceRef::calibration_split(source.key().clone(), &split_b)
+                .expect("typed split-b source"),
+            _ => source.clone(),
+        };
+    }
+    let assumption_key = source_key("discrepancy-origin-assumption");
+    let basis = match discrepancy {
+        DiscrepancyOriginFixture::Physical => {
+            sources.push(source(
+                assumption_key.as_str(),
+                SourceKind::Assumption,
+                hash(assumption_key.as_str()),
+            ));
+            Some(DiscrepancyInapplicability::PhysicalApplicability {
+                assumption: assumption_key.clone(),
+            })
+        }
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer,
+            stale_forward_binding,
+            production_binding_key,
+        } => {
+            let producer = artifact(declared_producer);
+            let generator_key = source_key("forward-a");
+            let generator_index = sources
+                .iter()
+                .position(|source| source.key() == &generator_key)
+                .expect("forward source fixture");
+            let binding_forward = sources[generator_index].clone();
+            let binding_preimage =
+                forward_model_production_binding_preimage(&producer, &binding_forward)
+                    .expect("producer binding preimage");
+            if stale_forward_binding {
+                sources[generator_index] = source(
+                    "forward-a",
+                    SourceKind::ForwardModel,
+                    hash("different-forward-a-content"),
+                );
+            }
+            let binding_key = source_key(production_binding_key);
+            sources.extend([
+                source(
+                    assumption_key.as_str(),
+                    SourceKind::Assumption,
+                    hash(assumption_key.as_str()),
+                ),
+                SourceRef::try_new(
+                    binding_key.clone(),
+                    SourceKind::ForwardModelProductionBinding,
+                    hash_domain(FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN, &binding_preimage),
+                    FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN,
+                    FORWARD_MODEL_PRODUCTION_BINDING_VERSION,
+                )
+                .expect("producer binding source"),
+            ]);
+            Some(DiscrepancyInapplicability::DeclaredSyntheticSelfModel {
+                generator: generator_key,
+                producer,
+                production_binding: binding_key,
+                assumption: assumption_key.clone(),
+            })
+        }
+        DiscrepancyOriginFixture::Uncharacterized => None,
+    };
+    let cases = document
+        .cases()
+        .values()
+        .map(|case| {
+            if case.id().as_str() != "a" {
+                return case.clone();
+            }
+            StudyCaseDocument::try_new(
+                case.id().clone(),
+                purpose.clone(),
+                case.initial_state(),
+                case.specimen().clone(),
+                case.protocol().clone(),
+                case.physics_sources().clone(),
+                case.forward_model().clone(),
+                case.data().clone(),
+                case.observations().values().cloned().collect(),
+                case.discrepancies()
+                    .keys()
+                    .cloned()
+                    .map(|channel| {
+                        let discrepancy = basis.clone().map_or_else(
+                            || StudyDiscrepancy::Uncharacterized {
+                                reason: "fixture leaves discrepancy applicability open".to_string(),
+                            },
+                            |basis| StudyDiscrepancy::NotApplicable { basis },
+                        );
+                        (channel, discrepancy)
+                    })
+                    .collect(),
+                case.observation_sharing().to_vec(),
+            )
+            .expect("rebuilt origin case")
+        })
+        .collect();
+    let document = IdentifiabilityProblemDocument::try_new(
+        document.context_source().clone(),
+        document.material_source().clone(),
+        document.model_source().clone(),
+        document.graph_source().clone(),
+        document.joint_prior().cloned(),
+        sources,
+        document.parameters().values().cloned().collect(),
+        document.constraints().values().cloned().collect(),
+        document.admissible_domain().clone(),
+        cases,
+        document.influences().values().cloned().collect(),
+        document.gauges().values().cloned().collect(),
+        document.gauge_compositions().values().cloned().collect(),
+        document.joint_noise().clone(),
+        document.data_reuse().clone(),
+    );
+    RetrospectiveOriginFixture {
+        problem: ProblemFixture {
+            context: base.context,
+            material: base.material,
+            model: base.model,
+            graph: base.graph,
+            document,
+        },
+        experiment,
+        split_a,
+        split_b,
+    }
+}
+
+fn admit_retrospective_origin_fixture(
+    fixture: &RetrospectiveOriginFixture,
+) -> Result<AdmittedIdentifiabilityProblem, IdentifiabilityError> {
+    let document = fixture
+        .problem
+        .document
+        .clone()
+        .expect("origin document admits structurally");
+    let opaque = opaque_resolutions(&document);
+    AdmittedIdentifiabilityProblem::resolve_and_admit(
+        document,
+        ProblemSourceBundle::new(
+            &fixture.problem.context,
+            &fixture.problem.material,
+            &fixture.problem.model,
+            BTreeMap::from([
+                (
+                    case_id("a"),
+                    CaseSourceBundle::new(&fixture.experiment, &fixture.split_a),
+                ),
+                (
+                    case_id("b"),
+                    CaseSourceBundle::new(&fixture.experiment, &fixture.split_b),
+                ),
+            ]),
+            opaque,
+        ),
+    )
+}
+
+fn gauge_validity_fixture(
+    members: &BTreeSet<ParameterRoleId>,
+    local_obstruction: bool,
+) -> GaugeValidityScope {
+    let local = if local_obstruction {
+        members.clone()
+    } else {
+        BTreeSet::new()
+    };
+    let per_case = ["a", "b"]
+        .into_iter()
+        .map(|name| {
+            (
+                case_id(name),
+                GaugeExtentSupport::try_new(local.clone(), members.clone())
+                    .expect("gauge extent support fixture"),
+            )
+        })
+        .collect();
+    GaugeValidityScope::try_new(BTreeMap::from([(
+        GaugeApplicabilityAxes::new(
+            GaugeInformationRegime::StructuralExactModel,
+            GaugeScalarDomain::Real,
+            GaugeLocus::WholeDomain,
+            GaugeQuantifierScope::AtRealization {
+                realization: source_key("fixture-gauge-realization"),
+            },
+        ),
+        GaugeCellDomain::try_new(per_case).expect("gauge cell fixture"),
+    )]))
+    .expect("gauge validity fixture")
+}
+
+fn gauge_fixture(
+    id: &str,
+    action: &str,
+    members: BTreeSet<ParameterRoleId>,
+    algebra: GaugeAlgebra,
+    orbit_geometry: GaugeOrbitGeometry,
+    local_obstruction: bool,
+) -> GaugeDeclaration {
+    let validity = gauge_validity_fixture(&members, local_obstruction);
+    GaugeDeclaration::try_new(
+        GaugeClassId::try_new(id).expect("gauge id"),
+        members,
+        source_key(action),
+        algebra,
+        orbit_geometry,
+        GaugeStatus::Assumed {
+            assumption: source_key("fixture-gauge-assumption"),
+        },
+        validity,
+    )
+    .expect("gauge fixture")
 }
 
 fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
@@ -618,7 +1078,107 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
         ),
         source("sensor-a", SourceKind::Metrology, hash("sensor-a")),
         source("sensor-b", SourceKind::Metrology, hash("sensor-b")),
+        source("unit-pa", SourceKind::UnitDefinition, hash("unit-pa")),
     ];
+    match options.joint_prior_choice {
+        0 => {}
+        1 => sources.push(source(
+            "joint-prior-measure-a",
+            SourceKind::ProbabilityMeasure,
+            hash("joint-prior-measure-a"),
+        )),
+        2 => sources.push(source(
+            "joint-prior-measure-b",
+            SourceKind::ProbabilityMeasure,
+            hash("joint-prior-measure-b"),
+        )),
+        other => panic!("unsupported joint-prior fixture choice {other}"),
+    }
+    for case in ["a", "b"] {
+        sources.extend([
+            case_physics_source(
+                &format!("frame-transform-{case}"),
+                SourceKind::Geometry,
+                FRAME_TRANSFORM_SOURCE_DOMAIN,
+            ),
+            case_physics_source(
+                &format!("geometry-{case}"),
+                SourceKind::Geometry,
+                SPECIMEN_GEOMETRY_SOURCE_DOMAIN,
+            ),
+            case_physics_source(
+                &format!("process-{case}"),
+                SourceKind::Process,
+                SPECIMEN_PROCESS_SOURCE_DOMAIN,
+            ),
+            case_physics_source(
+                &format!("preparation-{case}"),
+                SourceKind::Process,
+                SPECIMEN_PREPARATION_SOURCE_DOMAIN,
+            ),
+            case_physics_source(
+                &format!("load-path-{case}"),
+                SourceKind::Protocol,
+                LOAD_PATH_SOURCE_DOMAIN,
+            ),
+            case_physics_source(
+                &format!("environment-path-{case}"),
+                SourceKind::Protocol,
+                ENVIRONMENT_PATH_SOURCE_DOMAIN,
+            ),
+            case_physics_source(
+                &format!("time-grid-{case}"),
+                SourceKind::Protocol,
+                TIME_GRID_SOURCE_DOMAIN,
+            ),
+        ]);
+    }
+    match options.case_physics_mutation {
+        0 => {}
+        1 => sources.retain(|source| source.key().as_str() != "geometry-a"),
+        mutation @ 2..=5 => {
+            let target = sources
+                .iter_mut()
+                .find(|source| source.key().as_str() == "geometry-a")
+                .expect("case-physics mutation target");
+            let (kind, expected_hash, domain, version) = match mutation {
+                2 => (
+                    SourceKind::Process,
+                    target.expected_hash(),
+                    SPECIMEN_GEOMETRY_SOURCE_DOMAIN,
+                    CASE_PHYSICS_SOURCE_CONTRACT_VERSION,
+                ),
+                3 => (
+                    SourceKind::Geometry,
+                    case_physics_hash(SPECIMEN_GEOMETRY_SOURCE_DOMAIN, "wrong-geometry-a"),
+                    SPECIMEN_GEOMETRY_SOURCE_DOMAIN,
+                    CASE_PHYSICS_SOURCE_CONTRACT_VERSION,
+                ),
+                4 => (
+                    SourceKind::Geometry,
+                    target.expected_hash(),
+                    TEST_HASH_DOMAIN,
+                    CASE_PHYSICS_SOURCE_CONTRACT_VERSION,
+                ),
+                5 => (
+                    SourceKind::Geometry,
+                    target.expected_hash(),
+                    SPECIMEN_GEOMETRY_SOURCE_DOMAIN,
+                    CASE_PHYSICS_SOURCE_CONTRACT_VERSION + 1,
+                ),
+                _ => unreachable!(),
+            };
+            *target = SourceRef::try_new(
+                source_key("geometry-a"),
+                kind,
+                expected_hash,
+                domain,
+                version,
+            )
+            .expect("mutated case-physics source");
+        }
+        other => panic!("unsupported case-physics mutation {other}"),
+    }
     if options.dangling_operator {
         sources.retain(|source| source.key().as_str() != "operator-b");
     }
@@ -649,12 +1209,17 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
     let mut cases = vec![
         make_case(
             "a",
-            CasePurpose::Calibration,
+            if options.blind_prospective_case {
+                CasePurpose::BlindFalsification
+            } else {
+                CasePurpose::Calibration
+            },
             "stress",
             "stress",
             options.dense_with_bounded_marginal,
             options.retrospective_reuse,
             "experiment-shared",
+            options.observation_contract_mutation,
         ),
         make_case(
             "b",
@@ -670,25 +1235,129 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
             false,
             options.retrospective_reuse,
             "experiment-shared",
+            0,
         ),
     ];
     if options.reverse_cases {
         cases.reverse();
     }
+    let ordered_domains = match options.ordered_constraint_case {
+        0 => (None, None),
+        1 => (
+            Some(ParameterDomain::try_new(10.0, 20.0).expect("ordered left domain")),
+            Some(ParameterDomain::try_new(0.0, 1.0).expect("ordered right domain")),
+        ),
+        2 | 4 => (
+            Some(ParameterDomain::try_new(10.0, 20.0).expect("ordered left domain")),
+            Some(ParameterDomain::try_new(20.0, 30.0).expect("ordered right domain")),
+        ),
+        3 => (
+            Some(ParameterDomain::try_new(10.0, 20.0).expect("ordered left domain")),
+            Some(ParameterDomain::try_new(0.0, 10.0).expect("ordered right domain")),
+        ),
+        other => panic!("unsupported ordered-constraint fixture {other}"),
+    };
     let mut parameters = vec![
         parameter(
             "yield_stress",
             ParameterTreatment::Estimated,
             InfluenceCoverage::Declared,
             options.parameter_prior_version.max(1),
+            ordered_domains.0,
+            options.yield_prior_absent,
+            if options.yield_case_a_only {
+                ParameterScopeBinding::Cases(BTreeSet::from([case_id("a")]))
+            } else {
+                ParameterScopeBinding::Global
+            },
         ),
         parameter(
             "hardening_modulus",
             ParameterTreatment::Marginalized,
             InfluenceCoverage::Declared,
             options.parameter_prior_version.max(1),
+            ordered_domains.1,
+            false,
+            ParameterScopeBinding::Global,
         ),
     ];
+    if options.modeled_discrepancy_case != 0 {
+        sources.extend([
+            source(
+                "fixture-discrepancy-family",
+                SourceKind::Discrepancy,
+                hash("fixture-discrepancy-family"),
+            ),
+            source(
+                "fixture-discrepancy-guard",
+                SourceKind::Constraint,
+                hash("fixture-discrepancy-guard"),
+            ),
+        ]);
+        let discrepancy_domain =
+            ParameterDomain::try_new(-1.0e6, 1.0e6).expect("discrepancy domain");
+        parameters.push(
+            StudyParameter::try_new(
+                role("discrepancy_bias"),
+                QuantitySpec::dimensional(STRESS),
+                discrepancy_domain,
+                ParameterPurpose::Nuisance,
+                ParameterTreatment::Profiled,
+                ParameterOwnerBinding::Discrepancy {
+                    family: source_key("fixture-discrepancy-family"),
+                },
+                ParameterScopeBinding::Cases(BTreeSet::from([case_id("a")])),
+                PriorPolicy::Distribution(ParameterPrior::Uniform {
+                    version: 1,
+                    domain: discrepancy_domain,
+                }),
+                InfluenceCoverage::IntentionallyAbsent {
+                    reason: "this fixture isolates discrepancy ownership and case scope"
+                        .to_string(),
+                },
+            )
+            .expect("modeled discrepancy parameter"),
+        );
+
+        let target_case = match options.modeled_discrepancy_case {
+            1 => "a",
+            2 => "b",
+            other => panic!("unsupported modeled-discrepancy fixture {other}"),
+        };
+        let position = cases
+            .iter()
+            .position(|case| case.id() == &case_id(target_case))
+            .expect("modeled-discrepancy target case");
+        let case = cases.remove(position);
+        let target_channel = if target_case == "a" {
+            channel("stress")
+        } else {
+            channel("tangent")
+        };
+        let rebuilt = StudyCaseDocument::try_new(
+            case.id().clone(),
+            case.purpose().clone(),
+            case.initial_state(),
+            case.specimen().clone(),
+            case.protocol().clone(),
+            case.physics_sources().clone(),
+            case.forward_model().clone(),
+            case.data().clone(),
+            case.observations().values().cloned().collect(),
+            vec![(
+                target_channel,
+                StudyDiscrepancy::Modeled {
+                    family: source_key("fixture-discrepancy-family"),
+                    parameters: BTreeSet::from([role("discrepancy_bias")]),
+                    support: source_key(&format!("geometry-{target_case}")),
+                    confounding_guard: source_key("fixture-discrepancy-guard"),
+                },
+            )],
+            case.observation_sharing().to_vec(),
+        )
+        .expect("rebuilt modeled-discrepancy case");
+        cases.insert(position, rebuilt);
+    }
     if options.derived_cycle {
         sources.push(source(
             "derived-definition",
@@ -722,7 +1391,11 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
     let mut influences = vec![InfluenceDeclaration::new(
         InfluenceId::try_new("yield-to-stress").expect("influence id"),
         role("yield_stress"),
-        if options.yield_log_scale {
+        if options.yield_influence_case_b {
+            DistributionFunctional::Location {
+                observation: ObservationKey::new(case_id("b"), channel("tangent")),
+            }
+        } else if options.yield_log_scale {
             DistributionFunctional::LogScale {
                 observation: ObservationKey::new(case_id("a"), channel("stress")),
             }
@@ -758,6 +1431,41 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
             InfluenceRepresentation::Direct,
         ));
     }
+    if options.composite_influence_chain {
+        sources.push(source(
+            "composite-influence-operator",
+            SourceKind::InfluenceComposition,
+            hash("composite-influence-operator"),
+        ));
+        influences.extend([
+            InfluenceDeclaration::new(
+                InfluenceId::try_new("composite-middle").expect("influence id"),
+                role("yield_stress"),
+                DistributionFunctional::Location {
+                    observation: ObservationKey::new(case_id("a"), channel("stress")),
+                },
+                InfluenceRepresentation::Composite {
+                    operator: source_key("composite-influence-operator"),
+                    inputs: BTreeSet::from([
+                        InfluenceId::try_new("hardening-to-tangent").expect("influence id")
+                    ]),
+                },
+            ),
+            InfluenceDeclaration::new(
+                InfluenceId::try_new("composite-top").expect("influence id"),
+                role("yield_stress"),
+                DistributionFunctional::Location {
+                    observation: ObservationKey::new(case_id("a"), channel("stress")),
+                },
+                InfluenceRepresentation::Composite {
+                    operator: source_key("composite-influence-operator"),
+                    inputs: BTreeSet::from([
+                        InfluenceId::try_new("composite-middle").expect("influence id")
+                    ]),
+                },
+            ),
+        ]);
+    }
     let mut constraints = Vec::new();
     if options.valid_constraint {
         constraints.push(JointConstraint::new(
@@ -780,6 +1488,15 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
                 relation: ConstraintRelation::LessOrEqual,
                 rhs_si: 0.0,
                 residual_quantity: QuantitySpec::dimensional(STRESS),
+            },
+        ));
+    }
+    if options.ordered_constraint_case != 0 {
+        constraints.push(JointConstraint::new(
+            ConstraintId::try_new("ordered-stresses").expect("constraint id"),
+            JointConstraintKind::Ordered {
+                members: vec![role("yield_stress"), role("hardening_modulus")],
+                strict: matches!(options.ordered_constraint_case, 3 | 4),
             },
         ));
     }
@@ -808,70 +1525,243 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
         ));
     }
     let mut gauges = Vec::new();
+    let mut gauge_compositions = Vec::new();
+    if options.gauge_case != 0
+        || options.one_gauge
+        || options.claim_strata_in_problem
+        || options.overlapping_gauges
+    {
+        sources.extend([
+            source(
+                "fixture-gauge-assumption",
+                SourceKind::Assumption,
+                hash("fixture-gauge-assumption"),
+            ),
+            source(
+                "fixture-gauge-realization",
+                SourceKind::QuantifierRealization,
+                hash("fixture-gauge-realization"),
+            ),
+        ]);
+    }
+    if options.gauge_case != 0 {
+        let gauge_action = if options.gauge_case == 11 {
+            "fixture-unary-scaling-action"
+        } else {
+            "fixture-gauge-action"
+        };
+        sources.push(source(
+            gauge_action,
+            SourceKind::GaugeAction,
+            hash(gauge_action),
+        ));
+        let members = if options.gauge_case == 11 {
+            BTreeSet::from([role("yield_stress")])
+        } else {
+            BTreeSet::from([role("yield_stress"), role("hardening_modulus")])
+        };
+        let (algebra, orbit_geometry, local_obstruction) = match options.gauge_case {
+            1 => (
+                GaugeAlgebra::Discrete {
+                    size: GaugeDiscreteSize::Finite { order: 2 },
+                },
+                GaugeOrbitGeometry::Regular {
+                    principal: RegularGaugeOrbit::new(
+                        GaugeContinuousDimension::Finite { dimension: 0 },
+                        GaugeDiscreteOrbitCardinality::Finite { cardinality: 2 },
+                    ),
+                    stabilizer_profile: None,
+                },
+                false,
+            ),
+            2 | 3 | 7 => (
+                GaugeAlgebra::Mixed {
+                    continuous_group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+                    component_group: GaugeDiscreteSize::Finite { order: 2 },
+                },
+                GaugeOrbitGeometry::Regular {
+                    principal: RegularGaugeOrbit::new(
+                        GaugeContinuousDimension::Finite { dimension: 1 },
+                        GaugeDiscreteOrbitCardinality::Finite { cardinality: 2 },
+                    ),
+                    stabilizer_profile: None,
+                },
+                true,
+            ),
+            9 => {
+                sources.push(source(
+                    "fixture-gauge-strata",
+                    SourceKind::GaugeOrbitTypeProfile,
+                    hash("fixture-gauge-strata"),
+                ));
+                (
+                    GaugeAlgebra::Continuous {
+                        group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+                    },
+                    GaugeOrbitGeometry::Stratified {
+                        principal: RegularGaugeOrbit::new(
+                            GaugeContinuousDimension::Finite { dimension: 1 },
+                            GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                        ),
+                        orbit_type_stabilizer_profile: source_key("fixture-gauge-strata"),
+                    },
+                    true,
+                )
+            }
+            mode @ (4..=6 | 8 | 10 | 11) => {
+                let dimension = if mode == 10 { 2 } else { 1 };
+                (
+                    GaugeAlgebra::Continuous {
+                        group_dimension: GaugeContinuousDimension::Finite { dimension },
+                    },
+                    GaugeOrbitGeometry::Regular {
+                        principal: RegularGaugeOrbit::new(
+                            GaugeContinuousDimension::Finite { dimension },
+                            GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                        ),
+                        stabilizer_profile: None,
+                    },
+                    true,
+                )
+            }
+            other => panic!("unsupported gauge fixture {other}"),
+        };
+        gauges.push(gauge_fixture(
+            "fixture-gauge",
+            gauge_action,
+            members,
+            algebra,
+            orbit_geometry,
+            local_obstruction,
+        ));
+    }
     if options.one_gauge {
         sources.push(source(
             "single-gauge-action",
             SourceKind::GaugeAction,
             hash("single-gauge-action"),
         ));
-        gauges.push(
-            GaugeDeclaration::try_new(
-                GaugeClassId::try_new("single-gauge").expect("gauge id"),
-                BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
-                source_key("single-gauge-action"),
-                GaugeKind::Continuous { dimension: 1 },
-                GaugeHandling::Retained {
-                    reason: "the fixture retains one declared gauge".to_string(),
-                },
-            )
-            .expect("single gauge"),
-        );
+        gauges.push(gauge_fixture(
+            "single-gauge",
+            "single-gauge-action",
+            BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+            GaugeAlgebra::Continuous {
+                group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+            },
+            GaugeOrbitGeometry::Regular {
+                principal: RegularGaugeOrbit::new(
+                    GaugeContinuousDimension::Finite { dimension: 1 },
+                    GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                ),
+                stabilizer_profile: None,
+            },
+            true,
+        ));
     }
-    if options.claim_domain_in_problem {
+    if options.claim_strata_in_problem {
         sources.extend([
-            source(
-                "claim-domain",
-                SourceKind::ExternalManifold,
-                hash("claim-domain"),
-            ),
             source(
                 "claim-domain-action",
                 SourceKind::GaugeAction,
                 hash("claim-domain-action"),
             ),
+            source(
+                "claim-strata",
+                SourceKind::GaugeOrbitTypeProfile,
+                hash("claim-strata"),
+            ),
         ]);
-        gauges.push(
-            GaugeDeclaration::try_new(
-                GaugeClassId::try_new("claim-domain-gauge").expect("gauge id"),
-                BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
-                source_key("claim-domain-action"),
-                GaugeKind::Stratified {
-                    strata: source_key("claim-domain"),
-                },
-                GaugeHandling::Retained {
-                    reason: "the claim-domain strata remain explicit in this fixture".to_string(),
-                },
-            )
-            .expect("claim-domain gauge"),
-        );
+        gauges.push(gauge_fixture(
+            "claim-domain-gauge",
+            "claim-domain-action",
+            BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+            GaugeAlgebra::Continuous {
+                group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+            },
+            GaugeOrbitGeometry::Stratified {
+                principal: RegularGaugeOrbit::new(
+                    GaugeContinuousDimension::Finite { dimension: 1 },
+                    GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                ),
+                orbit_type_stabilizer_profile: source_key("claim-strata"),
+            },
+            true,
+        ));
     }
     if options.overlapping_gauges {
         for index in 0..2 {
             let action = format!("gauge-action-{index}");
             sources.push(source(&action, SourceKind::GaugeAction, hash(&action)));
-            gauges.push(
-                GaugeDeclaration::try_new(
-                    GaugeClassId::try_new(format!("gauge-{index}")).expect("gauge id"),
-                    BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
-                    source_key(&action),
-                    GaugeKind::Continuous { dimension: 1 },
-                    GaugeHandling::Retained {
-                        reason: "the test intentionally retains this gauge".to_string(),
-                    },
-                )
-                .expect("gauge fixture"),
-            );
+            gauges.push(gauge_fixture(
+                &format!("gauge-{index}"),
+                &action,
+                BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+                GaugeAlgebra::Continuous {
+                    group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+                },
+                GaugeOrbitGeometry::Regular {
+                    principal: RegularGaugeOrbit::new(
+                        GaugeContinuousDimension::Finite { dimension: 1 },
+                        GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                    ),
+                    stabilizer_profile: None,
+                },
+                true,
+            ));
         }
+    }
+    if options.declared_gauge_composition {
+        assert!(
+            options.overlapping_gauges,
+            "a composition fixture needs the two overlapping member gauges"
+        );
+        sources.push(source(
+            "gauge-composition-law",
+            SourceKind::GaugeComposition,
+            hash("gauge-composition-law"),
+        ));
+        let effective_dimension = if options.independent_gauge_composition {
+            2
+        } else {
+            1
+        };
+        gauge_compositions.push(
+            GaugeCompositionDeclaration::try_new(
+                GaugeCompositionId::try_new("gauge-system").expect("composition id"),
+                BTreeSet::from([
+                    GaugeClassId::try_new("gauge-0").expect("gauge id"),
+                    GaugeClassId::try_new("gauge-1").expect("gauge id"),
+                ]),
+                if options.independent_gauge_composition {
+                    GaugeCompositionKind::IndependentProduct
+                } else {
+                    GaugeCompositionKind::Generated
+                },
+                source_key("gauge-composition-law"),
+                GaugeAlgebra::Continuous {
+                    group_dimension: GaugeContinuousDimension::Finite {
+                        dimension: effective_dimension,
+                    },
+                },
+                GaugeOrbitGeometry::Regular {
+                    principal: RegularGaugeOrbit::new(
+                        GaugeContinuousDimension::Finite {
+                            dimension: effective_dimension,
+                        },
+                        GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                    ),
+                    stabilizer_profile: None,
+                },
+                GaugeStatus::Assumed {
+                    assumption: source_key("fixture-gauge-assumption"),
+                },
+                gauge_validity_fixture(
+                    &BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+                    true,
+                ),
+            )
+            .expect("declared gauge composition fixture"),
+        );
     }
     let joint_noise = if options.dense_with_bounded_marginal {
         sources.push(source(
@@ -888,6 +1778,10 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
                 .expect("correlation matrix"),
             model: source_key("correlation-model"),
         }
+    } else if options.declared_sharing {
+        JointNoiseModel::ExternalKernel {
+            model: source_key("joint-likelihood"),
+        }
     } else if options.external_noise {
         sources.push(source(
             "external-noise",
@@ -898,7 +1792,14 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
             model: source_key("external-noise"),
         }
     } else {
-        JointNoiseModel::Independent
+        sources.push(source(
+            "independent-noise-assumption",
+            SourceKind::Assumption,
+            hash("independent-noise-assumption"),
+        ));
+        JointNoiseModel::Independent {
+            assumption: source_key("independent-noise-assumption"),
+        }
     };
     let data_reuse = if options.retrospective_reuse && options.declared_sharing {
         DataReusePolicy::Shared {
@@ -918,17 +1819,73 @@ fn problem_fixture(options: ProblemOptions) -> ProblemFixture {
     } else {
         DataReusePolicy::Disjoint
     };
+    let admissible_domain = AdmissibleDomainWitness::try_new(
+        parameters
+            .iter()
+            .map(|parameter| (parameter.role().clone(), parameter.domain().bounds().0))
+            .collect(),
+        (options.gauge_case == 10).then(|| {
+            OpaqueDomainMembershipClaim::new(source_key("fixture-domain-membership-certificate"))
+        }),
+    )
+    .expect("constructive admissible-domain witness");
+    if options.gauge_case == 10 {
+        let parameter_map = parameters
+            .iter()
+            .cloned()
+            .map(|parameter| (parameter.role().clone(), parameter))
+            .collect();
+        let constraint_map = constraints
+            .iter()
+            .cloned()
+            .map(|constraint| (constraint.id().clone(), constraint))
+            .collect();
+        let source_map = sources
+            .iter()
+            .cloned()
+            .map(|source| (source.key().clone(), source))
+            .collect();
+        let certificate_preimage = admissible_domain_membership_certificate_preimage(
+            &admissible_domain,
+            &parameter_map,
+            &constraint_map,
+            &source_map,
+        )
+        .expect("canonical membership-certificate preimage");
+        sources.push(
+            SourceRef::try_new(
+                source_key("fixture-domain-membership-certificate"),
+                SourceKind::AdmissibleDomainCertificate,
+                hash_domain(
+                    ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_DOMAIN,
+                    &certificate_preimage,
+                ),
+                ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_DOMAIN,
+                ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_VERSION,
+            )
+            .expect("witness-bound membership certificate"),
+        );
+    }
+    let joint_prior = match options.joint_prior_choice {
+        0 => None,
+        1 => Some(source_key("joint-prior-measure-a")),
+        2 => Some(source_key("joint-prior-measure-b")),
+        _ => unreachable!("joint-prior fixture choice checked above"),
+    };
     let document = IdentifiabilityProblemDocument::try_new(
         source_key("context"),
         source_key("material"),
         source_key("model"),
         source_key("graph"),
+        joint_prior,
         sources,
         parameters,
         constraints,
+        admissible_domain,
         cases,
         influences,
         gauges,
+        gauge_compositions,
         joint_noise,
         data_reuse,
     );
@@ -1005,12 +1962,15 @@ fn rekey_problem_root(
         material_source,
         model_source,
         graph_source,
+        document.joint_prior().cloned(),
         sources,
         document.parameters().values().cloned().collect(),
         document.constraints().values().cloned().collect(),
+        document.admissible_domain().clone(),
         document.cases().values().cloned().collect(),
         document.influences().values().cloned().collect(),
         document.gauges().values().cloned().collect(),
+        document.gauge_compositions().values().cloned().collect(),
         document.joint_noise().clone(),
         document.data_reuse().clone(),
     );
@@ -1030,11 +1990,46 @@ fn unresolved_problem_identity(document: &IdentifiabilityProblemDocument) -> Con
     )
 }
 
-fn opaque_source_preimage(source: &SourceRef) -> &[u8] {
-    if source.kind() == SourceKind::ConstitutiveGraph {
-        b"constitutive-graph"
+fn opaque_source_preimage(
+    document: &IdentifiabilityProblemDocument,
+    source: &SourceRef,
+) -> Vec<u8> {
+    if source.kind() == SourceKind::AdmissibleDomainCertificate {
+        document
+            .admissible_domain()
+            .opaque_membership_claim()
+            .and_then(OpaqueDomainMembershipClaim::witness_binding)
+            .expect("bound admissible-domain membership certificate")
+            .as_bytes()
+            .to_vec()
+    } else if source.kind() == SourceKind::ForwardModelProductionBinding {
+        document
+            .cases()
+            .values()
+            .flat_map(|case| case.discrepancies().values())
+            .find_map(|discrepancy| match discrepancy {
+                StudyDiscrepancy::NotApplicable {
+                    basis:
+                        DiscrepancyInapplicability::DeclaredSyntheticSelfModel {
+                            generator,
+                            producer,
+                            production_binding,
+                            ..
+                        },
+                } if production_binding == source.key() => Some(
+                    forward_model_production_binding_preimage(
+                        producer,
+                        &document.sources()[generator],
+                    )
+                    .expect("exact production-binding preimage"),
+                ),
+                _ => None,
+            })
+            .expect("reachable production-binding source")
+    } else if source.kind() == SourceKind::ConstitutiveGraph {
+        b"constitutive-graph".to_vec()
     } else {
-        source.key().as_str().as_bytes()
+        source.key().as_str().as_bytes().to_vec()
     }
 }
 
@@ -1055,7 +2050,7 @@ fn opaque_resolutions(document: &IdentifiabilityProblemDocument) -> SourceResolu
         .map(|source| {
             SourceResolution::verify(
                 source,
-                opaque_source_preimage(source),
+                &opaque_source_preimage(document, source),
                 AuthorityDisposition::ContentVerified,
             )
             .expect("opaque resolution fixture")
@@ -1105,10 +2100,8 @@ fn admit_fixture_with_authority_and_order(
             .map(|source| {
                 SourceResolution::verify(
                     source,
-                    opaque_source_preimage(source),
-                    AuthorityDisposition::ExternalTrustReceipt {
-                        trust_receipt: hash(&format!("trust-{}", source.key())),
-                    },
+                    &opaque_source_preimage(&document, source),
+                    external_trust(&format!("trust-{}", source.key()), source),
                 )
                 .expect("authenticated resolution")
             })
@@ -1160,14 +2153,16 @@ fn admit_fixture_with_single_external_authority(
         .map(|source| {
             let authority = if source.key().as_str() == trusted_key {
                 changed += 1;
-                AuthorityDisposition::ExternalTrustReceipt {
-                    trust_receipt: hash(&format!("trust-{trusted_key}")),
-                }
+                external_trust(&format!("trust-{trusted_key}"), source)
             } else {
                 AuthorityDisposition::ContentVerified
             };
-            SourceResolution::verify(source, opaque_source_preimage(source), authority)
-                .expect("single-authority resolution")
+            SourceResolution::verify(
+                source,
+                &opaque_source_preimage(&document, source),
+                authority,
+            )
+            .expect("single-authority resolution")
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1289,9 +2284,7 @@ fn resolved_sources(sources: &[&SourceRef], external_trust: bool) -> SourceResol
             .iter()
             .map(|source| {
                 let authority = if external_trust {
-                    AuthorityDisposition::ExternalTrustReceipt {
-                        trust_receipt: hash(&format!("execution-trust-{}", source.key())),
-                    }
+                    external_trust(&format!("execution-trust-{}", source.key()), source)
                 } else {
                     AuthorityDisposition::ContentVerified
                 };
@@ -1303,6 +2296,180 @@ fn resolved_sources(sources: &[&SourceRef], external_trust: bool) -> SourceResol
     .expect("closed content-verified source set")
 }
 
+fn default_quantifier_domain(problem: &AdmittedIdentifiabilityProblem) -> SourceRef {
+    problem
+        .document()
+        .sources()
+        .get(&source_key("claim-domain"))
+        .cloned()
+        .unwrap_or_else(|| {
+            source(
+                "claim-domain",
+                SourceKind::QuantifierDomain,
+                hash("claim-domain"),
+            )
+        })
+}
+
+fn fixture_claim_quantifier(problem: &AdmittedIdentifiabilityProblem) -> ClaimQuantifier {
+    problem
+        .document()
+        .sources()
+        .get(&source_key("fixture-gauge-realization"))
+        .map_or_else(
+            || ClaimQuantifier::ForAll {
+                domain: default_quantifier_domain(problem),
+            },
+            |realization| ClaimQuantifier::AtRealization {
+                realization: realization.clone(),
+            },
+        )
+}
+
+fn default_claim(problem: &AdmittedIdentifiabilityProblem) -> TypedIdentifiabilityClaim {
+    let claimed_role = role("yield_stress");
+    let fiber = if let Some(strata) = problem
+        .document()
+        .sources()
+        .get(&source_key("claim-strata"))
+    {
+        FiberStructure::Stratified {
+            strata: strata.clone(),
+        }
+    } else if problem
+        .document()
+        .gauges()
+        .values()
+        .any(|gauge| gauge.members().contains(&claimed_role))
+    {
+        FiberStructure::PositiveDimensional {
+            lower_bound: FiberDimensionLowerBound::Finite {
+                minimum_dimension: 1,
+            },
+        }
+    } else {
+        FiberStructure::Unique
+    };
+    TypedIdentifiabilityClaim::new(
+        ClaimId::try_new("yield-structural-global").expect("claim id"),
+        InformationRegime::StructuralExactModel,
+        IdentifiabilityExtent::Global,
+        fiber,
+        fixture_claim_quantifier(problem),
+        ScalarDomain::Real,
+        ClaimSubject::Parameter(claimed_role),
+        ClaimScope::WholeCampaign,
+    )
+}
+
+fn structural_claim(
+    problem: &AdmittedIdentifiabilityProblem,
+    id: &str,
+    fiber: FiberStructure,
+    subject: ClaimSubject,
+    scope: ClaimScope,
+) -> TypedIdentifiabilityClaim {
+    TypedIdentifiabilityClaim::new(
+        ClaimId::try_new(id).expect("claim id"),
+        InformationRegime::StructuralExactModel,
+        IdentifiabilityExtent::Global,
+        fiber,
+        fixture_claim_quantifier(problem),
+        ScalarDomain::Real,
+        subject,
+        scope,
+    )
+}
+
+fn default_error_policy() -> DimensionlessErrorPolicy {
+    DimensionlessErrorPolicy::try_new(
+        source(
+            "claim-error-metric",
+            SourceKind::DimensionlessErrorMetric,
+            hash("claim-error-metric"),
+        ),
+        source(
+            "claim-nondimensionalization",
+            SourceKind::Nondimensionalization,
+            hash("claim-nondimensionalization"),
+        ),
+        1.0e-8,
+    )
+    .expect("dimensionless claim error policy")
+}
+
+fn default_claim_request(problem: &AdmittedIdentifiabilityProblem) -> ClaimRequest {
+    ClaimRequest::new(default_claim(problem), default_error_policy())
+}
+
+fn request_for_claim(claim: TypedIdentifiabilityClaim) -> ClaimRequest {
+    ClaimRequest::new(claim, default_error_policy())
+}
+
+fn claim_sources(claim: &TypedIdentifiabilityClaim) -> Vec<SourceRef> {
+    let mut sources = Vec::new();
+    if let InformationRegime::PosteriorUnderDeclaredPrior { joint_prior } = claim.information() {
+        sources.push(joint_prior.clone());
+    }
+    match claim.scalar_domain() {
+        ScalarDomain::Real => {}
+        ScalarDomain::Complex { extension } => sources.push(extension.clone()),
+        ScalarDomain::MixedDiscreteContinuous { stratification } => {
+            sources.push(stratification.clone());
+        }
+    }
+    if let FiberStructure::Stratified { strata } = claim.fiber() {
+        sources.push(strata.clone());
+    }
+    if let ClaimSubject::DerivedFunctional { definition, .. } = claim.subject() {
+        sources.push(definition.clone());
+    }
+    sources.push(match claim.quantifier() {
+        ClaimQuantifier::AtRealization { realization } => realization.clone(),
+        ClaimQuantifier::AlmostEverywhere { measure }
+        | ClaimQuantifier::ProbabilityAtLeast { measure, .. } => measure.clone(),
+        ClaimQuantifier::ForAll { domain } => domain.clone(),
+    });
+    sources
+}
+
+fn resolve_owned_sources(
+    sources: impl IntoIterator<Item = SourceRef>,
+    external_trust: bool,
+    authority_override: Option<(&SourceKey, AuthorityDisposition)>,
+) -> SourceResolutionSet {
+    let mut unique = BTreeMap::<SourceKey, SourceRef>::new();
+    for source in sources {
+        if let Some(prior) = unique.insert(source.key().clone(), source.clone()) {
+            assert_eq!(
+                prior, source,
+                "fixture source aliases must have exactly equal semantics",
+            );
+        }
+    }
+    SourceResolutionSet::try_new(
+        unique
+            .values()
+            .map(|source| {
+                let authority = authority_override
+                    .as_ref()
+                    .filter(|(key, _)| source.key() == *key)
+                    .map(|(_, authority)| authority.clone())
+                    .unwrap_or_else(|| {
+                        if external_trust {
+                            external_trust(&format!("execution-trust-{}", source.key()), source)
+                        } else {
+                            AuthorityDisposition::ContentVerified
+                        }
+                    });
+                SourceResolution::verify(source, source.key().as_str().as_bytes(), authority)
+                    .expect("content-verified owned source fixture")
+            })
+            .collect(),
+    )
+    .expect("deduplicated source authority")
+}
+
 fn execution(
     problem: &AdmittedIdentifiabilityProblem,
     affine: bool,
@@ -1310,49 +2477,179 @@ fn execution(
     tolerance: f64,
     wrong_action: bool,
 ) -> Result<IdentifiabilityExecutionPlan, IdentifiabilityError> {
-    execution_with_axes(
+    execution_with_claim_requests_and_authority(
         problem,
         affine,
         seed,
         tolerance,
         wrong_action,
-        BTreeSet::from([
-            RequestedClaimAxis::Structural,
-            RequestedClaimAxis::Local,
-            RequestedClaimAxis::Generic,
-            RequestedClaimAxis::Global,
-            RequestedClaimAxis::Practical,
-        ]),
-    )
-}
-
-fn execution_with_axes(
-    problem: &AdmittedIdentifiabilityProblem,
-    affine: bool,
-    seed: u64,
-    tolerance: f64,
-    wrong_action: bool,
-    requested_axes: BTreeSet<RequestedClaimAxis>,
-) -> Result<IdentifiabilityExecutionPlan, IdentifiabilityError> {
-    execution_with_axes_and_authority(
-        problem,
-        affine,
-        seed,
-        tolerance,
-        wrong_action,
-        requested_axes,
+        vec![default_claim_request(problem)],
+        Vec::new(),
         false,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn execution_with_axes_and_authority(
+fn execution_for_claim(
     problem: &AdmittedIdentifiabilityProblem,
     affine: bool,
     seed: u64,
     tolerance: f64,
     wrong_action: bool,
-    requested_axes: BTreeSet<RequestedClaimAxis>,
+    claim: TypedIdentifiabilityClaim,
+) -> Result<IdentifiabilityExecutionPlan, IdentifiabilityError> {
+    execution_with_claim_requests_and_authority(
+        problem,
+        affine,
+        seed,
+        tolerance,
+        wrong_action,
+        vec![request_for_claim(claim)],
+        Vec::new(),
+        false,
+    )
+}
+
+fn execution_for_claim_with_gauge_reductions(
+    problem: &AdmittedIdentifiabilityProblem,
+    claim: TypedIdentifiabilityClaim,
+    gauge_reductions: Vec<GaugeReductionBinding>,
+) -> Result<IdentifiabilityExecutionPlan, IdentifiabilityError> {
+    execution_with_claim_requests_and_authority(
+        problem,
+        false,
+        17,
+        1.0e-10,
+        false,
+        vec![request_for_claim(claim)],
+        gauge_reductions,
+        false,
+    )
+}
+
+fn gauge_reduction_authority_sources(binding: &GaugeReductionBinding) -> Vec<SourceRef> {
+    fn quotient_sources(quotient: &GaugeQuotientPlan, sources: &mut Vec<SourceRef>) {
+        match quotient {
+            GaugeQuotientPlan::RegularAtlas {
+                quotient_map,
+                local_section_atlas,
+                coverage,
+            } => sources.extend([
+                quotient_map.clone(),
+                local_section_atlas.clone(),
+                coverage.clone(),
+            ]),
+            GaugeQuotientPlan::SingularOrGeneralized {
+                quotient_map,
+                quotient_profile,
+                local_models,
+            } => {
+                sources.extend([quotient_map.clone(), quotient_profile.clone()]);
+                sources.extend(local_models.iter().cloned());
+            }
+            GaugeQuotientPlan::InvariantMap {
+                invariants,
+                completeness_profile,
+            } => sources.extend([invariants.clone(), completeness_profile.clone()]),
+            GaugeQuotientPlan::GroupoidOrStack {
+                presentation,
+                quotient_profile,
+            } => sources.extend([presentation.clone(), quotient_profile.clone()]),
+        }
+    }
+
+    fn slice_sources(slice: &GaugeSlicePlan, sources: &mut Vec<SourceRef>) {
+        sources.extend([slice.constraint().clone(), slice.coverage().clone()]);
+        match slice.expected_codimension() {
+            GaugeSliceCodimension::FixedFinite { .. } => {}
+            GaugeSliceCodimension::FixedInfinite {
+                codimension_model,
+                compatibility,
+            } => sources.extend([codimension_model.clone(), compatibility.clone()]),
+            GaugeSliceCodimension::Stratified { profile } => sources.push(profile.clone()),
+        }
+    }
+
+    fn continuous_sources(reduction: &ContinuousGaugeReductionPlan, sources: &mut Vec<SourceRef>) {
+        match reduction {
+            ContinuousGaugeReductionPlan::Quotient { quotient } => {
+                quotient_sources(quotient, sources);
+            }
+            ContinuousGaugeReductionPlan::Slice { slice } => slice_sources(slice, sources),
+        }
+    }
+
+    let mut sources = Vec::new();
+    match binding.plan() {
+        GaugeReductionPlan::Unreduced { .. } => {}
+        GaugeReductionPlan::Quotient { quotient } => quotient_sources(quotient, &mut sources),
+        GaugeReductionPlan::Slice { slice } => slice_sources(slice, &mut sources),
+        GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
+            reduction,
+            normal_subgroup,
+            factor_extension,
+            residual_quotient_action,
+            compatibility,
+        } => {
+            continuous_sources(reduction, &mut sources);
+            sources.extend([
+                normal_subgroup.clone(),
+                factor_extension.clone(),
+                residual_quotient_action.clone(),
+                compatibility.clone(),
+            ]);
+        }
+    }
+    if let GaugeReductionStage::After {
+        composition_law,
+        relation,
+        ..
+    } = binding.stage()
+    {
+        sources.push(composition_law.clone());
+        match relation {
+            GaugeReductionStageRelation::NormalSubgroupTower {
+                normality,
+                induced_residual_action,
+            } => sources.extend([normality.clone(), induced_residual_action.clone()]),
+            GaugeReductionStageRelation::SemidirectOrGenerated {
+                extension,
+                induced_residual_action,
+            } => sources.extend([extension.clone(), induced_residual_action.clone()]),
+            GaugeReductionStageRelation::TransverseSlices { transversality } => {
+                sources.push(transversality.clone());
+            }
+            GaugeReductionStageRelation::GaugeForGauge {
+                reducibility,
+                induced_residual_action,
+            } => sources.extend([reducibility.clone(), induced_residual_action.clone()]),
+        }
+    }
+    if let GaugeMeasureSemantics::Pushforward {
+        source_measure,
+        reduced_measure,
+        transport,
+        jacobian_or_disintegration,
+    } = binding.measure()
+    {
+        sources.extend([
+            source_measure.clone(),
+            reduced_measure.clone(),
+            transport.clone(),
+            jacobian_or_disintegration.clone(),
+        ]);
+    }
+    sources
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execution_with_claim_requests_and_authority(
+    problem: &AdmittedIdentifiabilityProblem,
+    affine: bool,
+    seed: u64,
+    tolerance: f64,
+    wrong_action: bool,
+    claim_requests: Vec<ClaimRequest>,
+    gauge_reductions: Vec<GaugeReductionBinding>,
     external_trust: bool,
 ) -> Result<IdentifiabilityExecutionPlan, IdentifiabilityError> {
     let analyzer = source("analyzer", SourceKind::Analyzer, hash("analyzer"));
@@ -1363,6 +2660,11 @@ fn execution_with_axes_and_authority(
         hash("derivatives"),
     );
     let quadrature = source("quadrature", SourceKind::Analyzer, hash("quadrature"));
+    let measure_transport = source(
+        "hardening-measure-transport",
+        SourceKind::MeasureTransport,
+        hash("hardening-measure-transport"),
+    );
     let initialization = source(
         "initialization",
         SourceKind::Assumption,
@@ -1370,25 +2672,40 @@ fn execution_with_axes_and_authority(
     );
     let stopping = source("stopping", SourceKind::Assumption, hash("stopping"));
     let determinism = source("determinism", SourceKind::Assumption, hash("determinism"));
+    let numerical_nondimensionalization = source(
+        "numerical-nondimensionalization",
+        SourceKind::Nondimensionalization,
+        hash("numerical-nondimensionalization"),
+    );
     let mut authority_sources = vec![
-        &analyzer,
-        &build,
-        &derivatives,
-        &initialization,
-        &stopping,
-        &determinism,
+        analyzer.clone(),
+        build.clone(),
+        derivatives.clone(),
+        initialization.clone(),
+        stopping.clone(),
+        determinism.clone(),
+        numerical_nondimensionalization.clone(),
     ];
     if !wrong_action {
-        authority_sources.push(&quadrature);
+        authority_sources.push(quadrature.clone());
+        authority_sources.push(measure_transport.clone());
     }
-    let source_authority = resolved_sources(&authority_sources, external_trust);
+    for request in &claim_requests {
+        authority_sources.extend(claim_sources(request.claim()));
+        authority_sources.push(request.error_policy().metric().clone());
+        authority_sources.push(request.error_policy().nondimensionalization().clone());
+    }
+    for reduction in &gauge_reductions {
+        authority_sources.extend(gauge_reduction_authority_sources(reduction));
+    }
+    let source_authority = resolve_owned_sources(authority_sources, external_trust, None);
     IdentifiabilityExecutionPlan::try_new(
         execution_header(seed),
         problem,
         analyzer,
         build,
         Some(derivatives),
-        requested_axes,
+        claim_requests,
         vec![
             (
                 role("yield_stress"),
@@ -1406,15 +2723,18 @@ fn execution_with_axes_and_authority(
                     ParameterExecutionAction::Marginalize {
                         coordinate: coordinate("hardening_modulus", affine),
                         integrator: quadrature,
+                        measure_transport,
                     }
                 },
             ),
         ],
+        gauge_reductions,
         IdentifiabilityNumericalPolicy::try_new(
             tolerance,
             0.0,
             1.0e12,
             ArithmeticPolicy::CertifiedInterval,
+            numerical_nondimensionalization,
         )?,
         initialization,
         stopping,
@@ -1429,8 +2749,9 @@ struct ExecutionParts {
     analyzer: SourceRef,
     build: SourceRef,
     derivative_provider: Option<SourceRef>,
-    requested_axes: BTreeSet<RequestedClaimAxis>,
+    claim_requests: Vec<ClaimRequest>,
     actions: Vec<(ParameterRoleId, ParameterExecutionAction)>,
+    gauge_reductions: Vec<GaugeReductionBinding>,
     numerical: IdentifiabilityNumericalPolicy,
     initialization: SourceRef,
     stopping: SourceRef,
@@ -1444,12 +2765,13 @@ impl ExecutionParts {
             analyzer: plan.analyzer().clone(),
             build: plan.build().clone(),
             derivative_provider: plan.derivative_provider().cloned(),
-            requested_axes: plan.requested_axes().clone(),
+            claim_requests: plan.claim_requests().values().cloned().collect(),
             actions: plan
                 .actions()
                 .iter()
                 .map(|(role, action)| (role.clone(), action.clone()))
                 .collect(),
+            gauge_reductions: plan.gauge_reductions().values().cloned().collect(),
             numerical: plan.numerical_policy().clone(),
             initialization: plan.initialization().clone(),
             stopping: plan.stopping().clone(),
@@ -1464,21 +2786,36 @@ impl ExecutionParts {
     ) -> IdentifiabilityExecutionPlan {
         let source_authority = {
             let mut sources = vec![
-                &self.analyzer,
-                &self.build,
-                &self.initialization,
-                &self.stopping,
-                &self.determinism,
+                self.analyzer.clone(),
+                self.build.clone(),
+                self.initialization.clone(),
+                self.stopping.clone(),
+                self.determinism.clone(),
+                self.numerical.nondimensionalization().clone(),
             ];
             if let Some(provider) = &self.derivative_provider {
-                sources.push(provider);
+                sources.push(provider.clone());
             }
             for (_, action) in &self.actions {
-                if let ParameterExecutionAction::Marginalize { integrator, .. } = action {
-                    sources.push(integrator);
+                if let ParameterExecutionAction::Marginalize {
+                    integrator,
+                    measure_transport,
+                    ..
+                } = action
+                {
+                    sources.push(integrator.clone());
+                    sources.push(measure_transport.clone());
                 }
             }
-            resolved_sources(&sources, external_trust)
+            for request in &self.claim_requests {
+                sources.extend(claim_sources(request.claim()));
+                sources.push(request.error_policy().metric().clone());
+                sources.push(request.error_policy().nondimensionalization().clone());
+            }
+            for reduction in &self.gauge_reductions {
+                sources.extend(gauge_reduction_authority_sources(reduction));
+            }
+            resolve_owned_sources(sources, external_trust, None)
         };
         IdentifiabilityExecutionPlan::try_new(
             self.header,
@@ -1486,8 +2823,9 @@ impl ExecutionParts {
             self.analyzer,
             self.build,
             self.derivative_provider,
-            self.requested_axes,
+            self.claim_requests,
             self.actions,
+            self.gauge_reductions,
             self.numerical,
             self.initialization,
             self.stopping,
@@ -1550,7 +2888,7 @@ fn assessment_result(
     execution: &IdentifiabilityExecutionPlan,
     receipt_label: &str,
 ) -> Result<IdentifiabilityAssessment, IdentifiabilityError> {
-    assessment_result_with_domain_authority(
+    assessment_result_with_claim_source_authority(
         problem,
         execution,
         receipt_label,
@@ -1558,64 +2896,151 @@ fn assessment_result(
     )
 }
 
-fn assessment_result_with_domain_authority(
+fn assessment_result_with_claim_source_authority(
     problem: &AdmittedIdentifiabilityProblem,
     execution: &IdentifiabilityExecutionPlan,
     receipt_label: &str,
-    domain_authority: AuthorityDisposition,
+    claim_source_authority: AuthorityDisposition,
 ) -> Result<IdentifiabilityAssessment, IdentifiabilityError> {
-    let claim_id = ClaimId::try_new("yield-structural-global").expect("claim id");
-    let domain = problem
-        .document()
-        .sources()
-        .get(&source_key("claim-domain"))
-        .cloned()
-        .unwrap_or_else(|| source("claim-domain", SourceKind::Assumption, hash("claim-domain")));
+    let claim = default_claim(problem);
+    let claim_id = claim.id().clone();
+    let authority_key = match claim.fiber() {
+        FiberStructure::Stratified { strata } => strata.key().clone(),
+        _ => match claim.quantifier() {
+            ClaimQuantifier::ForAll { domain } => domain.key().clone(),
+            _ => unreachable!("default claim uses universal quantification"),
+        },
+    };
+    let request =
+        execution
+            .claim_requests()
+            .get(&claim_id)
+            .ok_or(IdentifiabilityError::SourceMismatch {
+                field: "assessment/execution exact claim preregistration",
+            })?;
     let method = execution.analyzer().clone();
     let receipt = source(
-        "claim-receipt",
+        receipt_label,
         SourceKind::EvidenceReceipt,
         hash(receipt_label),
     );
-    let source_authority = SourceResolutionSet::try_new(
-        [
-            SourceResolution::verify(&domain, b"claim-domain", domain_authority)
-                .expect("claim-domain source resolution"),
-            SourceResolution::verify(&method, b"analyzer", AuthorityDisposition::ContentVerified)
-                .expect("execution-analyzer source resolution"),
-            SourceResolution::verify(
-                &receipt,
-                receipt_label.as_bytes(),
-                AuthorityDisposition::ContentVerified,
-            )
-            .expect("claim-receipt source resolution"),
-        ]
-        .into(),
-    )
-    .expect("assessment source authority");
+    let mut assessment_sources = claim_sources(&claim);
+    assessment_sources.extend([
+        method.clone(),
+        receipt.clone(),
+        request.error_policy().metric().clone(),
+        request.error_policy().nondimensionalization().clone(),
+    ]);
+    let source_authority = resolve_owned_sources(
+        assessment_sources,
+        false,
+        Some((&authority_key, claim_source_authority)),
+    );
     IdentifiabilityAssessment::try_new(
         header("assessment-1", "identifiability.assess"),
         problem,
         execution,
-        vec![TypedIdentifiabilityClaim::new(
-            claim_id.clone(),
-            InformationRegime::StructuralExactModel,
-            IdentifiabilityExtent::Global,
-            ClaimQuantifier::ForAll { domain },
-            ScalarDomain::Real,
-            ClaimSubject::Parameter(role("yield_stress")),
-            ClaimScope::WholeCampaign,
-        )],
+        vec![claim],
         vec![(
             claim_id,
             ClaimAssessment::ClaimedEstablished {
                 method,
                 receipt,
-                tolerance: 1.0e-8,
+                metric: request.error_policy().metric().clone(),
+                nondimensionalization: request.error_policy().nondimensionalization().clone(),
+                certified_error_bound: 5.0e-9,
+                gauge_resolutions: BTreeMap::new(),
             },
         )],
         source_authority,
     )
+}
+
+fn assessment_with_claim(
+    problem: &AdmittedIdentifiabilityProblem,
+    execution: &IdentifiabilityExecutionPlan,
+    claim: TypedIdentifiabilityClaim,
+    mut claim_sources: Vec<SourceRef>,
+) -> Result<IdentifiabilityAssessment, IdentifiabilityError> {
+    let claim_id = claim.id().clone();
+    let request =
+        execution
+            .claim_requests()
+            .get(&claim_id)
+            .ok_or(IdentifiabilityError::SourceMismatch {
+                field: "assessment/execution exact claim preregistration",
+            })?;
+    let method = execution.analyzer().clone();
+    let receipt = source(
+        "custom-claim-receipt",
+        SourceKind::EvidenceReceipt,
+        hash("custom-claim-receipt"),
+    );
+    claim_sources.extend([
+        method.clone(),
+        receipt.clone(),
+        request.error_policy().metric().clone(),
+        request.error_policy().nondimensionalization().clone(),
+    ]);
+    IdentifiabilityAssessment::try_new(
+        header("assessment-custom-claim", "identifiability.assess"),
+        problem,
+        execution,
+        vec![claim],
+        vec![(
+            claim_id,
+            ClaimAssessment::ClaimedEstablished {
+                method,
+                receipt,
+                metric: request.error_policy().metric().clone(),
+                nondimensionalization: request.error_policy().nondimensionalization().clone(),
+                certified_error_bound: 5.0e-9,
+                gauge_resolutions: BTreeMap::new(),
+            },
+        )],
+        resolve_owned_sources(claim_sources, false, None),
+    )
+}
+
+fn two_claims() -> Vec<TypedIdentifiabilityClaim> {
+    let domain_left = source(
+        "claim-domain-left",
+        SourceKind::QuantifierDomain,
+        hash("claim-domain-left"),
+    );
+    let domain_right = source(
+        "claim-domain-right",
+        SourceKind::QuantifierDomain,
+        hash("claim-domain-right"),
+    );
+    let left_id = ClaimId::try_new("claim-left").expect("left claim id");
+    let right_id = ClaimId::try_new("claim-right").expect("right claim id");
+    vec![
+        TypedIdentifiabilityClaim::new(
+            left_id.clone(),
+            InformationRegime::StructuralExactModel,
+            IdentifiabilityExtent::Global,
+            FiberStructure::Unique,
+            ClaimQuantifier::ForAll {
+                domain: domain_left.clone(),
+            },
+            ScalarDomain::Real,
+            ClaimSubject::Parameter(role("yield_stress")),
+            ClaimScope::WholeCampaign,
+        ),
+        TypedIdentifiabilityClaim::new(
+            right_id.clone(),
+            InformationRegime::StructuralExactModel,
+            IdentifiabilityExtent::Global,
+            FiberStructure::Unique,
+            ClaimQuantifier::ForAll {
+                domain: domain_right.clone(),
+            },
+            ScalarDomain::Real,
+            ClaimSubject::Parameter(role("hardening_modulus")),
+            ClaimScope::WholeCampaign,
+        ),
+    ]
 }
 
 fn two_claim_assessment(
@@ -1623,16 +3048,7 @@ fn two_claim_assessment(
     execution: &IdentifiabilityExecutionPlan,
 ) -> IdentifiabilityAssessment {
     let method = execution.analyzer().clone();
-    let domain_left = source(
-        "claim-domain-left",
-        SourceKind::Assumption,
-        hash("claim-domain-left"),
-    );
-    let domain_right = source(
-        "claim-domain-right",
-        SourceKind::Assumption,
-        hash("claim-domain-right"),
-    );
+    let claims = two_claims();
     let receipt_left = source(
         "claim-receipt-left",
         SourceKind::EvidenceReceipt,
@@ -1645,37 +3061,26 @@ fn two_claim_assessment(
     );
     let left_id = ClaimId::try_new("claim-left").expect("left claim id");
     let right_id = ClaimId::try_new("claim-right").expect("right claim id");
-    let claims = vec![
-        TypedIdentifiabilityClaim::new(
-            left_id.clone(),
-            InformationRegime::StructuralExactModel,
-            IdentifiabilityExtent::Global,
-            ClaimQuantifier::ForAll {
-                domain: domain_left.clone(),
-            },
-            ScalarDomain::Real,
-            ClaimSubject::Parameter(role("yield_stress")),
-            ClaimScope::WholeCampaign,
-        ),
-        TypedIdentifiabilityClaim::new(
-            right_id.clone(),
-            InformationRegime::StructuralExactModel,
-            IdentifiabilityExtent::Global,
-            ClaimQuantifier::ForAll {
-                domain: domain_right.clone(),
-            },
-            ScalarDomain::Real,
-            ClaimSubject::Parameter(role("hardening_modulus")),
-            ClaimScope::WholeCampaign,
-        ),
-    ];
+    let left_policy = execution
+        .claim_requests()
+        .get(&left_id)
+        .expect("left claim preregistered")
+        .error_policy();
+    let right_policy = execution
+        .claim_requests()
+        .get(&right_id)
+        .expect("right claim preregistered")
+        .error_policy();
     let evidence = vec![
         (
             left_id,
             ClaimAssessment::ClaimedEstablished {
                 method: method.clone(),
                 receipt: receipt_left.clone(),
-                tolerance: 1.0e-8,
+                metric: left_policy.metric().clone(),
+                nondimensionalization: left_policy.nondimensionalization().clone(),
+                certified_error_bound: 5.0e-9,
+                gauge_resolutions: BTreeMap::new(),
             },
         ),
         (
@@ -1683,20 +3088,24 @@ fn two_claim_assessment(
             ClaimAssessment::ClaimedEstablished {
                 method: method.clone(),
                 receipt: receipt_right.clone(),
-                tolerance: 1.0e-8,
+                metric: right_policy.metric().clone(),
+                nondimensionalization: right_policy.nondimensionalization().clone(),
+                certified_error_bound: 5.0e-9,
+                gauge_resolutions: BTreeMap::new(),
             },
         ),
     ];
-    let source_authority = resolved_sources(
-        &[
-            &domain_left,
-            &domain_right,
-            &method,
-            &receipt_left,
-            &receipt_right,
-        ],
-        false,
-    );
+    let mut assessment_sources = claims.iter().flat_map(claim_sources).collect::<Vec<_>>();
+    assessment_sources.extend([
+        method.clone(),
+        receipt_left.clone(),
+        receipt_right.clone(),
+        left_policy.metric().clone(),
+        left_policy.nondimensionalization().clone(),
+        right_policy.metric().clone(),
+        right_policy.nondimensionalization().clone(),
+    ]);
+    let source_authority = resolve_owned_sources(assessment_sources, false, None);
     IdentifiabilityAssessment::try_new(
         header("assessment-2", "identifiability.assess"),
         problem,
@@ -1709,36 +3118,759 @@ fn two_claim_assessment(
 }
 
 #[test]
-fn structural_global_claim_requires_both_preregistered_axes() {
+fn assessment_requires_the_exact_preregistered_proposition() {
     let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
-    for axes in [
-        BTreeSet::from([RequestedClaimAxis::Structural]),
-        BTreeSet::from([RequestedClaimAxis::Global]),
-    ] {
-        let plan = execution_with_axes(&problem, false, 17, 1.0e-10, false, axes)
-            .expect("partial-axis execution");
+    let plan = execution(&problem, false, 17, 1.0e-10, false).expect("execution");
+    assert_eq!(
+        plan.requested_axes(),
+        BTreeSet::from([RequestedClaimAxis::Structural, RequestedClaimAxis::Global,]),
+        "coarse axes remain a derived planner projection",
+    );
+    let baseline = default_claim(&problem);
+    let substitutions = [
+        (
+            "quantifier",
+            TypedIdentifiabilityClaim::new(
+                baseline.id().clone(),
+                baseline.information().clone(),
+                baseline.extent(),
+                baseline.fiber().clone(),
+                ClaimQuantifier::ForAll {
+                    domain: source(
+                        "substituted-quantifier-domain",
+                        SourceKind::QuantifierDomain,
+                        hash("substituted-quantifier-domain"),
+                    ),
+                },
+                baseline.scalar_domain().clone(),
+                baseline.subject().clone(),
+                baseline.scope().clone(),
+            ),
+        ),
+        (
+            "subject",
+            TypedIdentifiabilityClaim::new(
+                baseline.id().clone(),
+                baseline.information().clone(),
+                baseline.extent(),
+                baseline.fiber().clone(),
+                baseline.quantifier().clone(),
+                baseline.scalar_domain().clone(),
+                ClaimSubject::Parameter(role("hardening_modulus")),
+                baseline.scope().clone(),
+            ),
+        ),
+        (
+            "scope",
+            TypedIdentifiabilityClaim::new(
+                baseline.id().clone(),
+                baseline.information().clone(),
+                baseline.extent(),
+                baseline.fiber().clone(),
+                baseline.quantifier().clone(),
+                baseline.scalar_domain().clone(),
+                baseline.subject().clone(),
+                ClaimScope::Cases(BTreeSet::from([case_id("a")])),
+            ),
+        ),
+        (
+            "fiber",
+            TypedIdentifiabilityClaim::new(
+                baseline.id().clone(),
+                baseline.information().clone(),
+                baseline.extent(),
+                FiberStructure::FiniteToOne {
+                    maximum_cardinality: Some(FiberCardinalityBound::UniformU64(2)),
+                },
+                baseline.quantifier().clone(),
+                baseline.scalar_domain().clone(),
+                baseline.subject().clone(),
+                baseline.scope().clone(),
+            ),
+        ),
+    ];
+    for (field, substituted) in substitutions {
+        let substituted_plan =
+            execution_for_claim(&problem, false, 17, 1.0e-10, false, substituted.clone())
+                .unwrap_or_else(|error| panic!("valid {field} substitution refused: {error}"));
+        assert_eq!(
+            substituted_plan.requested_axes(),
+            plan.requested_axes(),
+            "{field} substitution must retain identical coarse planner axes",
+        );
+        let substituted_sources = claim_sources(&substituted);
         assert!(matches!(
-            assessment_result(&problem, &plan, "partial-axis-receipt"),
-            Err(IdentifiabilityError::InvalidText {
-                field: "unrequested claim axis",
-                ..
+            assessment_with_claim(&problem, &plan, substituted, substituted_sources),
+            Err(IdentifiabilityError::SourceMismatch {
+                field: "assessment/execution exact claim preregistration",
             })
         ));
     }
-    let plan = execution_with_axes(
-        &problem,
-        false,
-        17,
-        1.0e-10,
-        false,
-        BTreeSet::from([RequestedClaimAxis::Structural, RequestedClaimAxis::Global]),
-    )
-    .expect("fully preregistered execution");
-    assessment_result(&problem, &plan, "both-axes-receipt").expect("both claim axes admit");
+    assessment_result(&problem, &plan, "exact-proposition-receipt")
+        .expect("the exact preregistered proposition admits");
     log(
-        "claim-axis-product",
+        "exact-claim-preregistration",
         "pass",
-        "structural/global obligations are conjunctive rather than precedence-selected",
+        "matching coarse axes cannot authorize a post-hoc proposition substitution",
+    );
+}
+
+#[test]
+fn claimed_evidence_is_bound_to_metric_scale_and_preregistered_error_ceiling() {
+    let metric = source(
+        "claim-error-metric",
+        SourceKind::DimensionlessErrorMetric,
+        hash("claim-error-metric"),
+    );
+    let nondimensionalization = source(
+        "claim-nondimensionalization",
+        SourceKind::Nondimensionalization,
+        hash("claim-nondimensionalization"),
+    );
+    assert!(matches!(
+        DimensionlessErrorPolicy::try_new(
+            source(
+                "dimensional-error-metric",
+                SourceKind::Assumption,
+                hash("dimensional-error-metric"),
+            ),
+            nondimensionalization.clone(),
+            1.0e-8,
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "claim error metric",
+            ..
+        })
+    ));
+    assert!(matches!(
+        DimensionlessErrorPolicy::try_new(
+            metric,
+            source(
+                "implicit-claim-scale",
+                SourceKind::Assumption,
+                hash("implicit-claim-scale"),
+            ),
+            1.0e-8,
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "claim nondimensionalization",
+            ..
+        })
+    ));
+    assert!(matches!(
+        IdentifiabilityNumericalPolicy::try_new(
+            1.0e-10,
+            0.0,
+            1.0e12,
+            ArithmeticPolicy::CertifiedInterval,
+            source(
+                "dimensional-rank-policy",
+                SourceKind::Assumption,
+                hash("dimensional-rank-policy"),
+            ),
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "numerical nondimensionalization",
+            ..
+        })
+    ));
+    let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
+    let execution = execution(&problem, false, 17, 1.0e-10, false).expect("execution");
+    let baseline = assessment(&problem, &execution, "metric-policy-receipt");
+    let claim_id = baseline
+        .claims()
+        .keys()
+        .next()
+        .expect("baseline claim")
+        .clone();
+    let (method, receipt, metric, nondimensionalization) = match &baseline.evidence()[&claim_id] {
+        ClaimAssessment::ClaimedEstablished {
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            ..
+        } => (
+            method.clone(),
+            receipt.clone(),
+            metric.clone(),
+            nondimensionalization.clone(),
+        ),
+        _ => panic!("baseline evidence unexpectedly changed variant"),
+    };
+    let assess = |evidence| {
+        IdentifiabilityAssessment::try_new(
+            baseline.header().clone(),
+            &problem,
+            &execution,
+            baseline.claims().values().cloned().collect(),
+            vec![(claim_id.clone(), evidence)],
+            baseline.source_authority().clone(),
+        )
+    };
+
+    assert!(matches!(
+        assess(ClaimAssessment::ClaimedEstablished {
+            method: method.clone(),
+            receipt: receipt.clone(),
+            metric: source(
+                "post-hoc-error-metric",
+                SourceKind::DimensionlessErrorMetric,
+                hash("post-hoc-error-metric"),
+            ),
+            nondimensionalization: nondimensionalization.clone(),
+            certified_error_bound: 5.0e-9,
+            gauge_resolutions: BTreeMap::new(),
+        }),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "claim evidence/error policy",
+        })
+    ));
+    assess(ClaimAssessment::ClaimedRefuted {
+        method: method.clone(),
+        receipt: receipt.clone(),
+        metric: metric.clone(),
+        nondimensionalization: nondimensionalization.clone(),
+        certified_error_bound: 5.0e-9,
+    })
+    .expect("refuting evidence uses the same preregistered dimensionless policy");
+    assert!(matches!(
+        assess(ClaimAssessment::ClaimedEstablished {
+            method: method.clone(),
+            receipt: receipt.clone(),
+            metric: metric.clone(),
+            nondimensionalization: source(
+                "post-hoc-nondimensionalization",
+                SourceKind::Nondimensionalization,
+                hash("post-hoc-nondimensionalization"),
+            ),
+            certified_error_bound: 5.0e-9,
+            gauge_resolutions: BTreeMap::new(),
+        }),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "claim evidence/error policy",
+        })
+    ));
+    assert!(matches!(
+        assess(ClaimAssessment::ClaimedEstablished {
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            certified_error_bound: 2.0e-8,
+            gauge_resolutions: BTreeMap::new(),
+        }),
+        Err(IdentifiabilityError::InvalidNumeric {
+            field: "certified claim error",
+            ..
+        })
+    ));
+    log(
+        "claim-error-policy-binding",
+        "pass",
+        "claimed evidence cannot substitute its dimensionless metric, scaling policy, or preregistered error ceiling",
+    );
+}
+
+#[test]
+fn claim_quantifiers_require_semantically_typed_sources() {
+    let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
+    let claim_for = |quantifier| {
+        TypedIdentifiabilityClaim::new(
+            ClaimId::try_new("quantifier-kind-contract").expect("claim id"),
+            InformationRegime::StructuralExactModel,
+            IdentifiabilityExtent::Global,
+            FiberStructure::Unique,
+            quantifier,
+            ScalarDomain::Real,
+            ClaimSubject::Parameter(role("yield_stress")),
+            ClaimScope::WholeCampaign,
+        )
+    };
+
+    for quantifier in [
+        ClaimQuantifier::AtRealization {
+            realization: source(
+                "typed-realization",
+                SourceKind::QuantifierRealization,
+                hash("typed-realization"),
+            ),
+        },
+        ClaimQuantifier::AlmostEverywhere {
+            measure: source(
+                "reference-measure",
+                SourceKind::ReferenceMeasure,
+                hash("reference-measure"),
+            ),
+        },
+        ClaimQuantifier::AlmostEverywhere {
+            measure: source(
+                "probability-reference-measure",
+                SourceKind::ProbabilityMeasure,
+                hash("probability-reference-measure"),
+            ),
+        },
+        ClaimQuantifier::ForAll {
+            domain: source(
+                "universal-domain",
+                SourceKind::QuantifierDomain,
+                hash("universal-domain"),
+            ),
+        },
+        ClaimQuantifier::ProbabilityAtLeast {
+            probability: 0.95,
+            measure: source(
+                "probability-measure",
+                SourceKind::ProbabilityMeasure,
+                hash("probability-measure"),
+            ),
+        },
+    ] {
+        let claim = claim_for(quantifier);
+        let execution = execution_for_claim(&problem, false, 17, 1.0e-10, false, claim.clone())
+            .expect("typed quantifier preregisters");
+        assessment_with_claim(&problem, &execution, claim.clone(), claim_sources(&claim))
+            .expect("typed quantifier assesses");
+    }
+
+    for (field, quantifier) in [
+        (
+            "claim realization source",
+            ClaimQuantifier::AtRealization {
+                realization: source(
+                    "bad-realization-prior",
+                    SourceKind::ProbabilityMeasure,
+                    hash("bad-realization-prior"),
+                ),
+            },
+        ),
+        (
+            "claim almost-everywhere measure",
+            ClaimQuantifier::AlmostEverywhere {
+                measure: source(
+                    "bad-ae-analyzer",
+                    SourceKind::QuantifierRealization,
+                    hash("bad-ae-analyzer"),
+                ),
+            },
+        ),
+        (
+            "claim universal domain",
+            ClaimQuantifier::ForAll {
+                domain: source(
+                    "bad-domain-build",
+                    SourceKind::ReferenceMeasure,
+                    hash("bad-domain-build"),
+                ),
+            },
+        ),
+        (
+            "claim probability measure",
+            ClaimQuantifier::ProbabilityAtLeast {
+                probability: 0.95,
+                measure: source(
+                    "bad-probability-manifold",
+                    SourceKind::QuantifierDomain,
+                    hash("bad-probability-manifold"),
+                ),
+            },
+        ),
+    ] {
+        let claim = claim_for(quantifier);
+        assert!(matches!(
+            execution_for_claim(&problem, false, 17, 1.0e-10, false, claim),
+            Err(IdentifiabilityError::InvalidText { field: actual, .. }) if actual == field
+        ));
+    }
+    log(
+        "claim-quantifier-source-kinds",
+        "pass",
+        "realizations, universal domains, almost-everywhere measures, and probability measures enforce distinct source-kind contracts",
+    );
+}
+
+#[test]
+fn continuous_uniform_prior_refuses_atomic_or_out_of_domain_support() {
+    let physical = ParameterDomain::try_new(0.0, 2.0).expect("physical parameter domain");
+    let parameter_with_prior = |name: &str, prior_domain: ParameterDomain| {
+        StudyParameter::try_new(
+            role(name),
+            QuantitySpec::dimensional(STRESS),
+            physical,
+            ParameterPurpose::Estimand,
+            ParameterTreatment::Estimated,
+            ParameterOwnerBinding::ConstitutiveModel,
+            ParameterScopeBinding::Global,
+            PriorPolicy::Distribution(ParameterPrior::Uniform {
+                domain: prior_domain,
+                version: 1,
+            }),
+            InfluenceCoverage::Declared,
+        )
+    };
+
+    let singleton = ParameterDomain::try_new(1.0, 1.0).expect("singleton support");
+    assert!(matches!(
+        parameter_with_prior("singleton-uniform", singleton),
+        Err(IdentifiabilityError::InvalidNumeric {
+            field: "uniform prior support",
+            ..
+        })
+    ));
+    let signed_zero = ParameterDomain::try_new(-0.0, 0.0).expect("signed-zero support");
+    assert!(matches!(
+        parameter_with_prior("signed-zero-uniform", signed_zero),
+        Err(IdentifiabilityError::InvalidNumeric {
+            field: "uniform prior support",
+            ..
+        })
+    ));
+    let outside = ParameterDomain::try_new(-1.0, 1.0).expect("out-of-domain support");
+    assert!(matches!(
+        parameter_with_prior("outside-uniform", outside),
+        Err(IdentifiabilityError::InvalidNumeric {
+            field: "uniform prior support",
+            ..
+        })
+    ));
+    let positive = ParameterDomain::try_new(0.5, 1.5).expect("positive-width support");
+    parameter_with_prior("positive-width-uniform", positive)
+        .expect("positive-width contained uniform support");
+    log(
+        "continuous-uniform-support",
+        "pass",
+        "continuous Uniform priors require positive-width contained support; atomic mass awaits explicit discrete/Dirac semantics",
+    );
+}
+
+#[test]
+fn posterior_claims_bind_one_exact_joint_prior_measure() {
+    let fixture = retrospective_origin_fixture_with_options(
+        ExperimentOrigin::Physical {
+            apparatus_id: artifact("posterior-apparatus"),
+            facility_id: artifact("posterior-facility"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::Uncharacterized,
+        ProblemOptions {
+            joint_prior_choice: 1,
+            ..ProblemOptions::default()
+        },
+    );
+    let problem = admit_retrospective_origin_fixture(&fixture).expect("posterior problem admits");
+    let posterior_claim = |joint_prior| {
+        TypedIdentifiabilityClaim::new(
+            ClaimId::try_new("posterior-joint-prior-contract").expect("claim id"),
+            InformationRegime::PosteriorUnderDeclaredPrior { joint_prior },
+            IdentifiabilityExtent::Global,
+            FiberStructure::Unique,
+            ClaimQuantifier::ForAll {
+                domain: source(
+                    "posterior-domain",
+                    SourceKind::QuantifierDomain,
+                    hash("posterior-domain"),
+                ),
+            },
+            ScalarDomain::Real,
+            ClaimSubject::Parameter(role("yield_stress")),
+            ClaimScope::WholeCampaign,
+        )
+    };
+    let claim =
+        posterior_claim(problem.document().sources()[&source_key("joint-prior-measure-a")].clone());
+    let execution = execution_for_claim(&problem, false, 17, 1.0e-10, false, claim.clone())
+        .expect("posterior claim preregisters");
+    let assessment = IdentifiabilityAssessment::try_new(
+        header("posterior-assessment", "identifiability.assess"),
+        &problem,
+        &execution,
+        vec![claim.clone()],
+        vec![(
+            claim.id().clone(),
+            ClaimAssessment::ClaimedInconclusive {
+                method: None,
+                receipt: None,
+                reason: "the exact joint prior is bound, but no decisive posterior theorem receipt is claimed"
+                    .to_string(),
+            },
+        )],
+        resolve_owned_sources(claim_sources(&claim), false, None),
+    )
+    .expect("posterior claim records an honest inconclusive assessment");
+    assert!(
+        assessment
+            .source_authority()
+            .entries()
+            .get(&source_key("joint-prior-measure-a"))
+            .is_some(),
+        "the joint prior must remain in the assessment authority envelope",
+    );
+
+    let wrong_kind = posterior_claim(source(
+        "bare-prior-family",
+        SourceKind::Prior,
+        hash("bare-prior-family"),
+    ));
+    assert!(matches!(
+        execution_for_claim(&problem, false, 17, 1.0e-10, false, wrong_kind),
+        Err(IdentifiabilityError::InvalidText {
+            field: "claim joint-prior measure",
+            ..
+        })
+    ));
+    let mismatched_measure = posterior_claim(source(
+        "joint-prior-measure-b",
+        SourceKind::ProbabilityMeasure,
+        hash("joint-prior-measure-b"),
+    ));
+    assert!(matches!(
+        execution_for_claim(&problem, false, 17, 1.0e-10, false, mismatched_measure,),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "claim joint prior/problem joint prior",
+        })
+    ));
+    log(
+        "posterior-joint-prior",
+        "pass",
+        "posterior semantics carry one exact authorized probability measure rather than an implicit product-of-marginals assumption",
+    );
+}
+
+#[test]
+fn claim_product_rejects_cross_axis_semantic_contradictions() {
+    let domain = source(
+        "compatibility-domain",
+        SourceKind::QuantifierDomain,
+        hash("compatibility-domain"),
+    );
+    let make_claim = |information, fiber, scope| {
+        TypedIdentifiabilityClaim::new(
+            ClaimId::try_new("compatibility-claim").expect("claim id"),
+            information,
+            IdentifiabilityExtent::Global,
+            fiber,
+            ClaimQuantifier::ForAll {
+                domain: domain.clone(),
+            },
+            ScalarDomain::Real,
+            ClaimSubject::Parameter(role("yield_stress")),
+            scope,
+        )
+    };
+
+    let prospective = admit_fixture(problem_fixture(ProblemOptions::default()));
+    let claim = make_claim(
+        InformationRegime::NoisyFiniteData,
+        FiberStructure::Unique,
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim(&prospective, false, 17, 1.0e-10, false, claim,),
+        Err(IdentifiabilityError::InvalidText {
+            field: "finite-data claim scope",
+            ..
+        })
+    ));
+
+    let missing_prior_fixture = retrospective_origin_fixture_with_options(
+        ExperimentOrigin::Physical {
+            apparatus_id: artifact("missing-prior-apparatus"),
+            facility_id: artifact("missing-prior-facility"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::Uncharacterized,
+        ProblemOptions {
+            yield_prior_absent: true,
+            joint_prior_choice: 1,
+            ..ProblemOptions::default()
+        },
+    );
+    let missing_prior = admit_retrospective_origin_fixture(&missing_prior_fixture)
+        .expect("retrospective missing-parameter-prior problem");
+    let joint_prior =
+        missing_prior.document().sources()[&source_key("joint-prior-measure-a")].clone();
+    let claim = make_claim(
+        InformationRegime::PosteriorUnderDeclaredPrior { joint_prior },
+        FiberStructure::Unique,
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim(&missing_prior, false, 17, 1.0e-10, false, claim,),
+        Err(IdentifiabilityError::InvalidText {
+            field: "posterior claim prior",
+            ..
+        })
+    ));
+
+    let scoped = admit_fixture(problem_fixture(ProblemOptions {
+        yield_case_a_only: true,
+        ..ProblemOptions::default()
+    }));
+    let claim = make_claim(
+        InformationRegime::StructuralExactModel,
+        FiberStructure::Unique,
+        ClaimScope::Cases(BTreeSet::from([case_id("b")])),
+    );
+    assert!(matches!(
+        execution_for_claim(&scoped, false, 17, 1.0e-10, false, claim,),
+        Err(IdentifiabilityError::InvalidText {
+            field: "claim parameter/case scope",
+            ..
+        })
+    ));
+
+    let claim = make_claim(
+        InformationRegime::StructuralExactModel,
+        FiberStructure::FiniteToOne {
+            maximum_cardinality: Some(FiberCardinalityBound::UniformU64(1)),
+        },
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim(&prospective, false, 17, 1.0e-10, false, claim,),
+        Err(IdentifiabilityError::InvalidNumeric {
+            field: "finite-to-one cardinality",
+            ..
+        })
+    ));
+    log(
+        "claim-product-compatibility",
+        "pass",
+        "data regime, prior policy, parameter scope, and fiber cardinality fail closed as one product",
+    );
+}
+
+#[test]
+fn influence_endpoints_must_lie_inside_parameter_applicability() {
+    let result = problem_fixture(ProblemOptions {
+        yield_case_a_only: true,
+        yield_influence_case_b: true,
+        ..ProblemOptions::default()
+    })
+    .document;
+    assert!(matches!(
+        result,
+        Err(IdentifiabilityError::InvalidText {
+            field: "influence parameter/case scope",
+            ..
+        })
+    ));
+    log(
+        "influence-parameter-case-scope",
+        "pass",
+        "a declared influence endpoint cannot escape the exact applicability of its physical parameter",
+    );
+}
+
+#[test]
+fn influence_claim_scope_closes_over_the_transitive_composite_dag() {
+    let problem = admit_fixture(problem_fixture(ProblemOptions {
+        composite_influence_chain: true,
+        ..ProblemOptions::default()
+    }));
+    let case_a_only = structural_claim(
+        &problem,
+        "transitive-influence-scope",
+        FiberStructure::Unique,
+        ClaimSubject::Influence(InfluenceId::try_new("composite-top").expect("top influence id")),
+        ClaimScope::Cases(BTreeSet::from([case_id("a")])),
+    );
+    assert!(matches!(
+        execution_for_claim(&problem, false, 17, 1.0e-10, false, case_a_only),
+        Err(IdentifiabilityError::InvalidText {
+            field: "claim influence/case scope",
+            ..
+        })
+    ));
+
+    let closed_scope = structural_claim(
+        &problem,
+        "transitive-influence-scope",
+        FiberStructure::Unique,
+        ClaimSubject::Influence(InfluenceId::try_new("composite-top").expect("top influence id")),
+        ClaimScope::Cases(BTreeSet::from([case_id("a"), case_id("b")])),
+    );
+    let execution = execution_for_claim(&problem, false, 17, 1.0e-10, false, closed_scope.clone())
+        .expect("claim scope containing every transitive endpoint");
+    assessment_with_claim(
+        &problem,
+        &execution,
+        closed_scope.clone(),
+        claim_sources(&closed_scope),
+    )
+    .expect("transitively closed influence claim assesses");
+    log(
+        "influence-transitive-claim-scope",
+        "pass",
+        "ClaimSubject::Influence closes over every recursive composite input endpoint and parameter",
+    );
+}
+
+#[test]
+fn source_bound_derived_complex_and_local_set_valued_claims_round_trip() {
+    let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
+    let domain = source(
+        "derived-claim-domain",
+        SourceKind::QuantifierDomain,
+        hash("derived-claim-domain"),
+    );
+    let definition = source(
+        "derived-functional",
+        SourceKind::DerivedFunctional,
+        hash("derived-functional"),
+    );
+    let extension = source(
+        "complex-extension",
+        SourceKind::AlgebraicExtension,
+        hash("complex-extension"),
+    );
+    let claim = TypedIdentifiabilityClaim::new(
+        ClaimId::try_new("derived-complex-positive-dimensional-fiber").expect("claim id"),
+        InformationRegime::StructuralExactModel,
+        IdentifiabilityExtent::Local,
+        FiberStructure::PositiveDimensional {
+            lower_bound: FiberDimensionLowerBound::Finite {
+                minimum_dimension: 1,
+            },
+        },
+        ClaimQuantifier::ForAll {
+            domain: domain.clone(),
+        },
+        ScalarDomain::Complex {
+            extension: extension.clone(),
+        },
+        ClaimSubject::DerivedFunctional {
+            definition: definition.clone(),
+            parameters: BTreeSet::from([role("yield_stress")]),
+        },
+        ClaimScope::Cases(BTreeSet::from([case_id("a")])),
+    );
+    let execution = execution_for_claim(&problem, false, 17, 1.0e-10, false, claim.clone())
+        .expect("source-bound claim execution");
+    let assessment = assessment_with_claim(
+        &problem,
+        &execution,
+        claim,
+        vec![domain, definition, extension],
+    )
+    .expect("source-bound local positive-dimensional claim");
+    let bytes = assessment.canonical_bytes().expect("assessment bytes");
+    let replay = IdentifiabilityAssessment::from_canonical_bytes(
+        &bytes,
+        &problem,
+        &execution,
+        assessment.source_authority(),
+    )
+    .expect("assessment replay");
+    assert_eq!(assessment, replay);
+    assert_eq!(
+        assessment.id().expect("assessment id"),
+        replay.id().expect("replay id")
+    );
+    log(
+        "claim-taxonomy-round-trip",
+        "pass",
+        "local positive-dimensional derived functionals over a source-bound complex extension are canonical",
     );
 }
 
@@ -1837,6 +3969,50 @@ fn multi_case_campaign_qualifies_local_channel_names() {
 }
 
 #[test]
+fn lot_field_and_hierarchical_scopes_retain_explicit_case_support() {
+    let supported_cases = BTreeSet::from([case_id("a")]);
+    for scope in [
+        ParameterScopeBinding::MaterialLot {
+            lot: artifact("lot-a"),
+            cases: supported_cases.clone(),
+        },
+        ParameterScopeBinding::Field {
+            support: source_key("field-support-a"),
+            cases: supported_cases.clone(),
+        },
+        ParameterScopeBinding::Hierarchical {
+            population: artifact("population-a"),
+            level: 2,
+            hierarchy: source_key("hierarchy-a"),
+            cases: supported_cases.clone(),
+        },
+    ] {
+        let parameter = parameter(
+            "yield_stress",
+            ParameterTreatment::Estimated,
+            InfluenceCoverage::Declared,
+            1,
+            None,
+            false,
+            scope.clone(),
+        );
+        assert_eq!(parameter.scope(), &scope);
+        let cases = match parameter.scope() {
+            ParameterScopeBinding::MaterialLot { cases, .. }
+            | ParameterScopeBinding::Field { cases, .. }
+            | ParameterScopeBinding::Hierarchical { cases, .. } => cases,
+            _ => panic!("fixture scope unexpectedly changed variant"),
+        };
+        assert_eq!(cases, &supported_cases);
+    }
+    log(
+        "explicit-parameter-case-support",
+        "pass",
+        "lot, field, and hierarchical parameters retain exact case applicability instead of silently becoming campaign-global",
+    );
+}
+
+#[test]
 fn dangling_composite_observation_endpoint_refuses() {
     let result = problem_fixture(ProblemOptions {
         bad_observation_endpoint: true,
@@ -1893,6 +4069,103 @@ fn dangling_source_key_refuses_before_authority_admission() {
 }
 
 #[test]
+fn case_physics_sources_require_exact_role_hash_domain_and_version() {
+    for mutation in 1..=5 {
+        let error = problem_fixture(ProblemOptions {
+            case_physics_mutation: mutation,
+            ..ProblemOptions::default()
+        })
+        .document
+        .expect_err("mutated case-physics source must refuse");
+        assert!(
+            matches!(
+                error,
+                IdentifiabilityError::UnknownReference {
+                    field: "case specimen-geometry source",
+                    ..
+                } | IdentifiabilityError::SourceMismatch {
+                    field: "case specimen-geometry source"
+                }
+            ),
+            "mutation {mutation} returned the wrong diagnostic: {error}"
+        );
+    }
+    let admitted = admit_fixture(problem_fixture(ProblemOptions::default()));
+    let geometry = admitted
+        .document()
+        .sources()
+        .get(&source_key("geometry-a"))
+        .expect("admitted geometry source");
+    let resolution = admitted
+        .source_resolutions()
+        .get(geometry.key())
+        .expect("admitted geometry resolution");
+    assert!(matches!(
+        resolution.verification(),
+        SourceVerification::HashPreimage { byte_len }
+            if *byte_len == u64::try_from("geometry-a".len()).expect("fixture length")
+    ));
+    log(
+        "case-physics-source-closure",
+        "pass",
+        "every embedded physics digest is role/domain/version bound and hash-preimage verified before ProblemId",
+    );
+}
+
+#[test]
+fn observation_contract_mismatches_report_the_exact_field() {
+    for (mutation, expected) in [
+        (1, "case observation protocol version"),
+        (2, "case observation refinement version"),
+    ] {
+        assert!(matches!(
+            problem_fixture(ProblemOptions {
+                observation_contract_mutation: mutation,
+                ..ProblemOptions::default()
+            })
+            .document,
+            Err(IdentifiabilityError::VersionMismatch { field, .. }) if field == expected
+        ));
+    }
+    assert!(matches!(
+        problem_fixture(ProblemOptions {
+            observation_contract_mutation: 3,
+            ..ProblemOptions::default()
+        })
+        .document,
+        Err(IdentifiabilityError::InvalidText {
+            field: "case observation protocol clock",
+            detail,
+        }) if detail.contains("wrong-clock-a") && detail.contains("clock-a")
+    ));
+    log(
+        "observation-contract-diagnostics",
+        "pass",
+        "protocol, refinement, and clock mismatches report distinct fields and exact clock identities",
+    );
+}
+
+#[test]
+fn blind_falsification_cannot_bypass_release_with_prospective_data() {
+    assert!(matches!(
+        problem_fixture(ProblemOptions {
+            blind_prospective_case: true,
+            ..ProblemOptions::default()
+        })
+        .document,
+        Err(IdentifiabilityError::InvalidText {
+            field: "blind-falsification case data",
+            ..
+        })
+    ));
+    log(
+        "blind-prospective-bypass",
+        "pass",
+        "blind falsification requires retrospective blind rows before release authority can be considered",
+    );
+}
+
+#[test]
 fn derived_parameter_cycles_refuse() {
     let result = problem_fixture(ProblemOptions {
         derived_cycle: true,
@@ -1935,7 +4208,243 @@ fn joint_constraint_units_are_checked_term_by_term() {
 }
 
 #[test]
-fn overlapping_v1_gauges_refuse_instead_of_composing_by_order() {
+fn ordered_constraints_require_an_interval_witness() {
+    for fixture in [1, 3] {
+        assert!(matches!(
+            problem_fixture(ProblemOptions {
+                ordered_constraint_case: fixture,
+                ..ProblemOptions::default()
+            })
+            .document,
+            Err(IdentifiabilityError::InvalidNumeric {
+                field: "ordered constraint feasibility",
+                ..
+            })
+        ));
+    }
+    for fixture in [2, 4] {
+        problem_fixture(ProblemOptions {
+            ordered_constraint_case: fixture,
+            ..ProblemOptions::default()
+        })
+        .document
+        .unwrap_or_else(|error| panic!("feasible ordered fixture {fixture} refused: {error}"));
+    }
+    log(
+        "ordered-constraint-feasibility",
+        "pass",
+        "non-strict boundary witnesses admit while impossible and strict-boundary chains refuse",
+    );
+}
+
+#[test]
+fn modeled_discrepancy_parameters_obey_exact_case_scope() {
+    problem_fixture(ProblemOptions {
+        modeled_discrepancy_case: 1,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("case-a discrepancy uses a case-a parameter");
+    assert!(matches!(
+        problem_fixture(ProblemOptions {
+            modeled_discrepancy_case: 2,
+            ..ProblemOptions::default()
+        })
+        .document,
+        Err(IdentifiabilityError::InvalidText {
+            field: "discrepancy parameter/case scope",
+            ..
+        })
+    ));
+    log(
+        "modeled-discrepancy-case-scope",
+        "pass",
+        "matching owner families cannot authorize a discrepancy parameter outside its exact case applicability",
+    );
+}
+
+#[test]
+fn discrepancy_inapplicability_is_closed_against_typed_experiment_origin() {
+    let physical = retrospective_origin_fixture(
+        ExperimentOrigin::Physical {
+            apparatus_id: artifact("origin-apparatus"),
+            facility_id: artifact("origin-facility"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::Physical,
+    );
+    admit_retrospective_origin_fixture(&physical)
+        .expect("physical applicability basis matches physical experiment origin");
+
+    let synthetic_for_physical = retrospective_origin_fixture(
+        ExperimentOrigin::SyntheticHighFidelity {
+            producer: artifact("forward-producer-a"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::Physical,
+    );
+    assert!(matches!(
+        admit_retrospective_origin_fixture(&synthetic_for_physical),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "physical discrepancy/experiment origin",
+        })
+    ));
+
+    let declared_synthetic = retrospective_origin_fixture(
+        ExperimentOrigin::SyntheticHighFidelity {
+            producer: artifact("forward-producer-a"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer: "forward-producer-a",
+            stale_forward_binding: false,
+            production_binding_key: "forward-a-production-binding",
+        },
+    );
+    admit_retrospective_origin_fixture(&declared_synthetic).expect(
+        "declared-synthetic basis binds typed synthetic origin, producer, and full forward SourceRef",
+    );
+    let alternate_production_binding = retrospective_origin_fixture(
+        ExperimentOrigin::SyntheticHighFidelity {
+            producer: artifact("forward-producer-a"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer: "forward-producer-a",
+            stale_forward_binding: false,
+            production_binding_key: "forward-a-production-binding-alternate",
+        },
+    );
+    assert_ne!(
+        unresolved_problem_identity(
+            declared_synthetic
+                .problem
+                .document
+                .as_ref()
+                .expect("declared-synthetic document"),
+        ),
+        unresolved_problem_identity(
+            alternate_production_binding
+                .problem
+                .document
+                .as_ref()
+                .expect("alternate production-binding document"),
+        ),
+        "the exact production-binding SourceRef key and discrepancy pointer must move ProblemId",
+    );
+    admit_retrospective_origin_fixture(&alternate_production_binding)
+        .expect("alternate exact production-binding key remains structurally admissible");
+
+    let physical_for_synthetic = retrospective_origin_fixture(
+        ExperimentOrigin::Physical {
+            apparatus_id: artifact("origin-apparatus"),
+            facility_id: artifact("origin-facility"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer: "forward-producer-a",
+            stale_forward_binding: false,
+            production_binding_key: "forward-a-production-binding",
+        },
+    );
+    assert!(matches!(
+        admit_retrospective_origin_fixture(&physical_for_synthetic),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "declared-synthetic discrepancy/experiment origin",
+        })
+    ));
+
+    let wrong_producer = retrospective_origin_fixture(
+        ExperimentOrigin::SyntheticHighFidelity {
+            producer: artifact("different-producer"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer: "forward-producer-a",
+            stale_forward_binding: false,
+            production_binding_key: "forward-a-production-binding",
+        },
+    );
+    assert!(matches!(
+        admit_retrospective_origin_fixture(&wrong_producer),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "declared-synthetic producer/forward-model binding",
+        })
+    ));
+
+    let independent_implementation = retrospective_origin_fixture(
+        ExperimentOrigin::SecondImplementation {
+            producer: artifact("forward-producer-a"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer: "forward-producer-a",
+            stale_forward_binding: false,
+            production_binding_key: "forward-a-production-binding",
+        },
+    );
+    assert!(matches!(
+        admit_retrospective_origin_fixture(&independent_implementation),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "declared-synthetic discrepancy/experiment origin",
+        })
+    ));
+
+    let stale_forward_binding = retrospective_origin_fixture(
+        ExperimentOrigin::SyntheticHighFidelity {
+            producer: artifact("forward-producer-a"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::DeclaredSynthetic {
+            declared_producer: "forward-producer-a",
+            stale_forward_binding: true,
+            production_binding_key: "forward-a-production-binding",
+        },
+    );
+    assert!(matches!(
+        stale_forward_binding.problem.document,
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "declared-synthetic producer/forward-model production binding",
+        })
+    ));
+    log(
+        "discrepancy-origin-closure",
+        "pass",
+        "physical and declared-synthetic inapplicability are checked against typed origin, producer identity, and an independently resolved full-SourceRef production binding",
+    );
+}
+
+#[test]
+fn validation_only_cases_require_physical_experiments() {
+    for origin in [
+        ExperimentOrigin::SyntheticHighFidelity {
+            producer: artifact("validation-synthetic-producer"),
+        },
+        ExperimentOrigin::SecondImplementation {
+            producer: artifact("validation-second-implementation"),
+        },
+    ] {
+        let fixture = retrospective_origin_fixture(
+            origin,
+            CasePurpose::ValidationOnly,
+            DiscrepancyOriginFixture::Uncharacterized,
+        );
+        assert!(matches!(
+            admit_retrospective_origin_fixture(&fixture),
+            Err(IdentifiabilityError::SourceMismatch {
+                field: "validation-only case/physical experiment origin",
+            })
+        ));
+    }
+    log(
+        "validation-only-origin",
+        "pass",
+        "synthetic and second-implementation artifacts cannot inherit the physics-validation meaning of ValidationOnly",
+    );
+}
+
+#[test]
+fn overlapping_assumed_gauges_require_one_exact_composition_hyperedge() {
     let result = problem_fixture(ProblemOptions {
         overlapping_gauges: true,
         ..ProblemOptions::default()
@@ -1943,12 +4452,513 @@ fn overlapping_v1_gauges_refuse_instead_of_composing_by_order() {
     .document;
     assert!(matches!(
         result,
-        Err(IdentifiabilityError::InvalidGauge { .. })
+        Err(IdentifiabilityError::InvalidText {
+            field: "assumed gauge composition",
+            ..
+        })
     ));
     log(
         "overlapping-gauges",
         "pass",
-        "v1 refuses undeclared groupoid composition",
+        "simultaneously active assumed gauges refuse without one exact product/generated composition declaration",
+    );
+}
+
+#[test]
+fn admissible_domain_certificate_binds_exact_witness_preimage() {
+    let certified = problem_fixture(ProblemOptions {
+        gauge_case: 10,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("witness-bound opaque domain certificate");
+    let stale_membership_source = IdentifiabilityProblemDocument::try_new(
+        certified.context_source().clone(),
+        certified.material_source().clone(),
+        certified.model_source().clone(),
+        certified.graph_source().clone(),
+        certified.joint_prior().cloned(),
+        certified
+            .sources()
+            .values()
+            .map(|source| {
+                if source.kind() == SourceKind::AdmissibleDomainCertificate {
+                    SourceRef::try_new(
+                        source.key().clone(),
+                        source.kind(),
+                        hash("stale-membership-certificate-content"),
+                        source.content_hash_domain(),
+                        source.contract_version(),
+                    )
+                    .expect("stale membership source fixture")
+                } else {
+                    source.clone()
+                }
+            })
+            .collect(),
+        certified.parameters().values().cloned().collect(),
+        certified.constraints().values().cloned().collect(),
+        certified.admissible_domain().clone(),
+        certified.cases().values().cloned().collect(),
+        certified.influences().values().cloned().collect(),
+        certified.gauges().values().cloned().collect(),
+        certified.gauge_compositions().values().cloned().collect(),
+        certified.joint_noise().clone(),
+        certified.data_reuse().clone(),
+    );
+    assert!(matches!(
+        stale_membership_source,
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "admissible-domain membership certificate content"
+        })
+    ));
+    log(
+        "admissible-domain-certificate-binding",
+        "pass",
+        "opaque domain membership authority is bound to the exact witness/parameter/constraint/source preimage",
+    );
+}
+
+fn gauge_reduction_binding(
+    id: &str,
+    claim: &TypedIdentifiabilityClaim,
+    plan: GaugeReductionPlan,
+    measure: GaugeMeasureSemantics,
+) -> GaugeReductionBinding {
+    GaugeReductionBinding::try_new(
+        GaugeReductionId::try_new(id).expect("gauge reduction id"),
+        GaugeActionReference::Single(GaugeClassId::try_new("fixture-gauge").expect("gauge id")),
+        BTreeSet::from([claim.id().clone()]),
+        plan,
+        GaugeReductionStage::Root,
+        measure,
+    )
+    .expect("gauge reduction binding fixture")
+}
+
+fn regular_quotient(prefix: &str) -> GaugeQuotientPlan {
+    GaugeQuotientPlan::RegularAtlas {
+        quotient_map: source(
+            &format!("{prefix}-quotient-map"),
+            SourceKind::GaugeQuotientMap,
+            hash(&format!("{prefix}-quotient-map")),
+        ),
+        local_section_atlas: source(
+            &format!("{prefix}-section-atlas"),
+            SourceKind::GaugeSection,
+            hash(&format!("{prefix}-section-atlas")),
+        ),
+        coverage: source(
+            &format!("{prefix}-coverage"),
+            SourceKind::GaugeSection,
+            hash(&format!("{prefix}-coverage")),
+        ),
+    }
+}
+
+fn gauge_pushforward(prefix: &str) -> GaugeMeasureSemantics {
+    GaugeMeasureSemantics::Pushforward {
+        source_measure: source(
+            &format!("{prefix}-source-measure"),
+            SourceKind::ProbabilityMeasure,
+            hash(&format!("{prefix}-source-measure")),
+        ),
+        reduced_measure: source(
+            &format!("{prefix}-reduced-measure"),
+            SourceKind::ProbabilityMeasure,
+            hash(&format!("{prefix}-reduced-measure")),
+        ),
+        transport: source(
+            &format!("{prefix}-pushforward"),
+            SourceKind::GaugeMeasureTransport,
+            hash(&format!("{prefix}-pushforward")),
+        ),
+        jacobian_or_disintegration: source(
+            &format!("{prefix}-jacobian"),
+            SourceKind::GaugeMeasureTransport,
+            hash(&format!("{prefix}-jacobian")),
+        ),
+    }
+}
+
+fn gauge_slice_plan(
+    prefix: &str,
+    support: BTreeSet<ParameterRoleId>,
+    expected_codimension: GaugeSliceCodimension,
+    coverage_kind: SourceKind,
+) -> GaugeSlicePlan {
+    GaugeSlicePlan::try_new(
+        support,
+        source(
+            &format!("{prefix}-constraint"),
+            SourceKind::Constraint,
+            hash(&format!("{prefix}-constraint")),
+        ),
+        expected_codimension,
+        source(
+            &format!("{prefix}-coverage"),
+            coverage_kind,
+            hash(&format!("{prefix}-coverage")),
+        ),
+    )
+    .expect("gauge slice plan fixture")
+}
+
+#[test]
+fn gauge_slices_are_execution_plans_with_exact_support_codimension_and_coverage() {
+    let problem = admit_fixture(problem_fixture(ProblemOptions {
+        gauge_case: 4,
+        ..ProblemOptions::default()
+    }));
+    let claim = structural_claim(
+        &problem,
+        "fixed-slice-quotient",
+        FiberStructure::OrbitQuotientUnique {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    let valid_slice = gauge_slice_plan(
+        "fixed-slice",
+        BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+        GaugeSliceCodimension::FixedFinite { codimension: 1 },
+        SourceKind::GaugeSection,
+    );
+    let valid = execution_for_claim_with_gauge_reductions(
+        &problem,
+        claim.clone(),
+        vec![gauge_reduction_binding(
+            "fixed-slice-reduction",
+            &claim,
+            GaugeReductionPlan::Slice { slice: valid_slice },
+            gauge_pushforward("fixed-slice"),
+        )],
+    )
+    .expect("transverse fixed-codimension execution slice");
+    assert_eq!(
+        IdentifiabilityExecutionPlan::from_canonical_bytes(
+            &valid.canonical_bytes().expect("slice execution bytes"),
+            &problem,
+            valid.source_authority(),
+        )
+        .expect("slice execution replay"),
+        valid,
+    );
+
+    let invalid_support = gauge_slice_plan(
+        "invalid-support",
+        BTreeSet::from([role("not-in-gauge-carrier")]),
+        GaugeSliceCodimension::FixedFinite { codimension: 1 },
+        SourceKind::GaugeSection,
+    );
+    assert!(matches!(
+        execution_for_claim_with_gauge_reductions(
+            &problem,
+            claim.clone(),
+            vec![gauge_reduction_binding(
+                "invalid-support-reduction",
+                &claim,
+                GaugeReductionPlan::Slice {
+                    slice: invalid_support,
+                },
+                gauge_pushforward("invalid-support"),
+            )],
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "execution gauge slice support",
+            ..
+        })
+    ));
+    let invalid_codimension = gauge_slice_plan(
+        "invalid-codimension",
+        BTreeSet::from([role("yield_stress")]),
+        GaugeSliceCodimension::FixedFinite { codimension: 2 },
+        SourceKind::GaugeSection,
+    );
+    assert!(matches!(
+        execution_for_claim_with_gauge_reductions(
+            &problem,
+            claim.clone(),
+            vec![gauge_reduction_binding(
+                "invalid-codimension-reduction",
+                &claim,
+                GaugeReductionPlan::Slice {
+                    slice: invalid_codimension,
+                },
+                gauge_pushforward("invalid-codimension"),
+            )],
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "execution gauge slice codimension",
+            ..
+        })
+    ));
+    let invalid_coverage = gauge_slice_plan(
+        "invalid-coverage",
+        BTreeSet::from([role("yield_stress")]),
+        GaugeSliceCodimension::FixedFinite { codimension: 1 },
+        SourceKind::Assumption,
+    );
+    assert!(matches!(
+        execution_for_claim_with_gauge_reductions(
+            &problem,
+            claim.clone(),
+            vec![gauge_reduction_binding(
+                "invalid-coverage-reduction",
+                &claim,
+                GaugeReductionPlan::Slice {
+                    slice: invalid_coverage,
+                },
+                gauge_pushforward("invalid-coverage"),
+            )],
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "execution gauge slice sources",
+            ..
+        })
+    ));
+
+    let stratified_problem = admit_fixture(problem_fixture(ProblemOptions {
+        gauge_case: 9,
+        ..ProblemOptions::default()
+    }));
+    let stratified_claim = structural_claim(
+        &stratified_problem,
+        "stratified-slice-quotient",
+        FiberStructure::OrbitQuotientUnique {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    let orbit_profile =
+        stratified_problem.document().sources()[&source_key("fixture-gauge-strata")].clone();
+    let stratified_slice = gauge_slice_plan(
+        "stratified-slice",
+        BTreeSet::from([role("yield_stress"), role("hardening_modulus")]),
+        GaugeSliceCodimension::Stratified {
+            profile: orbit_profile,
+        },
+        SourceKind::GaugeSection,
+    );
+    execution_for_claim_with_gauge_reductions(
+        &stratified_problem,
+        stratified_claim.clone(),
+        vec![gauge_reduction_binding(
+            "stratified-slice-reduction",
+            &stratified_claim,
+            GaugeReductionPlan::Slice {
+                slice: stratified_slice,
+            },
+            gauge_pushforward("stratified-slice"),
+        )],
+    )
+    .expect("stratified execution slice binds exact orbit profile");
+
+    log(
+        "execution-gauge-slice-binding",
+        "pass",
+        "execution-time slices bind exact action support, effective-orbit codimension, section coverage, stratified profiles, measure transport, authority, and canonical replay",
+    );
+}
+
+#[test]
+fn orbit_fibers_distinguish_pure_discrete_mixed_residual_and_full_quotients() {
+    let pure_discrete = admit_fixture(problem_fixture(ProblemOptions {
+        gauge_case: 1,
+        ..ProblemOptions::default()
+    }));
+    let discrete_claim = structural_claim(
+        &pure_discrete,
+        "pure-discrete-orbit",
+        FiberStructure::DiscreteOrbit {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim(
+            &pure_discrete,
+            false,
+            17,
+            1.0e-10,
+            false,
+            discrete_claim.clone(),
+        ),
+        Err(IdentifiabilityError::Cardinality {
+            field: "gauge reduction coverage",
+            ..
+        })
+    ));
+    execution_for_claim_with_gauge_reductions(
+        &pure_discrete,
+        discrete_claim.clone(),
+        vec![gauge_reduction_binding(
+            "pure-discrete-unreduced",
+            &discrete_claim,
+            GaugeReductionPlan::Unreduced {
+                reason: "the analyzer evaluates the exact declared discrete orbit without quotienting it"
+                    .to_string(),
+            },
+            GaugeMeasureSemantics::NotApplicable {
+                reason: "an unreduced structural discrete-orbit proposition performs no measure transport"
+                    .to_string(),
+            },
+        )],
+    )
+    .expect("pure discrete orbit has an exact explicit unreduced plan");
+
+    let mixed_retained = admit_fixture(problem_fixture(ProblemOptions {
+        gauge_case: 2,
+        ..ProblemOptions::default()
+    }));
+    let wrong_discrete_claim = structural_claim(
+        &mixed_retained,
+        "mixed-is-not-pure-discrete",
+        FiberStructure::DiscreteOrbit {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    assert!(matches!(
+        execution_for_claim_with_gauge_reductions(
+            &mixed_retained,
+            wrong_discrete_claim.clone(),
+            vec![gauge_reduction_binding(
+                "wrong-pure-discrete-plan",
+                &wrong_discrete_claim,
+                GaugeReductionPlan::Unreduced {
+                    reason: "fixture retains the mixed action".to_string(),
+                },
+                GaugeMeasureSemantics::NotApplicable {
+                    reason: "unreduced structural analysis has no quotient measure".to_string(),
+                },
+            )],
+        ),
+        Err(IdentifiabilityError::InvalidNumeric {
+            field: "discrete-orbit fiber",
+            ..
+        })
+    ));
+    let mixed_claim = structural_claim(
+        &mixed_retained,
+        "declared-mixed-orbit",
+        FiberStructure::MixedOrbit {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    let unreduced_execution = execution_for_claim_with_gauge_reductions(
+        &mixed_retained,
+        mixed_claim.clone(),
+        vec![gauge_reduction_binding(
+            "mixed-unreduced",
+            &mixed_claim,
+            GaugeReductionPlan::Unreduced {
+                reason: "the mixed physical orbit is analyzed without computational quotienting"
+                    .to_string(),
+            },
+            GaugeMeasureSemantics::NotApplicable {
+                reason: "the unreduced structural proposition changes no probability measure"
+                    .to_string(),
+            },
+        )],
+    )
+    .expect("mixed orbit admits only after explicit unreduced coverage");
+    let mixed_residual_plan = GaugeReductionPlan::ContinuousReductionWithDiscreteResidual {
+        reduction: ContinuousGaugeReductionPlan::Quotient {
+            quotient: regular_quotient("mixed-residual"),
+        },
+        normal_subgroup: source(
+            "mixed-residual-normal-subgroup",
+            SourceKind::GaugeSubgroupCertificate,
+            hash("mixed-residual-normal-subgroup"),
+        ),
+        factor_extension: source(
+            "mixed-residual-factor-extension",
+            SourceKind::GaugeReductionLaw,
+            hash("mixed-residual-factor-extension"),
+        ),
+        residual_quotient_action: source(
+            "mixed-residual-action",
+            SourceKind::GaugeResidualAction,
+            hash("mixed-residual-action"),
+        ),
+        compatibility: source(
+            "mixed-residual-compatibility",
+            SourceKind::GaugeReductionLaw,
+            hash("mixed-residual-compatibility"),
+        ),
+    };
+    let mixed_execution = execution_for_claim_with_gauge_reductions(
+        &mixed_retained,
+        mixed_claim.clone(),
+        vec![gauge_reduction_binding(
+            "mixed-residual-reduction",
+            &mixed_claim,
+            mixed_residual_plan,
+            gauge_pushforward("mixed-residual"),
+        )],
+    )
+    .expect("continuous normal subgroup is reduced with an explicit residual discrete action");
+    assert_ne!(
+        unreduced_execution.id().expect("unreduced execution id"),
+        mixed_execution.id().expect("residual execution id"),
+        "unreduced and continuously reduced plans are distinct execution semantics",
+    );
+    assert_eq!(
+        IdentifiabilityExecutionPlan::from_canonical_bytes(
+            &mixed_execution
+                .canonical_bytes()
+                .expect("mixed-orbit execution bytes"),
+            &mixed_retained,
+            mixed_execution.source_authority(),
+        )
+        .expect("mixed-orbit execution replay"),
+        mixed_execution,
+    );
+    let quotient_claim = structural_claim(
+        &mixed_retained,
+        "fully-quotiented-mixed-orbit",
+        FiberStructure::OrbitQuotientUnique {
+            action: GaugeActionReference::Single(
+                GaugeClassId::try_new("fixture-gauge").expect("gauge id"),
+            ),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    execution_for_claim_with_gauge_reductions(
+        &mixed_retained,
+        quotient_claim.clone(),
+        vec![gauge_reduction_binding(
+            "mixed-full-quotient",
+            &quotient_claim,
+            GaugeReductionPlan::Quotient {
+                quotient: regular_quotient("mixed-full"),
+            },
+            gauge_pushforward("mixed-full"),
+        )],
+    )
+    .expect("full mixed quotient has exact atlas and measure semantics");
+    log(
+        "orbit-fiber-component-semantics",
+        "pass",
+        "pure discrete, unreduced mixed, continuously reduced mixed residual, and fully quotiented mixed semantics remain explicit and canonically distinct",
     );
 }
 
@@ -2168,6 +5178,487 @@ fn unverified_opaque_source_cannot_mint_problem_id() {
 }
 
 #[test]
+fn external_trust_receipts_bind_exact_source_and_typed_subject_artifact() {
+    let expected = source(
+        "trust-subject-expected",
+        SourceKind::Assumption,
+        hash("trust-subject-expected"),
+    );
+    let different = source(
+        "trust-subject-different",
+        SourceKind::Assumption,
+        hash("trust-subject-different"),
+    );
+    assert!(matches!(
+        SourceResolution::verify(
+            &expected,
+            b"trust-subject-expected",
+            external_trust("cross-source-trust-receipt", &different),
+        ),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "trust receipt subject/source resolution",
+        })
+    ));
+
+    let fixture = retrospective_origin_fixture(
+        ExperimentOrigin::Physical {
+            apparatus_id: artifact("trust-artifact-apparatus"),
+            facility_id: artifact("trust-artifact-facility"),
+        },
+        CasePurpose::Calibration,
+        DiscrepancyOriginFixture::Uncharacterized,
+    );
+    let document = fixture
+        .problem
+        .document
+        .clone()
+        .expect("trust subject artifact document");
+    let split_key = source_key("split-a");
+    let split_source = document.sources()[&split_key].clone();
+    let malformed_blind_namespace = SourceRef::try_new(
+        source_key("malformed-blind-receipt"),
+        SourceKind::EvidenceReceipt,
+        hash("malformed-blind-receipt"),
+        BLIND_RELEASE_TRUST_RECEIPT_DOMAIN,
+        BLIND_RELEASE_TRUST_RECEIPT_VERSION,
+    )
+    .expect("syntactically valid blind namespace source");
+    assert!(matches!(
+        TrustReceiptRef::try_new(
+            malformed_blind_namespace,
+            split_source.clone(),
+            TrustAuthentication::Unauthenticated,
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "trust receipt subject artifact",
+            ..
+        })
+    ));
+    let stale_blind_namespace = SourceRef::try_new(
+        source_key("stale-blind-receipt"),
+        SourceKind::EvidenceReceipt,
+        hash("stale-blind-receipt"),
+        BLIND_RELEASE_TRUST_RECEIPT_DOMAIN,
+        BLIND_RELEASE_TRUST_RECEIPT_VERSION + 1,
+    )
+    .expect("syntactically valid stale blind namespace source");
+    assert!(matches!(
+        TrustReceiptRef::try_new(
+            stale_blind_namespace,
+            split_source.clone(),
+            TrustAuthentication::Unauthenticated,
+        ),
+        Err(IdentifiabilityError::VersionMismatch {
+            field: "blind-release trust receipt",
+            ..
+        })
+    ));
+    assert!(matches!(
+        TrustReceiptRef::blind_release(
+            &expected,
+            artifact("not-a-calibration-split"),
+            hash("wrong-kind-blind-receipt"),
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "trust receipt subject artifact",
+            ..
+        })
+    ));
+    let generic_split_authority = external_trust("generic-non-blind-split-trust", &split_source);
+    let generic_bundle = ProblemSourceBundle::new(
+        &fixture.problem.context,
+        &fixture.problem.material,
+        &fixture.problem.model,
+        BTreeMap::from([
+            (
+                case_id("a"),
+                CaseSourceBundle::new(&fixture.experiment, &fixture.split_a),
+            ),
+            (
+                case_id("b"),
+                CaseSourceBundle::new(&fixture.experiment, &fixture.split_b),
+            ),
+        ]),
+        opaque_resolutions(&document),
+    )
+    .with_concrete_authority(vec![(split_key.clone(), generic_split_authority)])
+    .expect("generic non-blind split authority envelope");
+    let generic_admission = AdmittedIdentifiabilityProblem::resolve_and_admit(
+        document.clone(),
+        generic_bundle,
+    )
+    .expect(
+        "generic exact-SourceRef trust may authorize a non-blind split without artifact metadata",
+    );
+
+    let correct_blind_authority = AuthorityDisposition::ExternalTrustReceipt {
+        trust_receipt: TrustReceiptRef::blind_release(
+            &split_source,
+            fixture.split_a.id().clone(),
+            hash("correct-subject-artifact-receipt"),
+        )
+        .expect("exact blind-release subject artifact"),
+    };
+    let correct_blind_bundle = ProblemSourceBundle::new(
+        &fixture.problem.context,
+        &fixture.problem.material,
+        &fixture.problem.model,
+        BTreeMap::from([
+            (
+                case_id("a"),
+                CaseSourceBundle::new(&fixture.experiment, &fixture.split_a),
+            ),
+            (
+                case_id("b"),
+                CaseSourceBundle::new(&fixture.experiment, &fixture.split_b),
+            ),
+        ]),
+        opaque_resolutions(&document),
+    )
+    .with_concrete_authority(vec![(split_key.clone(), correct_blind_authority)])
+    .expect("bounded correct blind authority envelope");
+    let blind_admission =
+        AdmittedIdentifiabilityProblem::resolve_and_admit(document.clone(), correct_blind_bundle)
+            .expect("exact blind-release subject artifact admits");
+    assert_eq!(generic_admission.id(), blind_admission.id());
+    assert_ne!(
+        generic_admission.source_admission_id(),
+        blind_admission.source_admission_id(),
+        "typed blind-release authority must move only the authority envelope",
+    );
+
+    let policy_receipt = source(
+        "issuer-policy-trust-receipt",
+        SourceKind::EvidenceReceipt,
+        hash("issuer-policy-trust-receipt"),
+    );
+    let trust_policy = source(
+        "declared-trust-policy",
+        SourceKind::Assumption,
+        hash("declared-trust-policy"),
+    );
+    assert!(matches!(
+        TrustReceiptRef::try_new(
+            policy_receipt.clone(),
+            split_source.clone(),
+            TrustAuthentication::IssuerPolicy {
+                issuer: artifact("policy-issuer"),
+                trust_policy: source(
+                    "wrong-kind-trust-policy",
+                    SourceKind::EvidenceReceipt,
+                    hash("wrong-kind-trust-policy"),
+                ),
+            },
+        ),
+        Err(IdentifiabilityError::InvalidText {
+            field: "trust receipt policy",
+            ..
+        })
+    ));
+    let admit_with_trust_receipt = |trust_receipt| {
+        let bundle = ProblemSourceBundle::new(
+            &fixture.problem.context,
+            &fixture.problem.material,
+            &fixture.problem.model,
+            BTreeMap::from([
+                (
+                    case_id("a"),
+                    CaseSourceBundle::new(&fixture.experiment, &fixture.split_a),
+                ),
+                (
+                    case_id("b"),
+                    CaseSourceBundle::new(&fixture.experiment, &fixture.split_b),
+                ),
+            ]),
+            opaque_resolutions(&document),
+        )
+        .with_concrete_authority(vec![(
+            split_key.clone(),
+            AuthorityDisposition::ExternalTrustReceipt { trust_receipt },
+        )])
+        .expect("bounded issuer-policy authority envelope");
+        AdmittedIdentifiabilityProblem::resolve_and_admit(document.clone(), bundle)
+            .expect("issuer-policy declaration admits structurally")
+    };
+    let unauthenticated_declaration = admit_with_trust_receipt(
+        TrustReceiptRef::try_new(
+            policy_receipt.clone(),
+            split_source.clone(),
+            TrustAuthentication::Unauthenticated,
+        )
+        .expect("unauthenticated generic trust declaration"),
+    );
+    let issuer_policy_declaration = admit_with_trust_receipt(
+        TrustReceiptRef::try_new(
+            policy_receipt,
+            split_source.clone(),
+            TrustAuthentication::IssuerPolicy {
+                issuer: artifact("policy-issuer"),
+                trust_policy,
+            },
+        )
+        .expect("issuer-policy-bound trust declaration"),
+    );
+    assert_eq!(
+        unauthenticated_declaration.id(),
+        issuer_policy_declaration.id(),
+    );
+    assert_ne!(
+        unauthenticated_declaration.source_admission_id(),
+        issuer_policy_declaration.source_admission_id(),
+        "declared issuer/policy semantics must move SourceAdmissionId without claiming issuer verification",
+    );
+
+    let wrong_subject_artifact = AuthorityDisposition::ExternalTrustReceipt {
+        trust_receipt: TrustReceiptRef::blind_release(
+            &document.sources()[&split_key],
+            artifact("not-the-resolved-split"),
+            hash("wrong-subject-artifact-receipt"),
+        )
+        .expect("structurally typed blind-release receipt"),
+    };
+    let opaque = opaque_resolutions(&document);
+    let bundle = ProblemSourceBundle::new(
+        &fixture.problem.context,
+        &fixture.problem.material,
+        &fixture.problem.model,
+        BTreeMap::from([
+            (
+                case_id("a"),
+                CaseSourceBundle::new(&fixture.experiment, &fixture.split_a),
+            ),
+            (
+                case_id("b"),
+                CaseSourceBundle::new(&fixture.experiment, &fixture.split_b),
+            ),
+        ]),
+        opaque,
+    )
+    .with_concrete_authority(vec![(split_key, wrong_subject_artifact)])
+    .expect("bounded concrete authority envelope");
+    assert!(matches!(
+        AdmittedIdentifiabilityProblem::resolve_and_admit(document, bundle),
+        Err(IdentifiabilityError::SourceMismatch {
+            field: "trust receipt subject artifact/source resolution",
+        })
+    ));
+    log(
+        "typed-trust-subject-binding",
+        "pass",
+        "trust receipts cannot replay across SourceRefs, and blind-release subject artifacts must equal the exact resolved split ID",
+    );
+}
+
+#[test]
+fn source_bundle_public_ingress_enforces_aggregate_cardinality_before_admission_work() {
+    let fixture = problem_fixture(ProblemOptions::default());
+    let authority_overflow = (0..=MAX_IDENTIFIABILITY_ITEMS)
+        .map(|index| {
+            (
+                source_key(&format!("concrete-authority-{index:04}")),
+                AuthorityDisposition::ContentVerified,
+            )
+        })
+        .collect();
+    assert!(matches!(
+        ProblemSourceBundle::new(
+            &fixture.context,
+            &fixture.material,
+            &fixture.model,
+            BTreeMap::new(),
+            SourceResolutionSet::default(),
+        )
+        .with_concrete_authority(authority_overflow),
+        Err(IdentifiabilityError::Cardinality {
+            field: "concrete source authority",
+            ..
+        })
+    ));
+
+    let (experiment, split, _) = retrospective_artifacts(ExperimentOrigin::Physical {
+        apparatus_id: artifact("cardinality-apparatus"),
+        facility_id: artifact("cardinality-facility"),
+    });
+    let case_overflow = (0..=MAX_IDENTIFIABILITY_ITEMS)
+        .map(|index| {
+            (
+                case_id(&format!("concrete-case-{index:04}")),
+                CaseSourceBundle::new(&experiment, &split),
+            )
+        })
+        .collect();
+    let document = fixture.document.expect("cardinality document");
+    assert!(matches!(
+        AdmittedIdentifiabilityProblem::resolve_and_admit(
+            document,
+            ProblemSourceBundle::new(
+                &fixture.context,
+                &fixture.material,
+                &fixture.model,
+                case_overflow,
+                SourceResolutionSet::default(),
+            ),
+        ),
+        Err(IdentifiabilityError::Cardinality {
+            field: "retrospective case source bundles",
+            ..
+        })
+    ));
+    log(
+        "source-bundle-cardinality",
+        "pass",
+        "max-plus-one case bundles and concrete authority entries refuse before hashing, resolution, or derived-lineage work",
+    );
+}
+
+#[test]
+fn execution_and_assessment_collection_caps_match_the_canonical_decoder() {
+    let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
+    let baseline = execution(&problem, false, 17, 1.0e-10, false).expect("baseline execution");
+    let attempt_execution = |parts: ExecutionParts| {
+        IdentifiabilityExecutionPlan::try_new(
+            parts.header,
+            &problem,
+            parts.analyzer,
+            parts.build,
+            parts.derivative_provider,
+            parts.claim_requests,
+            parts.actions,
+            parts.gauge_reductions,
+            parts.numerical,
+            parts.initialization,
+            parts.stopping,
+            parts.determinism,
+            baseline.source_authority().clone(),
+        )
+    };
+
+    let mut oversized_actions = ExecutionParts::from_plan(&baseline);
+    oversized_actions.actions = vec![
+        (
+            role("overflow-action"),
+            ParameterExecutionAction::Conditioned
+        );
+        MAX_IDENTIFIABILITY_ITEMS + 1
+    ];
+    assert!(matches!(
+        attempt_execution(oversized_actions),
+        Err(IdentifiabilityError::Cardinality {
+            field: "execution parameter actions",
+            ..
+        })
+    ));
+
+    let claim = default_claim(&problem);
+    let reduction = gauge_reduction_binding(
+        "overflow-reduction",
+        &claim,
+        GaugeReductionPlan::Unreduced {
+            reason: "cardinality sentinel deliberately leaves the action unreduced".to_string(),
+        },
+        GaugeMeasureSemantics::NotApplicable {
+            reason: "no quotient or slice is applied".to_string(),
+        },
+    );
+    let mut oversized_reductions = ExecutionParts::from_plan(&baseline);
+    oversized_reductions.gauge_reductions = vec![reduction; MAX_IDENTIFIABILITY_ITEMS + 1];
+    assert!(matches!(
+        attempt_execution(oversized_reductions),
+        Err(IdentifiabilityError::Cardinality {
+            field: "execution gauge reductions",
+            ..
+        })
+    ));
+
+    let baseline_assessment = assessment(&problem, &baseline, "collection-cap-receipt");
+    let parts = AssessmentParts::from_assessment(&baseline_assessment);
+    let evidence_row = parts.evidence[0].clone();
+    assert!(matches!(
+        IdentifiabilityAssessment::try_new(
+            parts.header.clone(),
+            &problem,
+            &baseline,
+            parts.claims.clone(),
+            vec![evidence_row; MAX_IDENTIFIABILITY_ITEMS + 1],
+            parts.source_authority.clone(),
+        ),
+        Err(IdentifiabilityError::Cardinality {
+            field: "claim assessments",
+            ..
+        })
+    ));
+
+    let (claim_id, method, receipt, metric, nondimensionalization, certified_error_bound) = {
+        let (claim_id, conclusion) = &parts.evidence[0];
+        let ClaimAssessment::ClaimedEstablished {
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            certified_error_bound,
+            ..
+        } = conclusion
+        else {
+            panic!("baseline assessment must be claimed established");
+        };
+        (
+            claim_id.clone(),
+            method.clone(),
+            receipt.clone(),
+            metric.clone(),
+            nondimensionalization.clone(),
+            *certified_error_bound,
+        )
+    };
+    let oversized_gauge_resolutions = (0..=MAX_IDENTIFIABILITY_ITEMS)
+        .map(|index| {
+            let action = GaugeActionReference::Single(
+                GaugeClassId::try_new(format!("overflow-gauge-{index:04}"))
+                    .expect("bounded gauge id"),
+            );
+            (
+                action.clone(),
+                GaugeResolutionEvidence::new(
+                    action,
+                    GaugeResolutionDisposition::CandidateRefuted,
+                    method.clone(),
+                    receipt.clone(),
+                ),
+            )
+        })
+        .collect();
+    assert!(matches!(
+        IdentifiabilityAssessment::try_new(
+            parts.header,
+            &problem,
+            &baseline,
+            parts.claims,
+            vec![(
+                claim_id,
+                ClaimAssessment::ClaimedEstablished {
+                    method,
+                    receipt,
+                    metric,
+                    nondimensionalization,
+                    certified_error_bound,
+                    gauge_resolutions: oversized_gauge_resolutions,
+                },
+            )],
+            parts.source_authority,
+        ),
+        Err(IdentifiabilityError::Cardinality {
+            field: "positive-claim gauge resolutions",
+            ..
+        })
+    ));
+    log(
+        "canonical-collection-caps",
+        "pass",
+        "execution actions/reductions and assessment evidence/gauge-resolution maps refuse MAX+1 at public ingress, matching their decoder count bounds",
+    );
+}
+
+#[test]
 fn problem_and_source_admission_identities_separate_question_from_trust_envelope() {
     let content_only =
         admit_fixture_with_authority(problem_fixture(ProblemOptions::default()), false);
@@ -2191,6 +5682,40 @@ fn identifiability_problem_identity_bindings_have_exact_mutation_evidence() {
         .document
         .expect("baseline problem");
     let baseline = unresolved_problem_identity(&baseline_document);
+    let mut witness_values = baseline_document
+        .admissible_domain()
+        .values()
+        .iter()
+        .map(|(role, value)| (role.clone(), *value))
+        .collect::<Vec<_>>();
+    let (_, yield_witness) = witness_values
+        .iter_mut()
+        .find(|(role, _)| role == &role("yield_stress"))
+        .expect("yield witness");
+    *yield_witness = 2.0e6;
+    let witness_variant = IdentifiabilityProblemDocument::try_new(
+        baseline_document.context_source().clone(),
+        baseline_document.material_source().clone(),
+        baseline_document.model_source().clone(),
+        baseline_document.graph_source().clone(),
+        baseline_document.joint_prior().cloned(),
+        baseline_document.sources().values().cloned().collect(),
+        baseline_document.parameters().values().cloned().collect(),
+        baseline_document.constraints().values().cloned().collect(),
+        AdmissibleDomainWitness::try_new(witness_values, None)
+            .expect("mutated admissible-domain witness"),
+        baseline_document.cases().values().cloned().collect(),
+        baseline_document.influences().values().cloned().collect(),
+        baseline_document.gauges().values().cloned().collect(),
+        baseline_document
+            .gauge_compositions()
+            .values()
+            .cloned()
+            .collect(),
+        baseline_document.joint_noise().clone(),
+        baseline_document.data_reuse().clone(),
+    )
+    .expect("independent admissible-domain mutation");
     let variants = [
         (
             "context_source",
@@ -2259,6 +5784,7 @@ fn identifiability_problem_identity_bindings_have_exact_mutation_evidence() {
             .document
             .expect("constraint-registry mutation"),
         ),
+        ("admissible_domain", witness_variant),
         (
             "cases",
             problem_fixture(ProblemOptions {
@@ -2304,6 +5830,82 @@ fn identifiability_problem_identity_bindings_have_exact_mutation_evidence() {
         );
     }
 
+    let joint_prior_a = problem_fixture(ProblemOptions {
+        joint_prior_choice: 1,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("joint-prior A problem");
+    let joint_prior_b = problem_fixture(ProblemOptions {
+        joint_prior_choice: 2,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("joint-prior B problem");
+    assert_eq!(
+        joint_prior_a.sources().len(),
+        joint_prior_b.sources().len(),
+        "joint-prior alternatives must have equal-sized closed source registries",
+    );
+    assert!(
+        joint_prior_a
+            .sources()
+            .contains_key(&source_key("joint-prior-measure-a"))
+            && !joint_prior_a
+                .sources()
+                .contains_key(&source_key("joint-prior-measure-b"))
+            && joint_prior_b
+                .sources()
+                .contains_key(&source_key("joint-prior-measure-b"))
+            && !joint_prior_b
+                .sources()
+                .contains_key(&source_key("joint-prior-measure-a")),
+        "source reachability must retain exactly the selected joint measure",
+    );
+    assert_ne!(
+        unresolved_problem_identity(&joint_prior_a),
+        unresolved_problem_identity(&joint_prior_b),
+        "joint_prior semantic field did not move identity",
+    );
+
+    let generated_composition = problem_fixture(ProblemOptions {
+        overlapping_gauges: true,
+        declared_gauge_composition: true,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("generated gauge composition");
+    let independent_composition = problem_fixture(ProblemOptions {
+        overlapping_gauges: true,
+        declared_gauge_composition: true,
+        independent_gauge_composition: true,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("independent-product gauge composition");
+    assert_eq!(
+        generated_composition.sources(),
+        independent_composition.sources()
+    );
+    assert_eq!(
+        generated_composition.gauges(),
+        independent_composition.gauges()
+    );
+    for document in [&generated_composition, &independent_composition] {
+        assert_eq!(
+            IdentifiabilityProblemDocument::from_canonical_bytes(
+                &document.canonical_bytes().expect("composition transport")
+            )
+            .expect("composition replay"),
+            *document,
+        );
+    }
+    assert_ne!(
+        unresolved_problem_identity(&generated_composition),
+        unresolved_problem_identity(&independent_composition),
+        "gauge_compositions semantic field did not move identity",
+    );
+
     let shared_left = problem_fixture(ProblemOptions {
         retrospective_reuse: true,
         declared_sharing: true,
@@ -2324,7 +5926,7 @@ fn identifiability_problem_identity_bindings_have_exact_mutation_evidence() {
         unresolved_problem_identity(&shared_right),
         "data_reuse semantic field did not move identity",
     );
-    assert_eq!(baseline_document.schema_version(), 1);
+    assert_eq!(baseline_document.schema_version(), 3);
     log(
         "problem-identity-semantic-fields",
         "pass",
@@ -2442,19 +6044,28 @@ fn seed_and_tolerance_move_execution_identity() {
 #[test]
 fn execution_source_authority_moves_execution_identity() {
     let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
-    let axes = BTreeSet::from([
-        RequestedClaimAxis::Structural,
-        RequestedClaimAxis::Local,
-        RequestedClaimAxis::Generic,
-        RequestedClaimAxis::Global,
-        RequestedClaimAxis::Practical,
-    ]);
-    let content_only =
-        execution_with_axes_and_authority(&problem, false, 17, 1.0e-10, false, axes.clone(), false)
-            .expect("content-verified execution");
-    let external_trust =
-        execution_with_axes_and_authority(&problem, false, 17, 1.0e-10, false, axes, true)
-            .expect("externally trusted execution");
+    let content_only = execution_with_claim_requests_and_authority(
+        &problem,
+        false,
+        17,
+        1.0e-10,
+        false,
+        vec![default_claim_request(&problem)],
+        Vec::new(),
+        false,
+    )
+    .expect("content-verified execution");
+    let external_trust = execution_with_claim_requests_and_authority(
+        &problem,
+        false,
+        17,
+        1.0e-10,
+        false,
+        vec![default_claim_request(&problem)],
+        Vec::new(),
+        true,
+    )
+    .expect("externally trusted execution");
     assert_ne!(
         content_only.id().expect("content-only id"),
         external_trust.id().expect("external-trust id"),
@@ -2534,8 +6145,24 @@ fn identifiability_execution_identity_bindings_have_exact_mutation_evidence() {
     parts.derivative_provider = None;
     assert_moves("derivative_provider", parts, false);
     let mut parts = baseline_parts.clone();
-    parts.requested_axes.remove(&RequestedClaimAxis::Generic);
-    assert_moves("requested_axes", parts, false);
+    let baseline_request = parts
+        .claim_requests
+        .first()
+        .expect("baseline claim request")
+        .clone();
+    parts.claim_requests[0] = ClaimRequest::new(
+        baseline_request.claim().clone(),
+        DimensionlessErrorPolicy::try_new(
+            baseline_request.error_policy().metric().clone(),
+            baseline_request
+                .error_policy()
+                .nondimensionalization()
+                .clone(),
+            9.0e-9,
+        )
+        .expect("claim error-bound mutation"),
+    );
+    assert_moves("claim_requests", parts, false);
     let mut parts = baseline_parts.clone();
     for (role, action) in &mut parts.actions {
         if role.as_str() == "yield_stress" {
@@ -2546,11 +6173,13 @@ fn identifiability_execution_identity_bindings_have_exact_mutation_evidence() {
     }
     assert_moves("actions", parts, false);
     let mut parts = baseline_parts.clone();
+    let numerical_nondimensionalization = parts.numerical.nondimensionalization().clone();
     parts.numerical = IdentifiabilityNumericalPolicy::try_new(
         1.0e-8,
         0.0,
         1.0e12,
         ArithmeticPolicy::CertifiedInterval,
+        numerical_nondimensionalization,
     )
     .expect("numerical mutation");
     assert_moves("numerical", parts, false);
@@ -2572,6 +6201,63 @@ fn identifiability_execution_identity_bindings_have_exact_mutation_evidence() {
     );
     assert_moves("determinism_contract", parts, false);
     assert_moves("source_authority", baseline_parts.clone(), true);
+
+    let gauge_problem = admit_fixture(problem_fixture(ProblemOptions {
+        gauge_case: 4,
+        ..ProblemOptions::default()
+    }));
+    let action =
+        GaugeActionReference::Single(GaugeClassId::try_new("fixture-gauge").expect("gauge id"));
+    let gauge_claim = structural_claim(
+        &gauge_problem,
+        "identity-unreduced-gauge",
+        FiberStructure::OrbitQuotientUnique {
+            action: action.clone(),
+        },
+        ClaimSubject::Parameter(role("yield_stress")),
+        ClaimScope::WholeCampaign,
+    );
+    let unreduced = |reason: &str| {
+        GaugeReductionBinding::try_new(
+            GaugeReductionId::try_new("identity-unreduced-plan").expect("reduction id"),
+            action.clone(),
+            BTreeSet::from([gauge_claim.id().clone()]),
+            GaugeReductionPlan::Unreduced {
+                reason: reason.to_string(),
+            },
+            GaugeReductionStage::Root,
+            GaugeMeasureSemantics::NotApplicable {
+                reason: "no quotient transport is claimed for an unreduced action".to_string(),
+            },
+        )
+        .expect("unreduced gauge identity fixture")
+    };
+    let unreduced_left = execution_for_claim_with_gauge_reductions(
+        &gauge_problem,
+        gauge_claim.clone(),
+        vec![unreduced(
+            "the action remains explicit in the original coordinates",
+        )],
+    )
+    .expect("left unreduced execution");
+    let unreduced_right = execution_for_claim_with_gauge_reductions(
+        &gauge_problem,
+        gauge_claim.clone(),
+        vec![unreduced(
+            "the action is intentionally retained for a different declared reason",
+        )],
+    )
+    .expect("right unreduced execution");
+    assert_eq!(
+        unreduced_left.source_authority(),
+        unreduced_right.source_authority(),
+        "reason-only reduction mutation must not alter source authority",
+    );
+    assert_ne!(
+        unreduced_left.id().expect("left unreduced id"),
+        unreduced_right.id().expect("right unreduced id"),
+        "gauge_reductions semantic field did not move identity",
+    );
 
     let physical_variant = admit_fixture(problem_fixture(ProblemOptions {
         second_case_complementary: true,
@@ -2596,7 +6282,7 @@ fn identifiability_execution_identity_bindings_have_exact_mutation_evidence() {
         baseline_id,
         authority_execution.id().expect("authority variant id")
     );
-    assert_eq!(baseline.schema_version(), 1);
+    assert_eq!(baseline.schema_version(), 3);
     log(
         "execution-identity-semantic-fields",
         "pass",
@@ -2620,8 +6306,9 @@ fn execution_action_input_order_is_nonsemantic() {
         baseline.analyzer().clone(),
         baseline.build().clone(),
         baseline.derivative_provider().cloned(),
-        baseline.requested_axes().clone(),
+        baseline.claim_requests().values().cloned().collect(),
         reversed_actions,
+        baseline.gauge_reductions().values().cloned().collect(),
         baseline.numerical_policy().clone(),
         baseline.initialization().clone(),
         baseline.stopping().clone(),
@@ -2883,23 +6570,43 @@ fn identifiability_assessment_identity_bindings_have_exact_mutation_evidence() {
     let baseline_claim = baseline.claims().values().next().expect("baseline claim");
     let claim_variant = TypedIdentifiabilityClaim::new(
         baseline_claim.id().clone(),
-        baseline_claim.information(),
+        baseline_claim.information().clone(),
         baseline_claim.extent(),
+        FiberStructure::FiniteToOne {
+            maximum_cardinality: Some(FiberCardinalityBound::UniformU64(2)),
+        },
         baseline_claim.quantifier().clone(),
-        ScalarDomain::Complex,
+        baseline_claim.scalar_domain().clone(),
         baseline_claim.subject().clone(),
         baseline_claim.scope().clone(),
     );
-    let mut parts = baseline_parts.clone();
-    *parts
+    let variant_plan =
+        execution_for_claim(&problem, false, 17, 1.0e-10, false, claim_variant.clone())
+            .expect("claim-variant execution");
+    let mut claim_parts = baseline_parts.clone();
+    *claim_parts
         .claims
         .iter_mut()
         .find(|claim| claim.id() == baseline_claim.id())
         .expect("claim mutation target") = claim_variant;
-    assert_eq!(parts.evidence, baseline_parts.evidence);
-    assert_eq!(parts.source_authority, baseline_parts.source_authority);
-    assert_eq!(parts.header, baseline_parts.header);
-    assert_moves("claims", parts);
+    assert_eq!(claim_parts.evidence, baseline_parts.evidence);
+    assert_eq!(
+        claim_parts.source_authority,
+        baseline_parts.source_authority
+    );
+    assert_eq!(claim_parts.header, baseline_parts.header);
+    let claim_variant_assessment = claim_parts.build(&problem, &variant_plan);
+    assert_ne!(
+        baseline.execution_id(),
+        claim_variant_assessment.execution_id()
+    );
+    assert_ne!(
+        baseline_id,
+        claim_variant_assessment
+            .id()
+            .expect("claim-variant assessment id"),
+        "validity-coupled claim and execution projections must move assessment identity",
+    );
 
     let mut parts = baseline_parts.clone();
     let (_, conclusion) = parts
@@ -2907,21 +6614,111 @@ fn identifiability_assessment_identity_bindings_have_exact_mutation_evidence() {
         .iter_mut()
         .find(|(id, _)| id == baseline_claim.id())
         .expect("evidence mutation target");
-    let (method, receipt) = match conclusion.clone() {
+    let (method, receipt, metric, nondimensionalization) = match conclusion.clone() {
         ClaimAssessment::ClaimedEstablished {
-            method, receipt, ..
-        } => (method, receipt),
+            method,
+            receipt,
+            metric,
+            nondimensionalization,
+            ..
+        } => (method, receipt, metric, nondimensionalization),
         _ => panic!("baseline evidence unexpectedly changed variant"),
     };
     *conclusion = ClaimAssessment::ClaimedEstablished {
         method,
         receipt,
-        tolerance: 2.0e-8,
+        metric,
+        nondimensionalization,
+        certified_error_bound: 7.5e-9,
+        gauge_resolutions: BTreeMap::new(),
     };
     assert_eq!(parts.claims, baseline_parts.claims);
     assert_eq!(parts.source_authority, baseline_parts.source_authority);
     assert_eq!(parts.header, baseline_parts.header);
     assert_moves("evidence", parts);
+
+    let gauge_problem = admit_fixture(problem_fixture(ProblemOptions {
+        one_gauge: true,
+        ..ProblemOptions::default()
+    }));
+    let derived_definition = source(
+        "gauge-invariant-functional",
+        SourceKind::DerivedFunctional,
+        hash("gauge-invariant-functional"),
+    );
+    let gauge_claim = structural_claim(
+        &gauge_problem,
+        "gauge-resolution-identity",
+        FiberStructure::Unique,
+        ClaimSubject::DerivedFunctional {
+            definition: derived_definition,
+            parameters: BTreeSet::from([role("yield_stress")]),
+        },
+        ClaimScope::WholeCampaign,
+    );
+    let gauge_execution = execution_for_claim(
+        &gauge_problem,
+        false,
+        17,
+        1.0e-10,
+        false,
+        gauge_claim.clone(),
+    )
+    .expect("gauge-resolution execution");
+    let build_gauge_assessment = |disposition| {
+        let request = &gauge_execution.claim_requests()[gauge_claim.id()];
+        let method = gauge_execution.analyzer().clone();
+        let receipt = source(
+            "gauge-resolution-receipt",
+            SourceKind::EvidenceReceipt,
+            hash("gauge-resolution-receipt"),
+        );
+        let action =
+            GaugeActionReference::Single(GaugeClassId::try_new("single-gauge").expect("gauge id"));
+        let mut assessment_sources = claim_sources(&gauge_claim);
+        assessment_sources.extend([
+            method.clone(),
+            receipt.clone(),
+            request.error_policy().metric().clone(),
+            request.error_policy().nondimensionalization().clone(),
+        ]);
+        IdentifiabilityAssessment::try_new(
+            header("gauge-resolution-assessment", "identifiability.assess"),
+            &gauge_problem,
+            &gauge_execution,
+            vec![gauge_claim.clone()],
+            vec![(
+                gauge_claim.id().clone(),
+                ClaimAssessment::ClaimedEstablished {
+                    method: method.clone(),
+                    receipt: receipt.clone(),
+                    metric: request.error_policy().metric().clone(),
+                    nondimensionalization: request.error_policy().nondimensionalization().clone(),
+                    certified_error_bound: 5.0e-9,
+                    gauge_resolutions: BTreeMap::from([(
+                        action.clone(),
+                        GaugeResolutionEvidence::new(action, disposition, method, receipt),
+                    )]),
+                },
+            )],
+            resolve_owned_sources(assessment_sources, false, None),
+        )
+        .expect("positive nonempty gauge-resolution assessment")
+    };
+    let no_projection = build_gauge_assessment(GaugeResolutionDisposition::NoProjectionOnSubject);
+    let descends = build_gauge_assessment(GaugeResolutionDisposition::SubjectDescendsToQuotient);
+    assert_eq!(no_projection.problem_id(), descends.problem_id());
+    assert_eq!(no_projection.execution_id(), descends.execution_id());
+    assert_eq!(no_projection.claims(), descends.claims());
+    assert_eq!(
+        no_projection.source_authority(),
+        descends.source_authority(),
+    );
+    assert_ne!(
+        no_projection.id().expect("no-projection assessment id"),
+        descends.id().expect("quotient-descent assessment id"),
+        "nonempty gauge_resolutions semantic field did not move identity",
+    );
 
     let receipt = match baseline
         .evidence()
@@ -2941,9 +6738,7 @@ fn identifiability_assessment_identity_bindings_have_exact_mutation_evidence() {
     let replacement = SourceResolution::verify(
         &receipt,
         b"receipt-left",
-        AuthorityDisposition::ExternalTrustReceipt {
-            trust_receipt: hash("assessment-receipt-external-trust"),
-        },
+        external_trust("assessment-receipt-external-trust", &receipt),
     )
     .expect("assessment-exclusive trusted receipt resolution");
     let mut replacement_count = 0;
@@ -3036,7 +6831,7 @@ fn identifiability_assessment_identity_bindings_have_exact_mutation_evidence() {
 
     const ASSESSMENT_MAGIC: &[u8] = b"fs-material-identifiability-assessment\0";
     let mut stale = baseline.canonical_bytes().expect("assessment transport");
-    stale[ASSESSMENT_MAGIC.len()..ASSESSMENT_MAGIC.len() + 4].copy_from_slice(&2_u32.to_le_bytes());
+    stale[ASSESSMENT_MAGIC.len()..ASSESSMENT_MAGIC.len() + 4].copy_from_slice(&1_u32.to_le_bytes());
     assert!(matches!(
         IdentifiabilityAssessment::from_canonical_bytes(
             &stale,
@@ -3054,51 +6849,63 @@ fn identifiability_assessment_identity_bindings_have_exact_mutation_evidence() {
 }
 
 #[test]
-fn assessment_authority_must_agree_with_problem_on_transitive_overlap() {
+fn assessment_authority_must_agree_with_problem_and_execution_on_transitive_overlap() {
     let problem = admit_fixture(problem_fixture(ProblemOptions {
-        claim_domain_in_problem: true,
+        claim_strata_in_problem: true,
         ..ProblemOptions::default()
     }));
     let execution = execution(&problem, false, 17, 1.0e-10, false).expect("execution");
+    assert!(matches!(
+        execution
+            .claim_requests()
+            .values()
+            .next()
+            .expect("default claim request")
+            .claim()
+            .fiber(),
+        FiberStructure::Stratified { .. }
+    ));
+    let overlap_key = source_key("claim-strata");
+    assert_eq!(
+        execution.source_authority().entries().get(&overlap_key),
+        problem.source_resolutions().get(&overlap_key),
+        "preregistering the claim must carry forward the problem's admitted strata authority",
+    );
     assessment_result(&problem, &execution, "matching-domain-authority")
         .expect("matching problem/assessment authority admits");
-    let result = assessment_result_with_domain_authority(
+    let result = assessment_result_with_claim_source_authority(
         &problem,
         &execution,
         "conflicting-domain-authority",
-        AuthorityDisposition::ExternalTrustReceipt {
-            trust_receipt: hash("conflicting-domain-trust"),
-        },
+        external_trust(
+            "conflicting-domain-trust",
+            &problem.document().sources()[&overlap_key],
+        ),
     );
     assert!(matches!(
         result,
         Err(IdentifiabilityError::SourceMismatch {
-            field: "assessment/problem source authority",
+            field: "assessment/execution source authority",
         })
     ));
     log(
-        "assessment-problem-authority-overlap",
+        "assessment-problem-execution-authority-overlap",
         "pass",
-        "assessment cannot relabel authority for a source already admitted by the problem",
+        "assessment cannot relabel claim strata whose problem authority was carried into exact execution preregistration",
     );
 }
 
 #[test]
 fn assessment_authority_must_agree_with_execution_on_transitive_overlap() {
     let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
-    let execution = execution_with_axes_and_authority(
+    let execution = execution_with_claim_requests_and_authority(
         &problem,
         false,
         17,
         1.0e-10,
         false,
-        BTreeSet::from([
-            RequestedClaimAxis::Structural,
-            RequestedClaimAxis::Local,
-            RequestedClaimAxis::Generic,
-            RequestedClaimAxis::Global,
-            RequestedClaimAxis::Practical,
-        ]),
+        vec![default_claim_request(&problem)],
+        Vec::new(),
         true,
     )
     .expect("externally trusted execution");
@@ -3119,7 +6926,17 @@ fn assessment_authority_must_agree_with_execution_on_transitive_overlap() {
 #[test]
 fn assessment_input_order_is_nonsemantic() {
     let problem = admit_fixture(problem_fixture(ProblemOptions::default()));
-    let execution = execution(&problem, false, 17, 1.0e-10, false).expect("execution");
+    let execution = execution_with_claim_requests_and_authority(
+        &problem,
+        false,
+        17,
+        1.0e-10,
+        false,
+        two_claims().into_iter().map(request_for_claim).collect(),
+        Vec::new(),
+        false,
+    )
+    .expect("two-claim execution");
     let baseline = two_claim_assessment(&problem, &execution);
     let mut claims = baseline.claims().values().cloned().collect::<Vec<_>>();
     let mut evidence = baseline
@@ -3322,6 +7139,12 @@ fn identifiability_identity_preimages_have_exact_wire_layout() {
         );
     }
     assert_eq!(
+        problem_bytes.get(problem_at),
+        Some(&0),
+        "absent joint-prior tag moved",
+    );
+    problem_at += 1;
+    assert_eq!(
         read_u32_le(&problem_bytes, &mut problem_at, "source registry count"),
         u32::try_from(problem.document().sources().len()).expect("bounded source count"),
     );
@@ -3335,6 +7158,34 @@ fn identifiability_identity_preimages_have_exact_wire_layout() {
     assert_eq!(
         hash_domain(IDENTIFIABILITY_PROBLEM_IDENTITY_DOMAIN, &problem_bytes),
         problem.id().digest(),
+    );
+
+    let posterior_document = problem_fixture(ProblemOptions {
+        joint_prior_choice: 1,
+        ..ProblemOptions::default()
+    })
+    .document
+    .expect("posterior wire-layout problem");
+    let posterior_bytes = posterior_document
+        .canonical_bytes()
+        .expect("posterior problem preimage");
+    let mut posterior_at = PROBLEM_MAGIC.len();
+    assert_eq!(
+        read_u32_le(&posterior_bytes, &mut posterior_at, "posterior version"),
+        IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION,
+    );
+    for _ in 0..4 {
+        let _ = read_text(&posterior_bytes, &mut posterior_at, "posterior root source");
+    }
+    assert_eq!(
+        posterior_bytes.get(posterior_at),
+        Some(&1),
+        "present joint-prior tag moved",
+    );
+    posterior_at += 1;
+    assert_eq!(
+        read_text(&posterior_bytes, &mut posterior_at, "joint prior source"),
+        "joint-prior-measure-a",
     );
 
     let source_admission_bytes = problem
@@ -3473,7 +7324,7 @@ fn trailing_bytes_and_stale_versions_refuse() {
     trailing.push(0);
     assert!(IdentifiabilityProblemDocument::from_canonical_bytes(&trailing).is_err());
     let mut stale = problem.canonical_bytes().expect("bytes");
-    stale[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&2_u32.to_le_bytes());
+    stale[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&1_u32.to_le_bytes());
     assert!(matches!(
         IdentifiabilityProblemDocument::from_canonical_bytes(&stale),
         Err(IdentifiabilityError::UnsupportedSchemaVersion { .. })
@@ -3499,7 +7350,7 @@ fn identifiability_identity_versions_and_transports_fail_closed() {
     bad_problem_magic[0] ^= 0x01;
     assert!(IdentifiabilityProblemDocument::from_canonical_bytes(&bad_problem_magic).is_err());
     problem_bytes[PROBLEM_MAGIC.len()..PROBLEM_MAGIC.len() + 4]
-        .copy_from_slice(&2_u32.to_le_bytes());
+        .copy_from_slice(&1_u32.to_le_bytes());
     assert!(matches!(
         IdentifiabilityProblemDocument::from_canonical_bytes(&problem_bytes),
         Err(IdentifiabilityError::UnsupportedSchemaVersion { .. })
@@ -3519,7 +7370,7 @@ fn identifiability_identity_versions_and_transports_fail_closed() {
         .is_err()
     );
     execution_bytes[EXECUTION_MAGIC.len()..EXECUTION_MAGIC.len() + 4]
-        .copy_from_slice(&2_u32.to_le_bytes());
+        .copy_from_slice(&1_u32.to_le_bytes());
     assert!(matches!(
         IdentifiabilityExecutionPlan::from_canonical_bytes(
             &execution_bytes,
@@ -3543,7 +7394,7 @@ fn identifiability_identity_versions_and_transports_fail_closed() {
         .is_err()
     );
     assessment_bytes[ASSESSMENT_MAGIC.len()..ASSESSMENT_MAGIC.len() + 4]
-        .copy_from_slice(&2_u32.to_le_bytes());
+        .copy_from_slice(&1_u32.to_le_bytes());
     assert!(matches!(
         IdentifiabilityAssessment::from_canonical_bytes(
             &assessment_bytes,
@@ -3553,7 +7404,7 @@ fn identifiability_identity_versions_and_transports_fail_closed() {
         ),
         Err(IdentifiabilityError::UnsupportedSchemaVersion { .. })
     ));
-    assert!(check_source_admission_identity_version(2).is_err());
+    assert!(check_source_admission_identity_version(1).is_err());
     log(
         "identity-stage-version-transports",
         "pass",
@@ -3591,18 +7442,58 @@ fn source_ref_semantics_version_and_hash_are_mandatory() {
 }
 
 #[test]
-fn gauge_kinds_retain_ambitious_continuous_discrete_and_stratified_space() {
+fn gauge_algebra_and_orbits_retain_ambitious_continuous_discrete_and_stratified_space() {
     let members = BTreeSet::from([role("yield_stress"), role("hardening_modulus")]);
-    for (index, kind) in [
-        GaugeKind::Continuous { dimension: 1 },
-        GaugeKind::Discrete { group_order: 2 },
-        GaugeKind::Mixed {
-            continuous_dimension: 1,
-            discrete_order: 2,
-        },
-        GaugeKind::Stratified {
-            strata: source_key("strata"),
-        },
+    for (index, (algebra, orbit_geometry)) in [
+        (
+            GaugeAlgebra::Continuous {
+                group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+            },
+            GaugeOrbitGeometry::Regular {
+                principal: RegularGaugeOrbit::new(
+                    GaugeContinuousDimension::Finite { dimension: 1 },
+                    GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                ),
+                stabilizer_profile: None,
+            },
+        ),
+        (
+            GaugeAlgebra::Discrete {
+                size: GaugeDiscreteSize::Finite { order: 2 },
+            },
+            GaugeOrbitGeometry::Regular {
+                principal: RegularGaugeOrbit::new(
+                    GaugeContinuousDimension::Finite { dimension: 0 },
+                    GaugeDiscreteOrbitCardinality::Finite { cardinality: 2 },
+                ),
+                stabilizer_profile: None,
+            },
+        ),
+        (
+            GaugeAlgebra::Mixed {
+                continuous_group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+                component_group: GaugeDiscreteSize::Finite { order: 2 },
+            },
+            GaugeOrbitGeometry::Regular {
+                principal: RegularGaugeOrbit::new(
+                    GaugeContinuousDimension::Finite { dimension: 1 },
+                    GaugeDiscreteOrbitCardinality::Finite { cardinality: 2 },
+                ),
+                stabilizer_profile: None,
+            },
+        ),
+        (
+            GaugeAlgebra::Continuous {
+                group_dimension: GaugeContinuousDimension::Finite { dimension: 1 },
+            },
+            GaugeOrbitGeometry::Stratified {
+                principal: RegularGaugeOrbit::new(
+                    GaugeContinuousDimension::Finite { dimension: 1 },
+                    GaugeDiscreteOrbitCardinality::Finite { cardinality: 1 },
+                ),
+                orbit_type_stabilizer_profile: source_key("strata"),
+            },
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -3612,10 +7503,12 @@ fn gauge_kinds_retain_ambitious_continuous_discrete_and_stratified_space() {
                 GaugeClassId::try_new(format!("kind-{index}")).expect("gauge id"),
                 members.clone(),
                 source_key("action"),
-                kind,
-                GaugeHandling::Unresolved {
-                    reason: "the theorem search has not resolved this gauge".to_string(),
+                algebra,
+                orbit_geometry,
+                GaugeStatus::Candidate {
+                    rationale: source_key("candidate-rationale"),
                 },
+                gauge_validity_fixture(&members, true),
             )
             .is_ok()
         );
@@ -3636,9 +7529,11 @@ fn identity_version_guard_is_exact() {
         check_execution_identity_version,
         check_assessment_identity_version,
     ] {
-        assert!(checker(1).is_ok());
+        assert!(checker(3).is_ok());
         assert!(checker(0).is_err());
+        assert!(checker(1).is_err());
         assert!(checker(2).is_err());
+        assert!(checker(4).is_err());
     }
     log(
         "authority-version-guard",

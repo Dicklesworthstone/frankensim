@@ -10,17 +10,65 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::ContentHash;
 
 /// Version of the seven V&V artifact schemas.
-// v2 (bead xl3yi): experiments carry the canonical observation
-// manifest (id -> immutable source-row identity) on the wire, the
-// aggregate observations hash is derived rather than transported, and
-// the blind-holdout partition binds source identities into its sealed
-// commitment (domain ...vv-blind-holdout.v2). v1 artifacts do not
-// decode under v2.
-pub const VV_SCHEMA_VERSION: u32 = 2;
+// v3 (bead i94v.3.3.1): every experiment-manifest row binds its QoI,
+// instrument, acquisition channel, and clock in addition to a typed source
+// reference: exact dataset bytes, locator domain/version, locator hash, and
+// extraction receipt. Repeatability covariance also carries its explicit QoI
+// row/column order instead of inheriting a caller-dependent set order. The
+// observation-manifest identity domain is therefore v3. The blind-holdout
+// commitment remains the hash-only v2 commitment: its locator identity is
+// cross-checked against the richer experiment row.
+// Earlier wire schemas deliberately do not decode under v3.
+pub const VV_SCHEMA_VERSION: u32 = 3;
 /// Version of the structural rule matrix enforced by [`VvCase::admit`].
 pub const VV_RULESET_VERSION: u32 = 1;
-/// Stable family identity for canonical V&V payloads.
-pub const VV_ARTIFACT_FAMILY: &str = "org.frankensim.fs-evidence.vv-artifact.v1";
+/// Semantic identity version for the exact canonical artifact transport.
+///
+/// The version advances with [`VV_ARTIFACT_FAMILY`] and the wire schema because
+/// an artifact digest commits to the complete current transport.
+pub const VV_ARTIFACT_IDENTITY_VERSION: u32 = 3;
+/// Stable v3 identity domain for canonical V&V payloads.
+///
+/// Schema v3 changed the semantic observation-row payload, so retaining the v1
+/// digest domain would leave cross-era identity governance ambiguous.
+pub const VV_ARTIFACT_FAMILY: &str = "org.frankensim.fs-evidence.vv-artifact.v3";
+/// Semantic identity version for one complete, closed V&V case.
+///
+/// A case identity is an admission-receipt authority and is therefore kept
+/// distinct from every individual artifact identity, even though both use the
+/// same bounded canonical transport machinery.
+pub const VV_CASE_IDENTITY_VERSION: u32 = 3;
+/// Stable v3 identity domain for the exact canonical [`VvCase`] transport.
+pub const VV_CASE_FAMILY: &str = "org.frankensim.fs-evidence.vv-case.v3";
+/// Semantic identity version of the blind-holdout commitment.
+///
+/// Version 2 binds both the canonical observation id and its immutable source
+/// locator hash. It intentionally remains distinct from wire-schema v3: the
+/// case admission path cross-checks these v2 locator hashes against the richer
+/// typed observation-source references carried by experiment artifacts.
+pub const VV_BLIND_HOLDOUT_IDENTITY_VERSION: u32 = 2;
+/// Domain-separated identity for one preregistered blind-holdout commitment.
+pub const VV_BLIND_HOLDOUT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-evidence.vv-blind-holdout.v2";
+/// Semantic identity version of a structural schema-admission receipt.
+///
+/// Version 2 writes each artifact family's stable wire tag into the receipt
+/// preimage. Version 1 used the tag for sorting but encoded only the slug, so
+/// the preimage algorithm is intentionally domain-rotated rather than silently
+/// reinterpreted.
+pub const VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_VERSION: u32 = 2;
+/// Domain-separated identity for the exact fields of a schema-admission
+/// receipt. The receipt separately carries the admitted wire-schema and rule
+/// versions as semantic fields.
+pub const VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-evidence.vv-schema-admission-receipt.v2";
+/// Semantic version of the complete typed observation-manifest identity.
+///
+/// This version and [`VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN`] must advance
+/// together whenever [`ObservationManifest::canonical_hash`] changes meaning.
+pub const VV_OBSERVATION_MANIFEST_IDENTITY_VERSION: u32 = 3;
+/// Domain-separated identity for the exact typed observation-manifest preimage.
+pub const VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-evidence.vv-observation-manifest.v3";
 /// Maximum UTF-8 bytes in a machine identity.
 pub const MAX_VV_ID_BYTES: usize = 256;
 /// Maximum UTF-8 bytes in one descriptive field.
@@ -349,7 +397,7 @@ vv_id!(AxisId, "axis_id");
 vv_id!(UnitId, "unit_id");
 
 /// The seven top-level artifact families.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactKind {
     ContextOfUse,
     ValidationPlan,
@@ -361,6 +409,23 @@ pub enum ArtifactKind {
 }
 
 impl ArtifactKind {
+    /// Stable wire tag used anywhere artifact families need canonical ordering.
+    ///
+    /// This explicit mapping, rather than Rust enum declaration order, is part
+    /// of the versioned V&V identity contract.
+    #[must_use]
+    pub const fn canonical_wire_tag(self) -> u8 {
+        match self {
+            Self::ContextOfUse => 0,
+            Self::ValidationPlan => 1,
+            Self::ExperimentArtifact => 2,
+            Self::CalibrationSplit => 3,
+            Self::SolutionVerificationReceipt => 4,
+            Self::PredictionAssessment => 5,
+            Self::AssumptionsLedger => 6,
+        }
+    }
+
     #[must_use]
     pub const fn slug(self) -> &'static str {
         match self {
@@ -372,6 +437,20 @@ impl ArtifactKind {
             Self::PredictionAssessment => "prediction-assessment",
             Self::AssumptionsLedger => "assumptions-ledger",
         }
+    }
+}
+
+impl PartialOrd for ArtifactKind {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ArtifactKind {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.canonical_wire_tag()
+            .cmp(&other.canonical_wire_tag())
+            .then_with(|| self.slug().cmp(other.slug()))
     }
 }
 
@@ -459,6 +538,10 @@ impl ArtifactHeader {
         if let SeedDeclaration::NotApplicable { reason } = &seed {
             validate_text(reason, "header.seed.not_applicable")?;
         }
+        let accuracy = match accuracy {
+            DeclaredBudget::Limit(value) if value == 0.0 => DeclaredBudget::Limit(0.0),
+            other => other,
+        };
         match &accuracy {
             DeclaredBudget::Limit(value) if value.is_finite() && *value >= 0.0 => {}
             DeclaredBudget::NotApplicable { reason } => {
@@ -1585,6 +1668,22 @@ impl ClockSynchronization {
             } => Self::synchronized(clock_ids, method, max_skew_seconds, evidence_hash),
         }
     }
+
+    /// Whether this topology explicitly contains `clock_id`.
+    #[must_use]
+    pub fn contains_clock(&self, clock_id: &ArtifactId) -> bool {
+        match self {
+            Self::SingleClock { clock_id: declared } => declared == clock_id,
+            Self::Synchronized { clock_ids, .. } => clock_ids.iter().any(|id| id == clock_id),
+        }
+    }
+
+    fn contains_clock_canonical(&self, clock_id: &ArtifactId) -> bool {
+        match self {
+            Self::SingleClock { clock_id: declared } => declared == clock_id,
+            Self::Synchronized { clock_ids, .. } => clock_ids.binary_search(clock_id).is_ok(),
+        }
+    }
 }
 
 /// Symmetric covariance stored as a lower triangle in declared QoI order.
@@ -1595,7 +1694,7 @@ pub struct CovarianceMatrix {
 }
 
 impl CovarianceMatrix {
-    pub fn try_new(dimension: usize, lower_triangle: Vec<f64>) -> Result<Self, VvErrors> {
+    pub fn try_new(dimension: usize, mut lower_triangle: Vec<f64>) -> Result<Self, VvErrors> {
         let expected = dimension
             .checked_mul(dimension.saturating_add(1))
             .and_then(|value| value.checked_div(2));
@@ -1611,6 +1710,14 @@ impl CovarianceMatrix {
                 "experiment.covariance",
                 "covariance must be finite and have exactly n(n+1)/2 lower-triangle entries",
             ));
+        }
+        // A covariance tensor has one mathematical zero. Normalize IEEE
+        // signed zero before validation and identity encoding so +0.0 and
+        // -0.0 cannot mint distinct scientific artifacts.
+        for value in &mut lower_triangle {
+            if *value == 0.0 {
+                *value = 0.0;
+            }
         }
         let candidate = Self {
             dimension,
@@ -1694,10 +1801,22 @@ impl CovarianceMatrix {
     }
 }
 
-/// Repeatability sample count and covariance.
+/// Repeatability sample count and covariance with explicit QoI-axis meaning.
+///
+/// [`Self::try_new`] creates a summary whose covariance axes are bound, exactly
+/// once, to the ordered QoI argument of [`ExperimentArtifact::try_new`]. Use
+/// [`Self::try_new_for_qois`] when the axis declaration must exist before the
+/// summary enters an experiment. The declared order interprets the caller's
+/// matrix exactly once; admission then permutes the tensor into sorted QoI
+/// order. Equivalent paired axis/matrix permutations that pass the deliberately
+/// fail-closed finite-precision PSD screen share canonical bytes, while
+/// relabelling axes without the matching matrix permutation changes the
+/// represented covariance. Near-singular presentation invariance requires a
+/// stronger certified PSD predicate and is not claimed by this constructor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepeatabilitySummary {
     replicates: u32,
+    qoi_order: Vec<QoiId>,
     covariance: CovarianceMatrix,
 }
 
@@ -1714,13 +1833,91 @@ impl RepeatabilitySummary {
         }
         Ok(Self {
             replicates,
+            qoi_order: Vec::new(),
             covariance,
         })
+    }
+
+    /// Construct a repeatability summary with an explicit covariance-axis
+    /// order. The order must contain one unique QoI per covariance dimension.
+    pub fn try_new_for_qois(
+        replicates: u32,
+        qoi_order: Vec<QoiId>,
+        covariance: CovarianceMatrix,
+    ) -> Result<Self, VvErrors> {
+        Self::try_new(replicates, covariance)?.bind_to_experiment_qois(&qoi_order)
+    }
+
+    fn bind_to_experiment_qois(mut self, experiment_qois: &[QoiId]) -> Result<Self, VvErrors> {
+        let experiment_set = experiment_qois.iter().cloned().collect::<BTreeSet<_>>();
+        if experiment_qois.is_empty()
+            || experiment_qois.len() > MAX_VV_ITEMS
+            || experiment_set.len() != experiment_qois.len()
+        {
+            return Err(invalid(
+                VvRule::ExperimentRepeatabilityCovariance,
+                None,
+                None,
+                "experiment.repeatability.qoi_order",
+                "covariance axes require a bounded unique experiment QoI order",
+            ));
+        }
+        let declared_order = if self.qoi_order.is_empty() {
+            experiment_qois.to_vec()
+        } else {
+            self.qoi_order.clone()
+        };
+        let axis_set = declared_order.iter().cloned().collect::<BTreeSet<_>>();
+        if declared_order.len() != self.covariance.dimension
+            || axis_set.len() != declared_order.len()
+            || axis_set != experiment_set
+        {
+            return Err(invalid(
+                VvRule::ExperimentRepeatabilityCovariance,
+                None,
+                None,
+                "experiment.repeatability.qoi_order",
+                "covariance axes must name every experiment QoI exactly once and match the matrix dimension",
+            ));
+        }
+        let canonical_order = axis_set.into_iter().collect::<Vec<_>>();
+        if declared_order != canonical_order {
+            let declared_index = declared_order
+                .iter()
+                .enumerate()
+                .map(|(index, qoi)| (qoi.clone(), index))
+                .collect::<BTreeMap<_, _>>();
+            let mut canonical_lower = Vec::with_capacity(self.covariance.lower_triangle.len());
+            for canonical_row in 0..canonical_order.len() {
+                let declared_row = declared_index[&canonical_order[canonical_row]];
+                for canonical_column in 0..=canonical_row {
+                    let declared_column = declared_index[&canonical_order[canonical_column]];
+                    canonical_lower.push(self.covariance.get(declared_row, declared_column));
+                }
+            }
+            // Canonical transport decodes and validates this sorted tensor.
+            // Validate the exact canonical permutation now as well: the
+            // floating LDL^T predicate is deliberately fail-closed and can be
+            // order-sensitive near singularity, so skipping this check could
+            // admit an artifact whose own canonical bytes do not decode.
+            self.covariance = CovarianceMatrix::try_new(canonical_order.len(), canonical_lower)?;
+        }
+        self.qoi_order = canonical_order;
+        Ok(self)
     }
 
     #[must_use]
     pub const fn replicates(&self) -> u32 {
         self.replicates
+    }
+
+    /// Canonical sorted row/column order of the covariance matrix.
+    ///
+    /// This is empty only for a standalone value returned by [`Self::try_new`]
+    /// before it has entered an [`ExperimentArtifact`].
+    #[must_use]
+    pub fn qoi_order(&self) -> &[QoiId] {
+        &self.qoi_order
     }
 
     #[must_use]
@@ -1730,11 +1927,25 @@ impl RepeatabilitySummary {
 }
 
 /// Exact source bytes and custody evidence for an experimental dataset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// [`ExperimentArtifact::try_new`] rejects zero sentinels and requires every
+/// observation source to bind this exact `source_bytes_hash`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataAuthenticity {
     source_bytes_hash: ContentHash,
     custody_receipt_hash: ContentHash,
     authenticated: bool,
+}
+
+impl fmt::Debug for DataAuthenticity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DataAuthenticity")
+            .field("authenticated", &self.authenticated)
+            .field("source_bytes_hash", &"<redacted>")
+            .field("custody_receipt_hash", &"<redacted>")
+            .finish()
+    }
 }
 
 impl DataAuthenticity {
@@ -1767,22 +1978,291 @@ impl DataAuthenticity {
     }
 }
 
-/// Canonical observation manifest (bead xl3yi): every free-form
-/// [`ObservationId`] is bound to an IMMUTABLE source-row identity (a
-/// content-addressed locator/Merkle-leaf hash minted from the source
-/// coordinates, NOT from the row values — genuinely distinct replicate
-/// rows with equal values keep distinct locators). The map is
-/// INJECTIVE: two ids can never alias one source row, so relabeling a
-/// calibration row as a validation row is unrepresentable at the
-/// experiment. The aggregate `observations_hash` is DERIVED from this
-/// manifest, never caller-supplied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Exact, extraction-bound reference for one observation row.
+///
+/// The locator is meaningful only under its declared domain and positive
+/// contract version, against one exact dataset byte stream. The extraction
+/// receipt hash binds declared extraction evidence into row identity; verifying
+/// that receipt's issuer and contents remains an external authority decision.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObservationSourceRef {
+    dataset_source_bytes_hash: ContentHash,
+    locator_domain: String,
+    locator_contract_version: u32,
+    locator_hash: ContentHash,
+    extraction_receipt_hash: ContentHash,
+}
+
+impl fmt::Debug for ObservationSourceRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservationSourceRef")
+            .field("locator_contract_version", &self.locator_contract_version)
+            .field("locator_domain", &"<redacted>")
+            .field("dataset_source_bytes_hash", &"<redacted>")
+            .field("locator_hash", &"<redacted>")
+            .field("extraction_receipt_hash", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Receipt-independent identity of one immutable raw observation locator.
+///
+/// Extraction receipts remain part of [`ObservationSourceRef`] and therefore
+/// move artifact identity, but they cannot manufacture a second raw row. This
+/// projection is the no-double-count key used for manifest injectivity and
+/// downstream data-reuse checks.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObservationLocatorIdentity {
+    dataset_source_bytes_hash: ContentHash,
+    locator_domain: String,
+    locator_contract_version: u32,
+    locator_hash: ContentHash,
+}
+
+impl fmt::Debug for ObservationLocatorIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservationLocatorIdentity")
+            .field("locator_contract_version", &self.locator_contract_version)
+            .field("locator_domain", &"<redacted>")
+            .field("dataset_source_bytes_hash", &"<redacted>")
+            .field("locator_hash", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ObservationLocatorIdentity {
+    /// Exact source-byte identity of the dataset containing this locator.
+    #[must_use]
+    pub const fn dataset_source_bytes_hash(&self) -> ContentHash {
+        self.dataset_source_bytes_hash
+    }
+
+    /// Domain that gives the locator its interpretation.
+    #[must_use]
+    pub fn locator_domain(&self) -> &str {
+        &self.locator_domain
+    }
+
+    /// Positive version of the locator-domain contract.
+    #[must_use]
+    pub const fn locator_contract_version(&self) -> u32 {
+        self.locator_contract_version
+    }
+
+    /// Immutable locator digest under the declared contract.
+    #[must_use]
+    pub const fn locator_hash(&self) -> ContentHash {
+        self.locator_hash
+    }
+}
+
+impl ObservationSourceRef {
+    /// Construct one fully typed row-source reference.
+    pub fn try_new(
+        dataset_source_bytes_hash: ContentHash,
+        locator_domain: impl Into<String>,
+        locator_contract_version: u32,
+        locator_hash: ContentHash,
+        extraction_receipt_hash: ContentHash,
+    ) -> Result<Self, VvErrors> {
+        let locator_domain = locator_domain.into();
+        let source = Self {
+            dataset_source_bytes_hash,
+            locator_domain,
+            locator_contract_version,
+            locator_hash,
+            extraction_receipt_hash,
+        };
+        source.validate()?;
+        Ok(source)
+    }
+
+    fn validate(&self) -> Result<(), VvErrors> {
+        validate_id(&self.locator_domain, "experiment.manifest.locator_domain")?;
+        if self.locator_contract_version == 0 {
+            return Err(invalid(
+                VvRule::SchemaIdentity,
+                None,
+                None,
+                "experiment.manifest.locator_contract_version",
+                "a locator contract version must be positive",
+            ));
+        }
+        for (field, hash) in [
+            (
+                "experiment.manifest.dataset_source_bytes_hash",
+                self.dataset_source_bytes_hash,
+            ),
+            ("experiment.manifest.locator_hash", self.locator_hash),
+            (
+                "experiment.manifest.extraction_receipt_hash",
+                self.extraction_receipt_hash,
+            ),
+        ] {
+            if !hash.as_bytes().iter().any(|byte| *byte != 0) {
+                return Err(invalid(
+                    VvRule::SchemaIdentity,
+                    None,
+                    None,
+                    field,
+                    "a row-source authority hash cannot be the all-zero sentinel",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Exact source-byte identity of the dataset containing this row.
+    #[must_use]
+    pub const fn dataset_source_bytes_hash(&self) -> ContentHash {
+        self.dataset_source_bytes_hash
+    }
+
+    /// Domain that gives the locator its interpretation.
+    #[must_use]
+    pub fn locator_domain(&self) -> &str {
+        &self.locator_domain
+    }
+
+    /// Positive version of the locator-domain contract.
+    #[must_use]
+    pub const fn locator_contract_version(&self) -> u32 {
+        self.locator_contract_version
+    }
+
+    /// Immutable row locator under the declared locator contract.
+    #[must_use]
+    pub const fn locator_hash(&self) -> ContentHash {
+        self.locator_hash
+    }
+
+    /// Receipt for the exact extraction that produced this locator.
+    #[must_use]
+    pub const fn extraction_receipt_hash(&self) -> ContentHash {
+        self.extraction_receipt_hash
+    }
+
+    /// Receipt-independent raw-row identity used to prevent a new receipt
+    /// from relabelling one immutable locator as a second observation.
+    #[must_use]
+    pub fn locator_identity(&self) -> ObservationLocatorIdentity {
+        ObservationLocatorIdentity {
+            dataset_source_bytes_hash: self.dataset_source_bytes_hash,
+            locator_domain: self.locator_domain.clone(),
+            locator_contract_version: self.locator_contract_version,
+            locator_hash: self.locator_hash,
+        }
+    }
+}
+
+/// Authority-bearing lineage for one observation.
+///
+/// `source` binds the exact dataset bytes, locator contract, immutable locator,
+/// and extraction receipt (not merely the measured values). The remaining
+/// identities bind the scientific and metrology interpretation of those bytes,
+/// preventing a row from being silently re-labelled across QoIs, instruments,
+/// channels, or clocks.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ObservationManifestRow {
+    source: ObservationSourceRef,
+    qoi: QoiId,
+    instrument: ArtifactId,
+    acquisition_channel: ArtifactId,
+    clock: ArtifactId,
+}
+
+impl fmt::Debug for ObservationManifestRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservationManifestRow")
+            .field("source_contract", &self.source)
+            .field("qoi", &"<redacted>")
+            .field("instrument", &"<redacted>")
+            .field("acquisition_channel", &"<redacted>")
+            .field("clock", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ObservationManifestRow {
+    /// Construct one typed row binding.
+    pub fn try_new(
+        source: ObservationSourceRef,
+        qoi: QoiId,
+        instrument: ArtifactId,
+        acquisition_channel: ArtifactId,
+        clock: ArtifactId,
+    ) -> Result<Self, VvErrors> {
+        source.validate()?;
+        Ok(Self {
+            source,
+            qoi,
+            instrument,
+            acquisition_channel,
+            clock,
+        })
+    }
+
+    /// Complete typed source binding for this observation row.
+    #[must_use]
+    pub const fn source_ref(&self) -> &ObservationSourceRef {
+        &self.source
+    }
+
+    /// Immutable locator hash used by the narrow v2 blind-holdout commitment.
+    #[must_use]
+    pub const fn locator_hash(&self) -> ContentHash {
+        self.source.locator_hash
+    }
+
+    #[must_use]
+    pub const fn qoi(&self) -> &QoiId {
+        &self.qoi
+    }
+
+    #[must_use]
+    pub const fn instrument(&self) -> &ArtifactId {
+        &self.instrument
+    }
+
+    #[must_use]
+    pub const fn acquisition_channel(&self) -> &ArtifactId {
+        &self.acquisition_channel
+    }
+
+    #[must_use]
+    pub const fn clock(&self) -> &ArtifactId {
+        &self.clock
+    }
+}
+
+/// Canonical observation manifest (schema v3): every free-form
+/// [`ObservationId`] is bound to an immutable, fully typed
+/// [`ObservationManifestRow`]. Receipt-independent raw locator identities are
+/// INJECTIVE: two ids can never alias one immutable dataset locator merely by
+/// changing extraction evidence, while genuinely distinct locators with equal
+/// values remain distinct. Complete typed sources, including receipts, remain
+/// identity-bearing in the aggregate `observations_hash`, which is derived
+/// rather than caller-supplied.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ObservationManifest {
-    rows: BTreeMap<ObservationId, ContentHash>,
+    rows: BTreeMap<ObservationId, ObservationManifestRow>,
+}
+
+impl fmt::Debug for ObservationManifest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservationManifest")
+            .field("row_count", &self.rows.len())
+            .field("row_ids_and_bindings", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ObservationManifest {
-    pub fn try_new(rows: Vec<(ObservationId, ContentHash)>) -> Result<Self, VvErrors> {
+    pub fn try_new(rows: Vec<(ObservationId, ObservationManifestRow)>) -> Result<Self, VvErrors> {
         if rows.is_empty() || rows.len() > MAX_VV_ITEMS {
             return Err(invalid(
                 VvRule::SchemaCardinality,
@@ -1792,29 +2272,50 @@ impl ObservationManifest {
                 "the observation manifest must be explicit and bounded",
             ));
         }
+        let canonical_len = rows.iter().fold(8usize, |total, (id, row)| {
+            [
+                id.as_str().len(),
+                row.source.locator_domain.len(),
+                row.qoi.as_str().len(),
+                row.instrument.as_str().len(),
+                row.acquisition_channel.as_str().len(),
+                row.clock.as_str().len(),
+            ]
+            .into_iter()
+            .fold(total.saturating_add(148), usize::saturating_add)
+        });
+        if canonical_len > super::MAX_VV_CANONICAL_BYTES {
+            return Err(invalid(
+                VvRule::SchemaCardinality,
+                None,
+                None,
+                "experiment.manifest",
+                "the canonical typed manifest exceeds the bounded transport/hash envelope",
+            ));
+        }
         let row_count = rows.len();
-        let mut sources = BTreeSet::new();
+        let mut locators = BTreeSet::new();
+        for (_, row) in &rows {
+            let locator = (
+                row.source.dataset_source_bytes_hash,
+                row.source.locator_domain.as_str(),
+                row.source.locator_contract_version,
+                row.source.locator_hash,
+            );
+            if !locators.insert(locator) {
+                return Err(invalid(
+                    VvRule::SchemaIdentity,
+                    None,
+                    None,
+                    "experiment.manifest",
+                    "distinct observation ids cannot alias one immutable raw locator, even under different extraction receipts",
+                ));
+            }
+        }
+        drop(locators);
         let mut canonical = BTreeMap::new();
-        for (id, source) in rows {
-            if !source.as_bytes().iter().any(|byte| *byte != 0) {
-                return Err(invalid(
-                    VvRule::SchemaIdentity,
-                    None,
-                    None,
-                    "experiment.manifest",
-                    "a source-row identity cannot be the all-zero sentinel",
-                ));
-            }
-            if !sources.insert(source) {
-                return Err(invalid(
-                    VvRule::SchemaIdentity,
-                    None,
-                    None,
-                    "experiment.manifest",
-                    "distinct observation ids cannot alias one source row",
-                ));
-            }
-            if canonical.insert(id, source).is_some() {
+        for (id, row) in rows {
+            if canonical.insert(id, row).is_some() {
                 return Err(invalid(
                     VvRule::SchemaIdentity,
                     None,
@@ -1829,8 +2330,13 @@ impl ObservationManifest {
     }
 
     #[must_use]
-    pub const fn rows(&self) -> &BTreeMap<ObservationId, ContentHash> {
+    pub const fn rows(&self) -> &BTreeMap<ObservationId, ObservationManifestRow> {
         &self.rows
+    }
+
+    #[must_use]
+    pub fn row(&self, id: &ObservationId) -> Option<&ObservationManifestRow> {
+        self.rows.get(id)
     }
 
     #[must_use]
@@ -1839,30 +2345,128 @@ impl ObservationManifest {
     }
 
     #[must_use]
-    pub fn source_of(&self, id: &ObservationId) -> Option<ContentHash> {
-        self.rows.get(id).copied()
+    pub fn locator_hash_of(&self, id: &ObservationId) -> Option<ContentHash> {
+        self.rows.get(id).map(ObservationManifestRow::locator_hash)
+    }
+
+    /// Complete typed source binding for one manifest row.
+    #[must_use]
+    pub fn source_ref_of(&self, id: &ObservationId) -> Option<&ObservationSourceRef> {
+        self.rows.get(id).map(ObservationManifestRow::source_ref)
     }
 
     /// The derived aggregate identity: domain-separated over every
-    /// length-framed `(id, source)` pair in canonical id order.
+    /// length-framed typed row in canonical observation-id order.
     #[must_use]
     pub fn canonical_hash(&self) -> ContentHash {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(self.rows.len() as u64).to_le_bytes());
-        for (id, source) in &self.rows {
+        for (id, row) in &self.rows {
             bytes.extend_from_slice(&(id.as_str().len() as u64).to_le_bytes());
             bytes.extend_from_slice(id.as_str().as_bytes());
-            bytes.extend_from_slice(source.as_bytes());
+            bytes.extend_from_slice(row.source.dataset_source_bytes_hash.as_bytes());
+            bytes.extend_from_slice(&(row.source.locator_domain.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(row.source.locator_domain.as_bytes());
+            bytes.extend_from_slice(&row.source.locator_contract_version.to_le_bytes());
+            bytes.extend_from_slice(row.source.locator_hash.as_bytes());
+            bytes.extend_from_slice(row.source.extraction_receipt_hash.as_bytes());
+            for identity in [
+                row.qoi.as_str(),
+                row.instrument.as_str(),
+                row.acquisition_channel.as_str(),
+                row.clock.as_str(),
+            ] {
+                bytes.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(identity.as_bytes());
+            }
         }
-        fs_blake3::hash_domain(
-            "org.frankensim.fs-evidence.vv-observation-manifest.v2",
-            &bytes,
-        )
+        fs_blake3::hash_domain(VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN, &bytes)
     }
 }
 
+/// Exhaustive owner-field classifier for the typed observation-manifest
+/// identity. Adding a manifest field makes this function fail to compile until
+/// its identity role is reviewed.
+#[allow(dead_code)]
+fn classify_observation_manifest_identity_fields(
+    manifest: &ObservationManifest,
+    row: &ObservationManifestRow,
+    source: &ObservationSourceRef,
+    locator: &ObservationLocatorIdentity,
+) {
+    let ObservationManifest { rows } = manifest;
+    let ObservationManifestRow {
+        source: row_source,
+        qoi,
+        instrument,
+        acquisition_channel,
+        clock,
+    } = row;
+    let ObservationSourceRef {
+        dataset_source_bytes_hash,
+        locator_domain,
+        locator_contract_version,
+        locator_hash,
+        extraction_receipt_hash,
+    } = source;
+    let ObservationLocatorIdentity {
+        dataset_source_bytes_hash: projected_dataset_source_bytes_hash,
+        locator_domain: projected_locator_domain,
+        locator_contract_version: projected_locator_contract_version,
+        locator_hash: projected_locator_hash,
+    } = locator;
+    let _ = (
+        rows,
+        row_source,
+        qoi,
+        instrument,
+        acquisition_channel,
+        clock,
+        dataset_source_bytes_hash,
+        locator_domain,
+        locator_contract_version,
+        locator_hash,
+        extraction_receipt_hash,
+        projected_dataset_source_bytes_hash,
+        projected_locator_domain,
+        projected_locator_contract_version,
+        projected_locator_hash,
+    );
+}
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const VV_OBSERVATION_MANIFEST_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-evidence:observation-manifest",
+    "version_const=VV_OBSERVATION_MANIFEST_IDENTITY_VERSION",
+    "version=3",
+    "domain=org.frankensim.fs-evidence.vv-observation-manifest.v3",
+    "domain_const=VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN",
+    "encoder=ObservationManifest::canonical_hash",
+    "encoder_helpers=none",
+    "schema_constants=VV_OBSERVATION_MANIFEST_IDENTITY_VERSION,VV_OBSERVATION_MANIFEST_IDENTITY_DOMAIN,VV_SCHEMA_VERSION,MAX_VV_ID_BYTES,MAX_VV_ITEMS,crates/fs-evidence/src/vv/codec.rs#MAX_VV_CANONICAL_BYTES",
+    "schema_functions=ObservationManifest::try_new,ObservationManifest::canonical_hash,ObservationManifest::rows,ObservationManifest::row,ObservationManifest::ids,ObservationManifest::locator_hash_of,ObservationManifest::source_ref_of,ObservationManifestRow::try_new,ObservationManifestRow::source_ref,ObservationManifestRow::locator_hash,ObservationManifestRow::qoi,ObservationManifestRow::instrument,ObservationManifestRow::acquisition_channel,ObservationManifestRow::clock,ObservationSourceRef::try_new,ObservationSourceRef::validate,ObservationSourceRef::dataset_source_bytes_hash,ObservationSourceRef::locator_domain,ObservationSourceRef::locator_contract_version,ObservationSourceRef::locator_hash,ObservationSourceRef::extraction_receipt_hash,ObservationSourceRef::locator_identity,ObservationLocatorIdentity::dataset_source_bytes_hash,ObservationLocatorIdentity::locator_domain,ObservationLocatorIdentity::locator_contract_version,ObservationLocatorIdentity::locator_hash,validate_id,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=blake3-256-domain-separated",
+    "encoding=typed-binary",
+    "sources=ObservationManifest,ObservationManifestRow,ObservationSourceRef,ObservationLocatorIdentity",
+    "source_fields=ObservationManifest.rows:semantic,ObservationManifestRow.source:derived:nested-source-fields-classified-separately,ObservationManifestRow.qoi:semantic,ObservationManifestRow.instrument:semantic,ObservationManifestRow.acquisition_channel:semantic,ObservationManifestRow.clock:semantic,ObservationSourceRef.dataset_source_bytes_hash:semantic,ObservationSourceRef.locator_domain:semantic,ObservationSourceRef.locator_contract_version:semantic,ObservationSourceRef.locator_hash:semantic,ObservationSourceRef.extraction_receipt_hash:semantic,ObservationLocatorIdentity.dataset_source_bytes_hash:derived:receipt-independent-projection-of-observation-source,ObservationLocatorIdentity.locator_domain:derived:receipt-independent-projection-of-observation-source,ObservationLocatorIdentity.locator_contract_version:derived:receipt-independent-projection-of-observation-source,ObservationLocatorIdentity.locator_hash:derived:receipt-independent-projection-of-observation-source",
+    "source_bindings=ObservationManifest.rows>row-count+canonical-observation-id-order+observation-ids,ObservationManifestRow.qoi>qoi-identities,ObservationManifestRow.instrument>instrument-identities,ObservationManifestRow.acquisition_channel>acquisition-channel-identities,ObservationManifestRow.clock>clock-identities,ObservationSourceRef.dataset_source_bytes_hash>dataset-source-bytes-hashes,ObservationSourceRef.locator_domain>locator-domains,ObservationSourceRef.locator_contract_version>locator-contract-versions,ObservationSourceRef.locator_hash>locator-hashes,ObservationSourceRef.extraction_receipt_hash>extraction-receipt-hashes",
+    "external_semantic_fields=identity-domain,identity-version,length-framing,fixed-numeric-little-endian",
+    "semantic_fields=identity-domain,identity-version,row-count,canonical-observation-id-order,length-framing,fixed-numeric-little-endian,observation-ids,dataset-source-bytes-hashes,locator-domains,locator-contract-versions,locator-hashes,extraction-receipt-hashes,qoi-identities,instrument-identities,acquisition-channel-identities,clock-identities",
+    "excluded_fields=none",
+    "consumers=ExperimentArtifact::try_new,ObservationManifest::canonical_hash,fs-material::DataLineage::from_vv",
+    "mutations=identity-domain:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_version_and_domain_are_exact,identity-version:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_version_and_domain_are_exact,row-count:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,canonical-observation-id-order:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,length-framing:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,fixed-numeric-little-endian:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_preimage_is_exact_and_independently_reproducible,observation-ids:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,dataset-source-bytes-hashes:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,locator-domains:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,locator-contract-versions:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,locator-hashes:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,extraction-receipt-hashes:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,qoi-identities:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,instrument-identities:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,acquisition-channel-identities:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently,clock-identities:crates/fs-evidence/tests/vv.rs#observation_manifest_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_observation_manifest_identity_fields",
+    "transport_guard=ObservationManifest::try_new",
+    "version_guard=crates/fs-evidence/tests/vv.rs#observation_manifest_identity_version_and_domain_are_exact",
+    "coupling_surface=fs-evidence:observation-manifest",
+];
+
 /// Physical or synthetic observation artifact with metrology and authenticity.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ExperimentArtifact {
     header: ArtifactHeader,
     dataset_id: ArtifactId,
@@ -1875,6 +2479,37 @@ pub struct ExperimentArtifact {
     clocks: ClockSynchronization,
     repeatability: RepeatabilitySummary,
     authenticity: DataAuthenticity,
+}
+
+impl fmt::Debug for ExperimentArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let origin = match &self.origin {
+            ExperimentOrigin::Physical { .. } => "physical",
+            ExperimentOrigin::SyntheticHighFidelity { .. } => "synthetic-high-fidelity",
+            ExperimentOrigin::SecondImplementation { .. } => "second-implementation",
+        };
+        let clock_count = match &self.clocks {
+            ClockSynchronization::SingleClock { .. } => 1,
+            ClockSynchronization::Synchronized { clock_ids, .. } => clock_ids.len(),
+        };
+        formatter
+            .debug_struct("ExperimentArtifact")
+            .field("origin", &origin)
+            .field("qoi_count", &self.qois.len())
+            .field("observation_count", &self.observation_ids.len())
+            .field("instrument_count", &self.instruments.len())
+            .field("clock_count", &clock_count)
+            .field("replicates", &self.repeatability.replicates)
+            .field(
+                "covariance_dimension",
+                &self.repeatability.covariance.dimension,
+            )
+            .field("authenticated", &self.authenticity.authenticated)
+            .field("artifact_and_dataset_ids", &"<redacted>")
+            .field("dataset_and_observation_bindings", &"<redacted>")
+            .field("metrology_and_custody_evidence", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ExperimentArtifact {
@@ -1900,6 +2535,7 @@ impl ExperimentArtifact {
             ));
         }
         let qoi_count = qois.len();
+        let declared_qoi_order = qois.clone();
         let qois = qois.into_iter().collect::<BTreeSet<_>>();
         if qois.len() != qoi_count {
             return Err(invalid(
@@ -1908,6 +2544,21 @@ impl ExperimentArtifact {
                 None,
                 "experiment.qois",
                 "experiment QoI identities must be unique",
+            ));
+        }
+        let repeatability = repeatability.bind_to_experiment_qois(&declared_qoi_order)?;
+        let manifest_qois = manifest
+            .rows
+            .values()
+            .map(|row| row.qoi.clone())
+            .collect::<BTreeSet<_>>();
+        if manifest_qois != qois {
+            return Err(invalid(
+                VvRule::QoiDependencyClosed,
+                Some(header.id().as_str()),
+                None,
+                "experiment.manifest.qoi",
+                "manifest row QoIs must equal the experiment's declared QoIs exactly",
             ));
         }
         if repeatability.covariance.dimension != qois.len() {
@@ -1926,14 +2577,21 @@ impl ExperimentArtifact {
         let observations_hash = manifest.canonical_hash();
         if instruments.is_empty()
             || instruments.len() > MAX_VV_ITEMS
-            || instruments.iter().any(|instrument| !instrument.current)
+            || instruments.iter().any(|instrument| {
+                !instrument.current
+                    || !instrument
+                        .certificate_hash
+                        .as_bytes()
+                        .iter()
+                        .any(|byte| *byte != 0)
+            })
         {
             return Err(invalid(
                 VvRule::ExperimentInstrumentCalibration,
                 Some(header.id().as_str()),
                 None,
                 "experiment.instruments",
-                "every experiment needs current calibration evidence for every instrument",
+                "every experiment instrument needs current, non-zero calibration evidence",
             ));
         }
         let unique_instruments = instruments
@@ -1951,6 +2609,19 @@ impl ExperimentArtifact {
         }
         let mut instruments = instruments;
         instruments.sort_by(|left, right| left.instrument_id.cmp(&right.instrument_id));
+        if manifest.rows.values().any(|row| {
+            instruments
+                .binary_search_by(|calibration| calibration.instrument_id.cmp(row.instrument()))
+                .is_err()
+        }) {
+            return Err(invalid(
+                VvRule::ExperimentInstrumentCalibration,
+                Some(header.id().as_str()),
+                None,
+                "experiment.manifest.instrument",
+                "every manifest row instrument must have exactly one current calibration",
+            ));
+        }
         let clocks = clocks.validated_canonical().map_err(|_| {
             invalid(
                 VvRule::ExperimentClockSynchronization,
@@ -1960,6 +2631,52 @@ impl ExperimentArtifact {
                 "clock synchronization must be structurally valid and canonicalizable",
             )
         })?;
+        if manifest
+            .rows
+            .values()
+            .any(|row| !clocks.contains_clock_canonical(&row.clock))
+        {
+            return Err(invalid(
+                VvRule::ExperimentClockSynchronization,
+                Some(header.id().as_str()),
+                None,
+                "experiment.manifest.clock",
+                "every manifest row clock must belong to the experiment clock topology",
+            ));
+        }
+        for (field, hash) in [
+            (
+                "experiment.authenticity.source_bytes_hash",
+                authenticity.source_bytes_hash,
+            ),
+            (
+                "experiment.authenticity.custody_receipt_hash",
+                authenticity.custody_receipt_hash,
+            ),
+        ] {
+            if !hash.as_bytes().iter().any(|byte| *byte != 0) {
+                return Err(invalid(
+                    VvRule::ExperimentDataAuthenticity,
+                    Some(header.id().as_str()),
+                    None,
+                    field,
+                    "experiment provenance hashes cannot use the all-zero sentinel",
+                ));
+            }
+        }
+        if manifest
+            .rows
+            .values()
+            .any(|row| row.source.dataset_source_bytes_hash != authenticity.source_bytes_hash)
+        {
+            return Err(invalid(
+                VvRule::ExperimentDataAuthenticity,
+                Some(header.id().as_str()),
+                None,
+                "experiment.manifest.dataset_source_bytes_hash",
+                "every row source must bind the experiment's exact authenticated source bytes",
+            ));
+        }
         if !authenticity.authenticated {
             return Err(invalid(
                 VvRule::ExperimentDataAuthenticity,
@@ -2034,6 +2751,26 @@ impl ExperimentArtifact {
         &self.clocks
     }
 
+    /// Find one referenced instrument in this admitted artifact's canonical
+    /// calibration roster in logarithmic time.
+    #[must_use]
+    pub fn instrument_calibration(
+        &self,
+        instrument_id: &ArtifactId,
+    ) -> Option<&InstrumentCalibration> {
+        self.instruments
+            .binary_search_by(|calibration| calibration.instrument_id.cmp(instrument_id))
+            .ok()
+            .map(|index| &self.instruments[index])
+    }
+
+    /// Test membership in this admitted artifact's canonical clock topology in
+    /// logarithmic time for synchronized clocks.
+    #[must_use]
+    pub fn contains_clock(&self, clock_id: &ArtifactId) -> bool {
+        self.clocks.contains_clock_canonical(clock_id)
+    }
+
     #[must_use]
     pub const fn repeatability(&self) -> &RepeatabilitySummary {
         &self.repeatability
@@ -2061,15 +2798,27 @@ fn commitment_for_blind_rows(
         bytes.extend_from_slice(row.as_str().as_bytes());
         bytes.extend_from_slice(source.as_bytes());
     }
-    fs_blake3::hash_domain("org.frankensim.fs-evidence.vv-blind-holdout.v2", &bytes)
+    fs_blake3::hash_domain(VV_BLIND_HOLDOUT_IDENTITY_DOMAIN, &bytes)
 }
 
 /// Authority record required before blind holdout rows become validation input.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlindReleaseReceipt {
     split: ArtifactRef,
     blind_commitment: ContentHash,
     authority_receipt_hash: ContentHash,
+}
+
+impl fmt::Debug for BlindReleaseReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BlindReleaseReceipt")
+            .field("split_id", &"<redacted>")
+            .field("blind_commitment", &"<redacted>")
+            .field("split_content_hash", &"<redacted>")
+            .field("authority_receipt_hash", &"<redacted>")
+            .finish()
+    }
 }
 
 impl BlindReleaseReceipt {
@@ -2079,6 +2828,8 @@ impl BlindReleaseReceipt {
         authority_receipt_hash: ContentHash,
     ) -> Result<Self, VvErrors> {
         if split.kind != ArtifactKind::CalibrationSplit
+            || !split.hash.as_bytes().iter().any(|byte| *byte != 0)
+            || !blind_commitment.as_bytes().iter().any(|byte| *byte != 0)
             || !authority_receipt_hash
                 .as_bytes()
                 .iter()
@@ -2089,7 +2840,7 @@ impl BlindReleaseReceipt {
                 Some(split.id().as_str()),
                 None,
                 "blind_release",
-                "blind release must bind an exact split and non-empty authority evidence",
+                "blind release must bind a non-zero exact split identity, non-zero holdout commitment, and non-zero authority evidence",
             ));
         }
         Ok(Self {
@@ -2116,18 +2867,43 @@ impl BlindReleaseReceipt {
 }
 
 /// Evidence-bearing split partition. Calibration is deliberately absent.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EvidencePartition {
     Validation,
     BlindHoldout { release: BlindReleaseReceipt },
 }
 
+impl fmt::Debug for EvidencePartition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation => formatter.write_str("Validation"),
+            Self::BlindHoldout { .. } => formatter
+                .debug_struct("BlindHoldout")
+                .field("release_present", &true)
+                .finish(),
+        }
+    }
+}
+
 /// Sealed observation subset that can be consumed by validation metrics.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObservationSelection {
     split: ArtifactRef,
     ids: BTreeSet<ObservationId>,
     partition: EvidencePartition,
+}
+
+impl fmt::Debug for ObservationSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservationSelection")
+            .field("split_id", &"<redacted>")
+            .field("observation_count", &self.ids.len())
+            .field("partition", &self.partition)
+            .field("observation_ids", &"<redacted>")
+            .field("split_content_hash", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ObservationSelection {
@@ -2152,6 +2928,7 @@ impl ObservationSelection {
         partition: EvidencePartition,
     ) -> Result<Self, VvErrors> {
         if split.kind != ArtifactKind::CalibrationSplit
+            || !split.hash.as_bytes().iter().any(|byte| *byte != 0)
             || ids.is_empty()
             || ids.len() > MAX_VV_ITEMS
         {
@@ -2160,7 +2937,18 @@ impl ObservationSelection {
                 Some(split.id().as_str()),
                 None,
                 "selection",
-                "canonical selection must name a split and a bounded non-empty row set",
+                "canonical selection must name a non-zero exact split identity and a bounded non-empty row set",
+            ));
+        }
+        if let EvidencePartition::BlindHoldout { release } = &partition
+            && release.split() != &split
+        {
+            return Err(invalid(
+                VvRule::SplitBlindHoldoutSealed,
+                Some(split.id().as_str()),
+                None,
+                "selection.blind_release",
+                "blind release must bind the exact kind, id, and content hash of the enclosing selection split",
             ));
         }
         let count = ids.len();
@@ -2183,7 +2971,7 @@ impl ObservationSelection {
 }
 
 /// Pre-registered calibration, validation, and blind-holdout partition.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct CalibrationSplit {
     header: ArtifactHeader,
     experiment: ArtifactRef,
@@ -2193,6 +2981,22 @@ pub struct CalibrationSplit {
     blind_holdout: BTreeSet<ObservationId>,
     blind_sources: BTreeMap<ObservationId, ContentHash>,
     blind_commitment: ContentHash,
+}
+
+impl fmt::Debug for CalibrationSplit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CalibrationSplit")
+            .field("calibration_count", &self.calibration.len())
+            .field("validation_count", &self.validation.len())
+            .field("blind_holdout_count", &self.blind_holdout.len())
+            .field("artifact_and_experiment_ids", &"<redacted>")
+            .field("blind_commitment", &"<redacted>")
+            .field("partition_membership", &"<redacted>")
+            .field("blind_source_locators", &"<redacted>")
+            .field("preregistration_and_experiment_hashes", &"<redacted>")
+            .finish()
+    }
 }
 
 impl CalibrationSplit {
@@ -2211,6 +3015,19 @@ impl CalibrationSplit {
                 None,
                 "split.experiment",
                 "a split must reference one ExperimentArtifact",
+            ));
+        }
+        if !preregistration_hash
+            .as_bytes()
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(invalid(
+                VvRule::SplitBlindHoldoutSealed,
+                Some(header.id().as_str()),
+                None,
+                "split.preregistration_hash",
+                "a preregistered split needs a non-zero preregistration identity",
             ));
         }
         if calibration.is_empty()
@@ -2361,13 +3178,25 @@ impl CalibrationSplit {
         ids: Vec<ObservationId>,
         partition: EvidencePartition,
     ) -> Result<ObservationSelection, VvErrors> {
-        if split.kind != ArtifactKind::CalibrationSplit || split.id != *self.id() {
+        let expected_hash = self.content_hash().map_err(|error| {
+            invalid(
+                VvRule::SplitPartitionsDisjoint,
+                Some(self.id().as_str()),
+                None,
+                "selection.split",
+                format!("the split's canonical content identity could not be derived: {error}"),
+            )
+        })?;
+        if split.kind != ArtifactKind::CalibrationSplit
+            || split.id != *self.id()
+            || split.hash != expected_hash
+        {
             return Err(invalid(
                 VvRule::SplitPartitionsDisjoint,
                 Some(self.id().as_str()),
                 None,
                 "selection.split",
-                "selection must reference the split that minted it",
+                "selection must reference the exact kind, id, and content hash of the split that minted it",
             ));
         }
         if ids.is_empty() || ids.len() > MAX_VV_ITEMS {
@@ -2442,6 +3271,66 @@ impl CalibrationSplit {
             .collect()
     }
 }
+
+/// Exhaustive owner-field classifier for the blind-holdout commitment.
+///
+/// The commitment is deliberately narrower than complete split identity. Its
+/// excluded split fields are still enumerated so adding a field forces an
+/// explicit review of whether blind-release authority must bind it.
+#[allow(dead_code)]
+fn classify_vv_blind_holdout_identity_fields(split: &CalibrationSplit) {
+    let CalibrationSplit {
+        header,
+        experiment,
+        preregistration_hash,
+        calibration,
+        validation,
+        blind_holdout,
+        blind_sources,
+        blind_commitment,
+    } = split;
+    let _ = (
+        header,
+        experiment,
+        preregistration_hash,
+        calibration,
+        validation,
+        blind_holdout,
+        blind_sources,
+        blind_commitment,
+    );
+}
+
+/// Owner-local declaration for the preregistered blind-holdout commitment.
+#[allow(dead_code)]
+pub const VV_BLIND_HOLDOUT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-evidence:vv-blind-holdout",
+    "version_const=VV_BLIND_HOLDOUT_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-evidence.vv-blind-holdout.v2",
+    "domain_const=VV_BLIND_HOLDOUT_IDENTITY_DOMAIN",
+    "encoder=commitment_for_blind_rows",
+    "encoder_helpers=none",
+    "schema_constants=VV_BLIND_HOLDOUT_IDENTITY_VERSION,VV_BLIND_HOLDOUT_IDENTITY_DOMAIN,MAX_VV_ID_BYTES,MAX_VV_ITEMS",
+    "schema_functions=commitment_for_blind_rows,CalibrationSplit::try_new,CalibrationSplit::preregistration_hash,CalibrationSplit::blind_sources,CalibrationSplit::blind_commitment,CalibrationSplit::blind_selection,BlindReleaseReceipt::new,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-evidence:observation-manifest",
+    "digest=blake3-256-domain-separated",
+    "encoding=typed-binary",
+    "sources=CalibrationSplit",
+    "source_fields=CalibrationSplit.header:excluded:not-part-of-blind-release-commitment,CalibrationSplit.experiment:excluded:validated-separately-by-exact-split-artifact-reference,CalibrationSplit.preregistration_hash:semantic,CalibrationSplit.calibration:excluded:not-a-blind-row,CalibrationSplit.validation:excluded:not-a-blind-row,CalibrationSplit.blind_holdout:derived:canonical-key-set-of-blind-sources,CalibrationSplit.blind_sources:semantic,CalibrationSplit.blind_commitment:derived:recomputed-from-preregistration-and-blind-sources",
+    "source_bindings=CalibrationSplit.preregistration_hash>preregistration-hash,CalibrationSplit.blind_sources>blind-row-count+blind-row-order+observation-id-byte-count+observation-id-utf8+source-locator-hash",
+    "external_semantic_fields=identity-domain,identity-version,canonical-field-order,length-count-u64-le",
+    "semantic_fields=identity-domain,identity-version,canonical-field-order,length-count-u64-le,preregistration-hash,blind-row-count,blind-row-order,observation-id-byte-count,observation-id-utf8,source-locator-hash",
+    "excluded_fields=split-header:not-part-of-blind-release-commitment,experiment-reference:validated-by-exact-split-artifact-identity,calibration-partition:not-a-blind-row,validation-partition:not-a-blind-row",
+    "consumers=CalibrationSplit::try_new,CalibrationSplit::blind_commitment,CalibrationSplit::blind_selection,BlindReleaseReceipt::new,VvCase::validate_experiments_and_splits",
+    "mutations=identity-domain:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,identity-version:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,canonical-field-order:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,length-count-u64-le:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,preregistration-hash:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,blind-row-count:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,blind-row-order:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,observation-id-byte-count:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,observation-id-utf8:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact,source-locator-hash:crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_vv_blind_holdout_identity_fields",
+    "transport_guard=CalibrationSplit::try_new",
+    "version_guard=crates/fs-evidence/tests/vv.rs#blind_holdout_identity_version_domain_and_fields_are_exact",
+    "coupling_surface=fs-evidence:vv-blind-holdout",
+];
 
 fn next_up(value: f64) -> f64 {
     if value.is_nan() || value == f64::INFINITY {
@@ -3911,7 +4800,7 @@ impl AssumptionsLedger {
 }
 
 /// Any one of the seven top-level artifact schemas.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum VvArtifact {
     ContextOfUse(ContextOfUse),
     ValidationPlan(ValidationPlan),
@@ -3921,6 +4810,262 @@ pub enum VvArtifact {
     PredictionAssessment(PredictionAssessment),
     AssumptionsLedger(AssumptionsLedger),
 }
+
+impl fmt::Debug for VvArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VvArtifact")
+            .field("kind", &self.kind().slug())
+            .field("payload", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Named identity source for a tuple-payload sum that the identity checker
+/// cannot register directly.
+#[allow(dead_code)]
+struct VvArtifactIdentitySource {
+    artifact: VvArtifact,
+}
+
+/// Compiler-exhaustive classifier for the artifact sum and every top-level
+/// payload. Adding a variant or payload field makes this function fail to
+/// compile until the canonical identity schema is reviewed.
+#[allow(
+    dead_code,
+    unused_variables,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+fn classify_vv_artifact_identity_fields(
+    source: &VvArtifactIdentitySource,
+    header: &ArtifactHeader,
+    context: &ContextOfUse,
+    plan: &ValidationPlan,
+    experiment: &ExperimentArtifact,
+    repeatability: &RepeatabilitySummary,
+    covariance: &CovarianceMatrix,
+    split: &CalibrationSplit,
+    solution: &SolutionVerificationReceipt,
+    prediction: &PredictionAssessment,
+    assumptions: &AssumptionsLedger,
+) {
+    let VvArtifactIdentitySource { artifact } = source;
+    match artifact {
+        VvArtifact::ContextOfUse(value) => {
+            let _ = value;
+        }
+        VvArtifact::ValidationPlan(value) => {
+            let _ = value;
+        }
+        VvArtifact::ExperimentArtifact(value) => {
+            let _ = value;
+        }
+        VvArtifact::CalibrationSplit(value) => {
+            let _ = value;
+        }
+        VvArtifact::SolutionVerificationReceipt(value) => {
+            let _ = value;
+        }
+        VvArtifact::PredictionAssessment(value) => {
+            let _ = value;
+        }
+        VvArtifact::AssumptionsLedger(value) => {
+            let _ = value;
+        }
+    }
+
+    let ArtifactHeader {
+        id: header_id,
+        units: header_units,
+        seed: header_seed,
+        accuracy: header_accuracy,
+        time_ms: header_time_ms,
+        memory_bytes: header_memory_bytes,
+        versions: header_versions,
+        capabilities: header_capabilities,
+    } = header;
+
+    let ContextOfUse {
+        header: context_header,
+        decision,
+        qois: context_qois,
+        applicability: context_applicability,
+        applicability_policy,
+    } = context;
+    let ValidationPlan {
+        header: plan_header,
+        context: plan_context,
+        by_qoi,
+    } = plan;
+    let ExperimentArtifact {
+        header: experiment_header,
+        dataset_id,
+        origin,
+        qois: experiment_qois,
+        observation_ids,
+        observations_hash,
+        manifest,
+        instruments,
+        clocks,
+        repeatability,
+        authenticity,
+    } = experiment;
+    let RepeatabilitySummary {
+        replicates,
+        qoi_order,
+        covariance: repeatability_covariance,
+    } = repeatability;
+    let CovarianceMatrix {
+        dimension: covariance_dimension,
+        lower_triangle,
+    } = covariance;
+    let CalibrationSplit {
+        header: split_header,
+        experiment: split_experiment,
+        preregistration_hash,
+        calibration,
+        validation,
+        blind_holdout,
+        blind_sources,
+        blind_commitment,
+    } = split;
+    let SolutionVerificationReceipt {
+        header: solution_header,
+        solve_id,
+        qoi: solution_qoi,
+        unit,
+        mesh,
+        time,
+        nonlinear,
+        iterative,
+        combined_half_width,
+    } = solution;
+    let PredictionAssessment {
+        header: prediction_header,
+        context: prediction_context,
+        validation_plan,
+        qoi: prediction_qoi,
+        dependencies,
+        waterfall,
+        validation_metrics,
+        posterior_checks,
+        applicability_point,
+        applicability: prediction_applicability,
+        evidence_axes,
+        assumption_checks,
+    } = prediction;
+    let AssumptionsLedger {
+        header: assumptions_header,
+        rows,
+    } = assumptions;
+    let _ = (
+        header_id,
+        header_units,
+        header_seed,
+        header_accuracy,
+        header_time_ms,
+        header_memory_bytes,
+        header_versions,
+        header_capabilities,
+        context_header,
+        decision,
+        context_qois,
+        context_applicability,
+        applicability_policy,
+        plan_header,
+        plan_context,
+        by_qoi,
+        experiment_header,
+        dataset_id,
+        origin,
+        experiment_qois,
+        observation_ids,
+        observations_hash,
+        manifest,
+        instruments,
+        clocks,
+        repeatability,
+        authenticity,
+        replicates,
+        qoi_order,
+        repeatability_covariance,
+        covariance_dimension,
+        lower_triangle,
+        split_header,
+        split_experiment,
+        preregistration_hash,
+        calibration,
+        validation,
+        blind_holdout,
+        blind_sources,
+        blind_commitment,
+        solution_header,
+        solve_id,
+        solution_qoi,
+        unit,
+        mesh,
+        time,
+        nonlinear,
+        iterative,
+        combined_half_width,
+        prediction_header,
+        prediction_context,
+        validation_plan,
+        prediction_qoi,
+        dependencies,
+        waterfall,
+        validation_metrics,
+        posterior_checks,
+        applicability_point,
+        prediction_applicability,
+        evidence_axes,
+        assumption_checks,
+        assumptions_header,
+        rows,
+    );
+}
+
+fn vv_artifact_identity_hash(
+    artifact: &VvArtifact,
+) -> Result<ContentHash, super::codec::VvCodecError> {
+    artifact.content_hash()
+}
+
+fn vv_artifact_identity_transport(bytes: &[u8]) -> Result<VvArtifact, super::codec::VvCodecError> {
+    VvArtifact::from_canonical_bytes(bytes)
+}
+
+/// Owner-local declaration for exact canonical V&V artifact identity.
+#[allow(dead_code)]
+pub const VV_ARTIFACT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-evidence:vv-artifact",
+    "version_const=VV_ARTIFACT_IDENTITY_VERSION",
+    "version=3",
+    "domain=org.frankensim.fs-evidence.vv-artifact.v3",
+    "domain_const=VV_ARTIFACT_FAMILY",
+    "encoder=vv_artifact_identity_hash",
+    "encoder_helpers=none",
+    "schema_constants=VV_ARTIFACT_IDENTITY_VERSION,VV_ARTIFACT_FAMILY,VV_SCHEMA_VERSION,VV_RULESET_VERSION,MAX_VV_ID_BYTES,MAX_VV_TEXT_BYTES,MAX_VV_ITEMS,MAX_VV_MATRIX_DIMENSION,crates/fs-evidence/src/vv/codec.rs#MAGIC,crates/fs-evidence/src/vv/codec.rs#CANONICAL_RULE,crates/fs-evidence/src/vv/codec.rs#ROOT_ARTIFACT,crates/fs-evidence/src/vv/codec.rs#MAX_VV_CANONICAL_BYTES,crates/fs-evidence/src/vv/codec.rs#MAX_VV_STRING_BYTES,crates/fs-evidence/src/vv/codec.rs#MAX_VV_COLLECTION_ITEMS,crates/fs-evidence/src/vv/codec.rs#MAX_VV_TOTAL_COLLECTION_ITEMS",
+    "schema_functions=VvArtifact::kind,VvArtifact::header,VvArtifact::id,ArtifactKind::canonical_wire_tag,ArtifactHeader::try_new,ExperimentArtifact::try_new,RepeatabilitySummary::try_new,RepeatabilitySummary::try_new_for_qois,RepeatabilitySummary::bind_to_experiment_qois,RepeatabilitySummary::replicates,RepeatabilitySummary::qoi_order,RepeatabilitySummary::covariance,CovarianceMatrix::try_new,CovarianceMatrix::get,CovarianceMatrix::is_positive_semidefinite,CovarianceMatrix::dimension,CovarianceMatrix::lower_triangle,crates/fs-evidence/src/vv/codec.rs#VvArtifact::canonical_bytes,crates/fs-evidence/src/vv/codec.rs#VvArtifact::from_canonical_bytes,crates/fs-evidence/src/vv/codec.rs#VvArtifact::content_hash,crates/fs-evidence/src/vv/codec.rs#encode_artifact_kind,crates/fs-evidence/src/vv/codec.rs#decode_artifact_kind,crates/fs-evidence/src/vv/codec.rs#encode_header,crates/fs-evidence/src/vv/codec.rs#decode_header,crates/fs-evidence/src/vv/codec.rs#encode_repeatability,crates/fs-evidence/src/vv/codec.rs#decode_repeatability,crates/fs-evidence/src/vv/codec.rs#encode_covariance_matrix,crates/fs-evidence/src/vv/codec.rs#decode_covariance_matrix,crates/fs-evidence/src/vv/codec.rs#encode_artifact_payload,crates/fs-evidence/src/vv/codec.rs#decode_artifact_payload,crates/fs-evidence/src/vv/codec.rs#content_hash_for,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-evidence:observation-manifest",
+    "digest=blake3-256-domain-separated",
+    "encoding=canonical-transport-exact-bits",
+    "sources=VvArtifactIdentitySource,ArtifactHeader,ContextOfUse,ValidationPlan,ExperimentArtifact,RepeatabilitySummary,CovarianceMatrix,CalibrationSplit,SolutionVerificationReceipt,PredictionAssessment,AssumptionsLedger",
+    "source_fields=VvArtifactIdentitySource.artifact:semantic,ArtifactHeader.id:derived:transitively-bound-by-artifact-payload,ArtifactHeader.units:derived:transitively-bound-by-artifact-payload,ArtifactHeader.seed:derived:transitively-bound-by-artifact-payload,ArtifactHeader.accuracy:derived:transitively-bound-by-artifact-payload,ArtifactHeader.time_ms:derived:transitively-bound-by-artifact-payload,ArtifactHeader.memory_bytes:derived:transitively-bound-by-artifact-payload,ArtifactHeader.versions:derived:transitively-bound-by-artifact-payload,ArtifactHeader.capabilities:derived:transitively-bound-by-artifact-payload,ContextOfUse.header:derived:transitively-bound-by-artifact-payload,ContextOfUse.decision:derived:transitively-bound-by-artifact-payload,ContextOfUse.qois:derived:transitively-bound-by-artifact-payload,ContextOfUse.applicability:derived:transitively-bound-by-artifact-payload,ContextOfUse.applicability_policy:derived:transitively-bound-by-artifact-payload,ValidationPlan.header:derived:transitively-bound-by-artifact-payload,ValidationPlan.context:derived:transitively-bound-by-artifact-payload,ValidationPlan.by_qoi:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.header:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.dataset_id:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.origin:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.qois:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.observation_ids:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.observations_hash:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.manifest:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.instruments:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.clocks:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.repeatability:derived:transitively-bound-by-artifact-payload,ExperimentArtifact.authenticity:derived:transitively-bound-by-artifact-payload,RepeatabilitySummary.replicates:derived:transitively-bound-by-artifact-payload,RepeatabilitySummary.qoi_order:derived:transitively-bound-by-artifact-payload,RepeatabilitySummary.covariance:derived:transitively-bound-by-artifact-payload,CovarianceMatrix.dimension:derived:transitively-bound-by-artifact-payload,CovarianceMatrix.lower_triangle:derived:transitively-bound-by-artifact-payload,CalibrationSplit.header:derived:transitively-bound-by-artifact-payload,CalibrationSplit.experiment:derived:transitively-bound-by-artifact-payload,CalibrationSplit.preregistration_hash:derived:transitively-bound-by-artifact-payload,CalibrationSplit.calibration:derived:transitively-bound-by-artifact-payload,CalibrationSplit.validation:derived:transitively-bound-by-artifact-payload,CalibrationSplit.blind_holdout:derived:transitively-bound-by-artifact-payload,CalibrationSplit.blind_sources:derived:transitively-bound-by-artifact-payload,CalibrationSplit.blind_commitment:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.header:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.solve_id:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.qoi:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.unit:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.mesh:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.time:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.nonlinear:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.iterative:derived:transitively-bound-by-artifact-payload,SolutionVerificationReceipt.combined_half_width:derived:transitively-bound-by-artifact-payload,PredictionAssessment.header:derived:transitively-bound-by-artifact-payload,PredictionAssessment.context:derived:transitively-bound-by-artifact-payload,PredictionAssessment.validation_plan:derived:transitively-bound-by-artifact-payload,PredictionAssessment.qoi:derived:transitively-bound-by-artifact-payload,PredictionAssessment.dependencies:derived:transitively-bound-by-artifact-payload,PredictionAssessment.waterfall:derived:transitively-bound-by-artifact-payload,PredictionAssessment.validation_metrics:derived:transitively-bound-by-artifact-payload,PredictionAssessment.posterior_checks:derived:transitively-bound-by-artifact-payload,PredictionAssessment.applicability_point:derived:transitively-bound-by-artifact-payload,PredictionAssessment.applicability:derived:transitively-bound-by-artifact-payload,PredictionAssessment.evidence_axes:derived:transitively-bound-by-artifact-payload,PredictionAssessment.assumption_checks:derived:transitively-bound-by-artifact-payload,AssumptionsLedger.header:derived:transitively-bound-by-artifact-payload,AssumptionsLedger.rows:derived:transitively-bound-by-artifact-payload",
+    "source_bindings=VvArtifactIdentitySource.artifact>artifact-kind+artifact-payload",
+    "external_semantic_fields=identity-domain,identity-version,transport-magic,wire-schema-version,ruleset-version,root-tag,canonical-field-order,length-framing,fixed-numeric-little-endian",
+    "semantic_fields=identity-domain,identity-version,transport-magic,wire-schema-version,ruleset-version,root-tag,canonical-field-order,length-framing,fixed-numeric-little-endian,artifact-kind,artifact-payload",
+    "excluded_fields=none",
+    "consumers=VvArtifact::content_hash,VvArtifact::canonical_bytes,VvArtifact::from_canonical_bytes,ArtifactRef,VvCase::admit",
+    "mutations=identity-domain:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_version_and_domain_are_exact,identity-version:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_version_and_domain_are_exact,transport-magic:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,wire-schema-version:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,ruleset-version:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,root-tag:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,canonical-field-order:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,length-framing:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,fixed-numeric-little-endian:crates/fs-evidence/tests/vv.rs#vv_artifact_identity_fields_move_independently,artifact-kind:crates/fs-evidence/tests/vv.rs#vv_artifact_valid_semantic_mutations_cover_all_seven_variants_and_concrete_wrappers,artifact-payload:crates/fs-evidence/tests/vv.rs#vv_artifact_valid_semantic_mutations_cover_all_seven_variants_and_concrete_wrappers",
+    "nonsemantic_mutations=header-accuracy-signed-zero:crates/fs-evidence/tests/vv.rs#artifact_header_accuracy_normalizes_signed_zero_before_wire_identity,covariance-signed-zero:crates/fs-evidence/tests/vv.rs#covariance_signed_zero_has_one_canonical_representation",
+    "field_guard=classify_vv_artifact_identity_fields",
+    "transport_guard=vv_artifact_identity_transport",
+    "version_guard=crates/fs-evidence/tests/vv.rs#vv_artifact_identity_version_and_domain_are_exact",
+    "coupling_surface=fs-evidence:vv-artifact",
+];
 
 impl VvArtifact {
     #[must_use]
@@ -3974,7 +5119,7 @@ vv_artifact_from!(PredictionAssessment, PredictionAssessment);
 vv_artifact_from!(AssumptionsLedger, AssumptionsLedger);
 
 /// A complete, closed V&V case before structural admission.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct VvCase {
     context: ContextOfUse,
     validation_plan: ValidationPlan,
@@ -3983,6 +5128,28 @@ pub struct VvCase {
     solution_verification: BTreeMap<ArtifactId, SolutionVerificationReceipt>,
     predictions: BTreeMap<ArtifactId, PredictionAssessment>,
     assumptions: AssumptionsLedger,
+}
+
+impl fmt::Debug for VvCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VvCase")
+            .field("stage", &"unadmitted")
+            .field("qoi_count", &self.context.qois.len())
+            .field(
+                "validation_plan_row_count",
+                &self.validation_plan.by_qoi.len(),
+            )
+            .field("experiment_count", &self.experiments.len())
+            .field("split_count", &self.splits.len())
+            .field(
+                "solution_verification_count",
+                &self.solution_verification.len(),
+            )
+            .field("prediction_count", &self.predictions.len())
+            .field("assumption_count", &self.assumptions.rows.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl VvCase {
@@ -4129,6 +5296,72 @@ impl VvCase {
     }
 }
 
+/// Compiler-exhaustive owner-field classifier for the complete-case identity.
+/// Adding a top-level case field makes this function fail to compile until its
+/// identity role and canonical binding have been reviewed.
+#[allow(dead_code)]
+fn classify_vv_case_identity_fields(case: &VvCase) {
+    let VvCase {
+        context,
+        validation_plan,
+        experiments,
+        splits,
+        solution_verification,
+        predictions,
+        assumptions,
+    } = case;
+    let _ = (
+        context,
+        validation_plan,
+        experiments,
+        splits,
+        solution_verification,
+        predictions,
+        assumptions,
+    );
+}
+
+fn vv_case_identity_hash(case: &VvCase) -> Result<ContentHash, super::codec::VvCodecError> {
+    case.content_hash()
+}
+
+fn vv_case_identity_transport(bytes: &[u8]) -> Result<VvCase, super::codec::VvCodecError> {
+    VvCase::from_canonical_bytes(bytes)
+}
+
+/// Owner-local declaration for the admission-authoritative complete-case
+/// identity. Individual artifact hashes remain independently governed by
+/// [`VV_ARTIFACT_IDENTITY_SCHEMA_DECLARATION`].
+#[allow(dead_code)]
+pub const VV_CASE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-evidence:vv-case",
+    "version_const=VV_CASE_IDENTITY_VERSION",
+    "version=3",
+    "domain=org.frankensim.fs-evidence.vv-case.v3",
+    "domain_const=VV_CASE_FAMILY",
+    "encoder=vv_case_identity_hash",
+    "encoder_helpers=none",
+    "schema_constants=VV_CASE_IDENTITY_VERSION,VV_CASE_FAMILY,VV_SCHEMA_VERSION,VV_RULESET_VERSION,MAX_VV_ID_BYTES,MAX_VV_TEXT_BYTES,MAX_VV_ITEMS,MAX_VV_MATRIX_DIMENSION,crates/fs-evidence/src/vv/codec.rs#MAGIC,crates/fs-evidence/src/vv/codec.rs#CANONICAL_RULE,crates/fs-evidence/src/vv/codec.rs#ROOT_CASE,crates/fs-evidence/src/vv/codec.rs#MAX_VV_CANONICAL_BYTES,crates/fs-evidence/src/vv/codec.rs#MAX_VV_STRING_BYTES,crates/fs-evidence/src/vv/codec.rs#MAX_VV_COLLECTION_ITEMS,crates/fs-evidence/src/vv/codec.rs#MAX_VV_TOTAL_COLLECTION_ITEMS",
+    "schema_functions=VvCase::try_new,VvCase::context,VvCase::validation_plan,VvCase::experiments,VvCase::splits,VvCase::solution_verification,VvCase::predictions,VvCase::assumptions,VvCase::artifacts,crates/fs-evidence/src/vv/codec.rs#VvCase::canonical_bytes,crates/fs-evidence/src/vv/codec.rs#VvCase::from_canonical_bytes,crates/fs-evidence/src/vv/codec.rs#VvCase::content_hash,crates/fs-evidence/src/vv/codec.rs#encode_case_body,crates/fs-evidence/src/vv/codec.rs#decode_case_body,crates/fs-evidence/src/vv/codec.rs#case_content_hash_for,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-evidence:observation-manifest,fs-evidence:vv-artifact",
+    "digest=blake3-256-domain-separated",
+    "encoding=canonical-transport-exact-bits",
+    "sources=VvCase",
+    "source_fields=VvCase.context:semantic,VvCase.validation_plan:semantic,VvCase.experiments:semantic,VvCase.splits:semantic,VvCase.solution_verification:semantic,VvCase.predictions:semantic,VvCase.assumptions:semantic",
+    "source_bindings=VvCase.context>context-artifact,VvCase.validation_plan>validation-plan-artifact,VvCase.experiments>experiment-artifact-registry,VvCase.splits>calibration-split-artifact-registry,VvCase.solution_verification>solution-verification-artifact-registry,VvCase.predictions>prediction-assessment-artifact-registry,VvCase.assumptions>assumptions-ledger-artifact",
+    "external_semantic_fields=identity-domain,identity-version,transport-magic,wire-schema-version,ruleset-version,root-tag,canonical-field-order,length-framing,fixed-numeric-little-endian",
+    "semantic_fields=identity-domain,identity-version,transport-magic,wire-schema-version,ruleset-version,root-tag,canonical-field-order,length-framing,fixed-numeric-little-endian,context-artifact,validation-plan-artifact,experiment-artifact-registry,calibration-split-artifact-registry,solution-verification-artifact-registry,prediction-assessment-artifact-registry,assumptions-ledger-artifact",
+    "excluded_fields=none",
+    "consumers=VvCase::content_hash,VvCase::canonical_bytes,VvCase::from_canonical_bytes,VvCase::admit,SchemaAdmissionReceipt::new,SchemaAdmissionReceipt::verify_case",
+    "mutations=identity-domain:crates/fs-evidence/tests/vv.rs#vv_case_identity_version_domain_and_stage_separation_are_exact,identity-version:crates/fs-evidence/tests/vv.rs#vv_case_identity_version_domain_and_stage_separation_are_exact,transport-magic:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,wire-schema-version:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,ruleset-version:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,root-tag:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,canonical-field-order:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,length-framing:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,fixed-numeric-little-endian:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,context-artifact:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,validation-plan-artifact:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,experiment-artifact-registry:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,calibration-split-artifact-registry:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,solution-verification-artifact-registry:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,prediction-assessment-artifact-registry:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently,assumptions-ledger-artifact:crates/fs-evidence/tests/vv.rs#vv_case_identity_preimage_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_vv_case_identity_fields",
+    "transport_guard=vv_case_identity_transport",
+    "version_guard=crates/fs-evidence/tests/vv.rs#vv_case_identity_version_domain_and_stage_separation_are_exact",
+    "coupling_surface=fs-evidence:vv-case",
+];
+
 fn push_receipt_string(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
     bytes.extend_from_slice(value.as_bytes());
@@ -4152,19 +5385,25 @@ fn receipt_identity(
         push_receipt_string(&mut bytes, qoi.as_str());
     }
     bytes.extend_from_slice(&(artifact_hashes.len() as u64).to_le_bytes());
-    for ((kind, id), hash) in artifact_hashes {
+    let mut artifact_rows = artifact_hashes.iter().collect::<Vec<_>>();
+    artifact_rows.sort_by(|((left_kind, left_id), _), ((right_kind, right_id), _)| {
+        left_kind
+            .canonical_wire_tag()
+            .cmp(&right_kind.canonical_wire_tag())
+            .then_with(|| left_kind.slug().cmp(right_kind.slug()))
+            .then_with(|| left_id.cmp(right_id))
+    });
+    for ((kind, id), hash) in artifact_rows {
+        bytes.push(kind.canonical_wire_tag());
         push_receipt_string(&mut bytes, kind.slug());
         push_receipt_string(&mut bytes, id.as_str());
         bytes.extend_from_slice(hash.as_bytes());
     }
-    fs_blake3::hash_domain(
-        "org.frankensim.fs-evidence.vv-schema-admission-receipt.v1",
-        &bytes,
-    )
+    fs_blake3::hash_domain(VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_DOMAIN, &bytes)
 }
 
 /// Content-bound proof that the current V&V structural rules admitted a case.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SchemaAdmissionReceipt {
     schema_version: u32,
     ruleset_version: u32,
@@ -4173,6 +5412,21 @@ pub struct SchemaAdmissionReceipt {
     qois: BTreeSet<QoiId>,
     artifact_hashes: ArtifactHashMap,
     receipt_hash: ContentHash,
+}
+
+impl fmt::Debug for SchemaAdmissionReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SchemaAdmissionReceipt")
+            .field("schema_version", &self.schema_version)
+            .field("ruleset_version", &self.ruleset_version)
+            .field("qoi_count", &self.qois.len())
+            .field("artifact_count", &self.artifact_hashes.len())
+            .field("binding_present", &true)
+            .field("case_and_receipt_hashes", &"<redacted>")
+            .field("context_and_artifact_identities", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SchemaAdmissionReceipt {
@@ -4283,11 +5537,93 @@ impl SchemaAdmissionReceipt {
     }
 }
 
+/// Compiler-exhaustive owner-field classifier for schema-admission receipt
+/// identity. The stored digest is derived; every other field is semantic.
+#[allow(dead_code)]
+fn classify_vv_schema_admission_receipt_identity_fields(
+    receipt: &SchemaAdmissionReceipt,
+    artifact_kind: &ArtifactKind,
+) {
+    let SchemaAdmissionReceipt {
+        schema_version,
+        ruleset_version,
+        case_hash,
+        context_id,
+        qois,
+        artifact_hashes,
+        receipt_hash,
+    } = receipt;
+    let artifact_kind_variant = match artifact_kind {
+        ArtifactKind::ContextOfUse => 0_u8,
+        ArtifactKind::ValidationPlan => 1,
+        ArtifactKind::ExperimentArtifact => 2,
+        ArtifactKind::CalibrationSplit => 3,
+        ArtifactKind::SolutionVerificationReceipt => 4,
+        ArtifactKind::PredictionAssessment => 5,
+        ArtifactKind::AssumptionsLedger => 6,
+    };
+    let _ = (
+        schema_version,
+        ruleset_version,
+        case_hash,
+        context_id,
+        qois,
+        artifact_hashes,
+        receipt_hash,
+        artifact_kind_variant,
+    );
+}
+
+/// Owner-local declaration for the content-bound schema-admission receipt.
+#[allow(dead_code)]
+pub const VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-evidence:vv-schema-admission-receipt",
+    "version_const=VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-evidence.vv-schema-admission-receipt.v2",
+    "domain_const=VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_DOMAIN",
+    "encoder=receipt_identity",
+    "encoder_helpers=push_receipt_string",
+    "schema_constants=VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_VERSION,VV_SCHEMA_ADMISSION_RECEIPT_IDENTITY_DOMAIN,VV_SCHEMA_VERSION,VV_RULESET_VERSION,MAX_VV_ID_BYTES,MAX_VV_ITEMS",
+    "schema_functions=receipt_identity,push_receipt_string,ArtifactKind::canonical_wire_tag,ArtifactKind::slug,SchemaAdmissionReceipt::new,SchemaAdmissionReceipt::schema_version,SchemaAdmissionReceipt::ruleset_version,SchemaAdmissionReceipt::case_hash,SchemaAdmissionReceipt::context_id,SchemaAdmissionReceipt::qois,SchemaAdmissionReceipt::artifact_hashes,SchemaAdmissionReceipt::receipt_hash,SchemaAdmissionReceipt::has_valid_binding,SchemaAdmissionReceipt::verify_case,VvCase::admit,VvCase::artifact_hashes,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-evidence:vv-artifact,fs-evidence:vv-case",
+    "digest=blake3-256-domain-separated",
+    "encoding=typed-binary",
+    "sources=SchemaAdmissionReceipt,ArtifactKind",
+    "source_fields=SchemaAdmissionReceipt.schema_version:semantic,SchemaAdmissionReceipt.ruleset_version:semantic,SchemaAdmissionReceipt.case_hash:semantic,SchemaAdmissionReceipt.context_id:semantic,SchemaAdmissionReceipt.qois:semantic,SchemaAdmissionReceipt.artifact_hashes:semantic,SchemaAdmissionReceipt.receipt_hash:derived:recomputed-from-semantic-fields,ArtifactKind.variant:semantic",
+    "source_bindings=SchemaAdmissionReceipt.schema_version>wire-schema-version,SchemaAdmissionReceipt.ruleset_version>ruleset-version,SchemaAdmissionReceipt.case_hash>case-hash,SchemaAdmissionReceipt.context_id>context-id-byte-count+context-id-utf8,SchemaAdmissionReceipt.qois>qoi-count+qoi-order+qoi-id-byte-count+qoi-id-utf8,SchemaAdmissionReceipt.artifact_hashes>artifact-count+artifact-order+artifact-kind-order-tag+artifact-kind-byte-count+artifact-kind-utf8+artifact-id-byte-count+artifact-id-utf8+artifact-hash,ArtifactKind.variant>artifact-kind-order-tag+artifact-kind-byte-count+artifact-kind-utf8",
+    "external_semantic_fields=identity-domain,identity-version,canonical-field-order,length-count-u64-le,fixed-numeric-little-endian",
+    "semantic_fields=identity-domain,identity-version,canonical-field-order,length-count-u64-le,fixed-numeric-little-endian,wire-schema-version,ruleset-version,case-hash,context-id-byte-count,context-id-utf8,qoi-count,qoi-order,qoi-id-byte-count,qoi-id-utf8,artifact-count,artifact-order,artifact-kind-order-tag,artifact-kind-byte-count,artifact-kind-utf8,artifact-id-byte-count,artifact-id-utf8,artifact-hash",
+    "excluded_fields=none",
+    "consumers=SchemaAdmissionReceipt::new,SchemaAdmissionReceipt::has_valid_binding,SchemaAdmissionReceipt::verify_case,VvCase::admit,AdmittedVvCase::receipt",
+    "mutations=identity-domain:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,identity-version:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,canonical-field-order:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,length-count-u64-le:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,fixed-numeric-little-endian:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,wire-schema-version:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,ruleset-version:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,case-hash:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,context-id-byte-count:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,context-id-utf8:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,qoi-count:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,qoi-order:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,qoi-id-byte-count:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,qoi-id-utf8:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-count:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-order:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-kind-order-tag:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-kind-byte-count:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-kind-utf8:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-id-byte-count:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-id-utf8:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact,artifact-hash:crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_vv_schema_admission_receipt_identity_fields",
+    "transport_guard=SchemaAdmissionReceipt::has_valid_binding",
+    "version_guard=crates/fs-evidence/tests/vv.rs#schema_admission_receipt_identity_version_domain_fields_and_verification_are_exact",
+    "coupling_surface=fs-evidence:vv-schema-admission-receipt",
+];
+
 /// Opaque positive result of exact schema admission.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct AdmittedVvCase {
     case: VvCase,
     receipt: SchemaAdmissionReceipt,
+}
+
+impl fmt::Debug for AdmittedVvCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedVvCase")
+            .field("stage", &"admitted")
+            .field("qoi_count", &self.case.context.qois.len())
+            .field("experiment_count", &self.case.experiments.len())
+            .field("split_count", &self.case.splits.len())
+            .field("prediction_count", &self.case.predictions.len())
+            .field("receipt_binding_present", &true)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AdmittedVvCase {
@@ -4714,7 +6050,7 @@ impl VvCase {
                 // for that id — a re-pointed holdout row refuses even
                 // when the id sets still cover exactly.
                 for (id, source) in split.blind_sources() {
-                    if experiment.manifest.source_of(id) != Some(*source) {
+                    if experiment.manifest.locator_hash_of(id) != Some(*source) {
                         violations.push(VvViolation::new(
                             VvRule::SplitBlindHoldoutSealed,
                             Some(split.id().as_str().to_owned()),

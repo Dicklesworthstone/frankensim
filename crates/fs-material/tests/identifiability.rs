@@ -1,9 +1,13 @@
 #![cfg(any())]
 
 //! Historical single-case prototype tests retained for design archaeology.
-//! The authority-separated, multi-case v1 conformance suite lives in
+//! The authority-separated, multi-case v3 conformance suite lives in
 //! `identifiability_authority.rs`; this obsolete prototype cannot mint current
 //! identities and is deliberately excluded from compilation.
+//! The body intentionally preserves removed constants and obsolete APIs, is
+//! neither API-current nor compilable, and must not be treated as a re-enable
+//! checklist. Any future migration needs a new semantic review against the
+//! active contracts rather than mechanical uncommenting.
 //!
 //! I10.1 G0/G3 conformance for the law/experiment identifiability schema.
 //! Each case emits one deterministic JSON line so a batch-verification run can
@@ -16,8 +20,8 @@ use fs_evidence::ValidityDomain;
 use fs_evidence::vv::{
     ArtifactHeader, ArtifactId, ArtifactKind, ArtifactRef, CalibrationSplit, ClockSynchronization,
     CovarianceMatrix, DataAuthenticity, DeclaredBudget, ExperimentArtifact, ExperimentOrigin,
-    InstrumentCalibration, ObservationId, ObservationManifest, QoiId, RepeatabilitySummary,
-    SeedDeclaration, UnitId, VV_SCHEMA_VERSION,
+    InstrumentCalibration, ObservationId, ObservationManifest, ObservationManifestRow,
+    ObservationSourceRef, QoiId, RepeatabilitySummary, SeedDeclaration, UnitId, VV_SCHEMA_VERSION,
 };
 use fs_matdb::{
     ClaimSet, ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, MATDB_SCHEMA_VERSION,
@@ -143,12 +147,65 @@ fn model_cards() -> (MaterialCard, ConstitutiveModelCard) {
 }
 
 fn experiment_and_split() -> (ExperimentArtifact, CalibrationSplit) {
+    let source_bytes = hash("source-bytes");
     let blind_source = hash("source-row-blind-1");
+    let instrument = artifact_id("instrument-1");
+    let clock = artifact_id("clock-1");
+    let typed_source = |locator_hash: ContentHash, extraction_receipt: &str| {
+        ObservationSourceRef::try_new(
+            source_bytes,
+            "org.frankensim.fs-material.identifiability-test.row-locator.v1",
+            1,
+            locator_hash,
+            hash(extraction_receipt),
+        )
+        .expect("typed observation source")
+    };
     let manifest = ObservationManifest::try_new(vec![
-        (row_id("cal-1"), hash("source-row-cal-1")),
-        (row_id("cal-2"), hash("source-row-cal-2")),
-        (row_id("val-1"), hash("source-row-val-1")),
-        (row_id("blind-1"), blind_source),
+        (
+            row_id("cal-1"),
+            ObservationManifestRow::try_new(
+                typed_source(hash("source-row-cal-1"), "extraction-receipt-cal-1"),
+                qoi_id("stress"),
+                instrument.clone(),
+                artifact_id("acquisition-channel-cal-1"),
+                clock.clone(),
+            )
+            .expect("typed calibration row"),
+        ),
+        (
+            row_id("cal-2"),
+            ObservationManifestRow::try_new(
+                typed_source(hash("source-row-cal-2"), "extraction-receipt-cal-2"),
+                qoi_id("tangent"),
+                instrument.clone(),
+                artifact_id("acquisition-channel-cal-2"),
+                clock.clone(),
+            )
+            .expect("typed calibration row"),
+        ),
+        (
+            row_id("val-1"),
+            ObservationManifestRow::try_new(
+                typed_source(hash("source-row-val-1"), "extraction-receipt-val-1"),
+                qoi_id("stress"),
+                instrument.clone(),
+                artifact_id("acquisition-channel-val-1"),
+                clock.clone(),
+            )
+            .expect("typed validation row"),
+        ),
+        (
+            row_id("blind-1"),
+            ObservationManifestRow::try_new(
+                typed_source(blind_source, "extraction-receipt-blind-1"),
+                qoi_id("tangent"),
+                instrument.clone(),
+                artifact_id("acquisition-channel-blind-1"),
+                clock.clone(),
+            )
+            .expect("typed blind row"),
+        ),
     ])
     .expect("injective fixture manifest");
     let experiment = ExperimentArtifact::try_new(
@@ -161,20 +218,18 @@ fn experiment_and_split() -> (ExperimentArtifact, CalibrationSplit) {
         vec![qoi_id("stress"), qoi_id("tangent")],
         manifest,
         vec![InstrumentCalibration::new(
-            artifact_id("instrument-1"),
+            instrument,
             hash("instrument-calibration"),
             true,
         )],
-        ClockSynchronization::SingleClock {
-            clock_id: artifact_id("clock-1"),
-        },
+        ClockSynchronization::SingleClock { clock_id: clock },
         RepeatabilitySummary::try_new(
             4,
             CovarianceMatrix::try_new(2, vec![4.0, 0.5, 9.0])
                 .expect("positive-definite repeatability covariance"),
         )
         .expect("repeatability fixture"),
-        DataAuthenticity::new(hash("source-bytes"), hash("custody-receipt"), true),
+        DataAuthenticity::new(source_bytes, hash("custody-receipt"), true),
     )
     .expect("experiment fixture admits");
     let experiment_ref = ArtifactRef::new(
@@ -526,7 +581,7 @@ fn canonical_roundtrip_retains_exact_and_physical_preimages() {
 
     assert_eq!(replay.exact_receipt(), admitted.exact_receipt());
     assert_eq!(replay.physical_receipt(), admitted.physical_receipt());
-    assert_eq!(admitted.exact_receipt().schema_version(), 1);
+    assert_eq!(admitted.exact_receipt().schema_version(), 2);
     assert_eq!(admitted.exact_receipt().item_count(), 8);
     assert_ne!(
         admitted.exact_receipt().id().digest(),

@@ -1,13 +1,18 @@
-//! fs-material (plan patch Rev E): the constitutive-law kernel.
+//! fs-material: constitutive laws and authority-separated identifiability.
 //! Materials are NOT constants — they are mathematical objects with
 //! calibration domains, CONSISTENT tangent operators (algorithmic,
 //! matching the stress update exactly, or Newton dies), thermodynamic
 //! guardrails, hysteresis, and uncertainty. Owning them in one crate is
 //! what makes structural claims credible.
 //!
+//! The [`identifiability`] module separately closes multi-case physical
+//! questions, source admission, execution plans, and evidence-bearing
+//! assessments without conflating a content digest with a scientific theorem.
+//!
 //! Layer: L3 (FLUX support). Runtime deps: `std`, fs-ad (duals for
-//! energy-derived stresses/tangents), fs-evidence (model cards +
-//! Evidence), fs-qty, fs-math.
+//! energy-derived stresses/tangents), fs-blake3 (typed content identities),
+//! fs-evidence (model cards, Evidence, and V&V artifacts), fs-matdb (immutable
+//! material/model cards), fs-qty, and fs-math.
 
 pub mod calibrate;
 pub mod elastic;

@@ -32,16 +32,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::vv::{
     ArtifactHeader, ArtifactId, ArtifactKind, ArtifactRef, BlindReleaseReceipt, CalibrationSplit,
-    ContextOfUse, CovarianceMatrix, DeclaredBudget, ExperimentArtifact, ObservationId, QoiId,
-    SeedDeclaration, UnitId, VV_SCHEMA_VERSION,
+    ContextOfUse, CovarianceMatrix, DeclaredBudget, ExperimentArtifact, ObservationId,
+    ObservationManifest, ObservationManifestRow, ObservationSourceRef, QoiId, SeedDeclaration,
+    UnitId, VV_SCHEMA_VERSION,
 };
 use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, MATDB_SCHEMA_VERSION, MaterialCard,
 };
 use fs_qty::{Dims, QUANTITY_SPEC_ENCODED_LEN, QuantitySpec};
 
-/// Current binary/canonical semantics for [`IdentifiabilityStudySpec`].
-pub const IDENTIFIABILITY_SCHEMA_VERSION: u32 = 1;
+/// Retained binary/canonical semantics for the crate-private, single-case
+/// [`IdentifiabilityStudySpec`] prototype.
+pub(crate) const LEGACY_IDENTIFIABILITY_SCHEMA_VERSION: u32 = 2;
 /// Maximum identifier or short-reason byte length.
 pub const MAX_IDENTIFIABILITY_ID_BYTES: usize = 256;
 /// Maximum long diagnostic/reason byte length.
@@ -51,8 +53,8 @@ pub const MAX_IDENTIFIABILITY_ITEMS: usize = 4096;
 /// Maximum canonical study bytes accepted or emitted.
 pub const MAX_IDENTIFIABILITY_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
 
-const SPEC_DOMAIN: &str = "org.frankensim.fs-material.identifiability-spec.v1";
-const PHYSICAL_DOMAIN: &str = "org.frankensim.fs-material.identifiability-physical.v1";
+const SPEC_DOMAIN: &str = "org.frankensim.fs-material.identifiability-spec.v2";
+const PHYSICAL_DOMAIN: &str = "org.frankensim.fs-material.identifiability-physical.v2";
 const CANONICAL_MAGIC: &[u8] = b"fs-material-identifiability-study\0";
 
 fn hash_is_nonzero(hash: ContentHash) -> bool {
@@ -342,12 +344,14 @@ impl ParameterPrior {
                 *version
             }
             Self::Uniform { domain, version } => {
-                if domain.lo < parameter_domain.lo || domain.hi > parameter_domain.hi {
+                if domain.is_degenerate()
+                    || domain.lo < parameter_domain.lo
+                    || domain.hi > parameter_domain.hi
+                {
                     return Err(IdentifiabilityError::InvalidNumeric {
                         field: "uniform prior support",
-                        detail:
-                            "uniform-prior support must lie inside the physical parameter domain"
-                                .to_string(),
+                        detail: "uniform-prior support must have positive width and lie inside the physical parameter domain; atomic mass requires an explicit discrete/Dirac prior semantics"
+                            .to_string(),
                     });
                 }
                 *version
@@ -495,8 +499,12 @@ pub struct ParameterCoordinate {
 }
 
 impl ParameterCoordinate {
-    /// Construct one coordinate chart. Compatibility with the canonical
-    /// parameter domain is checked by [`ParameterSpec`] admission.
+    /// Construct one coordinate chart and validate the transform's local
+    /// numeric invariants. The owning schema checks quantity compatibility,
+    /// full-domain bijectivity, and physical-domain coverage when the chart is
+    /// admitted: [`ParameterSpec::try_new`] does so for the retained prototype,
+    /// and [`IdentifiabilityExecutionPlan::try_new`] does so for the current
+    /// authority-separated execution stage.
     pub fn try_new(
         id: CoordinateId,
         quantity: QuantitySpec,
@@ -677,7 +685,8 @@ impl ParameterSpec {
             if !matches!(&class, ParameterClass::Fixed { .. }) {
                 return Err(IdentifiabilityError::InvalidNumeric {
                     field: "parameter observability",
-                    detail: "only fixed parameters may use NotEstimated in schema v1".to_string(),
+                    detail: "only fixed parameters may use NotEstimated in legacy schema v2"
+                        .to_string(),
                 });
             }
         }
@@ -980,6 +989,18 @@ impl MaterialModelBinding {
         self.state_schema_version
     }
 
+    /// Initial-state policy declared by the exact model card.
+    #[must_use]
+    pub const fn initial_state_policy(&self) -> InitialStatePolicy {
+        self.initial_state_policy
+    }
+
+    /// Material-database schema version under which both cards were admitted.
+    #[must_use]
+    pub const fn matdb_schema_version(&self) -> u32 {
+        self.matdb_schema_version
+    }
+
     /// Parameter roles/dimensions from the exact model card.
     #[must_use]
     pub const fn parameter_roster(&self) -> &BTreeMap<ParameterRoleId, ModelParameterBinding> {
@@ -1000,6 +1021,24 @@ pub enum InitialStateBinding {
 }
 
 impl InitialStateBinding {
+    /// Exact state-schema version used by this binding.
+    #[must_use]
+    pub const fn schema_version(self) -> u32 {
+        match self {
+            Self::Zero { schema_version } | Self::Explicit { schema_version, .. } => schema_version,
+        }
+    }
+
+    /// Explicit state-artifact content identity, when the model does not use
+    /// its canonical zero state.
+    #[must_use]
+    pub const fn artifact(self) -> Option<ContentHash> {
+        match self {
+            Self::Zero { .. } => None,
+            Self::Explicit { artifact, .. } => Some(artifact),
+        }
+    }
+
     fn validate_against(self, model: &MaterialModelBinding) -> Result<(), IdentifiabilityError> {
         let schema_version = match self {
             Self::Zero { schema_version } | Self::Explicit { schema_version, .. } => schema_version,
@@ -1130,6 +1169,24 @@ impl SpecimenBinding {
         &self.id
     }
 
+    /// Exact specimen-geometry content identity.
+    #[must_use]
+    pub const fn geometry(&self) -> ContentHash {
+        self.geometry
+    }
+
+    /// Exact manufacturing/process content identity.
+    #[must_use]
+    pub const fn process(&self) -> ContentHash {
+        self.process
+    }
+
+    /// Exact preparation/conditioning content identity.
+    #[must_use]
+    pub const fn preparation(&self) -> ContentHash {
+        self.preparation
+    }
+
     /// Specimen frame.
     #[must_use]
     pub const fn frame(&self) -> &FrameBinding {
@@ -1214,6 +1271,24 @@ impl ProtocolBinding {
         self.refinement_version
     }
 
+    /// Exact prescribed-load path identity.
+    #[must_use]
+    pub const fn load_path(&self) -> ContentHash {
+        self.load_path
+    }
+
+    /// Exact environmental path identity.
+    #[must_use]
+    pub const fn environment_path(&self) -> ContentHash {
+        self.environment_path
+    }
+
+    /// Exact time-grid identity.
+    #[must_use]
+    pub const fn time_grid(&self) -> ContentHash {
+        self.time_grid
+    }
+
     /// Experiment clock identity.
     #[must_use]
     pub const fn clock(&self) -> &ArtifactId {
@@ -1289,7 +1364,7 @@ impl ContextBinding {
 
 /// Immutable raw-data, custody, calibration/validation, and blind-holdout
 /// lineage derived from concrete fs-evidence V&V artifacts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataLineage {
     experiment: ArtifactRef,
     split: ArtifactRef,
@@ -1300,7 +1375,7 @@ pub struct DataLineage {
     blind_commitment: ContentHash,
     qois: BTreeSet<QoiId>,
     observation_ids: BTreeSet<ObservationId>,
-    row_sources: BTreeMap<ObservationId, ContentHash>,
+    row_bindings: BTreeMap<ObservationId, ObservationManifestRow>,
     calibration_ids: BTreeSet<ObservationId>,
     validation_ids: BTreeSet<ObservationId>,
     blind_sources: BTreeMap<ObservationId, ContentHash>,
@@ -1309,6 +1384,24 @@ pub struct DataLineage {
     preprocessing: ContentHash,
     split_grouping: ArtifactId,
     vv_schema_version: u32,
+}
+
+impl fmt::Debug for DataLineage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DataLineage")
+            .field("experiment_binding", &"<redacted>")
+            .field("split_binding", &"<redacted>")
+            .field("qoi_count", &self.qois.len())
+            .field("observation_count", &self.observation_ids.len())
+            .field("partition_counts", &self.partition_counts())
+            .field("blind_commitment", &"<redacted>")
+            .field("parser_version", &self.parser_version)
+            .field("vv_schema_version", &self.vv_schema_version)
+            .field("row_bindings", &"<redacted>")
+            .field("source_and_custody_hashes", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DataLineage {
@@ -1336,8 +1429,26 @@ impl DataLineage {
             }
         }
         let blind_ids = self.blind_sources.keys().cloned().collect::<BTreeSet<_>>();
-        let row_ids = self.row_sources.keys().cloned().collect::<BTreeSet<_>>();
-        let unique_row_sources = self.row_sources.values().copied().collect::<BTreeSet<_>>();
+        let row_ids = self.row_bindings.keys().cloned().collect::<BTreeSet<_>>();
+        let unique_row_locators = self
+            .row_bindings
+            .values()
+            .map(|row| row.source_ref().locator_identity())
+            .collect::<BTreeSet<_>>();
+        let row_qois = self
+            .row_bindings
+            .values()
+            .map(|row| row.qoi().clone())
+            .collect::<BTreeSet<_>>();
+        let canonical_manifest = ObservationManifest::try_new(
+            self.row_bindings
+                .iter()
+                .map(|(id, row)| (id.clone(), row.clone()))
+                .collect(),
+        )
+        .map_err(|error| IdentifiabilityError::Vv {
+            detail: format!("data-lineage observation manifest is invalid: {error}"),
+        })?;
         let mut partition_union = self.calibration_ids.clone();
         partition_union.extend(self.validation_ids.iter().cloned());
         partition_union.extend(blind_ids.iter().cloned());
@@ -1345,11 +1456,16 @@ impl DataLineage {
             || self.qois.is_empty()
             || self.observation_ids.is_empty()
             || row_ids != self.observation_ids
-            || unique_row_sources.len() != self.row_sources.len()
+            || unique_row_locators.len() != self.row_bindings.len()
             || self
-                .row_sources
+                .row_bindings
                 .values()
-                .any(|source| !hash_is_nonzero(*source))
+                .any(|row| !hash_is_nonzero(row.locator_hash()))
+            || self
+                .row_bindings
+                .values()
+                .any(|row| row.source_ref().dataset_source_bytes_hash() != self.source_bytes)
+            || row_qois != self.qois
             || self.calibration_ids.is_empty()
             || self.validation_ids.is_empty()
             || self.blind_sources.is_empty()
@@ -1357,14 +1473,23 @@ impl DataLineage {
             || !self.calibration_ids.is_disjoint(&blind_ids)
             || !self.validation_ids.is_disjoint(&blind_ids)
             || partition_union != self.observation_ids
-            || self
-                .blind_sources
-                .values()
-                .any(|source| !hash_is_nonzero(*source))
+            || self.blind_sources.iter().any(|(id, source)| {
+                !hash_is_nonzero(*source)
+                    || self
+                        .row_bindings
+                        .get(id)
+                        .is_none_or(|row| row.locator_hash() != *source)
+            })
         {
             return Err(IdentifiabilityError::Cardinality {
                 field: "data lineage",
-                detail: "QoIs/rows/partitions/parser version are inconsistent".to_string(),
+                detail: "QoIs/typed row sources/partitions/parser version are inconsistent"
+                    .to_string(),
+            });
+        }
+        if canonical_manifest.canonical_hash() != self.raw_manifest {
+            return Err(IdentifiabilityError::SourceMismatch {
+                field: "raw observation manifest",
             });
         }
         Ok(())
@@ -1450,7 +1575,7 @@ impl DataLineage {
             });
         }
         for (row, source) in &blind_sources {
-            if experiment.manifest().source_of(row) != Some(*source) {
+            if experiment.manifest().locator_hash_of(row) != Some(*source) {
                 return Err(IdentifiabilityError::Vv {
                     detail: format!(
                         "blind row {} is not bound to its exact experiment-manifest source",
@@ -1469,7 +1594,7 @@ impl DataLineage {
             blind_commitment: split.blind_commitment(),
             qois: experiment.qois().clone(),
             observation_ids: experiment.observation_ids().clone(),
-            row_sources: experiment.manifest().rows().clone(),
+            row_bindings: experiment.manifest().rows().clone(),
             calibration_ids,
             validation_ids,
             blind_sources,
@@ -1513,22 +1638,81 @@ impl DataLineage {
         &self.qois
     }
 
-    /// Raw observation row identities retained by the experiment manifest.
+    /// All raw observation row identities retained by the experiment manifest.
+    ///
+    /// This is crate-private because the set includes validation and sealed
+    /// blind-holdout identities. Public estimation APIs expose only
+    /// [`Self::calibration_ids`] and calibration-authorized row bindings.
     #[must_use]
-    pub const fn observation_ids(&self) -> &BTreeSet<ObservationId> {
+    pub(crate) const fn observation_ids(&self) -> &BTreeSet<ObservationId> {
         &self.observation_ids
     }
 
-    /// Exact immutable source-row identity for every manifest row.
+    /// Exact row-level semantic bindings used by crate-internal admission and
+    /// data-reuse checks. Validation and blind rows deliberately remain
+    /// outside the public estimation capability.
     #[must_use]
-    pub const fn row_sources(&self) -> &BTreeMap<ObservationId, ContentHash> {
-        &self.row_sources
+    pub(crate) const fn row_bindings(&self) -> &BTreeMap<ObservationId, ObservationManifestRow> {
+        &self.row_bindings
     }
 
     /// Digest of the retained raw source bytes.
     #[must_use]
     pub const fn source_bytes(&self) -> ContentHash {
         self.source_bytes
+    }
+
+    /// Exact custody-receipt content identity inherited from the experiment.
+    #[must_use]
+    pub const fn custody_receipt(&self) -> ContentHash {
+        self.custody_receipt
+    }
+
+    /// Exact split-preregistration content identity.
+    #[must_use]
+    pub const fn preregistration(&self) -> ContentHash {
+        self.preregistration
+    }
+
+    /// Exact parser implementation/configuration content identity.
+    #[must_use]
+    pub const fn parser(&self) -> ContentHash {
+        self.parser
+    }
+
+    /// Published parser semantics version.
+    #[must_use]
+    pub const fn parser_version(&self) -> u32 {
+        self.parser_version
+    }
+
+    /// Exact preprocessing-pipeline content identity.
+    #[must_use]
+    pub const fn preprocessing(&self) -> ContentHash {
+        self.preprocessing
+    }
+
+    /// Grouping identity used to construct the calibration/validation/blind
+    /// partition.
+    #[must_use]
+    pub const fn split_grouping(&self) -> &ArtifactId {
+        &self.split_grouping
+    }
+
+    /// V&V artifact schema under which this lineage was derived.
+    #[must_use]
+    pub const fn vv_schema_version(&self) -> u32 {
+        self.vv_schema_version
+    }
+
+    /// Inspect the full semantic binding for an estimation-authorized row.
+    /// Validation, blind, and unknown rows return `None`.
+    #[must_use]
+    pub fn row_binding(&self, row: &ObservationId) -> Option<&ObservationManifestRow> {
+        if !self.calibration_ids.contains(row) {
+            return None;
+        }
+        self.row_bindings.get(row)
     }
 
     /// Rows preregistered for calibration/estimation. Validation and blind
@@ -2518,7 +2702,7 @@ impl IdentifiabilityStudySpec {
         for (component, expected) in [
             (
                 "fs-material-identifiability",
-                IDENTIFIABILITY_SCHEMA_VERSION,
+                LEGACY_IDENTIFIABILITY_SCHEMA_VERSION,
             ),
             ("fs-evidence-vv", VV_SCHEMA_VERSION),
             ("fs-matdb", MATDB_SCHEMA_VERSION),
@@ -2876,10 +3060,10 @@ impl IdentifiabilityStudySpec {
         })
     }
 
-    /// Current schema version.
+    /// Retained schema version of this crate-private historical prototype.
     #[must_use]
     pub const fn schema_version(&self) -> u32 {
-        IDENTIFIABILITY_SCHEMA_VERSION
+        LEGACY_IDENTIFIABILITY_SCHEMA_VERSION
     }
 
     /// Five-Explicits V&V header.
@@ -3035,13 +3219,13 @@ impl AdmittedIdentifiabilityStudy {
         })?;
         let exact = StudyIdentityReceipt {
             id: StudySpecId(hash_domain(SPEC_DOMAIN, &exact_bytes)),
-            schema_version: IDENTIFIABILITY_SCHEMA_VERSION,
+            schema_version: LEGACY_IDENTIFIABILITY_SCHEMA_VERSION,
             canonical_bytes: exact_bytes,
             item_count,
         };
         let physical = StudyIdentityReceipt {
             id: PhysicalStudyId(hash_domain(PHYSICAL_DOMAIN, &physical_bytes)),
-            schema_version: IDENTIFIABILITY_SCHEMA_VERSION,
+            schema_version: LEGACY_IDENTIFIABILITY_SCHEMA_VERSION,
             canonical_bytes: physical_bytes,
             item_count,
         };
@@ -3073,27 +3257,65 @@ impl AdmittedIdentifiabilityStudy {
 
 struct CanonicalWriter {
     bytes: Vec<u8>,
+    error: Option<IdentifiabilityError>,
 }
 
 impl CanonicalWriter {
     fn new() -> Self {
-        Self { bytes: Vec::new() }
+        Self {
+            bytes: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn raw(&mut self, value: &[u8]) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(requested) = self.bytes.len().checked_add(value.len()) else {
+            self.error = Some(IdentifiabilityError::Canonical {
+                at: self.bytes.len(),
+                detail: "canonical study length overflow".to_string(),
+            });
+            return;
+        };
+        if requested > MAX_IDENTIFIABILITY_CANONICAL_BYTES {
+            self.error = Some(IdentifiabilityError::Canonical {
+                at: self.bytes.len(),
+                detail: format!(
+                    "canonical study would require {requested} bytes; limit is {MAX_IDENTIFIABILITY_CANONICAL_BYTES}"
+                ),
+            });
+            return;
+        }
+        // The logical byte ceiling is checked before asking Vec to grow. Vec
+        // and the allocator may retain or round additional capacity, so this
+        // is deliberately not an exact resident-memory claim; geometric growth
+        // keeps repeated small-field encoding amortized rather than quadratic.
+        if self.bytes.try_reserve(value.len()).is_err() {
+            self.error = Some(IdentifiabilityError::Canonical {
+                at: self.bytes.len(),
+                detail: "canonical study allocation refused".to_string(),
+            });
+            return;
+        }
+        self.bytes.extend_from_slice(value);
     }
 
     fn byte(&mut self, value: u8) {
-        self.bytes.push(value);
+        self.raw(&[value]);
     }
 
     fn u32(&mut self, value: u32) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
+        self.raw(&value.to_le_bytes());
     }
 
     fn u64(&mut self, value: u64) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
+        self.raw(&value.to_le_bytes());
     }
 
     fn i64(&mut self, value: i64) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
+        self.raw(&value.to_le_bytes());
     }
 
     fn f64(&mut self, value: f64) {
@@ -3101,6 +3323,9 @@ impl CanonicalWriter {
     }
 
     fn count(&mut self, count: usize, field: &'static str) -> Result<(), IdentifiabilityError> {
+        if self.error.is_some() {
+            return Ok(());
+        }
         self.u32(
             u32::try_from(count).map_err(|_| IdentifiabilityError::Cardinality {
                 field,
@@ -3112,26 +3337,21 @@ impl CanonicalWriter {
 
     fn text(&mut self, value: &str, field: &'static str) -> Result<(), IdentifiabilityError> {
         self.count(value.len(), field)?;
-        self.bytes.extend_from_slice(value.as_bytes());
+        self.raw(value.as_bytes());
         Ok(())
     }
 
     fn hash(&mut self, value: ContentHash) {
-        self.bytes.extend_from_slice(value.as_bytes());
+        self.raw(value.as_bytes());
     }
 
     fn quantity(&mut self, value: QuantitySpec) {
-        self.bytes.extend_from_slice(&value.canonical_bytes());
+        self.raw(&value.canonical_bytes());
     }
 
     fn finish(self) -> Result<Vec<u8>, IdentifiabilityError> {
-        if self.bytes.len() > MAX_IDENTIFIABILITY_CANONICAL_BYTES {
-            return Err(IdentifiabilityError::Canonical {
-                at: self.bytes.len(),
-                detail: format!(
-                    "canonical study exceeds {MAX_IDENTIFIABILITY_CANONICAL_BYTES} bytes"
-                ),
-            });
+        if let Some(error) = self.error {
+            return Err(error);
         }
         Ok(self.bytes)
     }
@@ -3502,10 +3722,19 @@ fn encode_data(
     for id in &data.observation_ids {
         encode_observation_row_id(writer, id)?;
     }
-    writer.count(data.row_sources.len(), "raw observation sources")?;
-    for (id, source) in &data.row_sources {
+    writer.count(data.row_bindings.len(), "raw observation bindings")?;
+    for (id, binding) in &data.row_bindings {
         encode_observation_row_id(writer, id)?;
-        writer.hash(*source);
+        let source = binding.source_ref();
+        writer.hash(source.dataset_source_bytes_hash());
+        writer.text(source.locator_domain(), "raw observation locator domain")?;
+        writer.u32(source.locator_contract_version());
+        writer.hash(source.locator_hash());
+        writer.hash(source.extraction_receipt_hash());
+        encode_qoi_id(writer, binding.qoi())?;
+        encode_artifact_id(writer, binding.instrument())?;
+        encode_artifact_id(writer, binding.acquisition_channel())?;
+        encode_artifact_id(writer, binding.clock())?;
     }
     writer.count(data.calibration_ids.len(), "calibration observation ids")?;
     for id in &data.calibration_ids {
@@ -3803,8 +4032,8 @@ fn encode_study(
     exact: bool,
 ) -> Result<Vec<u8>, IdentifiabilityError> {
     let mut writer = CanonicalWriter::new();
-    writer.bytes.extend_from_slice(CANONICAL_MAGIC);
-    writer.u32(IDENTIFIABILITY_SCHEMA_VERSION);
+    writer.raw(CANONICAL_MAGIC);
+    writer.u32(LEGACY_IDENTIFIABILITY_SCHEMA_VERSION);
     writer.byte(u8::from(exact));
     if exact {
         encode_header(&mut writer, &study.header, true)?;
@@ -3841,13 +4070,15 @@ fn encode_study(
 }
 
 /// Fail closed on stale/future retained study schemas.
-pub fn check_identifiability_schema_version(declared: u32) -> Result<(), IdentifiabilityError> {
-    if declared == IDENTIFIABILITY_SCHEMA_VERSION {
+pub(crate) fn check_legacy_identifiability_schema_version(
+    declared: u32,
+) -> Result<(), IdentifiabilityError> {
+    if declared == LEGACY_IDENTIFIABILITY_SCHEMA_VERSION {
         Ok(())
     } else {
         Err(IdentifiabilityError::UnsupportedSchemaVersion {
             declared,
-            supported: IDENTIFIABILITY_SCHEMA_VERSION,
+            supported: LEGACY_IDENTIFIABILITY_SCHEMA_VERSION,
         })
     }
 }
@@ -3857,9 +4088,9 @@ pub fn check_identifiability_schema_version(declared: u32) -> Result<(), Identif
 const LEGACY_IDENTIFIABILITY_SPEC_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
     "legacy-nonauthoritative-identifiability-description-v0",
     "id=fs-material:identifiability-spec",
-    "version_const=IDENTIFIABILITY_SCHEMA_VERSION",
-    "version=1",
-    "domain=org.frankensim.fs-material.identifiability-spec.v1",
+    "version_const=LEGACY_IDENTIFIABILITY_SCHEMA_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-material.identifiability-spec.v2",
     "domain_const=SPEC_DOMAIN",
     "encoder=encode_study(exact=true)",
     "digest=fs-blake3-domain-separated",
@@ -3868,7 +4099,7 @@ const LEGACY_IDENTIFIABILITY_SPEC_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
     "semantic_fields=all-fields-including-header-id-and-parameter-coordinate",
     "excluded_fields=none",
     "consumers=AdmittedIdentifiabilityStudy::admit,StudySpecId",
-    "version_guard=check_identifiability_schema_version",
+    "version_guard=check_legacy_identifiability_schema_version",
     "coupling_surface=fs-material:identifiability-spec",
 ];
 
@@ -3878,9 +4109,9 @@ const LEGACY_IDENTIFIABILITY_SPEC_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
 const LEGACY_IDENTIFIABILITY_PHYSICAL_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
     "legacy-nonauthoritative-identifiability-description-v0",
     "id=fs-material:identifiability-physical",
-    "version_const=IDENTIFIABILITY_SCHEMA_VERSION",
-    "version=1",
-    "domain=org.frankensim.fs-material.identifiability-physical.v1",
+    "version_const=LEGACY_IDENTIFIABILITY_SCHEMA_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-material.identifiability-physical.v2",
     "domain_const=PHYSICAL_DOMAIN",
     "encoder=encode_study(exact=false)",
     "digest=fs-blake3-domain-separated",
@@ -3889,7 +4120,7 @@ const LEGACY_IDENTIFIABILITY_PHYSICAL_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
     "semantic_fields=all-physical-study-fields-except-header-artifact-id-and-validated-coordinate-chart",
     "excluded_fields=ArtifactHeader.id:wire-only,ParameterCoordinate:validated-bijective-chart-only",
     "consumers=AdmittedIdentifiabilityStudy::admit,PhysicalStudyId",
-    "version_guard=check_identifiability_schema_version",
+    "version_guard=check_legacy_identifiability_schema_version",
     "coupling_surface=fs-material:identifiability-physical",
 ];
 
@@ -4540,14 +4771,33 @@ fn decode_data(reader: &mut CanonicalReader<'_>) -> Result<DataLineage, Identifi
             });
         }
     }
-    let row_source_count = reader.count("raw observation sources")?;
-    let mut row_sources = BTreeMap::new();
-    for _ in 0..row_source_count {
+    let row_binding_count = reader.count("raw observation bindings")?;
+    let mut row_bindings = BTreeMap::new();
+    for _ in 0..row_binding_count {
         let id = decode_observation_row_id(reader)?;
-        let source = reader.hash("raw observation source")?;
-        if row_sources.insert(id.clone(), source).is_some() {
+        let source = ObservationSourceRef::try_new(
+            reader.hash("raw observation dataset source bytes")?,
+            reader.token("raw observation locator domain")?,
+            reader.u32("raw observation locator contract version")?,
+            reader.hash("raw observation locator")?,
+            reader.hash("raw observation extraction receipt")?,
+        )
+        .map_err(|error| IdentifiabilityError::Vv {
+            detail: error.to_string(),
+        })?;
+        let binding = ObservationManifestRow::try_new(
+            source,
+            decode_qoi_id(reader)?,
+            decode_artifact_id(reader)?,
+            decode_artifact_id(reader)?,
+            decode_artifact_id(reader)?,
+        )
+        .map_err(|error| IdentifiabilityError::Vv {
+            detail: error.to_string(),
+        })?;
+        if row_bindings.insert(id.clone(), binding).is_some() {
             return Err(IdentifiabilityError::Duplicate {
-                field: "raw observation source",
+                field: "raw observation binding",
                 id: id.as_str().to_string(),
             });
         }
@@ -4596,7 +4846,7 @@ fn decode_data(reader: &mut CanonicalReader<'_>) -> Result<DataLineage, Identifi
         blind_commitment,
         qois,
         observation_ids,
-        row_sources,
+        row_bindings,
         calibration_ids,
         validation_ids,
         blind_sources,
@@ -4928,7 +5178,7 @@ fn decode_study(bytes: &[u8]) -> Result<IdentifiabilityStudySpec, Identifiabilit
             detail: "wrong identifiability-study magic".to_string(),
         });
     }
-    check_identifiability_schema_version(reader.u32("study schema version")?)?;
+    check_legacy_identifiability_schema_version(reader.u32("study schema version")?)?;
     reader.expect_byte(1, "exact study marker")?;
     let header = decode_header(&mut reader)?;
     let context_of_use = decode_context(&mut reader)?;
@@ -4996,4 +5246,58 @@ fn decode_study(bytes: &[u8]) -> Result<IdentifiabilityStudySpec, Identifiabilit
         });
     }
     Ok(study)
+}
+
+#[cfg(test)]
+mod canonical_writer_resource_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_writer_bounds_logical_transport_and_refuses_before_reserve() {
+        const BLOCK_BYTES: usize = 4096;
+        let block = [0xa5; BLOCK_BYTES];
+        let block_count = MAX_IDENTIFIABILITY_CANONICAL_BYTES / BLOCK_BYTES;
+
+        let mut exact = CanonicalWriter::new();
+        for _ in 0..block_count {
+            exact.raw(&block);
+        }
+        assert_eq!(
+            exact
+                .finish()
+                .expect("the exact transport limit admits")
+                .len(),
+            MAX_IDENTIFIABILITY_CANONICAL_BYTES,
+        );
+
+        let mut oversized = CanonicalWriter::new();
+        for _ in 0..block_count {
+            oversized.raw(&block);
+        }
+        let capacity_at_limit = oversized.bytes.capacity();
+        oversized.byte(0xff);
+        assert_eq!(
+            oversized.bytes.len(),
+            MAX_IDENTIFIABILITY_CANONICAL_BYTES,
+            "the refusing append must not grow the logical transport",
+        );
+        assert_eq!(
+            oversized.bytes.capacity(),
+            capacity_at_limit,
+            "the over-limit append must refuse before asking Vec for more capacity",
+        );
+        oversized.raw(&block);
+        assert_eq!(
+            oversized.bytes.len(),
+            MAX_IDENTIFIABILITY_CANONICAL_BYTES,
+            "writes after the first refusal must be no-ops",
+        );
+        assert!(matches!(
+            oversized.finish(),
+            Err(IdentifiabilityError::Canonical {
+                at: MAX_IDENTIFIABILITY_CANONICAL_BYTES,
+                ..
+            })
+        ));
+    }
 }

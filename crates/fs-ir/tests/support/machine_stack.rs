@@ -175,10 +175,33 @@ fn admitted_vv_case_with_extra_observations(
     .expect("context fixture");
     let context_ref = artifact_reference(&context);
 
+    let source_bytes = hash("source-bytes");
+    let instrument = artifact_id("instrument-1");
+    let clock = artifact_id("clock-1");
+    let typed_manifest_entry = |id: ObservationId, locator_hash: ContentHash| {
+        let acquisition_channel = artifact_id(&format!("acquisition-channel-{}", id.as_str()));
+        let source = ObservationSourceRef::try_new(
+            source_bytes,
+            "org.frankensim.fs-ir.machine-assurance-test.row-locator.v1",
+            1,
+            locator_hash,
+            hash(&format!("extraction-receipt-{}", id.as_str())),
+        )
+        .expect("typed observation source");
+        let row = ObservationManifestRow::try_new(
+            source,
+            qoi.clone(),
+            instrument.clone(),
+            acquisition_channel,
+            clock.clone(),
+        )
+        .expect("typed observation manifest row");
+        (id, row)
+    };
     let mut manifest_rows = vec![
-        (observation_id("cal-1"), hash("row-cal-1")),
-        (observation_id("val-1"), hash("row-val-1")),
-        (observation_id("blind-1"), hash("row-blind-1")),
+        typed_manifest_entry(observation_id("cal-1"), hash("row-cal-1")),
+        typed_manifest_entry(observation_id("val-1"), hash("row-val-1")),
+        typed_manifest_entry(observation_id("blind-1"), hash("row-blind-1")),
     ];
     let mut calibration_ids = vec![observation_id("cal-1")];
     let mut validation_ids = vec![observation_id("val-1")];
@@ -186,7 +209,7 @@ fn admitted_vv_case_with_extra_observations(
     for index in 0..extra_observations {
         let id = observation_id(&format!("extra-{index:04}"));
         let source = hash(&format!("row-extra-{index:04}"));
-        manifest_rows.push((id.clone(), source));
+        manifest_rows.push(typed_manifest_entry(id.clone(), source));
         match index % 3 {
             0 => calibration_ids.push(id),
             1 => validation_ids.push(id),
@@ -205,19 +228,17 @@ fn admitted_vv_case_with_extra_observations(
         vec![qoi.clone()],
         ObservationManifest::try_new(manifest_rows).expect("injective observation manifest"),
         vec![InstrumentCalibration::new(
-            artifact_id("instrument-1"),
+            instrument,
             hash("instrument-calibration"),
             true,
         )],
-        ClockSynchronization::SingleClock {
-            clock_id: artifact_id("clock-1"),
-        },
+        ClockSynchronization::SingleClock { clock_id: clock },
         RepeatabilitySummary::try_new(
             replicates,
             CovarianceMatrix::try_new(1, vec![0.25]).expect("scalar covariance"),
         )
         .expect("repeatability fixture"),
-        DataAuthenticity::new(hash("source-bytes"), hash("custody"), true),
+        DataAuthenticity::new(source_bytes, hash("custody"), true),
     )
     .expect("experiment fixture");
     let experiment_ref = artifact_reference(&experiment);

@@ -1,12 +1,13 @@
 # fs-material — CONTRACT
 
-The constitutive-law kernel (plan patch Rev E): materials as mathematical
-objects — calibration domains, CONSISTENT tangent operators, thermodynamic
-guardrails, hysteresis, uncertainty — owned in one crate so structural
-claims stay credible.
+The constitutive-law and authority-separated identifiability kernel: materials
+as mathematical objects — calibration domains, CONSISTENT tangent operators,
+thermodynamic guardrails, hysteresis, uncertainty — plus source-closed,
+multi-case questions whose execution and assessment identities stay distinct.
 
 Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
-Ogden staged [F, no-claim below].
+multi-case identifiability authority schema [F]; Ogden staged [F, no-claim
+below].
 
 ## Purpose and layer
 
@@ -141,24 +142,40 @@ The authority chain is deliberately monotone:
    separate `SourceAdmissionId`.
 3. `IdentifiabilityExecutionPlan` adds coordinates, parameter actions,
    algorithms, analyzer/build/derivative semantics, seeds, budgets,
-   tolerances, arithmetic policy, initialization, stopping, and determinism. It
-   also requires an exact locally verified authority closure for every
-   transitive execution source, and replay requires the caller to present that
-   same closure. It mints `ExecutionId` without rewriting `ProblemId`.
+   numerical controls, arithmetic policy, initialization, stopping, and
+   determinism. Every confirmatory proposition is preregistered as an exact
+   `ClaimRequest` together with a sourced dimensionless error metric,
+   nondimensionalization, and maximum certified error. The plan also requires
+   an exact locally verified authority closure for every transitive execution
+   source, and replay requires the caller to present that same closure. It mints
+   `ExecutionId` without rewriting `ProblemId`.
 4. `IdentifiabilityAssessment` adds product-typed propositions and explicit
    claimed-established/claimed-refuted/claimed-inconclusive/not-assessed
-   conclusions with receipts. Its caller-held source authority must agree with
-   both problem and execution authority on every overlapping key. It mints
+   conclusions with receipts. Its proposition registry must equal the exact
+   preregistered execution registry; matching only coarse claim axes cannot
+   substitute a new proposition. Its caller-held source authority must agree
+   with both problem and execution authority on every overlapping key. It mints
    `AssessmentId` without rewriting the problem or execution. These
    deliberately named claims are not promoted to theorem tokens until a
    method-specific verifier exists.
 
 ### Current public schema
 
+The authoritative API and all four independently domain-separated identity
+stages are schema **v3**. Decoders require the exact stage version; v1/v2 bytes
+are not migrated or reinterpreted implicitly.
+
 - `SourceRef` binds a `SourceKey`, semantic `SourceKind`, expected content hash,
   exact fs-blake3 digest domain, and positive source-contract version. A hash is
   not issuer authentication. Opaque resolution must supply bytes that reproduce
-  the digest and retains the digest domain, preventing cross-domain replay.
+  the digest while retaining the digest domain, preventing cross-domain replay.
+  `SourceVerification` records the narrower fact actually established:
+  `TypedArtifact`, `HashPreimage { byte_len }`, or `Unverified`; it never
+  promotes byte equality into provenance or issuer trust. Synchronous generic
+  hash-preimage verification refuses inputs larger than the 4 MiB canonical
+  transport bound; larger sources require a future typed or streaming
+  artifact-store verifier rather than an unbounded allocation disguised as
+  admission.
   Typed Context/V&V/material/model artifacts additionally require their actual
   domain and schema version. `AuthorityDisposition` distinguishes byte-content
   verification, an unvalidated external trust-policy receipt, and an explicit
@@ -168,21 +185,55 @@ The authority chain is deliberately monotone:
   (`Estimated`, `Profiled`, `Marginalized`, source-bound `Conditioned`, or a
   DAG-checked `Derived` value). Physical quantity/domain/prior, concrete owner
   payload, population/case/specimen/field/hierarchical scope, and honest
-  connectivity coverage remain coordinate-free.
+  connectivity coverage remain coordinate-free. Case applicability is explicit:
+  material-lot, field, and hierarchical scopes carry nonempty exact case sets;
+  specimen scope names its one case; and only `Global` implies every campaign
+  case without enumerating it.
+  `ParameterPrior::Uniform` denotes a continuous uniform measure and therefore
+  requires finite, positive-width support contained in the physical domain.
+  Singleton support, including signed-zero aliases, refuses rather than silently
+  manufacturing atomic mass. A future discrete/Dirac prior family may represent
+  atoms explicitly without weakening this continuous-measure invariant.
 - `JointConstraint` supports dimension-checked affine, simplex, ordered,
   external-manifold, and stochastic-coupling domains. This prevents an
   apparently valid Cartesian product of marginal domains from silently
   admitting physically impossible parameter combinations.
+- `AdmissibleDomainWitness` supplies one finite value for every parameter and
+  proves that the *same global point* satisfies every locally evaluable
+  marginal, conditioned, affine, simplex, and ordered predicate. Derived
+  parameters or opaque external/stochastic constraints require exactly one
+  `OpaqueDomainMembershipClaim`. Its admitted
+  `AdmissibleDomainCertificate` source has an exact kind/domain/version, and
+  its binding commits to the witness, all parameter semantics, the complete
+  constraint conjunction, and the exact `SourceRef`s for opaque joint
+  constraints. Derived-definition source keys remain bound through the
+  parameter semantics and the enclosing problem source registry. This closes
+  the former gap where locally evaluable constraints could each look feasible
+  while their intersection was empty. The opaque certificate remains a
+  source-bound claim, not a theorem minted by fs-material.
 - `StudyCaseDocument` binds case purpose, exact initial state, specimen,
   protocol, forward model, prospective or retrospective data intent,
-  observations, and discrepancy semantics. `ObservationKey { case, channel }`
+  observations, and discrepancy semantics. `CasePhysicsSources` closes every
+  embedded frame, geometry, process, preparation, load, environment, time-grid,
+  and explicit-initial-state digest to an exact source kind, role-specific
+  domain, contract version, and hash. `ObservationKey { case, channel }`
   prevents local channel-name aliasing across cases.
 - `StudyObservation` carries exact QoI/unit/`QuantitySpec`, frame, graph port,
-  observation/aggregation/sensor sources, clock, versions, marginal noise,
-  missingness, saturation, and prospective or exact raw-row semantics. At
-  source admission, each QoI/unit is closed against the concrete Context of Use;
-  retrospective rows are closed against re-derived `DataLineage`; the exact
-  instrument must occur in the experiment roster, its calibration-certificate
+  observation/aggregation/sensor sources, instrument, acquisition channel,
+  clock, versions, marginal noise, missingness, saturation, and prospective or
+  exact raw-row semantics. At source admission, each QoI/unit is closed against
+  the concrete Context of Use;
+  every retrospective row is closed against the re-derived `DataLineage` and
+  must match its manifest QoI, instrument, acquisition channel, and clock.
+  Every `ObservationSourceRef` additionally binds the exact dataset-byte hash,
+  locator domain and positive locator-contract version, immutable locator
+  hash, and extraction-receipt hash. Distinct manifest IDs cannot alias one
+  receipt-independent raw locator identity: changing only an extraction
+  receipt cannot manufacture a second observation or cross a holdout
+  partition. Receipts still move the complete typed source and artifact
+  identities. Every row's dataset hash must equal the experiment authenticity
+  source-byte hash. The exact instrument must occur
+  exactly once in the current experiment roster, its calibration-certificate
   hash must equal the sensor source, and the observation/protocol clock must
   occur in the experiment clock topology. A blind-falsification case also needs
   an exact `BlindReleaseReceipt` accepted by
@@ -191,36 +242,101 @@ The authority chain is deliberately monotone:
 - `JointNoiseModel` keeps marginals and dependence separate. Dense correlation
   requires the exact composite channel set and marginals with finite standard
   deviation; bounded/unknown noise is never assigned a fictitious Gaussian
-  scale. External kernels and honest unknown dependence remain representable.
-- `DataReusePolicy` defaults to pairwise-disjoint raw data. Admission compares
-  exact raw-byte digests, manifest digests, and immutable row-source identities,
-  so distinct experiment wrappers cannot hide reuse. Intentional reuse requires
-  a non-overlapping `DataSharingGroup`, exact case membership, joint-likelihood
-  source, and human justification.
+  scale. `Independent` is not a default: it requires an exact source-bound
+  `Assumption`. External kernels and honest unknown dependence remain
+  representable.
+- `ObservationSharingGroup` closes intentional within-case reuse of one raw row
+  by naming every repeated row, its exact consumer-channel set, one
+  joint-likelihood source, and a justification. The row coverage is exact:
+  omitted repeats and declarations for rows that are not actually repeated both
+  refuse.
+- `DataReusePolicy` represents an explicit pairwise-disjoint raw-data policy or
+  explicit sharing groups; there is no inferred reuse default. Admission
+  compares exact raw-byte digests, manifest digests, and immutable row-source
+  identities, so distinct experiment wrappers cannot hide reuse. Intentional
+  reuse requires a non-overlapping `DataSharingGroup`, exact case membership,
+  joint-likelihood source, and human justification. Every within- and cross-case
+  sharing declaration must name the one global `DenseCorrelation` or
+  `ExternalKernel` likelihood; sharing under `Independent` or `Unknown`
+  dependence refuses.
 - `DistributionFunctional` names location, log-scale, cross-channel
   correlation, missingness-logit, and censoring-logit targets. Derivative units
   are derived from functional and physical-parameter quantities; callers cannot
   supply contradictory units. `InfluenceRepresentation` supports direct,
   state-mediated, composite-DAG, and externally defined mathematical routes;
   computational derivative providers live only in the execution plan. No route
-  carries a nonzero/proof receipt.
+  carries a nonzero/proof receipt. Every influence endpoint must lie in a case
+  where its parameter is active, and an influence claim's case scope must
+  contain every endpoint and parameter reached through the full transitive
+  composite-input DAG, not merely the final functional's endpoint.
 - `GaugeDeclaration` represents continuous, discrete, mixed, stratified, and
   explicitly suspected gauges plus quotient, local-section, slice, retained,
-  or unresolved handling. v1 refuses overlapping classes rather than applying
-  order-dependent composition; a future groupoid schema may lift that boundary
-  with explicit semantics and proofs.
+  unresolved, or continuous-reduction-with-discrete-residual handling. A
+  `GaugeSlice` binds its exact joint constraint, fixed codimension or
+  stratum-indexed codimension-profile source, and an exact `GaugeSection`
+  transversality/coverage source. Its constraint support must be a nonempty
+  subset of the gauge members; internally understood equality/manifold
+  codimensions must agree with the declaration, while inequality/order geometry
+  requires the external coverage declaration. Mixed gauges can name an exact
+  reduction of only their continuous component plus the induced residual
+  discrete action without conflating that state with a full quotient.
+  `GaugeCompositionDeclaration` is an exact hyperedge over a simultaneously
+  active gauge system. It binds the complete member set, an authority-owned
+  composition law, `IndependentProduct` or `Generated` semantics, effective
+  algebra/orbit geometry, status, and validity cells. Every simultaneously
+  active assumed system needs exactly one matching assumed hyperedge; missing,
+  partial, duplicate, or scope-incompatible composition refuses instead of
+  inheriting iteration order. Independent products must preserve the member
+  invariants, while generated actions may declare semidirect, ordered, bracket,
+  or richer interaction geometry within the union of coordinates their members
+  can move. This schema is deliberately fertile ground for future groupoid,
+  Lie-algebroid, sheaf, and cohomological composition theorems; the declared law
+  is their substitution-resistant input, not their proof.
+  Claim compatibility is fail-closed: a
+  raw `Unique` fiber cannot intersect any declared gauge; `DiscreteOrbit`
+  requires a purely discrete gauge containing every claimed parameter;
+  `MixedOrbit` requires a mixed gauge whose continuous component has an explicit
+  reduction and whose residual discrete action is source-bound;
+  `QuotientUnique` requires that containment plus a non-suspected gauge and an
+  explicit full quotient or full-coverage slice (a partial mixed reduction is
+  insufficient); and stratified fibers require a typed
+  stratification source. These checks prevent internally contradictory claim
+  shapes without asserting that the declared gauge or fiber theorem is true.
 - `ParameterExecutionAction` covers every physical parameter exactly once and
   must agree with its declared treatment. Built-in coordinates are checked as
-  dimensionally valid full-domain bijections. All Five Explicits and numerical
-  rank/conditioning/arithmetic choices are execution-identity inputs.
-- `TypedIdentifiabilityClaim` is a product of information regime, extent,
-  mathematical quantifier, scalar domain, subject, and campaign/case/stratum
-  scope. These axes are not collapsed into an ordinal evidence color.
+  dimensionally valid full-domain bijections. Numerical rank/singular-value
+  controls carry an exact `Nondimensionalization` source. All Five Explicits,
+  claim requests, numerical scaling, and rank/conditioning/arithmetic choices
+  are execution-identity inputs.
+- `TypedIdentifiabilityClaim` is a product of information regime, local/global
+  extent, fiber geometry/cardinality, mathematical quantifier, scalar/algebraic
+  domain, subject, and campaign/case/stratum scope. Complex extensions,
+  mixed/stratified domains, derived functionals, and stratified fibers carry
+  exact admitted source definitions. Finite, orbit, quotient, positive-
+  dimensional, and stratified fibers remain representable independently of
+  local/global extent. These axes are not collapsed into an ordinal evidence
+  color.
   Every applicable information/extent/genericity request is conjunctive rather
-  than precedence-selected. `ClaimAssessment` requires the execution analyzer,
-  a separately byte-verified receipt, and a tolerance no tighter than the
-  execution floor for positive/refuting *claims*, plus explicit reasons for
-  no-claim states.
+  than precedence-selected. Cross-axis validation refuses finite-data claims
+  over prospective cases, parameters inactive throughout the requested cases,
+  transitive influence endpoints outside the requested scope, and gauge-fiber
+  mismatch.
+  A posterior request additionally carries a `ProbabilityMeasure` joint-prior
+  source and requires a declared distribution prior for every free inferential
+  parameter active in any requested case. Quantifier sources are narrow:
+  `QuantifierRealization` for point claims, `ReferenceMeasure` or
+  `ProbabilityMeasure` for almost-everywhere claims, `QuantifierDomain` for
+  universal claims, and `ProbabilityMeasure` for probability thresholds.
+- `ClaimRequest` binds the complete `TypedIdentifiabilityClaim` proposition and
+  a `DimensionlessErrorPolicy` into execution identity. The policy carries
+  exact `DimensionlessErrorMetric` and `Nondimensionalization` sources plus a
+  finite nonnegative maximum certified error. `requested_axes()` is only a
+  derived planner projection; it is not independent authority or identity
+  state. A positive/refuting `ClaimAssessment` must reproduce the exact
+  preregistered proposition, analyzer, metric, and nondimensionalization, carry
+  a separately byte-verified evidence receipt, and report a finite nonnegative
+  certified error bound no larger than the preregistered maximum. Inconclusive
+  and not-assessed states retain explicit reasons.
 - Four owner-local identity declarations register the problem,
   source-admission, execution, and assessment surfaces independently. Each has
   its own version/domain/magic, exhaustive no-`..` field classifier, semantic
@@ -238,15 +354,18 @@ The authority chain is deliberately monotone:
    markers cannot mint authority. Problem identity exists only after exact
    source resolution.
 2. **Identity non-interference:** coordinates, algorithms, seeds, budgets,
-   tolerances, and builds move only `ExecutionId`; conclusions and receipts move
-   only `AssessmentId`; trust-policy receipts move `SourceAdmissionId` but not
-   the physical `ProblemId`. A ledger artifact-label mutation changes exact
-   transport but does not change `ExecutionId` or `AssessmentId`; execution
-   source-authority changes do change `ExecutionId`.
+   exact claim requests/error policies, and builds move only `ExecutionId`;
+   conclusions and receipts move only `AssessmentId`; trust-policy receipts
+   move `SourceAdmissionId` but not the physical `ProblemId`. A ledger
+   artifact-label mutation changes exact transport but does not change
+   `ExecutionId` or `AssessmentId`; execution source-authority changes do
+   change `ExecutionId`.
 3. **Multi-case closure:** all parameter scopes, observation endpoints, claim
-   scopes, data-sharing groups, discrepancy roles, constraints, influences,
-   and gauges reference the exact canonical campaign graph. Unreachable source
-   registry entries refuse instead of perturbing identity.
+   scopes, observation- and data-sharing groups, discrepancy roles,
+   constraints, influences, and gauges reference the exact canonical campaign
+   graph. Non-global ambiguous parameter scopes carry exact case applicability;
+   influence endpoints outside parameter applicability refuse. Unreachable
+   source registry entries refuse instead of perturbing identity.
 4. **Model/source closure:** concrete material/model membership, parameter
    roster/quantity/nominal bounds, initial-state policy, state/protocol version,
    Context-of-Use QoI/unit, experiment QoI membership, instrument/calibration
@@ -261,36 +380,74 @@ The authority chain is deliberately monotone:
 6. **Dimensional closure:** physical parameters retain exact `QuantitySpec`;
    affine joint constraints check coefficient-times-parameter dimensions;
    simplex/ordered constraints require exact common quantities; influence
-   derivatives are derived.
-7. **Graph closure:** derived parameters and composite influences must be DAGs;
+   derivatives are derived; numerical controls and claim error bounds bind
+   exact nondimensionalization semantics.
+7. **Global domain closure:** one canonical witness covers every parameter and
+   the full joint-constraint conjunction. Built-in predicates are evaluated at
+   that point; opaque predicates require the exact full-conjunction membership
+   binding, so individually plausible but jointly contradictory domains cannot
+   mint a problem identity.
+8. **Dependence closure:** independence is explicit and source-bound. Repeated
+   row consumption and cross-case provenance overlap require exact sharing
+   declarations, and every sharing declaration must agree with the one global
+   joint-likelihood source.
+9. **Confirmatory-claim closure:** execution owns a bounded nonempty registry of
+   exact propositions and sourced dimensionless error policies. Assessment must
+   reproduce that registry exactly; its metric and nondimensionalization must
+   equal the request, and its certified error cannot exceed the preregistered
+   maximum. Posterior claims bind a joint probability-measure source and require
+   distribution priors for every free parameter whose applicability overlaps
+   the claimed cases. Quantifier roles accept only their narrow source kinds.
+10. **Graph closure:** derived parameters and composite influences must be DAGs;
    every free parameter has a declared route or an explicit no-connectivity
-   reason; self-correlation and incompatible missingness/censoring functionals
-   refuse.
-8. **Bounded deterministic transport:** maps/sets and commutative affine terms,
+   reason; modeled-discrepancy parameter use must remain inside the parameter's
+   exact case applicability; influence-claim support closes recursively over
+   every composite input; self-correlation and incompatible
+   missingness/censoring functionals refuse.
+11. **Bounded deterministic transport:** maps/sets and commutative affine terms,
    symmetric correlation endpoints, sharing groups, and dense-correlation
    permutations are canonicalized; counts and text are bounded; floats retain
    exact bits with signed-zero normalization; schemas reject stale/future
-   versions.
+   versions. The current public authority schema is v3; v1/v2 transports fail
+   closed rather than being reinterpreted under the expanded domain-witness,
+   case-source, row-lineage, sharing, scope, and exact-claim semantics. Generic
+   synchronous source-preimage verification is bounded by the same 4 MiB
+   ceiling.
 
 ### Current verification and observability
 
 `tests/identifiability_authority.rs` and
 `tests/identifiability_retrospective.rs` emit deterministic JSON diagnostics and
 cover canonical problem/execution/assessment round trips, multi-case
-ordering and composite endpoints, source/dataset closure, source-authority
-separation, identity non-interference, disconnected parameters, derived and
-composite cycles, unit-invalid constraints, dense-correlation marginal rules,
-accidental and declared raw reuse, gauge overlap/kinds, treatment/action
-coverage, product-typed claims, real ExperimentArtifact/CalibrationSplit
-admission, partition leakage, experiment-QoI/instrument/clock closure,
+ordering and composite endpoints, source/dataset closure, constructive
+admissible-domain fixtures, source-authority separation, identity
+non-interference, disconnected parameters, derived and composite cycles,
+unit-invalid constraints, dense-correlation marginal rules, accidental and
+declared within-/cross-case raw reuse, explicit generated and independent gauge
+composition hyperedges, typed slice support/codimension/coverage, pure-discrete
+versus reduced-mixed residual orbits, modeled-discrepancy case scope,
+transitive composite-claim closure, treatment/action coverage, product-typed
+claims, real ExperimentArtifact/CalibrationSplit
+admission, partition leakage, experiment-QoI/instrument/channel/clock closure,
 blind-release absence/replay/commitment/purpose/conflict cases, transitive
 problem/execution/assessment authority agreement, and adversarial
-transport/version inputs. Identity tests also exercise stage-domain/magic
-separation, caller-order canonicalization, artifact-label exclusion, and exact
-stage version refusal.
+transport/version inputs. `fs-evidence/tests/vv.rs` independently exercises
+typed row-source injectivity, dataset anchoring, and codec/identity mutations.
+Identity tests also exercise stage-domain/magic separation, caller-order
+canonicalization, artifact-label exclusion, and exact stage version refusal.
 
-The schema/codec path is deterministic D0, bounded, allocation-auditable, has no
-I/O or parallel work, and contains no `unsafe`. Downstream symbolic, numerical,
+The v3 verification gate additionally requires adversarial mutations for exact
+claim substitution, metric/nondimensionalization substitution, certified error
+above the preregistered maximum, broad or mismatched quantifier kinds, missing
+joint-prior authority, a missing prior on any overlap-active free parameter,
+ambiguous-scope case-set drift, and influence endpoints outside parameter or
+claim applicability. Omitting any of these mutation classes is a verification
+gap, not evidence that the corresponding invariant is vacuous.
+
+The schema/codec path is deterministic D0, has bounded transport and collection
+ingress, performs no I/O or parallel work, and contains no `unsafe`. Its final
+aggregate structural cap is defense in depth, not yet a complete pre-allocation
+work ledger for every nested public input. Downstream symbolic, numerical,
 algebraic, differential, sheaf/cohomology, and theorem-discovery analyzers are
 not covered by that bounded-work exemption: they must be cancellable
 asupersync tile programs and finalize receipts only after drain.
@@ -300,24 +457,76 @@ asupersync tile programs and finalize receipts only after drain.
 - Structural admission proves closure of the declared question, not
   identifiability, observability, a nonzero sensitivity, laboratory validity, or
   model adequacy.
+- A `GaugeSlice` coverage source and a residual discrete-action source are exact,
+  authority-checked semantic inputs, not internal proofs of transversality,
+  global orbit coverage, induced-action well-definedness, freeness, or quotient
+  regularity. They make those ambitious theorem obligations preregistrable and
+  substitution-resistant; a future sealed gauge verifier must discharge them.
+- The admissible-domain witness is a constructive finite-f64 point, not a proof
+  of robust interior, positive measure, connectedness, smooth-manifold
+  regularity, or absence of disconnected or singular feasible components.
+  Built-in predicates are evaluated locally and exactly under the schema's f64
+  semantics. For derived/external/stochastic predicates, v3 verifies the
+  *structural binding* between the witness, full conjunction, and one admitted
+  certificate source; it does not parse that source or prove the external
+  membership assertion true. Future [F/M] certifiers may add rational/interval/
+  Taylor witnesses, independently checked decision procedures, constructive
+  infeasibility certificates, and sheaf-local witnesses with explicit
+  obstruction cocycles.
 - Content verification proves byte equality only. `ExternalTrustReceipt`
   retains a receipt issued under an external policy that fs-material does not
   authenticate; it does not prove the issuer, experiment, or scientific
   proposition correct.
+- Generic `SourceResolution::verify` is deliberately synchronous and bounded:
+  opaque preimages above 4 MiB refuse. v3 does not ship a generic typed or
+  streaming artifact-store verifier for arbitrary oversized opaque sources, a
+  Merkle-range proof protocol, or a resumable verification receipt. Callers
+  must not truncate a large artifact and treat a prefix digest as source
+  admission; the existing concrete typed artifact admission paths do not imply
+  that generic capability.
+- Exact `CasePhysicsSources` close embedded digests to source
+  kind/domain/version/hash and admitted bytes; they do not yet parse every
+  geometry, process, loading, environment, or time-grid source into a common
+  authority-grade semantic schema. Byte closure therefore cannot substitute
+  for physical-law or laboratory validation.
 - `InfluenceDeclaration` is reachability semantics. Only a separately admitted
   assessment may establish/refute nonzero influence, rank, genericity,
   globality, practical resolution, or a gauge theorem.
 - A source-bound zero-discrepancy assumption is still an assumption. Missing or
   uncharacterized discrepancy never means zero.
+- `DeclaredSyntheticSelfModel` additionally binds the declared producer and
+  the complete forward-model `SourceRef` through a domain-separated production
+  preimage. That caller-computable consistency relation is not evidence that
+  the experiment actually ran that executable or model. Theorem promotion
+  requires a future signed execution receipt binding the experiment hash,
+  executable/build identity, producer, and exact forward-model source.
+- Declared `ArtifactHeader` time and memory budgets are identity-bearing
+  execution policy, but v3 does not yet estimate a document's working set or
+  admit it against `memory_bytes`. Fixed transport, per-collection, and
+  aggregate structural ceilings remain independent safety limits. A future
+  deterministic estimator should charge nested allocation and semantic-work
+  units before construction and canonical decoding, then bind that admission
+  receipt into execution identity.
+- Custom `Debug` implementations on direct authority/capability carriers and
+  stage aggregates reduce accidental disclosure and keep aggregate output
+  bounded. They are not an authorization boundary: explicit getters expose
+  exact audit material, some public nested value and error diagnostics retain
+  ordinary `Debug`, and v3 does not claim panic-path-wide redaction. A future
+  authority-graph redaction certifier should cover every reachable public leaf,
+  error path, and maximum formatted size without removing exact audit access.
 - The gauge vocabulary intentionally leaves room for powerful new quotient,
-  slice, stratification, sheaf, and cohomological theorems. It does not turn
-  those targets into unconditional theorems; evidence can promote them without
-  shrinking the ambition of the representable claim space.
+  slice, stratification, groupoid, sheaf, and cohomological theorems. The v3
+  fiber/gauge compatibility checks eliminate contradictory declarations; they
+  do not establish freeness, properness, orbit completeness, quotient
+  regularity, slice coverage, stabilizer strata, or a global fiber theorem.
+  Future evidence can promote genuinely new theorems without shrinking the
+  ambition of the representable claim space.
 - The physical problem identity is coordinate-free but not magically invariant
   under arbitrary changes of units, likelihood, prior measure, model family,
   protocol, discretization, or data reuse. A future proved equivalence may bind
-  multiple `ProblemId`s in a new theorem receipt rather than mutating v1.
-- Retrospective v1 re-derives the experiment/split lineage directly. It does not
+  multiple `ProblemId`s in a new theorem receipt rather than silently changing
+  v3 identity semantics.
+- Retrospective v3 re-derives the experiment/split lineage directly. It does not
   yet require an `AdmittedVvCase`, so full validation-plan, physical-referent,
   solution-verification, and assumptions-ledger closure is a promotion blocker,
   not a current claim. Direct experiment instrument-roster/calibration-hash and
@@ -326,33 +535,65 @@ asupersync tile programs and finalize receipts only after drain.
   V&V-case authority chain. Likewise, `UnitId`/`QuantitySpec` agreement is
   declared and identity-bound but cannot be independently checked until the
   Context-of-Use schema carries dimensional unit semantics.
-- Raw rows are bound to immutable row-source identities and admitted partition
-  membership, but v1 does not yet carry a complete row-to-QoI/channel/unit/time/
-  spatial-location map. Experiment-level QoI membership is therefore stronger
-  than an unchecked row label but weaker than a fully typed measurement table.
+- Raw rows now bind dataset bytes, a versioned locator, extraction receipt, QoI,
+  instrument, acquisition channel, clock, and admitted partition membership.
+  Locator injectivity deliberately ignores the extraction-receipt hash, so
+  reissuing or relabelling a receipt cannot duplicate one immutable raw row;
+  the receipt remains artifact-identity-bearing provenance.
+  They still do not carry a typed per-sample value, unit, timestamp, spatial
+  coordinate/support, uncertainty contribution, parser transformation trace,
+  or authenticated extraction-receipt issuer. That is stronger than a row label
+  but remains weaker than a complete authority-grade measurement table.
+- Reuse closure prevents an observation row or cross-case dataset from being
+  silently counted as independent. It does not prove that the declared joint
+  likelihood is statistically adequate, identifiable, correctly normalized,
+  or robust to misspecification; `Independent` likewise remains an admitted
+  assumption rather than a discovered fact.
+- Material-lot, field, and hierarchical parameters now carry exact case sets,
+  and applicability/endpoint checks enforce structural overlap. Those checks do
+  not prove that a named lot was physically used in a specimen, that a field
+  support source denotes the intended region, or that a hierarchy source has
+  the claimed population semantics. Likewise, narrow quantifier source kinds
+  do not by themselves prove that a realization belongs to the claimed scope,
+  that a measure is normalized, or that its support equals the declared domain.
+- Posterior claims bind a joint `ProbabilityMeasure` source and require
+  individual distribution priors on every overlap-active free parameter. v3
+  does not independently prove that the joint measure is normalized, that its
+  marginals equal those parameter priors, or that its dependence/support match
+  the claimed campaign scope.
 - `ClaimedEstablished` and `ClaimedRefuted` are substitution-resistant content
   claims, not theorem receipts. A future sealed verifier must bind the full
   claim digest, problem/source-admission/execution identities, method/build,
   exact consumed partitioned row sources, numerical-error policy, issuer,
   checker, and trust policy before exposing an unprefixed theorem verdict.
+- Execution v3 preregisters the complete proposition and sourced dimensionless
+  error policy, and assessment enforces exact substitution resistance plus the
+  declared certified-error ceiling. Source admission still proves only the
+  metric/nondimensionalization/receipt bytes: it does not establish that those
+  bytes define a mathematically valid dimensionless metric, that the analyzer
+  computed the bound correctly, or that the receipt's issuer is trustworthy.
+  A sealed method-specific verifier must independently check those obligations
+  before the claimed bound can support a theorem token.
 
 ## Historical single-case identifiability prototype (non-authoritative)
 
 The following retained description documents the initial single-case draft for
-design archaeology. Its `StudySpecId`/`PhysicalStudyId` wrappers and prototype
-tests are crate-private/non-authoritative; they are not the current I10.1 public
-contract and cannot mint current authority.
+design archaeology. Its `StudySpecId`/`PhysicalStudyId` wrappers are
+crate-private, and its prototype integration test is compile-disabled. Both are
+non-authoritative: they are not the current I10.1 public contract and cannot
+mint current authority.
 
-`identifiability.rs` owns the admitted *subject* of every later structural,
-local, generic, global, and practical identifiability analysis. Its job is to
-make an inverse problem closed, replayable, and impossible to silently widen;
-it does not itself prove an identifiability theorem.
+The retained `identifiability.rs` prototype owned the admitted *subject* of
+later structural, local, generic, global, and practical identifiability
+analysis. Its job was to make an inverse problem closed, replayable, and
+impossible to silently widen; it did not itself prove an identifiability
+theorem. The authoritative multi-case schema above now owns that role.
 
 Ambition tags: closed law/experiment schema and canonical identities [S];
 downstream symbolic, numerical, algebraic, and sheaf-theoretic evidence [F/M]
 remains external and is carried only through explicit receipts.
 
-### Public types and semantics
+### Retained prototype types and semantics
 
 - `MaterialModelBinding::from_cards` binds the complete immutable
   `MaterialCard`, its exact member `ConstitutiveModelCard`, the narrow canonical
@@ -369,8 +610,9 @@ remains external and is carried only through explicit receipts.
   `CalibrationSplit` values rather than arbitrary references. It rebinds their
   exact canonical hashes, raw manifest/source/custody identities,
   preregistration, blind commitment, partition counts, parser/preprocessing,
-  and split-grouping identity. Only preregistered calibration row IDs are
-  exposed for estimation.
+  split-grouping identity, and V&V schema version. Only preregistered
+  calibration row IDs and their immutable source identities are exposed for
+  estimation; validation and blind row identities remain capability-restricted.
 - `ObservationSpec` binds the measured quantity, frame, model graph node/port,
   observation operator and version, aggregation, sensor/channel model,
   calibration certificate, transfer/filter/support, clock/delay/anti-aliasing,
@@ -457,9 +699,14 @@ covered by this exemption: they must run as cancellable asupersync tile programs
 and emit evidence artifacts only after drain/finalize. This module contains
 zero `unsafe` and has no feature flags.
 
-### Identifiability conformance tests
+### Archived compile-disabled test inventory
 
-`tests/identifiability.rs` emits deterministic JSON verdicts and covers:
+`tests/identifiability.rs` is guarded by `#![cfg(any())]` and therefore does not
+compile or run in the current conformance gate. It is retained only as design
+archaeology; the list below records what that historical prototype suite was
+intended to cover. None of these archived cases is evidence for the
+authoritative multi-case schema unless an enabled current test above proves the
+same obligation:
 
 - G0 exact decode/re-admit fixed points and retained exact/physical preimages;
 - G0 canonical invariance under parameter, observation, path, discrepancy, and
@@ -497,11 +744,13 @@ zero `unsafe` and has no feature flags.
   transforms, prior pushforwards, discretizations, frames, units, likelihoods,
   or discrepancy families. Stronger equivalence may absolutely be proved by
   future theorem-producing machinery, but it must mint a new evidence-bearing
-  identity/receipt rather than broadening v1 silently.
+  identity/receipt rather than silently broadening this retired prototype
+  identity.
 - **Gauge artifacts are declarations until proved.** A nonzero action/quotient/
   slice hash does not establish freeness, properness, orbit completeness,
   singular-stratum coverage, or a global slice theorem.
-- **Correlation v1 is cross-channel only.** Temporal kernels, parameter-
+- **The historical correlation surface is cross-channel only.** Temporal
+  kernels, parameter-
   dependent covariance, richer censoring/dropout likelihoods, repeated-trial
   hierarchies, derived-parameter graphs, bounded-logit/simplex/manifold charts,
   and, in this historical prototype, blind-release consumption belong to

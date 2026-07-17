@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Constitutive-law kernel: elasticity/hyperelasticity/J2 plasticity/RC fiber laws with algorithmically consistent tangents, thermodynamic admissibility, model cards, calibration."
+description = "Constitutive-law and identifiability-authority kernel with consistent tangents, material cards, multi-case source closure, and evidence-bound assessments."
 
 [package.metadata.frankensim]
 layer = "L3"

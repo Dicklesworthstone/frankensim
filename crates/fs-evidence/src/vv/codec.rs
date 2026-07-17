@@ -438,15 +438,7 @@ id_codec!(encode_axis_id, decode_axis_id, AxisId, "axis id");
 id_codec!(encode_unit_id, decode_unit_id, UnitId, "unit id");
 
 fn encode_artifact_kind(encoder: &mut Encoder, value: ArtifactKind) -> Result<(), VvCodecError> {
-    encoder.u8(match value {
-        ArtifactKind::ContextOfUse => 0,
-        ArtifactKind::ValidationPlan => 1,
-        ArtifactKind::ExperimentArtifact => 2,
-        ArtifactKind::CalibrationSplit => 3,
-        ArtifactKind::SolutionVerificationReceipt => 4,
-        ArtifactKind::PredictionAssessment => 5,
-        ArtifactKind::AssumptionsLedger => 6,
-    })
+    encoder.u8(value.canonical_wire_tag())
 }
 
 fn decode_artifact_kind(decoder: &mut Decoder<'_>) -> Result<ArtifactKind, VvCodecError> {
@@ -1473,17 +1465,26 @@ fn encode_repeatability(
     encoder: &mut Encoder,
     value: &RepeatabilitySummary,
 ) -> Result<(), VvCodecError> {
+    encoder.count(value.qoi_order().len())?;
+    for qoi in value.qoi_order() {
+        encode_qoi_id(encoder, qoi)?;
+    }
     encoder.u32(value.replicates())?;
     encode_covariance_matrix(encoder, value.covariance())
 }
 
 fn decode_repeatability(decoder: &mut Decoder<'_>) -> Result<RepeatabilitySummary, VvCodecError> {
+    let count = decoder.count()?;
+    let mut qoi_order = bounded_vec(decoder, count, "repeatability covariance QoI axes")?;
+    for _ in 0..count {
+        qoi_order.push(decode_qoi_id(decoder)?);
+    }
     let replicates = decoder.u32()?;
     let covariance = decode_covariance_matrix(decoder)?;
     decode_model(
         decoder,
         "repeatability summary",
-        RepeatabilitySummary::try_new(replicates, covariance),
+        RepeatabilitySummary::try_new_for_qois(replicates, qoi_order, covariance),
     )
 }
 
@@ -1515,7 +1516,7 @@ fn encode_experiment(
     for qoi in value.qois() {
         encode_qoi_id(encoder, qoi)?;
     }
-    encode_manifest_rows(encoder, value.manifest().rows())?;
+    encode_observation_manifest(encoder, value.manifest())?;
     encoder.count(value.instruments().len())?;
     for instrument in value.instruments() {
         encode_instrument_calibration(encoder, instrument)?;
@@ -1539,10 +1540,7 @@ fn decode_experiment(decoder: &mut Decoder<'_>) -> Result<ExperimentArtifact, Vv
         qois.push(qoi);
     }
 
-    let manifest_rows = decode_manifest_rows(decoder, "experiment manifest row")?;
-    let manifest_offset = decoder.position();
-    let manifest = ObservationManifest::try_new(manifest_rows)
-        .map_err(|_| VvCodecError::at(manifest_offset, "experiment manifest is invalid"))?;
+    let manifest = decode_observation_manifest(decoder)?;
     let count = decoder.count()?;
     let mut instruments = bounded_vec(decoder, count, "instrument calibrations")?;
     for _ in 0..count {
@@ -1652,9 +1650,92 @@ fn decode_observation_selection(
     )
 }
 
-// bead xl3yi: length-framed (id, source) manifest rows in strict
-// canonical id order — the wire form of source-row binding.
-fn encode_manifest_rows(
+// Schema v3 experiment rows bind scientific/metrology meaning as well as the
+// complete dataset/locator/extraction source authority. This codec is
+// intentionally distinct from the hash-only blind-partition codec below.
+fn encode_observation_source_ref(
+    encoder: &mut Encoder,
+    source: &ObservationSourceRef,
+) -> Result<(), VvCodecError> {
+    encoder.hash(source.dataset_source_bytes_hash())?;
+    encoder.string(source.locator_domain())?;
+    encoder.u32(source.locator_contract_version())?;
+    encoder.hash(source.locator_hash())?;
+    encoder.hash(source.extraction_receipt_hash())
+}
+
+fn decode_observation_source_ref(
+    decoder: &mut Decoder<'_>,
+) -> Result<ObservationSourceRef, VvCodecError> {
+    let offset = decoder.position();
+    let dataset_source_bytes_hash = decoder.hash()?;
+    let locator_domain = decoder.string()?;
+    let locator_contract_version = decoder.u32()?;
+    let locator_hash = decoder.hash()?;
+    let extraction_receipt_hash = decoder.hash()?;
+    ObservationSourceRef::try_new(
+        dataset_source_bytes_hash,
+        locator_domain,
+        locator_contract_version,
+        locator_hash,
+        extraction_receipt_hash,
+    )
+    .map_err(|error| model_error(offset, "observation source reference", error))
+}
+
+fn encode_observation_manifest(
+    encoder: &mut Encoder,
+    manifest: &ObservationManifest,
+) -> Result<(), VvCodecError> {
+    encoder.count(manifest.rows().len())?;
+    for (id, row) in manifest.rows() {
+        encode_observation_id(encoder, id)?;
+        encode_observation_source_ref(encoder, row.source_ref())?;
+        encode_qoi_id(encoder, row.qoi())?;
+        encode_artifact_id(encoder, row.instrument())?;
+        encode_artifact_id(encoder, row.acquisition_channel())?;
+        encode_artifact_id(encoder, row.clock())?;
+    }
+    Ok(())
+}
+
+fn decode_observation_manifest(
+    decoder: &mut Decoder<'_>,
+) -> Result<ObservationManifest, VvCodecError> {
+    let manifest_offset = decoder.position();
+    let count = decoder.count()?;
+    let mut rows: Vec<(ObservationId, ObservationManifestRow)> =
+        bounded_vec(decoder, count, "experiment manifest rows")?;
+    for _ in 0..count {
+        let row_offset = decoder.position();
+        let id = decode_observation_id(decoder)?;
+        ensure_strictly_increasing(
+            rows.last().map(|(last, _)| last),
+            &id,
+            row_offset,
+            "experiment manifest row",
+        )?;
+        let source = decode_observation_source_ref(decoder)?;
+        let qoi = decode_qoi_id(decoder)?;
+        let instrument = decode_artifact_id(decoder)?;
+        let acquisition_channel = decode_artifact_id(decoder)?;
+        let clock = decode_artifact_id(decoder)?;
+        let row = decode_model(
+            decoder,
+            "experiment manifest row",
+            ObservationManifestRow::try_new(source, qoi, instrument, acquisition_channel, clock),
+        )?;
+        rows.push((id, row));
+    }
+    ObservationManifest::try_new(rows)
+        .map_err(|error| model_error(manifest_offset, "experiment manifest", error))
+}
+
+// bead xl3yi: blind partitions deliberately retain the length-framed
+// hash-only `(id, source)` wire form in strict canonical id order. Their v2
+// locator commitment is checked against the richer v3 experiment manifest at
+// case admission.
+fn encode_hash_manifest_rows(
     encoder: &mut Encoder,
     rows: &std::collections::BTreeMap<ObservationId, ContentHash>,
 ) -> Result<(), VvCodecError> {
@@ -1666,7 +1747,7 @@ fn encode_manifest_rows(
     Ok(())
 }
 
-fn decode_manifest_rows(
+fn decode_hash_manifest_rows(
     decoder: &mut Decoder<'_>,
     context: &str,
 ) -> Result<Vec<(ObservationId, ContentHash)>, VvCodecError> {
@@ -1717,7 +1798,7 @@ fn encode_calibration_split(
     encoder.hash(value.preregistration_hash())?;
     encode_observation_set(encoder, value.calibration_ids())?;
     encode_observation_set(encoder, value.validation_ids())?;
-    encode_manifest_rows(encoder, value.blind_sources())?;
+    encode_hash_manifest_rows(encoder, value.blind_sources())?;
     encoder.hash(value.blind_commitment())
 }
 
@@ -1727,7 +1808,7 @@ fn decode_calibration_split(decoder: &mut Decoder<'_>) -> Result<CalibrationSpli
     let preregistration_hash = decoder.hash()?;
     let calibration = decode_observation_set(decoder, "calibration partition")?;
     let validation = decode_observation_set(decoder, "validation partition")?;
-    let blind_holdout = decode_manifest_rows(decoder, "blind-holdout row")?;
+    let blind_holdout = decode_hash_manifest_rows(decoder, "blind-holdout row")?;
     let encoded_commitment = decoder.hash()?;
     let split = decode_model(
         decoder,
@@ -2652,6 +2733,10 @@ fn content_hash_for(bytes: &[u8]) -> ContentHash {
     fs_blake3::hash_domain(VV_ARTIFACT_FAMILY, bytes)
 }
 
+fn case_content_hash_for(bytes: &[u8]) -> ContentHash {
+    fs_blake3::hash_domain(VV_CASE_FAMILY, bytes)
+}
+
 impl VvArtifact {
     /// Encode one top-level V&V artifact into the exact bounded transport.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, VvCodecError> {
@@ -2890,6 +2975,385 @@ impl VvCase {
 
     /// Domain-separated content identity of the exact canonical transport.
     pub fn content_hash(&self) -> Result<ContentHash, VvCodecError> {
-        Ok(content_hash_for(&self.canonical_bytes()?))
+        Ok(case_content_hash_for(&self.canonical_bytes()?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_hash(label: &str) -> ContentHash {
+        fs_blake3::hash_domain(
+            "org.frankensim.fs-evidence.vv-codec-test.v1",
+            label.as_bytes(),
+        )
+    }
+
+    fn split_ref(id: &str, content: &str) -> ArtifactRef {
+        ArtifactRef::new(
+            ArtifactKind::CalibrationSplit,
+            ArtifactId::try_new(id).expect("test split id"),
+            test_hash(content),
+        )
+    }
+
+    fn encoded_blind_selection(
+        selection_split: &ArtifactRef,
+        release: &BlindReleaseReceipt,
+    ) -> Vec<u8> {
+        encoded_blind_selection_parts(
+            selection_split,
+            release.split(),
+            release.blind_commitment(),
+            release.authority_receipt_hash(),
+        )
+    }
+
+    fn encoded_blind_selection_parts(
+        selection_split: &ArtifactRef,
+        release_split: &ArtifactRef,
+        blind_commitment: ContentHash,
+        authority_receipt_hash: ContentHash,
+    ) -> Vec<u8> {
+        // Write the release fields directly so the negative cases can express
+        // transports that the safe model constructors deliberately refuse.
+        let mut encoder = Encoder::new().expect("selection encoder");
+        encode_artifact_ref(&mut encoder, selection_split).expect("selection split");
+        encoder.count(1).expect("one selected row");
+        encode_observation_id(
+            &mut encoder,
+            &ObservationId::try_new("blind-1").expect("test observation id"),
+        )
+        .expect("selected row");
+        encoder.u8(1).expect("blind partition tag");
+        encode_artifact_ref(&mut encoder, release_split).expect("release split");
+        encoder.hash(blind_commitment).expect("blind commitment");
+        encoder
+            .hash(authority_receipt_hash)
+            .expect("release authority receipt");
+        encoder.finish()
+    }
+
+    fn encoded_validation_selection(selection_split: &ArtifactRef) -> Vec<u8> {
+        let mut encoder = Encoder::new().expect("selection encoder");
+        encode_artifact_ref(&mut encoder, selection_split).expect("selection split");
+        encoder.count(1).expect("one selected row");
+        encode_observation_id(
+            &mut encoder,
+            &ObservationId::try_new("validation-1").expect("test observation id"),
+        )
+        .expect("selected row");
+        encoder.u8(0).expect("validation partition tag");
+        encoder.finish()
+    }
+
+    #[test]
+    fn blind_selection_decoder_rejects_crosswired_release_and_binds_release_identity() {
+        let outer_split = split_ref("split-1", "split-content-a");
+        for (mismatch, release_split) in [
+            (
+                "same id but different content hash",
+                split_ref("split-1", "split-content-b"),
+            ),
+            (
+                "different id but same content hash",
+                split_ref("split-2", "split-content-a"),
+            ),
+        ] {
+            let forged = encoded_blind_selection_parts(
+                &outer_split,
+                &release_split,
+                test_hash("blind-commitment"),
+                test_hash("release-authority"),
+            );
+            let mut decoder = Decoder::new(&forged).expect("forged selection prefix");
+            let error = decode_observation_selection(&mut decoder)
+                .expect_err("decoder must refuse a crosswired release split");
+            assert_eq!(error.rule_name(), CANONICAL_RULE, "{mismatch}");
+            assert!(
+                error.detail().contains("selection.blind_release"),
+                "{mismatch}: {error}",
+            );
+            assert!(
+                error.detail().contains("exact kind, id, and content hash"),
+                "{mismatch}: {error}",
+            );
+        }
+
+        let wrong_kind = ArtifactRef::new(
+            ArtifactKind::ContextOfUse,
+            outer_split.id().clone(),
+            outer_split.hash(),
+        );
+        let forged = encoded_blind_selection_parts(
+            &outer_split,
+            &wrong_kind,
+            test_hash("blind-commitment"),
+            test_hash("release-authority"),
+        );
+        let mut decoder = Decoder::new(&forged).expect("wrong-kind selection prefix");
+        let error = decode_observation_selection(&mut decoder)
+            .expect_err("blind-release decoder must refuse a non-split release authority");
+        assert_eq!(error.rule_name(), CANONICAL_RULE);
+        assert!(error.detail().contains("blind-release receipt"));
+
+        let release = BlindReleaseReceipt::new(
+            outer_split.clone(),
+            test_hash("blind-commitment"),
+            test_hash("release-authority-a"),
+        )
+        .expect("exact release");
+        let exact = encoded_blind_selection(&outer_split, &release);
+        let mut decoder = Decoder::new(&exact).expect("exact selection prefix");
+        let decoded = decode_observation_selection(&mut decoder)
+            .expect("exact release and selection split must decode");
+        decoder.finish().expect("exact selection transport");
+        assert_eq!(decoded.split(), &outer_split);
+        let expected_partition = EvidencePartition::BlindHoldout {
+            release: release.clone(),
+        };
+        assert_eq!(decoded.partition(), &expected_partition);
+
+        let other_authority = BlindReleaseReceipt::new(
+            outer_split.clone(),
+            release.blind_commitment(),
+            test_hash("release-authority-b"),
+        )
+        .expect("other release authority");
+        assert_ne!(
+            encoded_blind_selection(&outer_split, &other_authority),
+            exact,
+            "authority receipt hash must move canonical selection bytes",
+        );
+
+        let other_commitment = BlindReleaseReceipt::new(
+            outer_split.clone(),
+            test_hash("other-blind-commitment"),
+            release.authority_receipt_hash(),
+        )
+        .expect("other blind commitment");
+        assert_ne!(
+            encoded_blind_selection(&outer_split, &other_commitment),
+            exact,
+            "blind commitment must move canonical selection bytes",
+        );
+    }
+
+    #[test]
+    fn blind_release_refuses_zero_authority_fields_in_constructors_and_raw_transport() {
+        let zero = ContentHash::from_slice(&[0_u8; 32]).expect("zero digest has the fixed width");
+        let exact_split = split_ref("split-1", "split-content");
+        let zero_split = ArtifactRef::new(
+            ArtifactKind::CalibrationSplit,
+            exact_split.id().clone(),
+            zero,
+        );
+        let commitment = test_hash("blind-commitment");
+        let authority = test_hash("release-authority");
+
+        for (field, split, candidate_commitment, candidate_authority) in [
+            (
+                "split content hash",
+                zero_split.clone(),
+                commitment,
+                authority,
+            ),
+            ("blind commitment", exact_split.clone(), zero, authority),
+            ("authority receipt", exact_split.clone(), commitment, zero),
+        ] {
+            let error =
+                BlindReleaseReceipt::new(split.clone(), candidate_commitment, candidate_authority)
+                    .expect_err("zero authority material must not construct a blind release");
+            assert!(
+                error.to_string().contains("non-zero exact split identity"),
+                "{field}: {error}",
+            );
+
+            let forged = encoded_blind_selection_parts(
+                &split,
+                &split,
+                candidate_commitment,
+                candidate_authority,
+            );
+            let mut decoder = Decoder::new(&forged).expect("forged selection prefix");
+            let error = decode_observation_selection(&mut decoder)
+                .expect_err("zero-but-internally-equal release transport must refuse");
+            assert_eq!(error.rule_name(), CANONICAL_RULE, "{field}");
+            assert!(
+                error.detail().contains("blind-release receipt"),
+                "{field}: {error}",
+            );
+        }
+    }
+
+    #[test]
+    fn validation_selection_refuses_zero_split_capabilities_in_raw_transport() {
+        let zero = ContentHash::from_slice(&[0_u8; 32]).expect("zero digest has the fixed width");
+        let zero_split = ArtifactRef::new(
+            ArtifactKind::CalibrationSplit,
+            ArtifactId::try_new("split-1").expect("test split id"),
+            zero,
+        );
+        let forged = encoded_validation_selection(&zero_split);
+        let mut decoder = Decoder::new(&forged).expect("forged selection prefix");
+        let error = decode_observation_selection(&mut decoder)
+            .expect_err("a zero split digest cannot become a typed validation capability");
+        assert_eq!(error.rule_name(), CANONICAL_RULE);
+        assert!(
+            error.detail().contains("non-zero exact split identity"),
+            "{error}",
+        );
+    }
+
+    #[test]
+    fn canonical_transport_byte_limit_is_exact_for_encoder_and_decoder() {
+        const PREFIX_BYTES: usize =
+            MAGIC.len() + core::mem::size_of::<u32>() + core::mem::size_of::<u32>();
+        let exact_payload_len = MAX_VV_CANONICAL_BYTES - PREFIX_BYTES;
+
+        let mut exact_encoder = Encoder::new().expect("canonical encoder prefix fits");
+        exact_encoder
+            .raw(&vec![0; exact_payload_len])
+            .expect("an exact-limit transport must encode");
+        assert_eq!(exact_encoder.finish().len(), MAX_VV_CANONICAL_BYTES);
+
+        let mut oversized_encoder = Encoder::new().expect("canonical encoder prefix fits");
+        let encode_error = oversized_encoder
+            .raw(&vec![0; exact_payload_len + 1])
+            .expect_err("one byte beyond the canonical envelope must refuse");
+        assert_eq!(encode_error.offset(), PREFIX_BYTES);
+        assert_eq!(encode_error.rule_name(), CANONICAL_RULE);
+        assert_eq!(
+            encode_error.detail(),
+            format!(
+                "canonical transport would require {} bytes; limit is {MAX_VV_CANONICAL_BYTES}",
+                MAX_VV_CANONICAL_BYTES + 1
+            )
+        );
+
+        let mut exact_transport = vec![0; MAX_VV_CANONICAL_BYTES];
+        exact_transport[..MAGIC.len()].copy_from_slice(MAGIC);
+        exact_transport[4..8].copy_from_slice(&VV_SCHEMA_VERSION.to_le_bytes());
+        exact_transport[8..12].copy_from_slice(&VV_RULESET_VERSION.to_le_bytes());
+        let exact_decoder =
+            Decoder::new(&exact_transport).expect("the exact byte limit passes the size gate");
+        assert_eq!(exact_decoder.position(), PREFIX_BYTES);
+
+        let mut oversized_transport = exact_transport;
+        oversized_transport.push(0);
+        let decode_error = Decoder::new(&oversized_transport)
+            .err()
+            .expect("one byte beyond the canonical envelope must refuse before decoding");
+        assert_eq!(decode_error.offset(), 0);
+        assert_eq!(decode_error.rule_name(), CANONICAL_RULE);
+        assert_eq!(
+            decode_error.detail(),
+            format!(
+                "canonical transport has {} bytes; limit is {MAX_VV_CANONICAL_BYTES}",
+                MAX_VV_CANONICAL_BYTES + 1
+            )
+        );
+    }
+
+    #[test]
+    fn collection_and_nested_aggregate_limits_refuse_before_allocation() {
+        assert_eq!(
+            MAX_VV_TOTAL_COLLECTION_ITEMS % MAX_VV_COLLECTION_ITEMS,
+            0,
+            "the exact-boundary construction assumes whole maximum-size collections",
+        );
+        let full_collections = MAX_VV_TOTAL_COLLECTION_ITEMS / MAX_VV_COLLECTION_ITEMS;
+        assert_eq!(full_collections, 16);
+
+        let mut per_collection = Encoder::new().expect("canonical encoder prefix");
+        let per_collection_offset = per_collection.bytes.len();
+        let error = per_collection
+            .count(MAX_VV_COLLECTION_ITEMS + 1)
+            .expect_err("one entry beyond the per-collection limit must refuse");
+        assert_eq!(error.offset(), per_collection_offset);
+        assert_eq!(
+            error.detail(),
+            format!(
+                "collection has {} entries; limit is {MAX_VV_COLLECTION_ITEMS}",
+                MAX_VV_COLLECTION_ITEMS + 1
+            )
+        );
+        assert_eq!(
+            per_collection.bytes.len(),
+            per_collection_offset,
+            "the encoder must refuse before writing an inadmissible count",
+        );
+
+        let mut exact_aggregate = Encoder::new().expect("canonical encoder prefix");
+        for _ in 0..full_collections {
+            exact_aggregate
+                .count(MAX_VV_COLLECTION_ITEMS)
+                .expect("the exact aggregate item limit must encode");
+        }
+        assert_eq!(
+            exact_aggregate.collection_items,
+            MAX_VV_TOTAL_COLLECTION_ITEMS
+        );
+        let aggregate_offset = exact_aggregate.bytes.len();
+        assert_eq!(aggregate_offset, 12 + full_collections * 8);
+        let error = exact_aggregate
+            .count(1)
+            .expect_err("one nested item beyond the aggregate limit must refuse");
+        assert_eq!(error.offset(), aggregate_offset);
+        assert_eq!(
+            error.detail(),
+            format!("aggregate collection entries exceed {MAX_VV_TOTAL_COLLECTION_ITEMS}")
+        );
+        assert_eq!(
+            exact_aggregate.bytes.len(),
+            aggregate_offset,
+            "the encoder must refuse before writing the over-budget nested count",
+        );
+
+        let mut oversized_count_transport = Encoder::new().expect("canonical encoder prefix");
+        oversized_count_transport
+            .u64((MAX_VV_COLLECTION_ITEMS + 1) as u64)
+            .expect("raw adversarial count word fits the byte envelope");
+        let oversized_count_bytes = oversized_count_transport.finish();
+        let mut decoder = Decoder::new(&oversized_count_bytes)
+            .expect("adversarial count transport has a valid prefix");
+        let error = decoder
+            .count()
+            .expect_err("decoder must gate a count before bounded_vec can allocate");
+        assert_eq!(error.offset(), 12);
+        assert_eq!(
+            error.detail(),
+            format!(
+                "collection length {} exceeds {MAX_VV_COLLECTION_ITEMS}",
+                MAX_VV_COLLECTION_ITEMS + 1
+            )
+        );
+
+        let mut nested_transport = Encoder::new().expect("canonical encoder prefix");
+        for _ in 0..full_collections {
+            nested_transport
+                .u64(MAX_VV_COLLECTION_ITEMS as u64)
+                .expect("raw exact-limit count word fits");
+        }
+        nested_transport.u64(1).expect("raw N+1 count word fits");
+        let nested_bytes = nested_transport.finish();
+        let mut decoder = Decoder::new(&nested_bytes).expect("nested-count transport prefix");
+        for _ in 0..full_collections {
+            assert_eq!(
+                decoder.count().expect("exact aggregate count must decode"),
+                MAX_VV_COLLECTION_ITEMS
+            );
+        }
+        assert_eq!(decoder.collection_items, MAX_VV_TOTAL_COLLECTION_ITEMS);
+        assert_eq!(decoder.position(), aggregate_offset);
+        let error = decoder
+            .count()
+            .expect_err("decoder must refuse the aggregate N+1 count before allocation");
+        assert_eq!(error.offset(), aggregate_offset);
+        assert_eq!(
+            error.detail(),
+            format!("aggregate collection entries exceed {MAX_VV_TOTAL_COLLECTION_ITEMS}")
+        );
     }
 }

@@ -274,11 +274,21 @@ are `ContextOfUse`, `ValidationPlan`, `ExperimentArtifact`, `CalibrationSplit`,
 `SolutionVerificationReceipt`, `PredictionAssessment`, and
 `AssumptionsLedger`.
 
-- Every artifact carries a stable artifact identity and the Five Explicits:
+- Every individual artifact carries a stable artifact identity and the Five Explicits:
   units, a fixed seed or an explicit not-applicable reason, accuracy/time/memory
   budgets, component/schema versions, and required capabilities. References
   bind both the named artifact and its content identity; a display label is
-  never lineage authority.
+  never lineage authority. A finite zero-valued header accuracy limit is stored
+  as canonical mathematical zero, so IEEE `-0.0` cannot create a second header
+  or artifact identity. The complete `VvCase` has its own separately
+  versioned identity domain (`org.frankensim.fs-evidence.vv-case.v3`), distinct
+  from `…vv-artifact.v3`; this exact case identity is what schema-admission
+  receipts bind. The receipt digest itself is governed independently under
+  `…vv-schema-admission-receipt.v2`; its v2 preimage includes the admitted
+  wire-schema/ruleset versions rather than conflating those versions with the
+  receipt-identity era. Each artifact row encodes the artifact family's stable
+  one-byte wire tag as well as its slug, id, and content hash; the tag is not
+  merely an implementation detail used for sorting.
 - `ContextOfUse` binds the decision, named QoIs, acceptance bands, and the
   applicability domain. `ValidationPlan` binds each QoI to its experiment,
   solution-verification, diagnostic, and assessment dependencies. Dependency
@@ -286,13 +296,77 @@ are `ContextOfUse`, `ValidationPlan`, `ExperimentArtifact`, `CalibrationSplit`,
   for one QoI cannot silently support another QoI.
 - `CalibrationSplit` requires non-empty, pairwise-disjoint calibration,
   validation, and blind-holdout dataset sets. Blind data is inadmissible before
-  a release record binds the prior commitment and released dataset identity;
+  a non-zero preregistration identity and a release record bind the prior
+  commitment and released dataset identity;
   calibration data can never be relabeled as validation or blind evidence.
+  The sealed commitment has its own registered v2 identity
+  (`…vv-blind-holdout.v2`) over the preregistration hash and canonically ordered,
+  length-framed `(observation id, immutable source-locator hash)` rows. Split
+  headers and non-blind partitions remain outside this narrow commitment but
+  inside the complete split artifact identity.
+  Selection minting recomputes the split's canonical content hash and requires
+  the exact kind/id/hash reference; a same-id forged reference cannot mint a
+  validation or released-blind capability even if later whole-case admission
+  is never invoked. Canonical decoding enforces the same invariant locally:
+  every validation or blind selection must carry a non-zero split content
+  identity, and the split reference enclosing a `BlindHoldout` selection must
+  exactly equal
+  the release receipt's split reference in kind, id, and content hash before a
+  typed selection is returned. A release constructor and decoder also refuse
+  all-zero sentinels for the exact split content hash, blind commitment, or
+  authority receipt; mutually consistent zero-valued references cannot become
+  typed authority. The blind commitment and non-zero release-authority receipt
+  remain independently identity-bearing; whole-case admission additionally
+  checks the commitment against the admitted split.
 - `ExperimentArtifact` records physical dataset lineage, instrument-calibration
   receipts, clock-synchronization evidence and tolerance, repeatability and
-  covariance, and an authenticity reference. The schema checks presence,
-  dimensions, finite values, and reference closure; it does not itself
-  authenticate a laboratory, instrument, clock, signer, or dataset.
+  covariance, and an authenticity reference. Covariance rows and columns bind
+  an explicit, unique QoI order. Admission first interprets the supplied matrix
+  in that declared order, then permutes the tensor into sorted QoI order for
+  transport and identity. Simultaneous axis/matrix permutations that pass the
+  deterministic covariance screen therefore canonicalize identically, while
+  relabeling axes without moving the corresponding matrix entries changes
+  tensor semantics. The current finite-precision, unpivoted LDL^T screen runs
+  both before and after canonical axis permutation so no admitted artifact can
+  fail its own canonical decode. It is deliberately fail-closed, but it is not
+  an exact or interval PSD certificate: near-singular tensors can be refused in
+  one declared ordering even when another ordering reaches the same canonical
+  tensor. Scientific PSD certification and fully presentation-invariant
+  admission remain an explicit stronger follow-up, not an implicit claim of
+  this structural schema.
+  IEEE signed zero is normalized before covariance validation and encoding, so
+  `-0.0` cannot mint an identity distinct from mathematical zero.
+  Constructor input order is never discarded into a set and silently reused as
+  covariance meaning. Every observation row binds an
+  `ObservationSourceRef`: the exact dataset source-bytes hash, bounded locator
+  domain, positive locator-contract version, non-zero immutable locator hash,
+  and non-zero extraction-receipt hash. It also binds the row's QoI,
+  instrument, acquisition channel, and clock. Admission requires every row's
+  receipt-independent `(dataset, locator domain/version, locator)` identity to
+  be unique: changing only extraction evidence cannot manufacture a second raw
+  observation or move one locator across calibration/validation partitions.
+  The receipt remains part of the complete typed source and artifact identity.
+  Admission also requires every row's
+  dataset hash to equal the experiment's exact source-bytes hash; both that
+  source hash and the custody-receipt hash must be non-zero. It further requires
+  exact manifest/declaration QoI equality, exactly one current non-zero
+  calibration receipt for each referenced instrument, and membership of each
+  referenced clock in the declared synchronization topology. The schema checks
+  presence, dimensions, finite values, typed reference closure, and these
+  internal bindings; it does not itself authenticate a laboratory, instrument,
+  clock, signer, extraction receipt, or dataset.
+- Raw-lineage carriers and their top-level case/receipt wrappers use deliberately
+  redacted `Debug` implementations. Formatting observation sources/manifests,
+  experiments, authenticity records, calibration splits, observation
+  selections, blind releases, `VvCase`, `SchemaAdmissionReceipt`, or
+  `AdmittedVvCase`—and formatting the `VvArtifact` sum wrapper—may expose
+  bounded counts, stage/variant tags, contract/schema versions, and
+  authentication/binding-presence booleans, but never raw row
+  membership, dataset/locator/extraction/custody hashes, metrology bindings,
+  preregistration material, artifact maps, or release-authority material. This
+  is defense against accidental log and panic disclosure, not an authorization
+  boundary: explicit typed getters still expose the exact values to code that
+  already holds the evidence object.
 - A validation plan must name observability, identifiability, confounding, and
   inverse-crime diagnostics. A synthetic oracle, high-fidelity code, reduced
   model, or second implementation is code/solution verification or discrepancy
@@ -340,31 +414,69 @@ Outcomes are derived, never caller-asserted; failed outcomes stay
 visible as violations and additionally refuse any POSITIVE
 model-form-validation or comparison-to-experiment evidence axis.
 
-Observation identity is source-bound (bead xl3yi, schema v2): every
-experiment carries a canonical `ObservationManifest` mapping each
-observation id to an immutable, non-zero source-row locator identity —
-INJECTIVE, so two ids can never alias one source row, while genuinely
-distinct replicate rows with equal values keep distinct locators. The
-aggregate observations hash is DERIVED from the manifest, never
-transported. Blind-holdout partitions carry their (id, source) bindings;
-the sealed blind commitment (domain `…vv-blind-holdout.v2`) binds source
-identities, and case closure cross-checks every blind binding against
-the experiment manifest in addition to the exact id-coverage rule. The
-wire schema and commitment domain are deliberately bumped; v1 artifacts
-do not decode under v2.
+Observation identity and interpretation are authority-bound (beads xl3yi and
+i94v.3.3.1, schema v3): every experiment carries a canonical
+`ObservationManifest` mapping each observation id to a typed
+`ObservationSourceRef` plus the exact QoI, instrument, acquisition channel, and
+clock identities used to interpret it. Each source reference binds exact
+dataset bytes, locator domain and positive contract version, non-zero locator,
+and non-zero extraction receipt; experiment admission proves the row's dataset
+hash equals its `DataAuthenticity` source-bytes hash. Receipt-independent raw
+locator identities are INJECTIVE, so two ids can never alias one immutable
+source row by relabelling only its extraction receipt, while genuinely distinct
+locators with equal values remain distinct. The complete source, including its
+receipt, remains identity-bearing.
+Every one of those bindings enters the derived aggregate observations hash
+under domain `…vv-observation-manifest.v3`; none is transported as a
+caller-supplied aggregate. Blind-holdout partitions retain their hash-only
+`(id, source)` bindings and sealed v2 commitment (domain
+`…vv-blind-holdout.v2`), while case closure cross-checks each source against the
+richer experiment manifest in addition to the exact id-coverage rule. The wire
+schema and artifact content-identity domain deliberately advance together to
+v3 (`…vv-artifact.v3`); v1/v2 artifacts do not decode under v3 and cannot share
+content identities with current artifacts.
+
+Two no-claim boundaries remain explicit in schema v3. First,
+`ObservationLocatorIdentity` is receipt-independent but is still scoped by its
+caller-declared locator domain and contract version. It does **not** normalize
+equivalent raw records expressed under different locator domains or versions,
+so it cannot by itself prevent cross-contract relabelling. Promotion work must
+add a stable schema-owned `RawRecordIdentity`, recomputable from an exact
+dataset-scoped byte-span or canonical Merkle-leaf proof, while retaining the
+locator contract as separate interpretive authority. A supplied leaf hash is
+not authentication; typed verification must check the byte-span/inclusion
+proof against the admitted dataset bytes.
+
+Second, a `VvCase` does not yet prove disjoint raw-locator use across two
+different `ExperimentArtifact` wrappers and does not yet encode explicit
+cross-experiment sharing or joint-likelihood groups. A blanket overlap ban
+would incorrectly reject legitimate shared-data analyses. Successor work must
+make the policy explicit, require exact group coverage and likelihood
+authority, and test both undeclared reuse refusal and declared reuse admission.
 
 V&V artifacts have a versioned canonical bounded binary encoding. Fields are
 fixed-order and length-framed; maps/sets use canonical ordering; floating-point
-values preserve their exact IEEE-754 bits. Decoding caps total bytes, counts,
+values preserve their exact IEEE-754 bits except at schema-declared
+mathematical-zero seams (currently header accuracy and covariance entries),
+where `-0.0` is normalized to `+0.0`. Decoding caps total bytes, counts,
 nesting, and string sizes, and refuses unknown tags, invalid UTF-8, duplicate or
 out-of-order keys, non-canonical encodings, and trailing bytes. An accepted
-decode must re-encode byte-identically. Caller-retained applicability decisions
+decode must re-encode byte-identically. The 4 MiB transport ceiling is exact:
+an N-byte encoder/decoder input is accepted by the size gate and N+1 is refused
+with the canonical rule and byte offset. Caller-retained applicability decisions
 must also match recomputed numeric violations bit-for-bit, and signed-zero
 metric thresholds share one semantic ordering key so aliases cannot evade
-duplicate detection. The admission receipt binds the schema
-version, artifact content identity, QoI/context identity, and validation-rule
-version; it proves that those structural rules ran, not that referenced
+duplicate detection. The admission receipt binds the schema version, dedicated
+complete-case content identity, complete individual-artifact identity map,
+QoI/context identity, and validation-rule version under the registered
+`…vv-schema-admission-receipt.v2` identity; it proves that those
+structural rules ran, not that referenced
 experimental evidence is authentic or scientifically sufficient.
+Receipt artifact-map rows are canonically sorted by the artifact family's
+explicit stable wire tag and then artifact id. They never inherit ordering from
+Rust enum declaration position or caller/map insertion order; the explicit tag
+mapping and artifact-kind variants are governed inputs to the receipt identity
+schema.
 
 Stable rule-coded errors identify the failed invariant and artifact path. G0
 tests cover all seven schema round trips, byte/identity determinism, split
