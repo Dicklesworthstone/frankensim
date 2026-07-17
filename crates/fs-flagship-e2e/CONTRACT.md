@@ -63,9 +63,11 @@ and structured failure evidence.
   its current root digest is FNV-1a-64 over those canonical bytes.
 - `artifact(flagship, tier, metrics, wall_s)` constructs a
   `StageArtifact` with its content hash already computed.
-- `log_row(stage, kind, payload)` emits the suite's structured JSON
-  row shape: `stage`, `kind`, and `payload`. The first two fields are
-  JSON-escaped; `payload` is a caller-supplied complete JSON value.
+- `log_row(stage, kind, payload)` constructs the utility JSON row shape
+  exercised by the forensic self-audit: `stage`, `kind`, and `payload`.
+  The first two fields are JSON-escaped; `payload` is a caller-supplied
+  complete JSON value. Live suite evidence uses canonical `fs-obs`
+  events rather than printing this utility shape directly.
 - `notebook(artifacts)` emits the deterministic lab-notebook body
   over stage hashes and metric bit patterns.
 - `lbm_core_roll_hash()` runs a canonical D2Q9 roll fixture so vessel
@@ -78,8 +80,9 @@ and structured failure evidence.
    not identity.
 2. Re-running the same deterministic smoke stage must reproduce the
    same metric hash before that hash is eligible to become a golden.
-   Vessel and ornith smoke log rows include the complete metric-bit notebook
-   evidence so a future golden delta can be attributed field by field.
+   Vessel and ornith smoke companion events include the complete metric-bit
+   notebook evidence so a future golden delta can be attributed field by
+   field.
 3. Shared machinery changes should surface once in the shared audit,
    not as silent drift across individual flagships.
 4. Mid and full stages are wired with `#[ignore]` until their
@@ -91,9 +94,10 @@ and structured failure evidence.
 ## Error model
 
 The crate is a conformance suite, so programmer-contract violations
-panic through test assertions. Runtime evidence is emitted as
-structured log rows and deterministic artifacts rather than a
-recoverable application API.
+panic through test assertions. Completed aggregates emit canonical
+`fs_obs::EventKind::ConformanceCase` records, and forensic evidence
+uses validated object-shaped `Custom` companions. Evidence and
+deterministic artifacts are not a recoverable application API.
 
 ## Determinism class
 
@@ -136,6 +140,37 @@ than Cargo features.
   replay.
 - `fe2e_mid_stages` and `fe2e_full_stages` are intentionally ignored
   lane placeholders until the perf/CI cadence lands.
+
+The eight completed aggregates retain their existing case identities
+and emit canonical `ConformanceCase` records with Info/Error severity,
+failure-record linting, JSONL validation, and print-before-terminal-
+assert ordering. Ten live forensic companions retain the prior identity
+pairs by mapping `stage` to the emitter scope and `kind` to the
+`Custom` name: `vessel-smoke/artifact`, `ornith-smoke/artifact`,
+`frame-smoke/artifact`, `marquee/status`, `erace-audit/race`, the four
+`drill/*` outcomes, and `notebook/emitted`. Their object payloads are
+validated before printing. The constructed-only `log_row` fixtures in
+fe2e-008 remain the escaping and utility-shape self-audit; they are not
+live suite rows.
+
+Input-seed provenance follows the fixtures exactly. fe2e-001,
+fe2e-004, and fe2e-005 are fixed-input cases and use zero. fe2e-002
+uses `0xE2E` for both its generation LCG and screening call. fe2e-003
+uses ensemble input seed `90210`; the Cx stream seed `0xF1A6_5A1D` is
+recorded separately as execution provenance and is never presented as
+input randomness. fe2e-006 uses `0xAB` for both replayed race runs.
+The composite fe2e-007 aggregate uses zero while its companions carry
+the cancellation seed `0x570`, the shared surrogate/model seed
+`0x0771`, and zero for the fixed ledger drill. The composite fe2e-008
+aggregate likewise uses zero while its notebook companion records the
+fixed vessel input, ornith input `0xE2E`, frame input `90210`, and the
+separate frame execution seed. The process ID used only to isolate the
+crash-recovery database path is a resource identity, not a seed.
+
+Setup and operation expectations can still abort before an aggregate
+is reached; they remain ordinary Rust test diagnostics. Failure-drill
+companions are emitted incrementally before the combined verdict. The
+ignored MID/FULL lanes remain assertion-only and emit no aggregate.
 
 Current caveat: the smoke battery is the fast replay gate for the
 frozen constants above. Mid/full fidelity envelopes remain ignored

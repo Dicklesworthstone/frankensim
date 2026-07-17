@@ -4,6 +4,7 @@
 //! and the bitwise-replayable lab notebook. MID/FULL stages are wired
 //! behind `#[ignore]` — their CI cadence belongs to the perf-CI lanes.
 
+use std::fmt::Write as _;
 use std::time::Instant;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -17,9 +18,77 @@ use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_vessel::pour::{PourRig, run_pour};
 use fs_vessel::robustify;
 
-fn verdict(name: &str, pass: bool, details: &str) {
-    println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
+const SUITE: &str = "fs-flagship-e2e/e2e-battery";
+const FIXED_INPUT_SEED: u64 = 0;
+const ORNITH_INPUT_SEED: u64 = 0xE2E;
+const FRAME_INPUT_SEED: u64 = 90_210;
+const FRAME_EXECUTION_SEED: u64 = 0xF1A6_5A1D;
+const ERACE_INPUT_SEED: u64 = 0xAB;
+const CANCELLATION_INPUT_SEED: u64 = 0x570;
+const SURROGATE_INPUT_SEED: u64 = 0x0771;
+
+fn verdict(name: &str, pass: bool, details: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, name);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: name.to_string(),
+            pass,
+            detail: details.to_string(),
+            seed,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event)
+        .expect("flagship e2e verdict must carry replayable failure evidence");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("flagship e2e verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "{name}: {details}");
+}
+
+fn forensic_row(stage: &str, kind: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, stage);
+    let line = emitter
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: kind.to_string(),
+                json,
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("flagship forensic companion must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
@@ -33,7 +102,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 0xF1A6_5A1D,
+                seed: FRAME_EXECUTION_SEED,
                 kernel_id: 1,
                 tile: 0,
                 iteration: 0,
@@ -125,7 +194,7 @@ fn vessel_smoke() -> (StageArtifact, f64) {
 
 fn ornith_smoke() -> (StageArtifact, f64) {
     let t0 = Instant::now();
-    let mut seed = 0xE2E_u64;
+    let mut seed = ORNITH_INPUT_SEED;
     let mut lcg = move || {
         seed = seed
             .wrapping_mul(6364136223846793005)
@@ -138,7 +207,7 @@ fn ornith_smoke() -> (StageArtifact, f64) {
             OrnithCandidate::from_genes(&g)
         })
         .collect();
-    let rep = screen_generation(&generation, 0xE2E).expect("normalized screen losses");
+    let rep = screen_generation(&generation, ORNITH_INPUT_SEED).expect("normalized screen losses");
     let winner = generation[rep.winner];
     let cert = fs_ornith::certify(&winner);
     // roa is BACK in the hashed stream (6ure closed): the divergence was
@@ -169,7 +238,7 @@ fn frame_smoke() -> StageArtifact {
     });
     let ensemble = StochasticEnsemble {
         name: "e2e-kt".to_string(),
-        seed: 90210,
+        seed: FRAME_INPUT_SEED,
         members: 60,
         duration: QtyAny::new(12.0, TIME),
         dt: QtyAny::new(0.02, TIME),
@@ -200,16 +269,14 @@ fn fe2e_001_vessel_smoke_golden() {
     // metric back in the hash: the band catches meaning, the hash bits).
     let poured_ok = (0.25..0.40).contains(&poured_a) && (poured_a - poured_b).abs() < 1e-9;
     let evidence = notebook(std::slice::from_ref(&a));
-    println!(
-        "{}",
-        log_row(
-            "vessel-smoke",
-            "artifact",
-            &format!(
-                "{{\"hash\":\"0x{:016x}\",\"wall_s\":{:.2},\"evidence\":{evidence}}}",
-                a.hash, a.wall_s,
-            )
-        )
+    forensic_row(
+        "vessel-smoke",
+        "artifact",
+        format!(
+            "{{\"hash\":\"0x{:016x}\",\"wall_s\":{:.2},\"evidence\":{evidence},\
+             \"input_seed\":{FIXED_INPUT_SEED}}}",
+            a.hash, a.wall_s,
+        ),
     );
     verdict(
         "fe2e-001-vessel-smoke",
@@ -221,6 +288,7 @@ fn fe2e_001_vessel_smoke_golden() {
             poured_a.to_bits(),
             a.wall_s,
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -232,16 +300,14 @@ fn fe2e_002_ornith_smoke_golden() {
     // proxy stable to 1e-6 within a platform and physically plausible.
     let roa_ok = (0.1..2.0).contains(&roa_a) && (roa_a - roa_b).abs() < 1e-6;
     let evidence = notebook(std::slice::from_ref(&a));
-    println!(
-        "{}",
-        log_row(
-            "ornith-smoke",
-            "artifact",
-            &format!(
-                "{{\"hash\":\"0x{:016x}\",\"wall_s\":{:.2},\"evidence\":{evidence}}}",
-                a.hash, a.wall_s,
-            )
-        )
+    forensic_row(
+        "ornith-smoke",
+        "artifact",
+        format!(
+            "{{\"hash\":\"0x{:016x}\",\"wall_s\":{:.2},\"evidence\":{evidence},\
+             \"input_seed\":{ORNITH_INPUT_SEED}}}",
+            a.hash, a.wall_s,
+        ),
     );
     verdict(
         "fe2e-002-ornith-smoke",
@@ -252,6 +318,7 @@ fn fe2e_002_ornith_smoke_golden() {
             roa_a.to_bits(),
             a.wall_s,
         ),
+        ORNITH_INPUT_SEED,
     );
 }
 
@@ -259,16 +326,15 @@ fn fe2e_002_ornith_smoke_golden() {
 fn fe2e_003_frame_smoke_golden() {
     let a = frame_smoke();
     let b = frame_smoke();
-    println!(
-        "{}",
-        log_row(
-            "frame-smoke",
-            "artifact",
-            &format!(
-                "{{\"hash\":\"0x{:016x}\",\"wall_s\":{:.2}}}",
-                a.hash, a.wall_s
-            )
-        )
+    forensic_row(
+        "frame-smoke",
+        "artifact",
+        format!(
+            "{{\"hash\":\"0x{:016x}\",\"wall_s\":{:.2},\
+             \"input_seed\":{FRAME_INPUT_SEED},\
+             \"execution_seed\":{FRAME_EXECUTION_SEED}}}",
+            a.hash, a.wall_s
+        ),
     );
     verdict(
         "fe2e-003-frame-smoke",
@@ -277,6 +343,7 @@ fn fe2e_003_frame_smoke_golden() {
             "frame smoke: hash 0x{:016x} (golden 0x{GOLDEN_FRAME_SMOKE:016x}), replay equal, wall {:.1}s",
             a.hash, a.wall_s
         ),
+        FRAME_INPUT_SEED,
     );
 }
 
@@ -286,13 +353,15 @@ fn fe2e_003_frame_smoke_golden() {
 fn fe2e_004_marquee_status_recorded() {
     let status = fs_marquee::status();
     let scope = fs_marquee::scope_summary();
-    println!(
-        "{}",
-        log_row(
-            "marquee",
-            "status",
-            &format!("{{\"status\":\"{status:?}\",\"scope\":\"{scope}\"}}")
-        )
+    let status_json = json_string(&format!("{status:?}"));
+    let scope_json = json_string(&scope);
+    forensic_row(
+        "marquee",
+        "status",
+        format!(
+            "{{\"status\":{status_json},\"scope\":{scope_json},\
+             \"input_seed\":{FIXED_INPUT_SEED}}}"
+        ),
     );
     verdict(
         "fe2e-004-marquee-status",
@@ -300,6 +369,7 @@ fn fe2e_004_marquee_status_recorded() {
         &format!(
             "marquee lane status {status:?} recorded (feature-gated by its owner; suite does not pretend)"
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -316,6 +386,7 @@ fn fe2e_005_shared_lbm_core_audit() {
         &format!(
             "canonical D2Q9 roll: 0x{h1:016x} (golden 0x{GOLDEN_LBM_CORE:016x}), replay equal — vessel and ornithoid ride the same bits"
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -350,20 +421,18 @@ fn fe2e_006_erace_consistency_audit() {
         )
         .expect("fixture losses stay within the declared span")
     };
-    let a = run(0xAB);
-    let b = run(0xAB);
-    println!(
-        "{}",
-        log_row(
-            "erace-audit",
-            "race",
-            &format!(
-                "{{\"winner\":{},\"evals\":{},\"eliminated\":{}}}",
-                a.winner,
-                a.evaluations_used,
-                a.eliminated.len()
-            )
-        )
+    let a = run(ERACE_INPUT_SEED);
+    let b = run(ERACE_INPUT_SEED);
+    forensic_row(
+        "erace-audit",
+        "race",
+        format!(
+            "{{\"winner\":{},\"evals\":{},\"eliminated\":{},\
+             \"input_seed\":{ERACE_INPUT_SEED}}}",
+            a.winner,
+            a.evaluations_used,
+            a.eliminated.len()
+        ),
     );
     verdict(
         "fe2e-006-erace-audit",
@@ -377,6 +446,7 @@ fn fe2e_006_erace_consistency_audit() {
             a.evaluations_used,
             a.eliminated.len()
         ),
+        ERACE_INPUT_SEED,
     );
 }
 
@@ -403,7 +473,7 @@ fn fe2e_007_failure_drills() {
                 let _ = kills.kill(victim as u64);
             }
         }
-        let mut h = (i as u64) << 32 ^ t ^ 0x570_u64;
+        let mut h = (i as u64) << 32 ^ t ^ CANCELLATION_INPUT_SEED;
         h ^= h << 13;
         h ^= h >> 7;
         h ^= h << 17;
@@ -419,23 +489,21 @@ fn fe2e_007_failure_drills() {
     )
     .expect("fixture losses stay within the declared span");
     let storm_ok = out.winner == 0;
-    println!(
-        "{}",
-        log_row(
-            "drill",
-            "cancellation-storm",
-            &format!(
-                "{{\"winner\":{},\"survivors\":{}}}",
-                out.winner,
-                out.survivors.len()
-            )
-        )
+    forensic_row(
+        "drill",
+        "cancellation-storm",
+        format!(
+            "{{\"winner\":{},\"survivors\":{},\
+             \"input_seed\":{CANCELLATION_INPUT_SEED}}}",
+            out.winner,
+            out.survivors.len()
+        ),
     );
 
     // (b) BUDGET EXHAUSTION: the ornithoid campaign degrades to the
     // surrogate+conformal path (the flagship's own drill, re-run at
     // suite level through public API).
-    let mut seed = 0x0771_u64;
+    let mut seed = SURROGATE_INPUT_SEED;
     let mut lcg = move || {
         seed = seed
             .wrapping_mul(6364136223846793005)
@@ -461,13 +529,13 @@ fn fe2e_007_failure_drills() {
         .filter(|c| sur.band.covers(sur.predict(c), lift_to_drag(c)))
         .count();
     let budget_ok = in_band >= 5;
-    println!(
-        "{}",
-        log_row(
-            "drill",
-            "budget-exhaustion",
-            &format!("{{\"degraded\":6,\"in_band\":{in_band}}}")
-        )
+    forensic_row(
+        "drill",
+        "budget-exhaustion",
+        format!(
+            "{{\"degraded\":6,\"in_band\":{in_band},\
+             \"input_seed\":{SURROGATE_INPUT_SEED}}}"
+        ),
     );
 
     // (c) LEDGER CRASH-RECOVERY: write events, drop WITHOUT commit
@@ -504,34 +572,38 @@ fn fe2e_007_failure_drills() {
     };
     let reopened = fs_ledger::Ledger::open(&path_s).expect("reopen after crash");
     let recovered = reopened.schema_version().is_ok();
-    println!(
-        "{}",
-        log_row(
-            "drill",
-            "ledger-crash-recovery",
-            &format!("{{\"committed_ops\":{committed_ops},\"recovered\":{recovered}}}")
-        )
+    forensic_row(
+        "drill",
+        "ledger-crash-recovery",
+        format!(
+            "{{\"committed_ops\":{committed_ops},\"recovered\":{recovered},\
+             \"input_seed\":{FIXED_INPUT_SEED}}}"
+        ),
     );
 
     // (d) MODEL-FORM ESCALATION: a prediction OUTSIDE the conformal
     // band must trigger escalation (the certify-or-escalate contract).
     let outside = !sur.band.covers(1000.0, lift_to_drag(&fresh[0]));
-    println!(
-        "{}",
-        log_row(
-            "drill",
-            "model-form-escalation",
-            &format!("{{\"escalates_on_outlier\":{outside}}}")
-        )
+    forensic_row(
+        "drill",
+        "model-form-escalation",
+        format!(
+            "{{\"escalates_on_outlier\":{outside},\
+             \"input_seed\":{SURROGATE_INPUT_SEED}}}"
+        ),
     );
 
     verdict(
         "fe2e-007-failure-drills",
         storm_ok && budget_ok && recovered && outside,
         &format!(
-            "cancellation storm: winner {} among survivors; budget exhaustion: {in_band}/6 in band; ledger crash-recovery: reopened consistent; model-form escalation triggers on outliers",
+            "cancellation storm (input seed {CANCELLATION_INPUT_SEED:#x}): winner {} \
+             among survivors; budget exhaustion and model-form escalation (input seed \
+             {SURROGATE_INPUT_SEED:#x}): {in_band}/6 in band and outliers escalate; \
+             ledger crash-recovery: reopened consistent; composite aggregate seed is zero",
             out.winner
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -559,13 +631,17 @@ fn fe2e_008_forensics_and_notebook() {
     // Replay: rebuild everything and regenerate.
     let arts2 = vec![vessel_smoke().0, ornith_smoke().0, frame_smoke()];
     let n2 = notebook(&arts2);
-    println!(
-        "{}",
-        log_row(
-            "notebook",
-            "emitted",
-            &format!("{{\"bytes\":{}}}", n1.len())
-        )
+    forensic_row(
+        "notebook",
+        "emitted",
+        format!(
+            "{{\"bytes\":{},\"aggregate_input_seed\":{FIXED_INPUT_SEED},\
+             \"vessel_input_seed\":{FIXED_INPUT_SEED},\
+             \"ornith_input_seed\":{ORNITH_INPUT_SEED},\
+             \"frame_input_seed\":{FRAME_INPUT_SEED},\
+             \"frame_execution_seed\":{FRAME_EXECUTION_SEED}}}",
+            n1.len()
+        ),
     );
     verdict(
         "fe2e-008-forensics-notebook",
@@ -578,9 +654,14 @@ fn fe2e_008_forensics_and_notebook() {
             && n1.contains("\"stages\":[")
             && arts.len() == 3,
         &format!(
-            "forensic rows escape string fields and carry required keys; lab notebook ({} bytes) regenerates BITWISE on full replay",
+            "constructed log-row fixtures escape string fields and carry required keys; \
+             lab notebook ({} bytes) regenerates BITWISE on full replay using vessel input \
+             seed zero, ornith input seed {ORNITH_INPUT_SEED:#x}, frame input seed \
+             {FRAME_INPUT_SEED}, and frame execution seed {FRAME_EXECUTION_SEED:#x}; \
+             composite aggregate seed is zero",
             n1.len()
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
