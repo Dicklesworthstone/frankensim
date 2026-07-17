@@ -2,10 +2,20 @@
 
 #![cfg(feature = "moonshot-integral-topology")]
 
+use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
 use fs_feec::integral_topology::{
     ExactAlgebraBudget, ExactIntegerMatrix, IntegralTopologyError, IntegralTopologyFailureClass,
-    MatrixRole, SmithNormalFormWitness, SmithWitnessStage, TopologyApplicability,
-    verify_smith_normal_form, verify_smith_normal_form_with_checkpoint,
+    MatrixRole, SmithNormalFormWitness, SmithWitnessStage, TerminalRelativeBoundaryBudget,
+    TopologyApplicability, extract_terminal_relative_boundary_matrix,
+    extract_terminal_relative_boundary_matrix_with_checkpoint, verify_smith_normal_form,
+    verify_smith_normal_form_with_checkpoint,
+};
+use fs_feec::terminal_relative::{
+    BoundaryIncidence, CellRef, CellularSubcomplex, ConductorComponent, ConductorComponentId,
+    FiniteCellComplex, IncidenceSign, IntegralRelativeChain, IntegralRelativeCochain,
+    OrientationMapSign, PhaseId, PhysicalTerminal, PhysicalTerminalId, PresentedMachinePortRef,
+    TerminalOrientation, TerminalPortCoordinate, TerminalPortTrivialization, TerminalRelativePair,
+    TerminalRole, TrivializationId,
 };
 
 fn budget(max_extent: usize, max_work: u128) -> ExactAlgebraBudget {
@@ -44,6 +54,193 @@ fn rank_one_witness() -> (ExactIntegerMatrix, SmithNormalFormWitness) {
     (
         source,
         SmithNormalFormWitness::new(diagonal, left, left_inverse, right, right_inverse),
+    )
+}
+
+fn stable(value: &str) -> StableId {
+    StableId::new(value).expect("fixture stable id")
+}
+
+fn subcomplex(
+    ambient: &FiniteCellComplex,
+    id: &str,
+    cells: impl IntoIterator<Item = CellRef>,
+) -> CellularSubcomplex {
+    CellularSubcomplex::try_new(stable(id), cells, ambient).expect("fixture subcomplex")
+}
+
+fn loop_terminal(
+    ambient: &FiniteCellComplex,
+    ordinal: u32,
+    id: &str,
+    role: TerminalRole,
+    orientation: TerminalOrientation,
+    sign: OrientationMapSign,
+) -> PhysicalTerminal {
+    let port = PortKind::ElectricalVoltageCurrent
+        .scalar_seed_schema(
+            stable(&format!("port/{id}")),
+            CoordinateBinding::new(
+                stable("basis/winding-terminal"),
+                stable("frame/winding-terminal"),
+                PortOrientation::OutwardFromOwner,
+            ),
+            PortTimestamp::new(stable("clock/electrical"), 31),
+        )
+        .expect("electrical port");
+    PhysicalTerminal::new(
+        PhysicalTerminalId::new(format!("terminal/{id}")).expect("terminal id"),
+        subcomplex(
+            ambient,
+            &format!("support/{id}"),
+            [CellRef::new(0, ordinal)],
+        ),
+        ConductorComponentId::new("component/winding").expect("component id"),
+        PhaseId::new("phase/a").expect("phase id"),
+        role,
+        orientation,
+        TerminalPortCoordinate::Flow,
+        port.clone(),
+        PresentedMachinePortRef::try_new(
+            stable("org.frankensim.fs-ir.machine.graph.v1"),
+            1,
+            [0x42; 32],
+            stable("machine-owner/stator-winding"),
+            stable(&format!("port/{id}")),
+            stable(&format!("machine-terminal/{id}-voltage")),
+            stable(&format!("machine-terminal/{id}-current")),
+        )
+        .expect("presented Machine-IR port"),
+        TerminalPortTrivialization::new(
+            TrivializationId::new(format!("trivialization/{id}")).expect("trivialization id"),
+            port.id().clone(),
+            sign,
+            stable("voltage-reference/dc-link-negative"),
+            stable(&format!("current-reference/{id}")),
+        ),
+    )
+    .expect("physical terminal")
+}
+
+#[allow(clippy::too_many_lines)]
+fn terminal_cut_loop_pair(reverse_declarations: bool) -> TerminalRelativePair {
+    let mut incidences = vec![
+        BoundaryIncidence::new(
+            CellRef::new(0, 0),
+            CellRef::new(1, 0),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 1),
+            CellRef::new(1, 0),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 1),
+            CellRef::new(1, 1),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 2),
+            CellRef::new(1, 1),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 1),
+            CellRef::new(1, 2),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 2),
+            CellRef::new(1, 2),
+            IncidenceSign::Positive,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 2),
+            CellRef::new(1, 3),
+            IncidenceSign::Negative,
+        ),
+        BoundaryIncidence::new(
+            CellRef::new(0, 3),
+            CellRef::new(1, 3),
+            IncidenceSign::Positive,
+        ),
+    ];
+    if reverse_declarations {
+        incidences.reverse();
+    }
+    let complex =
+        FiniteCellComplex::try_new(1, vec![4, 4], incidences).expect("terminal-cut loop graph");
+    let conductor = subcomplex(
+        &complex,
+        "support/conductor-loop",
+        [
+            CellRef::new(0, 0),
+            CellRef::new(0, 1),
+            CellRef::new(0, 2),
+            CellRef::new(0, 3),
+            CellRef::new(1, 0),
+            CellRef::new(1, 1),
+            CellRef::new(1, 2),
+            CellRef::new(1, 3),
+        ],
+    );
+    let component = ConductorComponent::new(
+        ConductorComponentId::new("component/winding").expect("component id"),
+        conductor.clone(),
+    )
+    .expect("component");
+    let mut terminals = vec![
+        loop_terminal(
+            &complex,
+            0,
+            "loop-positive",
+            TerminalRole::Driven,
+            TerminalOrientation::OutOfConductor,
+            OrientationMapSign::Preserve,
+        ),
+        loop_terminal(
+            &complex,
+            3,
+            "loop-return",
+            TerminalRole::ReturnReference,
+            TerminalOrientation::IntoConductor,
+            OrientationMapSign::Reverse,
+        ),
+    ];
+    if reverse_declarations {
+        terminals.reverse();
+    }
+    TerminalRelativePair::try_new(
+        complex.clone(),
+        conductor,
+        subcomplex(
+            &complex,
+            "support/terminal-relative-loop",
+            [CellRef::new(0, 0), CellRef::new(0, 3)],
+        ),
+        subcomplex(&complex, "support/insulation-empty-loop", []),
+        vec![component],
+        terminals,
+    )
+    .expect("terminal-cut loop pair")
+}
+
+fn boundary_budget(
+    max_rows: usize,
+    max_cols: usize,
+    max_entries: usize,
+    max_retained: usize,
+    max_component_visits: usize,
+    max_incidence_visits: usize,
+) -> TerminalRelativeBoundaryBudget {
+    TerminalRelativeBoundaryBudget::new(
+        max_rows,
+        max_cols,
+        max_entries,
+        max_retained,
+        max_component_visits,
+        max_incidence_visits,
     )
 }
 
@@ -230,12 +427,12 @@ fn it_007_every_cancellation_poll_is_transactional() {
         );
         let error = result.expect_err("every injected cancellation must refuse");
         assert!(
-            matches!(error, IntegralTopologyError::Cancelled { .. }),
+            matches!(&error, IntegralTopologyError::Cancelled { .. }),
             "poll {stop_at} must publish only cancellation: {error:?}"
         );
         if stop_at + 1 == poll_count {
             assert!(matches!(
-                error,
+                &error,
                 IntegralTopologyError::Cancelled {
                     phase: "smith witness finalize",
                     completed_scalar_operations: 48,
@@ -356,4 +553,268 @@ fn it_011_rectangular_and_empty_shapes_remain_exactly_distinct() {
         .expect("three-by-zero matrix keeps its shape");
     assert_eq!((verified.source().rows(), verified.source().cols()), (3, 0));
     assert_eq!(verified.scalar_operations(), 54);
+}
+
+#[test]
+fn it_012_terminal_relative_boundary_binds_pair_phase_component_and_bases() {
+    let pair = terminal_cut_loop_pair(false);
+    let phase = PhaseId::new("phase/a").expect("phase id");
+    let boundary = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        1,
+        boundary_budget(2, 4, 8, 14, 16, 8),
+    )
+    .expect("canonical terminal-relative boundary");
+
+    assert_eq!(boundary.pair_id(), pair.identity());
+    assert_eq!(boundary.phase(), &phase);
+    assert_eq!(boundary.component().as_str(), "component/winding");
+    assert_eq!(boundary.source_degree(), 1);
+    assert_eq!(boundary.target_degree(), Some(0));
+    assert_eq!(
+        boundary.source_basis(),
+        &[
+            CellRef::new(1, 0),
+            CellRef::new(1, 1),
+            CellRef::new(1, 2),
+            CellRef::new(1, 3),
+        ]
+    );
+    assert_eq!(
+        boundary.target_basis(),
+        &[CellRef::new(0, 1), CellRef::new(0, 2)]
+    );
+    assert_eq!((boundary.matrix().rows(), boundary.matrix().cols()), (2, 4));
+    assert_eq!(boundary.matrix().entries(), &[1, -1, -1, 0, 0, 1, 1, -1]);
+    assert_eq!(boundary.work_items(), 24);
+    assert_eq!(
+        boundary.applicability(),
+        TopologyApplicability::TerminalRelativeIncidenceOnly
+    );
+
+    let chain = IntegralRelativeChain::try_new(&pair, phase.clone(), 1, vec![2, -1, 3, 4])
+        .expect("relative chain");
+    assert_eq!(
+        pair.boundary(&chain)
+            .expect("exact boundary")
+            .coefficients(),
+        &[0, -2]
+    );
+    let cochain =
+        IntegralRelativeCochain::try_new(&pair, phase, 0, vec![2, 5]).expect("relative cochain");
+    assert_eq!(
+        pair.integral_coboundary(&cochain)
+            .expect("exact coboundary")
+            .coefficients(),
+        &[2, 3, 3, -5]
+    );
+}
+
+#[test]
+fn it_013_pair_boundary_replays_across_declaration_order() {
+    let forward = terminal_cut_loop_pair(false);
+    let reverse = terminal_cut_loop_pair(true);
+    let phase = PhaseId::new("phase/a").expect("phase id");
+    assert_eq!(forward.identity(), reverse.identity());
+
+    let forward = extract_terminal_relative_boundary_matrix(
+        &forward,
+        &phase,
+        1,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("forward boundary");
+    let reverse = extract_terminal_relative_boundary_matrix(
+        &reverse,
+        &phase,
+        1,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("reverse boundary");
+    assert_eq!(forward, reverse);
+}
+
+#[test]
+fn it_014_unaugmented_edge_zero_matrices_preserve_rectangular_shapes() {
+    let pair = terminal_cut_loop_pair(false);
+    let phase = PhaseId::new("phase/a").expect("phase id");
+
+    let bottom = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        0,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("bottom zero map");
+    assert_eq!(bottom.source_degree(), 0);
+    assert_eq!(bottom.target_degree(), None);
+    assert_eq!((bottom.matrix().rows(), bottom.matrix().cols()), (0, 2));
+    assert!(bottom.target_basis().is_empty());
+    assert_eq!(
+        bottom.source_basis(),
+        &[CellRef::new(0, 1), CellRef::new(0, 2)]
+    );
+
+    let top = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        2,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("top zero map");
+    assert_eq!(top.source_degree(), 2);
+    assert_eq!(top.target_degree(), Some(1));
+    assert_eq!((top.matrix().rows(), top.matrix().cols()), (4, 0));
+    assert!(top.source_basis().is_empty());
+    assert_eq!(
+        top.target_basis(),
+        &[
+            CellRef::new(1, 0),
+            CellRef::new(1, 1),
+            CellRef::new(1, 2),
+            CellRef::new(1, 3),
+        ]
+    );
+    assert!(bottom.matrix().entries().is_empty());
+    assert!(top.matrix().entries().is_empty());
+}
+
+#[test]
+fn it_015_pair_boundary_preflights_every_independent_budget() {
+    let pair = terminal_cut_loop_pair(false);
+    let phase = PhaseId::new("phase/a").expect("phase id");
+    for (budget, expected) in [
+        (boundary_budget(1, 4, 8, 14, 16, 8), "rows"),
+        (boundary_budget(2, 3, 8, 14, 16, 8), "columns"),
+        (boundary_budget(2, 4, 7, 14, 16, 8), "entries"),
+        (boundary_budget(2, 4, 8, 13, 16, 8), "retained"),
+        (boundary_budget(2, 4, 8, 14, 15, 8), "component visits"),
+        (boundary_budget(2, 4, 8, 14, 16, 7), "incidence visits"),
+    ] {
+        let error = extract_terminal_relative_boundary_matrix(&pair, &phase, 1, budget)
+            .expect_err("limit minus one must refuse");
+        match expected {
+            "rows" | "columns" => assert!(matches!(
+                &error,
+                IntegralTopologyError::MatrixExtentExceeded {
+                    rows: 2,
+                    cols: 4,
+                    ..
+                }
+            )),
+            "entries" => assert!(matches!(
+                &error,
+                IntegralTopologyError::MatrixEntryBudgetExceeded {
+                    requested: 8,
+                    max: 7,
+                }
+            )),
+            "retained" => assert!(matches!(
+                &error,
+                IntegralTopologyError::RetainedEntryBudgetExceeded {
+                    requested: 14,
+                    max: 13,
+                }
+            )),
+            "component visits" => assert!(matches!(
+                &error,
+                IntegralTopologyError::ComponentVisitBudgetExceeded {
+                    requested: 16,
+                    max: 15,
+                }
+            )),
+            "incidence visits" => assert!(matches!(
+                &error,
+                IntegralTopologyError::IncidenceVisitBudgetExceeded {
+                    requested: 8,
+                    max: 7,
+                }
+            )),
+            _ => unreachable!(),
+        }
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+    }
+}
+
+#[test]
+fn it_016_pair_boundary_cancellation_is_transactional_through_publication() {
+    let pair = terminal_cut_loop_pair(false);
+    let phase = PhaseId::new("phase/a").expect("phase id");
+    let mut poll_count = 0_usize;
+    let boundary = extract_terminal_relative_boundary_matrix_with_checkpoint(
+        &pair,
+        &phase,
+        1,
+        TerminalRelativeBoundaryBudget::default(),
+        &mut |_| {
+            poll_count += 1;
+            true
+        },
+    )
+    .expect("uninterrupted extraction");
+    assert_eq!(boundary.work_items(), 24);
+
+    for stop_at in 0..poll_count {
+        let mut observed = 0_usize;
+        let error = extract_terminal_relative_boundary_matrix_with_checkpoint(
+            &pair,
+            &phase,
+            1,
+            TerminalRelativeBoundaryBudget::default(),
+            &mut |_| {
+                let keep_running = observed != stop_at;
+                observed += 1;
+                keep_running
+            },
+        )
+        .expect_err("injected cancellation must refuse");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        assert!(matches!(
+            &error,
+            IntegralTopologyError::PairBoundaryCancelled { .. }
+        ));
+        if stop_at + 1 == poll_count {
+            assert!(matches!(
+                &error,
+                IntegralTopologyError::PairBoundaryCancelled {
+                    phase: "terminal-relative boundary finalize",
+                    completed_work_items: 24,
+                    planned_work_items: 24,
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn it_017_pair_boundary_refuses_unknown_phase_and_excess_degree() {
+    let pair = terminal_cut_loop_pair(false);
+    let unknown = PhaseId::new("phase/unknown").expect("phase id");
+    let error = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &unknown,
+        1,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect_err("unknown phase must refuse");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Refuted);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::UnknownTerminalRelativePhase { .. }
+    ));
+
+    let phase = PhaseId::new("phase/a").expect("phase id");
+    let error = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        3,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect_err("degree above dimension plus one must refuse");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Refuted);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::BoundaryDegreeOutOfRange { degree: 3, max: 2 }
+    ));
 }

@@ -187,6 +187,12 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   the exact source and all witness matrices and is unconditionally tagged
   `AbstractAlgebraOnly`; it is not yet an `IntegralRelativeTopologyReceipt`, a
   homology computation, or physical R3 winding authority.
+  Its second tranche extracts an opaque exact boundary matrix bound to the
+  admitted pair identity, phase, component, degree, and canonical source/target
+  quotient bases. Rows are degree `k-1`, columns are degree `k`, and the
+  unaugmented edge maps retain distinct `0 x dim(C_0)` and `dim(C_top) x 0`
+  shapes. Terminal orientation, port trivialization, and phase-current signs
+  do not alter intrinsic cellular incidence.
 
 ## Invariants
 
@@ -293,6 +299,9 @@ The feature-gated exact topology checker returns `IntegralTopologyError` for
 matrix shape, retained/workspace entry, scalar-work, allocation, cancellation,
 checked-arithmetic, inverse, transform, and canonical-diagonal refusals. No
 overflow or incomplete witness is reinterpreted as rank, torsion, or success.
+Pair-boundary extraction additionally distinguishes unknown phase/excess degree
+counterexamples from typed component/incidence budget, invariant-loss,
+allocation, and cancellation Unknowns.
 
 ## Determinism class
 
@@ -324,6 +333,9 @@ Integral-topology witness verification is integer-only, row-major, and
 fixed-order. Exact product traversal, error precedence, invariant-factor order,
 and scalar-work counts are deterministic across ISA and thread counts. The
 first tranche deliberately emits no persistent identity or promotion receipt.
+Pair-boundary extraction traverses canonical `CellRef` and admitted-incidence
+order and binds the complete pair identity, so declaration order cannot change
+its bases, signs, matrix bytes, or work count.
 
 ## Cancellation behavior
 
@@ -342,6 +354,9 @@ entries, and exact scalar work before allocation. It polls before every output
 scalar and again before final publication, so at most `max(rows, cols)` checked
 inner-product terms occur between polls. Cancellation publishes only a typed
 refusal; no partially verified value is constructible.
+Pair-boundary extraction separately caps component visits, incidence visits,
+matrix extents/entries, and retained basis-plus-matrix entries. It polls each
+deterministic visit and once after the final incidence before publication.
 
 ## Unsafe boundary
 
@@ -474,6 +489,11 @@ off-diagonal, negative, zero-order, divisibility, fake-inverse, transformed-
 source, shape, storage, exact-work limit+1, and checked-overflow twins. Every
 cancellation poll is injected transactionally; the empty exact matrix remains
 representable and every success is tagged abstract-algebra-only.
+The tranche-2 tests pin the terminal-cut-loop matrix, pair/phase/component and
+basis binding, declaration-order replay, independent boundary/coboundary action,
+both unaugmented rectangular edge maps, every budget limit-minus-one,
+unknown-phase/excess-degree refusals, and cancellation through final
+publication.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -635,6 +655,10 @@ representable and every success is tagged abstract-algebra-only.
   free or torsion generators, periods, linking pairings, long exact sequences,
   or induced maps. A later constructive solver must emit the same complete
   witness and pass this verifier before claiming those results.
+- I13.2b tranche 2 proves faithful extraction of one admitted phase-local
+  quotient incidence matrix. Independently Smith-reducing adjacent boundary
+  matrices is not a homology proof: the incoming image must first be
+  transported into the outgoing map's verified kernel coordinates.
 - `AbstractAlgebraOnly` is load-bearing. Synthetic CW/Moore/lens-space matrices
   may test the algebra kernel but cannot establish a conductor, terminal,
   material, embedding, winding, flux, force, or machine claim. Physical R3

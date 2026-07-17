@@ -1,6 +1,6 @@
 //! Bounded exact-integer topology algebra for I13.2b.
 //!
-//! This first tranche is an independently replayable Smith-normal-form
+//! The first tranche is an independently replayable Smith-normal-form
 //! *witness verifier*. It accepts a general exact integer matrix only when
 //! explicit integer left/right transformations and their explicit inverses
 //! prove
@@ -13,13 +13,21 @@
 //! checked `i128`; overflow, allocation pressure, work exhaustion, and
 //! cancellation refuse without publishing a partially verified value.
 //!
-//! A verified value is tagged [`TopologyApplicability::AbstractAlgebraOnly`].
-//! It is not yet a terminal-relative homology receipt or physical R3 winding
-//! authority. The constructive normal-form solver and the binding to an
-//! admitted [`crate::terminal_relative::TerminalRelativePair`] follow in
-//! later I13.2b tranches.
+//! The second tranche extracts the exact cellular boundary for one admitted
+//! [`crate::terminal_relative::TerminalRelativePair`], phase, component, and
+//! degree while retaining both canonical quotient bases. It includes the
+//! unaugmented zero maps at the two chain-complex edges.
+//!
+//! Neither value is a terminal-relative homology receipt or physical R3
+//! winding authority. The constructive normal-form solver, kernel-coordinate
+//! transport, and free/torsion decomposition follow in later I13.2b tranches.
 
 use core::fmt;
+
+use crate::terminal_relative::{
+    CellRef, ConductorComponentId, IncidenceSign, MAX_TERMINAL_RELATIVE_CELLS,
+    MAX_TERMINAL_RELATIVE_INCIDENCES, PhaseId, TerminalRelativePair, TerminalRelativePairId,
+};
 
 /// Default maximum row or column extent admitted by the exact checker.
 pub const DEFAULT_MAX_MATRIX_EXTENT: usize = 256;
@@ -33,6 +41,13 @@ pub const DEFAULT_MAX_WORKSPACE_ENTRIES: usize = DEFAULT_MAX_MATRIX_ENTRIES;
 /// Exact dot-product terms (one checked multiply/add pair each) admitted by
 /// the default checker.
 pub const DEFAULT_MAX_SCALAR_OPERATIONS: u128 = 101_000_000;
+/// Default maximum component-cell visits across both canonical basis scans.
+pub const DEFAULT_MAX_BOUNDARY_COMPONENT_VISITS: usize = 2 * MAX_TERMINAL_RELATIVE_CELLS;
+/// Default maximum admitted incidences visited while binding one pair boundary.
+pub const DEFAULT_MAX_BOUNDARY_INCIDENCE_VISITS: usize = MAX_TERMINAL_RELATIVE_INCIDENCES;
+/// Default retained entries across a pair boundary matrix and its two bases.
+pub const DEFAULT_MAX_BOUNDARY_RETAINED_ENTRIES: usize =
+    DEFAULT_MAX_MATRIX_ENTRIES + 2 * DEFAULT_MAX_MATRIX_EXTENT;
 
 /// Explicit resource envelope for exact integer witness admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +128,91 @@ impl Default for ExactAlgebraBudget {
             DEFAULT_MAX_RETAINED_ENTRIES,
             DEFAULT_MAX_WORKSPACE_ENTRIES,
             DEFAULT_MAX_SCALAR_OPERATIONS,
+        )
+    }
+}
+
+/// Explicit resource envelope for one terminal-relative boundary extraction.
+///
+/// Component and incidence visits are capped independently because a sparse
+/// admitted complex can be much larger than the requested phase-local matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalRelativeBoundaryBudget {
+    max_rows: usize,
+    max_cols: usize,
+    max_matrix_entries: usize,
+    max_retained_entries: usize,
+    max_component_visits: usize,
+    max_incidence_visits: usize,
+}
+
+impl TerminalRelativeBoundaryBudget {
+    /// Construct an exact extraction envelope.
+    #[must_use]
+    pub const fn new(
+        max_rows: usize,
+        max_cols: usize,
+        max_matrix_entries: usize,
+        max_retained_entries: usize,
+        max_component_visits: usize,
+        max_incidence_visits: usize,
+    ) -> Self {
+        Self {
+            max_rows,
+            max_cols,
+            max_matrix_entries,
+            max_retained_entries,
+            max_component_visits,
+            max_incidence_visits,
+        }
+    }
+
+    /// Maximum target-basis rows.
+    #[must_use]
+    pub const fn max_rows(self) -> usize {
+        self.max_rows
+    }
+
+    /// Maximum source-basis columns.
+    #[must_use]
+    pub const fn max_cols(self) -> usize {
+        self.max_cols
+    }
+
+    /// Maximum dense matrix entries.
+    #[must_use]
+    pub const fn max_matrix_entries(self) -> usize {
+        self.max_matrix_entries
+    }
+
+    /// Maximum entries retained across matrix and bases.
+    #[must_use]
+    pub const fn max_retained_entries(self) -> usize {
+        self.max_retained_entries
+    }
+
+    /// Maximum component-support visits across both canonical basis scans.
+    #[must_use]
+    pub const fn max_component_visits(self) -> usize {
+        self.max_component_visits
+    }
+
+    /// Maximum ambient incidence rows visited.
+    #[must_use]
+    pub const fn max_incidence_visits(self) -> usize {
+        self.max_incidence_visits
+    }
+}
+
+impl Default for TerminalRelativeBoundaryBudget {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_MATRIX_EXTENT,
+            DEFAULT_MAX_MATRIX_EXTENT,
+            DEFAULT_MAX_MATRIX_ENTRIES,
+            DEFAULT_MAX_BOUNDARY_RETAINED_ENTRIES,
+            DEFAULT_MAX_BOUNDARY_COMPONENT_VISITS,
+            DEFAULT_MAX_BOUNDARY_INCIDENCE_VISITS,
         )
     }
 }
@@ -222,6 +322,364 @@ impl ExactIntegerMatrix {
     }
 }
 
+/// Canonically bound terminal-relative boundary matrix.
+///
+/// Rows are the phase-local quotient basis in degree `k - 1` and columns are
+/// the basis in degree `k`. The unaugmented edge maps are represented too:
+/// degree zero has no target basis (`0 x dim(C_0)`), while degree one above
+/// the complex has no source basis (`dim(C_top) x 0`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRelativeBoundaryMatrix {
+    pair: TerminalRelativePairId,
+    phase: PhaseId,
+    component: ConductorComponentId,
+    source_degree: u8,
+    target_degree: Option<u8>,
+    source_basis: Vec<CellRef>,
+    target_basis: Vec<CellRef>,
+    matrix: ExactIntegerMatrix,
+    work_items: u128,
+}
+
+impl TerminalRelativeBoundaryMatrix {
+    /// Strong identity of the complete admitted pair.
+    #[must_use]
+    pub const fn pair_id(&self) -> TerminalRelativePairId {
+        self.pair
+    }
+
+    /// Phase whose component-local quotient basis was extracted.
+    #[must_use]
+    pub const fn phase(&self) -> &PhaseId {
+        &self.phase
+    }
+
+    /// Component bound to the retained phase by pair admission.
+    #[must_use]
+    pub const fn component(&self) -> &ConductorComponentId {
+        &self.component
+    }
+
+    /// Source chain degree `k`.
+    #[must_use]
+    pub const fn source_degree(&self) -> u8 {
+        self.source_degree
+    }
+
+    /// Target chain degree, or `None` for the unaugmented degree-zero edge.
+    #[must_use]
+    pub const fn target_degree(&self) -> Option<u8> {
+        self.target_degree
+    }
+
+    /// Canonically ordered source cells corresponding to matrix columns.
+    #[must_use]
+    pub fn source_basis(&self) -> &[CellRef] {
+        &self.source_basis
+    }
+
+    /// Canonically ordered target cells corresponding to matrix rows.
+    #[must_use]
+    pub fn target_basis(&self) -> &[CellRef] {
+        &self.target_basis
+    }
+
+    /// Exact row-major boundary matrix.
+    #[must_use]
+    pub const fn matrix(&self) -> &ExactIntegerMatrix {
+        &self.matrix
+    }
+
+    /// Deterministic component-cell and incidence visits completed.
+    #[must_use]
+    pub const fn work_items(&self) -> u128 {
+        self.work_items
+    }
+
+    /// This binds exact admitted incidence, not a homology or winding result.
+    #[must_use]
+    pub const fn applicability(&self) -> TopologyApplicability {
+        TopologyApplicability::TerminalRelativeIncidenceOnly
+    }
+}
+
+/// Extract a canonical terminal-relative boundary without injected cancellation.
+pub fn extract_terminal_relative_boundary_matrix(
+    pair: &TerminalRelativePair,
+    phase: &PhaseId,
+    source_degree: u8,
+    budget: TerminalRelativeBoundaryBudget,
+) -> Result<TerminalRelativeBoundaryMatrix, IntegralTopologyError> {
+    extract_terminal_relative_boundary_matrix_with_checkpoint(
+        pair,
+        phase,
+        source_degree,
+        budget,
+        &mut |_| true,
+    )
+}
+
+/// Extract a canonical pair/phase/degree boundary under bounded polling.
+///
+/// This is the intrinsic cellular incidence. Terminal-current orientation,
+/// port trivialization, and phase-current relabel signs are deliberately not
+/// applied. The callback runs before both deterministic component scans,
+/// before every ambient incidence visit, and before final publication.
+#[allow(clippy::too_many_lines)]
+pub fn extract_terminal_relative_boundary_matrix_with_checkpoint(
+    pair: &TerminalRelativePair,
+    phase: &PhaseId,
+    source_degree: u8,
+    budget: TerminalRelativeBoundaryBudget,
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+) -> Result<TerminalRelativeBoundaryMatrix, IntegralTopologyError> {
+    let Some(component_id) = pair.phase_component(phase) else {
+        return Err(IntegralTopologyError::UnknownTerminalRelativePhase {
+            phase: phase.as_str().to_owned(),
+        });
+    };
+    let max_source_degree = pair.complex().dimension().checked_add(1).ok_or(
+        IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative edge degree",
+        },
+    )?;
+    if source_degree > max_source_degree {
+        return Err(IntegralTopologyError::BoundaryDegreeOutOfRange {
+            degree: source_degree,
+            max: max_source_degree,
+        });
+    }
+    let Some(component) = pair
+        .components()
+        .iter()
+        .find(|component| component.id() == component_id)
+    else {
+        return Err(IntegralTopologyError::PhaseComponentBindingLost {
+            phase: phase.as_str().to_owned(),
+            component: component_id.as_str().to_owned(),
+        });
+    };
+    let component_cells = component.support().cells().len();
+    let component_visits =
+        component_cells
+            .checked_mul(2)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "terminal-relative component visits",
+            })?;
+    if component_visits > budget.max_component_visits {
+        return Err(IntegralTopologyError::ComponentVisitBudgetExceeded {
+            requested: component_visits,
+            max: budget.max_component_visits,
+        });
+    }
+    let incidence_visits = pair.complex().incidences().len();
+    if incidence_visits > budget.max_incidence_visits {
+        return Err(IntegralTopologyError::IncidenceVisitBudgetExceeded {
+            requested: incidence_visits,
+            max: budget.max_incidence_visits,
+        });
+    }
+    let planned = u128::try_from(component_visits)
+        .ok()
+        .and_then(|visits| {
+            u128::try_from(incidence_visits)
+                .ok()
+                .and_then(|incidences| visits.checked_add(incidences))
+        })
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative boundary extraction",
+        })?;
+    let retained_phase = phase.clone();
+    let retained_component = component_id.clone();
+    poll_pair_boundary(
+        checkpoint,
+        "terminal-relative boundary preflight",
+        0,
+        planned,
+    )?;
+
+    let target_degree = source_degree.checked_sub(1);
+    let mut completed = 0_u128;
+    let mut source_count = 0_usize;
+    let mut target_count = 0_usize;
+    for cell in component.support().cells() {
+        poll_pair_boundary(
+            checkpoint,
+            "terminal-relative basis count",
+            completed,
+            planned,
+        )?;
+        if !pair.relative().cells().contains(cell) {
+            if cell.degree() == source_degree {
+                source_count =
+                    source_count
+                        .checked_add(1)
+                        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                            phase: "terminal-relative source basis count",
+                        })?;
+            }
+            if target_degree.is_some_and(|degree| cell.degree() == degree) {
+                target_count =
+                    target_count
+                        .checked_add(1)
+                        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                            phase: "terminal-relative target basis count",
+                        })?;
+            }
+        }
+        complete_pair_boundary_item(&mut completed)?;
+    }
+    preflight_boundary_output(target_count, source_count, budget)?;
+
+    let mut source_basis = allocate_cell_refs(source_count, "terminal-relative source basis")?;
+    let mut target_basis = allocate_cell_refs(target_count, "terminal-relative target basis")?;
+    for cell in component.support().cells() {
+        poll_pair_boundary(
+            checkpoint,
+            "terminal-relative basis materialization",
+            completed,
+            planned,
+        )?;
+        if !pair.relative().cells().contains(cell) {
+            if cell.degree() == source_degree {
+                source_basis.push(*cell);
+            }
+            if target_degree.is_some_and(|degree| cell.degree() == degree) {
+                target_basis.push(*cell);
+            }
+        }
+        complete_pair_boundary_item(&mut completed)?;
+    }
+
+    let matrix_entries =
+        target_count
+            .checked_mul(source_count)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "terminal-relative boundary entries",
+            })?;
+    let mut entries = allocate_zeroed(matrix_entries, "terminal-relative boundary matrix")?;
+    for incidence in pair.complex().incidences() {
+        poll_pair_boundary(
+            checkpoint,
+            "terminal-relative incidence projection",
+            completed,
+            planned,
+        )?;
+        if let (Ok(row), Ok(col)) = (
+            target_basis.binary_search(&incidence.lower()),
+            source_basis.binary_search(&incidence.upper()),
+        ) {
+            entries[row * source_count + col] = match incidence.sign() {
+                IncidenceSign::Negative => -1,
+                IncidenceSign::Positive => 1,
+            };
+        }
+        complete_pair_boundary_item(&mut completed)?;
+    }
+    poll_pair_boundary(
+        checkpoint,
+        "terminal-relative boundary finalize",
+        completed,
+        planned,
+    )?;
+    debug_assert_eq!(completed, planned);
+
+    Ok(TerminalRelativeBoundaryMatrix {
+        pair: pair.identity(),
+        phase: retained_phase,
+        component: retained_component,
+        source_degree,
+        target_degree,
+        source_basis,
+        target_basis,
+        matrix: ExactIntegerMatrix {
+            rows: target_count,
+            cols: source_count,
+            entries,
+        },
+        work_items: completed,
+    })
+}
+
+fn preflight_boundary_output(
+    rows: usize,
+    cols: usize,
+    budget: TerminalRelativeBoundaryBudget,
+) -> Result<(), IntegralTopologyError> {
+    if rows > budget.max_rows || cols > budget.max_cols {
+        return Err(IntegralTopologyError::MatrixExtentExceeded {
+            rows,
+            cols,
+            max_rows: budget.max_rows,
+            max_cols: budget.max_cols,
+        });
+    }
+    let matrix_entries = rows
+        .checked_mul(cols)
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative boundary entry count",
+        })?;
+    if matrix_entries > budget.max_matrix_entries {
+        return Err(IntegralTopologyError::MatrixEntryBudgetExceeded {
+            requested: matrix_entries,
+            max: budget.max_matrix_entries,
+        });
+    }
+    let retained = matrix_entries
+        .checked_add(rows)
+        .and_then(|entries| entries.checked_add(cols))
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative boundary retained entries",
+        })?;
+    if retained > budget.max_retained_entries {
+        return Err(IntegralTopologyError::RetainedEntryBudgetExceeded {
+            requested: retained,
+            max: budget.max_retained_entries,
+        });
+    }
+    Ok(())
+}
+
+fn allocate_cell_refs(
+    entries: usize,
+    phase: &'static str,
+) -> Result<Vec<CellRef>, IntegralTopologyError> {
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(entries)
+        .map_err(|_| IntegralTopologyError::AllocationRefused {
+            phase,
+            requested_entries: entries,
+        })?;
+    Ok(cells)
+}
+
+fn complete_pair_boundary_item(completed: &mut u128) -> Result<(), IntegralTopologyError> {
+    *completed = completed
+        .checked_add(1)
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "completed terminal-relative boundary work",
+        })?;
+    Ok(())
+}
+
+fn poll_pair_boundary(
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+    phase: &'static str,
+    completed: u128,
+    planned: u128,
+) -> Result<(), IntegralTopologyError> {
+    if checkpoint(phase) {
+        Ok(())
+    } else {
+        Err(IntegralTopologyError::PairBoundaryCancelled {
+            phase,
+            completed_work_items: completed,
+            planned_work_items: planned,
+        })
+    }
+}
+
 /// Role of one retained matrix in a Smith witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatrixRole {
@@ -323,6 +781,9 @@ pub enum TopologyApplicability {
     /// Algebraic verification only. No physical R3 embedding or winding
     /// conclusion may consume this value as authority.
     AbstractAlgebraOnly,
+    /// Exact incidence bound to an admitted pair, phase, component, degree,
+    /// and canonical quotient bases. No homology or physical R3 conclusion.
+    TerminalRelativeIncidenceOnly,
 }
 
 /// Authority classification for an unsuccessful exact verification.
@@ -821,6 +1282,48 @@ fn poll(
 /// Structured fail-closed exact-algebra refusal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntegralTopologyError {
+    /// The requested phase has no admitted component binding in the pair.
+    UnknownTerminalRelativePhase {
+        /// Rejected phase identity.
+        phase: String,
+    },
+    /// Boundary degree exceeded the unaugmented chain-complex edge.
+    BoundaryDegreeOutOfRange {
+        /// Requested source degree.
+        degree: u8,
+        /// Highest admitted source degree (`complex dimension + 1`).
+        max: u8,
+    },
+    /// An opaque admitted pair lost its retained phase/component invariant.
+    PhaseComponentBindingLost {
+        /// Phase whose component could not be recovered.
+        phase: String,
+        /// Component identity retained by the phase map.
+        component: String,
+    },
+    /// Component-support traversal exceeded its explicit envelope.
+    ComponentVisitBudgetExceeded {
+        /// Required support-cell visits.
+        requested: usize,
+        /// Maximum admitted visits.
+        max: usize,
+    },
+    /// Ambient incidence traversal exceeded its explicit envelope.
+    IncidenceVisitBudgetExceeded {
+        /// Required incidence visits.
+        requested: usize,
+        /// Maximum admitted visits.
+        max: usize,
+    },
+    /// Cancellation was observed while binding a pair boundary.
+    PairBoundaryCancelled {
+        /// Observation phase.
+        phase: &'static str,
+        /// Deterministic component/incidence work items completed.
+        completed_work_items: u128,
+        /// Deterministic component/incidence work items planned.
+        planned_work_items: u128,
+    },
     /// Matrix extent exceeded its explicit envelope.
     MatrixExtentExceeded {
         /// Supplied rows.
@@ -861,7 +1364,8 @@ pub enum IntegralTopologyError {
         /// Retained entries.
         entries: usize,
     },
-    /// Complete retained source/witness storage exceeded the envelope.
+    /// Complete retained matrix/basis or source/witness storage exceeded the
+    /// envelope.
     RetainedEntryBudgetExceeded {
         /// Requested retained entries.
         requested: usize,
@@ -900,7 +1404,7 @@ pub enum IntegralTopologyError {
         /// Refusing phase.
         phase: &'static str,
     },
-    /// Internal exact workspace allocation refused.
+    /// Internal exact matrix, basis, or workspace allocation refused.
     AllocationRefused {
         /// Refusing allocation phase.
         phase: &'static str,
@@ -980,14 +1484,20 @@ impl IntegralTopologyError {
     #[must_use]
     pub const fn failure_class(&self) -> IntegralTopologyFailureClass {
         match self {
-            Self::MatrixEntryCount { .. }
+            Self::UnknownTerminalRelativePhase { .. }
+            | Self::BoundaryDegreeOutOfRange { .. }
+            | Self::MatrixEntryCount { .. }
             | Self::WitnessShape { .. }
             | Self::WitnessProductMismatch { .. }
             | Self::OffDiagonalEntry { .. }
             | Self::NegativeInvariantFactor { .. }
             | Self::NonzeroAfterZero { .. }
             | Self::InvariantFactorDivisibility { .. } => IntegralTopologyFailureClass::Refuted,
-            Self::MatrixExtentExceeded { .. }
+            Self::PhaseComponentBindingLost { .. }
+            | Self::ComponentVisitBudgetExceeded { .. }
+            | Self::IncidenceVisitBudgetExceeded { .. }
+            | Self::PairBoundaryCancelled { .. }
+            | Self::MatrixExtentExceeded { .. }
             | Self::MatrixEntryBudgetExceeded { .. }
             | Self::RetainedMatrixExceedsBudget { .. }
             | Self::RetainedEntryBudgetExceeded { .. }
