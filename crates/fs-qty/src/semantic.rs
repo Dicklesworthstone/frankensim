@@ -245,6 +245,372 @@ impl SemanticType {
     }
 }
 
+/// Version byte of the canonical [`QuantitySpec`] identity encoding.
+pub const QUANTITY_SPEC_ENCODING_VERSION: u8 = 1;
+
+/// Exact byte length of the canonical [`QuantitySpec`] identity encoding.
+pub const QUANTITY_SPEC_ENCODED_LEN: usize = 12;
+
+/// Exact dimension and optional semantic-kind schema for one scalar quantity.
+///
+/// `Dimensional` is an explicit no-kind claim, not a wildcard. `Semantic`
+/// retains the quantity kind and value form, so dimensionally equal aliases
+/// such as pressure/stress or absolute/difference temperature remain distinct.
+/// This descriptor does not attach or validate a scalar value; use
+/// [`SemanticQty`] at value-admission boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuantitySpec {
+    /// Six-base dimensions with no semantic-kind claim.
+    Dimensional(Dims),
+    /// Exact semantic kind and scalar form; dimensions are derived from it.
+    Semantic(SemanticType),
+}
+
+impl QuantitySpec {
+    /// Construct an explicit dimension-only schema.
+    #[must_use]
+    pub const fn dimensional(dims: Dims) -> Self {
+        Self::Dimensional(dims)
+    }
+
+    /// Construct an exact semantic descriptor.
+    ///
+    /// This does not admit a value or assert that the kind/form combination
+    /// can carry a real scalar. [`SemanticQty::new`] is the value boundary.
+    #[must_use]
+    pub const fn semantic(semantic_type: SemanticType) -> Self {
+        Self::Semantic(semantic_type)
+    }
+
+    /// Required six-base coherent-SI dimension vector.
+    #[must_use]
+    pub const fn dims(self) -> Dims {
+        match self {
+            Self::Dimensional(dims) => dims,
+            Self::Semantic(semantic_type) => semantic_type.expected_dims(),
+        }
+    }
+
+    /// Exact semantic kind/form, or `None` for a dimension-only declaration.
+    #[must_use]
+    pub const fn semantic_type(self) -> Option<SemanticType> {
+        match self {
+            Self::Dimensional(_) => None,
+            Self::Semantic(semantic_type) => Some(semantic_type),
+        }
+    }
+
+    /// Encode a collision-free, versioned 12-byte identity token.
+    ///
+    /// Layout: version, six signed exponent bytes, variant tag, semantic kind,
+    /// two kind parameters, and value form. Dimension-only payload bytes are
+    /// zero. Semantic dimensions are repeated so a decoder can refuse a
+    /// non-canonical alias instead of silently normalizing it.
+    #[must_use]
+    pub const fn canonical_bytes(self) -> [u8; QUANTITY_SPEC_ENCODED_LEN] {
+        let dims = self.dims().0;
+        let (variant, kind, parameter_a, parameter_b, form) = match self {
+            Self::Dimensional(_) => (0, 0, 0, 0, 0),
+            Self::Semantic(semantic_type) => {
+                let (kind, parameter_a, parameter_b) = encode_quantity_kind(semantic_type.kind());
+                (
+                    1,
+                    kind,
+                    parameter_a,
+                    parameter_b,
+                    encode_value_form(semantic_type.form()),
+                )
+            }
+        };
+        [
+            QUANTITY_SPEC_ENCODING_VERSION,
+            dims[0].to_le_bytes()[0],
+            dims[1].to_le_bytes()[0],
+            dims[2].to_le_bytes()[0],
+            dims[3].to_le_bytes()[0],
+            dims[4].to_le_bytes()[0],
+            dims[5].to_le_bytes()[0],
+            variant,
+            kind,
+            parameter_a,
+            parameter_b,
+            form,
+        ]
+    }
+
+    /// Decode an exact canonical identity token.
+    ///
+    /// # Errors
+    /// Returns [`QuantitySpecDecodeError`] for wrong length/version, unknown
+    /// tags, nonzero dimension-only payload, or semantic dimensions that do
+    /// not exactly match the decoded kind.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, QuantitySpecDecodeError> {
+        if bytes.len() != QUANTITY_SPEC_ENCODED_LEN {
+            return Err(QuantitySpecDecodeError::Length {
+                actual: bytes.len(),
+            });
+        }
+        if bytes[0] != QUANTITY_SPEC_ENCODING_VERSION {
+            return Err(QuantitySpecDecodeError::Version { actual: bytes[0] });
+        }
+        let dims = Dims([
+            i8::from_le_bytes([bytes[1]]),
+            i8::from_le_bytes([bytes[2]]),
+            i8::from_le_bytes([bytes[3]]),
+            i8::from_le_bytes([bytes[4]]),
+            i8::from_le_bytes([bytes[5]]),
+            i8::from_le_bytes([bytes[6]]),
+        ]);
+        match bytes[7] {
+            0 => {
+                if let Some(offset) = bytes[8..].iter().position(|&value| value != 0) {
+                    let index = offset + 8;
+                    return Err(QuantitySpecDecodeError::DimensionalPayload {
+                        index,
+                        value: bytes[index],
+                    });
+                }
+                Ok(Self::Dimensional(dims))
+            }
+            1 => {
+                let kind = decode_quantity_kind(bytes[8], bytes[9], bytes[10]).ok_or(
+                    QuantitySpecDecodeError::SemanticKind {
+                        kind: bytes[8],
+                        parameter_a: bytes[9],
+                        parameter_b: bytes[10],
+                    },
+                )?;
+                let form = decode_value_form(bytes[11])
+                    .ok_or(QuantitySpecDecodeError::ValueForm { actual: bytes[11] })?;
+                let semantic_type = SemanticType::new(kind, form);
+                let expected = semantic_type.expected_dims();
+                if dims != expected {
+                    return Err(QuantitySpecDecodeError::SemanticDimensions {
+                        semantic_type,
+                        actual: dims,
+                        expected,
+                    });
+                }
+                Ok(Self::Semantic(semantic_type))
+            }
+            actual => Err(QuantitySpecDecodeError::Variant { actual }),
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for QuantitySpec {
+    type Error = QuantitySpecDecodeError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_canonical_bytes(bytes)
+    }
+}
+
+/// Structured refusal for a non-canonical [`QuantitySpec`] identity token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantitySpecDecodeError {
+    /// The token is not exactly [`QUANTITY_SPEC_ENCODED_LEN`] bytes.
+    Length {
+        /// Supplied byte length.
+        actual: usize,
+    },
+    /// The leading encoding version is not supported.
+    Version {
+        /// Supplied version byte.
+        actual: u8,
+    },
+    /// The dimension-only/semantic variant tag is unknown.
+    Variant {
+        /// Supplied variant tag.
+        actual: u8,
+    },
+    /// A dimension-only token carried forbidden semantic payload bytes.
+    DimensionalPayload {
+        /// Absolute byte index in the token.
+        index: usize,
+        /// Nonzero payload byte.
+        value: u8,
+    },
+    /// The semantic kind tag or its parameters are unknown/non-canonical.
+    SemanticKind {
+        /// Supplied semantic-kind tag.
+        kind: u8,
+        /// First supplied kind parameter.
+        parameter_a: u8,
+        /// Second supplied kind parameter.
+        parameter_b: u8,
+    },
+    /// The scalar value-form tag is unknown.
+    ValueForm {
+        /// Supplied value-form tag.
+        actual: u8,
+    },
+    /// Encoded dimensions disagree with the decoded semantic kind.
+    SemanticDimensions {
+        /// Decoded kind and scalar form.
+        semantic_type: SemanticType,
+        /// Dimensions supplied by the token.
+        actual: Dims,
+        /// Dimensions required by the semantic kind.
+        expected: Dims,
+    },
+}
+
+impl fmt::Display for QuantitySpecDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Length { actual } => write!(
+                f,
+                "quantity-spec token has {actual} bytes; expected {QUANTITY_SPEC_ENCODED_LEN}"
+            ),
+            Self::Version { actual } => write!(
+                f,
+                "quantity-spec encoding version {actual} is unsupported; expected {QUANTITY_SPEC_ENCODING_VERSION}"
+            ),
+            Self::Variant { actual } => {
+                write!(f, "quantity-spec variant tag {actual} is unknown")
+            }
+            Self::DimensionalPayload { index, value } => write!(
+                f,
+                "dimension-only quantity-spec byte {index} must be zero, got {value}"
+            ),
+            Self::SemanticKind {
+                kind,
+                parameter_a,
+                parameter_b,
+            } => write!(
+                f,
+                "quantity-spec semantic kind ({kind}, {parameter_a}, {parameter_b}) is unknown or non-canonical"
+            ),
+            Self::ValueForm { actual } => {
+                write!(f, "quantity-spec value-form tag {actual} is unknown")
+            }
+            Self::SemanticDimensions {
+                semantic_type,
+                actual,
+                expected,
+            } => write!(
+                f,
+                "quantity-spec dimensions {actual:?} do not match {semantic_type:?} dimensions {expected:?}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for QuantitySpecDecodeError {}
+
+const fn encode_quantity_kind(kind: QuantityKind) -> (u8, u8, u8) {
+    match kind {
+        QuantityKind::AbsoluteTemperature => (1, 0, 0),
+        QuantityKind::TemperatureDifference => (2, 0, 0),
+        QuantityKind::Angle(domain) => (3, encode_angle_domain(domain), 0),
+        QuantityKind::AngularVelocity(domain) => (4, encode_angle_domain(domain), 0),
+        QuantityKind::Torque => (5, 0, 0),
+        QuantityKind::Energy => (6, 0, 0),
+        QuantityKind::Pressure => (7, 0, 0),
+        QuantityKind::Stress => (8, 0, 0),
+        QuantityKind::Strain { basis, component } => (
+            9,
+            match basis {
+                StrainBasis::Tensor => 1,
+                StrainBasis::Engineering => 2,
+            },
+            match component {
+                StrainComponent::Normal => 1,
+                StrainComponent::Shear => 2,
+            },
+        ),
+        QuantityKind::Composition(basis) => (
+            10,
+            match basis {
+                CompositionBasis::MassFraction => 1,
+                CompositionBasis::MoleFraction => 2,
+                CompositionBasis::VolumeFraction => 3,
+            },
+            0,
+        ),
+        QuantityKind::Mass => (11, 0, 0),
+        QuantityKind::Amount => (12, 0, 0),
+        QuantityKind::MolarMass => (13, 0, 0),
+        QuantityKind::MassConcentration => (14, 0, 0),
+        QuantityKind::AmountConcentration => (15, 0, 0),
+        QuantityKind::Entropy => (16, 0, 0),
+        QuantityKind::HeatCapacity => (17, 0, 0),
+        QuantityKind::AcousticPressure => (18, 0, 0),
+        QuantityKind::AcousticPower => (19, 0, 0),
+    }
+}
+
+const fn encode_angle_domain(domain: AngleDomain) -> u8 {
+    match domain {
+        AngleDomain::Mechanical => 1,
+        AngleDomain::Electrical => 2,
+    }
+}
+
+const fn encode_value_form(form: ValueForm) -> u8 {
+    match form {
+        ValueForm::Static => 1,
+        ValueForm::Instantaneous => 2,
+        ValueForm::Peak => 3,
+        ValueForm::Rms => 4,
+    }
+}
+
+const fn decode_quantity_kind(kind: u8, parameter_a: u8, parameter_b: u8) -> Option<QuantityKind> {
+    match (kind, parameter_a, parameter_b) {
+        (1, 0, 0) => Some(QuantityKind::AbsoluteTemperature),
+        (2, 0, 0) => Some(QuantityKind::TemperatureDifference),
+        (3, 1, 0) => Some(QuantityKind::Angle(AngleDomain::Mechanical)),
+        (3, 2, 0) => Some(QuantityKind::Angle(AngleDomain::Electrical)),
+        (4, 1, 0) => Some(QuantityKind::AngularVelocity(AngleDomain::Mechanical)),
+        (4, 2, 0) => Some(QuantityKind::AngularVelocity(AngleDomain::Electrical)),
+        (5, 0, 0) => Some(QuantityKind::Torque),
+        (6, 0, 0) => Some(QuantityKind::Energy),
+        (7, 0, 0) => Some(QuantityKind::Pressure),
+        (8, 0, 0) => Some(QuantityKind::Stress),
+        (9, 1, 1) => Some(QuantityKind::Strain {
+            basis: StrainBasis::Tensor,
+            component: StrainComponent::Normal,
+        }),
+        (9, 1, 2) => Some(QuantityKind::Strain {
+            basis: StrainBasis::Tensor,
+            component: StrainComponent::Shear,
+        }),
+        (9, 2, 1) => Some(QuantityKind::Strain {
+            basis: StrainBasis::Engineering,
+            component: StrainComponent::Normal,
+        }),
+        (9, 2, 2) => Some(QuantityKind::Strain {
+            basis: StrainBasis::Engineering,
+            component: StrainComponent::Shear,
+        }),
+        (10, 1, 0) => Some(QuantityKind::Composition(CompositionBasis::MassFraction)),
+        (10, 2, 0) => Some(QuantityKind::Composition(CompositionBasis::MoleFraction)),
+        (10, 3, 0) => Some(QuantityKind::Composition(CompositionBasis::VolumeFraction)),
+        (11, 0, 0) => Some(QuantityKind::Mass),
+        (12, 0, 0) => Some(QuantityKind::Amount),
+        (13, 0, 0) => Some(QuantityKind::MolarMass),
+        (14, 0, 0) => Some(QuantityKind::MassConcentration),
+        (15, 0, 0) => Some(QuantityKind::AmountConcentration),
+        (16, 0, 0) => Some(QuantityKind::Entropy),
+        (17, 0, 0) => Some(QuantityKind::HeatCapacity),
+        (18, 0, 0) => Some(QuantityKind::AcousticPressure),
+        (19, 0, 0) => Some(QuantityKind::AcousticPower),
+        _ => None,
+    }
+}
+
+const fn decode_value_form(form: u8) -> Option<ValueForm> {
+    match form {
+        1 => Some(ValueForm::Static),
+        2 => Some(ValueForm::Instantaneous),
+        3 => Some(ValueForm::Peak),
+        4 => Some(ValueForm::Rms),
+        _ => None,
+    }
+}
+
 /// Scalar-domain rule named by [`SemanticError::InvalidValue`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueRequirement {

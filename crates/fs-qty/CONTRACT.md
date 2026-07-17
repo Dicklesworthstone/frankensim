@@ -71,6 +71,14 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   changes, and sinusoidal peak/RMS factors explicit. Whole-vector
   `Composition`, paired `PhasorQty`, and referenced `AcousticLevel` prevent
   convention fragments from drifting independently.
+- `QuantitySpec` (also available as `semantic::QuantitySpec`) is the reusable
+  scalar-schema identity descriptor:
+  either explicit six-base dimensions with no kind claim, or one exact
+  `SemanticType`. Its version-1 canonical token is exactly 12 bytes: version,
+  six raw signed exponent bytes, variant, kind, two kind parameters, and value
+  form. Strict decoding rejects wrong length/version/tags, nonzero reserved
+  payload, and semantic dimensions that disagree with the kind; accepted
+  bytes re-encode exactly. The descriptor does not attach or admit a value.
 - `chemistry` — validated opaque `SpeciesId`, `ElementId`, and `ReactionId`;
   immutable `ElementalMatrix`, `StoichiometricMatrix`, and `ChargeVector` with
   domain-separated content identities; exact checked-`i128` verification of
@@ -105,6 +113,11 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   offset while angular-velocity maps do not. Offset-bearing operations accept
   only static/instantaneous point values, while linear waveform amplitudes may
   cross domains without applying an offset.
+- Quantity-spec encoding is injective over the current descriptor domain:
+  dimension-only and semantic variants have disjoint tags, parameter slots
+  are exact, unused bytes are zero, and semantic dimensions are canonicalized
+  from the kind. Unknown future versions and tags refuse instead of falling
+  back to dimension-only semantics.
 - Positive scalar mass/amount and concentration-basis conversions never retain
   a rounded zero. If the exact positive result is below the representable f64
   domain, the conversion returns a typed representability refusal; a true zero
@@ -124,7 +137,8 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
 ## Error model
 `DimensionMismatch { op, left, right }`, `DimensionOverflow { op, dims, factor }`,
 `ParseError { preview, preview_start, input_bytes, source_hash, at, kind, help }`,
-`JsonError { at, message }`, `SemanticError`, and `ChemistryError` are
+`JsonError { at, message }`, `SemanticError`, `QuantitySpecDecodeError`, and
+`ChemistryError` are
 structured values with contextual operations, kinds, axes, indices, or
 arithmetic laws as applicable (P10 errors-as-guidance); no panics across the
 crate boundary. `ParseError::verifies_source` checks an admitted source against
@@ -140,7 +154,8 @@ logarithms. JSON writing uses Rust's shortest-round-trip float formatting;
 migration receipts hash the exact supplied v1 bytes and exact canonical v2
 bytes with `fs-blake3`; noncanonical source spellings cannot mint receipts.
 Chemical content identities use deterministic canonical encodings and
-domain-separated `fs-blake3` hashes.
+domain-separated `fs-blake3` hashes. Quantity-spec tokens use a closed,
+fixed-width integer encoding with no allocation, hashing, or host byte order.
 
 ## Cancellation behavior
 Scalar operations are O(1). Quantity parsing is O(admitted input bytes) with
@@ -172,7 +187,10 @@ byte/factor/token budget boundaries and deterministic bounded diagnostics
 dimension-vector laws with shrinking enabled and fixed cases retained. The
 exhaustive qty-007 Cartesian
 kind/form/phasor matrix emits one JSONL admission/refusal record per case, and
-qty-008 proves parser-to-semantic unit-rescaling invariance. Unit tests include
+qty-008 proves parser-to-semantic unit-rescaling invariance. qty-009 exhausts
+the quantity-spec kind/form codec, pins representative bytes, and mutation-
+tests strict canonical decoding while proving value admission remains separate.
+Unit tests include
 the 20k-case seeded garbage battery, default/custom/zero budget boundaries,
 UTF-8 excerpt and exact-offset cases, long unknown-unit/exponent refusals,
 new-token collision cases, nonzero-mole round trips, strict canonical v1/v2
@@ -191,6 +209,12 @@ literal never causes a source-sized transient allocation.
   `Stress`/`Pressure` remain the same Rust type. Boundaries that need semantic
   distinctions must opt into `semantic::SemanticQty` rather than retag raw
   values by convention.
+- `QuantitySpec` is an identity descriptor, not a value carrier, conversion
+  receipt, or physics certificate. It does not retain source unit spelling,
+  coordinate frame, vector component order, covariance/observation role,
+  support geometry, instrument calibration, or acquisition-cost meaning;
+  actual scalar values still require `SemanticQty` admission where semantics
+  matter.
 - Information/monetary units (refused with a pointer to fs-ir budgets).
 - A full content hash for source rejected by the byte-admission gate. Such an
   error retains exact source length plus a bounded position-aware excerpt, but

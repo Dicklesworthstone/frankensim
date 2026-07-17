@@ -10,7 +10,10 @@ use fs_qty::semantic::{
     amount_concentration_to_mass_concentration, amount_to_mass,
     mass_concentration_to_amount_concentration, mass_to_amount,
 };
-use fs_qty::{Dims, DynViscosity, Length, Pressure, QtyAny, Time};
+use fs_qty::{
+    Dims, DynViscosity, Length, Pressure, QUANTITY_SPEC_ENCODED_LEN, QtyAny, QuantitySpec,
+    QuantitySpecDecodeError, Time,
+};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -482,6 +485,243 @@ fn qty_008_mass_amount_unit_rescaling_is_metamorphic() {
             "amount_concentration={} recovered_mass_concentration={}",
             amount_concentration.value(),
             recovered.value()
+        ),
+    );
+}
+
+fn quantity_spec_kinds() -> [QuantityKind; 26] {
+    [
+        QuantityKind::AbsoluteTemperature,
+        QuantityKind::TemperatureDifference,
+        QuantityKind::Angle(AngleDomain::Mechanical),
+        QuantityKind::Angle(AngleDomain::Electrical),
+        QuantityKind::AngularVelocity(AngleDomain::Mechanical),
+        QuantityKind::AngularVelocity(AngleDomain::Electrical),
+        QuantityKind::Torque,
+        QuantityKind::Energy,
+        QuantityKind::Pressure,
+        QuantityKind::Stress,
+        QuantityKind::Strain {
+            basis: StrainBasis::Tensor,
+            component: StrainComponent::Normal,
+        },
+        QuantityKind::Strain {
+            basis: StrainBasis::Tensor,
+            component: StrainComponent::Shear,
+        },
+        QuantityKind::Strain {
+            basis: StrainBasis::Engineering,
+            component: StrainComponent::Normal,
+        },
+        QuantityKind::Strain {
+            basis: StrainBasis::Engineering,
+            component: StrainComponent::Shear,
+        },
+        QuantityKind::Composition(CompositionBasis::MassFraction),
+        QuantityKind::Composition(CompositionBasis::MoleFraction),
+        QuantityKind::Composition(CompositionBasis::VolumeFraction),
+        QuantityKind::Mass,
+        QuantityKind::Amount,
+        QuantityKind::MolarMass,
+        QuantityKind::MassConcentration,
+        QuantityKind::AmountConcentration,
+        QuantityKind::Entropy,
+        QuantityKind::HeatCapacity,
+        QuantityKind::AcousticPressure,
+        QuantityKind::AcousticPower,
+    ]
+}
+
+/// qty-009: one reusable, injective identity token covers every dimensional
+/// and semantic scalar descriptor without laundering dimension-only aliases.
+#[test]
+fn qty_009_quantity_spec_codec_is_canonical_and_injective() {
+    let dimensional = QuantitySpec::dimensional(Dims([1, -2, 3, -4, 5, -6]));
+    let dimensional_bytes = dimensional.canonical_bytes();
+    let pressure =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+    let strain = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Strain {
+            basis: StrainBasis::Engineering,
+            component: StrainComponent::Shear,
+        },
+        ValueForm::Static,
+    ));
+    let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let temperature_difference = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::TemperatureDifference,
+        ValueForm::Static,
+    ));
+
+    let goldens = dimensional_bytes == [1, 1, 254, 3, 252, 5, 250, 0, 0, 0, 0, 0]
+        && pressure.canonical_bytes() == [1, 255, 1, 254, 0, 0, 0, 1, 7, 0, 0, 1]
+        && strain.canonical_bytes() == [1, 0, 0, 0, 0, 0, 0, 1, 9, 2, 2, 1];
+    let temperatures_are_distinct = QuantitySpec::dimensional(Dims([0, 0, 0, 1, 0, 0]))
+        != absolute_temperature
+        && absolute_temperature != temperature_difference
+        && absolute_temperature.canonical_bytes() != temperature_difference.canonical_bytes();
+
+    let mut encodings = std::collections::BTreeSet::new();
+    encodings.insert(dimensional_bytes);
+    let mut all_round_trip = true;
+    let mut semantic_cases = 0usize;
+    for kind in quantity_spec_kinds() {
+        for form in [
+            ValueForm::Static,
+            ValueForm::Instantaneous,
+            ValueForm::Peak,
+            ValueForm::Rms,
+        ] {
+            let spec = QuantitySpec::semantic(SemanticType::new(kind, form));
+            let bytes = spec.canonical_bytes();
+            all_round_trip &= QuantitySpec::from_canonical_bytes(&bytes) == Ok(spec);
+            all_round_trip &= encodings.insert(bytes);
+            semantic_cases += 1;
+        }
+    }
+    let extreme_dims = QuantitySpec::dimensional(Dims([i8::MIN, -1, 0, 1, i8::MAX, 42]));
+    let extreme_round_trip =
+        QuantitySpec::from_canonical_bytes(&extreme_dims.canonical_bytes()) == Ok(extreme_dims);
+
+    verdict(
+        "qty-009/canonical-injective",
+        QUANTITY_SPEC_ENCODED_LEN == 12
+            && goldens
+            && temperatures_are_distinct
+            && semantic_cases == 104
+            && encodings.len() == 105
+            && all_round_trip
+            && extreme_round_trip,
+        &format!(
+            "semantic_cases={semantic_cases} unique_tokens={} dimensional={dimensional_bytes:?}",
+            encodings.len()
+        ),
+    );
+}
+
+/// qty-009b: the decoder accepts only canonical schema tokens. A descriptor
+/// can name an unsupported kind/form for diagnostics, but value admission
+/// remains independently fail-closed through `SemanticQty`.
+#[test]
+#[allow(clippy::too_many_lines)] // One mutation matrix exercises every codec refusal class.
+fn qty_009b_quantity_spec_decode_refuses_aliases() {
+    let dimensional = QuantitySpec::dimensional(Dims([1, -2, 3, -4, 5, -6]));
+    let dimensional_bytes = dimensional.canonical_bytes();
+    let pressure =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+    let pressure_bytes = pressure.canonical_bytes();
+    let strain = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Strain {
+            basis: StrainBasis::Engineering,
+            component: StrainComponent::Shear,
+        },
+        ValueForm::Static,
+    ));
+
+    let short = matches!(
+        QuantitySpec::from_canonical_bytes(&dimensional_bytes[..11]),
+        Err(QuantitySpecDecodeError::Length { actual: 11 })
+    );
+    let long = matches!(
+        QuantitySpec::from_canonical_bytes(&[0; 13]),
+        Err(QuantitySpecDecodeError::Length { actual: 13 })
+    );
+    let mut wrong_version = dimensional_bytes;
+    wrong_version[0] = 2;
+    let version = matches!(
+        QuantitySpec::from_canonical_bytes(&wrong_version),
+        Err(QuantitySpecDecodeError::Version { actual: 2 })
+    );
+    let mut wrong_variant = dimensional_bytes;
+    wrong_variant[7] = 2;
+    let variant = matches!(
+        QuantitySpec::from_canonical_bytes(&wrong_variant),
+        Err(QuantitySpecDecodeError::Variant { actual: 2 })
+    );
+    let mut dimensional_payload = dimensional_bytes;
+    dimensional_payload[10] = 1;
+    let payload = matches!(
+        QuantitySpec::from_canonical_bytes(&dimensional_payload),
+        Err(QuantitySpecDecodeError::DimensionalPayload {
+            index: 10,
+            value: 1
+        })
+    );
+    let mut unknown_kind = pressure_bytes;
+    unknown_kind[8] = 255;
+    let kind = matches!(
+        QuantitySpec::from_canonical_bytes(&unknown_kind),
+        Err(QuantitySpecDecodeError::SemanticKind { kind: 255, .. })
+    );
+    let mut noncanonical_parameters = pressure_bytes;
+    noncanonical_parameters[9] = 1;
+    let parameters = matches!(
+        QuantitySpec::from_canonical_bytes(&noncanonical_parameters),
+        Err(QuantitySpecDecodeError::SemanticKind {
+            kind: 7,
+            parameter_a: 1,
+            parameter_b: 0
+        })
+    );
+    let mut unknown_form = pressure_bytes;
+    unknown_form[11] = 0;
+    let form = matches!(
+        QuantitySpec::from_canonical_bytes(&unknown_form),
+        Err(QuantitySpecDecodeError::ValueForm { actual: 0 })
+    );
+    let mut wrong_semantic_dims = pressure_bytes;
+    wrong_semantic_dims[1] = 0;
+    let dimensions = matches!(
+        QuantitySpec::from_canonical_bytes(&wrong_semantic_dims),
+        Err(QuantitySpecDecodeError::SemanticDimensions {
+            actual: Dims([0, 1, -2, 0, 0, 0]),
+            expected: Dims([-1, 1, -2, 0, 0, 0]),
+            ..
+        })
+    );
+
+    let mut mutation_law = true;
+    for canonical in [dimensional_bytes, pressure_bytes, strain.canonical_bytes()] {
+        for index in 0..canonical.len() {
+            for value in u8::MIN..=u8::MAX {
+                let mut mutated = canonical;
+                mutated[index] = value;
+                if let Ok(decoded) = QuantitySpec::from_canonical_bytes(&mutated) {
+                    mutation_law &= decoded.canonical_bytes() == mutated;
+                }
+            }
+        }
+    }
+
+    let unsupported_type = SemanticType::new(QuantityKind::Energy, ValueForm::Rms);
+    let unsupported_spec = QuantitySpec::semantic(unsupported_type);
+    let descriptor_round_trip =
+        QuantitySpec::from_canonical_bytes(&unsupported_spec.canonical_bytes())
+            == Ok(unsupported_spec);
+    let value_refused = matches!(
+        SemanticQty::new(QtyAny::new(1.0, unsupported_type.expected_dims()), unsupported_type),
+        Err(SemanticError::UnsupportedForm { source, .. }) if source == unsupported_type
+    );
+
+    verdict(
+        "qty-009/noncanonical-refusal",
+        short
+            && long
+            && version
+            && variant
+            && payload
+            && kind
+            && parameters
+            && form
+            && dimensions
+            && mutation_law
+            && descriptor_round_trip
+            && value_refused,
+        &format!(
+            "lengths={short}/{long} tags={version}/{variant}/{kind}/{form} canonical_mutations={mutation_law} value_refused={value_refused}"
         ),
     );
 }

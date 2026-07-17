@@ -34,11 +34,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_assimilate::{AssimError, Belief, assimilate_colored_with_shared_poll_quota, point_sensor};
 use fs_evidence::{Color, ColorRank, color_leaf_identity_reason};
 use fs_exec::Cx;
-use fs_qty::semantic::{
-    AngleDomain, CompositionBasis, QuantityKind, SemanticQty, SemanticType, StrainBasis,
-    StrainComponent, ValueForm,
-};
-use fs_qty::{Dims, QtyAny};
+use fs_qty::semantic::{QuantityKind, SemanticQty, SemanticType, ValueForm};
+use fs_qty::{Dims, QUANTITY_SPEC_ENCODED_LEN, QtyAny, QuantitySpec};
 use fs_toleralloc::{Feature, allocate};
 use fs_voi::{
     Action, ActionKind, ActionValue, DesignEstimate, Recommendation, Uncertainty,
@@ -102,7 +99,7 @@ const SCAN_READ_BYTE_UNITS: u128 = 16;
 const FULL_EOL_SCAN_SWEEPS: u128 = fs_voi::EOL_QUADRATURE_PANELS as u128 + 3;
 // `measure-` / `sensor-` identity prefixes added to candidate names.
 const ACTION_PREFIX_BYTE_UNITS: u128 = 8;
-const OBJECTIVE_SCHEMA_BYTES: u128 = 12;
+const OBJECTIVE_SCHEMA_BYTES: u128 = QUANTITY_SPEC_ENCODED_LEN as u128;
 const OBJECTIVE_SCHEMA_HEX_BYTES: u128 = OBJECTIVE_SCHEMA_BYTES * 2;
 const SENSOR_IDENTITY_FIXED_BYTES: u128 = 7 + 2 + OBJECTIVE_SCHEMA_HEX_BYTES;
 
@@ -173,6 +170,15 @@ impl ObjectiveSpec {
         self.semantic_type
     }
 
+    /// Reusable fs-qty schema retained by this OED-specific wrapper.
+    #[must_use]
+    pub const fn quantity_spec(self) -> QuantitySpec {
+        match self.semantic_type {
+            Some(semantic_type) => QuantitySpec::semantic(semantic_type),
+            None => QuantitySpec::dimensional(self.dims),
+        }
+    }
+
     /// Dimension vector required by prior, sensor-noise, and posterior
     /// variances (`Q²`).
     pub fn variance_dims(self) -> Result<Dims, CandidateError> {
@@ -221,27 +227,8 @@ impl ObjectiveSpec {
         Ok(ObjectiveValue::from_raw(value, self.decision_spec()))
     }
 
-    fn canonical_bytes(self) -> [u8; OBJECTIVE_SCHEMA_BYTES as usize] {
-        let mut bytes = [0u8; OBJECTIVE_SCHEMA_BYTES as usize];
-        bytes[0] = 1;
-        for (target, exponent) in bytes[1..7].iter_mut().zip(self.dims.0) {
-            *target = exponent as u8;
-        }
-        let Some(semantic_type) = self.semantic_type else {
-            return bytes;
-        };
-        bytes[7] = 1;
-        let (kind, parameter_a, parameter_b) = quantity_kind_identity(semantic_type.kind());
-        bytes[8] = kind;
-        bytes[9] = parameter_a;
-        bytes[10] = parameter_b;
-        bytes[11] = match semantic_type.form() {
-            ValueForm::Static => 1,
-            ValueForm::Instantaneous => 2,
-            ValueForm::Peak => 3,
-            ValueForm::Rms => 4,
-        };
-        bytes
+    fn canonical_bytes(self) -> [u8; QUANTITY_SPEC_ENCODED_LEN] {
+        self.quantity_spec().canonical_bytes()
     }
 
     fn identity_hex(self) -> String {
@@ -253,55 +240,6 @@ impl ObjectiveSpec {
             encoded.push(HEX[usize::from(byte & 0x0f)] as char);
         }
         encoded
-    }
-}
-
-fn quantity_kind_identity(kind: QuantityKind) -> (u8, u8, u8) {
-    match kind {
-        QuantityKind::AbsoluteTemperature => (1, 0, 0),
-        QuantityKind::TemperatureDifference => (2, 0, 0),
-        QuantityKind::Angle(domain) => (3, angle_domain_identity(domain), 0),
-        QuantityKind::AngularVelocity(domain) => (4, angle_domain_identity(domain), 0),
-        QuantityKind::Torque => (5, 0, 0),
-        QuantityKind::Energy => (6, 0, 0),
-        QuantityKind::Pressure => (7, 0, 0),
-        QuantityKind::Stress => (8, 0, 0),
-        QuantityKind::Strain { basis, component } => (
-            9,
-            match basis {
-                StrainBasis::Tensor => 1,
-                StrainBasis::Engineering => 2,
-            },
-            match component {
-                StrainComponent::Normal => 1,
-                StrainComponent::Shear => 2,
-            },
-        ),
-        QuantityKind::Composition(basis) => (
-            10,
-            match basis {
-                CompositionBasis::MassFraction => 1,
-                CompositionBasis::MoleFraction => 2,
-                CompositionBasis::VolumeFraction => 3,
-            },
-            0,
-        ),
-        QuantityKind::Mass => (11, 0, 0),
-        QuantityKind::Amount => (12, 0, 0),
-        QuantityKind::MolarMass => (13, 0, 0),
-        QuantityKind::MassConcentration => (14, 0, 0),
-        QuantityKind::AmountConcentration => (15, 0, 0),
-        QuantityKind::Entropy => (16, 0, 0),
-        QuantityKind::HeatCapacity => (17, 0, 0),
-        QuantityKind::AcousticPressure => (18, 0, 0),
-        QuantityKind::AcousticPower => (19, 0, 0),
-    }
-}
-
-const fn angle_domain_identity(domain: AngleDomain) -> u8 {
-    match domain {
-        AngleDomain::Mechanical => 1,
-        AngleDomain::Electrical => 2,
     }
 }
 
@@ -3155,7 +3093,7 @@ mod tests {
     fn objective_schema_encoding_binds_all_six_axes_and_semantic_parameters() {
         use fs_qty::Dims;
         use fs_qty::semantic::{
-            AngleDomain, CompositionBasis, QuantityKind, SemanticType, StrainBasis,
+            AngleDomain, CompositionBasis, QuantityKind, QuantitySpec, SemanticType, StrainBasis,
             StrainComponent, ValueForm,
         };
 
@@ -3163,6 +3101,10 @@ mod tests {
         assert_eq!(
             base.canonical_bytes(),
             [1, 1, 254, 3, 252, 5, 250, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            QuantitySpec::from_canonical_bytes(&base.canonical_bytes()),
+            Ok(base.quantity_spec())
         );
         for axis in 0..6 {
             let mut exponents = base.dims().0;

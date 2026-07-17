@@ -879,6 +879,23 @@ fn g3_metre_millimetre_rescaling_preserves_science_identity_and_output_units() {
 }
 
 #[test]
+fn g3_rescaling_schema_is_scale_independent_while_value_bits_remain_exact() {
+    let metres = ObjectiveValue::dimensional(parse_qty("0.7m").expect("metres")).expect("finite");
+    let millimetres =
+        ObjectiveValue::dimensional(parse_qty("700mm").expect("millimetres")).expect("finite");
+
+    assert_eq!(metres.spec(), millimetres.spec());
+    assert_eq!(
+        metres.spec().quantity_spec(),
+        millimetres.spec().quantity_spec()
+    );
+    assert_eq!(metres.quantity().dims, millimetres.quantity().dims);
+    assert_ne!(metres.to_bits(), millimetres.to_bits());
+    assert_eq!(metres.to_bits(), 0x3fe6_6666_6666_6666);
+    assert_eq!(millimetres.to_bits(), 0x3fe6_6666_6666_6667);
+}
+
+#[test]
 fn campaign_inputs_are_checked_before_work_starts() {
     assert_eq!(campaign(&[], 0.0, 0), Err(OedError::NoCandidates));
     let one = candidate("A", 0.0, 0.0, 1.0, 1.0, 1.0);

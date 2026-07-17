@@ -9,7 +9,8 @@ Composes `fs-assimilate` and `fs-exec` (one explicit cancellation context and
 private invocation-global poll ledger), `fs-voi` (EVPI + recommend),
 `fs-toleralloc` (first-order budget), `fs-evidence` (Estimated lineage), and
 `fs-blake3` (bounded canonical identities). `fs-qty` is the sole authority for
-six-base dimensions and semantic quantity kinds at the public OED boundary.
+six-base dimensions, semantic quantity kinds, and the fixed-width canonical
+`QuantitySpec` token at the public OED boundary.
 Dependencies point downward.
 
 ## Public types and semantics
@@ -17,7 +18,8 @@ Dependencies point downward.
 - `ObjectiveValue` admits either a finite `QtyAny` under an explicit
   dimension-only/no-kind schema or an already checked `SemanticQty`. Its
   `ObjectiveSpec` retains all six exponents plus the exact optional quantity
-  kind and scalar form. Dimension-only is an exact claim, never a wildcard.
+  kind and scalar form, and exposes the shared `fs-qty::QuantitySpec` it wraps.
+  Dimension-only is an exact claim, never a wildcard.
 - `Candidate::new(...) -> Result<Candidate, CandidateError>` checks and seals
   the name; truth/prior mean under one exact objective schema `Q`;
   non-negative prior variance and positive sensor-noise variance in `Q²`; and
@@ -75,7 +77,10 @@ Dependencies point downward.
   the manifest also locks planning policy v4, byte policy v3, poll policy v2,
   `fs-voi` EVPI semantics, record stride 256, and action stride 1. The same
   fixed schema token is included in each point-sensor instrument identity, so
-  nested `fs-assimilate` colors cannot collide across semantic aliases.
+  nested `fs-assimilate` colors receive distinct preimages for semantic aliases.
+  The token layout and tags are owned by `fs-qty`; this extraction preserves
+  the previously landed 12 bytes exactly, so identity v8 and byte policy v3 do
+  not change.
 
 ## Invariants
 
@@ -101,8 +106,9 @@ Dependencies point downward.
   work: all candidates share exact `Q`; variance/noise fields are `Q²`; and the
   threshold carries the derived decision schema. Pressure and stress refuse
   despite identical dimensions, as do semantic and dimension-only aliases.
-  Coherent-SI normalization makes equivalent metre/millimetre declarations
-  bit- and identity-equivalent.
+  Equivalent metre/millimetre declarations share one schema identity.
+  Complete report identities are equal only when coherent-SI conversion also
+  lands on the same `f64` bits, because scientific values are bound exactly.
 - Zero total prior variance has fractional reduction `0.0`, not NaN. A
   zero-sensitivity candidate receives `+infinity` allocation, the exact
   unconstrained first-order optimum; positive-sensitivity allocations must be
@@ -189,7 +195,8 @@ dimensions; report and nested assimilation identity movement by schema;
 unmeasured-input evidence binding; instrument-bound assimilation lineage;
 admitted/realized work locks; hostile-maximum admission; nested and finalization
 quota sweeps; execution/budget/work identity binding; exact quadrature-bit
-semantics; and sealed-output identity movement.
+semantics; byte-exact delegation to the reusable `fs-qty::QuantitySpec`
+codec; and sealed-output identity movement.
 
 ## No-claim boundaries
 
@@ -208,6 +215,10 @@ semantics; and sealed-output identity movement.
   fixed internal budget remain dimensionless proxies; introducing a real
   acquisition-cost/utility algebra requires its own schema and conversion
   contract rather than relabeling these scalars.
+- `QuantitySpec` binds only the dimension/kind/form portion of an objective.
+  It does not encode coordinate frames, candidate ordering, covariance role,
+  observation support, instrument calibration, or the actual scientific
+  scalar; the OED report preimage binds those separate fields where present.
 - Logical-work and poll counts do not claim instruction counts, wall-clock or
   memory bounds, pause/resume support, deadline/cost enforcement, drain latency,
   or a 200-microsecond cancellation guarantee. Identity roots are

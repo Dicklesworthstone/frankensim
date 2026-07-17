@@ -25,6 +25,11 @@ pub mod json;
 pub mod parse;
 pub mod semantic;
 
+pub use semantic::{
+    QUANTITY_SPEC_ENCODED_LEN, QUANTITY_SPEC_ENCODING_VERSION, QuantitySpec,
+    QuantitySpecDecodeError,
+};
+
 use core::cmp::Ordering;
 use core::fmt;
 use core::ops::{Add, Div, Mul, Neg, Sub};
