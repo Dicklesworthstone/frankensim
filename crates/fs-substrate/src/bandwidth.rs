@@ -214,9 +214,28 @@ mod tests {
         let m = measure(2);
         assert!(m.single_thread_gbs > 0.0);
         assert!(m.all_core_gbs > 0.0);
-        println!(
-            "{{\"suite\":\"fs-substrate/bandwidth\",\"case\":\"triad\",\"verdict\":\"pass\",\"detail\":\"single={:.1}GB/s all={:.1}GB/s\"}}",
-            m.single_thread_gbs, m.all_core_gbs
-        );
+        let machine = crate::CapabilityProbe::topology_only().fingerprint();
+        let mut emitter = fs_obs::Emitter::new("fs-substrate/bandwidth", "triad/measurement");
+        for (kernel, value) in [
+            ("stream-triad-single-thread", m.single_thread_gbs),
+            ("stream-triad-two-thread-test", m.all_core_gbs),
+        ] {
+            let event = emitter.emit(
+                fs_obs::Severity::Info,
+                fs_obs::EventKind::BenchmarkResult {
+                    kernel: kernel.to_string(),
+                    metric: "bandwidth_gbs".to_string(),
+                    value,
+                    machine,
+                },
+                None,
+            );
+            fs_obs::lint_failure_record(&event)
+                .expect("STREAM triad measurement must be replayable");
+            let line = event.to_jsonl();
+            fs_obs::validate_line(&line)
+                .expect("STREAM triad measurement must use the fs-obs wire schema");
+            println!("{line}");
+        }
     }
 }

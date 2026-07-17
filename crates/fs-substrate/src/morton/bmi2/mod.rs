@@ -54,7 +54,26 @@ mod tests {
     #[test]
     fn capsule_matches_the_magic_reference_when_available() {
         if !std::arch::is_x86_feature_detected!("bmi2") {
-            eprintln!("{{\"note\":\"bmi2 unavailable; capsule untested on this host\"}}");
+            let mut emitter =
+                fs_obs::Emitter::new("fs-substrate/morton-bmi2", "capsule-equivalence/outcome");
+            let event = emitter.emit(
+                fs_obs::Severity::Info,
+                fs_obs::EventKind::CapabilityDomainDecision {
+                    capability: "morton-bmi2".to_string(),
+                    domain: "current-host".to_string(),
+                    decision: fs_obs::CapabilityDecision::Refused,
+                    detail:
+                        "CPU does not advertise BMI2; capsule equivalence execution was skipped"
+                            .to_string(),
+                },
+                None,
+            );
+            fs_obs::lint_failure_record(&event)
+                .expect("BMI2 capability refusal must be replayable");
+            let line = event.to_jsonl();
+            fs_obs::validate_line(&line)
+                .expect("BMI2 capability refusal must use the fs-obs wire schema");
+            eprintln!("{line}");
             return;
         }
         for x in [0u32, 1, 7, 63, 1 << 20, (1 << 21) - 1] {
