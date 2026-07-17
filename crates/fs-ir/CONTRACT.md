@@ -593,10 +593,13 @@ admitted derived-geometry boundary.
   (`CATALOG_SCHEMA_VERSION`) and `diff()` answers "what changed since
   the version I know". `validate()` refuses duplicate names, missing
   sugar targets, exampleless entries, registry/catalog disagreement in
-  either direction, and signature drift (a sugar verb must produce
+  either direction, signature drift (a sugar verb must produce
   `ir-form`; a QoI produces `probability` exactly when its live
   metadata says probabilistic; every entry consumes at least one typed
-  kind). NO-CLAIM: entries catalog the
+  kind), and dispatch/registry set-inequality (lower's sugar dispatch
+  is an enumerable table, `lower::dispatch_heads()`, held set-equal to
+  `SUGAR_VERBS` — the growth discipline: a new dispatch arm cannot
+  land uncataloged, nor a registry entry unimplemented). NO-CLAIM: entries catalog the
   surfaces that exist today (two sugar verbs, two core operators, the
   QoI menu, arithmetic forms); per-operator wall-cost NUMBERS stay in
   sealed cost models, never in catalog prose; the ≤100ms serve budget

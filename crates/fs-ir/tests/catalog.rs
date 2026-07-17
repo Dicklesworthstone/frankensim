@@ -433,6 +433,21 @@ fn cat_011_error_model_references_resolve() {
     }
 }
 
+#[test]
+fn cat_012_dispatch_and_registry_are_set_equal() {
+    // Growth discipline (auto-discovery): the heads `lower` actually
+    // dispatches on and the SUGAR_VERBS registry must agree exactly —
+    // add both or neither. validate() enforces this too; this fixture
+    // states it as its own loud acceptance.
+    let dispatch: std::collections::BTreeSet<&str> =
+        fs_ir::lower::dispatch_heads().into_iter().collect();
+    let registry: std::collections::BTreeSet<&str> = SUGAR_VERBS.iter().copied().collect();
+    assert_eq!(
+        dispatch, registry,
+        "lower's dispatch table and catalog::SUGAR_VERBS drifted apart"
+    );
+}
+
 fn latency_query_set() -> Vec<CatalogQuery> {
     vec![
         CatalogQuery::default(),

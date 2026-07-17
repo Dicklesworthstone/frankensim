@@ -788,6 +788,22 @@ impl Catalog {
                 });
             }
         }
+        // Growth discipline: lower's dispatch table and the registry
+        // must be SET-EQUAL — a new dispatch arm cannot land without a
+        // registry entry (and hence a cataloged, example-executed
+        // operator), nor a registry entry without a dispatch arm.
+        let dispatch: std::collections::BTreeSet<&str> =
+            crate::lower::dispatch_heads().into_iter().collect();
+        let registry: std::collections::BTreeSet<&str> = SUGAR_VERBS.iter().copied().collect();
+        if dispatch != registry {
+            drifts.push(CatalogDrift {
+                entry: "sugar-dispatch".to_string(),
+                detail: format!(
+                    "lower dispatch heads {dispatch:?} and the SUGAR_VERBS registry \
+                     {registry:?} are not set-equal"
+                ),
+            });
+        }
         for form in ARITH_SAME_DIMS.iter().chain(COMPARE_FORMS) {
             if !self.entries.iter().any(|e| e.name == *form) {
                 drifts.push(CatalogDrift {

@@ -60,11 +60,33 @@ fn lower_inner(node: &Node, trace: &mut Vec<LowerStep>) -> Result<Node, IrError>
         }
         _ => node.clone(),
     };
-    match lowered_children.head() {
-        Some("optimize-shape") => lower_optimize_shape(&lowered_children, trace),
-        Some("simulate-pour") => lower_simulate_pour(&lowered_children, trace),
-        _ => Ok(lowered_children),
+    match lowered_children
+        .head()
+        .and_then(|head| SUGAR_DISPATCH.iter().find(|(name, _)| *name == head))
+    {
+        Some((_, expand)) => expand(&lowered_children, trace),
+        None => Ok(lowered_children),
     }
+}
+
+type SugarExpansion = fn(&Node, &mut Vec<LowerStep>) -> Result<Node, IrError>;
+
+/// The sugar dispatch table: the ONLY place a verb head is bound to
+/// its expansion. Kept as data (not match arms) so the catalog's
+/// growth discipline can enumerate it — `Catalog::validate` refuses a
+/// dispatch/registry set difference, so a new arm cannot land without
+/// a `catalog::SUGAR_VERBS` entry (and hence a full catalog entry with
+/// an executed example), nor vice versa.
+const SUGAR_DISPATCH: &[(&str, SugarExpansion)] = &[
+    ("optimize-shape", lower_optimize_shape),
+    ("simulate-pour", lower_simulate_pour),
+];
+
+/// The exact set of sugar heads `lower` dispatches on, for the
+/// registry set-equality check (catalog growth discipline).
+#[must_use]
+pub fn dispatch_heads() -> Vec<&'static str> {
+    SUGAR_DISPATCH.iter().map(|(name, _)| *name).collect()
 }
 
 fn sym(s: &str) -> Node {
