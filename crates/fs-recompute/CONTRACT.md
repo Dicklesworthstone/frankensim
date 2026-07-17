@@ -144,6 +144,17 @@ makes the plan a structured `StalePlan` refusal, validated before any burn
 or telemetry mutation. Duplicate burns are aggregated before the atomic
 fit check (api-006).
 
+`tests/api.rs` emits one canonical fs-obs `ConformanceCase` aggregate verdict
+after each completed api-001..api-006 case. Assertions and expectations that
+abort before that point remain Rust test-harness diagnostics; this suite does
+not claim aggregate-event coverage for those early exits. api-005 carries its
+actual LCG input seed (`0x1001_2026_0707_0085`); the other five cases are
+deterministic and use aggregate seed zero. The fixture `NodeRecord::rng_seed`
+is also zero throughout and describes the manifest records, not hidden test
+randomness. The api-004 dashboard and api-005 replay measurements use validated
+fs-obs `Custom` companion events, keeping runtime measurements out of aggregate
+verdict identity.
+
 ## Error model
 
 `StoreError::DeterminismViolation` (stop-the-line, with likely-cause

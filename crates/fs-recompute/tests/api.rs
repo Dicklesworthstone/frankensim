@@ -2,21 +2,57 @@
 //! `tolerance-invalidation`). First-class plans with certificates and
 //! costs, leaf/root boundaries, the cost-weighted-vs-LRU eviction A/B,
 //! pinned-pressure structured errors, per-op skip-yield telemetry, and
-//! the kill-criterion replay measurement. JSON-line verdicts; seeded
-//! cases carry seeds.
+//! the kill-criterion replay measurement. Completed cases emit canonical
+//! aggregate fs-obs verdicts; earlier assertion or expectation failures remain
+//! ordinary Rust test diagnostics. The one randomized case carries its actual
+//! input-generation seed, while deterministic cases use zero. Dynamic
+//! measurements live in validated companion events rather than aggregate
+//! verdict details.
 
 use fs_ledger::{ContentHash, hash_bytes};
 use fs_recompute::api::RecomputeApi;
 use fs_recompute::invalidate::Edge;
 use fs_recompute::{NodeRecord, PinReason, PutOutcome, Store, StoreError};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-recompute/api\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-recompute/api", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-recompute/api".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("recompute API verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("recompute API verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
+}
+
+fn companion(case: &str, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new("fs-recompute/api", case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("recompute API companion event must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("recompute API companion event must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 struct Lcg(u64);
@@ -123,14 +159,11 @@ fn api_001_perturb_plan() {
     verdict(
         "api-001",
         frontier_right && certs && cost_ok && pure && leaf_ok && root_ok,
-        &format!(
-            "the diamond plan recomputes {{src, right}} and certifies {{left, sink}} \
-             with absorbed-perturbation claims; costs read {:.0} vs hash-memo \
-             {:.0}; plans are pure until commit; a leaf touches only itself; a \
-             swamping root perturbation recomputes the full frontier",
-            p.estimated_cost(),
-            p.hash_memo_cost()
-        ),
+        "the diamond plan recomputes {src, right} and certifies {left, sink} \
+         with absorbed-perturbation claims; costs read 101 vs hash-memo 1111; \
+         plans are pure until commit; a leaf touches only itself; a swamping \
+         root perturbation recomputes the full frontier",
+        0,
     );
 }
 
@@ -160,11 +193,12 @@ fn api_002_commit_burns() {
         "slack is spendable through the API: the first two 8e-3 perturbations absorb \
          at `left` (burning 4e-3 each of its 1e-2 slack), the third finds it spent \
          and recomputes",
+        0,
     );
 }
 
 /// api-003 — the eviction A/B: cost-weighted eviction preserves more
-/// recompute-cost-saved than LRU on a seeded trace; pins survive both;
+/// recompute-cost-saved than LRU on a deterministic trace; pins survive both;
 /// a pinned-saturated cache is a STRUCTURED error.
 #[test]
 fn api_003_eviction_ab() {
@@ -227,13 +261,11 @@ fn api_003_eviction_ab() {
     verdict(
         "api-003",
         evicted > 0 && hot_survive && pin_survives && cw_cost_kept > lru_cost_kept && structured,
-        &format!(
-            "cost-weighted eviction keeps all four hot expensive nodes \
-             ({cw_cost_kept:.0} recompute-cost preserved vs {lru_cost_kept:.0} \
-             under LRU insertion order), the contract pin survives, and pinned \
-             saturation surfaces a STRUCTURED CacheFullOfPins error; \
-             seed 0x1001_2026_0707_0083"
-        ),
+        "cost-weighted eviction keeps all four hot expensive nodes (4000 \
+         recompute-cost preserved vs 0 under LRU insertion order), the contract \
+         pin survives, and pinned saturation surfaces a STRUCTURED \
+         CacheFullOfPins error",
+        0,
     );
 }
 
@@ -258,27 +290,18 @@ fn api_004_skip_yield_dashboard() {
     let worst = y.worst_first();
     let worst_ordering = worst.first().is_some_and(|(_, v)| *v == 0.0);
     let dashboard = y.dashboard_json();
-    let mut em = fs_obs::Emitter::new("fs-recompute/api", "api-004/skip-yield");
-    let line = em
-        .emit(
-            fs_obs::Severity::Info,
-            fs_obs::EventKind::Custom {
-                name: "recompute-skip-yield".to_string(),
-                json: dashboard.clone(),
-            },
-            None,
-        )
-        .to_jsonl();
-    fs_obs::validate_line(&line).expect("dashboard validates");
-    println!("{line}");
+    companion(
+        "api-004/skip-yield",
+        "recompute-skip-yield",
+        format!("{{\"dashboard\":{dashboard}}}"),
+    );
     verdict(
         "api-004",
         right_worst && src_worst && left_partial && worst_ordering,
-        &format!(
-            "per-op yields separate the never-absorbing ops (src, right at 0.0 — \
-             where tightening effort goes, worst-first) from the absorbing ones \
-             (left > 0), and the dashboard ships live: {dashboard}"
-        ),
+        "per-op yields separate the never-absorbing ops (src, right at 0.0 — \
+         where tightening effort goes, worst-first) from the absorbing ones \
+         (left > 0), and the dashboard ships as a validated companion event",
+        0,
     );
 }
 
@@ -288,6 +311,8 @@ fn api_004_skip_yield_dashboard() {
 /// decision will use, at fixture scale).
 #[test]
 fn api_005_kill_criterion_replay() {
+    const SEED: u64 = 0x1001_2026_0707_0085;
+
     // A pipeline where most stages have healthy slack: an agent
     // exploring nearby variants perturbs the design repeatedly.
     let mut store = Store::new();
@@ -309,7 +334,7 @@ fn api_005_kill_criterion_replay() {
     for (k, s) in stages.iter().enumerate() {
         api.record_cost(s, if k == 0 { 1.0 } else { 50.0 });
     }
-    let mut rng = Lcg(0x1001_2026_0707_0085);
+    let mut rng = Lcg(SEED);
     let mut certified_cost = 0.0;
     let mut memo_cost = 0.0;
     let mut plans = 0;
@@ -323,20 +348,21 @@ fn api_005_kill_criterion_replay() {
         // the same base design (branch checkouts, Proposal 10).
     }
     let speedup = memo_cost / certified_cost.max(1e-12);
-    println!(
-        "{{\"suite\":\"fs-recompute/api\",\"case\":\"api-005-metric\",\"verdict\":\"info\",\
-         \"detail\":\"plans={plans} certified={certified_cost:.0} memo={memo_cost:.0} \
-         speedup={speedup:.1}x\"}}"
+    companion(
+        "api-005/kill-criterion",
+        "kill-criterion-replay-metric",
+        format!(
+            "{{\"plans\":{plans},\"certified_cost\":{certified_cost},\
+             \"memo_cost\":{memo_cost},\"speedup\":{speedup},\"input_seed\":{SEED}}}"
+        ),
     );
     verdict(
         "api-005",
         speedup >= 2.0 && plans == 100,
-        &format!(
-            "the 100-variant replay pays {certified_cost:.0} in certified delta-solve \
-             cost vs {memo_cost:.0} under hash memoization — {speedup:.1}x, the \
-             kill-criterion measurement machinery (fixture-scale; the production \
-             decision runs on recorded agent traces); seed 0x1001_2026_0707_0085"
-        ),
+        "the 100-variant replay meets the 2x certified-delta-solve versus \
+         hash-memoization threshold; measurements live in the companion event \
+         (fixture-scale; the production decision runs on recorded agent traces)",
+        SEED,
     );
 }
 
@@ -407,5 +433,6 @@ fn api_006_stale_plan_refuses_atomically() {
         "a plan certified against pre-burn slack refuses after a sibling plan commits; \
          a same-revision plan from different state also refuses; failures perform no \
          partial burns or false telemetry, and dashboard operator ids are JSON-escaped",
+        0,
     );
 }
