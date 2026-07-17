@@ -227,6 +227,15 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   the exact generator-by-cocycle period matrix `G^T Omega = [0 | I]^T`. This is
   only the witness-relative free `Hom(H_k,Z)` dual; integer periods kill the
   torsion generators and do not stand in for torsion cohomology or linking.
+  Its eighth tranche accepts one strongly pair/phase/degree-bound integral
+  `C_k` chain, proves `A_k x = 0`, and classifies the cycle in the retained
+  generator basis. Nontrivial torsion coordinates are canonical nonnegative
+  residues modulo their positive invariant factors; free coordinates are
+  independently replayed as `Omega^T x`. It retains an exact original-basis
+  `C_(k+1)` adjustment and verifies the complete decomposition
+  `x = G gamma + A_(k+1) h`. Consequently a zero coordinate column carries an
+  explicit filling witness, while a nonzero coordinate column is a successful
+  homology classification rather than a refusal.
 
 ## Invariants
 
@@ -358,6 +367,12 @@ Free-cocycle construction likewise consumes only opaque verified generators;
 output/retention/work, allocation, arithmetic, cancellation, invariant, and
 coboundary/pairing failures are typed Unknowns. It never narrows `i128`
 cocycles into the existing `i64` relative-cochain type implicitly.
+Integral-cycle classification treats a strong pair, phase, or degree mismatch
+and an exact nonzero `A_k x` row as Refuted. Opaque-authority shape drift,
+coefficient-arity loss after successful binding, output/workspace/retention or
+multiply-accumulate budget refusal, allocation, checked arithmetic,
+cancellation, period disagreement, and decomposition disagreement remain typed
+Unknowns. No partial coordinates or adjustment are published.
 
 ## Determinism class
 
@@ -414,6 +429,12 @@ in fixed order, then checks incoming columns and generator columns row-major.
 The cocycle and generator representatives transform together under alternate
 valid Smith witnesses, while the retained zero-then-identity period matrix and
 all counters replay exactly for identical authorities.
+Integral-cycle classification visits outgoing rows, outgoing-Smith
+coordinates, lower-presentation coordinates, free periods, incoming adjustment
+coefficients, and decomposition rows in fixed order. Torsion normalization uses
+`div_euclid` and `rem_euclid` with positive retained factors. Identical
+authorities, typed chain bytes, and budgets therefore replay class coordinates,
+adjustment, work counts, and checked multiply-accumulate counts byte-for-byte.
 
 ## Cancellation behavior
 
@@ -457,6 +478,13 @@ Free-cocycle construction preflights its cocycle and period matrices, retained
 authority, and scalar work before allocation. It polls each cocycle coefficient,
 incoming-boundary equation, and generator pairing plus final publication, with
 at most `max(cycle_rank, dim(C_k))` checked terms between polls.
+Integral-cycle classification preflights output, retained authority, scratch
+coordinates, and every checked multiply-accumulate term before allocation. It
+polls each cycle equation, coordinate, period, adjustment, and decomposition
+row plus preflight, allocation, and final publication. At most
+`max(dim(C_k), cycle_rank, boundary_rank, generator_count + dim(C_(k+1)))`
+checked terms occur between polls; cancellation discards all private
+coordinates and returns exact completed/planned counters.
 
 ## Unsafe boundary
 
@@ -625,6 +653,12 @@ torsion-only `2 x 0` cocycles, a mixed `Z/2 + Z` zero-then-identity period
 matrix, and a sign-changed complete Smith witness whose generator and cocycle
 both change while their period remains one. Every resource limit-minus-one and
 all 14 cancellation polls through final publication are covered.
+Tranche 8 pins the centered free generator, an explicit face boundary, and a
+boundary-shifted free representative; the abstract `Z/2` generator, its exact
+order-two filling, and negative-residue normalization; and a zero-homology
+bottom chain with an explicit filling. Strong binding/noncycle refusals, every
+resource limit-minus-one, full decomposition replay, and all 26 centered
+cancellation polls through final publication are covered.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -809,6 +843,14 @@ all 14 cancellation polls through final publication are covered.
   characters, `Q/Z` or `R/Z` linking, cup/Poincare pairings, harmonic or de
   Rham representatives, continuum units, naturality, and physical circulation,
   flux, current, winding, or embedding authority remain absent.
+- I13.2b tranche 8 classifies one admitted pair-bound integral cycle and retains
+  one exact representative-plus-boundary decomposition in the selected Smith
+  witness basis. Its torsion residues are canonical only relative to the
+  retained ordered invariant factors; its free coordinates and adjustment are
+  witness-relative, not minimal, harmonic, geometric, or canonical across
+  alternative valid witnesses. It adds no relabel/remesh naturality, induced
+  map, linking, continuum-period, embedding, flux, current, or physical-winding
+  authority.
 - `AbstractAlgebraOnly` is load-bearing. Synthetic CW/Moore/lens-space matrices
   may test the algebra kernel but cannot establish a conductor, terminal,
   material, embedding, winding, flux, force, or machine claim. Physical R3

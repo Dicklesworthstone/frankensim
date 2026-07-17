@@ -4,11 +4,12 @@
 
 use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
 use fs_feec::integral_topology::{
-    ExactAlgebraBudget, ExactIntegerMatrix, HomologyCocycleBudget, HomologyDecompositionBudget,
-    HomologyGeneratorBudget, HomologyGeneratorKind, IntegralTopologyError,
-    IntegralTopologyFailureClass, KernelCoordinateBudget, MatrixRole, SmithConstructionBudget,
-    SmithNormalFormWitness, SmithWitnessStage, TerminalRelativeBoundaryBudget,
-    TerminalRelativeBoundaryMatrix, TopologyApplicability, VerifiedSmithNormalForm,
+    ExactAlgebraBudget, ExactIntegerMatrix, HomologyClassBudget, HomologyCocycleBudget,
+    HomologyDecompositionBudget, HomologyGeneratorBudget, HomologyGeneratorKind,
+    IntegralTopologyError, IntegralTopologyFailureClass, KernelCoordinateBudget, MatrixRole,
+    SmithConstructionBudget, SmithNormalFormWitness, SmithWitnessStage,
+    TerminalRelativeBoundaryBudget, TerminalRelativeBoundaryMatrix, TopologyApplicability,
+    VerifiedSmithNormalForm, VerifiedTerminalRelativeFreeCocyclePeriods,
     VerifiedTerminalRelativeHomology, VerifiedTerminalRelativeHomologyGenerators,
     VerifiedTerminalRelativeKernelTransport, construct_smith_normal_form,
     construct_smith_normal_form_with_checkpoint, extract_terminal_relative_boundary_matrix,
@@ -17,7 +18,10 @@ use fs_feec::integral_topology::{
     verify_terminal_relative_free_cocycle_periods_with_checkpoint,
     verify_terminal_relative_homology, verify_terminal_relative_homology_generators,
     verify_terminal_relative_homology_generators_with_checkpoint,
-    verify_terminal_relative_homology_with_checkpoint, verify_terminal_relative_kernel_transport,
+    verify_terminal_relative_homology_with_checkpoint,
+    verify_terminal_relative_integral_homology_class,
+    verify_terminal_relative_integral_homology_class_with_checkpoint,
+    verify_terminal_relative_kernel_transport,
     verify_terminal_relative_kernel_transport_with_checkpoint,
 };
 use fs_feec::terminal_relative::{
@@ -787,6 +791,20 @@ fn cocycle_budget(
     )
 }
 
+fn class_budget(
+    max_output_entries: usize,
+    max_retained_entries: usize,
+    max_workspace_entries: usize,
+    max_scalar_operations: u128,
+) -> HomologyClassBudget {
+    HomologyClassBudget::new(
+        max_output_entries,
+        max_retained_entries,
+        max_workspace_entries,
+        max_scalar_operations,
+    )
+}
+
 fn centered_kernel_inputs() -> (
     TerminalRelativeBoundaryMatrix,
     TerminalRelativeBoundaryMatrix,
@@ -925,6 +943,22 @@ fn abstract_torsion_generators() -> VerifiedTerminalRelativeHomologyGenerators {
         generator_budget(4, 52, 10),
     )
     .expect("abstract torsion generator")
+}
+
+fn centered_free_periods() -> VerifiedTerminalRelativeFreeCocyclePeriods {
+    verify_terminal_relative_free_cocycle_periods(
+        centered_homology_generators(),
+        cocycle_budget(7, 293, 60),
+    )
+    .expect("centered free integral period dual")
+}
+
+fn abstract_torsion_periods() -> VerifiedTerminalRelativeFreeCocyclePeriods {
+    verify_terminal_relative_free_cocycle_periods(
+        abstract_torsion_generators(),
+        cocycle_budget(0, 52, 0),
+    )
+    .expect("torsion-only empty free period dual")
 }
 
 #[test]
@@ -2598,6 +2632,41 @@ fn it_036_zero_homology_preserves_all_empty_certificate_shapes() {
     assert_eq!(periods.work_items(), 0);
     assert_eq!(periods.scalar_operations(), 0);
     assert_eq!(period_polls, 3);
+
+    let chain = IntegralRelativeChain::try_new(&pair, phase, 0, vec![1, 0])
+        .expect("zero-homology bottom chain");
+    let mut class_polls = 0_usize;
+    let class = verify_terminal_relative_integral_homology_class_with_checkpoint(
+        periods,
+        chain,
+        class_budget(4, retained_entries + 6, 4, 24),
+        &mut |_| {
+            class_polls += 1;
+            true
+        },
+    )
+    .expect("every bottom cycle has an explicit incoming-chain filling");
+    assert_eq!(
+        (
+            class.class_coordinates().rows(),
+            class.class_coordinates().cols(),
+        ),
+        (0, 1)
+    );
+    assert!(class.class_coordinates().entries().is_empty());
+    assert_eq!(
+        (
+            class.boundary_adjustment().rows(),
+            class.boundary_adjustment().cols(),
+        ),
+        (4, 1)
+    );
+    assert!(class.represents_zero_class());
+    assert!(class.is_boundary());
+    assert_eq!(class.work_items(), 10);
+    assert_eq!(class.scalar_operations(), 24);
+    assert_eq!(class.retained_entries(), retained_entries + 6);
+    assert_eq!(class_polls, 13);
 }
 
 #[test]
@@ -2914,6 +2983,297 @@ fn it_042_free_cocycle_cancellation_is_transactional_through_publication() {
                     planned_work_items: 11,
                     completed_scalar_operations: 60,
                     planned_scalar_operations: 60,
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn it_043_free_cycle_classifies_in_the_retained_generator_period_basis() {
+    let pair = centered_surface_pair();
+    let phase = PhaseId::new("phase/surface").expect("phase id");
+    let chain = IntegralRelativeChain::try_new(&pair, phase, 1, vec![0, 0, -1, 0, 0, 1])
+        .expect("centered free-generator chain");
+    let class = verify_terminal_relative_integral_homology_class(
+        centered_free_periods(),
+        chain.clone(),
+        class_budget(5, 304, 10, 119),
+    )
+    .expect("centered free homology class");
+
+    assert_eq!(class.chain(), &chain);
+    assert!(class.torsion_orders().is_empty());
+    assert!(class.torsion_residues().is_empty());
+    assert_eq!(class.free_coordinates(), &[1]);
+    assert_eq!(
+        (
+            class.class_coordinates().rows(),
+            class.class_coordinates().cols(),
+        ),
+        (1, 1)
+    );
+    assert_eq!(class.class_coordinates().entries(), &[1]);
+    assert_eq!(class.boundary_adjustment().entries(), &[0, 0, 0, 0]);
+    assert_eq!(
+        class.boundary_adjustment_basis(),
+        &[
+            CellRef::new(2, 0),
+            CellRef::new(2, 1),
+            CellRef::new(2, 2),
+            CellRef::new(2, 3),
+        ]
+    );
+    assert!(!class.represents_zero_class());
+    assert!(!class.is_boundary());
+    assert_eq!(class.work_items(), 23);
+    assert_eq!(class.scalar_operations(), 119);
+    assert_eq!(class.retained_entries(), 304);
+    assert_eq!(
+        class.applicability(),
+        TopologyApplicability::TerminalRelativeIntegralHomologyClassOnly
+    );
+}
+
+#[test]
+fn it_044_boundary_adjustment_replays_zero_and_shifted_free_classes() {
+    let pair = centered_surface_pair();
+    let phase = PhaseId::new("phase/surface").expect("phase id");
+    let face = IntegralRelativeChain::try_new(&pair, phase.clone(), 2, vec![1, 0, 0, 0])
+        .expect("first centered face");
+    let boundary = pair.boundary(&face).expect("first face boundary");
+    assert_eq!(boundary.coefficients(), &[0, 0, 1, -1, 0, 0]);
+
+    let periods = centered_free_periods();
+    let zero = verify_terminal_relative_integral_homology_class(
+        periods.clone(),
+        boundary,
+        class_budget(5, 304, 10, 119),
+    )
+    .expect("exact face boundary");
+    assert_eq!(zero.class_coordinates().entries(), &[0]);
+    assert_eq!(zero.boundary_adjustment().entries(), &[1, 0, 0, 0]);
+    assert!(zero.represents_zero_class());
+    assert!(zero.is_boundary());
+
+    let shifted = IntegralRelativeChain::try_new(&pair, phase, 1, vec![0, 0, -2, -1, 0, 3])
+        .expect("three generators plus one face boundary");
+    let shifted = verify_terminal_relative_integral_homology_class(
+        periods,
+        shifted,
+        class_budget(5, 304, 10, 119),
+    )
+    .expect("shifted free class");
+    assert_eq!(shifted.free_coordinates(), &[3]);
+    assert_eq!(shifted.class_coordinates().entries(), &[3]);
+    assert_eq!(shifted.boundary_adjustment().entries(), &[1, 0, 0, 0]);
+    assert!(!shifted.is_boundary());
+}
+
+#[test]
+fn it_045_torsion_residues_are_nonnegative_and_retain_exact_adjustments() {
+    let pair = abstract_torsion_pair();
+    let phase = PhaseId::new("phase/torsion").expect("phase id");
+    let periods = abstract_torsion_periods();
+
+    let generator = IntegralRelativeChain::try_new(&pair, phase.clone(), 1, vec![0, 1])
+        .expect("torsion generator");
+    let generator = verify_terminal_relative_integral_homology_class(
+        periods.clone(),
+        generator,
+        class_budget(3, 57, 4, 18),
+    )
+    .expect("nonzero torsion class");
+    assert_eq!(generator.torsion_orders(), &[2]);
+    assert_eq!(generator.torsion_residues(), &[1]);
+    assert!(generator.free_coordinates().is_empty());
+    assert_eq!(generator.boundary_adjustment().entries(), &[0, 0]);
+    assert_eq!(generator.work_items(), 8);
+    assert_eq!(generator.scalar_operations(), 18);
+    assert_eq!(generator.retained_entries(), 57);
+
+    let double = IntegralRelativeChain::try_new(&pair, phase.clone(), 1, vec![0, 2])
+        .expect("twice the torsion generator");
+    let double = verify_terminal_relative_integral_homology_class(
+        periods.clone(),
+        double,
+        class_budget(3, 57, 4, 18),
+    )
+    .expect("torsion order relation");
+    assert_eq!(double.torsion_residues(), &[0]);
+    assert_eq!(double.boundary_adjustment().entries(), &[-1, 1]);
+    assert!(double.is_boundary());
+
+    let negative = IntegralRelativeChain::try_new(&pair, phase, 1, vec![0, -1])
+        .expect("negative torsion generator");
+    let negative = verify_terminal_relative_integral_homology_class(
+        periods,
+        negative,
+        class_budget(3, 57, 4, 18),
+    )
+    .expect("canonical negative torsion residue");
+    assert_eq!(negative.torsion_residues(), &[1]);
+    assert_eq!(negative.boundary_adjustment().entries(), &[1, -1]);
+}
+
+#[test]
+fn it_046_classification_refutes_noncycles_and_strong_binding_mismatches() {
+    let pair = centered_surface_pair();
+    let phase = PhaseId::new("phase/surface").expect("phase id");
+    let periods = centered_free_periods();
+    let noncycle = IntegralRelativeChain::try_new(&pair, phase.clone(), 1, vec![0, 0, 1, 0, 0, 0])
+        .expect("centered noncycle");
+    let error = verify_terminal_relative_integral_homology_class(
+        periods.clone(),
+        noncycle,
+        class_budget(5, 304, 10, 119),
+    )
+    .expect_err("nonzero outgoing boundary must refute cyclehood");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Refuted);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::HomologyClassNotCycle { row: 0, actual: -1 }
+    ));
+
+    let wrong_degree = IntegralRelativeChain::try_new(&pair, phase, 0, vec![1])
+        .expect("same-pair wrong-degree chain");
+    let error = verify_terminal_relative_integral_homology_class(
+        periods.clone(),
+        wrong_degree,
+        class_budget(5, 304, 10, 119),
+    )
+    .expect_err("chain degree must remain strongly bound");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Refuted);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::HomologyClassBindingMismatch {
+            field: "chain degree"
+        }
+    ));
+
+    let other_pair = terminal_cut_loop_pair(false);
+    let other_phase = PhaseId::new("phase/a").expect("phase id");
+    let other_chain = IntegralRelativeChain::try_new(&other_pair, other_phase, 1, vec![0, 0, 0, 0])
+        .expect("different-pair chain");
+    let error = verify_terminal_relative_integral_homology_class(
+        periods,
+        other_chain,
+        class_budget(5, 304, 10, 119),
+    )
+    .expect_err("pair identity must remain strongly bound");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Refuted);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::HomologyClassBindingMismatch {
+            field: "pair identity"
+        }
+    ));
+}
+
+#[test]
+fn it_047_homology_classification_preflights_every_resource_limit() {
+    let pair = centered_surface_pair();
+    let phase = PhaseId::new("phase/surface").expect("phase id");
+    let chain = IntegralRelativeChain::try_new(&pair, phase, 1, vec![0, 0, -1, 0, 0, 1])
+        .expect("centered free-generator chain");
+    let periods = centered_free_periods();
+
+    for (limits, expected) in [
+        (class_budget(4, 304, 10, 119), "output"),
+        (class_budget(5, 303, 10, 119), "retained"),
+        (class_budget(5, 304, 9, 119), "workspace"),
+        (class_budget(5, 304, 10, 118), "scalar"),
+    ] {
+        let error = verify_terminal_relative_integral_homology_class(
+            periods.clone(),
+            chain.clone(),
+            limits,
+        )
+        .expect_err("limit minus one must refuse class publication");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        match expected {
+            "output" => assert!(matches!(
+                error,
+                IntegralTopologyError::HomologyClassOutputBudgetExceeded {
+                    requested: 5,
+                    max: 4,
+                }
+            )),
+            "retained" => assert!(matches!(
+                error,
+                IntegralTopologyError::RetainedEntryBudgetExceeded {
+                    requested: 304,
+                    max: 303,
+                }
+            )),
+            "workspace" => assert!(matches!(
+                error,
+                IntegralTopologyError::WorkspaceEntryBudgetExceeded {
+                    requested: 10,
+                    max: 9,
+                }
+            )),
+            "scalar" => assert!(matches!(
+                error,
+                IntegralTopologyError::ScalarWorkBudgetExceeded {
+                    requested: 119,
+                    max: 118,
+                }
+            )),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn it_048_homology_class_cancellation_is_transactional_through_publication() {
+    let pair = centered_surface_pair();
+    let phase = PhaseId::new("phase/surface").expect("phase id");
+    let chain = IntegralRelativeChain::try_new(&pair, phase, 1, vec![0, 0, -1, 0, 0, 1])
+        .expect("centered free-generator chain");
+    let periods = centered_free_periods();
+    let mut poll_count = 0_usize;
+    let complete = verify_terminal_relative_integral_homology_class_with_checkpoint(
+        periods.clone(),
+        chain.clone(),
+        class_budget(5, 304, 10, 119),
+        &mut |_| {
+            poll_count += 1;
+            true
+        },
+    )
+    .expect("uninterrupted homology-class verification");
+    assert_eq!(complete.work_items(), 23);
+    assert_eq!(complete.scalar_operations(), 119);
+    assert_eq!(poll_count, 26);
+
+    for stop_at in 0..poll_count {
+        let mut observed = 0_usize;
+        let error = verify_terminal_relative_integral_homology_class_with_checkpoint(
+            periods.clone(),
+            chain.clone(),
+            class_budget(5, 304, 10, 119),
+            &mut |_| {
+                let keep_running = observed != stop_at;
+                observed += 1;
+                keep_running
+            },
+        )
+        .expect_err("every homology-class cancellation poll must refuse");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        assert!(matches!(
+            &error,
+            IntegralTopologyError::HomologyClassCancelled { .. }
+        ));
+        if stop_at + 1 == poll_count {
+            assert!(matches!(
+                error,
+                IntegralTopologyError::HomologyClassCancelled {
+                    phase: "terminal-relative homology-class finalize",
+                    completed_work_items: 23,
+                    planned_work_items: 23,
+                    completed_scalar_operations: 119,
+                    planned_scalar_operations: 119,
                 }
             ));
         }

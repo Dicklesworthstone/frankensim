@@ -47,12 +47,18 @@
 //! This is the witness-relative free `Hom(H_k, Z)` sector only: torsion
 //! cohomology, linking, harmonic representatives, continuum periods, and
 //! physical winding remain outside its authority.
+//!
+//! The eighth tranche classifies an existing pair-bound
+//! [`IntegralRelativeChain`] only after proving it is a cycle. It publishes
+//! canonical nonnegative torsion residues and exact free coordinates in the
+//! retained witness basis, with an independent free-period replay.
 
 use core::fmt;
 
 use crate::terminal_relative::{
-    CellRef, ConductorComponentId, IncidenceSign, MAX_TERMINAL_RELATIVE_CELLS,
-    MAX_TERMINAL_RELATIVE_INCIDENCES, PhaseId, TerminalRelativePair, TerminalRelativePairId,
+    CellRef, ConductorComponentId, IncidenceSign, IntegralRelativeChain,
+    MAX_TERMINAL_RELATIVE_CELLS, MAX_TERMINAL_RELATIVE_INCIDENCES, PhaseId, TerminalRelativePair,
+    TerminalRelativePairId,
 };
 
 /// Default maximum row or column extent admitted by the exact checker.
@@ -108,6 +114,15 @@ pub const DEFAULT_MAX_COCYCLE_OUTPUT_ENTRIES: usize = 2 * DEFAULT_MAX_MATRIX_ENT
 /// their period-pairing matrix.
 pub const DEFAULT_MAX_COCYCLE_RETAINED_ENTRIES: usize =
     DEFAULT_MAX_GENERATOR_RETAINED_ENTRIES + DEFAULT_MAX_COCYCLE_OUTPUT_ENTRIES;
+/// Default maximum class-coordinate plus boundary-adjustment outputs.
+pub const DEFAULT_MAX_HOMOLOGY_CLASS_OUTPUT_ENTRIES: usize = 2 * DEFAULT_MAX_MATRIX_EXTENT;
+/// Default scratch entries for full outgoing-Smith coordinates and lower-image
+/// diagonal quotients.
+pub const DEFAULT_MAX_HOMOLOGY_CLASS_WORKSPACE_ENTRIES: usize = 2 * DEFAULT_MAX_MATRIX_EXTENT;
+/// Default retained entries across period authority, classified chain, and
+/// class coordinates.
+pub const DEFAULT_MAX_HOMOLOGY_CLASS_RETAINED_ENTRIES: usize =
+    DEFAULT_MAX_COCYCLE_RETAINED_ENTRIES + 3 * DEFAULT_MAX_MATRIX_EXTENT;
 
 /// Explicit resource envelope for exact integer witness admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -565,6 +580,72 @@ impl Default for HomologyCocycleBudget {
         Self::new(
             DEFAULT_MAX_COCYCLE_OUTPUT_ENTRIES,
             DEFAULT_MAX_COCYCLE_RETAINED_ENTRIES,
+            DEFAULT_MAX_SCALAR_OPERATIONS,
+        )
+    }
+}
+
+/// Resource envelope for classifying one exact pair-bound relative cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HomologyClassBudget {
+    max_output_entries: usize,
+    max_retained_entries: usize,
+    max_workspace_entries: usize,
+    max_scalar_operations: u128,
+}
+
+impl HomologyClassBudget {
+    /// Construct a cycle-classification envelope.
+    #[must_use]
+    pub const fn new(
+        max_output_entries: usize,
+        max_retained_entries: usize,
+        max_workspace_entries: usize,
+        max_scalar_operations: u128,
+    ) -> Self {
+        Self {
+            max_output_entries,
+            max_retained_entries,
+            max_workspace_entries,
+            max_scalar_operations,
+        }
+    }
+
+    /// Maximum class coordinates plus boundary-adjustment coefficients.
+    #[must_use]
+    pub const fn max_output_entries(self) -> usize {
+        self.max_output_entries
+    }
+
+    /// Maximum retained entries including the complete period authority and
+    /// classified chain.
+    #[must_use]
+    pub const fn max_retained_entries(self) -> usize {
+        self.max_retained_entries
+    }
+
+    /// Maximum scratch outgoing-Smith coordinates and diagonal quotients.
+    #[must_use]
+    pub const fn max_workspace_entries(self) -> usize {
+        self.max_workspace_entries
+    }
+
+    /// Maximum checked multiply-accumulate terms across cycle, transform,
+    /// period, adjustment, and decomposition equations. Exact Euclidean
+    /// quotient/remainder normalization is charged as presentation work items,
+    /// not as inner-product terms.
+    #[must_use]
+    pub const fn max_scalar_operations(self) -> u128 {
+        self.max_scalar_operations
+    }
+}
+
+impl Default for HomologyClassBudget {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_HOMOLOGY_CLASS_OUTPUT_ENTRIES,
+            DEFAULT_MAX_HOMOLOGY_CLASS_RETAINED_ENTRIES,
+            DEFAULT_MAX_HOMOLOGY_CLASS_WORKSPACE_ENTRIES,
             DEFAULT_MAX_SCALAR_OPERATIONS,
         )
     }
@@ -1585,6 +1666,23 @@ pub enum HomologyCocycleStage {
     PeriodDualVerification,
 }
 
+/// Exact cycle-classification calculation or verification phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomologyClassStage {
+    /// Exact outgoing-boundary cycle check `A_k * x = 0`.
+    CycleVerification,
+    /// Full outgoing-Smith coordinate transform `V_A^-1 * x`.
+    OutgoingSmithCoordinateTransform,
+    /// Lower-image presentation transform `U_L * y`.
+    PresentationCoordinateTransform,
+    /// Independent integer-period replay `Omega^T * x`.
+    FreePeriodVerification,
+    /// Incoming-chain adjustment `V_L * floor(c / D_L)`.
+    BoundaryAdjustment,
+    /// Complete chain decomposition `x = G * gamma + A_(k+1) * h`.
+    DecompositionVerification,
+}
+
 /// Untrusted complete Smith-normal-form witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmithNormalFormWitness {
@@ -1670,6 +1768,9 @@ pub enum TopologyApplicability {
     /// generators. No torsion-cohomology, metric, continuum, or physical
     /// period conclusion follows.
     TerminalRelativeFreeCocyclePeriodsOnly,
+    /// Exact torsion residues and free coordinates of one admitted pair-bound
+    /// integral cycle. No physical winding or naturality conclusion follows.
+    TerminalRelativeIntegralHomologyClassOnly,
 }
 
 /// Authority classification for an unsuccessful exact verification.
@@ -2085,6 +2186,137 @@ impl VerifiedTerminalRelativeFreeCocyclePeriods {
     #[must_use]
     pub const fn applicability(&self) -> TopologyApplicability {
         TopologyApplicability::TerminalRelativeFreeCocyclePeriodsOnly
+    }
+}
+
+/// Exact homology coordinates of one admitted terminal-relative integral
+/// cycle.
+///
+/// Torsion residues use the same order as
+/// [`VerifiedTerminalRelativeHomology::torsion_invariant_factors`] and are
+/// normalized into `0..order`. Free coordinates use the retained free
+/// generator/period order. The complete period authority and original typed
+/// chain remain attached. A retained incoming-chain adjustment proves the
+/// exact decomposition into the selected representative plus a boundary; no
+/// public constructor can manufacture a class from an unchecked or differently
+/// bound chain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedTerminalRelativeIntegralHomologyClass {
+    periods: VerifiedTerminalRelativeFreeCocyclePeriods,
+    chain: IntegralRelativeChain,
+    class_coordinates: ExactIntegerMatrix,
+    boundary_adjustment: ExactIntegerMatrix,
+    work_items: u128,
+    scalar_operations: u128,
+    retained_entries: usize,
+}
+
+impl VerifiedTerminalRelativeIntegralHomologyClass {
+    /// Complete period/generator/homology authority used for classification.
+    #[must_use]
+    pub const fn periods(&self) -> &VerifiedTerminalRelativeFreeCocyclePeriods {
+        &self.periods
+    }
+
+    /// Original typed pair-bound integral chain proven to be a cycle.
+    #[must_use]
+    pub const fn chain(&self) -> &IntegralRelativeChain {
+        &self.chain
+    }
+
+    /// Positive orders of the nontrivial torsion coordinates.
+    #[must_use]
+    pub fn torsion_orders(&self) -> &[i128] {
+        self.periods
+            .generators()
+            .homology()
+            .torsion_invariant_factors()
+    }
+
+    /// Generator-ordered class coordinates as one exact column: canonical
+    /// torsion residues followed by signed free coordinates.
+    #[must_use]
+    pub const fn class_coordinates(&self) -> &ExactIntegerMatrix {
+        &self.class_coordinates
+    }
+
+    /// Canonical nonnegative residues for the nontrivial torsion summands.
+    #[must_use]
+    pub fn torsion_residues(&self) -> &[i128] {
+        let torsion_count = self.periods.generators().torsion_generator_count();
+        &self.class_coordinates.entries[..torsion_count]
+    }
+
+    /// Exact coordinates in the retained free generator basis.
+    #[must_use]
+    pub fn free_coordinates(&self) -> &[i128] {
+        let torsion_count = self.periods.generators().torsion_generator_count();
+        &self.class_coordinates.entries[torsion_count..]
+    }
+
+    /// Exact incoming-chain adjustment `h` in the original pair-bound
+    /// `C_(k+1)` basis such that `x = G * class_coordinates + A_(k+1) * h`.
+    #[must_use]
+    pub const fn boundary_adjustment(&self) -> &ExactIntegerMatrix {
+        &self.boundary_adjustment
+    }
+
+    /// Ordered `C_(k+1)` cells corresponding to boundary-adjustment rows.
+    #[must_use]
+    pub fn boundary_adjustment_basis(&self) -> &[CellRef] {
+        self.periods.generators().bounding_chain_basis()
+    }
+
+    /// Whether the cycle represents the zero quotient-homology class.
+    ///
+    /// In this case [`Self::boundary_adjustment`] is a concrete exact
+    /// incoming-chain filling witness for the original cycle.
+    #[must_use]
+    pub fn represents_zero_class(&self) -> bool {
+        self.class_coordinates
+            .entries
+            .iter()
+            .all(|coordinate| *coordinate == 0)
+    }
+
+    /// Whether the retained adjustment is an exact incoming-chain filling of
+    /// the original cycle.
+    #[must_use]
+    pub fn is_boundary(&self) -> bool {
+        self.represents_zero_class()
+    }
+
+    /// Deterministic equation/coordinate work units completed.
+    #[must_use]
+    pub const fn work_items(&self) -> u128 {
+        self.work_items
+    }
+
+    /// Checked multiply-accumulate terms completed across every retained
+    /// equation. Exact quotient/remainder normalization is represented by the
+    /// presentation work-item count rather than this inner-product counter.
+    #[must_use]
+    pub const fn scalar_operations(&self) -> u128 {
+        self.scalar_operations
+    }
+
+    /// Retained entries across period authority, chain, class coordinates, and
+    /// boundary adjustment.
+    #[must_use]
+    pub const fn retained_entries(&self) -> usize {
+        self.retained_entries
+    }
+
+    /// Consume the class while preserving its complete period authority.
+    #[must_use]
+    pub fn into_periods(self) -> VerifiedTerminalRelativeFreeCocyclePeriods {
+        self.periods
+    }
+
+    /// Exact witness-relative integral homology coordinates only.
+    #[must_use]
+    pub const fn applicability(&self) -> TopologyApplicability {
+        TopologyApplicability::TerminalRelativeIntegralHomologyClassOnly
     }
 }
 
@@ -3247,6 +3479,579 @@ fn poll_homology_cocycles(
         Ok(())
     } else {
         Err(IntegralTopologyError::HomologyCocycleCancelled {
+            phase,
+            completed_work_items,
+            planned_work_items,
+            completed_scalar_operations,
+            planned_scalar_operations,
+        })
+    }
+}
+
+/// Verify and classify one pair-bound integral relative chain without injected
+/// cancellation.
+#[allow(clippy::large_types_passed_by_value)]
+pub fn verify_terminal_relative_integral_homology_class(
+    periods: VerifiedTerminalRelativeFreeCocyclePeriods,
+    chain: IntegralRelativeChain,
+    budget: HomologyClassBudget,
+) -> Result<VerifiedTerminalRelativeIntegralHomologyClass, IntegralTopologyError> {
+    verify_terminal_relative_integral_homology_class_with_checkpoint(
+        periods,
+        chain,
+        budget,
+        &mut |_| true,
+    )
+}
+
+/// Verify cyclehood, compute exact Smith quotient coordinates, and retain a
+/// complete representative-plus-boundary decomposition under bounded polling.
+///
+/// For `x` in the pair-bound `C_k` basis, this computes
+/// `z = V_A^-1 x`, `c = U_L z[rank(A_k)..]`, normalizes every nontrivial
+/// torsion coordinate modulo its positive invariant factor, and independently
+/// checks every free coordinate against `Omega^T x`. With diagonal quotients
+/// `a_i = c_i.div_euclid(d_i)`, it retains `h = V_L a` and verifies
+/// `x = G gamma + A_(k+1) h` exactly. Thus a zero class has an explicit
+/// incoming-chain filling, while a nonzero class remains a successful result.
+#[allow(clippy::large_types_passed_by_value)]
+#[allow(clippy::too_many_lines)]
+pub fn verify_terminal_relative_integral_homology_class_with_checkpoint(
+    periods: VerifiedTerminalRelativeFreeCocyclePeriods,
+    chain: IntegralRelativeChain,
+    budget: HomologyClassBudget,
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+) -> Result<VerifiedTerminalRelativeIntegralHomologyClass, IntegralTopologyError> {
+    for (field, matches) in [
+        ("pair identity", chain.pair_id() == periods.pair_id()),
+        ("phase identity", chain.phase() == periods.phase()),
+        ("chain degree", chain.degree() == periods.degree()),
+    ] {
+        if !matches {
+            return Err(IntegralTopologyError::HomologyClassBindingMismatch { field });
+        }
+    }
+
+    let generators = periods.generators();
+    let homology = generators.homology();
+    let transport = homology.transport();
+    let outgoing = transport.outgoing_boundary().matrix();
+    let incoming = transport.incoming_boundary().matrix();
+    let outgoing_smith = transport.outgoing_smith();
+    let image_smith = homology.image_smith();
+    let generator_matrix = generators.cycle_representatives();
+    let cocycle_matrix = periods.cocycle_representatives();
+
+    let outgoing_rows = outgoing.rows;
+    let chain_extent = transport.chain_extent();
+    let incoming_cols = incoming.cols;
+    let outgoing_rank = transport.outgoing_rank();
+    let cycle_rank = homology.cycle_rank();
+    let boundary_rank = homology.boundary_rank();
+    let torsion_start = homology.torsion_start;
+    let torsion_count = generators.torsion_count;
+    let generator_count = generators.generator_count();
+    let free_count = generators.free_generator_count();
+
+    if chain.coefficients().len() != chain_extent {
+        return Err(IntegralTopologyError::HomologyClassCoefficientArityLost {
+            expected: chain_extent,
+            actual: chain.coefficients().len(),
+        });
+    }
+    let internal_shapes_hold = incoming.rows == chain_extent
+        && outgoing_rank <= chain_extent
+        && outgoing_smith.rank() == outgoing_rank
+        && cycle_rank == chain_extent - outgoing_rank
+        && boundary_rank <= cycle_rank
+        && boundary_rank <= incoming_cols
+        && image_smith.rank() == boundary_rank
+        && image_smith.invariant_factors().len() == boundary_rank
+        && torsion_start <= boundary_rank
+        && torsion_count == boundary_rank - torsion_start
+        && free_count == cycle_rank - boundary_rank
+        && generator_count == torsion_count + free_count
+        && outgoing_smith.right_inverse().rows == chain_extent
+        && outgoing_smith.right_inverse().cols == chain_extent
+        && image_smith.left_transform().rows == cycle_rank
+        && image_smith.left_transform().cols == cycle_rank
+        && image_smith.right_transform().rows == incoming_cols
+        && image_smith.right_transform().cols == incoming_cols
+        && generator_matrix.rows == chain_extent
+        && generator_matrix.cols == generator_count
+        && cocycle_matrix.rows == chain_extent
+        && cocycle_matrix.cols == free_count;
+    if !internal_shapes_hold {
+        return Err(IntegralTopologyError::HomologyClassInvariantLost {
+            field: "retained homology-class shapes and ranks",
+        });
+    }
+
+    let output_entries = generator_count.checked_add(incoming_cols).ok_or(
+        IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative homology-class output entries",
+        },
+    )?;
+    if output_entries > budget.max_output_entries {
+        return Err(IntegralTopologyError::HomologyClassOutputBudgetExceeded {
+            requested: output_entries,
+            max: budget.max_output_entries,
+        });
+    }
+    let workspace_entries =
+        chain_extent
+            .checked_add(boundary_rank)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "terminal-relative homology-class workspace entries",
+            })?;
+    if workspace_entries > budget.max_workspace_entries {
+        return Err(IntegralTopologyError::WorkspaceEntryBudgetExceeded {
+            requested: workspace_entries,
+            max: budget.max_workspace_entries,
+        });
+    }
+    let retained_entries = periods
+        .retained_entries
+        .checked_add(chain.coefficients().len())
+        .and_then(|entries| entries.checked_add(output_entries))
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative homology-class retained entries",
+        })?;
+    if retained_entries > budget.max_retained_entries {
+        return Err(IntegralTopologyError::RetainedEntryBudgetExceeded {
+            requested: retained_entries,
+            max: budget.max_retained_entries,
+        });
+    }
+    let scalar_operations = planned_homology_class_scalar_operations(
+        outgoing_rows,
+        chain_extent,
+        incoming_cols,
+        cycle_rank,
+        boundary_rank,
+        generator_count,
+        free_count,
+    )?;
+    if scalar_operations > budget.max_scalar_operations {
+        return Err(IntegralTopologyError::ScalarWorkBudgetExceeded {
+            requested: scalar_operations,
+            max: budget.max_scalar_operations,
+        });
+    }
+    let work_items = planned_homology_class_work_items(
+        outgoing_rows,
+        chain_extent,
+        incoming_cols,
+        cycle_rank,
+        free_count,
+    )?;
+
+    let mut completed_work = 0_u128;
+    let mut completed_scalar = 0_u128;
+    poll_homology_class(
+        checkpoint,
+        "terminal-relative homology-class preflight",
+        completed_work,
+        work_items,
+        completed_scalar,
+        scalar_operations,
+    )?;
+    for row in 0..outgoing_rows {
+        poll_homology_class(
+            checkpoint,
+            "terminal-relative homology-class cycle verification",
+            completed_work,
+            work_items,
+            completed_scalar,
+            scalar_operations,
+        )?;
+        let mut actual = 0_i128;
+        for term in 0..chain_extent {
+            actual = checked_homology_class_accumulate(
+                actual,
+                outgoing.entry(row, term),
+                i128::from(chain.coefficients()[term]),
+                HomologyClassStage::CycleVerification,
+                row,
+                term,
+                &mut completed_scalar,
+            )?;
+        }
+        if actual != 0 {
+            return Err(IntegralTopologyError::HomologyClassNotCycle { row, actual });
+        }
+        completed_work =
+            completed_work
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "completed terminal-relative homology-class work",
+                })?;
+    }
+
+    poll_homology_class(
+        checkpoint,
+        "terminal-relative homology-class allocation",
+        completed_work,
+        work_items,
+        completed_scalar,
+        scalar_operations,
+    )?;
+    let mut smith_coordinates =
+        allocate_zeroed(chain_extent, "homology-class outgoing Smith coordinates")?;
+    let mut diagonal_quotients =
+        allocate_zeroed(boundary_rank, "homology-class diagonal quotients")?;
+    let mut class_values = allocate_zeroed(generator_count, "homology-class coordinates")?;
+    let mut adjustment_values =
+        allocate_zeroed(incoming_cols, "homology-class boundary adjustment")?;
+
+    let outgoing_right_inverse = outgoing_smith.right_inverse();
+    for row in 0..chain_extent {
+        poll_homology_class(
+            checkpoint,
+            "terminal-relative homology-class outgoing Smith transform",
+            completed_work,
+            work_items,
+            completed_scalar,
+            scalar_operations,
+        )?;
+        let mut coordinate = 0_i128;
+        for term in 0..chain_extent {
+            coordinate = checked_homology_class_accumulate(
+                coordinate,
+                outgoing_right_inverse.entry(row, term),
+                i128::from(chain.coefficients()[term]),
+                HomologyClassStage::OutgoingSmithCoordinateTransform,
+                row,
+                term,
+                &mut completed_scalar,
+            )?;
+        }
+        if row < outgoing_rank && coordinate != 0 {
+            return Err(IntegralTopologyError::HomologyClassVerificationMismatch {
+                stage: HomologyClassStage::OutgoingSmithCoordinateTransform,
+                row,
+                expected: 0,
+                actual: coordinate,
+            });
+        }
+        smith_coordinates[row] = coordinate;
+        completed_work =
+            completed_work
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "completed terminal-relative homology-class work",
+                })?;
+    }
+
+    let image_left = image_smith.left_transform();
+    let invariant_factors = image_smith.invariant_factors();
+    for coordinate_index in 0..cycle_rank {
+        poll_homology_class(
+            checkpoint,
+            "terminal-relative homology-class presentation transform",
+            completed_work,
+            work_items,
+            completed_scalar,
+            scalar_operations,
+        )?;
+        let mut coordinate = 0_i128;
+        for term in 0..cycle_rank {
+            coordinate = checked_homology_class_accumulate(
+                coordinate,
+                image_left.entry(coordinate_index, term),
+                smith_coordinates[outgoing_rank + term],
+                HomologyClassStage::PresentationCoordinateTransform,
+                coordinate_index,
+                term,
+                &mut completed_scalar,
+            )?;
+        }
+        if coordinate_index < boundary_rank {
+            let factor = invariant_factors[coordinate_index];
+            if factor <= 0 {
+                return Err(IntegralTopologyError::HomologyClassInvariantLost {
+                    field: "nonpositive retained presentation factor",
+                });
+            }
+            diagonal_quotients[coordinate_index] = coordinate.div_euclid(factor);
+            if coordinate_index >= torsion_start {
+                class_values[coordinate_index - torsion_start] = coordinate.rem_euclid(factor);
+            }
+        } else {
+            class_values[torsion_count + coordinate_index - boundary_rank] = coordinate;
+        }
+        completed_work =
+            completed_work
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "completed terminal-relative homology-class work",
+                })?;
+    }
+
+    for free in 0..free_count {
+        poll_homology_class(
+            checkpoint,
+            "terminal-relative homology-class free-period verification",
+            completed_work,
+            work_items,
+            completed_scalar,
+            scalar_operations,
+        )?;
+        let mut actual = 0_i128;
+        for term in 0..chain_extent {
+            actual = checked_homology_class_accumulate(
+                actual,
+                cocycle_matrix.entry(term, free),
+                i128::from(chain.coefficients()[term]),
+                HomologyClassStage::FreePeriodVerification,
+                free,
+                term,
+                &mut completed_scalar,
+            )?;
+        }
+        let expected = class_values[torsion_count + free];
+        if actual != expected {
+            return Err(IntegralTopologyError::HomologyClassVerificationMismatch {
+                stage: HomologyClassStage::FreePeriodVerification,
+                row: free,
+                expected,
+                actual,
+            });
+        }
+        completed_work =
+            completed_work
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "completed terminal-relative homology-class work",
+                })?;
+    }
+
+    let image_right = image_smith.right_transform();
+    for row in 0..incoming_cols {
+        poll_homology_class(
+            checkpoint,
+            "terminal-relative homology-class boundary adjustment",
+            completed_work,
+            work_items,
+            completed_scalar,
+            scalar_operations,
+        )?;
+        let mut adjustment = 0_i128;
+        for term in 0..boundary_rank {
+            adjustment = checked_homology_class_accumulate(
+                adjustment,
+                image_right.entry(row, term),
+                diagonal_quotients[term],
+                HomologyClassStage::BoundaryAdjustment,
+                row,
+                term,
+                &mut completed_scalar,
+            )?;
+        }
+        adjustment_values[row] = adjustment;
+        completed_work =
+            completed_work
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "completed terminal-relative homology-class work",
+                })?;
+    }
+
+    for row in 0..chain_extent {
+        poll_homology_class(
+            checkpoint,
+            "terminal-relative homology-class decomposition verification",
+            completed_work,
+            work_items,
+            completed_scalar,
+            scalar_operations,
+        )?;
+        let mut actual = 0_i128;
+        for term in 0..generator_count {
+            actual = checked_homology_class_accumulate(
+                actual,
+                generator_matrix.entry(row, term),
+                class_values[term],
+                HomologyClassStage::DecompositionVerification,
+                row,
+                term,
+                &mut completed_scalar,
+            )?;
+        }
+        for term in 0..incoming_cols {
+            actual = checked_homology_class_accumulate(
+                actual,
+                incoming.entry(row, term),
+                adjustment_values[term],
+                HomologyClassStage::DecompositionVerification,
+                row,
+                generator_count + term,
+                &mut completed_scalar,
+            )?;
+        }
+        let expected = i128::from(chain.coefficients()[row]);
+        if actual != expected {
+            return Err(IntegralTopologyError::HomologyClassVerificationMismatch {
+                stage: HomologyClassStage::DecompositionVerification,
+                row,
+                expected,
+                actual,
+            });
+        }
+        completed_work =
+            completed_work
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "completed terminal-relative homology-class work",
+                })?;
+    }
+
+    poll_homology_class(
+        checkpoint,
+        "terminal-relative homology-class finalize",
+        completed_work,
+        work_items,
+        completed_scalar,
+        scalar_operations,
+    )?;
+    debug_assert_eq!(completed_work, work_items);
+    debug_assert_eq!(completed_scalar, scalar_operations);
+
+    Ok(VerifiedTerminalRelativeIntegralHomologyClass {
+        periods,
+        chain,
+        class_coordinates: ExactIntegerMatrix {
+            rows: generator_count,
+            cols: 1,
+            entries: class_values,
+        },
+        boundary_adjustment: ExactIntegerMatrix {
+            rows: incoming_cols,
+            cols: 1,
+            entries: adjustment_values,
+        },
+        work_items: completed_work,
+        scalar_operations: completed_scalar,
+        retained_entries,
+    })
+}
+
+fn planned_homology_class_scalar_operations(
+    outgoing_rows: usize,
+    chain_extent: usize,
+    incoming_cols: usize,
+    cycle_rank: usize,
+    boundary_rank: usize,
+    generator_count: usize,
+    free_count: usize,
+) -> Result<u128, IntegralTopologyError> {
+    let cycle = checked_homology_generator_plan_product(
+        &[outgoing_rows, chain_extent],
+        "terminal-relative homology-class cycle scalar operations",
+    )?;
+    let outgoing_transform = checked_homology_generator_plan_product(
+        &[chain_extent, chain_extent],
+        "terminal-relative homology-class outgoing transform operations",
+    )?;
+    let presentation = checked_homology_generator_plan_product(
+        &[cycle_rank, cycle_rank],
+        "terminal-relative homology-class presentation operations",
+    )?;
+    let periods = checked_homology_generator_plan_product(
+        &[free_count, chain_extent],
+        "terminal-relative homology-class free-period operations",
+    )?;
+    let adjustment = checked_homology_generator_plan_product(
+        &[incoming_cols, boundary_rank],
+        "terminal-relative homology-class adjustment operations",
+    )?;
+    let decomposition_width = generator_count.checked_add(incoming_cols).ok_or(
+        IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative homology-class decomposition width",
+        },
+    )?;
+    let decomposition = checked_homology_generator_plan_product(
+        &[chain_extent, decomposition_width],
+        "terminal-relative homology-class decomposition operations",
+    )?;
+    [
+        cycle,
+        outgoing_transform,
+        presentation,
+        periods,
+        adjustment,
+        decomposition,
+    ]
+    .into_iter()
+    .try_fold(0_u128, u128::checked_add)
+    .ok_or(IntegralTopologyError::WorkPlanOverflow {
+        phase: "terminal-relative homology-class scalar operations",
+    })
+}
+
+fn planned_homology_class_work_items(
+    outgoing_rows: usize,
+    chain_extent: usize,
+    incoming_cols: usize,
+    cycle_rank: usize,
+    free_count: usize,
+) -> Result<u128, IntegralTopologyError> {
+    [
+        outgoing_rows,
+        chain_extent,
+        cycle_rank,
+        free_count,
+        incoming_cols,
+        chain_extent,
+    ]
+    .into_iter()
+    .try_fold(0_u128, |total, items| {
+        u128::try_from(items)
+            .ok()
+            .and_then(|items| total.checked_add(items))
+    })
+    .ok_or(IntegralTopologyError::WorkPlanOverflow {
+        phase: "terminal-relative homology-class work items",
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checked_homology_class_accumulate(
+    sum: i128,
+    left: i128,
+    right: i128,
+    stage: HomologyClassStage,
+    row: usize,
+    term: usize,
+    completed_scalar: &mut u128,
+) -> Result<i128, IntegralTopologyError> {
+    let product = left
+        .checked_mul(right)
+        .ok_or(IntegralTopologyError::HomologyClassArithmeticOverflow { stage, row, term })?;
+    let next = sum
+        .checked_add(product)
+        .ok_or(IntegralTopologyError::HomologyClassArithmeticOverflow { stage, row, term })?;
+    *completed_scalar =
+        completed_scalar
+            .checked_add(1)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "completed terminal-relative homology-class scalar operations",
+            })?;
+    Ok(next)
+}
+
+fn poll_homology_class(
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+    phase: &'static str,
+    completed_work_items: u128,
+    planned_work_items: u128,
+    completed_scalar_operations: u128,
+    planned_scalar_operations: u128,
+) -> Result<(), IntegralTopologyError> {
+    if checkpoint(phase) {
+        Ok(())
+    } else {
+        Err(IntegralTopologyError::HomologyClassCancelled {
             phase,
             completed_work_items,
             planned_work_items,
@@ -5071,6 +5876,70 @@ pub enum IntegralTopologyError {
         /// Planned checked scalar terms.
         planned_scalar_operations: u128,
     },
+    /// A typed relative chain was bound to a different homology authority.
+    HomologyClassBindingMismatch {
+        /// First mismatched strong binding.
+        field: &'static str,
+    },
+    /// A strongly bound opaque chain lost its canonical coefficient arity.
+    HomologyClassCoefficientArityLost {
+        /// Required pair-bound `C_k` extent.
+        expected: usize,
+        /// Retained chain coefficient count.
+        actual: usize,
+    },
+    /// The caller-supplied chain has an exact nonzero outgoing boundary.
+    HomologyClassNotCycle {
+        /// First nonzero boundary row.
+        row: usize,
+        /// Exact nonzero boundary coefficient.
+        actual: i128,
+    },
+    /// Class coordinates plus boundary adjustment exceeded their envelope.
+    HomologyClassOutputBudgetExceeded {
+        /// Required output coefficients.
+        requested: usize,
+        /// Maximum admitted output coefficients.
+        max: usize,
+    },
+    /// An opaque period/generator authority violated a class invariant.
+    HomologyClassInvariantLost {
+        /// Broken invariant field.
+        field: &'static str,
+    },
+    /// Checked class construction or decomposition arithmetic overflowed.
+    HomologyClassArithmeticOverflow {
+        /// Classification phase.
+        stage: HomologyClassStage,
+        /// Output or equation row.
+        row: usize,
+        /// Inner-product term.
+        term: usize,
+    },
+    /// Opaque authorities disagreed during class or decomposition replay.
+    HomologyClassVerificationMismatch {
+        /// Equation that disagreed.
+        stage: HomologyClassStage,
+        /// Equation row.
+        row: usize,
+        /// Exact required value.
+        expected: i128,
+        /// Exact observed value.
+        actual: i128,
+    },
+    /// Cancellation was observed before homology-class publication.
+    HomologyClassCancelled {
+        /// Observation phase.
+        phase: &'static str,
+        /// Completed deterministic equation/coordinate work items.
+        completed_work_items: u128,
+        /// Planned deterministic equation/coordinate work items.
+        planned_work_items: u128,
+        /// Completed checked scalar terms.
+        completed_scalar_operations: u128,
+        /// Planned checked scalar terms.
+        planned_scalar_operations: u128,
+    },
     /// Matrix extent exceeded its explicit envelope.
     MatrixExtentExceeded {
         /// Supplied rows.
@@ -5241,6 +6110,8 @@ impl IntegralTopologyError {
             | Self::IncomingImageOutsideKernel { .. }
             | Self::HomologySmithSourceShapeMismatch { .. }
             | Self::HomologySmithSourceEntryMismatch { .. }
+            | Self::HomologyClassBindingMismatch { .. }
+            | Self::HomologyClassNotCycle { .. }
             | Self::MatrixEntryCount { .. }
             | Self::WitnessShape { .. }
             | Self::WitnessProductMismatch { .. }
@@ -5276,6 +6147,12 @@ impl IntegralTopologyError {
             | Self::HomologyCocycleArithmeticOverflow { .. }
             | Self::HomologyCocycleVerificationMismatch { .. }
             | Self::HomologyCocycleCancelled { .. }
+            | Self::HomologyClassCoefficientArityLost { .. }
+            | Self::HomologyClassOutputBudgetExceeded { .. }
+            | Self::HomologyClassInvariantLost { .. }
+            | Self::HomologyClassArithmeticOverflow { .. }
+            | Self::HomologyClassVerificationMismatch { .. }
+            | Self::HomologyClassCancelled { .. }
             | Self::MatrixExtentExceeded { .. }
             | Self::MatrixEntryBudgetExceeded { .. }
             | Self::RetainedMatrixExceedsBudget { .. }
