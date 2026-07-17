@@ -240,8 +240,8 @@ fn checkpoint_outcome() -> CaseOutcome {
 fn lobatto_outcome() -> CaseOutcome {
     let points = lobatto_points(1);
     let matrix = diff_matrix(1);
-    let expected_points = [1.0, -1.0];
-    let expected_matrix = [0.5, -0.5, 0.5, -0.5];
+    let expected_points: [f64; 2] = [1.0, -1.0];
+    let expected_matrix: [f64; 4] = [0.5, -0.5, 0.5, -0.5];
     if points.len() != expected_points.len() || matrix.len() != expected_matrix.len() {
         return CaseOutcome::fail(format!(
             "operation=lobatto_points+diff_matrix; n=1; computed_point_count={}; reference_point_count={}; computed_matrix_count={}; reference_matrix_count={}",
