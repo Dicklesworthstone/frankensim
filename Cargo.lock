@@ -923,6 +923,7 @@ dependencies = [
  "fs-ivl",
  "fs-la",
  "fs-math",
+ "fsci-integrate",
 ]
 
 [[package]]
@@ -1384,6 +1385,7 @@ dependencies = [
  "fs-roofline",
  "fs-simd",
  "fs-soa",
+ "fsci-linalg",
 ]
 
 [[package]]
@@ -1949,6 +1951,7 @@ version = "0.0.1"
 dependencies = [
  "fs-ivl",
  "fs-math",
+ "fs-obs",
 ]
 
 [[package]]
@@ -2046,11 +2049,13 @@ dependencies = [
  "fs-ad",
  "fs-alloc",
  "fs-blake3",
+ "fs-casebook",
  "fs-exec",
  "fs-ga",
  "fs-la",
  "fs-math",
  "fs-solver",
+ "fsci-integrate",
 ]
 
 [[package]]
