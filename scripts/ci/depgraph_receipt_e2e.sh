@@ -126,8 +126,12 @@ SNAPSHOT_BEFORE=$(tree_snapshot)
 # ---- S1: mint the locked single-root receipt (twice-derived internally),
 # then prove verify-mode round-trips the exact bytes.
 RECEIPT="$LOG_DIR/receipt.json"
-if run_cargo s1-mint run -q -p xtask -- depgraph-receipt -- --package "$ROOT_PACKAGE" \
-  && mv "$LOG_DIR/s1-mint.log" "$RECEIPT" && [[ -s "$RECEIPT" ]]; then
+# The receipt is stdout ONLY: a cold xtask build's compiler warnings land
+# on stderr and must never pollute the captured canonical bytes.
+if CARGO_TARGET_DIR="$TARGET_DIR" "$CARGO_BIN" "+$TOOLCHAIN" run -q -p xtask -- \
+    depgraph-receipt -- --package "$ROOT_PACKAGE" \
+    >"$RECEIPT" 2>"$LOG_DIR/s1-mint.log" \
+  && [[ -s "$RECEIPT" ]]; then
   row "s1-receipt-mint" ok "locked single-root receipt: $(wc -c <"$RECEIPT" | tr -d ' ') bytes" "$RECEIPT"
 else
   row "s1-receipt-mint" fail "xtask depgraph-receipt refused" "$LOG_DIR/s1-mint.log"
