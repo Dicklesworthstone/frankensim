@@ -976,6 +976,7 @@ fn g3_cli_compiles_committed_aisi_4140_rc33_exact_condition_seed() {
     for (property, temperature_c, expected_value, expected_dims, method_note, sample_note) in
         expected
     {
+        let expected_value: f64 = expected_value;
         let temperature_k = temperature_c + 273.15;
         let (_, claim) = decoded
             .claims()
