@@ -5,9 +5,10 @@
 use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
 use fs_feec::integral_topology::{
     ExactAlgebraBudget, ExactIntegerMatrix, IntegralTopologyError, IntegralTopologyFailureClass,
-    KernelCoordinateBudget, MatrixRole, SmithNormalFormWitness, SmithWitnessStage,
-    TerminalRelativeBoundaryBudget, TerminalRelativeBoundaryMatrix, TopologyApplicability,
-    VerifiedSmithNormalForm, extract_terminal_relative_boundary_matrix,
+    KernelCoordinateBudget, MatrixRole, SmithConstructionBudget, SmithNormalFormWitness,
+    SmithWitnessStage, TerminalRelativeBoundaryBudget, TerminalRelativeBoundaryMatrix,
+    TopologyApplicability, VerifiedSmithNormalForm, construct_smith_normal_form,
+    construct_smith_normal_form_with_checkpoint, extract_terminal_relative_boundary_matrix,
     extract_terminal_relative_boundary_matrix_with_checkpoint, verify_smith_normal_form,
     verify_smith_normal_form_with_checkpoint, verify_terminal_relative_kernel_transport,
     verify_terminal_relative_kernel_transport_with_checkpoint,
@@ -518,6 +519,20 @@ fn kernel_budget(
         max_retained_entries,
         max_binding_items,
         max_scalar_operations,
+    )
+}
+
+fn construction_budget(
+    max_live_entries: usize,
+    max_elementary_operations: u128,
+    max_entry_steps: u128,
+    max_abs_coefficient: u128,
+) -> SmithConstructionBudget {
+    SmithConstructionBudget::new(
+        max_live_entries,
+        max_elementary_operations,
+        max_entry_steps,
+        max_abs_coefficient,
     )
 }
 
@@ -1371,6 +1386,319 @@ fn it_021_kernel_transport_cancellation_is_transactional_through_publication() {
                     planned_scalar_operations: 144,
                 }
             ));
+        }
+    }
+}
+
+#[test]
+fn it_022_constructive_smith_repairs_divisibility_and_replays_byte_exactly() {
+    let cases = [
+        (matrix(2, 2, &[2, 4, 4, 8]), vec![2, 0, 0, 0], vec![2]),
+        (matrix(2, 2, &[4, 0, 0, 6]), vec![2, 0, 0, 12], vec![2, 12]),
+        (
+            matrix(3, 3, &[6, 0, 0, 0, 10, 0, 0, 0, 15]),
+            vec![1, 0, 0, 0, 30, 0, 0, 0, 30],
+            vec![1, 30, 30],
+        ),
+        (
+            matrix(2, 3, &[2, 4, 0, 0, 6, 3]),
+            vec![1, 0, 0, 0, 6, 0],
+            vec![1, 6],
+        ),
+    ];
+    for (source, expected_diagonal, expected_invariants) in cases {
+        let constructed = construct_smith_normal_form(
+            source.clone(),
+            SmithConstructionBudget::default(),
+            ExactAlgebraBudget::default(),
+        )
+        .expect("deterministic constructor must publish only a verified witness");
+        assert_eq!(constructed.verified().source(), &source);
+        assert_eq!(
+            constructed.verified().diagonal().entries(),
+            expected_diagonal
+        );
+        assert_eq!(
+            constructed.verified().invariant_factors(),
+            expected_invariants
+        );
+        assert!(
+            constructed.entry_steps()
+                >= u128::try_from(source.entries().len()).expect("fixture entry count")
+        );
+        assert_eq!(
+            constructed.applicability(),
+            TopologyApplicability::AbstractAlgebraOnly
+        );
+    }
+
+    let source = matrix(2, 2, &[4, 0, 0, 6]);
+    let first = construct_smith_normal_form(
+        source.clone(),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("first deterministic replay");
+    let second = construct_smith_normal_form(
+        source,
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("second deterministic replay");
+    assert_eq!(first, second, "all transforms, inverses, and counts replay");
+}
+
+#[test]
+fn it_023_constructive_smith_preserves_rectangles_signs_and_empty_shapes() {
+    for (source, expected_diagonal, expected_invariants) in [
+        (matrix(1, 1, &[-7]), vec![7], vec![7]),
+        (matrix(1, 3, &[6, -10, 15]), vec![1, 0, 0], vec![1]),
+        (matrix(3, 1, &[6, -10, 15]), vec![1, 0, 0], vec![1]),
+        (
+            matrix(2, 3, &[0, 0, 0, 0, 0, 0]),
+            vec![0, 0, 0, 0, 0, 0],
+            vec![],
+        ),
+        (matrix(0, 0, &[]), vec![], vec![]),
+        (matrix(0, 3, &[]), vec![], vec![]),
+        (matrix(3, 0, &[]), vec![], vec![]),
+    ] {
+        let shape = (source.rows(), source.cols());
+        let constructed = construct_smith_normal_form(
+            source,
+            SmithConstructionBudget::default(),
+            ExactAlgebraBudget::default(),
+        )
+        .expect("rectangular or empty exact source");
+        assert_eq!(
+            (
+                constructed.verified().diagonal().rows(),
+                constructed.verified().diagonal().cols()
+            ),
+            shape
+        );
+        assert_eq!(
+            constructed.verified().diagonal().entries(),
+            expected_diagonal
+        );
+        assert_eq!(
+            constructed.verified().invariant_factors(),
+            expected_invariants
+        );
+    }
+}
+
+#[test]
+fn it_024_constructive_smith_enforces_every_data_dependent_budget() {
+    let source = matrix(2, 2, &[4, 0, 0, 6]);
+    let baseline = construct_smith_normal_form(
+        source.clone(),
+        SmithConstructionBudget::default(),
+        budget(2, 48),
+    )
+    .expect("baseline construction");
+    let operations = baseline.elementary_operations();
+    let steps = baseline.entry_steps();
+    assert_eq!(operations, 6);
+    assert_eq!(steps, 71);
+
+    construct_smith_normal_form(
+        source.clone(),
+        construction_budget(24, operations, steps, i128::MAX.unsigned_abs()),
+        budget(2, 48),
+    )
+    .expect("every exact construction limit admits");
+
+    let error = construct_smith_normal_form(
+        source.clone(),
+        construction_budget(24, operations, 3, i128::MAX.unsigned_abs()),
+        budget(2, 48),
+    )
+    .expect_err("source coefficient scan itself is entry-budgeted");
+    assert!(matches!(
+        error,
+        IntegralTopologyError::SmithConstructionEntryStepBudgetExceeded {
+            requested: 4,
+            max: 3,
+        }
+    ));
+
+    for (construction_limits, expected) in [
+        (
+            construction_budget(23, operations, steps, i128::MAX.unsigned_abs()),
+            "live",
+        ),
+        (
+            construction_budget(24, operations - 1, steps, i128::MAX.unsigned_abs()),
+            "operations",
+        ),
+        (
+            construction_budget(24, operations, steps - 1, i128::MAX.unsigned_abs()),
+            "steps",
+        ),
+        (construction_budget(24, operations, steps, 5), "coefficient"),
+    ] {
+        let error = construct_smith_normal_form(source.clone(), construction_limits, budget(2, 48))
+            .expect_err("limit minus one must refuse construction");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        match expected {
+            "live" => assert!(matches!(
+                error,
+                IntegralTopologyError::SmithConstructionLiveEntryBudgetExceeded {
+                    requested: 24,
+                    max: 23,
+                }
+            )),
+            "operations" => assert!(matches!(
+                error,
+                IntegralTopologyError::SmithConstructionOperationBudgetExceeded { .. }
+            )),
+            "steps" => assert!(matches!(
+                error,
+                IntegralTopologyError::SmithConstructionEntryStepBudgetExceeded { .. }
+            )),
+            "coefficient" => assert!(matches!(
+                error,
+                IntegralTopologyError::SmithConstructionCoefficientMagnitudeExceeded {
+                    role: MatrixRole::Source,
+                    magnitude: 6,
+                    max: 5,
+                    ..
+                }
+            )),
+            _ => unreachable!(),
+        }
+    }
+
+    let error = construct_smith_normal_form(
+        matrix(1, 1, &[i128::MIN]),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect_err("unrepresentable positive magnitude must remain unknown");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::SmithConstructionCoefficientMagnitudeExceeded {
+            role: MatrixRole::Source,
+            row: 0,
+            col: 0,
+            magnitude,
+            max,
+        } if magnitude == i128::MIN.unsigned_abs() && max == i128::MAX.unsigned_abs()
+    ));
+
+    let error = construct_smith_normal_form(
+        matrix(3, 3, &[6, 0, 0, 0, 10, 0, 0, 0, 15]),
+        construction_budget(54, 1_000, 10_000, 29),
+        budget(3, 162),
+    )
+    .expect_err("generated coefficient growth must obey its cap");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::SmithConstructionCoefficientMagnitudeExceeded {
+            role,
+            magnitude,
+            max: 29,
+            ..
+        } if role != MatrixRole::Source && magnitude > 29
+    ));
+}
+
+#[test]
+fn it_025_constructive_smith_cancellation_covers_reduction_and_verification() {
+    let source = matrix(2, 2, &[4, 0, 0, 6]);
+    let mut poll_count = 0_usize;
+    let complete = construct_smith_normal_form_with_checkpoint(
+        source.clone(),
+        SmithConstructionBudget::default(),
+        budget(2, 48),
+        &mut |_| {
+            poll_count += 1;
+            true
+        },
+    )
+    .expect("uninterrupted construction and verification");
+    assert_eq!(complete.verified().invariant_factors(), &[2, 12]);
+
+    for stop_at in 0..poll_count {
+        let mut observed = 0_usize;
+        let error = construct_smith_normal_form_with_checkpoint(
+            source.clone(),
+            SmithConstructionBudget::default(),
+            budget(2, 48),
+            &mut |_| {
+                let keep_running = observed != stop_at;
+                observed += 1;
+                keep_running
+            },
+        )
+        .expect_err("every cancellation poll must refuse publication");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        assert!(matches!(
+            &error,
+            IntegralTopologyError::SmithConstructionCancelled { .. }
+                | IntegralTopologyError::Cancelled { .. }
+        ));
+        if stop_at + 1 == poll_count {
+            assert!(matches!(
+                error,
+                IntegralTopologyError::Cancelled {
+                    phase: "smith witness finalize",
+                    completed_scalar_operations: 48,
+                    planned_scalar_operations: 48,
+                }
+            ));
+        }
+    }
+}
+
+fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+#[test]
+fn it_026_constructive_smith_exhausts_small_two_by_two_oracle() {
+    for a in -2_i128..=2 {
+        for b in -2_i128..=2 {
+            for c in -2_i128..=2 {
+                for d in -2_i128..=2 {
+                    let source = matrix(2, 2, &[a, b, c, d]);
+                    let constructed = construct_smith_normal_form(
+                        source,
+                        SmithConstructionBudget::default(),
+                        budget(2, 48),
+                    )
+                    .expect("small exact matrix must remain inside i128");
+                    let gcd = [a, b, c, d]
+                        .into_iter()
+                        .map(i128::unsigned_abs)
+                        .fold(0_u128, gcd_u128);
+                    let determinant = a * d - b * c;
+                    let expected = if gcd == 0 {
+                        Vec::new()
+                    } else if determinant == 0 {
+                        vec![i128::try_from(gcd).expect("small gcd")]
+                    } else {
+                        vec![
+                            i128::try_from(gcd).expect("small gcd"),
+                            i128::try_from(determinant.unsigned_abs() / gcd)
+                                .expect("small determinant quotient"),
+                        ]
+                    };
+                    assert_eq!(
+                        constructed.verified().invariant_factors(),
+                        expected,
+                        "source [{a}, {b}; {c}, {d}]"
+                    );
+                }
+            }
         }
     }
 }

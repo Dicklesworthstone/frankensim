@@ -198,6 +198,14 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   the first `rank(A_k)` rows to vanish exactly, and retains only the lower
   kernel-coordinate image. Those rows are coordinates in the retained Smith
   witness's kernel basis, not canonical cells or canonical homology generators.
+  Its fourth tranche constructs `D`, `U`, `U^-1`, `V`, and `V^-1` by a
+  deterministic minimum-magnitude, row-major Euclidean reduction. It repairs
+  divisibility against the entire trailing block rather than accepting a merely
+  diagonal matrix, caps live storage, elementary operations, entry work, and
+  every source/generated coefficient, and publishes only after the independent
+  first-tranche verifier rechecks the complete witness. Construction work stays
+  attached to the returned construction receipt alongside the opaque verified
+  authority.
 
 ## Invariants
 
@@ -311,6 +319,12 @@ Kernel-coordinate transport refuses pair/phase/component/degree/basis or Smith-
 source mismatches and any exact nonzero nonkernel coordinate. Extent, binding,
 retained-storage, scalar-work, arithmetic, allocation, invariant-loss, and
 cancellation failures remain typed Unknowns.
+Constructive Smith reduction treats coefficient growth, `i128` arithmetic,
+live-entry, operation, entry-step, allocation, cancellation, and runtime-
+invariant failure as typed Unknown. In particular, `i128::MIN` is refused
+because its positive invariant magnitude is not representable. A constructor-
+generated witness that fails independent structural verification is an internal
+Unknown, not a Refuted judgment against the caller's valid source matrix.
 
 ## Determinism class
 
@@ -348,6 +362,11 @@ its bases, signs, matrix bytes, or work count.
 Kernel transport compares bindings in canonical order and evaluates every
 `V^-1 A_(k+1)` coordinate row-major with checked `i128` dot products. Different
 valid Smith witnesses may intentionally produce different lower matrices.
+Constructive Smith reduction selects the least unsigned-magnitude active entry
+with row-major tie-breaking, uses checked Euclidean quotients, and records exact
+operation/entry counts. Identical source bytes and budgets replay the complete
+constructed witness and counters byte-for-byte; relabeled inputs are promised
+only the same canonical invariant factors, not the same transforms.
 
 ## Cancellation behavior
 
@@ -372,6 +391,12 @@ deterministic visit and once after the final incidence before publication.
 Kernel transport caps extents, output and total retained entries, binding
 comparisons, and exact dot terms. It polls every comparison/output scalar,
 around allocation, and immediately before allocation-free publication.
+Constructive Smith reduction polls every scan item and before each elementary
+operation; a swap updates at most `2 * max(n + 2m, m + 2n)` destination
+entries, while shears and sign normalization update at most half that bound.
+It polls at the verification handoff and then reuses every poll, including final
+publication, from the exact witness verifier. Cancellation discards the private
+partial reduction and publishes only a typed Unknown.
 
 ## Unsafe boundary
 
@@ -513,6 +538,13 @@ Tranche 3 adds a centered cellular-surface chain with a nontrivial verified
 kernel transform, a bottom-edge shear proving `V^-1` rather than cell labels,
 Smith-source mutation refusal, every resource limit-minus-one, and exhaustive
 cancellation through final binding/scalar counts.
+Tranche 4 constructs and independently verifies rank-deficient, rectangular,
+negative, empty, and divisibility-repair Smith forms, including the repair
+cascade `diag(6,10,15) -> diag(1,30,30)`. It pins byte-identical replay, every
+data-dependent limit-minus-one, unrepresentable coefficient refusal,
+cancellation across construction and final verification, and an exhaustive
+625-matrix `2 x 2` oracle over entries `-2..=2` using independent gcd/determinant
+invariant-factor identities.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -669,19 +701,21 @@ cancellation through final binding/scalar counts.
 
 ## No-claim boundaries (integral topology)
 
-- I13.2b tranche 1 verifies a supplied Smith witness; it does not yet compute
-  Smith/Hermite normal form, kernels, images, relative homology/cohomology,
-  free or torsion generators, periods, linking pairings, long exact sequences,
-  or induced maps. A later constructive solver must emit the same complete
-  witness and pass this verifier before claiming those results.
+- I13.2b tranche 1 verifies a supplied Smith witness. Tranche 4 now computes a
+  deterministic Smith form, emits the same complete witness, and passes it back
+  through that verifier. It still does not construct Hermite form, quotient
+  homology/cohomology, free or torsion generators, periods, linking pairings,
+  long exact sequences, or induced maps.
 - I13.2b tranche 2 proves faithful extraction of one admitted phase-local
   quotient incidence matrix. Independently Smith-reducing adjacent boundary
   matrices is not a homology proof: the incoming image must first be
   transported into the outgoing map's verified kernel coordinates.
 - I13.2b tranche 3 proves that exact incoming incidence lies in one verified
   outgoing kernel and records its witness-relative coordinates. It does not
-  Smith-reduce that lower matrix or claim homology, torsion, free generators,
-  periods, linking, long exact sequences, naturality, or physical winding.
+  itself claim homology, torsion, free generators, periods, linking, long exact
+  sequences, naturality, or physical winding. The generic tranche-4 constructor
+  can reduce that lower matrix, but a later authority-binding tranche must own
+  and byte-compare both values before publishing the quotient decomposition.
 - `AbstractAlgebraOnly` is load-bearing. Synthetic CW/Moore/lens-space matrices
   may test the algebra kernel but cannot establish a conductor, terminal,
   material, embedding, winding, flux, force, or machine claim. Physical R3

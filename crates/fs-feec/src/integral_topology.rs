@@ -21,9 +21,16 @@
 //! The third tranche verifies adjacent pair-bound boundaries and computes
 //! `V^-1 * A_(k+1)` for one exact outgoing Smith witness. It refuses a nonzero
 //! nonkernel prefix and retains only the witness-relative kernel-coordinate
-//! image. Neither value is a terminal-relative homology receipt or physical
-//! R3 winding authority. Constructive normal forms and free/torsion quotient
-//! decomposition follow in later I13.2b tranches.
+//! image.
+//!
+//! The fourth tranche deterministically constructs a complete Smith witness
+//! using checked elementary unimodular operations, explicit coefficient and
+//! data-dependent work caps, and row-major minimum-magnitude pivots. It never
+//! publishes construction output until the independent witness verifier above
+//! accepts every inverse, product, and canonical-divisibility obligation.
+//! None of these values is yet a terminal-relative homology receipt or
+//! physical R3 winding authority. Free/torsion quotient decomposition follows
+//! in a later I13.2b tranche.
 
 use core::fmt;
 
@@ -57,6 +64,14 @@ pub const DEFAULT_MAX_KERNEL_RETAINED_ENTRIES: usize =
 /// Default exact binding comparisons for adjacent-boundary transport.
 pub const DEFAULT_MAX_KERNEL_BINDING_ITEMS: usize =
     DEFAULT_MAX_MATRIX_ENTRIES + DEFAULT_MAX_MATRIX_EXTENT;
+/// Default maximum simultaneously live source, diagonal, and transform entries
+/// during constructive Smith reduction.
+pub const DEFAULT_MAX_CONSTRUCTION_LIVE_ENTRIES: usize = DEFAULT_MAX_RETAINED_ENTRIES;
+/// Default maximum elementary unimodular row/column operations.
+pub const DEFAULT_MAX_CONSTRUCTION_OPERATIONS: u128 = 1_000_000;
+/// Default maximum admitted source/diagonal inspections and destination-slot
+/// updates during reduction.
+pub const DEFAULT_MAX_CONSTRUCTION_ENTRY_STEPS: u128 = DEFAULT_MAX_SCALAR_OPERATIONS;
 
 /// Explicit resource envelope for exact integer witness admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +312,77 @@ impl Default for KernelCoordinateBudget {
             DEFAULT_MAX_KERNEL_RETAINED_ENTRIES,
             DEFAULT_MAX_KERNEL_BINDING_ITEMS,
             DEFAULT_MAX_SCALAR_OPERATIONS,
+        )
+    }
+}
+
+/// Data-dependent resource envelope for deterministic constructive Smith
+/// reduction. Final witness verification remains independently bounded by an
+/// [`ExactAlgebraBudget`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmithConstructionBudget {
+    max_live_entries: usize,
+    max_elementary_operations: u128,
+    max_entry_steps: u128,
+    max_abs_coefficient: u128,
+}
+
+impl SmithConstructionBudget {
+    /// Construct a reduction envelope. Excluding bounded workspace
+    /// initialization, entry steps count admitted-source and active-diagonal
+    /// inspections plus each destination slot updated or swapped. Source reads
+    /// inside one already-reserved destination update are not counted again.
+    #[must_use]
+    pub const fn new(
+        max_live_entries: usize,
+        max_elementary_operations: u128,
+        max_entry_steps: u128,
+        max_abs_coefficient: u128,
+    ) -> Self {
+        Self {
+            max_live_entries,
+            max_elementary_operations,
+            max_entry_steps,
+            max_abs_coefficient,
+        }
+    }
+
+    /// Maximum simultaneously live entries across the retained source and
+    /// five construction matrices.
+    #[must_use]
+    pub const fn max_live_entries(self) -> usize {
+        self.max_live_entries
+    }
+
+    /// Maximum row swaps, column swaps, Euclidean reductions, repairs, and
+    /// sign normalizations.
+    #[must_use]
+    pub const fn max_elementary_operations(self) -> u128 {
+        self.max_elementary_operations
+    }
+
+    /// Maximum admitted source/diagonal inspections and destination updates.
+    #[must_use]
+    pub const fn max_entry_steps(self) -> u128 {
+        self.max_entry_steps
+    }
+
+    /// Maximum unsigned magnitude of any source or generated coefficient.
+    /// A cap no greater than `i128::MAX` excludes the unrepresentable positive
+    /// magnitude of `i128::MIN`.
+    #[must_use]
+    pub const fn max_abs_coefficient(self) -> u128 {
+        self.max_abs_coefficient
+    }
+}
+
+impl Default for SmithConstructionBudget {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_CONSTRUCTION_LIVE_ENTRIES,
+            DEFAULT_MAX_CONSTRUCTION_OPERATIONS,
+            DEFAULT_MAX_CONSTRUCTION_ENTRY_STEPS,
+            i128::MAX.unsigned_abs(),
         )
     }
 }
@@ -1268,6 +1354,19 @@ pub enum SmithWitnessStage {
     KernelCoordinateIncoming,
 }
 
+/// Elementary phase whose checked constructive Smith arithmetic refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmithConstructionStage {
+    /// Euclidean elimination below the active pivot.
+    RowReduction,
+    /// Euclidean elimination right of the active pivot.
+    ColumnReduction,
+    /// Trailing-block mixing needed to repair invariant-factor divisibility.
+    DivisibilityRepair,
+    /// Conversion of a negative final pivot to its positive canonical form.
+    SignNormalization,
+}
+
 /// Untrusted complete Smith-normal-form witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmithNormalFormWitness {
@@ -1428,6 +1527,1109 @@ impl VerifiedSmithNormalForm {
     #[must_use]
     pub const fn applicability(&self) -> TopologyApplicability {
         TopologyApplicability::AbstractAlgebraOnly
+    }
+}
+
+/// Deterministically constructed Smith witness after independent exact
+/// verification.
+///
+/// Construction counters remain attached to this receipt so consumers that
+/// retain constructive provenance can distinguish reduction work from the
+/// independently replayed verification work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstructedSmithNormalForm {
+    verified: VerifiedSmithNormalForm,
+    elementary_operations: u128,
+    entry_steps: u128,
+}
+
+impl ConstructedSmithNormalForm {
+    /// Independently verified source, canonical diagonal, and complete
+    /// unimodular witness.
+    #[must_use]
+    pub const fn verified(&self) -> &VerifiedSmithNormalForm {
+        &self.verified
+    }
+
+    /// Exact elementary operations completed by deterministic construction.
+    #[must_use]
+    pub const fn elementary_operations(&self) -> u128 {
+        self.elementary_operations
+    }
+
+    /// Exact admitted source/diagonal inspections and destination updates
+    /// completed by construction.
+    #[must_use]
+    pub const fn entry_steps(&self) -> u128 {
+        self.entry_steps
+    }
+
+    /// Consume the construction receipt while preserving its independently
+    /// verified Smith authority for a downstream algebraic check.
+    #[must_use]
+    pub fn into_verified(self) -> VerifiedSmithNormalForm {
+        self.verified
+    }
+
+    /// Constructive Smith form is still abstract algebra, not physical
+    /// terminal-relative topology authority.
+    #[must_use]
+    pub const fn applicability(&self) -> TopologyApplicability {
+        TopologyApplicability::AbstractAlgebraOnly
+    }
+}
+
+/// Deterministically construct and then independently verify a complete Smith
+/// witness without injected cancellation.
+pub fn construct_smith_normal_form(
+    source: ExactIntegerMatrix,
+    construction_budget: SmithConstructionBudget,
+    verification_budget: ExactAlgebraBudget,
+) -> Result<ConstructedSmithNormalForm, IntegralTopologyError> {
+    construct_smith_normal_form_with_checkpoint(
+        source,
+        construction_budget,
+        verification_budget,
+        &mut |_| true,
+    )
+}
+
+/// Deterministically construct and independently verify a complete Smith
+/// witness with bounded cancellation polling.
+///
+/// Pivot selection is minimum unsigned magnitude with row-major tie-breaking.
+/// Every transformation is an exact elementary unimodular operation applied
+/// to the working matrix, the relevant transform, and the inverse transform
+/// on its mathematically required opposite side. A trailing-block entry that
+/// is not divisible by the active pivot is mixed into the pivot row and the
+/// Euclidean reduction resumes; merely diagonalizing is never accepted as
+/// Smith form. The existing witness verifier is the final publication gate.
+#[allow(clippy::too_many_lines)]
+pub fn construct_smith_normal_form_with_checkpoint(
+    source: ExactIntegerMatrix,
+    construction_budget: SmithConstructionBudget,
+    verification_budget: ExactAlgebraBudget,
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+) -> Result<ConstructedSmithNormalForm, IntegralTopologyError> {
+    let initial_entry_steps = preflight_smith_construction(
+        &source,
+        construction_budget,
+        verification_budget,
+        checkpoint,
+    )?;
+    poll_smith_construction(
+        checkpoint,
+        "smith construction preflight",
+        0,
+        construction_budget.max_elementary_operations,
+        initial_entry_steps,
+        construction_budget.max_entry_steps,
+    )?;
+
+    let rows = source.rows;
+    let cols = source.cols;
+    let diagonal = try_clone_matrix(&source, "smith construction source clone")?;
+    let left = try_identity_matrix(rows, "smith construction left identity")?;
+    let left_inverse = try_identity_matrix(rows, "smith construction left inverse identity")?;
+    let right = try_identity_matrix(cols, "smith construction right identity")?;
+    let right_inverse = try_identity_matrix(cols, "smith construction right inverse identity")?;
+    let mut state = SmithConstructionState {
+        diagonal,
+        left,
+        left_inverse,
+        right,
+        right_inverse,
+        elementary_operations: 0,
+        entry_steps: initial_entry_steps,
+        budget: construction_budget,
+    };
+
+    for pivot in 0..rows.min(cols) {
+        let Some((pivot_row, pivot_col)) = state.find_pivot(pivot, checkpoint)? else {
+            break;
+        };
+        if pivot_row != pivot {
+            state.swap_rows(pivot, pivot_row, checkpoint)?;
+        }
+        if pivot_col != pivot {
+            state.swap_columns(pivot, pivot_col, checkpoint)?;
+        }
+        if state.inspect(pivot, pivot, "smith construction pivot sign", checkpoint)? < 0 {
+            state.normalize_pivot_sign(pivot, checkpoint)?;
+        }
+
+        loop {
+            let mut restart = false;
+            for row in (pivot + 1)..rows {
+                let entry =
+                    state.inspect(row, pivot, "smith construction column scan", checkpoint)?;
+                if entry == 0 {
+                    continue;
+                }
+                let pivot_value =
+                    state.inspect(pivot, pivot, "smith construction row quotient", checkpoint)?;
+                if pivot_value <= 0 {
+                    return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                        field: "row reduction pivot is not positive",
+                    });
+                }
+                let quotient = entry.checked_div_euclid(pivot_value).ok_or(
+                    IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                        stage: SmithConstructionStage::RowReduction,
+                        role: MatrixRole::Diagonal,
+                        row,
+                        col: pivot,
+                    },
+                )?;
+                state.subtract_row_multiple(row, pivot, quotient, checkpoint)?;
+                let remainder =
+                    state.inspect(row, pivot, "smith construction row remainder", checkpoint)?;
+                if remainder != 0 {
+                    if remainder.unsigned_abs() >= pivot_value.unsigned_abs() {
+                        return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                            field: "row Euclidean remainder did not reduce pivot",
+                        });
+                    }
+                    state.swap_rows(pivot, row, checkpoint)?;
+                }
+                restart = true;
+                break;
+            }
+            if restart {
+                continue;
+            }
+
+            for col in (pivot + 1)..cols {
+                let entry = state.inspect(pivot, col, "smith construction row scan", checkpoint)?;
+                if entry == 0 {
+                    continue;
+                }
+                let pivot_value = state.inspect(
+                    pivot,
+                    pivot,
+                    "smith construction column quotient",
+                    checkpoint,
+                )?;
+                if pivot_value <= 0 {
+                    return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                        field: "column reduction pivot is not positive",
+                    });
+                }
+                let quotient = entry.checked_div_euclid(pivot_value).ok_or(
+                    IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                        stage: SmithConstructionStage::ColumnReduction,
+                        role: MatrixRole::Diagonal,
+                        row: pivot,
+                        col,
+                    },
+                )?;
+                state.subtract_column_multiple(
+                    col,
+                    pivot,
+                    quotient,
+                    SmithConstructionStage::ColumnReduction,
+                    "smith construction column reduction",
+                    checkpoint,
+                )?;
+                let remainder = state.inspect(
+                    pivot,
+                    col,
+                    "smith construction column remainder",
+                    checkpoint,
+                )?;
+                if remainder != 0 {
+                    if remainder.unsigned_abs() >= pivot_value.unsigned_abs() {
+                        return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                            field: "column Euclidean remainder did not reduce pivot",
+                        });
+                    }
+                    state.swap_columns(pivot, col, checkpoint)?;
+                }
+                restart = true;
+                break;
+            }
+            if restart {
+                continue;
+            }
+
+            let pivot_value = state.inspect(
+                pivot,
+                pivot,
+                "smith construction divisibility pivot",
+                checkpoint,
+            )?;
+            if pivot_value <= 0 {
+                return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                    field: "divisibility pivot is not positive",
+                });
+            }
+            let Some((repair_row, repair_col)) =
+                state.find_nondivisible(pivot, pivot_value, checkpoint)?
+            else {
+                break;
+            };
+            state.add_row_for_divisibility_repair(pivot, repair_row, checkpoint)?;
+            let repair_entry = state.inspect(
+                pivot,
+                repair_col,
+                "smith construction repair entry",
+                checkpoint,
+            )?;
+            let quotient = repair_entry.checked_div_euclid(pivot_value).ok_or(
+                IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                    stage: SmithConstructionStage::DivisibilityRepair,
+                    role: MatrixRole::Diagonal,
+                    row: pivot,
+                    col: repair_col,
+                },
+            )?;
+            state.subtract_column_multiple(
+                repair_col,
+                pivot,
+                quotient,
+                SmithConstructionStage::DivisibilityRepair,
+                "smith construction divisibility repair column reduction",
+                checkpoint,
+            )?;
+            let remainder = state.inspect(
+                pivot,
+                repair_col,
+                "smith construction repair remainder",
+                checkpoint,
+            )?;
+            if remainder == 0 || remainder.unsigned_abs() >= pivot_value.unsigned_abs() {
+                return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                    field: "divisibility repair did not strictly reduce pivot",
+                });
+            }
+            state.swap_columns(pivot, repair_col, checkpoint)?;
+        }
+    }
+
+    poll_smith_construction(
+        checkpoint,
+        "smith construction verification handoff",
+        state.elementary_operations,
+        construction_budget.max_elementary_operations,
+        state.entry_steps,
+        construction_budget.max_entry_steps,
+    )?;
+    let elementary_operations = state.elementary_operations;
+    let entry_steps = state.entry_steps;
+    let witness = SmithNormalFormWitness::new(
+        state.diagonal,
+        state.left,
+        state.left_inverse,
+        state.right,
+        state.right_inverse,
+    );
+    let verified = match verify_smith_normal_form_with_checkpoint(
+        source,
+        witness,
+        verification_budget,
+        checkpoint,
+    ) {
+        Ok(verified) => verified,
+        Err(error) if error.failure_class() == IntegralTopologyFailureClass::Refuted => {
+            return Err(IntegralTopologyError::SmithConstructionInvariantLost {
+                field: "constructed witness failed independent verification",
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(ConstructedSmithNormalForm {
+        verified,
+        elementary_operations,
+        entry_steps,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn preflight_smith_construction(
+    source: &ExactIntegerMatrix,
+    construction_budget: SmithConstructionBudget,
+    verification_budget: ExactAlgebraBudget,
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+) -> Result<u128, IntegralTopologyError> {
+    source.ensure_within(MatrixRole::Source, verification_budget)?;
+    if (source.rows > 0 || source.cols > 0) && construction_budget.max_abs_coefficient < 1 {
+        return Err(
+            IntegralTopologyError::SmithConstructionCoefficientMagnitudeExceeded {
+                role: if source.rows > 0 {
+                    MatrixRole::LeftTransform
+                } else {
+                    MatrixRole::RightTransform
+                },
+                row: 0,
+                col: 0,
+                magnitude: 1,
+                max: construction_budget.max_abs_coefficient,
+            },
+        );
+    }
+    let mut initial_entry_steps = 0_u128;
+    let mut index = 0_usize;
+    while index < source.entries.len() {
+        let requested =
+            initial_entry_steps
+                .checked_add(1)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "smith construction source coefficient scan",
+                })?;
+        if requested > construction_budget.max_entry_steps {
+            return Err(
+                IntegralTopologyError::SmithConstructionEntryStepBudgetExceeded {
+                    requested,
+                    max: construction_budget.max_entry_steps,
+                },
+            );
+        }
+        poll_smith_construction(
+            checkpoint,
+            "smith construction source coefficient scan",
+            0,
+            construction_budget.max_elementary_operations,
+            initial_entry_steps,
+            construction_budget.max_entry_steps,
+        )?;
+        initial_entry_steps = requested;
+        let value = source.entries[index];
+        let magnitude = value.unsigned_abs();
+        if magnitude > construction_budget.max_abs_coefficient {
+            return Err(
+                IntegralTopologyError::SmithConstructionCoefficientMagnitudeExceeded {
+                    role: MatrixRole::Source,
+                    row: index / source.cols.max(1),
+                    col: index % source.cols.max(1),
+                    magnitude,
+                    max: construction_budget.max_abs_coefficient,
+                },
+            );
+        }
+        index += 1;
+    }
+    let rows_squared =
+        source
+            .rows
+            .checked_mul(source.rows)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction left entries",
+            })?;
+    let cols_squared =
+        source
+            .cols
+            .checked_mul(source.cols)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction right entries",
+            })?;
+    for entries in [source.entries.len(), rows_squared, cols_squared] {
+        if entries > verification_budget.max_matrix_entries {
+            return Err(IntegralTopologyError::MatrixEntryBudgetExceeded {
+                requested: entries,
+                max: verification_budget.max_matrix_entries,
+            });
+        }
+    }
+    let live_entries = source
+        .entries
+        .len()
+        .checked_mul(2)
+        .and_then(|entries| {
+            rows_squared
+                .checked_mul(2)
+                .and_then(|left| entries.checked_add(left))
+        })
+        .and_then(|entries| {
+            cols_squared
+                .checked_mul(2)
+                .and_then(|right| entries.checked_add(right))
+        })
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "smith construction live entries",
+        })?;
+    if live_entries > construction_budget.max_live_entries {
+        return Err(
+            IntegralTopologyError::SmithConstructionLiveEntryBudgetExceeded {
+                requested: live_entries,
+                max: construction_budget.max_live_entries,
+            },
+        );
+    }
+    if live_entries > verification_budget.max_retained_entries {
+        return Err(IntegralTopologyError::RetainedEntryBudgetExceeded {
+            requested: live_entries,
+            max: verification_budget.max_retained_entries,
+        });
+    }
+    if source.entries.len() > verification_budget.max_workspace_entries {
+        return Err(IntegralTopologyError::WorkspaceEntryBudgetExceeded {
+            requested: source.entries.len(),
+            max: verification_budget.max_workspace_entries,
+        });
+    }
+    Ok(initial_entry_steps)
+}
+
+fn try_clone_matrix(
+    matrix: &ExactIntegerMatrix,
+    phase: &'static str,
+) -> Result<ExactIntegerMatrix, IntegralTopologyError> {
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(matrix.entries.len())
+        .map_err(|_| IntegralTopologyError::AllocationRefused {
+            phase,
+            requested_entries: matrix.entries.len(),
+        })?;
+    entries.extend_from_slice(&matrix.entries);
+    Ok(ExactIntegerMatrix {
+        rows: matrix.rows,
+        cols: matrix.cols,
+        entries,
+    })
+}
+
+fn try_identity_matrix(
+    extent: usize,
+    phase: &'static str,
+) -> Result<ExactIntegerMatrix, IntegralTopologyError> {
+    let entries = extent
+        .checked_mul(extent)
+        .ok_or(IntegralTopologyError::WorkPlanOverflow { phase })?;
+    let mut matrix = ExactIntegerMatrix {
+        rows: extent,
+        cols: extent,
+        entries: allocate_zeroed(entries, phase)?,
+    };
+    for index in 0..extent {
+        matrix.entries[index * extent + index] = 1;
+    }
+    Ok(matrix)
+}
+
+struct SmithConstructionState {
+    diagonal: ExactIntegerMatrix,
+    left: ExactIntegerMatrix,
+    left_inverse: ExactIntegerMatrix,
+    right: ExactIntegerMatrix,
+    right_inverse: ExactIntegerMatrix,
+    elementary_operations: u128,
+    entry_steps: u128,
+    budget: SmithConstructionBudget,
+}
+
+impl SmithConstructionState {
+    fn inspect(
+        &mut self,
+        row: usize,
+        col: usize,
+        phase: &'static str,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<i128, IntegralTopologyError> {
+        self.reserve_scan_steps(1, phase, checkpoint)?;
+        Ok(self.diagonal.entry(row, col))
+    }
+
+    fn find_pivot(
+        &mut self,
+        offset: usize,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<Option<(usize, usize)>, IntegralTopologyError> {
+        let mut best: Option<(u128, usize, usize)> = None;
+        for row in offset..self.diagonal.rows {
+            for col in offset..self.diagonal.cols {
+                let value = self.inspect(row, col, "smith construction pivot scan", checkpoint)?;
+                if value == 0 {
+                    continue;
+                }
+                let candidate = (value.unsigned_abs(), row, col);
+                if best.is_none_or(|current| candidate < current) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        Ok(best.map(|(_, row, col)| (row, col)))
+    }
+
+    fn find_nondivisible(
+        &mut self,
+        pivot: usize,
+        divisor: i128,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<Option<(usize, usize)>, IntegralTopologyError> {
+        debug_assert!(divisor > 0);
+        for row in (pivot + 1)..self.diagonal.rows {
+            for col in (pivot + 1)..self.diagonal.cols {
+                let value =
+                    self.inspect(row, col, "smith construction divisibility scan", checkpoint)?;
+                let remainder = value.checked_rem_euclid(divisor).ok_or(
+                    IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                        stage: SmithConstructionStage::DivisibilityRepair,
+                        role: MatrixRole::Diagonal,
+                        row,
+                        col,
+                    },
+                )?;
+                if remainder != 0 {
+                    return Ok(Some((row, col)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn swap_rows(
+        &mut self,
+        first: usize,
+        second: usize,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = self
+            .diagonal
+            .cols
+            .checked_add(self.left.cols)
+            .and_then(|count| count.checked_add(self.left_inverse.rows))
+            .and_then(|count| count.checked_mul(2))
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction row swap steps",
+            })?;
+        self.begin_operation(steps, "smith construction row swap", checkpoint)?;
+        swap_matrix_rows(&mut self.diagonal, first, second);
+        swap_matrix_rows(&mut self.left, first, second);
+        swap_matrix_columns(&mut self.left_inverse, first, second);
+        Ok(())
+    }
+
+    fn swap_columns(
+        &mut self,
+        first: usize,
+        second: usize,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = self
+            .diagonal
+            .rows
+            .checked_add(self.right.rows)
+            .and_then(|count| count.checked_add(self.right_inverse.cols))
+            .and_then(|count| count.checked_mul(2))
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction column swap steps",
+            })?;
+        self.begin_operation(steps, "smith construction column swap", checkpoint)?;
+        swap_matrix_columns(&mut self.diagonal, first, second);
+        swap_matrix_columns(&mut self.right, first, second);
+        swap_matrix_rows(&mut self.right_inverse, first, second);
+        Ok(())
+    }
+
+    fn subtract_row_multiple(
+        &mut self,
+        target: usize,
+        source: usize,
+        quotient: i128,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = self
+            .diagonal
+            .cols
+            .checked_add(self.left.cols)
+            .and_then(|count| count.checked_add(self.left_inverse.rows))
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction row reduction steps",
+            })?;
+        self.begin_operation(steps, "smith construction row reduction", checkpoint)?;
+        checked_subtract_matrix_row(
+            &mut self.diagonal,
+            target,
+            source,
+            quotient,
+            SmithConstructionStage::RowReduction,
+            MatrixRole::Diagonal,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_subtract_matrix_row(
+            &mut self.left,
+            target,
+            source,
+            quotient,
+            SmithConstructionStage::RowReduction,
+            MatrixRole::LeftTransform,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_add_matrix_column(
+            &mut self.left_inverse,
+            source,
+            target,
+            quotient,
+            SmithConstructionStage::RowReduction,
+            MatrixRole::LeftInverse,
+            self.budget.max_abs_coefficient,
+        )
+    }
+
+    fn subtract_column_multiple(
+        &mut self,
+        target: usize,
+        source: usize,
+        quotient: i128,
+        stage: SmithConstructionStage,
+        phase: &'static str,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = self
+            .diagonal
+            .rows
+            .checked_add(self.right.rows)
+            .and_then(|count| count.checked_add(self.right_inverse.cols))
+            .ok_or(IntegralTopologyError::WorkPlanOverflow { phase })?;
+        self.begin_operation(steps, phase, checkpoint)?;
+        checked_subtract_matrix_column(
+            &mut self.diagonal,
+            target,
+            source,
+            quotient,
+            stage,
+            MatrixRole::Diagonal,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_subtract_matrix_column(
+            &mut self.right,
+            target,
+            source,
+            quotient,
+            stage,
+            MatrixRole::RightTransform,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_add_matrix_row(
+            &mut self.right_inverse,
+            source,
+            target,
+            quotient,
+            stage,
+            MatrixRole::RightInverse,
+            self.budget.max_abs_coefficient,
+        )
+    }
+
+    fn add_row_for_divisibility_repair(
+        &mut self,
+        target: usize,
+        source: usize,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = self
+            .diagonal
+            .cols
+            .checked_add(self.left.cols)
+            .and_then(|count| count.checked_add(self.left_inverse.rows))
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction divisibility repair steps",
+            })?;
+        self.begin_operation(steps, "smith construction divisibility repair", checkpoint)?;
+        checked_add_matrix_row(
+            &mut self.diagonal,
+            target,
+            source,
+            1,
+            SmithConstructionStage::DivisibilityRepair,
+            MatrixRole::Diagonal,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_add_matrix_row(
+            &mut self.left,
+            target,
+            source,
+            1,
+            SmithConstructionStage::DivisibilityRepair,
+            MatrixRole::LeftTransform,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_subtract_matrix_column(
+            &mut self.left_inverse,
+            source,
+            target,
+            1,
+            SmithConstructionStage::DivisibilityRepair,
+            MatrixRole::LeftInverse,
+            self.budget.max_abs_coefficient,
+        )
+    }
+
+    fn normalize_pivot_sign(
+        &mut self,
+        pivot: usize,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = self
+            .diagonal
+            .cols
+            .checked_add(self.left.cols)
+            .and_then(|count| count.checked_add(self.left_inverse.rows))
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction sign steps",
+            })?;
+        self.begin_operation(steps, "smith construction sign normalization", checkpoint)?;
+        checked_negate_matrix_row(
+            &mut self.diagonal,
+            pivot,
+            SmithConstructionStage::SignNormalization,
+            MatrixRole::Diagonal,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_negate_matrix_row(
+            &mut self.left,
+            pivot,
+            SmithConstructionStage::SignNormalization,
+            MatrixRole::LeftTransform,
+            self.budget.max_abs_coefficient,
+        )?;
+        checked_negate_matrix_column(
+            &mut self.left_inverse,
+            pivot,
+            SmithConstructionStage::SignNormalization,
+            MatrixRole::LeftInverse,
+            self.budget.max_abs_coefficient,
+        )
+    }
+
+    fn reserve_scan_steps(
+        &mut self,
+        steps: usize,
+        phase: &'static str,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let steps = u128::try_from(steps).map_err(|_| IntegralTopologyError::WorkPlanOverflow {
+            phase: "smith construction scan step conversion",
+        })?;
+        let requested =
+            self.entry_steps
+                .checked_add(steps)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "smith construction scan steps",
+                })?;
+        if requested > self.budget.max_entry_steps {
+            return Err(
+                IntegralTopologyError::SmithConstructionEntryStepBudgetExceeded {
+                    requested,
+                    max: self.budget.max_entry_steps,
+                },
+            );
+        }
+        poll_smith_construction(
+            checkpoint,
+            phase,
+            self.elementary_operations,
+            self.budget.max_elementary_operations,
+            self.entry_steps,
+            self.budget.max_entry_steps,
+        )?;
+        self.entry_steps = requested;
+        Ok(())
+    }
+
+    fn begin_operation(
+        &mut self,
+        steps: usize,
+        phase: &'static str,
+        checkpoint: &mut impl FnMut(&'static str) -> bool,
+    ) -> Result<(), IntegralTopologyError> {
+        let requested_operations = self.elementary_operations.checked_add(1).ok_or(
+            IntegralTopologyError::WorkPlanOverflow {
+                phase: "smith construction operation count",
+            },
+        )?;
+        if requested_operations > self.budget.max_elementary_operations {
+            return Err(
+                IntegralTopologyError::SmithConstructionOperationBudgetExceeded {
+                    requested: requested_operations,
+                    max: self.budget.max_elementary_operations,
+                },
+            );
+        }
+        let steps = u128::try_from(steps).map_err(|_| IntegralTopologyError::WorkPlanOverflow {
+            phase: "smith construction update step conversion",
+        })?;
+        let requested_steps =
+            self.entry_steps
+                .checked_add(steps)
+                .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                    phase: "smith construction update steps",
+                })?;
+        if requested_steps > self.budget.max_entry_steps {
+            return Err(
+                IntegralTopologyError::SmithConstructionEntryStepBudgetExceeded {
+                    requested: requested_steps,
+                    max: self.budget.max_entry_steps,
+                },
+            );
+        }
+        poll_smith_construction(
+            checkpoint,
+            phase,
+            self.elementary_operations,
+            self.budget.max_elementary_operations,
+            self.entry_steps,
+            self.budget.max_entry_steps,
+        )?;
+        self.elementary_operations = requested_operations;
+        self.entry_steps = requested_steps;
+        Ok(())
+    }
+}
+
+fn poll_smith_construction(
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+    phase: &'static str,
+    completed_operations: u128,
+    max_operations: u128,
+    completed_entry_steps: u128,
+    max_entry_steps: u128,
+) -> Result<(), IntegralTopologyError> {
+    if checkpoint(phase) {
+        Ok(())
+    } else {
+        Err(IntegralTopologyError::SmithConstructionCancelled {
+            phase,
+            completed_operations,
+            max_operations,
+            completed_entry_steps,
+            max_entry_steps,
+        })
+    }
+}
+
+fn swap_matrix_rows(matrix: &mut ExactIntegerMatrix, first: usize, second: usize) {
+    for col in 0..matrix.cols {
+        matrix
+            .entries
+            .swap(first * matrix.cols + col, second * matrix.cols + col);
+    }
+}
+
+fn swap_matrix_columns(matrix: &mut ExactIntegerMatrix, first: usize, second: usize) {
+    for row in 0..matrix.rows {
+        matrix
+            .entries
+            .swap(row * matrix.cols + first, row * matrix.cols + second);
+    }
+}
+
+fn checked_subtract_matrix_row(
+    matrix: &mut ExactIntegerMatrix,
+    target: usize,
+    source: usize,
+    multiplier: i128,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    max_abs_coefficient: u128,
+) -> Result<(), IntegralTopologyError> {
+    for col in 0..matrix.cols {
+        let source_value = matrix.entries[source * matrix.cols + col];
+        let target_index = target * matrix.cols + col;
+        let value = matrix.entries[target_index]
+            .checked_sub(checked_construction_product(
+                source_value,
+                multiplier,
+                stage,
+                role,
+                target,
+                col,
+            )?)
+            .ok_or(IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                stage,
+                role,
+                row: target,
+                col,
+            })?;
+        matrix.entries[target_index] =
+            checked_construction_coefficient(value, max_abs_coefficient, role, target, col)?;
+    }
+    Ok(())
+}
+
+fn checked_add_matrix_row(
+    matrix: &mut ExactIntegerMatrix,
+    target: usize,
+    source: usize,
+    multiplier: i128,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    max_abs_coefficient: u128,
+) -> Result<(), IntegralTopologyError> {
+    for col in 0..matrix.cols {
+        let source_value = matrix.entries[source * matrix.cols + col];
+        let target_index = target * matrix.cols + col;
+        let value = matrix.entries[target_index]
+            .checked_add(checked_construction_product(
+                source_value,
+                multiplier,
+                stage,
+                role,
+                target,
+                col,
+            )?)
+            .ok_or(IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                stage,
+                role,
+                row: target,
+                col,
+            })?;
+        matrix.entries[target_index] =
+            checked_construction_coefficient(value, max_abs_coefficient, role, target, col)?;
+    }
+    Ok(())
+}
+
+fn checked_subtract_matrix_column(
+    matrix: &mut ExactIntegerMatrix,
+    target: usize,
+    source: usize,
+    multiplier: i128,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    max_abs_coefficient: u128,
+) -> Result<(), IntegralTopologyError> {
+    for row in 0..matrix.rows {
+        let source_value = matrix.entries[row * matrix.cols + source];
+        let target_index = row * matrix.cols + target;
+        let value = matrix.entries[target_index]
+            .checked_sub(checked_construction_product(
+                source_value,
+                multiplier,
+                stage,
+                role,
+                row,
+                target,
+            )?)
+            .ok_or(IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                stage,
+                role,
+                row,
+                col: target,
+            })?;
+        matrix.entries[target_index] =
+            checked_construction_coefficient(value, max_abs_coefficient, role, row, target)?;
+    }
+    Ok(())
+}
+
+fn checked_add_matrix_column(
+    matrix: &mut ExactIntegerMatrix,
+    target: usize,
+    source: usize,
+    multiplier: i128,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    max_abs_coefficient: u128,
+) -> Result<(), IntegralTopologyError> {
+    for row in 0..matrix.rows {
+        let source_value = matrix.entries[row * matrix.cols + source];
+        let target_index = row * matrix.cols + target;
+        let value = matrix.entries[target_index]
+            .checked_add(checked_construction_product(
+                source_value,
+                multiplier,
+                stage,
+                role,
+                row,
+                target,
+            )?)
+            .ok_or(IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                stage,
+                role,
+                row,
+                col: target,
+            })?;
+        matrix.entries[target_index] =
+            checked_construction_coefficient(value, max_abs_coefficient, role, row, target)?;
+    }
+    Ok(())
+}
+
+fn checked_negate_matrix_row(
+    matrix: &mut ExactIntegerMatrix,
+    row: usize,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    max_abs_coefficient: u128,
+) -> Result<(), IntegralTopologyError> {
+    for col in 0..matrix.cols {
+        let index = row * matrix.cols + col;
+        let value = matrix.entries[index].checked_neg().ok_or(
+            IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                stage,
+                role,
+                row,
+                col,
+            },
+        )?;
+        matrix.entries[index] =
+            checked_construction_coefficient(value, max_abs_coefficient, role, row, col)?;
+    }
+    Ok(())
+}
+
+fn checked_negate_matrix_column(
+    matrix: &mut ExactIntegerMatrix,
+    col: usize,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    max_abs_coefficient: u128,
+) -> Result<(), IntegralTopologyError> {
+    for row in 0..matrix.rows {
+        let index = row * matrix.cols + col;
+        let value = matrix.entries[index].checked_neg().ok_or(
+            IntegralTopologyError::SmithConstructionArithmeticOverflow {
+                stage,
+                role,
+                row,
+                col,
+            },
+        )?;
+        matrix.entries[index] =
+            checked_construction_coefficient(value, max_abs_coefficient, role, row, col)?;
+    }
+    Ok(())
+}
+
+fn checked_construction_product(
+    left: i128,
+    right: i128,
+    stage: SmithConstructionStage,
+    role: MatrixRole,
+    row: usize,
+    col: usize,
+) -> Result<i128, IntegralTopologyError> {
+    left.checked_mul(right)
+        .ok_or(IntegralTopologyError::SmithConstructionArithmeticOverflow {
+            stage,
+            role,
+            row,
+            col,
+        })
+}
+
+fn checked_construction_coefficient(
+    value: i128,
+    max_abs_coefficient: u128,
+    role: MatrixRole,
+    row: usize,
+    col: usize,
+) -> Result<i128, IntegralTopologyError> {
+    let magnitude = value.unsigned_abs();
+    if magnitude > max_abs_coefficient {
+        Err(
+            IntegralTopologyError::SmithConstructionCoefficientMagnitudeExceeded {
+                role,
+                row,
+                col,
+                magnitude,
+                max: max_abs_coefficient,
+            },
+        )
+    } else {
+        Ok(value)
     }
 }
 
@@ -1973,6 +3175,73 @@ pub enum IntegralTopologyError {
         /// Planned checked dot-product terms.
         planned_scalar_operations: u128,
     },
+    /// Simultaneously live source and construction matrices exceeded their
+    /// explicit storage envelope.
+    SmithConstructionLiveEntryBudgetExceeded {
+        /// Required live entries.
+        requested: usize,
+        /// Maximum admitted live entries.
+        max: usize,
+    },
+    /// Another elementary operation would exceed the construction envelope.
+    SmithConstructionOperationBudgetExceeded {
+        /// Operation count including the refused next operation.
+        requested: u128,
+        /// Maximum admitted elementary operations.
+        max: u128,
+    },
+    /// Exact construction inspections/destination updates exceeded their
+    /// envelope.
+    SmithConstructionEntryStepBudgetExceeded {
+        /// Step count including the refused inspection/update block.
+        requested: u128,
+        /// Maximum admitted entry steps.
+        max: u128,
+    },
+    /// A source or generated coefficient exceeded its explicit magnitude cap.
+    SmithConstructionCoefficientMagnitudeExceeded {
+        /// Matrix containing the refused coefficient.
+        role: MatrixRole,
+        /// Coefficient row.
+        row: usize,
+        /// Coefficient column.
+        col: usize,
+        /// Unsigned exact magnitude.
+        magnitude: u128,
+        /// Maximum admitted magnitude.
+        max: u128,
+    },
+    /// Checked constructive row/column arithmetic overflowed `i128`.
+    SmithConstructionArithmeticOverflow {
+        /// Elementary operation phase.
+        stage: SmithConstructionStage,
+        /// Matrix whose update or quotient refused.
+        role: MatrixRole,
+        /// Refusing row.
+        row: usize,
+        /// Refusing column.
+        col: usize,
+    },
+    /// A runtime construction invariant or its independent witness check
+    /// failed. This is inconclusive for the mathematically valid source.
+    SmithConstructionInvariantLost {
+        /// Broken invariant.
+        field: &'static str,
+    },
+    /// Cancellation was observed during data-dependent constructive reduction.
+    SmithConstructionCancelled {
+        /// Observation phase.
+        phase: &'static str,
+        /// Completed elementary operations.
+        completed_operations: u128,
+        /// Maximum admitted elementary operations.
+        max_operations: u128,
+        /// Completed source/diagonal inspections and destination updates.
+        completed_entry_steps: u128,
+        /// Maximum admitted source/diagonal inspections and destination
+        /// updates.
+        max_entry_steps: u128,
+    },
     /// Matrix extent exceeded its explicit envelope.
     MatrixExtentExceeded {
         /// Supplied rows.
@@ -2156,6 +3425,13 @@ impl IntegralTopologyError {
             | Self::KernelCoordinateExtentExceeded { .. }
             | Self::KernelBindingBudgetExceeded { .. }
             | Self::KernelCoordinateCancelled { .. }
+            | Self::SmithConstructionLiveEntryBudgetExceeded { .. }
+            | Self::SmithConstructionOperationBudgetExceeded { .. }
+            | Self::SmithConstructionEntryStepBudgetExceeded { .. }
+            | Self::SmithConstructionCoefficientMagnitudeExceeded { .. }
+            | Self::SmithConstructionArithmeticOverflow { .. }
+            | Self::SmithConstructionInvariantLost { .. }
+            | Self::SmithConstructionCancelled { .. }
             | Self::MatrixExtentExceeded { .. }
             | Self::MatrixEntryBudgetExceeded { .. }
             | Self::RetainedMatrixExceedsBudget { .. }
