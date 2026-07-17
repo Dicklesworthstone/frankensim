@@ -345,6 +345,11 @@ where
     F: Fn(&[f64]) -> f64,
 {
     /// A δ-perturbation step with explicit tolerances and an objective.
+    ///
+    /// Evaluation requires a finite, strictly positive `delta`, finite
+    /// non-negative tolerances, and a finite endpoint design. The fields stay
+    /// public for decoded policy assembly, so every evaluation revalidates
+    /// them and returns a fail-closed veto when they are malformed.
     pub fn new(delta: f64, better_tol: f64, sharpness_tol: f64, objective: F) -> Self {
         DeltaPerturbationStep {
             delta,
@@ -364,11 +369,8 @@ where
     }
 
     fn evaluate(&self, endpoint: &Endpoint) -> StepOutcome {
-        // Fail closed on a non-finite endpoint objective.
-        if !endpoint.objective.is_finite() {
-            return StepOutcome::Vetoed {
-                reason: "endpoint objective is non-finite".to_string(),
-            };
+        if let Some(reason) = self.invalid_input_reason(endpoint) {
+            return StepOutcome::Vetoed { reason };
         }
         // A 0-dim design has nothing to perturb — vacuously robust.
         if endpoint.design.is_empty() {
@@ -380,7 +382,24 @@ where
         for k in 0..endpoint.design.len() {
             for signed in [self.delta, -self.delta] {
                 let mut probe = endpoint.design.clone();
-                probe[k] += signed;
+                let perturbed = probe[k] + signed;
+                if !perturbed.is_finite() {
+                    return StepOutcome::Vetoed {
+                        reason: format!(
+                            "a signed delta={signed} perturbation makes coord {k} non-finite (base={})",
+                            probe[k]
+                        ),
+                    };
+                }
+                if perturbed.to_bits() == probe[k].to_bits() {
+                    return StepOutcome::Vetoed {
+                        reason: format!(
+                            "a signed delta={signed} perturbation does not change coord {k} at its floating-point scale (base={})",
+                            probe[k]
+                        ),
+                    };
+                }
+                probe[k] = perturbed;
                 let fp = (self.objective)(&probe);
                 if !fp.is_finite() {
                     return StepOutcome::Vetoed {
@@ -391,6 +410,13 @@ where
                     };
                 }
                 let diff = fp - f0;
+                if !diff.is_finite() {
+                    return StepOutcome::Vetoed {
+                        reason: format!(
+                            "objective difference is non-finite under a signed delta={signed} perturbation of coord {k} (probe={fp}, endpoint={f0})"
+                        ),
+                    };
+                }
                 worst_lower = worst_lower.min(diff);
                 worst_higher = worst_higher.max(diff);
             }
@@ -412,5 +438,44 @@ where
             };
         }
         StepOutcome::Passed
+    }
+}
+
+impl<F> DeltaPerturbationStep<F> {
+    fn invalid_input_reason(&self, endpoint: &Endpoint) -> Option<String> {
+        // These fields are public so callers can assemble policy from decoded
+        // configuration. Validate at the point of use: NaN tolerances make
+        // every ordered comparison false and must never turn into a pass.
+        if !self.delta.is_finite() || self.delta <= 0.0 {
+            return Some(format!(
+                "delta must be finite and strictly positive, got {}",
+                self.delta
+            ));
+        }
+        if !self.better_tol.is_finite() || self.better_tol < 0.0 {
+            return Some(format!(
+                "better_tol must be finite and non-negative, got {}",
+                self.better_tol
+            ));
+        }
+        if !self.sharpness_tol.is_finite() || self.sharpness_tol < 0.0 {
+            return Some(format!(
+                "sharpness_tol must be finite and non-negative, got {}",
+                self.sharpness_tol
+            ));
+        }
+        if !endpoint.objective.is_finite() {
+            return Some("endpoint objective is non-finite".to_string());
+        }
+        if let Some((k, value)) = endpoint
+            .design
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Some(format!("endpoint design coord {k} is non-finite ({value})"));
+        }
+        None
     }
 }

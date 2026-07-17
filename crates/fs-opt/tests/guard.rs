@@ -191,12 +191,40 @@ fn delta_step<F: Fn(&[f64]) -> f64 + 'static>(f: F) -> Box<dyn EscalationStep> {
     Box::new(DeltaPerturbationStep::new(0.1, 1e-6, 1.0, f))
 }
 
+fn assert_veto_reason(outcome: StepOutcome, expected: &str) {
+    let StepOutcome::Vetoed { reason } = outcome else {
+        panic!("expected a fail-closed veto, got {outcome:?}");
+    };
+    assert!(
+        reason.contains(expected),
+        "veto reason {reason:?} must identify {expected:?}"
+    );
+}
+
 #[test]
 fn delta_perturbation_passes_a_smooth_optimum() {
     // f(x) = Σ x_i²  has a smooth minimum at 0; perturbing rises gently.
     let step = delta_step(|x: &[f64]| x.iter().map(|v| v * v).sum());
     let out = step.evaluate(&Endpoint::new("smooth", vec![0.0, 0.0], 0.0));
     assert!(out.is_pass(), "smooth optimum must pass: {out:?}");
+}
+
+#[test]
+fn delta_perturbation_accepts_inclusive_tolerance_boundaries() {
+    let step = DeltaPerturbationStep::new(0.25, 0.25, 0.5, |x: &[f64]| {
+        if x[0].is_sign_positive() { -0.25 } else { 0.5 }
+    });
+    let out = step.evaluate(&Endpoint::new("inclusive-boundaries", vec![0.0], 0.0));
+    assert!(
+        out.is_pass(),
+        "equality with either tolerance must pass: {out:?}"
+    );
+
+    for zero in [0.0, -0.0] {
+        let flat = DeltaPerturbationStep::new(0.25, zero, zero, |_: &[f64]| 0.0);
+        let out = flat.evaluate(&Endpoint::new("zero-tolerances", vec![0.0], 0.0));
+        assert!(out.is_pass(), "flat probes satisfy zero tolerance: {out:?}");
+    }
 }
 
 #[test]
@@ -218,20 +246,102 @@ fn delta_perturbation_vetoes_a_sharp_crack() {
 
 #[test]
 fn delta_perturbation_fails_closed_on_nonfinite() {
-    // non-finite endpoint objective → veto.
-    let step = delta_step(|x: &[f64]| x.iter().sum());
-    let out = step.evaluate(&Endpoint::new("nan-endpoint", vec![0.0], f64::NAN));
-    assert!(out.is_veto());
-    // non-finite objective under perturbation → veto.
-    let step2 = delta_step(|x: &[f64]| {
-        if x[0].abs() < 1e-9 {
-            0.0
-        } else {
-            f64::INFINITY
-        }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let step = delta_step(|x: &[f64]| x.iter().sum());
+        assert_veto_reason(
+            step.evaluate(&Endpoint::new("nonfinite-endpoint", vec![0.0], value)),
+            "endpoint objective",
+        );
+
+        let step = delta_step(move |_: &[f64]| value);
+        assert_veto_reason(
+            step.evaluate(&Endpoint::new("nonfinite-probe", vec![0.0], 0.0)),
+            "objective is non-finite",
+        );
+    }
+}
+
+#[test]
+fn delta_perturbation_refuses_malformed_numeric_policy() {
+    for (delta, better_tol, sharpness_tol, expected) in [
+        (f64::NAN, 0.0, 1.0, "delta"),
+        (0.0, 0.0, 1.0, "delta"),
+        (-0.0, 0.0, 1.0, "delta"),
+        (-0.1, 0.0, 1.0, "delta"),
+        (f64::INFINITY, 0.0, 1.0, "delta"),
+        (f64::NEG_INFINITY, 0.0, 1.0, "delta"),
+        (0.1, f64::NAN, 1.0, "better_tol"),
+        (0.1, -1.0, 1.0, "better_tol"),
+        (0.1, f64::INFINITY, 1.0, "better_tol"),
+        (0.1, f64::NEG_INFINITY, 1.0, "better_tol"),
+        (0.1, 0.0, f64::NAN, "sharpness_tol"),
+        (0.1, 0.0, f64::INFINITY, "sharpness_tol"),
+        (0.1, 0.0, f64::NEG_INFINITY, "sharpness_tol"),
+        (0.1, 0.0, -1.0, "sharpness_tol"),
+    ] {
+        let step = DeltaPerturbationStep::new(delta, better_tol, sharpness_tol, |_: &[f64]| 0.0);
+        assert_veto_reason(
+            step.evaluate(&Endpoint::new("malformed-policy", vec![0.0], 0.0)),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn delta_perturbation_refuses_nonfinite_design_even_when_objective_ignores_it() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let step = delta_step(|_: &[f64]| 0.0);
+        assert_veto_reason(
+            step.evaluate(&Endpoint::new("nonfinite-design", vec![value], 0.0)),
+            "design coord 0",
+        );
+    }
+}
+
+#[test]
+fn delta_perturbation_refuses_nonfinite_probe_and_difference() {
+    let overflowing_probe =
+        DeltaPerturbationStep::new(f64::MAX, f64::MAX, f64::MAX, |_: &[f64]| 0.0);
+    assert_veto_reason(
+        overflowing_probe.evaluate(&Endpoint::new("probe-overflow", vec![f64::MAX], 0.0)),
+        "makes coord 0 non-finite",
+    );
+    assert_veto_reason(
+        overflowing_probe.evaluate(&Endpoint::new(
+            "negative-probe-overflow",
+            vec![-f64::MAX],
+            0.0,
+        )),
+        "makes coord 0 non-finite",
+    );
+
+    let overflowing_difference =
+        DeltaPerturbationStep::new(0.1, f64::MAX, f64::MAX, |_: &[f64]| f64::MAX);
+    assert_veto_reason(
+        overflowing_difference.evaluate(&Endpoint::new(
+            "difference-overflow",
+            vec![0.0],
+            -f64::MAX,
+        )),
+        "objective difference is non-finite",
+    );
+}
+
+#[test]
+fn delta_perturbation_refuses_a_radius_absorbed_by_coordinate_scale() {
+    let objective_invoked = std::cell::Cell::new(false);
+    let step = DeltaPerturbationStep::new(1.0, 0.0, 0.0, |_: &[f64]| {
+        objective_invoked.set(true);
+        0.0
     });
-    let out2 = step2.evaluate(&Endpoint::new("nan-probe", vec![0.0], 0.0));
-    assert!(out2.is_veto());
+    assert_veto_reason(
+        step.evaluate(&Endpoint::new("rounded-away", vec![f64::MAX], 0.0)),
+        "does not change coord 0",
+    );
+    assert!(
+        !objective_invoked.get(),
+        "an unchanged probe must be refused before objective evaluation"
+    );
 }
 
 #[test]
