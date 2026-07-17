@@ -95,6 +95,16 @@ e-BH FDR 0.001 ≤ 0.1 at power 1.00 (10 signals / 30 nulls × 300 sims);
 race decided + bit-replayable; arithmetic laws; bounded-input refusal;
 declared-span boundaries and one-ULP refusal; equal-mean skew counterexample.
 
+`tests/hardening.rs`, behind `conformal-hardening`, emits canonical aggregate
+`ConformanceCase` verdicts for ch-001..ch-005 and validated object-shaped
+`Custom` measurement companions for ch-001..ch-004. The literal input roots
+are `0xa11ce`, `0xd21f7`, `0xfc12`, `0x0b71`, and `0x5eed`, respectively;
+the suite has no execution/Cx seed. Assertions and expectations reached before
+an aggregate verdict remain ordinary Rust test diagnostics. The fixed
+regressions ch-006..ch-008 remain assertion-only and do not claim aggregate
+event coverage. Central proof must explicitly enable
+`fs-eproc/conformal-hardening`; a default-feature pass skips the target.
+
 ## No-claim boundaries
 - Empirical-Bernstein/hedged closed-form CS for bounded means (mixture CS
   covers sub-Gaussian; EB variant is follow-up scope with its consumers).

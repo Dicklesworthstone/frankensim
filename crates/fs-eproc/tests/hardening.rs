@@ -14,11 +14,60 @@ use fs_eproc::hardening::{
     admission_alpha, fcr_flag,
 };
 
-fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-eproc/hardening\",\"case\":\"{case}\",\"verdict\":\"pass\",\
-         \"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-eproc/hardening";
+const CH_001_INPUT_SEED: u64 = 0xa11ce;
+const CH_002_INPUT_SEED: u64 = 0xd21f7;
+const CH_003_INPUT_SEED: u64 = 0xfc12;
+const CH_004_INPUT_SEED: u64 = 0x0b71;
+const CH_005_INPUT_SEED: u64 = 0x5eed;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("hardening verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("hardening verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, name: &str, json: String) {
+    let identity = format!("{case}/measurement");
+    let mut emitter = fs_obs::Emitter::new(SUITE, &identity);
+    let line = emitter
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: name.to_string(),
+                json,
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("hardening measurement must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
 }
 
 struct Lcg(u64);
@@ -43,7 +92,7 @@ fn ch_001_mondrian_catches_what_marginal_hides() {
     // Two regimes: "smooth" residuals ~ 0.1|N|, "shock" ~ 0.5|N|.
     // The pooled marginal band undercovers the shock regime; the
     // Mondrian per-bucket bands hold coverage in BOTH.
-    let mut rng = Lcg(0xa11ce);
+    let mut rng = Lcg(CH_001_INPUT_SEED);
     let mut cal = MondrianConformal::new(50);
     for _ in 0..400 {
         cal.add("smooth", 0.1 * rng.gauss().abs());
@@ -71,10 +120,18 @@ fn ch_001_mondrian_catches_what_marginal_hides() {
     };
     let marg_on_shock = cover(w_marg, 0.5, &mut rng);
     let mondrian_on_shock = cover(w_shock, 0.5, &mut rng);
-    println!(
-        "{{\"metric\":\"bucket-coverage\",\"nominal\":{:.2},\"marginal_on_shock\":{marg_on_shock:.3},\
-         \"mondrian_on_shock\":{mondrian_on_shock:.3}}}",
-        1.0 - alpha
+    let nominal_json = finite_json(1.0 - alpha);
+    let marginal_json = finite_json(marg_on_shock);
+    let mondrian_json = finite_json(mondrian_on_shock);
+    measurement(
+        "ch-001",
+        "bucket-coverage",
+        format!(
+            "{{\"metric\":\"bucket-coverage\",\"nominal\":{nominal_json},\
+             \"marginal_on_shock\":{marginal_json},\
+             \"mondrian_on_shock\":{mondrian_json},\
+             \"input_seed\":{CH_001_INPUT_SEED}}}"
+        ),
     );
     assert!(
         marg_on_shock < 0.86,
@@ -94,14 +151,16 @@ fn ch_001_mondrian_catches_what_marginal_hides() {
     );
     verdict(
         "ch-001",
+        true,
         "marginal band covers only ~0.8 on the high-noise regime while the Mondrian \
          bucket holds ~0.9 nominal; unseen regimes refuse instead of extrapolating",
+        CH_001_INPUT_SEED,
     );
 }
 
 #[test]
 fn ch_002_drift_etest_detects_within_budget_no_false_alarm() {
-    let mut rng = Lcg(0xd21f7);
+    let mut rng = Lcg(CH_002_INPUT_SEED);
     let train: Vec<f64> = (0..500).map(|_| rng.gauss()).collect();
     // NULL: same distribution — no false alarm across 2000 samples
     // (anytime validity, adversarial-stopping-proof by construction).
@@ -124,9 +183,15 @@ fn ch_002_drift_etest_detects_within_budget_no_false_alarm() {
             break;
         }
     }
-    println!(
-        "{{\"metric\":\"drift-detection\",\"shift\":\"+1sigma\",\"detected_at\":{at},\
-         \"validity_scale\":{scale:.3}}}"
+    let scale_json = finite_json(scale);
+    measurement(
+        "ch-002",
+        "drift-detection",
+        format!(
+            "{{\"metric\":\"drift-detection\",\"shift\":\"+1sigma\",\
+             \"detected_at\":{at},\"validity_scale\":{scale_json},\
+             \"input_seed\":{CH_002_INPUT_SEED}}}"
+        ),
     );
     assert!(
         at > 0 && at <= 200,
@@ -135,8 +200,10 @@ fn ch_002_drift_etest_detects_within_budget_no_false_alarm() {
     assert!(scale < 1.0, "the validity domain SHRINKS on drift: {scale}");
     verdict(
         "ch-002",
+        true,
         "1-sigma covariate shift detected within 200 samples; zero false alarms across \
          2000 null samples; escalation shrinks the surrogate validity domain",
+        CH_002_INPUT_SEED,
     );
 }
 
@@ -145,7 +212,7 @@ fn ch_003_fcr_budget_flags_broken_claims() {
     // 60 simultaneous coverage claims at alpha = 0.1; 10 are BROKEN
     // (true miss rate 0.4). The e-BH budget pass flags mostly the
     // broken ones (FDR controlled by the e-BH guarantee).
-    let mut rng = Lcg(0xfc12);
+    let mut rng = Lcg(CH_003_INPUT_SEED);
     let mut claims: Vec<CoverageClaim> = (0..60)
         .map(|k| CoverageClaim::new(&format!("claim-{k:02}"), 0.1))
         .collect();
@@ -158,10 +225,14 @@ fn ch_003_fcr_budget_flags_broken_claims() {
     let flagged = fcr_flag(&claims, 0.05);
     let true_pos = flagged.iter().filter(|&&i| i < 10).count();
     let false_pos = flagged.len() - true_pos;
-    println!(
-        "{{\"metric\":\"fcr-budget\",\"flagged\":{},\"true_pos\":{true_pos},\
-         \"false_pos\":{false_pos}}}",
-        flagged.len()
+    measurement(
+        "ch-003",
+        "fcr-budget",
+        format!(
+            "{{\"metric\":\"fcr-budget\",\"flagged\":{},\"true_pos\":{true_pos},\
+             \"false_pos\":{false_pos},\"input_seed\":{CH_003_INPUT_SEED}}}",
+            flagged.len()
+        ),
     );
     assert!(true_pos >= 8, "most broken claims flagged: {true_pos}/10");
     assert!(
@@ -174,8 +245,10 @@ fn ch_003_fcr_budget_flags_broken_claims() {
     assert!((per - 1e-4).abs() < 1e-12, "Bonferroni reservation: {per}");
     verdict(
         "ch-003",
+        true,
         "e-BH over 60 simultaneous miscoverage e-processes flags 8+ of 10 broken claims \
          with <=2 false flags; admission reserves budget/k per claim",
+        CH_003_INPUT_SEED,
     );
 }
 
@@ -188,7 +261,7 @@ fn ch_004_adversarial_optimizer_shift() {
     // silently undercovers on B. WITH hardening: the drift monitor
     // fires DURING the walk and the exchangeability card names the
     // policy — no silent invalid coverage.
-    let mut rng = Lcg(0x0b71);
+    let mut rng = Lcg(CH_004_INPUT_SEED);
     let mut cal = MondrianConformal::new(50);
     let train_x: Vec<f64> = (0..300).map(|_| rng.next()).collect();
     for _ in 0..300 {
@@ -222,10 +295,16 @@ fn ch_004_adversarial_optimizer_shift() {
         }
     }
     let naive_cov = f64::from(naive_hits) / f64::from(naive_total);
-    println!(
-        "{{\"metric\":\"adversarial-shift\",\"naive_coverage_on_B\":{naive_cov:.3},\
-         \"nominal\":{:.2},\"drift_fired_at\":{fired_at}}}",
-        1.0 - alpha
+    let naive_cov_json = finite_json(naive_cov);
+    let nominal_json = finite_json(1.0 - alpha);
+    measurement(
+        "ch-004",
+        "adversarial-shift",
+        format!(
+            "{{\"metric\":\"adversarial-shift\",\"naive_coverage_on_B\":{naive_cov_json},\
+             \"nominal\":{nominal_json},\"drift_fired_at\":{fired_at},\
+             \"input_seed\":{CH_004_INPUT_SEED}}}"
+        ),
     );
     assert!(
         naive_cov < 0.6,
@@ -249,9 +328,11 @@ fn ch_004_adversarial_optimizer_shift() {
     assert!(card.to_json().contains("recalibrate-on-drift"));
     verdict(
         "ch-004",
+        true,
         "the exploiting optimizer collapses naive coverage to ~0.5 on region B, but the \
          drift e-test fires mid-walk and the B bucket refuses — no silent invalid \
          coverage; the exchangeability card declares the policy",
+        CH_004_INPUT_SEED,
     );
 }
 
@@ -259,7 +340,7 @@ fn ch_004_adversarial_optimizer_shift() {
 fn ch_005_g5_determinism() {
     // All monitors replay bit-equal from the same stream.
     let run = || -> (f64, u64) {
-        let mut rng = Lcg(0x5eed);
+        let mut rng = Lcg(CH_005_INPUT_SEED);
         let train: Vec<f64> = (0..200).map(|_| rng.gauss()).collect();
         let mut mon = DriftMonitor::new(train, 0.05);
         let mut last = 0.0;
@@ -274,7 +355,9 @@ fn ch_005_g5_determinism() {
     assert!(a1.to_bits() == a2.to_bits() && d1 == d2, "bit-equal replay");
     verdict(
         "ch-005",
+        true,
         "drift monitors replay bit-equal from the same stream (G5)",
+        CH_005_INPUT_SEED,
     );
 }
 

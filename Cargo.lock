@@ -1061,6 +1061,7 @@ name = "fs-eproc"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+ "fs-obs",
  "fs-rand",
 ]
 
