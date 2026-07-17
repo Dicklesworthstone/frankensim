@@ -1,0 +1,66 @@
+frankensim.matdb-source.v1
+observation	table-ii-y30-catalog-midpoints	e-magnetsuk-y30-online-grade-family-accessed-2019-product-lot-process-unspecified	Sjölund, Leijon, and Eriksson 2020 Table II; source ranges accessed from the e-magnetsuk online ferrite-grades page on 2019-09-25 and represented by the authors as midpoint plus or minus half-range for their finite-element model	The paper prints Br 385 plus or minus 15 mT, Hcb 192.5 plus or minus 17.5 kA/m, Hcj 200 plus or minus 20 kA/m, and BHmax 28 plus or minus 2 kJ/m3, then states that the average values are used for every magnitude. The runtime claims retain only those four source-used midpoints because the printed half-ranges are catalog bounds without statistical confidence semantics. The online source identifies a grade family, not a purchased specimen: physical product, manufacturer, supplier of a product, composition, production lot, sinter schedule, magnetization state, magnetic test method, and property test temperature are absent. The paper runs its simulation at 20 degC, but that model temperature is not laundered into a material measurement temperature or service-temperature qualification
+scalar	remanence-catalog-midpoint	table-ii-y30-catalog-midpoints	remanent_flux_density	385	mT	constant
+uncertainty	remanence-catalog-midpoint	unstated	-	-	-	-
+validity	remanence-catalog-midpoint	source_catalog_grade_y30	1	1	1
+validity	remanence-catalog-midpoint	source_catalog_midpoint_used	1	1	1
+validity	remanence-catalog-midpoint	source_physical_product_identified	0	0	1
+validity	remanence-catalog-midpoint	source_product_supplier_identified	0	0	1
+validity	remanence-catalog-midpoint	source_production_lot_known	0	0	1
+validity	remanence-catalog-midpoint	source_composition_known	0	0	1
+validity	remanence-catalog-midpoint	source_sinter_process_known	0	0	1
+validity	remanence-catalog-midpoint	source_magnetic_test_temperature_known	0	0	1
+validity	remanence-catalog-midpoint	source_magnetic_test_method_known	0	0	1
+validity	remanence-catalog-midpoint	source_simulation_temperature	20	20	degC
+scalar	coercivity-catalog-midpoint	table-ii-y30-catalog-midpoints	coercive_field_strength	192.5	kA/m	constant
+uncertainty	coercivity-catalog-midpoint	unstated	-	-	-	-
+validity	coercivity-catalog-midpoint	source_catalog_grade_y30	1	1	1
+validity	coercivity-catalog-midpoint	source_catalog_midpoint_used	1	1	1
+validity	coercivity-catalog-midpoint	source_physical_product_identified	0	0	1
+validity	coercivity-catalog-midpoint	source_product_supplier_identified	0	0	1
+validity	coercivity-catalog-midpoint	source_production_lot_known	0	0	1
+validity	coercivity-catalog-midpoint	source_composition_known	0	0	1
+validity	coercivity-catalog-midpoint	source_sinter_process_known	0	0	1
+validity	coercivity-catalog-midpoint	source_magnetic_test_temperature_known	0	0	1
+validity	coercivity-catalog-midpoint	source_magnetic_test_method_known	0	0	1
+validity	coercivity-catalog-midpoint	source_simulation_temperature	20	20	degC
+scalar	intrinsic-coercivity-catalog-midpoint	table-ii-y30-catalog-midpoints	intrinsic_coercive_field_strength	200	kA/m	constant
+uncertainty	intrinsic-coercivity-catalog-midpoint	unstated	-	-	-	-
+validity	intrinsic-coercivity-catalog-midpoint	source_catalog_grade_y30	1	1	1
+validity	intrinsic-coercivity-catalog-midpoint	source_catalog_midpoint_used	1	1	1
+validity	intrinsic-coercivity-catalog-midpoint	source_physical_product_identified	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_product_supplier_identified	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_production_lot_known	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_composition_known	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_sinter_process_known	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_magnetic_test_temperature_known	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_magnetic_test_method_known	0	0	1
+validity	intrinsic-coercivity-catalog-midpoint	source_simulation_temperature	20	20	degC
+scalar	maximum-energy-product-catalog-midpoint	table-ii-y30-catalog-midpoints	maximum_magnetic_energy_product	28	kJ/m3	constant
+uncertainty	maximum-energy-product-catalog-midpoint	unstated	-	-	-	-
+validity	maximum-energy-product-catalog-midpoint	source_catalog_grade_y30	1	1	1
+validity	maximum-energy-product-catalog-midpoint	source_catalog_midpoint_used	1	1	1
+validity	maximum-energy-product-catalog-midpoint	source_physical_product_identified	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_product_supplier_identified	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_production_lot_known	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_composition_known	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_sinter_process_known	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_magnetic_test_temperature_known	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_magnetic_test_method_known	0	0	1
+validity	maximum-energy-product-catalog-midpoint	source_simulation_temperature	20	20	degC
+observation	equation-2-model-relative-permeability	e-magnetsuk-y30-online-grade-family-accessed-2019-product-lot-process-unspecified	Sjölund, Leijon, and Eriksson 2020 Equation 2 evaluated at the Table II Y30 remanence and maximum-energy-product midpoints	The source derives mu_r = Br squared divided by four times mu_0 times BHmax after assuming a linear second-quadrant B-H branch above the maximum-energy-product point, then assumes isotropic constant permeability because transverse data are absent. The resulting 1.0531580999909012 is a finite-element model input derived from two catalog midpoints. It is not measured recoil permeability, a minor-loop slope, a temperature-dependent recoil law, or an irreversible demagnetization boundary. The authors explicitly report that no adequate Y30 demagnetization curve was found to validate the modeled knee point
+scalar	model-relative-permeability-derived	equation-2-model-relative-permeability	model_relative_permeability	1.0531580999909012	1	constant
+uncertainty	model-relative-permeability-derived	unstated	-	-	-	-
+validity	model-relative-permeability-derived	source_catalog_grade_y30	1	1	1
+validity	model-relative-permeability-derived	source_catalog_midpoint_used	1	1	1
+validity	model-relative-permeability-derived	source_physical_product_identified	0	0	1
+validity	model-relative-permeability-derived	source_product_supplier_identified	0	0	1
+validity	model-relative-permeability-derived	source_production_lot_known	0	0	1
+validity	model-relative-permeability-derived	source_composition_known	0	0	1
+validity	model-relative-permeability-derived	source_sinter_process_known	0	0	1
+validity	model-relative-permeability-derived	source_magnetic_test_temperature_known	0	0	1
+validity	model-relative-permeability-derived	source_magnetic_test_method_known	0	0	1
+validity	model-relative-permeability-derived	source_simulation_temperature	20	20	degC
+validity	model-relative-permeability-derived	source_model_mu_equation_2_derived	1	1	1
+validity	model-relative-permeability-derived	source_model_mu_is_measured_recoil_mu	0	0	1
+validity	model-relative-permeability-derived	source_minor_loop_recoil_data_known	0	0	1

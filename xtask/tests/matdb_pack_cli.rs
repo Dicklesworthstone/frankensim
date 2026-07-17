@@ -40,6 +40,8 @@ const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
 const JINSHAN_N42_PRISTINE_TEMPERATURE_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/jinshan-n42-pristine-temperature/manifest.tsv";
+const SJOLUND_2020_Y30_CATALOG_MODEL_INPUTS_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/sjolund-2020-y30-catalog-model-inputs/manifest.tsv";
 const KIM_BAEK_2026_Y30_AFCP_DEMAGNETIZATION_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/kim-baek-2026-y30-afcp-demagnetization/manifest.tsv";
 const NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST: &str =
@@ -2311,6 +2313,226 @@ fn g3_cli_compiles_committed_jinshan_n42_pristine_temperature_endpoints() {
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "source-absent Jinshan N42 property must remain refused: {refused_property}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_y30_catalog_model_inputs_without_recoil_transfer() {
+    let manifest = workspace_path(SJOLUND_2020_Y30_CATALOG_MODEL_INPUTS_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed Sjolund Y30 catalog-model manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("sjolund-y30-catalog-first.fsmatpk");
+    let second_path = directory.join("sjolund-y30-catalog-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Sjolund Y30 catalog compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Sjolund Y30 catalog compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Sjolund Y30 catalog decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Sjolund Y30 catalog pack");
+    let second_bytes = fs::read(second_path).expect("read second Sjolund Y30 catalog pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "Sjolund Y30 catalog pack bytes moved"
+    );
+    let decoded =
+        NormalizedPack::from_bytes(&first_bytes).expect("decode Sjolund Y30 catalog pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Sjolund Y30 catalog pack identity");
+
+    assert_eq!(decoded.pack_id(), "sjolund-2020-y30-catalog-model-inputs");
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("Creative Commons"));
+    assert_eq!(decoded.claims().claim_count(), 5);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let mu_0 = 4.0_f64 * std::f64::consts::PI * 1.0e-7;
+    let model_relative_permeability = (0.385_f64 * 0.385_f64) / (4.0 * mu_0 * 28_000.0);
+    let expectations = [
+        (
+            "remanent_flux_density",
+            385.0_f64 * 1.0e-3,
+            Dims([0, 1, -2, 0, -1, 0]),
+        ),
+        (
+            "coercive_field_strength",
+            192.5_f64 * 1.0e3,
+            Dims([-1, 0, 0, 0, 1, 0]),
+        ),
+        (
+            "intrinsic_coercive_field_strength",
+            200.0_f64 * 1.0e3,
+            Dims([-1, 0, 0, 0, 1, 0]),
+        ),
+        (
+            "maximum_magnetic_energy_product",
+            28.0_f64 * 1.0e3,
+            Dims([-1, 1, -2, 0, 0, 0]),
+        ),
+        (
+            "model_relative_permeability",
+            model_relative_permeability,
+            Dims::NONE,
+        ),
+    ];
+    let mut observation_ids = Vec::new();
+    for (property, expected_value, expected_dims) in expectations {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing Sjolund Y30 {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Sjolund Y30 {property} was not scalar");
+        };
+        assert_eq!(*dims, expected_dims);
+        let scale = expected_value.abs().max(1.0e-12);
+        assert!((*value - expected_value).abs() / scale <= 2.0e-15);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, CC_BY_4_0_LICENSE);
+        assert!(claim.provenance.source.contains("10.1063/1.5129303"));
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("[source:published-table-ii]")
+        );
+        assert_eq!(
+            claim.validity.bound("source_catalog_grade_y30"),
+            Some((1.0, 1.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_catalog_midpoint_used"),
+            Some((1.0, 1.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_simulation_temperature"),
+            Some((293.15, 293.15))
+        );
+        for missing_axis in [
+            "source_physical_product_identified",
+            "source_product_supplier_identified",
+            "source_production_lot_known",
+            "source_composition_known",
+            "source_sinter_process_known",
+            "source_magnetic_test_temperature_known",
+            "source_magnetic_test_method_known",
+        ] {
+            assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+        }
+        observation_ids.push((property, claim.observations[0]));
+    }
+
+    let catalog_observation_id = observation_ids[0].1;
+    assert!(
+        observation_ids[..4]
+            .iter()
+            .all(|(_, observation)| *observation == catalog_observation_id),
+        "the four Table II midpoint claims must retain one shared observation"
+    );
+    let catalog_observation = decoded
+        .claims()
+        .observation(catalog_observation_id)
+        .expect("Sjolund Y30 Table II observation remains linked");
+    assert_eq!(
+        catalog_observation.specimen,
+        "e-magnetsuk-y30-online-grade-family-accessed-2019-product-lot-process-unspecified"
+    );
+    assert!(
+        catalog_observation
+            .method
+            .contains("midpoint plus or minus half-range")
+    );
+    for printed_range in [
+        "Br 385 plus or minus 15 mT",
+        "Hcb 192.5 plus or minus 17.5 kA/m",
+        "Hcj 200 plus or minus 20 kA/m",
+        "BHmax 28 plus or minus 2 kJ/m3",
+    ] {
+        assert!(catalog_observation.caveats.contains(printed_range));
+    }
+    assert!(
+        catalog_observation
+            .caveats
+            .contains("not laundered into a material measurement temperature")
+    );
+
+    let model_claim = decoded.claims().claims_for("model_relative_permeability");
+    let model_claim = model_claim[0].1;
+    assert_ne!(
+        model_claim.observations[0], catalog_observation_id,
+        "the Equation 2 derivation must retain its own observation"
+    );
+    assert_eq!(
+        model_claim
+            .validity
+            .bound("source_model_mu_equation_2_derived"),
+        Some((1.0, 1.0))
+    );
+    assert_eq!(
+        model_claim
+            .validity
+            .bound("source_model_mu_is_measured_recoil_mu"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(
+        model_claim
+            .validity
+            .bound("source_minor_loop_recoil_data_known"),
+        Some((0.0, 0.0))
+    );
+    let model_observation = decoded
+        .claims()
+        .observation(model_claim.observations[0])
+        .expect("Sjolund Y30 Equation 2 observation remains linked");
+    assert!(model_observation.method.contains("Equation 2"));
+    assert!(
+        model_observation
+            .caveats
+            .contains("not measured recoil permeability")
+    );
+    assert!(
+        model_observation
+            .caveats
+            .contains("no adequate Y30 demagnetization curve")
+    );
+
+    for refused_property in [
+        "recoil_relative_permeability",
+        "demagnetization_curve",
+        "irreversible_demagnetization_loss_boundary",
+        "remanence_temperature_coefficient",
+        "coercivity_temperature_coefficient",
+        "continuous_demagnetization_temperature_law",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "catalog/model input crossed the {refused_property} no-claim boundary"
         );
     }
 

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	sjolund-2020-y30-catalog-model-inputs
+redistribution	permitted	Creative Commons Attribution 4.0 permits sharing and adaptation with attribution; retain the authors, article title, DOI, journal citation, and license identifier; factual rows only with no table or figure reproduction
+citation	Sjölund, J., Leijon, M., and Eriksson, S. (2020), Method for optimizing the magnetic circuit of a linear generator using FEM simulations, AIP Advances 10, 035312, doi:10.1063/1.5129303
+license	CC-BY-4.0
+source	published-table-ii	properties.tsv	material-tsv-v1

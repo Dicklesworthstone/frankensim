@@ -689,6 +689,53 @@ Jinshan N42 reference:
 - <https://www.sciencedirect.com/science/article/pii/S2238785424030382>
 - <https://creativecommons.org/licenses/by/4.0/>
 
+## Y30 catalog-midpoint and model-input tranche
+
+`sjolund-2020-y30-catalog-model-inputs/` retains the Y30 inputs that Sjölund,
+Leijon, and Eriksson used for their linear-generator finite-element study.
+Table II reports the grade data as midpoint plus or minus half-range:
+remanence `385 +/- 15 mT`, coercive field strength
+`192.5 +/- 17.5 kA/m`, intrinsic coercive field strength
+`200 +/- 20 kA/m`, and maximum energy product `28 +/- 2 kJ/m^3`.
+The authors state that the average value of every magnitude is used in their
+model, so the pack admits the four midpoints as the exact source-used values.
+
+The printed half-ranges came from an online ferrite-grade catalog and carry no
+statistical confidence semantics. The current runtime uncertainty types model
+confidence-bearing half-widths, so the pack does not mislabel these catalog
+bounds as a confidence interval. Instead, it preserves all four ranges in the
+shared observation caveat and marks each runtime uncertainty `Unstated`.
+
+The paper's Equation 2 derives a constant model relative permeability from the
+remanence and energy-product midpoints,
+`mu_r = Br^2 / (4 mu_0 BHmax)`. Exact evaluation gives
+`1.0531580999909012`. That value is retained under the deliberately narrow
+property name `model_relative_permeability`: it depends on an assumed linear
+second-quadrant branch, and the authors assume isotropy because transverse data
+are unavailable. It is not relabeled as measured recoil permeability or as a
+minor-loop law. The source explicitly says that no adequate Y30
+demagnetization curve was found to validate the modeled knee point.
+
+The simulation is held at `20 degC`, but the catalog property's measurement
+temperature is not reported. The pack therefore records `20 degC` only as
+`source_simulation_temperature` while keeping
+`source_magnetic_test_temperature_known = 0`. The catalog does not identify a
+purchased product, product supplier, manufacturer, composition, production
+lot, sinter schedule, magnetization state, or magnetic test method. Those gaps
+remain fail-closed axes. This tranche supplies redistributable grade-level
+model inputs; it does not complete bead `1sxe`'s supplier/process/temperature-
+pinned Y30 material card or its temperature-dependent recoil-limit evidence.
+
+The article is distributed under CC-BY-4.0; the manifest retains its authors,
+title, DOI, journal citation, and license identifier.
+
+Y30 catalog/model-input references:
+
+- <https://doi.org/10.1063/1.5129303>
+- <https://research.chalmers.se/publication/516199>
+- <https://research.chalmers.se/publication/516199/file/516199_Fulltext.pdf>
+- <https://creativecommons.org/licenses/by/4.0/>
+
 ## Y30 optimized-motor application-demagnetization tranche
 
 `kim-baek-2026-y30-afcp-demagnetization/` retains two exact

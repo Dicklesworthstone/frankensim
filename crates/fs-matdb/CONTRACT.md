@@ -359,7 +359,11 @@ printed magnetization points plus the fixed-flux frequency-loss reference and
 exponent, while proving that absent process, anneal, test-method, and full
 Steinmetz identity remain fail-closed. The NGYC N42 battery additionally pins
 supplier, sintered grade, and coating identity while proving that incompatible
-SI/CGS energy-product prints survive as distinct claims. The NACA TN 2680
+SI/CGS energy-product prints survive as distinct claims. The Y30 catalog-input
+battery verifies the four source-used Table II midpoints and Equation 2 model
+permeability while proving that physical-product, process, test-temperature,
+measured-recoil, demagnetization-curve, and irreversible-limit authority remain
+absent. The NACA TN 2680
 battery compiles the supplier-minimum-purity 2,2,4-trimethylpentane tranche and
 verifies all fifteen apparatus-bound Table I maximum-flame-speed rows without
 promoting the report's empirical fit to a bulk-material law. The FACE G
@@ -433,7 +437,10 @@ Wankel-housing authority.
   nickel-coated cubes. A separate Jinshan N42 tranche adds exact `25 degC` and
   `120 degC` remanence, intrinsic-coercivity, and maximum-energy-product
   endpoints plus the source's two interval-average temperature coefficients
-  for its pristine, wire-cut commercial sintered state. The NACA TN 2680
+  for its pristine, wire-cut commercial sintered state. A Y30 catalog-input
+  tranche adds four source-used Table II midpoints and the paper's separately
+  derived Equation 2 model relative permeability, while retaining the printed
+  catalog ranges as non-statistical observation caveats. The NACA TN 2680
   iso-octane tranche adds one
   supplier-minimum-purity claim and fifteen atmospheric Bunsen-flame maximum-
   speed observations with explicit temperature, oxidizer, flow, burner, and
@@ -539,7 +546,19 @@ Wankel-housing authority.
   protocol, temperature-control details, field sweep, repeats, uncertainty,
   recoil permeability, and irreversible-loss boundary remain fail-closed.
   Neither the two endpoint states nor the interval-average coefficients are a
-  continuous law or extrapolation authority. The Kim and Baek Y30 claims are
+  continuous law or extrapolation authority. The Sjölund Y30 claims retain
+  grade-level values copied by the paper from an online catalog, not a physical
+  material card. The four admitted values are source-used midpoints; their
+  printed plus-or-minus catalog ranges lack confidence semantics and therefore
+  remain observation caveats with `Unstated` runtime uncertainty. The paper's
+  `20 degC` is simulation context, not a material test temperature. Product,
+  manufacturer, supplier, composition, lot, sinter schedule, magnetization
+  state, and magnetic test method remain absent. Equation 2's
+  `1.0531580999909012` value is a constant finite-element model input derived
+  from the remanence and energy-product midpoints under a linear-branch and
+  isotropy assumption; it is not measured recoil permeability, a minor-loop
+  slope, a temperature-dependent law, or an irreversible-loss boundary. The
+  Kim and Baek Y30 claims are
   application-model evidence for one optimized `750 W` axial-flux
   consequent-pole motor, not a supplier-qualified material card. The `1.654%`
   at `20 degC` and `22.396%` at `-40 degC` values are spatial maxima from 3-D
@@ -569,8 +588,9 @@ Wankel-housing authority.
   uncertainty remain absent; no density, viscosity, vapor pressure,
   distillation, heat capacity, latent heat, flame speed, ignition delay, storage,
   compatibility, or emissions authority follows. Bead 1sxe still owns the
-  N42 recoil-limit evidence and the remaining curated material/property
-  and interface-system dataset. The WO 2018/125520 Formulation 8 claims bind
+  N42 recoil-limit evidence, a supplier/process/temperature-pinned Y30 card,
+  Y30 recoil-limit evidence, and the remaining curated material/property and
+  interface-system dataset. The WO 2018/125520 Formulation 8 claims bind
   one patent-table comparator with four named source-era commercial products,
   exact as-added mass fractions, and eight printed 5W-30 property results. They
   are not authority for the SAE grade generally, current trademarked products,
