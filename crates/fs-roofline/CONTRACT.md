@@ -56,18 +56,19 @@ crates plus `std`.
   bytes verbatim.
 - `ExternalPerfGateLane` / `ExternalPerfGateReceipt` /
   `record_external_perf_gate_at_path` — the shared positive-recording boundary
-  for the FEEC and FFT performance lanes. The configured durable path is named
-  once by `EXTERNAL_PERF_GATE_LEDGER_ENV`
+  for the FEEC, FFT, and D3Q19 LBM performance lanes. The configured durable
+  path is named once by `EXTERNAL_PERF_GATE_LEDGER_ENV`
   (`FRANKENSIM_ROOFLINE_LEDGER`); an empty path, `:memory:`, or any SQLite
   `file:` URI is outside this deliberately narrow durable-path boundary. The
   gate JSON is bounded to `MAX_EXTERNAL_PERF_GATE_JSON_BYTES`, must be one
-  valid object for the typed lane (`feec-gate` or `fft-gate`), has at most 64
-  top-level fields and 64 nested containers, and must carry exactly one top-level
-  `citation_eligible:true`, `recorded:true`, `report_only:false`, and the exact
-  supplied admission receipt. Candidate, stale, denied, malformed,
-  mismatched-lane, and report-only inputs are refusals. The Ledger-typed
-  `record_external_perf_gate_in_ledger` is the in-memory test seam; FEEC/FFT use
-  the path wrapper and need no direct fs-ledger dependency.
+  valid object for the typed lane (`feec-gate`, `fft-gate`, or
+  `lbm-d3q19-gate`), has at most 64 top-level fields and 64 nested containers,
+  and must carry exactly one top-level `citation_eligible:true`,
+  `recorded:true`, `report_only:false`, and the exact supplied admission
+  receipt. Candidate, stale, denied, malformed, mismatched-lane, and
+  report-only inputs are refusals. The Ledger-typed
+  `record_external_perf_gate_in_ledger` is the in-memory test seam; FEEC/FFT/LBM
+  use the path wrapper and need no direct fs-ledger dependency.
 
   One recorder-owned transaction stores the exact axis-admission bytes as a
   content-addressed `In` artifact and the exact final-gate JSON as a

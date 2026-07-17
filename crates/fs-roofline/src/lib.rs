@@ -2532,6 +2532,8 @@ pub enum ExternalPerfGateLane {
     Feec,
     /// Memory-resident Stockham FFT lane.
     Fft,
+    /// Memory-resident sparse-grid D3Q19 LBM sweep lane.
+    Lbm,
 }
 
 impl ExternalPerfGateLane {
@@ -2541,6 +2543,7 @@ impl ExternalPerfGateLane {
         match self {
             Self::Feec => "feec",
             Self::Fft => "fft",
+            Self::Lbm => "lbm",
         }
     }
 
@@ -2548,6 +2551,7 @@ impl ExternalPerfGateLane {
         match self {
             Self::Feec => "feec-gate",
             Self::Fft => "fft-gate",
+            Self::Lbm => "lbm-d3q19-gate",
         }
     }
 
@@ -2555,6 +2559,7 @@ impl ExternalPerfGateLane {
         match self {
             Self::Feec => "external_perf_gate_feec",
             Self::Fft => "external_perf_gate_fft",
+            Self::Lbm => "external_perf_gate_lbm",
         }
     }
 }
@@ -2932,9 +2937,9 @@ fn external_gate_path_is_nondurable(path: &str) -> bool {
 /// external performance gate.
 ///
 /// Empty paths, SQLite's `:memory:` sentinel, and all `file:` URI forms are
-/// refused: FEEC/FFT cannot emit recorded/citable evidence unless the receipt
-/// survives the process. URI interpretation is deliberately outside this
-/// narrow durable-path boundary.
+/// refused: FEEC/FFT/LBM cannot emit recorded/citable evidence unless the
+/// receipt survives the process. URI interpretation is deliberately outside
+/// this narrow durable-path boundary.
 /// The supplied gate must be a bounded JSON object for the selected lane with
 /// literal positive citation/recording fields and the exact admission receipt.
 ///
@@ -5024,6 +5029,29 @@ mod tests {
                 "source receipt {source} must survive byte-for-byte"
             );
         }
+    }
+
+    #[test]
+    fn external_gate_recorder_retains_typed_lbm_lane() {
+        let axes = synthetic_axes();
+        let (_, snapshot, _) = external_gate_snapshot(&axes, "lbm-external-gate-key");
+        let gate_json = external_gate_json(ExternalPerfGateLane::Lbm, &snapshot);
+        let ledger = Ledger::open(":memory:").expect("in-memory external-gate ledger");
+
+        let receipt = record_external_perf_gate_in_ledger(
+            &ledger,
+            ExternalPerfGateLane::Lbm,
+            &snapshot,
+            &gate_json,
+        )
+        .expect("authority-admitted LBM gate must record atomically");
+
+        assert_eq!(receipt.lane(), ExternalPerfGateLane::Lbm);
+        assert!(receipt.receipt_json().contains("\"lane\":\"lbm\""));
+        assert_eq!(ledger.table_count("ops").expect("count ops"), 1);
+        assert_eq!(ledger.table_count("artifacts").expect("count artifacts"), 2);
+        assert_eq!(ledger.table_count("edges").expect("count edges"), 2);
+        assert_eq!(ledger.table_count("events").expect("count events"), 1);
     }
 
     #[test]
