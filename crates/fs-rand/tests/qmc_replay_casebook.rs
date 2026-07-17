@@ -32,6 +32,16 @@ const OWEN_INPUTS_DIGEST: u64 = 0xD52F_0C16_0B18_9289;
 
 const LATTICE_N: u32 = 257;
 const LATTICE_DIM: usize = 5;
+const LATTICE_GENERATOR_KAT: [u32; LATTICE_DIM] = [1, 71, 56, 106, 21];
+const LATTICE_ERROR_BITS_KAT: u64 = 0x3F2D_F9C3_0302_C000;
+const LATTICE_OUTPUT_DIGEST_KAT: u64 = 0x1AC8_4991_434D_6165;
+const EXACT_CBC_PREFIX_SCORE_KAT: [u128; LATTICE_DIM] = [
+    101_847_815,
+    40_362_029_797_457,
+    15_995_623_986_899_325_239,
+    6_339_386_867_986_228_279_805_729,
+    2_512_580_116_249_860_337_276_736_679_911,
+];
 const BAKER_INPUTS: [f64; 5] = [0.0, 0.125, 0.5, 0.875, 1.0];
 const BAKER_OUTPUTS: [f64; 5] = [0.0, 0.25, 1.0, 0.25, 0.0];
 const LATTICE_INPUTS_DIGEST: u64 = 0x08CF_F502_6B21_3C41;
@@ -288,6 +298,86 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
+/// Return the integer numerator of `1 + B2(residue / n)` over the common
+/// denominator `6*n^2`:
+///
+/// `1 + B2(r/n) = (7*n^2 + 6*r^2 - 6*r*n) / (6*n^2)`.
+///
+/// CBC compares candidates at a fixed prefix length, so their denominators
+/// are identical. Comparing sums of products of these numerators therefore
+/// gives the exact declared Korobov ordering without reproducing production's
+/// floating-point product cache or inheriting its roundoff-dependent ties.
+fn exact_kernel_numerator(n: u32, residue: u32) -> u128 {
+    let n = u128::from(n);
+    let residue = u128::from(residue);
+    let positive = 7 * n * n + 6 * residue * residue;
+    positive
+        .checked_sub(6 * residue * n)
+        .expect("the non-negative Bernoulli-B2 kernel numerator cannot underflow")
+}
+
+/// Score one complete prefix from first principles. The fixture's `n=257`
+/// and five dimensions fit comfortably in `u128`; checked arithmetic keeps a
+/// future fixture expansion from silently invalidating this exact oracle.
+fn exact_cbc_prefix_score(n: u32, generators: &[u32]) -> u128 {
+    let mut score = 0_u128;
+    for point in 0..n {
+        let mut product = 1_u128;
+        for &generator in generators {
+            let residue = u32::try_from(u64::from(point) * u64::from(generator) % u64::from(n))
+                .expect("a modular residue below n fits u32");
+            product = product
+                .checked_mul(exact_kernel_numerator(n, residue))
+                .expect("the finite CBC fixture score fits u128");
+        }
+        score = score
+            .checked_add(product)
+            .expect("the finite CBC fixture score fits u128");
+    }
+    score
+}
+
+/// Exhaustively construct the mathematically canonical CBC vector. Unlike
+/// `Lattice::cbc`, this oracle recomputes every candidate's whole prefix and
+/// compares exact integer scores. Equal scores are resolved explicitly toward
+/// the lower candidate, which makes the documented tie rule observable rather
+/// than an accident of loop order or floating-point summation.
+fn exact_cbc_oracle(n: u32, dim: usize) -> (Vec<u32>, Vec<u128>) {
+    let mut generators = Vec::with_capacity(dim);
+    let mut prefix_scores = Vec::with_capacity(dim);
+
+    for _ in 0..dim {
+        let mut best: Option<(u128, u32)> = None;
+        for candidate in 1..n {
+            if gcd(candidate, n) != 1 {
+                continue;
+            }
+            generators.push(candidate);
+            let score = exact_cbc_prefix_score(n, &generators);
+            let removed = generators
+                .pop()
+                .expect("the just-appended CBC candidate is present");
+            debug_assert_eq!(removed, candidate);
+
+            let replace = match best {
+                None => true,
+                Some((best_score, best_candidate)) => {
+                    score < best_score || (score == best_score && candidate < best_candidate)
+                }
+            };
+            if replace {
+                best = Some((score, candidate));
+            }
+        }
+
+        let (score, candidate) = best.expect("n >= 3 has at least one coprime CBC candidate");
+        generators.push(candidate);
+        prefix_scores.push(score);
+    }
+
+    (generators, prefix_scores)
+}
+
 fn lattice_output_digest(lattice: &Lattice, error: f64, points: &[f64]) -> u64 {
     let mut bytes = b"fs-rand:qmc:cbc-output:v1".to_vec();
     bytes.extend_from_slice(&lattice.n.to_le_bytes());
@@ -320,6 +410,51 @@ fn lattice_outcome() -> CaseOutcome {
             first.z.len()
         ));
     }
+
+    let (oracle_generators, oracle_prefix_scores) = exact_cbc_oracle(LATTICE_N, LATTICE_DIM);
+    if oracle_generators.as_slice() != &LATTICE_GENERATOR_KAT[..]
+        || oracle_prefix_scores.as_slice() != &EXACT_CBC_PREFIX_SCORE_KAT[..]
+    {
+        return qmc_failure(format!(
+            "stage=exact-oracle-kat; computed_z={oracle_generators:?}; reference_z={LATTICE_GENERATOR_KAT:?}; computed_prefix_scores={oracle_prefix_scores:?}; reference_prefix_scores={EXACT_CBC_PREFIX_SCORE_KAT:?}"
+        ));
+    }
+    for dimension in 0..LATTICE_DIM {
+        let returned_score = exact_cbc_prefix_score(LATTICE_N, &first.z[..=dimension]);
+        if returned_score != oracle_prefix_scores[dimension] {
+            return qmc_failure(format!(
+                "stage=cbc-exact-minimality; dimension={dimension}; returned_generator={}; returned_score={returned_score}; minimum_score={}; returned_prefix={:?}; canonical_prefix={:?}",
+                first.z[dimension],
+                oracle_prefix_scores[dimension],
+                &first.z[..=dimension],
+                &oracle_generators[..=dimension]
+            ));
+        }
+        if first.z[dimension] != oracle_generators[dimension] {
+            return qmc_failure(format!(
+                "stage=cbc-exact-tie-break; dimension={dimension}; returned_generator={}; canonical_lowest_generator={}; exact_score={returned_score}; returned_prefix={:?}; canonical_prefix={:?}",
+                first.z[dimension],
+                oracle_generators[dimension],
+                &first.z[..=dimension],
+                &oracle_generators[..=dimension]
+            ));
+        }
+    }
+    if first.z.as_slice() != &LATTICE_GENERATOR_KAT[..] {
+        return qmc_failure(format!(
+            "stage=generator-kat; computed={:?}; reference={LATTICE_GENERATOR_KAT:?}",
+            first.z
+        ));
+    }
+
+    let bad_generators = [1_u32; LATTICE_DIM];
+    let bad_score = exact_cbc_prefix_score(LATTICE_N, &bad_generators);
+    let optimum_score = oracle_prefix_scores[LATTICE_DIM - 1];
+    if bad_score <= optimum_score {
+        return qmc_failure(format!(
+            "stage=bad-generator-rejection; bad_z={bad_generators:?}; bad_score={bad_score}; optimum_score={optimum_score}"
+        ));
+    }
     for (dimension, &generator) in first.z.iter().enumerate() {
         if !(1..LATTICE_N).contains(&generator) || gcd(generator, LATTICE_N) != 1 {
             return qmc_failure(format!(
@@ -335,6 +470,12 @@ fn lattice_outcome() -> CaseOutcome {
             "stage=error-replay; error=0x{:016x}; replay=0x{:016x}",
             error.to_bits(),
             replay_error.to_bits()
+        ));
+    }
+    if error.to_bits() != LATTICE_ERROR_BITS_KAT {
+        return qmc_failure(format!(
+            "stage=error-kat; computed=0x{:016x}; reference=0x{LATTICE_ERROR_BITS_KAT:016x}",
+            error.to_bits()
         ));
     }
 
@@ -389,12 +530,18 @@ fn lattice_outcome() -> CaseOutcome {
         }
     }
 
+    let digest = lattice_output_digest(&first, error, &points);
+    if digest != LATTICE_OUTPUT_DIGEST_KAT {
+        return qmc_failure(format!(
+            "stage=output-digest-kat; computed={digest:016x}; reference={LATTICE_OUTPUT_DIGEST_KAT:016x}"
+        ));
+    }
+
     CaseOutcome::pass(format!(
-        "frame_version={INPUT_FRAME_VERSION}; fs_rand={}; n={LATTICE_N}; dim={LATTICE_DIM}; z={:?}; error_bits=0x{:016x}; public_points=exact; residue_permutations={LATTICE_DIM}/{LATTICE_DIM}; baker_kat=5/5; output_digest={:016x}",
+        "frame_version={INPUT_FRAME_VERSION}; fs_rand={}; n={LATTICE_N}; dim={LATTICE_DIM}; z={:?}; error_bits=0x{:016x}; exact_cbc_prefix_minima={LATTICE_DIM}/{LATTICE_DIM}; exact_tie_break=lowest_candidate; bad_generator_rejected={bad_generators:?}; public_points=exact; residue_permutations={LATTICE_DIM}/{LATTICE_DIM}; baker_kat=5/5; output_digest={digest:016x}",
         fs_rand::VERSION,
         first.z,
         error.to_bits(),
-        lattice_output_digest(&first, error, &points)
     ))
     .with_evidence("crates/fs-rand/CONTRACT.md#qmc-qmc-module")
 }
