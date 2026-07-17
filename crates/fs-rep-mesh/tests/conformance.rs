@@ -49,6 +49,25 @@ fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
     assert!(pass, "case {case}: {detail}");
 }
 
+fn failure_diagnostic(case: &str, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-rep-mesh/conformance", case);
+    let event = emitter.emit(
+        fs_obs::Severity::Error,
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-rep-mesh/conformance".to_string(),
+            case: case.to_string(),
+            pass: false,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("mesh diagnostic must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("mesh diagnostic must use the fs-obs wire schema");
+    println!("{line}");
+}
+
 struct Lcg(u64);
 
 impl Lcg {
@@ -1174,7 +1193,14 @@ fn rmesh_008_dual_contouring_reconstructs_certifies_and_detects_bad_triangles() 
             let (cert_ok, margin) = match cert {
                 Ok(report) => (true, report.worst_margin),
                 Err(fails) => {
-                    println!("bracket failures: {fails:?}");
+                    failure_diagnostic(
+                        "rmesh-008/bracket",
+                        &format!(
+                            "bracket certificate failed on fixed input; execution seed \
+                             {EXECUTION_SEED:#x}; failures: {fails:?}"
+                        ),
+                        FIXED_INPUT_SEED,
+                    );
                     (false, f64::NAN)
                 }
             };
