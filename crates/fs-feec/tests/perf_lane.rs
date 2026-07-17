@@ -24,6 +24,23 @@ use std::collections::BTreeSet;
 use std::io::Read as _;
 
 const MAX_RETAINED_RECEIPT_INPUT_BYTES: usize = fs_roofline::baseline::MAX_BASELINE_STORE_BYTES;
+const OBS_SUITE: &str = "fs-feec/perf-lane";
+
+fn emit_observation(identity: &str, name: &str, severity: fs_obs::Severity, json: String) {
+    let mut emitter = fs_obs::Emitter::new(OBS_SUITE, identity);
+    let event = emitter.emit(
+        severity,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("performance diagnostic must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("performance diagnostic must use the fs-obs wire schema");
+    println!("{line}");
+}
 
 fn json_escape(value: &str) -> String {
     use core::fmt::Write as _;
@@ -43,6 +60,22 @@ fn json_escape(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn finite_json_2(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn finite_json_3(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.3}")
+    } else {
+        "null".to_string()
+    }
 }
 
 fn read_bounded_text(path: &str, kind: &str, limit: usize) -> Result<String, String> {
@@ -379,33 +412,50 @@ fn prepare_admission(axes: &MachineAxes) -> PreparedAdmission {
     )
 }
 
-fn fail_invalid_environment(reason: &str, attainment: Option<f64>) -> ! {
+fn fail_invalid_environment(identity: &str, reason: &str, attainment: Option<f64>) -> ! {
     let escaped_reason = json_escape(reason);
     match attainment {
-        Some(value) => println!(
-            "{{\"metric\":\"feec-gate\",\"verdict\":\"environment_invalid\",\
-             \"reason\":\"{escaped_reason}\",\"attainment\":{value:.3},\
-             \"machine\":\"{}-{}\"}}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+        Some(value) => emit_observation(
+            identity,
+            "environment-invalid",
+            fs_obs::Severity::Error,
+            format!(
+                "{{\"metric\":\"feec-gate\",\"verdict\":\"environment_invalid\",\
+                 \"reason\":\"{escaped_reason}\",\"attainment\":{},\
+                 \"machine\":\"{}-{}\"}}",
+                finite_json_3(value),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
         ),
-        None => println!(
-            "{{\"metric\":\"feec-gate\",\"verdict\":\"environment_invalid\",\
-             \"reason\":\"{escaped_reason}\",\"attainment\":null,\
-             \"machine\":\"{}-{}\"}}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+        None => emit_observation(
+            identity,
+            "environment-invalid",
+            fs_obs::Severity::Error,
+            format!(
+                "{{\"metric\":\"feec-gate\",\"verdict\":\"environment_invalid\",\
+                 \"reason\":\"{escaped_reason}\",\"attainment\":null,\
+                 \"machine\":\"{}-{}\"}}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
         ),
     }
     panic!("FEEC roofline evidence rejected: {reason}");
 }
 
-fn fail_invalid_numerics(reason: &str) -> ! {
-    println!(
-        "{{\"metric\":\"feec-gate\",\"verdict\":\"numerical_invalid\",\
-         \"reason\":\"{reason}\",\"machine\":\"{}-{}\"}}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
+fn fail_invalid_numerics(identity: &str, reason: &str) -> ! {
+    emit_observation(
+        identity,
+        "numerical-invalid",
+        fs_obs::Severity::Error,
+        format!(
+            "{{\"metric\":\"feec-gate\",\"verdict\":\"numerical_invalid\",\
+             \"reason\":\"{}\",\"machine\":\"{}-{}\"}}",
+            json_escape(reason),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ),
     );
     panic!("FEEC numerical measurement rejected: {reason}");
 }
@@ -867,13 +917,18 @@ fn measure_apply(m: usize, r: usize, reps: usize) -> (f64, f64) {
 #[ignore = "perf lane: run explicitly in release with --ignored"]
 fn sum_factorized_attainment() {
     let axes = MachineAxes::probe();
-    println!("{{\"metric\":\"axes-pre\",\"axes\":{}}}", axes.to_jsonl());
+    emit_observation(
+        "axes/pre/measurement",
+        "axes-pre",
+        fs_obs::Severity::Info,
+        format!("{{\"metric\":\"axes-pre\",\"axes\":{}}}", axes.to_jsonl()),
+    );
     // Environment validity (bead 1n61): implausible axes mean the probe
     // itself was contaminated (contended/throttled machine), so BOTH the
     // numerator and denominator of attainment are garbage — refuse to
     // gate rather than emit a vacuous pass or a false failure.
     if let Some(reason) = axes.plausibility_error() {
-        fail_invalid_environment(reason, None);
+        fail_invalid_environment("terminal/pre-axes/environment-invalid", reason, None);
     }
     let admission = prepare_admission(&axes);
     // The p-sweep table (r = 1..6), retained as measurement JSON.
@@ -881,15 +936,29 @@ fn sum_factorized_attainment() {
         let m = (48 / (r + 1)).max(6);
         let (gflops, sink) = measure_apply(m, r, 3);
         if !gflops.is_finite() || gflops < 0.0 {
-            fail_invalid_environment("non-finite or negative FEEC throughput", None);
+            fail_invalid_environment(
+                &format!("terminal/sweep/r-{r}/environment-invalid"),
+                "non-finite or negative FEEC throughput",
+                None,
+            );
         }
         if !sink.is_finite() {
-            fail_invalid_numerics("non-finite FEEC apply sink");
+            fail_invalid_numerics(
+                &format!("terminal/sweep/r-{r}/numerical-invalid"),
+                "non-finite FEEC apply sink",
+            );
         }
-        println!(
-            "{{\"metric\":\"feec-apply\",\"r\":{r},\"m\":{m},\"gflops\":{gflops:.2},\
-             \"attainment_single\":{:.3},\"sink\":{sink:.3}}}",
-            gflops / axes.peak_single_gflops
+        emit_observation(
+            &format!("sweep/r-{r}/measurement"),
+            "feec-apply",
+            fs_obs::Severity::Info,
+            format!(
+                "{{\"metric\":\"feec-apply\",\"r\":{r},\"m\":{m},\"gflops\":{},\
+                 \"attainment_single\":{},\"sink\":{}}}",
+                finite_json_2(gflops),
+                finite_json_3(gflops / axes.peak_single_gflops),
+                finite_json_3(sink)
+            ),
         );
     }
     // THE GATE at p = 4 (r = 3, per the bead's p-convention: degree-4
@@ -899,15 +968,27 @@ fn sum_factorized_attainment() {
     let (gflops, sink) = measure_apply(12, 3, 6);
     let attainment = gflops / axes.peak_single_gflops;
     if !attainment.is_finite() || attainment < 0.0 {
-        fail_invalid_environment("non-finite or negative FEEC attainment", None);
+        fail_invalid_environment(
+            "terminal/gate-measurement/environment-invalid",
+            "non-finite or negative FEEC attainment",
+            None,
+        );
     }
     if !sink.is_finite() {
-        fail_invalid_numerics("non-finite FEEC gate sink");
+        fail_invalid_numerics(
+            "terminal/gate-measurement/numerical-invalid",
+            "non-finite FEEC gate sink",
+        );
     }
     let post_axes = MachineAxes::probe();
-    println!(
-        "{{\"metric\":\"axes-post\",\"axes\":{}}}",
-        post_axes.to_jsonl()
+    emit_observation(
+        "axes/post/measurement",
+        "axes-post",
+        fs_obs::Severity::Info,
+        format!(
+            "{{\"metric\":\"axes-post\",\"axes\":{}}}",
+            post_axes.to_jsonl()
+        ),
     );
     let (snapshot, configuration_refusal) = admission.snapshot(&axes, &post_axes);
     println!("{}", snapshot.receipt_json());
@@ -917,6 +998,7 @@ fn sum_factorized_attainment() {
     // kernel is fast — the whole measurement is invalid, both directions.
     if attainment > 1.5 {
         fail_invalid_environment(
+            "terminal/over-roof/environment-invalid",
             "attainment exceeds the credible roofline band",
             Some(attainment),
         );
@@ -927,7 +1009,11 @@ fn sum_factorized_attainment() {
         GateAdmission::Citable => (true, None),
         GateAdmission::ReportOnly(reason) => (false, Some(reason)),
         GateAdmission::EnvironmentInvalid(reason) => {
-            fail_invalid_environment(&reason, Some(attainment));
+            fail_invalid_environment(
+                "terminal/admission/environment-invalid",
+                &reason,
+                Some(attainment),
+            );
         }
     };
     let target_met = citation_eligible && attainment >= 0.30;
@@ -955,6 +1041,7 @@ fn sum_factorized_attainment() {
         )
         .unwrap_or_else(|error| {
             fail_invalid_environment(
+                "terminal/ledger/environment-invalid",
                 &format!("cannot ledger authority-admitted FEEC gate: {error}"),
                 Some(attainment),
             )
