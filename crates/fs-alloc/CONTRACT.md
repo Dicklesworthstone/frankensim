@@ -199,16 +199,20 @@ unsafe-capsules.json; enforced by `cargo run -p xtask -- check-unsafe`.
 None. Everything here is `[S]` solid-tier.
 
 ## Conformance tests
-`tests/conformance.rs`, cases alloc-001..alloc-010 (JSON-line verdicts;
-seeded cases carry their seed): unconditional alignment, scope reclaim,
-structured budget refusal, the 10^6-cancellation G4 storm (emits a
-`storm_assertion` event through fs-obs), shadow-model accounting +
-disjointness, concurrent leak-freedom, G5 deterministic reports, recorded
-hugepage decisions, chunk-recycling bounds, and seeded reclaimed-chunk
-corruption detection/quarantine/recovery. Any reimplementation must pass this
-suite. alloc-010 also proves that mismatch quarantine occurs before an
-operation-lease charge by requiring a fresh detection lease to retain an exact
-zero receipt.
+`tests/conformance.rs`, cases alloc-001..alloc-010 (canonical fs-obs
+`conformance_case` verdicts; seeded cases carry their input-generation seed):
+unconditional alignment, scope reclaim, structured budget refusal, the
+10^6-cancellation G4 storm (also emits a typed `storm_assertion` event),
+shadow-model accounting + disjointness, concurrent leak-freedom, G5
+deterministic reports, recorded hugepage decisions, chunk-recycling bounds,
+and seeded reclaimed-chunk corruption detection/quarantine/recovery. The
+hugepage decision and reclaim-poison receipt retain validated structured
+companion events. Any reimplementation must pass this suite. alloc-010 also
+proves that mismatch quarantine occurs before an operation-lease charge by
+requiring a fresh detection lease to retain an exact zero receipt.
+alloc-006's base seed reconstructs every thread-local RNG stream, but not the
+OS interleaving; its existing cross-schedule bit-stability no-claim still
+applies to the emitted accounting detail.
 In-module tests additionally verify first-chunk preflight sizing, structured
 reservation overflow, concurrent hard-limit claims, the exhaustive v1
 hugepage-decision identity mutation battery, exact round trips, and fail-closed

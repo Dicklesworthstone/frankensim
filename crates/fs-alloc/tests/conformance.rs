@@ -2,9 +2,9 @@
 //!
 //! Gauntlet coverage: G0 (accounting laws, alignment laws, shadow-model
 //! equivalence), G4 (the 10^6-cancellation storm, concurrent hammer), and
-//! G5 (deterministic accounting reports). Every case prints one JSON-line
-//! verdict; randomized cases carry their seed so failures replay from the
-//! log alone.
+//! G5 (deterministic accounting reports). Every case prints one canonical
+//! fs-obs conformance verdict. Randomized cases carry their input seed;
+//! alloc-006 deliberately makes no exact OS-interleaving replay claim.
 
 use fs_alloc::{
     ALLOC_ALIGN, AllocError, ArenaConfig, ArenaPool, HUGEPAGE_BYTES, HugepageOutcome,
@@ -12,12 +12,27 @@ use fs_alloc::{
     SiteStats,
 };
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-alloc/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-alloc/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-alloc/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("allocation verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("allocation verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -71,6 +86,7 @@ fn alloc_001_unconditional_128_byte_alignment() {
         "alloc-001",
         checked == 14,
         "every allocation kind is 128-byte aligned (G0 alignment law)",
+        0,
     );
 }
 
@@ -93,6 +109,7 @@ fn alloc_002_scope_reclaim_reaches_quiescence() {
         "alloc-002",
         stats.quiescent(),
         &format!("nested scopes reclaim to quiescence: {}", stats.to_json()),
+        0,
     );
 }
 
@@ -124,6 +141,7 @@ fn alloc_003_budget_refusal_is_structured_and_recoverable() {
         "alloc-003",
         structured && teaches && pool.stats().quiescent(),
         &format!("budget exhaustion is a structured teaching error: {err}"),
+        0,
     );
 }
 
@@ -193,6 +211,7 @@ fn alloc_004_g4_storm_one_million_cancellations() {
              completed={completed} {}",
             stats.to_json()
         ),
+        SEED,
     );
 }
 
@@ -251,11 +270,13 @@ fn alloc_005_g0_shadow_model_accounting_and_disjointness() {
             shadow_site_b.bytes,
             shadow_site_b.allocations
         ),
+        SEED,
     );
 }
 
 #[test]
 fn alloc_006_concurrent_arenas_and_pools_stay_leak_free() {
+    const SEED: u64 = 0xC0C0;
     let pool = ArenaPool::new(small_config());
     let shaped: ShardedPool<Vec<u64>> = ShardedPool::new(4);
     std::thread::scope(|s| {
@@ -263,7 +284,7 @@ fn alloc_006_concurrent_arenas_and_pools_stay_leak_free() {
         let shaped = &shaped;
         for t in 0..8usize {
             s.spawn(move || {
-                let mut rng = Lcg(0xC0C0 + t as u64);
+                let mut rng = Lcg(SEED + t as u64);
                 for i in 0..400usize {
                     pool.scope(|a| {
                         let len = 1 + (rng.below(1024) as usize);
@@ -283,10 +304,11 @@ fn alloc_006_concurrent_arenas_and_pools_stay_leak_free() {
         "alloc-006",
         ps.quiescent() && shaped.quiescent(),
         &format!(
-            "8 threads x 400 scopes leak nothing: arena={} pool={}",
+            "8 threads x 400 scopes leak nothing (base seed {SEED:#x}, per-thread seed = base + thread index): arena={} pool={}",
             ps.to_json(),
             ss.to_json()
         ),
+        SEED,
     );
 }
 
@@ -317,6 +339,7 @@ fn alloc_007_g5_deterministic_accounting_reports() {
         "alloc-007",
         r1 == r2 && s1 == s2,
         &format!("same seed => identical reports (G5, seed {SEED:#x}): {r1}"),
+        SEED,
     );
 }
 
@@ -362,6 +385,7 @@ fn alloc_008_hugepage_decision_is_recorded_and_honored() {
         "alloc-008",
         outcome_valid && recorded && alignment_honored,
         &format!("hugepage choice recorded + honored: {}", decision.to_json()),
+        0,
     );
 }
 
@@ -386,6 +410,7 @@ fn alloc_009_chunk_recycling_bounds_os_traffic() {
         "alloc-009",
         stats.chunks_created == created_after_warmup && stats.chunks_recycled >= 100,
         &format!("steady-state scopes recycle chunks: {}", stats.to_json()),
+        0,
     );
 }
 
@@ -496,12 +521,26 @@ fn alloc_010_seeded_reclaim_poison_detects_and_quarantines_corruption() {
     assert_eq!(detection_receipt.release_invariant_violations, 0);
     assert!(leased_pool.stats().quiescent());
 
-    println!(
-        "{{\"suite\":\"fs-alloc/conformance\",\"case\":\"alloc-010\",\
-         \"poison_version\":{},\"seed\":{SEED},\"chunk_bytes\":{},\"offset\":{},\
-         \"expected\":{},\"actual\":{}}}",
-        mutation.version, mutation.chunk_bytes, mutation.offset, mutation.expected, mutation.actual
+    let mut emitter = fs_obs::Emitter::new("fs-alloc/conformance", "alloc-010/poison");
+    let poison_event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: "fs-alloc-reclaim-poison".to_string(),
+            json: format!(
+                "{{\"poison_version\":{},\"seed\":{SEED},\"chunk_bytes\":{},\
+                 \"offset\":{},\"expected\":{},\"actual\":{}}}",
+                mutation.version,
+                mutation.chunk_bytes,
+                mutation.offset,
+                mutation.expected,
+                mutation.actual
+            ),
+        },
+        None,
     );
+    let poison_line = poison_event.to_jsonl();
+    fs_obs::validate_line(&poison_line).expect("poison receipt must use the fs-obs wire schema");
+    println!("{poison_line}");
     verdict(
         "alloc-010",
         receipt_matches
@@ -519,5 +558,6 @@ fn alloc_010_seeded_reclaim_poison_detects_and_quarantines_corruption() {
             after_detection.to_json(),
             after_recovery.to_json()
         ),
+        SEED,
     );
 }
