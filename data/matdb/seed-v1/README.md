@@ -633,6 +633,40 @@ NACA TN 2680 references:
 - <https://ntrs.nasa.gov/citations/19930083861>
 - <https://ntrs.nasa.gov/api/citations/19930083861/downloads/19930083861.pdf>
 
+## FACE G CDTRF-G 2023 v1 gasoline-surrogate tranche
+
+`face-g-cdtrf-g-2023-v1/` retains Rao, Zheng, and Yang's five-component
+`CDTRF-G` surrogate formulation targeting FACE G gasoline. The repository's
+`2023-v1` suffix versions this exact source transcription; it does not imply
+that the authors named a separate v1 formulation.
+
+Table 2 states the composition on a volume-fraction basis: `23.75%`
+isooctane, `19%` n-heptane, `42.75%` toluene, `9.5%` DIB
+(diisobutylene), and `5%` cyclohexane. The five retained claims sum exactly to
+`100%`. The source's surrounding FACE G hydrocarbon-class targets use a molar
+basis, so the pack does not conflate those targets with the surrogate's volume
+fractions. It also does not add supplier, lot, purity, preparation order,
+mixing temperature or pressure, volume-contraction treatment, or a broader
+commercial-DIB specification.
+
+The article is internally inconsistent at its displayed RON precision. Table
+2 prints `94` for CDTRF-G, while Table 7 prints `93.9` for Fuel 2 with the
+identical five fractions. Both are described as calculated, not CFR-engine
+measurements. The pack retains the two prints as separate `Unstated` claims
+with separate observations; it does not average them, prefer one, or treat
+their difference as statistical uncertainty.
+
+This is the bead's first explicit versioned multicomponent gasoline-surrogate
+composition, but not a general gasoline material card or reaction mechanism.
+The article is distributed under CC-BY-4.0, and the manifest retains the
+authors, title, DOI, journal citation, and license identifier.
+
+FACE G CDTRF-G references:
+
+- <https://doi.org/10.3390/molecules28114273>
+- <https://www.mdpi.com/1420-3049/28/11/4273>
+- <https://creativecommons.org/licenses/by/4.0/>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -707,6 +741,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv \
   --out /path/to/naca-tn-2680-2-2-4-trimethylpentane-flame-speed.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/face-g-cdtrf-g-2023-v1/manifest.tsv \
+  --out /path/to/face-g-cdtrf-g-2023-v1.fsmatpk
 ```
 
 ## No-claim boundary
@@ -871,3 +909,14 @@ tension, heat capacity, latent heat, vapor pressure, octane rating, transport
 curve, or permission to transfer the measured maxima to another burner,
 pressure, oxidizer, humidity state, or practical gasoline. The empirical fit
 printed by the report remains excluded as model-only evidence.
+
+The FACE G CDTRF-G 2023 v1 tranche is not an assay of FACE G, a fungible
+gasoline recipe, a set of pure-component cards, or a combustion mechanism. It
+binds five published volume fractions and two conflict-preserving calculated
+RON prints to one named surrogate. Component supplier, lot, purity, detailed
+DIB component specification, preparation history, mixing conditions,
+contraction behavior, measurement uncertainty, CFR-engine RON, and target-fuel
+batch identity remain absent. It supplies no density, viscosity, vapor pressure,
+distillation curve, heat capacity, latent heat, flame speed, ignition delay,
+emissions behavior, storage stability, material compatibility, or authority
+outside the source's reported modeling context.

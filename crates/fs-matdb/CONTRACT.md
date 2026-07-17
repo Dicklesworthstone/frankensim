@@ -317,7 +317,9 @@ grade, and coating identity while proving that incompatible SI/CGS energy-produc
 prints survive as distinct claims. The NACA TN 2680 battery compiles the
 supplier-minimum-purity 2,2,4-trimethylpentane tranche and verifies all fifteen
 apparatus-bound Table I maximum-flame-speed rows without promoting the report's
-empirical fit to a bulk-material law.
+empirical fit to a bulk-material law. The FACE G CDTRF-G 2023 v1 battery checks
+five exact volume fractions, their unit sum, and two conflict-preserving
+calculated-RON prints for the same named formulation.
 
 ## No-claim boundaries
 
@@ -369,7 +371,10 @@ empirical fit to a bulk-material law.
   nickel-coated cubes. The NACA TN 2680 iso-octane tranche adds one
   supplier-minimum-purity claim and fifteen atmospheric Bunsen-flame maximum-
   speed observations with explicit temperature, oxidizer, flow, burner, and
-  missing-condition metadata.
+  missing-condition metadata. The FACE G CDTRF-G 2023 v1 tranche adds five
+  composition claims on the source's volume-fraction basis and two separately
+  provenance-linked calculated-RON claims (`94` and `93.9`) for the identical
+  formulation.
   The gas associations do not define air or exhaust mixture compositions,
   humidity, or combustion completeness. The Aluminum claims do not define a
   continuous constitutive curve or a general-purpose design card; their NIST
@@ -458,9 +463,17 @@ empirical fit to a bulk-material law.
   remain absent. The observations are not a pure-fluid property card, gasoline
   surrogate specification, reaction mechanism, transferable burner law, or
   authority for density, viscosity, surface tension, heat capacity, latent heat,
-  vapor pressure, octane rating, or the report's empirical fit. Bead 1sxe still
-  owns the versioned multicomponent gasoline surrogate, temperature-dependent
-  N42 card, and the remaining curated material/property and interface-system dataset.
+  vapor pressure, octane rating, or the report's empirical fit. The FACE G
+  CDTRF-G 2023 v1 claims bind one named surrogate's five published volume
+  fractions and two internally inconsistent calculated-RON prints. They are not
+  an assay of FACE G, a fungible gasoline recipe, pure-component cards, or a
+  combustion mechanism. Component suppliers, lots, purities, preparation and
+  mixing state, volume-contraction treatment, CFR-engine RON, and statistical
+  uncertainty remain absent; no density, viscosity, vapor pressure,
+  distillation, heat capacity, latent heat, flame speed, ignition delay, storage,
+  compatibility, or emissions authority follows. Bead 1sxe still owns the
+  temperature-dependent N42 card and the remaining curated material/property
+  and interface-system dataset.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,

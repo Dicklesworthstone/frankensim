@@ -38,6 +38,8 @@ const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
 const NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv";
+const FACE_G_CDTRF_G_2023_V1_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/face-g-cdtrf-g-2023-v1/manifest.tsv";
 const AISI_4140_RC33_SEED_MANIFEST: &str = "data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv";
 const AISI_1045_COLD_DRAWN_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv";
@@ -2081,6 +2083,184 @@ fn g3_cli_compiles_committed_naca_tn_2680_isooctane_flame_speed_seed() {
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "source-absent or model-only NACA TN 2680 property must remain refused: {refused_property}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_face_g_cdtrf_g_2023_v1_surrogate_seed() {
+    let manifest = workspace_path(FACE_G_CDTRF_G_2023_V1_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed FACE G CDTRF-G 2023 v1 surrogate seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("face-g-cdtrf-g-2023-v1-first.fsmatpk");
+    let second_path = directory.join("face-g-cdtrf-g-2023-v1-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first FACE G CDTRF-G seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second FACE G CDTRF-G seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "FACE G CDTRF-G decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first FACE G CDTRF-G pack");
+    let second_bytes = fs::read(second_path).expect("read second FACE G CDTRF-G pack");
+    assert_eq!(first_bytes, second_bytes, "FACE G CDTRF-G pack bytes moved");
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode FACE G CDTRF-G pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify FACE G CDTRF-G pack identity");
+
+    assert_eq!(decoded.pack_id(), "face-g-cdtrf-g-2023-v1");
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("Creative Commons"));
+    assert_eq!(decoded.claims().claim_count(), 7);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expected_components = [
+        ("isooctane_component_volume_fraction", 23.75),
+        ("n_heptane_component_volume_fraction", 19.0),
+        ("toluene_component_volume_fraction", 42.75),
+        ("diisobutylene_component_volume_fraction", 9.5),
+        ("cyclohexane_component_volume_fraction", 5.0),
+    ];
+    let mut fraction_sum = 0.0;
+    for (property, source_percent) in expected_components {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing unique CDTRF-G {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("CDTRF-G {property} was not scalar");
+        };
+        let expected_fraction = source_percent * 0.01;
+        assert!((*value - expected_fraction).abs() / expected_fraction <= 2.0e-15);
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        fraction_sum += *value;
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_composition_basis_is_volume_fraction"),
+            Some((1.0, 1.0))
+        );
+        for missing_axis in [
+            "source_component_supplier_known",
+            "source_component_lot_known",
+            "source_component_purity_known",
+            "source_mixing_temperature_known",
+            "source_mixing_pressure_known",
+            "source_volume_contraction_treatment_known",
+        ] {
+            assert_eq!(
+                claim.validity.bound(missing_axis),
+                Some((0.0, 0.0)),
+                "CDTRF-G {property} must retain missing axis {missing_axis}"
+            );
+        }
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, CC_BY_4_0_LICENSE);
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("10.3390/molecules28114273")
+        );
+        assert!(claim.provenance.source.contains("[source:primary]"));
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("CDTRF-G composition observation remains linked");
+        assert_eq!(
+            observation.specimen,
+            "face-g-targeted-cdtrf-g-2023-v1-source-component-lots-and-purities-unspecified"
+        );
+        assert!(observation.method.contains("Table 2 CDTRF-G"));
+        assert!(observation.caveats.contains("sum to exactly 100 percent"));
+        assert!(observation.caveats.contains("molar basis"));
+    }
+    assert!((fraction_sum - 1.0_f64).abs() <= 2.0e-15);
+
+    let ron_claims = decoded
+        .claims()
+        .claims_for("reported_calculated_research_octane_number");
+    assert_eq!(ron_claims.len(), 2);
+    assert_ne!(
+        ron_claims[0].1.observations[0], ron_claims[1].1.observations[0],
+        "conflicting CDTRF-G RON prints must retain distinct observations"
+    );
+    let mut ron_values = ron_claims
+        .iter()
+        .map(|(_, claim)| match &claim.value {
+            PropertyValue::Scalar { value, dims } => {
+                assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+                *value
+            }
+            PropertyValue::Curve { .. } => panic!("CDTRF-G RON was not scalar"),
+        })
+        .collect::<Vec<_>>();
+    ron_values.sort_by(f64::total_cmp);
+    assert_eq!(ron_values, vec![93.9, 94.0]);
+    for (_, claim) in ron_claims {
+        assert_eq!(
+            claim.validity.bound("source_octane_measurement_performed"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_octane_calculation_basis_unambiguous"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_component_purity_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, CC_BY_4_0_LICENSE);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("CDTRF-G RON observation remains linked");
+        assert!(observation.caveats.contains("Table 2"));
+        assert!(observation.caveats.contains("Table 7"));
+        assert!(observation.caveats.contains("separate"));
+    }
+
+    for refused_property in [
+        "density",
+        "dynamic_viscosity",
+        "surface_tension",
+        "specific_heat_capacity",
+        "heat_of_vaporization",
+        "vapor_pressure",
+        "motor_octane_number",
+        "laminar_flame_speed",
+        "ignition_delay_time",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "source-absent or model-only CDTRF-G property must remain refused: {refused_property}"
         );
     }
 
