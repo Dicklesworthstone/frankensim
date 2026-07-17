@@ -34,6 +34,7 @@ const MAX_ITERATIONS: usize = 300;
 const OBJECTIVE_ORACLE_VERSION: &str = "rosenbrock-chain-independent-v1";
 const HESSIAN_ORACLE_VERSION: &str = "rosenbrock-tridiagonal-independent-v1";
 const TRUST_CONFIG_VERSION: &str = "trust-region-newton-steihaug-v1";
+const TRACE_ORACLE_VERSION: &str = "trust-region-callback-protocol-replay-v2";
 const INITIAL_TRUST_RADIUS: f64 = 1.0;
 const STEIHAUG_RELATIVE_TOLERANCE: f64 = 1e-8;
 const STEIHAUG_GRADIENT_NORM_FLOOR: f64 = 1e-30;
@@ -177,11 +178,13 @@ struct ReceiptPayload {
     suite: &'static str,
     mutation_seed: u64,
     event_seed_sentinel: u64,
+    fs_ascent_version: &'static str,
     fs_math_version: &'static str,
     fs_obs_version: &'static str,
     objective_oracle_version: &'static str,
     hessian_oracle_version: &'static str,
     trust_config_version: &'static str,
+    trace_oracle_version: &'static str,
     config: TrustRegionConfigPayload,
     start_bits: Vec<u64>,
     objective_calls: Vec<ObjectiveCall>,
@@ -199,11 +202,11 @@ struct ReceiptPayload {
 impl ReceiptPayload {
     #[allow(clippy::too_many_lines)] // One canonical field-order audit for the complete receipt.
     fn identity(&self) -> ReplayIdentity {
-        let mut builder = IdentityBuilder::new("fs-ascent-trust-region-study-receipt-v3")
+        let mut builder = IdentityBuilder::new("fs-ascent-trust-region-study-receipt-v4")
             .str("suite", self.suite)
             .u64("mutation-seed", self.mutation_seed)
             .u64("event-seed-sentinel", self.event_seed_sentinel)
-            .str("fs-ascent-version", fs_ascent::VERSION)
+            .str("fs-ascent-version", self.fs_ascent_version)
             .str("fs-math-version", self.fs_math_version)
             .str("fs-obs-version", self.fs_obs_version)
             .str("engine", "trust_region_newton/Steihaug-CG")
@@ -213,6 +216,7 @@ impl ReceiptPayload {
             .str("objective-oracle-version", self.objective_oracle_version)
             .str("hessian-oracle-version", self.hessian_oracle_version)
             .str("trust-config-version", self.trust_config_version)
+            .str("trace-oracle-version", self.trace_oracle_version)
             .u64("dimension", self.config.dimension as u64)
             .u64(
                 "gradient-tolerance-bits",
@@ -424,6 +428,10 @@ enum SemanticRefusal {
     TraceOrdinalMismatch,
     TraceRoleMismatch,
     TraceSegmentMismatch,
+    SteihaugReplayMismatch,
+    TrustTransitionMismatch,
+    TrustTerminationMismatch,
+    ReportStateMismatch,
     NegativeCurvatureMismatch,
     NegativeCurvatureWitnessMismatch,
 }
@@ -581,6 +589,12 @@ enum TraceEventLocator {
 struct IterationSegment {
     steihaug_call_indices: Vec<usize>,
     model_decrease_call_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrustProtocolReplay {
+    negative_curvature_call_indices: Vec<usize>,
+    final_objective_call_index: usize,
 }
 
 fn classify_captured_hessian_calls(
@@ -777,6 +791,251 @@ fn reconstruct_iteration_segments(
     Ok(segments)
 }
 
+fn replay_boundary_tau(
+    point: &[f64],
+    direction: &[f64],
+    radius: f64,
+) -> Result<f64, SemanticRefusal> {
+    let point_direction = dot(point, direction);
+    let direction_squared = dot(direction, direction);
+    let point_squared = dot(point, point);
+    let discriminant = point_direction.mul_add(
+        point_direction,
+        direction_squared * (radius * radius - point_squared),
+    );
+    if !point_direction.is_finite()
+        || !direction_squared.is_finite()
+        || direction_squared <= 0.0
+        || !point_squared.is_finite()
+        || !discriminant.is_finite()
+    {
+        return Err(SemanticRefusal::NonFiniteEvidence);
+    }
+    let tau = (-point_direction + fs_math::det::sqrt(discriminant.max(0.0))) / direction_squared;
+    if !tau.is_finite() || tau < 0.0 {
+        return Err(SemanticRefusal::NonFiniteEvidence);
+    }
+    Ok(tau)
+}
+
+/// Replay the private production Steihaug state machine from the captured
+/// callback transcript. Recorded Hessian products drive the bit-exact state
+/// recurrence because those are the values production consumed; the separate
+/// analytic Hessian oracle below independently checks their values and signs.
+fn replay_steihaug_segment(
+    gradient: &[f64],
+    radius: f64,
+    calls: &[HessianVectorCall],
+    segment: &IterationSegment,
+) -> Result<(Vec<f64>, Option<usize>), SemanticRefusal> {
+    let mut step = vec![0.0; gradient.len()];
+    let mut residual: Vec<f64> = gradient.iter().map(|value| -value).collect();
+    let mut direction = residual.clone();
+    let mut residual_squared = dot(&residual, &residual);
+    let initial_gradient_norm = residual_squared.sqrt();
+    if !radius.is_finite()
+        || radius <= 0.0
+        || !residual_squared.is_finite()
+        || !initial_gradient_norm.is_finite()
+    {
+        return Err(SemanticRefusal::NonFiniteEvidence);
+    }
+
+    let maximum_steps = STEIHAUG_MAX_STEPS_PER_DIMENSION
+        .checked_mul(gradient.len())
+        .ok_or(SemanticRefusal::SteihaugReplayMismatch)?;
+    let mut captured_position = 0_usize;
+    for _ in 0..maximum_steps {
+        let residual_norm = residual_squared.sqrt();
+        if !residual_norm.is_finite() {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        if residual_norm
+            < STEIHAUG_RELATIVE_TOLERANCE * initial_gradient_norm.max(STEIHAUG_GRADIENT_NORM_FLOOR)
+        {
+            if captured_position != segment.steihaug_call_indices.len() {
+                return Err(SemanticRefusal::SteihaugReplayMismatch);
+            }
+            return Ok((step, None));
+        }
+
+        let Some(&call_index) = segment.steihaug_call_indices.get(captured_position) else {
+            return Err(SemanticRefusal::SteihaugReplayMismatch);
+        };
+        let call = &calls[call_index];
+        if call.direction_bits != bits(&direction) {
+            return Err(SemanticRefusal::SteihaugReplayMismatch);
+        }
+        let hessian_direction = decode_finite(&call.product_bits)?;
+        captured_position += 1;
+
+        let directional_curvature = dot(&direction, &hessian_direction);
+        if !directional_curvature.is_finite() {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        if directional_curvature <= NEGATIVE_CURVATURE_THRESHOLD {
+            if captured_position != segment.steihaug_call_indices.len() {
+                return Err(SemanticRefusal::SteihaugReplayMismatch);
+            }
+            let tau = replay_boundary_tau(&step, &direction, radius)?;
+            for index in 0..step.len() {
+                step[index] = tau.mul_add(direction[index], step[index]);
+            }
+            return Ok((step, Some(call_index)));
+        }
+
+        let alpha = residual_squared / directional_curvature;
+        if !alpha.is_finite() {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        let mut next_step = step.clone();
+        for index in 0..next_step.len() {
+            next_step[index] = alpha.mul_add(direction[index], next_step[index]);
+        }
+        let next_step_norm = dot(&next_step, &next_step).sqrt();
+        if !next_step_norm.is_finite() {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        if next_step_norm >= radius {
+            if captured_position != segment.steihaug_call_indices.len() {
+                return Err(SemanticRefusal::SteihaugReplayMismatch);
+            }
+            let tau = replay_boundary_tau(&step, &direction, radius)?;
+            for index in 0..step.len() {
+                step[index] = tau.mul_add(direction[index], step[index]);
+            }
+            return Ok((step, None));
+        }
+
+        step = next_step;
+        for index in 0..residual.len() {
+            residual[index] = alpha.mul_add(-hessian_direction[index], residual[index]);
+        }
+        let next_residual_squared = dot(&residual, &residual);
+        if !next_residual_squared.is_finite() || residual_squared <= 0.0 {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        let beta = next_residual_squared / residual_squared;
+        if !beta.is_finite() {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        residual_squared = next_residual_squared;
+        for index in 0..direction.len() {
+            direction[index] = beta.mul_add(direction[index], residual[index]);
+        }
+    }
+
+    if captured_position != segment.steihaug_call_indices.len() {
+        return Err(SemanticRefusal::SteihaugReplayMismatch);
+    }
+    Ok((step, None))
+}
+
+/// Reconstruct every state transition that the public report summarizes. This
+/// closes the otherwise-real ambiguity where the next Hessian point could be
+/// changed from the accepted trial to the old current point (or vice versa)
+/// while still satisfying a merely structural "one of those two" check.
+fn replay_trust_region_protocol(
+    payload: &ReceiptPayload,
+    segments: &[IterationSegment],
+) -> Result<TrustProtocolReplay, SemanticRefusal> {
+    if segments.len() != payload.report_iterations {
+        return Err(SemanticRefusal::AccountingMismatch);
+    }
+
+    let mut current_objective_call_index = 0_usize;
+    let mut radius = INITIAL_TRUST_RADIUS;
+    let mut negative_curvature_call_indices = Vec::new();
+    for (outer_iteration, segment) in segments.iter().enumerate() {
+        let current_call = &payload.objective_calls[current_objective_call_index];
+        let current_gradient = decode_finite(&current_call.gradient_bits)?;
+        let current_gradient_norm = inf_norm(&current_gradient);
+        if current_gradient_norm <= GRADIENT_TOLERANCE {
+            return Err(SemanticRefusal::TrustTerminationMismatch);
+        }
+
+        let model_call = &payload.hessian_vector_calls[segment.model_decrease_call_index];
+        if model_call.point_bits != current_call.point_bits {
+            return Err(SemanticRefusal::TrustTransitionMismatch);
+        }
+        let (step, negative_curvature_call_index) = replay_steihaug_segment(
+            &current_gradient,
+            radius,
+            &payload.hessian_vector_calls,
+            segment,
+        )?;
+        if model_call.direction_bits != bits(&step) {
+            return Err(SemanticRefusal::SteihaugReplayMismatch);
+        }
+        if let Some(call_index) = negative_curvature_call_index {
+            negative_curvature_call_indices.push(call_index);
+        }
+
+        let model_product = decode_finite(&model_call.product_bits)?;
+        let gradient_step = dot(&current_gradient, &step);
+        let step_hessian_step = dot(&step, &model_product);
+        let model_decrease = -gradient_step - 0.5 * step_hessian_step;
+        let current_objective = f64::from_bits(current_call.objective_bits);
+        let trial_call = &payload.objective_calls[outer_iteration + 1];
+        let trial_objective = f64::from_bits(trial_call.objective_bits);
+        let actual_decrease = current_objective - trial_objective;
+        if !gradient_step.is_finite()
+            || !step_hessian_step.is_finite()
+            || !model_decrease.is_finite()
+            || !actual_decrease.is_finite()
+        {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        let agreement_ratio = if model_decrease.abs() < MODEL_DECREASE_ZERO_THRESHOLD {
+            0.0
+        } else {
+            actual_decrease / model_decrease
+        };
+        let step_norm = dot(&step, &step).sqrt();
+        if !agreement_ratio.is_finite() || !step_norm.is_finite() {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+
+        if agreement_ratio < SHRINK_RATIO_THRESHOLD {
+            radius *= RADIUS_SHRINK_FACTOR;
+        } else if agreement_ratio > GROW_RATIO_THRESHOLD
+            && (step_norm - radius).abs() < BOUNDARY_RELATIVE_TOLERANCE * radius
+        {
+            radius = (RADIUS_GROW_FACTOR * radius).min(MAX_TRUST_RADIUS);
+        }
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(SemanticRefusal::NonFiniteEvidence);
+        }
+        if agreement_ratio > ACCEPT_RATIO_THRESHOLD {
+            current_objective_call_index = outer_iteration + 1;
+        }
+        if outer_iteration + 1 < segments.len() && radius < MIN_TRUST_RADIUS {
+            return Err(SemanticRefusal::TrustTerminationMismatch);
+        }
+    }
+
+    let final_call = &payload.objective_calls[current_objective_call_index];
+    let final_gradient = decode_finite(&final_call.gradient_bits)?;
+    let final_gradient_norm = inf_norm(&final_gradient);
+    if payload.report_x_bits != final_call.point_bits
+        || payload.report_f_bits != final_call.objective_bits
+        || payload.report_gradient_norm_bits != final_gradient_norm.to_bits()
+    {
+        return Err(SemanticRefusal::ReportStateMismatch);
+    }
+    if payload.report_iterations < MAX_ITERATIONS
+        && radius >= MIN_TRUST_RADIUS
+        && final_gradient_norm > GRADIENT_TOLERANCE
+    {
+        return Err(SemanticRefusal::TrustTerminationMismatch);
+    }
+
+    Ok(TrustProtocolReplay {
+        negative_curvature_call_indices,
+        final_objective_call_index: current_objective_call_index,
+    })
+}
+
 fn independently_count_negative_curvature_triggers(
     calls: &[HessianVectorCall],
     segments: &[IterationSegment],
@@ -865,11 +1124,13 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
     if payload.suite != SUITE
         || payload.mutation_seed != MUTATION_SEED
         || payload.event_seed_sentinel != EVENT_SEED_SENTINEL
+        || payload.fs_ascent_version != fs_ascent::VERSION
         || payload.fs_math_version != fs_math::VERSION
         || payload.fs_obs_version != fs_obs::VERSION
         || payload.objective_oracle_version != OBJECTIVE_ORACLE_VERSION
         || payload.hessian_oracle_version != HESSIAN_ORACLE_VERSION
         || payload.trust_config_version != TRUST_CONFIG_VERSION
+        || payload.trace_oracle_version != TRACE_ORACLE_VERSION
     {
         return Err(SemanticRefusal::FixtureMetadataMismatch);
     }
@@ -923,9 +1184,12 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
         &payload.hessian_vector_calls,
         payload.report_iterations,
     )?;
+    let protocol = replay_trust_region_protocol(payload, &segments)?;
     let trigger_indices =
         independently_count_negative_curvature_triggers(&payload.hessian_vector_calls, &segments)?;
-    if trigger_indices.is_empty() || payload.report_negative_curvature_hits != trigger_indices.len()
+    if trigger_indices.is_empty()
+        || protocol.negative_curvature_call_indices != trigger_indices
+        || payload.report_negative_curvature_hits != trigger_indices.len()
     {
         return Err(SemanticRefusal::NegativeCurvatureMismatch);
     }
@@ -949,10 +1213,10 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
     }
 
     let report_x = decode_finite(&payload.report_x_bits)?;
-    if !payload
+    if payload
         .objective_calls
-        .iter()
-        .any(|call| call.point_bits == payload.report_x_bits)
+        .get(protocol.final_objective_call_index)
+        .is_none_or(|call| call.point_bits != payload.report_x_bits)
     {
         return Err(SemanticRefusal::ReportObjectiveMismatch);
     }
@@ -1063,11 +1327,13 @@ fn receipt(start: &[f64], run: &RunRecord) -> RetainedReceipt {
         suite: SUITE,
         mutation_seed: MUTATION_SEED,
         event_seed_sentinel: EVENT_SEED_SENTINEL,
+        fs_ascent_version: fs_ascent::VERSION,
         fs_math_version: fs_math::VERSION,
         fs_obs_version: fs_obs::VERSION,
         objective_oracle_version: OBJECTIVE_ORACLE_VERSION,
         hessian_oracle_version: HESSIAN_ORACLE_VERSION,
         trust_config_version: TRUST_CONFIG_VERSION,
+        trace_oracle_version: TRACE_ORACLE_VERSION,
         config: TrustRegionConfigPayload::canonical(),
         start_bits,
         objective_calls: run.objective_calls.clone(),
@@ -1096,6 +1362,83 @@ fn mutate_returned_decision(receipt: &RetainedReceipt) -> (RetainedReceipt, usiz
     );
     mutant.reseal();
     (mutant, coordinate, mask)
+}
+
+/// Flip one already-evaluated outer transition from its production-selected
+/// current point to the other structurally plausible state. The final segment
+/// is used so the old permissive either/or check cannot be rescued or rejected
+/// by a later segment. All Hessian products and x+p linkage are resealed
+/// consistently, leaving exact rho/acceptance replay as the decisive gate.
+fn mutate_final_acceptance_transition(receipt: &RetainedReceipt) -> RetainedReceipt {
+    let segments = reconstruct_iteration_segments(
+        &receipt.payload.start_bits,
+        &receipt.payload.objective_calls,
+        &receipt.payload.hessian_vector_calls,
+        receipt.payload.report_iterations,
+    )
+    .expect("reference trace must have structurally valid iteration segments");
+    let outer_iteration = segments
+        .len()
+        .checked_sub(1)
+        .filter(|&iteration| iteration > 0)
+        .expect("reference study must contain at least two outer iterations");
+    let prior_model_index = segments[outer_iteration - 1].model_decrease_call_index;
+    let current_model_index = segments[outer_iteration].model_decrease_call_index;
+    let prior_current_bits = &receipt.payload.hessian_vector_calls[prior_model_index].point_bits;
+    let prior_trial_bits = &receipt.payload.objective_calls[outer_iteration].point_bits;
+    let actual_current_bits = &receipt.payload.hessian_vector_calls[current_model_index].point_bits;
+    assert_ne!(
+        prior_current_bits, prior_trial_bits,
+        "the final reference transition must distinguish current and trial states"
+    );
+    let alternate_current_bits = if actual_current_bits == prior_current_bits {
+        prior_trial_bits.clone()
+    } else if actual_current_bits == prior_trial_bits {
+        prior_current_bits.clone()
+    } else {
+        panic!("the final reference current point must be the prior current or prior trial")
+    };
+
+    let mut mutant = receipt.clone();
+    let alternate_current = decode_finite(&alternate_current_bits)
+        .expect("the alternate production state must be finite and dimension-correct");
+    let trial_point =
+        decode_finite(&mutant.payload.objective_calls[outer_iteration + 1].point_bits)
+            .expect("the following trial state must be finite and dimension-correct");
+    let replacement_step: Vec<f64> = trial_point
+        .iter()
+        .zip(&alternate_current)
+        .map(|(trial, current)| trial - current)
+        .collect();
+    assert!(
+        alternate_current
+            .iter()
+            .zip(&replacement_step)
+            .zip(&trial_point)
+            .all(|((&current, &step), &trial)| (current + step).to_bits() == trial.to_bits()),
+        "acceptance red mutation must preserve production's bit-exact x+p linkage"
+    );
+
+    let segment = &segments[outer_iteration];
+    for &call_index in &segment.steihaug_call_indices {
+        let call = &mutant.payload.hessian_vector_calls[call_index];
+        let direction = decode_finite(&call.direction_bits)
+            .expect("reference Steihaug direction must be finite and dimension-correct");
+        let product = fixture_rosenbrock_hessian_vector(&alternate_current, &direction);
+        let call = &mutant.payload.hessian_vector_calls[call_index];
+        assert_eq!(call.outer_iteration, outer_iteration);
+        let call = &mut mutant.payload.hessian_vector_calls[call_index];
+        call.point_bits = alternate_current_bits.clone();
+        call.product_bits = bits(&product);
+    }
+    let model_call = &mut mutant.payload.hessian_vector_calls[segment.model_decrease_call_index];
+    let replacement_product =
+        fixture_rosenbrock_hessian_vector(&alternate_current, &replacement_step);
+    model_call.point_bits = alternate_current_bits;
+    model_call.direction_bits = bits(&replacement_step);
+    model_call.product_bits = bits(&replacement_product);
+    mutant.reseal();
+    mutant
 }
 
 fn assert_stale_and_resealed_refusal(
@@ -1217,11 +1560,7 @@ fn trust_region_study_replays_and_rejects_seeded_red_mutation() {
         "the seeded red mutation and evidence identity must be stable"
     );
     assert_ne!(mutant.declared_identity, reference.declared_identity);
-    assert_stale_and_resealed_refusal(
-        &reference,
-        &mutant,
-        SemanticRefusal::ReportObjectiveMismatch,
-    );
+    assert_stale_and_resealed_refusal(&reference, &mutant, SemanticRefusal::ReportStateMismatch);
     assert_eq!(
         admit_receipt(&mutant.declared_identity, &reference),
         Err(MergeRefusal::ReferenceIdentityMismatch),
@@ -1285,6 +1624,28 @@ fn trust_region_study_replays_and_rejects_seeded_red_mutation() {
     let role_mutant = RetainedReceipt::new(role_payload);
     assert_stale_and_resealed_refusal(&reference, &role_mutant, SemanticRefusal::TraceRoleMismatch);
 
+    let mut steihaug_payload = reference.payload.clone();
+    let steihaug_call = steihaug_payload
+        .hessian_vector_calls
+        .iter_mut()
+        .find(|call| call.role == HessianVectorRole::Steihaug)
+        .expect("reference trace contains a Steihaug search-direction call");
+    steihaug_call.direction_bits[0] ^= 1_u64 << 20;
+    let steihaug_point = decode_finite(&steihaug_call.point_bits)
+        .expect("reference Steihaug point must be finite and dimension-correct");
+    let steihaug_direction = decode_finite(&steihaug_call.direction_bits)
+        .expect("mantissa-only Steihaug mutation must remain finite");
+    steihaug_call.product_bits = bits(&fixture_rosenbrock_hessian_vector(
+        &steihaug_point,
+        &steihaug_direction,
+    ));
+    let steihaug_mutant = RetainedReceipt::new(steihaug_payload);
+    assert_stale_and_resealed_refusal(
+        &reference,
+        &steihaug_mutant,
+        SemanticRefusal::SteihaugReplayMismatch,
+    );
+
     let mut segment_payload = reference.payload.clone();
     let corrupted_iteration = segment_payload.hessian_vector_calls[0]
         .outer_iteration
@@ -1295,6 +1656,13 @@ fn trust_region_study_replays_and_rejects_seeded_red_mutation() {
         &reference,
         &segment_mutant,
         SemanticRefusal::TraceSegmentMismatch,
+    );
+
+    let transition_mutant = mutate_final_acceptance_transition(&reference);
+    assert_stale_and_resealed_refusal(
+        &reference,
+        &transition_mutant,
+        SemanticRefusal::TrustTransitionMismatch,
     );
 
     let mut negative_claim_payload = reference.payload.clone();
