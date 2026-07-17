@@ -19,6 +19,7 @@ fs-substrate = { path = "../fs-substrate" }
 frontier-sme2 = []
 
 [dev-dependencies]
+fs-casebook = { path = "../fs-casebook" }
 
 [[test]]
 name = "sme2_battery"

@@ -87,18 +87,30 @@ when a consumer wants it — never load-bearing. `frontier-sme2` is the
 separate fs-simd-sme2 bead.
 
 ## Conformance tests
-tier_equivalence_battery (lens 0..67 × finite seeded values for reduction
-envelopes, plus explicit subnormal/qNaN/sNaN/infinity/invalid-product/±0
-microkernel cases, bitwise + envelope), dispatch singleton + tier match, known answers
-(bit-exact), alignment helper, loud length mismatch. VERIFIED EXECUTION:
-aarch64-apple NEON (M4 Pro, local) and x86-64 AVX2 (Threadripper PRO 5995WX,
-trj) — both green. Miri lane green (scalar dispatch).
+The shared `fs-casebook` runner records three bounded, replay-complete cases:
+exact primitive known answers, the exhaustive 16-row pure
+`mk8x4_f64_tier_for` admission truth table, and resolved dispatch-table versus
+scalar-twin bit equivalence over 30 vector fixtures plus eight packed 8×4 tile
+fixtures. Records name the global dispatch tier and the effective 8×4 tier
+separately, preserving operation-specific fallback truth. A disclosed
+`0xF51D_0001` seeded reference corruption proves both the structured red record
+and `assert_green` refusal path. These records are portable G0 evidence suitable
+for separately retained cross-host execution; they do not replace the broader
+source-level battery or themselves constitute a G5 cross-ISA comparison.
+
+That battery covers lengths 0..67 × finite seeded values for reduction
+envelopes, explicit subnormal/qNaN/sNaN/infinity/invalid-product/±0
+microkernel cases, dispatch singleton + tier match, alignment, and loud length
+mismatch refusal. VERIFIED EXECUTION: aarch64-apple NEON (M4 Pro, local) and
+x86-64 AVX2 (Threadripper PRO 5995WX, trj) — both green. Miri lane green
+(scalar dispatch). The structured Casebook tranche remains proof-pending until
+the central batch records its requested package run.
 
 ## No-claim boundaries
 - AVX-512 EXECUTION unverified (Zen 3 lacks it; compile-checked for both
   x86 targets; runs when a Zen 4/Sapphire-Rapids-class runner exists —
   ci-gauntlet-pipeline bead).
-- x86 tier v1 covers axpy/dot/sum; scale/mul_elem/fma3 fall back to scalar
-  there until fs-la's packing kernels demand them (<300-line capsule cap).
+- x86 tier v1 covers axpy/fma3/fmacc/dot/sum; scale and mul_elem fall back to
+  scalar there (<300-line capsule cap).
 - No f32 variants yet (arrive with their consumers).
 - No performance claims (roofline harness owns those).
