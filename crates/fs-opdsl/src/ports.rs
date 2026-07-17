@@ -214,6 +214,8 @@ impl PortDiscretization {
 pub enum PortPrimitiveKind {
     /// One side of an admitted lossless two-port junction.
     ConservativeJunction,
+    /// One side of an evidence-bound reversible skew coupling.
+    ReversibleSkewCoupling,
     /// Stored-energy descriptor with a named constitutive gradient.
     Storage,
     /// Evidence-bound irreversible constitutive relation.
@@ -226,10 +228,121 @@ impl PortPrimitiveKind {
     const fn as_str(self) -> &'static str {
         match self {
             Self::ConservativeJunction => "conservative-junction",
+            Self::ReversibleSkewCoupling => "reversible-skew-coupling",
             Self::Storage => "storage",
             Self::Dissipation => "dissipation",
             Self::SourceOrReservoir => "source-or-reservoir",
         }
+    }
+}
+
+/// Exact side of a [`ReversibleSkewCoupling`].
+///
+/// The ordered roles are semantic: the forward action maps side A effort to
+/// side B flow, while the adjoint action maps side B effort to side A flow and
+/// receives the explicit negative skew sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReversibleSkewSide {
+    /// Adjoint-action side; its generated power contribution is negated.
+    A,
+    /// Forward-action side; its generated power contribution keeps its sign.
+    B,
+}
+
+impl ReversibleSkewSide {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "a-adjoint-negative",
+            Self::B => "b-forward-positive",
+        }
+    }
+}
+
+/// Compiler-facing descriptor for a reversible cross coupling.
+///
+/// The structural convention is
+/// `flow_b = forward_operator(effort_a)` and
+/// `flow_a = -adjoint_operator(effort_b)`. `skew_adjoint_evidence` is the
+/// durable external evidence reference asserting that the two actions are
+/// adjoints under the declared port pairings. This compiler identity-binds
+/// those references; it does not execute or authenticate them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReversibleSkewCoupling {
+    id: StableId,
+    port_a: PortSchema,
+    port_b: PortSchema,
+    forward_operator: StableId,
+    adjoint_operator: StableId,
+    skew_adjoint_evidence: StableId,
+}
+
+impl ReversibleSkewCoupling {
+    /// Construct an ordered reversible coupling descriptor.
+    ///
+    /// # Errors
+    /// Refuses reused port identities and relation/port identity aliasing.
+    pub fn new(
+        id: StableId,
+        port_a: PortSchema,
+        port_b: PortSchema,
+        forward_operator: StableId,
+        adjoint_operator: StableId,
+        skew_adjoint_evidence: StableId,
+    ) -> Result<Self, PortEquationError> {
+        if port_a.id() == port_b.id() {
+            return Err(PortEquationError::DuplicatePortId {
+                port: port_a.id().as_str().to_string(),
+            });
+        }
+        if &id == port_a.id() || &id == port_b.id() {
+            let port = if &id == port_a.id() {
+                port_a.id()
+            } else {
+                port_b.id()
+            };
+            return Err(PortEquationError::PrimitivePortIdentityAlias {
+                primitive: id.as_str().to_string(),
+                port: port.as_str().to_string(),
+            });
+        }
+        Ok(Self {
+            id,
+            port_a,
+            port_b,
+            forward_operator,
+            adjoint_operator,
+            skew_adjoint_evidence,
+        })
+    }
+
+    /// Stable coupling identity.
+    #[must_use]
+    pub const fn id(&self) -> &StableId {
+        &self.id
+    }
+
+    /// Ordered A/B power ports.
+    #[must_use]
+    pub const fn ports(&self) -> (&PortSchema, &PortSchema) {
+        (&self.port_a, &self.port_b)
+    }
+
+    /// Action mapping side A effort to side B flow.
+    #[must_use]
+    pub const fn forward_operator(&self) -> &StableId {
+        &self.forward_operator
+    }
+
+    /// Adjoint action mapping side B effort to side A flow before negation.
+    #[must_use]
+    pub const fn adjoint_operator(&self) -> &StableId {
+        &self.adjoint_operator
+    }
+
+    /// External evidence for the declared adjoint relation.
+    #[must_use]
+    pub const fn skew_adjoint_evidence(&self) -> &StableId {
+        &self.skew_adjoint_evidence
     }
 }
 
@@ -260,6 +373,10 @@ enum PortPrimitiveBinding {
         junction: ConservativeJunction,
         side: ConservativeJunctionSide,
     },
+    ReversibleSkewCoupling {
+        coupling: ReversibleSkewCoupling,
+        side: ReversibleSkewSide,
+    },
     Storage(StorageElement),
     Dissipation(DissipativeRelation),
     SourceOrReservoir(SourceOrReservoir),
@@ -269,6 +386,7 @@ impl PortPrimitiveBinding {
     fn kind(&self) -> PortPrimitiveKind {
         match self {
             Self::ConservativeJunction { .. } => PortPrimitiveKind::ConservativeJunction,
+            Self::ReversibleSkewCoupling { .. } => PortPrimitiveKind::ReversibleSkewCoupling,
             Self::Storage(_) => PortPrimitiveKind::Storage,
             Self::Dissipation(_) => PortPrimitiveKind::Dissipation,
             Self::SourceOrReservoir(_) => PortPrimitiveKind::SourceOrReservoir,
@@ -278,6 +396,7 @@ impl PortPrimitiveBinding {
     fn id(&self) -> &StableId {
         match self {
             Self::ConservativeJunction { junction, .. } => junction.id(),
+            Self::ReversibleSkewCoupling { coupling, .. } => coupling.id(),
             Self::Storage(primitive) => primitive.id(),
             Self::Dissipation(primitive) => primitive.id(),
             Self::SourceOrReservoir(primitive) => primitive.id(),
@@ -287,7 +406,30 @@ impl PortPrimitiveBinding {
     fn junction_side(&self) -> Option<ConservativeJunctionSide> {
         match self {
             Self::ConservativeJunction { side, .. } => Some(*side),
-            Self::Storage(_) | Self::Dissipation(_) | Self::SourceOrReservoir(_) => None,
+            Self::ReversibleSkewCoupling { .. }
+            | Self::Storage(_)
+            | Self::Dissipation(_)
+            | Self::SourceOrReservoir(_) => None,
+        }
+    }
+
+    fn reversible_skew_side(&self) -> Option<ReversibleSkewSide> {
+        match self {
+            Self::ReversibleSkewCoupling { side, .. } => Some(*side),
+            Self::ConservativeJunction { .. }
+            | Self::Storage(_)
+            | Self::Dissipation(_)
+            | Self::SourceOrReservoir(_) => None,
+        }
+    }
+
+    fn reversible_skew_coupling(&self) -> Option<&ReversibleSkewCoupling> {
+        match self {
+            Self::ReversibleSkewCoupling { coupling, .. } => Some(coupling),
+            Self::ConservativeJunction { .. }
+            | Self::Storage(_)
+            | Self::Dissipation(_)
+            | Self::SourceOrReservoir(_) => None,
         }
     }
 }
@@ -368,6 +510,47 @@ impl PortEquationSpec {
         ]
     }
 
+    /// Construct the two signed power contributions of an evidence-bound
+    /// reversible skew coupling.
+    ///
+    /// Side A carries the explicit negative adjoint-action contribution and
+    /// side B carries the positive forward-action contribution. The operator
+    /// references and skew-adjoint evidence are identity-bearing, but their
+    /// numeric action is not executed by this structural lowering.
+    #[must_use]
+    pub fn from_reversible_skew_coupling(
+        coupling: ReversibleSkewCoupling,
+        discretization: PortDiscretization,
+    ) -> [Self; 2] {
+        let (port_a, port_b) = coupling.ports();
+        let schema_a = port_a.clone();
+        let schema_b = port_b.clone();
+        [
+            Self {
+                schema: schema_a,
+                discretization,
+                sense: PortEquationSense::Reversed,
+                term_kind: AccountingTermKind::Reversible,
+                ownership: OwnershipDisposition::NotApplicable,
+                primitive: Some(PortPrimitiveBinding::ReversibleSkewCoupling {
+                    coupling: coupling.clone(),
+                    side: ReversibleSkewSide::A,
+                }),
+            },
+            Self {
+                schema: schema_b,
+                discretization,
+                sense: PortEquationSense::AsDeclared,
+                term_kind: AccountingTermKind::Reversible,
+                ownership: OwnershipDisposition::NotApplicable,
+                primitive: Some(PortPrimitiveBinding::ReversibleSkewCoupling {
+                    coupling,
+                    side: ReversibleSkewSide::B,
+                }),
+            },
+        ]
+    }
+
     /// Construct a stored-energy port equation whose owner, state schema, and
     /// constitutive-gradient reference come from one admitted primitive.
     #[must_use]
@@ -429,7 +612,7 @@ impl PortEquationSpec {
     }
 
     /// Retained admitted primitive family, when constructed from a closed
-    /// `fs-couple` one-port descriptor.
+    /// neutral primitive or compiler-facing reversible-skew descriptor.
     #[must_use]
     pub fn primitive_kind(&self) -> Option<PortPrimitiveKind> {
         self.primitive.as_ref().map(PortPrimitiveBinding::kind)
@@ -447,6 +630,21 @@ impl PortEquationSpec {
         self.primitive
             .as_ref()
             .and_then(PortPrimitiveBinding::junction_side)
+    }
+
+    /// Retained A/B role when this request comes from a reversible skew
+    /// coupling.
+    #[must_use]
+    pub fn reversible_skew_side(&self) -> Option<ReversibleSkewSide> {
+        self.primitive
+            .as_ref()
+            .and_then(PortPrimitiveBinding::reversible_skew_side)
+    }
+
+    fn reversible_skew_coupling(&self) -> Option<&ReversibleSkewCoupling> {
+        self.primitive
+            .as_ref()
+            .and_then(PortPrimitiveBinding::reversible_skew_coupling)
     }
 }
 
@@ -606,6 +804,13 @@ pub enum PortEquationError {
         /// Duplicated stable port identity.
         port: String,
     },
+    /// A closed primitive reused one of its port identities.
+    PrimitivePortIdentityAlias {
+        /// Stable primitive identity.
+        primitive: String,
+        /// Aliased stable port identity.
+        port: String,
+    },
     /// One stable interface identity requested both an effort/flow energy term
     /// and a stream-carried energy term.
     DuplicateEnergyCarrier {
@@ -697,6 +902,10 @@ impl core::fmt::Display for PortEquationError {
             Self::DuplicatePortId { port } => {
                 write!(f, "port identity {port} appears more than once")
             }
+            Self::PrimitivePortIdentityAlias { primitive, port } => write!(
+                f,
+                "primitive identity {primitive} aliases its port identity {port}"
+            ),
             Self::DuplicateEnergyCarrier { port } => write!(
                 f,
                 "interface {port} carries energy through both an effort/flow term and a stream bundle"
@@ -795,6 +1004,10 @@ pub struct PortEquationReceipt {
     primitive_kind: Option<PortPrimitiveKind>,
     primitive_id: Option<String>,
     conservative_junction_side: Option<ConservativeJunctionSide>,
+    reversible_skew_side: Option<ReversibleSkewSide>,
+    reversible_skew_forward_operator: Option<String>,
+    reversible_skew_adjoint_operator: Option<String>,
+    reversible_skew_evidence: Option<String>,
 }
 
 impl PortEquationReceipt {
@@ -878,7 +1091,7 @@ impl PortEquationReceipt {
     }
 
     /// Retained closed primitive family, if this request was constructed from
-    /// an admitted `fs-couple` storage/loss/source descriptor.
+    /// an admitted neutral primitive or reversible-skew descriptor.
     #[must_use]
     pub const fn primitive_kind(&self) -> Option<PortPrimitiveKind> {
         self.primitive_kind
@@ -897,6 +1110,30 @@ impl PortEquationReceipt {
         self.conservative_junction_side
     }
 
+    /// Exact signed A/B action role for a reversible skew coupling.
+    #[must_use]
+    pub const fn reversible_skew_side(&self) -> Option<ReversibleSkewSide> {
+        self.reversible_skew_side
+    }
+
+    /// Forward action mapping side A effort to side B flow.
+    #[must_use]
+    pub fn reversible_skew_forward_operator(&self) -> Option<&str> {
+        self.reversible_skew_forward_operator.as_deref()
+    }
+
+    /// Adjoint action mapping side B effort to side A flow before negation.
+    #[must_use]
+    pub fn reversible_skew_adjoint_operator(&self) -> Option<&str> {
+        self.reversible_skew_adjoint_operator.as_deref()
+    }
+
+    /// External evidence reference for the declared skew-adjoint relation.
+    #[must_use]
+    pub fn reversible_skew_evidence(&self) -> Option<&str> {
+        self.reversible_skew_evidence.as_deref()
+    }
+
     /// Re-derived power dimensions after the pairing measure is applied.
     #[must_use]
     pub const fn product_dims(&self) -> Dims {
@@ -910,6 +1147,21 @@ impl PortEquationReceipt {
         let loss_ownership_id = self
             .loss_ownership_id
             .map_or_else(|| "null".to_string(), |id| format!("\"{}\"", id.to_hex()));
+        let reversible_skew_fields = match (
+            self.reversible_skew_side,
+            self.reversible_skew_forward_operator.as_ref(),
+            self.reversible_skew_adjoint_operator.as_ref(),
+            self.reversible_skew_evidence.as_ref(),
+        ) {
+            (Some(side), Some(forward), Some(adjoint), Some(evidence)) => format!(
+                ",\"reversible_skew_side\":\"{}\",\
+                 \"reversible_skew_forward_operator\":\"{forward}\",\
+                 \"reversible_skew_adjoint_operator\":\"{adjoint}\",\
+                 \"reversible_skew_evidence\":\"{evidence}\"",
+                side.as_str()
+            ),
+            _ => String::new(),
+        };
         let primitive_fields = self
             .primitive_kind
             .zip(self.primitive_id.as_ref())
@@ -920,7 +1172,7 @@ impl PortEquationReceipt {
                         format!(",\"conservative_junction_side\":\"{}\"", side.as_str())
                     });
                 format!(
-                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"{side}",
+                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"{side}{reversible_skew_fields}",
                     kind.as_str()
                 )
             });
@@ -934,7 +1186,7 @@ impl PortEquationReceipt {
              \"term_kind\":\"{}\",\"ownership\":\"{}\",\
              \"loss_ownership_id\":{}{},\
              \"authority\":\"structural-generated\",\
-             \"no_claim\":\"numeric contraction, quadrature, adapter truth, and closed-window conservation remain external\"}}",
+             \"no_claim\":\"numeric contraction, quadrature, adapter truth, referenced operator/evidence truth, and closed-window conservation remain external\"}}",
             PORT_EQUATION_RECEIPT_SCHEMA_V1,
             self.port_id,
             crate::VERSION,
@@ -1425,6 +1677,20 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
     let primitive_kind = spec.primitive_kind();
     let primitive_id = spec.primitive_id().map(|id| id.as_str().to_string());
     let conservative_junction_side = spec.conservative_junction_side();
+    let reversible_skew_side = spec.reversible_skew_side();
+    let (
+        reversible_skew_forward_operator,
+        reversible_skew_adjoint_operator,
+        reversible_skew_evidence,
+    ) = spec
+        .reversible_skew_coupling()
+        .map_or((None, None, None), |coupling| {
+            (
+                Some(coupling.forward_operator().as_str().to_string()),
+                Some(coupling.adjoint_operator().as_str().to_string()),
+                Some(coupling.skew_adjoint_evidence().as_str().to_string()),
+            )
+        });
     let receipt = PortEquationReceipt {
         port_id: spec.schema.id().as_str().to_string(),
         port_schema_version: spec.schema.version(),
@@ -1442,6 +1708,10 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
         primitive_kind,
         primitive_id,
         conservative_junction_side,
+        reversible_skew_side,
+        reversible_skew_forward_operator,
+        reversible_skew_adjoint_operator,
+        reversible_skew_evidence,
     };
     Ok(CompiledPortEquation { system, receipt })
 }
@@ -1880,6 +2150,20 @@ fn encode_primitive_binding(bytes: &mut Vec<u8>, primitive: &PortPrimitiveBindin
             push_text(bytes, port_a.id().as_str());
             push_text(bytes, port_b.id().as_str());
         }
+        PortPrimitiveBinding::ReversibleSkewCoupling { coupling, side } => {
+            bytes.push(4);
+            push_text(bytes, coupling.id().as_str());
+            bytes.push(match side {
+                ReversibleSkewSide::A => 0,
+                ReversibleSkewSide::B => 1,
+            });
+            let (port_a, port_b) = coupling.ports();
+            push_text(bytes, port_a.id().as_str());
+            push_text(bytes, port_b.id().as_str());
+            push_text(bytes, coupling.forward_operator().as_str());
+            push_text(bytes, coupling.adjoint_operator().as_str());
+            push_text(bytes, coupling.skew_adjoint_evidence().as_str());
+        }
         PortPrimitiveBinding::Storage(storage) => {
             bytes.push(0);
             push_text(bytes, storage.id().as_str());
@@ -1932,6 +2216,19 @@ fn primitive_binding_variable_bytes(
                 junction.id().as_str().len(),
                 port_a.id().as_str().len(),
                 port_b.id().as_str().len(),
+            ]
+            .into_iter()
+            .try_fold(64usize, checked_metadata_add)
+        }
+        PortPrimitiveBinding::ReversibleSkewCoupling { coupling, .. } => {
+            let (port_a, port_b) = coupling.ports();
+            [
+                coupling.id().as_str().len(),
+                port_a.id().as_str().len(),
+                port_b.id().as_str().len(),
+                coupling.forward_operator().as_str().len(),
+                coupling.adjoint_operator().as_str().len(),
+                coupling.skew_adjoint_evidence().as_str().len(),
             ]
             .into_iter()
             .try_fold(64usize, checked_metadata_add)

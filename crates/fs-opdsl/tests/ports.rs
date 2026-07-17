@@ -16,9 +16,10 @@ use fs_iface::SpaceType;
 use fs_opdsl::{
     AccountingTermKind, CompiledInterfaceEquation, ConservativeJunctionSide, InterfaceEquationSpec,
     LossOwnershipId, OwnershipDisposition, PortDiscretization, PortEquationError,
-    PortEquationSense, PortEquationSpec, PortPrimitiveKind, SpatialSupport, StreamEnergyChartKind,
-    StreamEnergyOwnership, StreamEquationSpec, SystemExpr, compile_interface_equations,
-    compile_port_equation, compile_port_equations, compile_stream_equation,
+    PortEquationSense, PortEquationSpec, PortPrimitiveKind, ReversibleSkewCoupling,
+    ReversibleSkewSide, SpatialSupport, StreamEnergyChartKind, StreamEnergyOwnership,
+    StreamEquationSpec, SystemExpr, compile_interface_equations, compile_port_equation,
+    compile_port_equations, compile_stream_equation,
 };
 use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Dims, Force, MassFlowRate, Power, Velocity};
@@ -183,6 +184,25 @@ fn conservative_junction_specs(port_a: &str, port_b: &str) -> [PortEquationSpec;
     )
     .expect("admitted conservative junction");
     PortEquationSpec::from_conservative_junction(primitive, PortDiscretization::lumped())
+}
+
+fn reversible_skew_specs(
+    port_a: &str,
+    port_b: &str,
+    forward_operator: &str,
+    adjoint_operator: &str,
+    evidence: &str,
+) -> [PortEquationSpec; 2] {
+    let coupling = ReversibleSkewCoupling::new(
+        stable("reversible-skew-coupling"),
+        scalar_schema(port_a, PortOrientation::OutwardFromOwner),
+        scalar_schema(port_b, PortOrientation::OutwardFromOwner),
+        stable(forward_operator),
+        stable(adjoint_operator),
+        stable(evidence),
+    )
+    .expect("reversible skew descriptor");
+    PortEquationSpec::from_reversible_skew_coupling(coupling, PortDiscretization::lumped())
 }
 
 #[test]
@@ -781,4 +801,177 @@ fn g3_conservative_junction_lowers_signed_sides_and_preserves_permutation() {
         0,
         "the two structural power contributions retain balancing signs"
     );
+}
+
+#[test]
+fn g3_reversible_skew_coupling_retains_actions_evidence_and_signed_roles() {
+    let ab = compile_port_equations(
+        reversible_skew_specs(
+            "skew-a",
+            "skew-b",
+            "operator-a-effort-to-b-flow-v1",
+            "operator-b-effort-to-a-flow-adjoint-v1",
+            "evidence-skew-adjoint-v1",
+        )
+        .into(),
+    )
+    .expect("A/B reversible skew sides lower");
+    let ab_a = ab
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "skew-a")
+        .expect("A-side skew equation");
+    let ab_b = ab
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "skew-b")
+        .expect("B-side skew equation");
+
+    assert_eq!(ab_a.receipt().sign(), -1);
+    assert_eq!(ab_b.receipt().sign(), 1);
+    assert_eq!(
+        ab_a.receipt().primitive_kind(),
+        Some(PortPrimitiveKind::ReversibleSkewCoupling)
+    );
+    assert_eq!(
+        ab_a.receipt().reversible_skew_side(),
+        Some(ReversibleSkewSide::A)
+    );
+    assert_eq!(
+        ab_b.receipt().reversible_skew_side(),
+        Some(ReversibleSkewSide::B)
+    );
+    assert_eq!(
+        ab_a.receipt().reversible_skew_forward_operator(),
+        Some("operator-a-effort-to-b-flow-v1")
+    );
+    assert_eq!(
+        ab_a.receipt().reversible_skew_adjoint_operator(),
+        Some("operator-b-effort-to-a-flow-adjoint-v1")
+    );
+    assert_eq!(
+        ab_a.receipt().reversible_skew_evidence(),
+        Some("evidence-skew-adjoint-v1")
+    );
+    assert!(matches!(
+        ab_a.receipt().ownership(),
+        OwnershipDisposition::NotApplicable
+    ));
+    assert_eq!(ab_a.receipt().loss_ownership_id(), None);
+    assert_eq!(ab_b.receipt().loss_ownership_id(), None);
+    assert_eq!(
+        i16::from(ab_a.receipt().sign()) + i16::from(ab_b.receipt().sign()),
+        0,
+        "the structural skew contributions retain opposite polarity"
+    );
+
+    let json = ab_a.receipt().to_json();
+    assert!(json.contains("\"primitive_kind\":\"reversible-skew-coupling\""));
+    assert!(json.contains("\"reversible_skew_side\":\"a-adjoint-negative\""));
+    assert!(json.contains("\"reversible_skew_evidence\":\"evidence-skew-adjoint-v1\""));
+
+    let changed_operator = compile_port_equations(
+        reversible_skew_specs(
+            "skew-a",
+            "skew-b",
+            "operator-a-effort-to-b-flow-v2",
+            "operator-b-effort-to-a-flow-adjoint-v1",
+            "evidence-skew-adjoint-v1",
+        )
+        .into(),
+    )
+    .expect("changed operator remains structurally admissible");
+    let changed_a = changed_operator
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "skew-a")
+        .expect("changed A-side equation");
+    assert_ne!(
+        ab_a.receipt().system_identity(),
+        changed_a.receipt().system_identity(),
+        "forward action identity is semantic"
+    );
+
+    let changed_evidence = compile_port_equations(
+        reversible_skew_specs(
+            "skew-a",
+            "skew-b",
+            "operator-a-effort-to-b-flow-v1",
+            "operator-b-effort-to-a-flow-adjoint-v1",
+            "evidence-skew-adjoint-v2",
+        )
+        .into(),
+    )
+    .expect("changed evidence remains structurally admissible");
+    let changed_evidence_a = changed_evidence
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "skew-a")
+        .expect("evidence-mutated A-side equation");
+    assert_ne!(
+        ab_a.receipt().system_identity(),
+        changed_evidence_a.receipt().system_identity(),
+        "skew-adjoint evidence identity is semantic"
+    );
+
+    let ba = compile_port_equations(
+        reversible_skew_specs(
+            "skew-b",
+            "skew-a",
+            "operator-a-effort-to-b-flow-v1",
+            "operator-b-effort-to-a-flow-adjoint-v1",
+            "evidence-skew-adjoint-v1",
+        )
+        .into(),
+    )
+    .expect("permuted reversible skew sides lower");
+    let ba_a = ba
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "skew-a")
+        .expect("permuted skew-a equation");
+    assert_eq!(ba_a.receipt().sign(), 1);
+    assert_eq!(
+        ba_a.receipt().reversible_skew_side(),
+        Some(ReversibleSkewSide::B)
+    );
+    assert_ne!(
+        ab_a.receipt().system_identity(),
+        ba_a.receipt().system_identity(),
+        "permuting the ordered cross action changes side role and identity"
+    );
+}
+
+#[test]
+fn g3_reversible_skew_coupling_refuses_aliased_relation_or_port_ids() {
+    let port_a = scalar_schema("skew-aliased", PortOrientation::OutwardFromOwner);
+    let port_b = scalar_schema("skew-distinct", PortOrientation::OutwardFromOwner);
+    assert!(matches!(
+        ReversibleSkewCoupling::new(
+            stable("skew-aliased"),
+            port_a,
+            port_b,
+            stable("operator-forward"),
+            stable("operator-adjoint"),
+            stable("evidence-skew"),
+        ),
+        Err(PortEquationError::PrimitivePortIdentityAlias {
+            ref primitive,
+            ref port,
+        }) if primitive == "skew-aliased" && port == "skew-aliased"
+    ));
+
+    let duplicate_port = scalar_schema("skew-duplicate", PortOrientation::OutwardFromOwner);
+    assert!(matches!(
+        ReversibleSkewCoupling::new(
+            stable("skew-distinct-relation"),
+            duplicate_port.clone(),
+            duplicate_port,
+            stable("operator-forward"),
+            stable("operator-adjoint"),
+            stable("evidence-skew"),
+        ),
+        Err(PortEquationError::DuplicatePortId { ref port })
+            if port == "skew-duplicate"
+    ));
 }

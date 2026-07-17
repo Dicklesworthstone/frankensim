@@ -280,6 +280,16 @@ documented in the bead close); cross-ISA golden hash.
   two otherwise identical external fields distinct semantic interface-side
   identities, so the two contributions remain independently admitted system
   fragments; this slice does not invent a false in-system equality constraint.
+- `ReversibleSkewCoupling` preserves an ordered reversible cross action without
+  classifying it as a dissipative block. Its fixed convention is
+  `flow_b = K(effort_a)` and `flow_a = -K*(effort_b)`: side A therefore lowers
+  with an explicit negative sign and side B with a positive sign. The coupling
+  ID, ordered port IDs, forward and adjoint operator references, external
+  skew-adjoint evidence reference, and exact A/B role are identity-bearing.
+  Receipts expose those references, retain `Reversible` accounting with no
+  owner, and never mint a `LossOwnershipId`. Relation/port identity aliasing
+  and duplicate side-port IDs refuse before generation; swapping A/B or
+  changing either action/evidence reference changes the generated identities.
 - `compile_stream_equation` imports an already-admitted `fs_couple::StreamPort`
   and lowers its mass, canonical constituent amount, momentum, energy, and
   entropy rates into five typed external boundary field blocks. The generated
@@ -301,8 +311,12 @@ documented in the bead close); cross-ISA golden hash.
   uniqueness; primitive operator/evidence/boundary identity adversaries;
   stream-energy double-count adversaries; component shape; empty-input; and
   metadata-resource-bomb fixtures. The junction fixture additionally checks
-  balancing signs, exact A/B identity, and port-order permutation. The test
-  target is explicitly gated by `required-features = ["port-equations"]`.
+  balancing signs, exact A/B identity, and port-order permutation. The
+  reversible-skew fixture checks opposite structural polarity, distinct
+  non-dissipative classification, absent loss ownership, ordered-role
+  permutation, operator/evidence identity mutation, and relation/port alias
+  refusal. The test target is explicitly gated by `required-features =
+  ["port-equations"]`.
 - NO-CLAIM: this slice generates structural equations; it does not execute the
   scalar/vector/tensor/field contraction, quadrature, trace pullback, numeric
   port adapter, source/dissipation law, or closed-window audit. Stream-bundle
@@ -313,9 +327,12 @@ documented in the bead close); cross-ISA golden hash.
   pending because the neutral primitive does not yet expose state-coordinate
   dimensions. Conservative-junction side lowering binds the upstream
   shared-effort/opposite-flow admission and emits balancing power signs, but it
-  does not re-emit or execute that topology constraint inside one system;
-  reversible skew-block preservation remains a subsequent I01.3 slice. A receipt
-  proves that the supplied schema lowered consistently, not that the schema or
-  its referenced physical evidence is true. The [F] baseline deck, activation
-  threshold, kill criterion, cost percentiles, and independent reproduction
-  pack remain pending, so the feature stays default-off.
+  does not re-emit or execute that topology constraint inside one system.
+  Reversible-skew lowering likewise preserves signed action structure and
+  evidence identity only: it does not type-check the external cross-operator
+  domains, authenticate adjointness, execute either action, or prove zero power
+  numerically. A receipt proves that the supplied schema lowered consistently,
+  not that the schema or its referenced physical evidence is true. The [F]
+  baseline deck, activation threshold, kill criterion, cost percentiles, and
+  independent reproduction pack remain pending, so the feature stays
+  default-off.
