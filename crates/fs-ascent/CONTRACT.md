@@ -210,6 +210,20 @@ forms are both refused by the test-local merge gate. This proves one
 objective/Hessian pair only, not approximate-Hessian parity, all objectives,
 cancellation, checkpointing, cross-ISA equality, persistence, or performance.
 
+`tests/constrained_study_replay.rs` (bead 7tv.21.26) supplies retained
+study-scale replay and seeded-failure self-tests for all three constrained
+engines: augmented Lagrangian, log-barrier interior point, and active-set SQP.
+Each production engine solves the shared equality-plus-active-inequality KKT
+fixture. Its versioned receipt binds the fixed input seed, engine tolerance and
+iteration cap, exact ordered objective/constraint/Jacobian-transpose callback
+inputs and outputs, and every public result, multiplier, accounting, convergence,
+and four-component KKT field. Independent repeats must be byte-identical and
+must recover the analytic optimum with a positive active multiplier. An
+engine-keyed mutation seed flips one finite returned-decision mantissa bit;
+stale and self-consistently resealed variants are both refused. This is one
+small dense fixture, not all constrained problems, large-scale sparse behavior,
+cancellation, checkpointing, cross-ISA equality, persistence, or performance.
+
 `tests/wfg_moo_battery.rs` covers WFG-scale front geometry without claiming
 the full deceptive or multimodal transformation stack. Concave, convex, and
 WFG1-class mixed fixtures retain their measured sweep behavior as linted,
