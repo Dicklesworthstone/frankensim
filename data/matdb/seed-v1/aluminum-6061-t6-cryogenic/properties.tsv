@@ -1,0 +1,22 @@
+frankensim.matdb-source.v1
+observation	nist-k-fit	aluminum-6061-t6-uns-aa96061-temper-t6	NIST thermal-conductivity polynomial evaluated into exact-temperature derived scalars	log10(y)=sum(a_i*log10(T)^i); a..i=0.07918,1.0957,-0.07277,0.08084,0.02803,-0.09464,0.04179,-0.00571,0; data range 4-300 K; equation range 1-300 K; NIST reports 0.5 percent curve-fit error relative to data, without a confidence level or degrees of freedom
+observation	nist-cp-fit	aluminum-6061-t6-uns-aa96061-temper-t6	NIST specific-heat polynomial evaluated into exact-temperature derived scalars	log10(y)=sum(a_i*log10(T)^i); a..i=46.6467,-314.292,866.662,-1298.3,1162.27,-637.795,210.351,-38.3094,2.96344; data and equation range 4-300 K; NIST reports 5 percent curve-fit error relative to data, without a confidence level or degrees of freedom
+observation	nist-e-fit	aluminum-6061-t6-uns-aa96061-temper-t6	NIST Young's-modulus polynomial evaluated into exact-temperature derived scalars	y=sum(a_i*T^i); a..e=77.71221,0.01030646,-0.0002924100,0.00000089936,-0.0000000010709; data range 0-299 K; equation range 2-295 K; NIST reports 1 percent curve-fit error relative to data, without a confidence level or degrees of freedom
+scalar	thermal-conductivity-77K	nist-k-fit	thermal_conductivity	83.5314419470723	W/m/K	constant
+uncertainty	thermal-conductivity-77K	unstated	-	-	-	-
+validity	thermal-conductivity-77K	temperature	77	77	K
+scalar	specific-heat-capacity-77K	nist-cp-fit	specific_heat_capacity	348.127924911502	J/kg/K	constant
+uncertainty	specific-heat-capacity-77K	unstated	-	-	-	-
+validity	specific-heat-capacity-77K	temperature	77	77	K
+scalar	young-modulus-77K	nist-e-fit	young_modulus	77.1450506572731	GPa	constant
+uncertainty	young-modulus-77K	unstated	-	-	-	-
+validity	young-modulus-77K	temperature	77	77	K
+scalar	thermal-conductivity-293K	nist-k-fit	thermal_conductivity	154.345205650720	W/m/K	constant
+uncertainty	thermal-conductivity-293K	unstated	-	-	-	-
+validity	thermal-conductivity-293K	temperature	293	293	K
+scalar	specific-heat-capacity-293K	nist-cp-fit	specific_heat_capacity	942.911235990911	J/kg/K	constant
+uncertainty	specific-heat-capacity-293K	unstated	-	-	-	-
+validity	specific-heat-capacity-293K	temperature	293	293	K
+scalar	young-modulus-293K	nist-e-fit	young_modulus	70.3585921827291	GPa	constant
+uncertainty	young-modulus-293K	unstated	-	-	-	-
+validity	young-modulus-293K	temperature	293	293	K

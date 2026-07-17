@@ -324,11 +324,17 @@ NIST displayed-precision agreement checks.
   deliberately NOT a storable geometry-free material scalar; store
   magnetization/specific-moment curves instead.
 - No complete seed dataset ships in this crate. The repository's first
-  `data/matdb/seed-v1` tranches are only raw, offline-compiled gas-species
-  associations; they do not define air or exhaust mixture compositions,
-  humidity, or combustion completeness. Bead 1sxe still owns the curated
-  material/property dataset. No equilibrium computation happens here
-  (fs-thermochem consumes phase data; this crate only stores it).
+  `data/matdb/seed-v1` tranches contain raw, offline-compiled gas-species
+  associations plus six exact-temperature Aluminum 6061-T6 scalar claims.
+  The gas associations do not define air or exhaust mixture compositions,
+  humidity, or combustion completeness. The Aluminum claims do not define a
+  continuous constitutive curve or a general-purpose design card; their NIST
+  polynomial-fit errors lack the confidence metadata needed by the current
+  statistical uncertainty variants and therefore remain observation caveats
+  with explicitly `Unstated` runtime uncertainty. Bead 1sxe still owns the
+  remaining curated material/property and interface-system dataset. No
+  equilibrium computation happens here (fs-thermochem consumes phase data;
+  this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,
   or other raw formats and does not decide whether terms permit
   redistribution; those are L6/offline compiler responsibilities. A nonblank

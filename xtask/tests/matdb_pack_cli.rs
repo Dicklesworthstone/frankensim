@@ -6,9 +6,9 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_matdb::{
-    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, PropertyValue,
+    InterpolationPolicy, NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, PropertyValue,
     SPECIES_MOLAR_MASS_DIMS, SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS,
-    SpeciesNormalizationTarget,
+    SpeciesNormalizationTarget, UncertaintyModel,
 };
 use fs_qty::Dims;
 
@@ -24,7 +24,10 @@ const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 const METHANE_SEED_MANIFEST: &str = "data/matdb/seed-v1/methane/manifest.tsv";
+const ALUMINUM_6061_T6_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/aluminum-6061-t6-cryogenic/manifest.tsv";
 const NASA_SEED_LICENSE: &str = "Work-of-the-US-Government-Public-Use-Permitted";
+const NIST_PUBLIC_INFORMATION_LICENSE: &str = "NIST-Public-Information-Attribution-Requested";
 const NASA_METHANE_MOLAR_MASS_G_PER_MOL: f64 = 16.042_46;
 const NIST_SRD69_METHANE_MOLAR_MASS_KG_PER_MOL: f64 = 0.016_042_5;
 const NIST_SRD69_DISPLAY_ROUNDING_HALF_WIDTH_KG_PER_MOL: f64 = 0.000_000_05;
@@ -416,6 +419,204 @@ fn g3_cli_compiles_handbook_bh_sn_and_lubricant_material_claims() {
             "missing admission row for {source}"
         );
     }
+}
+
+#[test]
+fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
+    let manifest = workspace_path(ALUMINUM_6061_T6_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed Aluminum 6061-T6 seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("aluminum-6061-t6-first.fsmatpk");
+    let second_path = directory.join("aluminum-6061-t6-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Aluminum 6061-T6 seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Aluminum 6061-T6 seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Aluminum 6061-T6 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Aluminum 6061-T6 pack");
+    let second_bytes = fs::read(second_path).expect("read second Aluminum 6061-T6 pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "Aluminum 6061-T6 pack bytes moved"
+    );
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode Aluminum 6061-T6 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Aluminum 6061-T6 pack identity");
+
+    assert_eq!(decoded.pack_id(), "aluminum-6061-t6-cryogenic");
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("public information")
+    );
+    assert_eq!(decoded.claims().claim_count(), 6);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expected = [
+        (
+            "thermal_conductivity",
+            77.0,
+            83.531_441_947_072_3,
+            Dims([1, 1, -3, -1, 0, 0]),
+            "0.5 percent curve-fit error",
+            "a..i=0.07918,1.0957",
+        ),
+        (
+            "thermal_conductivity",
+            293.0,
+            154.345_205_650_720,
+            Dims([1, 1, -3, -1, 0, 0]),
+            "0.5 percent curve-fit error",
+            "a..i=0.07918,1.0957",
+        ),
+        (
+            "specific_heat_capacity",
+            77.0,
+            348.127_924_911_502,
+            Dims([2, 0, -2, -1, 0, 0]),
+            "5 percent curve-fit error",
+            "a..i=46.6467,-314.292",
+        ),
+        (
+            "specific_heat_capacity",
+            293.0,
+            942.911_235_990_911,
+            Dims([2, 0, -2, -1, 0, 0]),
+            "5 percent curve-fit error",
+            "a..i=46.6467,-314.292",
+        ),
+        (
+            "young_modulus",
+            77.0,
+            77.145_050_657_273_1e9,
+            Dims([-1, 1, -2, 0, 0, 0]),
+            "1 percent curve-fit error",
+            "a..e=77.71221,0.01030646",
+        ),
+        (
+            "young_modulus",
+            293.0,
+            70.358_592_182_729_1e9,
+            Dims([-1, 1, -2, 0, 0, 0]),
+            "1 percent curve-fit error",
+            "a..e=77.71221,0.01030646",
+        ),
+    ];
+
+    for (property, temperature, expected_value, expected_dims, fit_error_note, coefficient_note) in
+        expected
+    {
+        let (_, claim) = decoded
+            .claims()
+            .claims_for(property)
+            .into_iter()
+            .find(|(_, claim)| {
+                claim.validity.bound("temperature") == Some((temperature, temperature))
+            })
+            .unwrap_or_else(|| panic!("missing {property} claim at {temperature} K"));
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("{property} at {temperature} K was not an exact-point scalar");
+        };
+        assert_eq!(*dims, expected_dims, "{property} dimensions moved");
+        let relative_error = (*value - expected_value).abs() / expected_value;
+        assert!(
+            relative_error <= 2.0e-15,
+            "{property} at {temperature} K moved by {relative_error:e} relative"
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(
+            claim.interpolation,
+            InterpolationPolicy::ConstantWithinValidity
+        );
+        assert_eq!(claim.observations.len(), 1);
+        assert_eq!(claim.provenance.license, NIST_PUBLIC_INFORMATION_LICENSE);
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("National Institute of Standards and Technology")
+        );
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("[source:nist-cryogenic-fit]")
+        );
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("claim observation remains linked");
+        assert_eq!(
+            observation.specimen,
+            "aluminum-6061-t6-uns-aa96061-temper-t6"
+        );
+        assert!(observation.method.contains("NIST"));
+        assert!(
+            observation
+                .method
+                .contains("exact-temperature derived scalars")
+        );
+        assert!(observation.caveats.contains(fit_error_note));
+        assert!(observation.caveats.contains(coefficient_note));
+        assert!(
+            observation
+                .caveats
+                .contains("without a confidence level or degrees of freedom")
+        );
+    }
+
+    // G3 independent-source evidence only: NASA's 1966 compilation reports
+    // 82 W/(m K) at 75 K and 155 W/(m K) at 300 K. These nearby-temperature
+    // checks do not replace the exact NIST-derived values stored above.
+    for (nist_temperature, nasa_temperature, nasa_value) in
+        [(77.0, 75.0, 82.0), (293.0, 300.0, 155.0)]
+    {
+        let (_, claim) = decoded
+            .claims()
+            .claims_for("thermal_conductivity")
+            .into_iter()
+            .find(|(_, claim)| {
+                claim.validity.bound("temperature") == Some((nist_temperature, nist_temperature))
+            })
+            .expect("thermal-conductivity comparison point");
+        let PropertyValue::Scalar { value, .. } = &claim.value else {
+            panic!("thermal-conductivity comparison point is scalar");
+        };
+        assert!((nist_temperature - nasa_temperature).abs() <= 7.0);
+        let relative_difference = (*value - nasa_value).abs() / nasa_value;
+        assert!(
+            relative_difference <= 0.03,
+            "NIST-derived {nist_temperature} K conductivity and NASA {nasa_temperature} K comparison differ by {relative_difference:e}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
 }
 
 #[test]
