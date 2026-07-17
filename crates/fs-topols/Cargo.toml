@@ -17,5 +17,9 @@ fs-ivl = { path = "../fs-ivl" }
 fs-material = { path = "../fs-material" }
 fs-sparse = { path = "../fs-sparse" }
 
+[dev-dependencies]
+fs-obs = { path = "../fs-obs" }
+fs-topo = { path = "../fs-topo" }
+
 [lints]
 workspace = true

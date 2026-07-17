@@ -24,6 +24,9 @@ use fs_cutfem::{
     Quadtree,
 };
 use fs_material::IsotropicElastic;
+use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
+use fs_obs::{Emitter, EventKind, Severity};
+use fs_topo::cubical::{Bar, VoxelField, betti, persistence0};
 use fs_topols::optimize::{Cantilever, material_volume};
 use fs_topols::{
     GridSdf, OptimizeSettings, Velocity, advect, extend_velocity, hausdorff, nucleate,
@@ -41,6 +44,126 @@ fn verdict(name: &str, pass: bool, details: &str) {
 
 fn circle_sdf(cx: f64, cy: f64, r: f64) -> impl Fn(f64, f64) -> f64 {
     move |x: f64, y: f64| ((x - cx) * (x - cx) + (y - cy) * (y - cy)).sqrt() - r
+}
+
+/// Sample the optimizer's final 2D level set at cell centers and extrude it by
+/// one voxel. The extrusion preserves the planar homotopy (`b1` counts holes)
+/// while presenting the exact public field consumed by fs-topo's cubical
+/// certificate machinery.
+fn topology_field(phi: &GridSdf) -> VoxelField {
+    let n = phi.n();
+    let n_u32 = u32::try_from(n).expect("optimizer lattice fits fs-topo dimensions");
+    let mut values = Vec::with_capacity(n * n);
+    #[allow(clippy::cast_precision_loss)]
+    for j in 0..n {
+        for i in 0..n {
+            values.push(phi.value_at([(i as f64 + 0.5) / n as f64, (j as f64 + 0.5) / n as f64]));
+        }
+    }
+    VoxelField {
+        dims: [n_u32, n_u32, 1],
+        values,
+        h: phi.h(),
+    }
+}
+
+fn components_alive_at(bars: &[Bar], level: f64) -> usize {
+    bars.iter()
+        .filter(|bar| bar.birth <= level && bar.death > level)
+        .count()
+}
+
+fn topology_audit_identity(
+    optimizer_snapshot: u64,
+    field: &VoxelField,
+    betti_numbers: (u32, u32, u32),
+    alive_components: usize,
+) -> ReplayIdentity {
+    let (b0, b1, b2) = betti_numbers;
+    let mut builder = IdentityBuilder::new("fs-topols-output-topology-audit-v1")
+        .str("optimizer", fs_topols::VERSION)
+        .str("topology-oracle", fs_topo::VERSION)
+        .u64("optimizer-final-snapshot", optimizer_snapshot)
+        .u64("cells-x", u64::from(field.dims[0]))
+        .u64("cells-y", u64::from(field.dims[1]))
+        .u64("cells-z", u64::from(field.dims[2]))
+        .f64_bits("maximum-cell-width", field.h)
+        .f64_bits("design-threshold", 0.0)
+        .u64("betti-0", u64::from(b0))
+        .u64("betti-1", u64::from(b1))
+        .u64("betti-2", u64::from(b2))
+        .u64(
+            "persistence-components-alive-at-threshold",
+            u64::try_from(alive_components).expect("component count fits u64"),
+        )
+        .flag(
+            "persistence-localizable",
+            alive_components == usize::try_from(b0).expect("Betti count fits usize"),
+        )
+        .u64(
+            "sample-values",
+            u64::try_from(field.values.len()).expect("sample count fits u64"),
+        );
+    for &value in &field.values {
+        builder = builder.f64_bits("cell-center-level-set", value);
+    }
+    builder.finish()
+}
+
+fn emit_topology_audit(
+    identity: &ReplayIdentity,
+    betti_numbers: (u32, u32, u32),
+    alive_components: usize,
+    filled_mutant: (u32, u32, u32),
+    severed_mutant: (u32, u32, u32),
+) {
+    let (b0, b1, b2) = betti_numbers;
+    let persistence_localizable =
+        alive_components == usize::try_from(b0).expect("Betti count fits usize");
+    let mut emitter = Emitter::new("fs-topols/output-topology-audit", "tls-006/topology-audit");
+    let receipt = emitter.emit(
+        Severity::Info,
+        EventKind::Custom {
+            name: "topology-optimizer-output-audit".to_string(),
+            json: format!(
+                "{{\"identity\":\"{}\",\"input_seed\":0,\"betti\":[{b0},{b1},{b2}],\
+                 \"persistence_components_alive\":{alive_components},\
+                 \"persistence_localizable\":{persistence_localizable},\
+                 \"filled_void_mutant_betti\":[{},{},{}],\
+                 \"severed_material_mutant_betti\":[{},{},{}]}}",
+                identity.hex(),
+                filled_mutant.0,
+                filled_mutant.1,
+                filled_mutant.2,
+                severed_mutant.0,
+                severed_mutant.1,
+                severed_mutant.2,
+            ),
+        },
+        None,
+    );
+    let receipt_line = receipt.to_jsonl();
+    fs_obs::validate_line(&receipt_line)
+        .expect("topology audit receipt must use the fs-obs wire schema");
+    println!("{receipt_line}");
+
+    let verdict = emitter.emit(
+        Severity::Info,
+        EventKind::ConformanceCase {
+            suite: "fs-topols/output-topology-audit".to_string(),
+            case: "tls-006/topology-audit".to_string(),
+            pass: true,
+            detail: "the actual level-set optimizer output has one exact Betti material component and at least one cubical tunnel; the H0 persistence localization count is retained, independent replay matches, and filled/severed topology mutants are caught"
+                .to_string(),
+            seed: 0,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&verdict).expect("topology audit verdict must be replayable");
+    let verdict_line = verdict.to_jsonl();
+    fs_obs::validate_line(&verdict_line)
+        .expect("topology audit verdict must use the fs-obs wire schema");
+    println!("{verdict_line}");
 }
 
 // ------------------------------------------------------------------ tls-001
@@ -534,7 +657,7 @@ fn tls_006_cantilever_descent() {
         (phi, report)
     };
     let (phi, report) = run();
-    let (_, report_b) = run();
+    let (phi_b, report_b) = run();
     let deterministic = report.snapshots == report_b.snapshots;
     let load_pad_deterministic = report.load_pad_nodes == report_b.load_pad_nodes;
     let load_pad_tracked = report.load_pad_nodes.len() == settings.iterations;
@@ -550,6 +673,76 @@ fn tls_006_cantilever_descent() {
     // an interior void component not touching the box boundary.
     let fired = report.events.iter().any(|e| e.predicted_gain > 0.0);
     let interior_hole = has_interior_void(&phi);
+    // CROSS-LAYER HONESTY LOOP: audit the actual optimizer output through
+    // fs-topo's public persistence and exact cubical Betti machinery. A
+    // one-cell extrusion preserves the planar tunnels created by nucleation.
+    let topology = topology_field(&phi);
+    let topology_betti = betti(&topology, 0.0);
+    let material_components = components_alive_at(&persistence0(&topology), 0.0);
+    let final_snapshot = *report.snapshots.last().expect("optimizer snapshot");
+    let topology_identity = topology_audit_identity(
+        final_snapshot,
+        &topology,
+        topology_betti,
+        material_components,
+    );
+    let topology_replay = topology_field(&phi_b);
+    let topology_replay_betti = betti(&topology_replay, 0.0);
+    let replay_components = components_alive_at(&persistence0(&topology_replay), 0.0);
+    let replay_identity = topology_audit_identity(
+        *report_b
+            .snapshots
+            .last()
+            .expect("replay optimizer snapshot"),
+        &topology_replay,
+        topology_replay_betti,
+        replay_components,
+    );
+    let topology_replays = topology_identity.canonical_bytes() == replay_identity.canonical_bytes();
+
+    // Disclosed deterministic falsifiers: filling every void destroys the
+    // tunnel, while retaining two separated material cells creates two
+    // components. The same production oracle must catch both alterations.
+    let mut filled_void_mutant = topology.clone();
+    for value in &mut filled_void_mutant.values {
+        if *value >= 0.0 {
+            *value = -topology.h;
+        }
+    }
+    let filled_void_betti = betti(&filled_void_mutant, 0.0);
+    let mut severed_material_mutant = topology.clone();
+    let nx = usize::try_from(severed_material_mutant.dims[0]).expect("x cells fit usize");
+    let ny = usize::try_from(severed_material_mutant.dims[1]).expect("y cells fit usize");
+    severed_material_mutant.values.fill(topology.h);
+    let y = ny / 2;
+    severed_material_mutant.values[1 + y * nx] = -topology.h;
+    severed_material_mutant.values[(nx - 2) + y * nx] = -topology.h;
+    let severed_material_betti = betti(&severed_material_mutant, 0.0);
+    let severed_components = components_alive_at(&persistence0(&severed_material_mutant), 0.0);
+    let topology_audit_ok = topology_betti.0 == 1
+        && topology_betti.1 >= 1
+        && topology_betti.2 == 0
+        && material_components
+            >= usize::try_from(topology_betti.0).expect("Betti count fits usize")
+        && topology_replays;
+    let topology_mutants_caught = filled_void_betti == (1, 0, 0)
+        && severed_material_betti == (2, 0, 0)
+        && severed_components == 2;
+    assert!(
+        topology_audit_ok,
+        "optimizer topology audit failed: betti={topology_betti:?}, persistent_h0={material_components}, replay={topology_replays}"
+    );
+    assert!(
+        topology_mutants_caught,
+        "topology falsifiers escaped: filled={filled_void_betti:?}, severed={severed_material_betti:?}, severed_h0={severed_components}"
+    );
+    emit_topology_audit(
+        &topology_identity,
+        topology_betti,
+        material_components,
+        filled_void_betti,
+        severed_material_betti,
+    );
     // Drift audits under budget.
     let drift_ok = report.audits.iter().all(|a| a.interface_drift_h < 0.5);
     // Quality: beats the TRIVIAL design (uniform band) atEQUAL volume.
@@ -566,6 +759,8 @@ fn tls_006_cantilever_descent() {
         && stabilized
         && fired
         && interior_hole
+        && topology_audit_ok
+        && topology_mutants_caught
         && drift_ok
         && deterministic
         && load_pad_deterministic
@@ -589,11 +784,18 @@ fn tls_006_cantilever_descent() {
              determinism, beats-trivial\",\"v_final\":{v_final:.3},\
              \"j_final\":{j_final:.5e},\"j_trivial_same_volume\":{j_trivial:.5e},\
              \"deterministic\":{deterministic},\"interior_hole\":{interior_hole},\
+             \"topology_betti\":[{},{},{}],\
+             \"persistence_components_alive\":{material_components},\
+             \"topology_replays\":{topology_replays},\
+             \"topology_mutants_caught\":{topology_mutants_caught},\
              \"load_pad_deterministic\":{load_pad_deterministic},\
              \"load_pad_tracked\":{load_pad_tracked},\
              \"load_pad_intervened\":{load_pad_intervened},\
              \"final_support_valid\":{final_support_valid},\
              \"events\":[{}],\"trajectory\":[{}]",
+            topology_betti.0,
+            topology_betti.1,
+            topology_betti.2,
             ev.trim_end_matches(','),
             rows.trim_end_matches(',')
         ),

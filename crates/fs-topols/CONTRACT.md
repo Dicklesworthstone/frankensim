@@ -91,7 +91,13 @@ with zero meshing anywhere in the loop.
    stabilizes (tail variation < 20%), fires nucleation with positive
    predicted gain producing a GENUINE interior hole (flood-fill
    verified), keeps every redistancing drift < 0.5h, and BEATS the
-   trivial uniform-band design at equal volume (tls-006).
+   trivial uniform-band design at equal volume (tls-006). The actual final
+   optimizer field also crosses the L4→L2 honesty boundary: cell-center
+   sampling into fs-topo's public `VoxelField` must yield exact cubical
+   `b0 = 1`, `b1 >= 1`, and `b2 = 0`; the H0 persistence filtration's
+   face-connected alive-component count is retained separately for
+   localization, and an independent repeat reproduces the complete audit
+   identity bitwise.
 8. Determinism (P2): two descent runs produce bitwise-identical FNV
    snapshot sequences.
 9. Typed right-edge load support (G0/G3): aligned or non-aligned checked bands
@@ -154,7 +160,17 @@ drift policy; tls-005 numerical sensitivity gates (DT vs punched
 hole, shape velocity vs FD); tls-006 the cantilever descent (volume,
 stabilization, nucleation with interior-hole flood-fill proof,
 determinism, recorded/replayed load-pad intervention, final typed-support
-validity, beats-trivial-at-equal-volume). Unit tests: enclosure
+validity, beats-trivial-at-equal-volume). tls-006 additionally sends that
+same final field—not a synthetic replacement—through fs-topo's production H0
+persistence and exact cubical Betti oracle after a one-cell extrusion. A
+versioned fs-obs receipt binds both crate versions, the optimizer's final
+snapshot, every sampled level-set bit, grid metadata, threshold, Betti tuple,
+and persistent material-component count. A repeat must reproduce the receipt
+bitwise; the receipt explicitly records whether face-connected persistence
+localization agrees with the closed-cube Betti component authority. Disclosed
+filled-void and two-island mutations must respectively erase the tunnel and
+produce exactly two components before the passing `ConformanceCase` can be
+emitted. Unit tests: enclosure
 containment including degenerate lattice-aligned boxes, planar extension,
 typed aligned-band success/replay, supported-cut refusal, deterministic strict
 load-pad retention without unrelated-column fill, and invalid fixture/material
@@ -185,3 +201,9 @@ no-mutation refusals.
   one-move-per-iteration policy.
 - The vessel flagship's lip-channel fixture (§15.3) — the cantilever
   classic ships; the flagship composes downstream.
+- The output audit is exact for the sampled cubical solid only. Cell-center
+  sampling can miss sub-cell features of the continuous bilinear `GridSdf`, so
+  it is a resolution-scoped cross-layer audit rather than a continuous-topology
+  theorem. fs-topo's shipped persistence pairing is H0; the nucleated planar
+  hole is checked by exact cubical `b1`, not laundered into an H1 persistence
+  claim.
