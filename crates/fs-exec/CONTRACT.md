@@ -574,6 +574,32 @@ stream provenance; they are not fault-plan input seeds. Neither seed class
 claims replay of thread scheduling, completion count, or timing. This bounded
 battery is G4 evidence, not an exhaustive scheduler-state exploration.
 
+The ignored release-only harnesses `tests/pool_pin_ab.rs` and
+`tests/tune_machine_ab.rs` emit their compound measurement rows as validated
+`fs-obs` `Custom` events without synthesizing deterministic aggregate verdicts.
+The pool-pinning suite is `fs-exec/pool-pin-ab`, with the single identity
+`pool-pin-ab/measurement`. The machine-tuning suite is
+`fs-exec/tune-machine-ab`; after the existing canonical, ledger-bound tuner
+calibration report is printed unchanged, its event identities remain ordered
+as `schedule-selected/measurement`, `class-distribution/measurement`, and
+`weight-ab/measurement`. The opaque calibration report is intentionally not
+wrapped or re-encoded because it is already the tuner's externally consumable
+canonical artifact rather than an ad-hoc test dialect.
+
+Each compound row retains the legacy metric name and field order, adds the
+stable machine fingerprint, and validates after `fs-obs` serialization before
+printing. The pool experiments record logical TilePool execution root `0xF22`;
+that root identifies deterministic pool stream decisions but is not a seed for
+wall-clock values, OS scheduling, steal counts, or placement success. Each
+three-trial timing row therefore records a null timing seed and explicitly
+marks timing replay false; the class-distribution row likewise disclaims OS
+schedule replay. Non-finite compound timing values serialize as JSON `null`.
+The ignored attributes, minimum-of-three timing method, measurements,
+assertions, and output ordering are unchanged. These rows are machine-local
+diagnostics only: they establish the existing bit-invariance gates but make no
+throughput, pinning-success, calibrated-is-faster, repeatability, or statistical
+confidence claim.
+
 ## No-claim boundaries
 - NO 200 µs cancel-latency CLAIM yet: the reference-hardware p99 gate
   belongs to the roofline/perf harness with release builds and machine
