@@ -260,12 +260,13 @@ record the standalone numeric `execution_seed` when applicable. The
 dual-contouring companion encodes an unavailable non-finite certificate margin
 as JSON `null`, never as a non-JSON numeric token.
 
-If the fixed rmesh-008 bracket certificate refuses, the suite emits a distinct
-`rmesh-008/bracket` Error `ConformanceCase` diagnostic before continuing to the
-aggregate verdict. That diagnostic is failure-record linted and wire-validated,
-uses input seed zero for the fixed chart, and records the separate fixed Cx
-execution seed in its detail. It does not assert or replace the rmesh-008
-aggregate gate.
+If the fixed rmesh-008 bracket certificate completes with localized failures,
+the suite emits a distinct `rmesh-008/bracket` Error `ConformanceCase`
+diagnostic before continuing to the aggregate verdict. That diagnostic is
+failure-record linted and wire-validated, uses input seed zero for the fixed
+chart, and records the separate fixed Cx execution seed in its detail. It does
+not assert on the bracket outcome or replace the rmesh-008 aggregate gate;
+schema lint and wire validation remain fail-closed.
 
 ## No-claim boundaries
 - Self-intersection FLAGGING is deferred to the validity-certificates
