@@ -141,6 +141,36 @@ than Cargo features.
 - `fe2e_mid_stages` and `fe2e_full_stages` are intentionally ignored
   lane placeholders until the perf/CI cadence lands.
 
+`tests/production_scale.rs` is the ignored first tranche for
+`frankensim-ei3b`. An explicit release-only profile selects either the M4
+128^3 or Threadripper 256^3 scalar-field rung; missing profile input produces
+a named refusal without allocating, while malformed or host-mismatched input
+fails after emitting the refusal. The stable configuration identity binds the
+shape, exact payload and fresh-chunk reservation, pool/lease limits, OS,
+architecture, bounded model string, logical CPU count, and crate versions. It
+explicitly excludes phase clocks and process RSS.
+
+The tranche separately proves two memory properties. First, an exact
+fresh-pool lease limit one byte below the preflight reservation refuses before
+allocator or payload mutation: the arena and pool counters remain unchanged,
+the external mutation sentinel is untouched, and the exact refusal receipt is
+retained. Second, the admitted rung performs one arena allocation whose
+initialization is also its first touch, sweeps every f64 cell in deterministic
+index order, and drops the arena. With free-list retention disabled, the
+operation lease returns to zero and pool accounting reports zero live,
+reserved, and free bytes. These are logical allocator/lease claims, not process
+RSS or worker-owned NUMA placement claims.
+
+Phase rows are report-only, object-shaped `Custom` observations named
+`allocate_initialize_first_touch_ns`, `serial_sweep_ns`, and
+`arena_drop_reclaim_ns`. They carry the workload configuration root rather than
+mislabeling it as an `fs-substrate` machine fingerprint, so cross-run
+performance comparison remains refused. On Linux only, `/proc/self/status`
+`VmHWM` is recorded under its exact process-lifetime high-water semantics; it
+includes harness startup and cannot be reset, so this tranche does not use it
+as an admitted RSS budget gate. On macOS, current RSS is not relabeled as peak
+and the true peak claim is named-skipped.
+
 The eight completed aggregates retain their existing case identities
 and emit canonical `ConformanceCase` records with Info/Error severity,
 failure-record linting, JSONL validation, and print-before-terminal-
@@ -181,7 +211,13 @@ until their perf/CI cadence lands.
 - No new vessel, ornithoid, frame, or LBM physics claim is made here;
   this crate composes public APIs from those crates.
 - No production-scale full-fidelity flagship run is claimed. Mid and
-  full lanes are wired as ignored tests with envelope homes.
+  full lanes are wired as ignored tests with envelope homes. The ignored
+  scalar-field scale tranche proves only arena/lease admission, first-touch
+  initialization, serial sweep, and reclaim accounting. Sparse D3Q19 at one
+  million active cells, TilePool ownership, NUMA placement, per-CCD bandwidth,
+  CCD-shaped reductions, quiet-host timing promotion, cross-ISA comparison,
+  and an admitted M4 peak-RSS budget remain explicit named skips until their
+  retained host evidence exists.
 - No CI authority is claimed. DSR remains the repository automation
   source of truth.
 - No evidence package or FrankenScript study driver is emitted yet;
