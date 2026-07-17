@@ -4,19 +4,19 @@ use core::num::NonZeroUsize;
 
 use fs_couple::{
     AccountingBoundary, AmountFlowRate, BoundaryTreatment, ChemicalEnergyAccounting,
-    ChemicalEnergyInput, ConservationRole, CoordinateBinding, DeviatoricStressWork,
-    DissipationEvidence, DissipationLaw, DissipativeRelation, EntropyFlowRate, FieldMeasureSide,
-    MovingStreamEnthalpyChart, PortKind, PortOrientation, PortSchema, PortTimestamp,
-    PortValueShape, PowerPairing, SourceClass, SourceOrReservoir, SpecificEnergy, StableId,
-    StorageElement, StoragePotential, StreamChartBinding, StreamConstituentFlow,
-    StreamConstituentId, StreamEnergyChart, StreamKinematics, StreamPort,
+    ChemicalEnergyInput, ConservationRole, ConservativeJunction, CoordinateBinding,
+    DeviatoricStressWork, DissipationEvidence, DissipationLaw, DissipativeRelation,
+    EntropyFlowRate, FieldMeasureSide, MovingStreamEnthalpyChart, PortKind, PortOrientation,
+    PortSchema, PortTimestamp, PortValueShape, PowerPairing, SourceClass, SourceOrReservoir,
+    SpecificEnergy, StableId, StorageElement, StoragePotential, StreamChartBinding,
+    StreamConstituentFlow, StreamConstituentId, StreamEnergyChart, StreamKinematics, StreamPort,
     StreamStressWorkConvention,
 };
 use fs_iface::SpaceType;
 use fs_opdsl::{
-    AccountingTermKind, CompiledInterfaceEquation, InterfaceEquationSpec, LossOwnershipId,
-    OwnershipDisposition, PortDiscretization, PortEquationError, PortEquationSense,
-    PortEquationSpec, PortPrimitiveKind, SpatialSupport, StreamEnergyChartKind,
+    AccountingTermKind, CompiledInterfaceEquation, ConservativeJunctionSide, InterfaceEquationSpec,
+    LossOwnershipId, OwnershipDisposition, PortDiscretization, PortEquationError,
+    PortEquationSense, PortEquationSpec, PortPrimitiveKind, SpatialSupport, StreamEnergyChartKind,
     StreamEnergyOwnership, StreamEquationSpec, SystemExpr, compile_interface_equations,
     compile_port_equation, compile_port_equations, compile_stream_equation,
 };
@@ -173,6 +173,16 @@ fn source_spec(treatment: BoundaryTreatment) -> PortEquationSpec {
         PortDiscretization::lumped(),
         PortEquationSense::AsDeclared,
     )
+}
+
+fn conservative_junction_specs(port_a: &str, port_b: &str) -> [PortEquationSpec; 2] {
+    let primitive = ConservativeJunction::new(
+        stable("conservative-junction"),
+        scalar_schema(port_a, PortOrientation::OutwardFromOwner),
+        scalar_schema(port_b, PortOrientation::OutwardFromOwner),
+    )
+    .expect("admitted conservative junction");
+    PortEquationSpec::from_conservative_junction(primitive, PortDiscretization::lumped())
 }
 
 #[test]
@@ -696,4 +706,79 @@ fn g3_closed_primitive_metadata_is_identity_bearing_and_owner_derived() {
     let json = reservoir.receipt().to_json();
     assert!(json.contains("\"primitive_kind\":\"source-or-reservoir\""));
     assert!(json.contains("\"primitive_id\":\"source-relation\""));
+}
+
+#[test]
+fn g3_conservative_junction_lowers_signed_sides_and_preserves_permutation() {
+    let ab = compile_port_equations(conservative_junction_specs("junction-a", "junction-b").into())
+        .expect("A/B junction sides lower");
+    let ab_a = ab
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "junction-a")
+        .expect("A-side equation");
+    let ab_b = ab
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "junction-b")
+        .expect("B-side equation");
+
+    assert_eq!(ab_a.receipt().sign(), 1);
+    assert_eq!(ab_b.receipt().sign(), -1);
+    assert_eq!(
+        ab_a.receipt().primitive_kind(),
+        Some(PortPrimitiveKind::ConservativeJunction)
+    );
+    assert_eq!(
+        ab_a.receipt().conservative_junction_side(),
+        Some(ConservativeJunctionSide::A)
+    );
+    assert_eq!(
+        ab_b.receipt().conservative_junction_side(),
+        Some(ConservativeJunctionSide::B)
+    );
+    assert_eq!(ab_a.receipt().primitive_id(), Some("conservative-junction"));
+    assert!(matches!(
+        ab_a.receipt().ownership(),
+        OwnershipDisposition::NotApplicable
+    ));
+    assert!(
+        ab_a.receipt()
+            .to_json()
+            .contains("\"conservative_junction_side\":\"a\"")
+    );
+
+    let ba = compile_port_equations(conservative_junction_specs("junction-b", "junction-a").into())
+        .expect("B/A junction sides lower");
+    let ba_a = ba
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "junction-a")
+        .expect("permuted A port");
+    let ba_b = ba
+        .equations()
+        .iter()
+        .find(|equation| equation.receipt().port_id() == "junction-b")
+        .expect("permuted B port");
+
+    assert_eq!(ba_a.receipt().sign(), -1);
+    assert_eq!(ba_b.receipt().sign(), 1);
+    assert_eq!(
+        ba_a.receipt().conservative_junction_side(),
+        Some(ConservativeJunctionSide::B)
+    );
+    assert_eq!(
+        ba_b.receipt().conservative_junction_side(),
+        Some(ConservativeJunctionSide::A)
+    );
+    assert_ne!(
+        ab_a.receipt().system_identity(),
+        ba_a.receipt().system_identity(),
+        "permuting a junction changes the exact side role and sign"
+    );
+    assert_eq!(
+        i16::from(ab_a.receipt().sign()) + i16::from(ab_b.receipt().sign()),
+        0,
+        "the two structural power contributions retain balancing signs"
+    );
 }

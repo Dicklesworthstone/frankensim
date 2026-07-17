@@ -45,9 +45,9 @@ pub use plan::{LoweredOperator, PlanReport, dwr_indicators};
 #[cfg(feature = "port-equations")]
 pub use ports::{
     AccountingTermKind, CompiledInterfaceEquation, CompiledPortEquation, CompiledStreamEquation,
-    InterfaceEquationBatch, InterfaceEquationSpec, LossOwnershipId, OwnershipDisposition,
-    PORT_EQUATION_RECEIPT_SCHEMA_V1, PortDiscretization, PortEquationBatch, PortEquationError,
-    PortEquationReceipt, PortEquationSense, PortEquationSpec, PortPrimitiveKind,
+    ConservativeJunctionSide, InterfaceEquationBatch, InterfaceEquationSpec, LossOwnershipId,
+    OwnershipDisposition, PORT_EQUATION_RECEIPT_SCHEMA_V1, PortDiscretization, PortEquationBatch,
+    PortEquationError, PortEquationReceipt, PortEquationSense, PortEquationSpec, PortPrimitiveKind,
     STREAM_EQUATION_RECEIPT_SCHEMA_V1, StreamEnergyChartKind, StreamEnergyOwnership,
     StreamEquationReceipt, StreamEquationSpec, compile_interface_equations, compile_port_equation,
     compile_port_equations, compile_stream_equation,

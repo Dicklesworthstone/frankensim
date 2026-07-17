@@ -271,6 +271,15 @@ documented in the bead close); cross-ISA golden hash.
   relation ID. Changing an operator, evidence kind/receipt, or boundary
   treatment therefore changes the `SystemId`; owned loss identities also bind
   the retained constitutive evidence.
+- `PortEquationSpec::from_conservative_junction` imports both sides of an
+  admitted `fs_couple::ConservativeJunction` without asking the caller to
+  repeat its sign convention. Side A lowers as declared, side B lowers through
+  an explicit `-1`, and both side fragments bind the junction ID, ordered port
+  IDs, and exact A/B role. Permuting the neutral junction reverses the retained
+  roles and changes the generated identities. The v1 system IR cannot assign
+  two otherwise identical external fields distinct semantic interface-side
+  identities, so the two contributions remain independently admitted system
+  fragments; this slice does not invent a false in-system equality constraint.
 - `compile_stream_equation` imports an already-admitted `fs_couple::StreamPort`
   and lowers its mass, canonical constituent amount, momentum, energy, and
   entropy rates into five typed external boundary field blocks. The generated
@@ -291,8 +300,9 @@ documented in the bead close); cross-ISA golden hash.
   orientation reversal; canonical same-kind and mixed batch order; ownership
   uniqueness; primitive operator/evidence/boundary identity adversaries;
   stream-energy double-count adversaries; component shape; empty-input; and
-  metadata-resource-bomb fixtures. The test target is explicitly gated by
-  `required-features = ["port-equations"]`.
+  metadata-resource-bomb fixtures. The junction fixture additionally checks
+  balancing signs, exact A/B identity, and port-order permutation. The test
+  target is explicitly gated by `required-features = ["port-equations"]`.
 - NO-CLAIM: this slice generates structural equations; it does not execute the
   scalar/vector/tensor/field contraction, quadrature, trace pullback, numeric
   port adapter, source/dissipation law, or closed-window audit. Stream-bundle
@@ -301,8 +311,10 @@ documented in the bead close); cross-ISA golden hash.
   window recomposition is claimed. Primitive operator IDs and evidence are
   identity-bound but are not executed; typed storage-state action lowering is
   pending because the neutral primitive does not yet expose state-coordinate
-  dimensions. Junction permutations and reversible skew-block preservation
-  remain subsequent I01.3 slices. A receipt
+  dimensions. Conservative-junction side lowering binds the upstream
+  shared-effort/opposite-flow admission and emits balancing power signs, but it
+  does not re-emit or execute that topology constraint inside one system;
+  reversible skew-block preservation remains a subsequent I01.3 slice. A receipt
   proves that the supplied schema lowered consistently, not that the schema or
   its referenced physical evidence is true. The [F] baseline deck, activation
   threshold, kill criterion, cost percentiles, and independent reproduction

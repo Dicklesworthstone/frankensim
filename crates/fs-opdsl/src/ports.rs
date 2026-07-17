@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use fs_couple::{
-    BoundaryTreatment, ConservationRole, DissipationEvidence, DissipationLaw, DissipativeRelation,
-    FieldMeasureSide, PORT_SCHEMA_VERSION, PortKind, PortOrientation, PortSchema, PortValueShape,
-    PowerPairing, STREAM_PORT_VERSION, SourceClass, SourceOrReservoir, StableId, StorageElement,
-    StoragePotential, StreamConstituentId, StreamEnergyChart, StreamPort,
+    BoundaryTreatment, ConservationRole, ConservativeJunction, DissipationEvidence, DissipationLaw,
+    DissipativeRelation, FieldMeasureSide, PORT_SCHEMA_VERSION, PortKind, PortOrientation,
+    PortSchema, PortValueShape, PowerPairing, STREAM_PORT_VERSION, SourceClass, SourceOrReservoir,
+    StableId, StorageElement, StoragePotential, StreamConstituentId, StreamEnergyChart, StreamPort,
     StreamStressWorkConvention,
 };
 use fs_iface::SpaceType;
@@ -209,9 +209,11 @@ impl PortDiscretization {
     }
 }
 
-/// Closed one-port primitive family retained by a compiled equation.
+/// Closed port primitive family retained by a compiled equation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortPrimitiveKind {
+    /// One side of an admitted lossless two-port junction.
+    ConservativeJunction,
     /// Stored-energy descriptor with a named constitutive gradient.
     Storage,
     /// Evidence-bound irreversible constitutive relation.
@@ -223,6 +225,7 @@ pub enum PortPrimitiveKind {
 impl PortPrimitiveKind {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::ConservativeJunction => "conservative-junction",
             Self::Storage => "storage",
             Self::Dissipation => "dissipation",
             Self::SourceOrReservoir => "source-or-reservoir",
@@ -230,8 +233,33 @@ impl PortPrimitiveKind {
     }
 }
 
+/// Exact side of an admitted [`ConservativeJunction`].
+///
+/// The side is identity-bearing because the neutral junction's scalar seed
+/// declares side A's flow as supplied and side B's flow as its negative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConservativeJunctionSide {
+    /// The junction's declared A side; its contribution keeps its sign.
+    A,
+    /// The junction's declared B side; its contribution is explicitly negated.
+    B,
+}
+
+impl ConservativeJunctionSide {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PortPrimitiveBinding {
+    ConservativeJunction {
+        junction: ConservativeJunction,
+        side: ConservativeJunctionSide,
+    },
     Storage(StorageElement),
     Dissipation(DissipativeRelation),
     SourceOrReservoir(SourceOrReservoir),
@@ -240,6 +268,7 @@ enum PortPrimitiveBinding {
 impl PortPrimitiveBinding {
     fn kind(&self) -> PortPrimitiveKind {
         match self {
+            Self::ConservativeJunction { .. } => PortPrimitiveKind::ConservativeJunction,
             Self::Storage(_) => PortPrimitiveKind::Storage,
             Self::Dissipation(_) => PortPrimitiveKind::Dissipation,
             Self::SourceOrReservoir(_) => PortPrimitiveKind::SourceOrReservoir,
@@ -248,9 +277,17 @@ impl PortPrimitiveBinding {
 
     fn id(&self) -> &StableId {
         match self {
+            Self::ConservativeJunction { junction, .. } => junction.id(),
             Self::Storage(primitive) => primitive.id(),
             Self::Dissipation(primitive) => primitive.id(),
             Self::SourceOrReservoir(primitive) => primitive.id(),
+        }
+    }
+
+    fn junction_side(&self) -> Option<ConservativeJunctionSide> {
+        match self {
+            Self::ConservativeJunction { side, .. } => Some(*side),
+            Self::Storage(_) | Self::Dissipation(_) | Self::SourceOrReservoir(_) => None,
         }
     }
 }
@@ -286,6 +323,49 @@ impl PortEquationSpec {
             ownership,
             primitive: None,
         }
+    }
+
+    /// Construct the two signed power contributions of an admitted lossless
+    /// junction.
+    ///
+    /// The returned requests retain the neutral descriptor's A/B order: side A
+    /// is as declared and side B is explicitly reversed. They intentionally
+    /// compile as two independent system fragments because the v1 system IR
+    /// has no semantic interface-side field identity. The upstream junction's
+    /// shared-effort/opposite-flow constraint is identity-bound but is not
+    /// re-emitted or executed by this structural lowering.
+    #[must_use]
+    pub fn from_conservative_junction(
+        primitive: ConservativeJunction,
+        discretization: PortDiscretization,
+    ) -> [Self; 2] {
+        let (port_a, port_b) = primitive.ports();
+        let schema_a = port_a.clone();
+        let schema_b = port_b.clone();
+        [
+            Self {
+                schema: schema_a,
+                discretization,
+                sense: PortEquationSense::AsDeclared,
+                term_kind: AccountingTermKind::Reversible,
+                ownership: OwnershipDisposition::NotApplicable,
+                primitive: Some(PortPrimitiveBinding::ConservativeJunction {
+                    junction: primitive.clone(),
+                    side: ConservativeJunctionSide::A,
+                }),
+            },
+            Self {
+                schema: schema_b,
+                discretization,
+                sense: PortEquationSense::Reversed,
+                term_kind: AccountingTermKind::Reversible,
+                ownership: OwnershipDisposition::NotApplicable,
+                primitive: Some(PortPrimitiveBinding::ConservativeJunction {
+                    junction: primitive,
+                    side: ConservativeJunctionSide::B,
+                }),
+            },
+        ]
     }
 
     /// Construct a stored-energy port equation whose owner, state schema, and
@@ -359,6 +439,14 @@ impl PortEquationSpec {
     #[must_use]
     pub fn primitive_id(&self) -> Option<&StableId> {
         self.primitive.as_ref().map(PortPrimitiveBinding::id)
+    }
+
+    /// Retained A/B role when this request comes from a conservative junction.
+    #[must_use]
+    pub fn conservative_junction_side(&self) -> Option<ConservativeJunctionSide> {
+        self.primitive
+            .as_ref()
+            .and_then(PortPrimitiveBinding::junction_side)
     }
 }
 
@@ -706,6 +794,7 @@ pub struct PortEquationReceipt {
     loss_ownership_id: Option<LossOwnershipId>,
     primitive_kind: Option<PortPrimitiveKind>,
     primitive_id: Option<String>,
+    conservative_junction_side: Option<ConservativeJunctionSide>,
 }
 
 impl PortEquationReceipt {
@@ -801,6 +890,13 @@ impl PortEquationReceipt {
         self.primitive_id.as_deref()
     }
 
+    /// Exact A/B role when the equation is one side of a conservative
+    /// junction.
+    #[must_use]
+    pub const fn conservative_junction_side(&self) -> Option<ConservativeJunctionSide> {
+        self.conservative_junction_side
+    }
+
     /// Re-derived power dimensions after the pairing measure is applied.
     #[must_use]
     pub const fn product_dims(&self) -> Dims {
@@ -818,8 +914,13 @@ impl PortEquationReceipt {
             .primitive_kind
             .zip(self.primitive_id.as_ref())
             .map_or_else(String::new, |(kind, id)| {
+                let side = self
+                    .conservative_junction_side
+                    .map_or_else(String::new, |side| {
+                        format!(",\"conservative_junction_side\":\"{}\"", side.as_str())
+                    });
                 format!(
-                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"",
+                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"{side}",
                     kind.as_str()
                 )
             });
@@ -1323,6 +1424,7 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
     let system = system.admit()?;
     let primitive_kind = spec.primitive_kind();
     let primitive_id = spec.primitive_id().map(|id| id.as_str().to_string());
+    let conservative_junction_side = spec.conservative_junction_side();
     let receipt = PortEquationReceipt {
         port_id: spec.schema.id().as_str().to_string(),
         port_schema_version: spec.schema.version(),
@@ -1339,6 +1441,7 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
         loss_ownership_id,
         primitive_kind,
         primitive_id,
+        conservative_junction_side,
     };
     Ok(CompiledPortEquation { system, receipt })
 }
@@ -1766,6 +1869,17 @@ fn encode_primitive_binding(bytes: &mut Vec<u8>, primitive: &PortPrimitiveBindin
     bytes.push(0x80);
     bytes.extend_from_slice(&PRIMITIVE_BINDING_VERSION.to_le_bytes());
     match primitive {
+        PortPrimitiveBinding::ConservativeJunction { junction, side } => {
+            bytes.push(3);
+            push_text(bytes, junction.id().as_str());
+            bytes.push(match side {
+                ConservativeJunctionSide::A => 0,
+                ConservativeJunctionSide::B => 1,
+            });
+            let (port_a, port_b) = junction.ports();
+            push_text(bytes, port_a.id().as_str());
+            push_text(bytes, port_b.id().as_str());
+        }
         PortPrimitiveBinding::Storage(storage) => {
             bytes.push(0);
             push_text(bytes, storage.id().as_str());
@@ -1812,6 +1926,16 @@ fn primitive_binding_variable_bytes(
     primitive: &PortPrimitiveBinding,
 ) -> Result<usize, PortEquationError> {
     match primitive {
+        PortPrimitiveBinding::ConservativeJunction { junction, .. } => {
+            let (port_a, port_b) = junction.ports();
+            [
+                junction.id().as_str().len(),
+                port_a.id().as_str().len(),
+                port_b.id().as_str().len(),
+            ]
+            .into_iter()
+            .try_fold(64usize, checked_metadata_add)
+        }
         PortPrimitiveBinding::Storage(storage) => [
             storage.id().as_str().len(),
             storage.state_schema().as_str().len(),
