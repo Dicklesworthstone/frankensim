@@ -832,6 +832,44 @@ Rotary-coating references:
 - <https://ntrs.nasa.gov/api/citations/19950016805/downloads/19950016805.pdf>
 - <https://patents.google.com/patent/US4728448A/en>
 
+## NASA AISI 52100 dry and GXL-320A interface tranches
+
+`nasa-52100-dry-air-interface/` is an ordered rider-on-disk system card for the
+SAE 52100 atmospheric endpoint printed in Figure 11(a) of Buckley, Swikert, and
+Johnson's NASA-authored friction study. It retains the source's Table 1
+composition range and Rockwell C60..63 condition, separate 3/16-inch-radius
+rider and 2-inch-diameter disk roles, finish-ground 4..8-microinch surfaces,
+specified cleaning sequence, fresh specimens, one-hour duration, `75 degF`,
+`760 mm Hg`, `390 ft/min`, and `1000 gram-force`. The sole claim is the printed
+kinetic-friction coefficient `0.45`. SI validity points record the conventional
+conversions explicitly; the source does not name the roughness metric, repeat
+count, dispersion, humidity, oxide state, wear rate, or transferable friction
+law, and no such claim is inferred.
+
+`nasa-52100-gxl320a-vacuum-interface/` is a separate ordered four-ball system
+card from NASA/TM-1999-209064. It binds one rotating and three stationary
+grade-25, 9.5-mm AISI 52100 balls to the reported cleaning sequence, named
+GXL-320A base grease, vacuum strictly below `6.7e-4 Pa`, `200 N`, `28.8 mm/s`,
+initial `3.5 GPa` Hertz mean stress, approximately `23 degC`, four-hour test,
+and four-run aggregate. Table 2's `0.11` mean and observed `0.09..0.23` range
+are three distinct claims with `Unstated` uncertainty; the observed extrema
+are not represented as a confidence interval. Supplier lot, thickener, full
+formulation, steel heat/hardness/roughness, grease quantity, run-level values,
+wear rate, friction law, service lifetime, and transfer to another grease or
+environment remain outside the card.
+
+NTRS marks both records public, U.S.-Government works, and Public Use
+Permitted. The 1999 PDF's preprint page separately requests author permission
+to cite or reproduce. Its manifest preserves that conflict and the pack uses
+only attributed factual rows; it does not reproduce a table or figure.
+
+Interface references:
+
+- <https://ntrs.nasa.gov/citations/20150020881>
+- <https://ntrs.nasa.gov/api/citations/20150020881/downloads/20150020881.pdf>
+- <https://ntrs.nasa.gov/citations/19990031946>
+- <https://ntrs.nasa.gov/api/citations/19990031946/downloads/19990031946.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -930,6 +968,14 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/nasa-cr-195445-omc-ps200-rotary-coating/manifest.tsv \
   --out /path/to/nasa-cr-195445-omc-ps200-rotary-coating-system.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-52100-dry-air-interface/manifest.tsv \
+  --out /path/to/nasa-52100-dry-air-interface.fsintpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-52100-gxl320a-vacuum-interface/manifest.tsv \
+  --out /path/to/nasa-52100-gxl320a-vacuum-interface.fsintpk
 ```
 
 ## No-claim boundary
@@ -952,6 +998,14 @@ confidence interval. The NASA comparison uses nearby temperatures and is only
 a coarse independent agreement check. These missing claims and the remaining
 named materials and interface systems keep bead
 `frankensim-ext-matdb-seed-dataset-1sxe` open.
+
+The two AISI 52100 interface tranches are apparatus- and history-bound system
+cards, not bulk coefficients for bearing steel. The dry value applies only to
+the retained rider/disk roles and atmospheric endpoint. The GXL-320A values
+apply only to the retained four-ball vacuum system; its printed extrema are an
+observed range, not uncertainty bounds. Neither pack supplies static friction,
+wear, a constitutive friction law, lifetime, air/vacuum transfer, surface-state
+evolution, or authority for another heat, finish, cleaner, or lubricant.
 
 The OFHC Copper tranche likewise does not select between UNS C10100 and C10200,
 define electrical resistivity, density, mechanical strength, temper, grain

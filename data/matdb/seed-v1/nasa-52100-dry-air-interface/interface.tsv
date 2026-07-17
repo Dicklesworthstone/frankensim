@@ -1,0 +1,15 @@
+frankensim.matdb-source.v1
+surface_a	SAE 52100 source-Table-1 composition	phase unstated by source	Rockwell C60 to C63 finish-ground then acetone alumina tap-water and distilled-water cleaned	1	finish-ground-4-to-8-microinch-rider
+surface_b	SAE 52100 source-Table-1 composition	phase unstated by source	Rockwell C60 to C63 finish-ground then acetone alumina tap-water and distilled-water cleaned	1	finish-ground-4-to-8-microinch-disk
+context	dry-unlubricated-contact	-	air-at-760-mmHg	fresh-specimens-one-hour-run
+observation	dry-air-friction	SAE 52100 tool-steel 3/16-inch-radius rider on SAE 52100 tool-steel 2-inch-diameter disk; source Table 1 chemistry and Rockwell C60..63 hardness	continuous strain-gage friction force during one-hour rotating-disk test; Figure 11(a) atmospheric endpoint	Figure 11(a) prints 0.45 at 760 mm Hg and 75 degF with 390 ft/min and 1000 g dead-weight load; SI condition rows use 760 mmHg = 101325 Pa, 75 degF = 297.0388888888889 K, 390 ft/min = 1.9812 m/s, and 1000 gram-force = 9.80665 N; surface-finish metric beyond 4..8 microinch is not stated; no repeats dispersion lot heat exact composition cleaning-water purity humidity oxide state static friction wear rate or transferable friction law
+scalar	friction	dry-air-friction	kinetic-friction-coefficient	0.45	1	constant
+uncertainty	friction	unstated	-	-	-	-
+validity	friction	temperature	297.0388888888889	297.0388888888889	K
+validity	friction	ambient_pressure	101325	101325	Pa
+validity	friction	sliding_speed	1.9812	1.9812	m/s
+validity	friction	normal_force	9.80665	9.80665	N
+validity	friction	test_duration	3600	3600	s
+validity	friction	rider_radius	0.0047625	0.0047625	m
+validity	friction	disk_diameter	0.0508	0.0508	m
+validity	friction	source_atmosphere_air	1	1	1

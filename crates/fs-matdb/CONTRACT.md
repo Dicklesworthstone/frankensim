@@ -318,7 +318,15 @@ whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
 explicitly non-authoritative ordered steel/bronze fixture into byte-identical,
 identity-verified interface packs; compiler-identity retention; surface,
 context, and claim reconstruction; and fail-closed missing-context and
-noncanonical-revision cases. Real seed cards remain separately source-bound.
+noncanonical-revision cases.
+
+`xtask/tests/interface_pack_seed_cli.rs`: G3 two-pass compilation of the first
+two source-bound interface seeds into byte-identical, externally pinned packs.
+The battery checks the NASA 52100 dry-air rider/disk identity and `0.45` value,
+the NASA GXL-320A vacuum four-ball identity and distinct `0.11` mean plus
+`0.09..0.23` observed extrema, exact retained condition axes, `Unstated`
+uncertainty, surface-role order, complete context, and explicit friction-law,
+wear, and lifetime no-claim exclusions.
 
 `xtask/tests/matdb_pack_cli.rs`: G3 compilation of the committed methane,
 nitrogen, oxygen, argon, carbon-dioxide, water-vapor, and carbon-monoxide seed
@@ -550,6 +558,16 @@ Wankel-housing authority.
   property, transferable durability, generic Wankel identity, or service-life
   authority follows. Source-text redistribution grants no patent-practice or
   trademark rights.
+  The first source-bound interface packs remain separate from every bulk 52100
+  card. The Buckley dry-air card binds a fresh, cleaned, finish-ground 52100
+  rider/disk pair to one atmospheric apparatus endpoint and one `0.45`
+  kinetic-friction value. The GXL-320A card binds a cleaned 52100 four-ball
+  system to that named grease, strict vacuum bound, four-hour history, and the
+  source's separate `0.11` mean and `0.09..0.23` observed extrema. The latter
+  range is not a confidence interval. Missing surface-metrology detail,
+  material heats, repeat-level values, lubricant formulation, uncertainty,
+  wear, constitutive laws, lifetime, and transfer across apparatus,
+  environment, finish, or lubricant remain fail-closed no-claims.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,

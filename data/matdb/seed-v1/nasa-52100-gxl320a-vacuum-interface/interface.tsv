@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+surface_a	AISI 52100 chrome bearing steel	phase and heat lot unstated by source	grade-25 9.5-mm ball ultrasonically cleaned in hexane acetone and ethanol then nitrogen dried and UV-ozone treated	1	grade-25-9.5mm-rotating-ball
+surface_b	AISI 52100 chrome bearing steel	phase and heat lot unstated by source	grade-25 9.5-mm balls ultrasonically cleaned in hexane acetone and ethanol then nitrogen dried and UV-ozone treated	1	grade-25-9.5mm-three-stationary-balls
+context	boundary-lubricated-contact	GXL-320A-base-grease	vacuum-below-6.7e-4-Pa	four-hour-test-with-hourly-wear-measurements
+observation	gxl320a-friction	one rotating and three stationary grade-25 AISI 52100 9.5-mm bearing balls covered with source-designated GXL-320A base grease	vacuum four-ball tribometer with continuous Hall-effect frictional-torque recording; Table 2 four-run aggregate	Table 2 reports mean 0.11 and observed range 0.09..0.23 across four runs; the range is not a confidence interval; tests used 200 N, 28.8 mm/s, initial 3.5 GPa Hertz mean stress, pressure strictly below 6.7e-4 Pa, and approximately 23 degC; source identifies GXL-320A and an FZ PFPE base fluid but omits supplier lot thickener full formulation steel heat hardness roughness grease quantity repeat-level values and statistical confidence; NTRS public-use metadata and the PDF preprint citation-reproduction warning are both retained; no wear-rate friction-law lifetime air-service or other-grease authority
+scalar	friction-mean	gxl320a-friction	kinetic-friction-coefficient	0.11	1	constant
+scalar	friction-minimum	gxl320a-friction	kinetic-friction-coefficient-observed-minimum	0.09	1	constant
+scalar	friction-maximum	gxl320a-friction	kinetic-friction-coefficient-observed-maximum	0.23	1	constant
+uncertainty	friction-mean	unstated	-	-	-	-
+uncertainty	friction-minimum	unstated	-	-	-	-
+uncertainty	friction-maximum	unstated	-	-	-	-
+validity	friction-mean	normal_force	200	200	N
+validity	friction-mean	sliding_speed	0.0288	0.0288	m/s
+validity	friction-mean	initial_hertz_mean_stress	3500000000	3500000000	Pa
+validity	friction-mean	test_duration	14400	14400	s
+validity	friction-mean	number_of_runs	4	4	1
+validity	friction-mean	ball_diameter	0.0095	0.0095	m
+validity	friction-mean	source_temperature_approximately_23c	1	1	1
+validity	friction-mean	source_pressure_less_than_6.7e-4_pa	1	1	1
+validity	friction-minimum	normal_force	200	200	N
+validity	friction-minimum	sliding_speed	0.0288	0.0288	m/s
+validity	friction-minimum	initial_hertz_mean_stress	3500000000	3500000000	Pa
+validity	friction-minimum	test_duration	14400	14400	s
+validity	friction-minimum	number_of_runs	4	4	1
+validity	friction-minimum	ball_diameter	0.0095	0.0095	m
+validity	friction-minimum	source_temperature_approximately_23c	1	1	1
+validity	friction-minimum	source_pressure_less_than_6.7e-4_pa	1	1	1
+validity	friction-maximum	normal_force	200	200	N
+validity	friction-maximum	sliding_speed	0.0288	0.0288	m/s
+validity	friction-maximum	initial_hertz_mean_stress	3500000000	3500000000	Pa
+validity	friction-maximum	test_duration	14400	14400	s
+validity	friction-maximum	number_of_runs	4	4	1
+validity	friction-maximum	ball_diameter	0.0095	0.0095	m
+validity	friction-maximum	source_temperature_approximately_23c	1	1	1
+validity	friction-maximum	source_pressure_less_than_6.7e-4_pa	1	1	1
