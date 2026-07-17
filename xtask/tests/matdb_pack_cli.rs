@@ -42,6 +42,12 @@ const FACE_G_CDTRF_G_2023_V1_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/face-g-cdtrf-g-2023-v1/manifest.tsv";
 const WO2018_125520_FORMULATION_8_5W30_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/wo2018-125520-formulation-8-5w30/manifest.tsv";
+const NASA_UAM_MW16C_POLYIMIDE_WIRE_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-uam-mw16c-polyimide-magnet-wire/manifest.tsv";
+const NASA_UAM_NOMEX_410_SLOT_LINER_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-uam-nomex-410-slot-liner/manifest.tsv";
+const NASA_UAM_COOLTHERM_EP2000_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-uam-cooltherm-ep2000-180c-cure/manifest.tsv";
 const AISI_4140_RC33_SEED_MANIFEST: &str = "data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv";
 const AISI_1045_COLD_DRAWN_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv";
@@ -2459,6 +2465,7 @@ fn g3_cli_compiles_committed_wo2018_formulation_8_5w30_seed() {
     ];
     let mut performance_observation = None;
     for (property, expected_value, expected_dims, validity_temperature) in expected_unique {
+        let expected_value: f64 = expected_value;
         let claims = decoded.claims().claims_for(property);
         assert_eq!(claims.len(), 1, "missing unique Formulation 8 {property}");
         let (id, claim) = claims[0];
@@ -2562,6 +2569,276 @@ fn g3_cli_compiles_committed_wo2018_formulation_8_5w30_seed() {
             .lines()
             .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
     );
+}
+
+#[test]
+fn g3_cli_compiles_committed_nasa_uam_insulation_stack_constituents() {
+    let seeds = [
+        (
+            NASA_UAM_MW16C_POLYIMIDE_WIRE_SEED_MANIFEST,
+            "nasa-uam-mw16c-polyimide-magnet-wire",
+            2_usize,
+        ),
+        (
+            NASA_UAM_NOMEX_410_SLOT_LINER_SEED_MANIFEST,
+            "nasa-uam-nomex-410-slot-liner",
+            1_usize,
+        ),
+        (
+            NASA_UAM_COOLTHERM_EP2000_SEED_MANIFEST,
+            "nasa-uam-cooltherm-ep2000-180c-cure",
+            2_usize,
+        ),
+    ];
+    let directory = fixture_dir();
+
+    for (manifest_relative, expected_pack_id, expected_claim_count) in seeds {
+        let manifest = workspace_path(manifest_relative);
+        assert!(
+            manifest.is_file(),
+            "committed NASA UAM insulation seed manifest is missing: {manifest_relative}"
+        );
+        let first_path = directory.join(format!("{expected_pack_id}-first.fsmatpk"));
+        let second_path = directory.join(format!("{expected_pack_id}-second.fsmatpk"));
+
+        let first = run_compiler(&manifest, &first_path);
+        let second = run_compiler(&manifest, &second_path);
+        assert!(
+            first.status.success(),
+            "first {expected_pack_id} compilation failed: {}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert!(
+            second.status.success(),
+            "second {expected_pack_id} compilation failed: {}",
+            String::from_utf8_lossy(&second.stderr)
+        );
+        assert_eq!(
+            first.stdout, second.stdout,
+            "{expected_pack_id} decision stream moved"
+        );
+        assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+        let first_bytes = fs::read(first_path).expect("read first NASA insulation pack");
+        let second_bytes = fs::read(second_path).expect("read second NASA insulation pack");
+        assert_eq!(
+            first_bytes, second_bytes,
+            "{expected_pack_id} pack bytes moved"
+        );
+        let decoded =
+            NormalizedPack::from_bytes(&first_bytes).expect("decode NASA insulation pack");
+        let pack_hash = decoded.content_hash();
+        let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+            .expect("verify NASA insulation pack identity");
+
+        assert_eq!(decoded.pack_id(), expected_pack_id);
+        assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+        assert!(
+            decoded
+                .redistribution_terms()
+                .contains("government public use permitted")
+        );
+        assert_eq!(decoded.claims().claim_count(), expected_claim_count);
+        assert!(decoded.joint_statistics().is_empty());
+
+        match expected_pack_id {
+            "nasa-uam-mw16c-polyimide-magnet-wire" => {
+                let temperature_claims = decoded
+                    .claims()
+                    .claims_for("thermal_endurance_reference_temperature");
+                let duration_claims = decoded
+                    .claims()
+                    .claims_for("thermal_endurance_reference_duration");
+                assert_eq!(temperature_claims.len(), 1);
+                assert_eq!(duration_claims.len(), 1);
+
+                let (temperature_id, temperature_claim) = temperature_claims[0];
+                let PropertyValue::Scalar {
+                    value: temperature,
+                    dims: temperature_dims,
+                } = &temperature_claim.value
+                else {
+                    panic!("MW-16C thermal-endurance temperature was not scalar");
+                };
+                assert_eq!(*temperature_dims, Dims([0, 0, 0, 1, 0, 0]));
+                assert!((*temperature - (240.0 + 273.15)).abs() <= 1.0e-12);
+                assert_eq!(
+                    temperature_claim.validity.bound("reference_duration"),
+                    Some((20_000.0 * 3_600.0, 20_000.0 * 3_600.0))
+                );
+
+                let (duration_id, duration_claim) = duration_claims[0];
+                let PropertyValue::Scalar {
+                    value: duration,
+                    dims: duration_dims,
+                } = &duration_claim.value
+                else {
+                    panic!("MW-16C thermal-endurance duration was not scalar");
+                };
+                assert_eq!(*duration_dims, Dims([0, 0, 1, 0, 0, 0]));
+                assert_eq!(*duration, 20_000.0 * 3_600.0);
+                assert_eq!(
+                    duration_claim.validity.bound("reference_temperature"),
+                    Some((240.0 + 273.15, 240.0 + 273.15))
+                );
+
+                for (id, claim) in [
+                    (temperature_id, temperature_claim),
+                    (duration_id, duration_claim),
+                ] {
+                    for required_axis in [
+                        "source_wire_spec_nema_mw16c",
+                        "source_nema_mw1000_2003",
+                        "source_test_standard_astm_d2307_2013",
+                    ] {
+                        assert_eq!(claim.validity.bound(required_axis), Some((1.0, 1.0)));
+                    }
+                    for missing_axis in [
+                        "source_wire_vendor_known",
+                        "source_wire_lot_known",
+                        "source_thermal_endurance_raw_data_available",
+                    ] {
+                        assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+                    }
+                    assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+                    assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+                    assert!(claim.provenance.source.contains("NTRS 20240007451"));
+                    assert!(claim.provenance.source.contains("[source:primary]"));
+                    assert_eq!(id.0, claim.content_hash());
+                }
+                assert_eq!(temperature_claim.observations, duration_claim.observations);
+                let observation = decoded
+                    .claims()
+                    .observation(temperature_claim.observations[0])
+                    .expect("MW-16C observation remains linked");
+                assert!(observation.method.contains("ASTM D2307-2013"));
+                assert!(
+                    observation
+                        .caveats
+                        .contains("cross-bound classification basis")
+                );
+                assert!(observation.caveats.contains("not an Arrhenius law"));
+                assert!(observation.caveats.contains("different unspecified spool"));
+            }
+            "nasa-uam-nomex-410-slot-liner" => {
+                let claims = decoded.claims().claims_for("selected_slot_liner_thickness");
+                assert_eq!(claims.len(), 1);
+                let (id, claim) = claims[0];
+                let PropertyValue::Scalar { value, dims } = &claim.value else {
+                    panic!("Nomex 410 selected thickness was not scalar");
+                };
+                assert_eq!(*dims, Dims([1, 0, 0, 0, 0, 0]));
+                assert!((*value - 0.08e-3).abs() <= 1.0e-15);
+                assert_eq!(
+                    claim.validity.bound("source_product_is_dupont_nomex_410"),
+                    Some((1.0, 1.0))
+                );
+                assert_eq!(
+                    claim.validity.bound("source_material_is_aramid_paper"),
+                    Some((1.0, 1.0))
+                );
+                for missing_axis in [
+                    "source_product_lot_known",
+                    "source_thickness_measurement_method_known",
+                    "source_moisture_condition_known",
+                ] {
+                    assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+                }
+                assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+                assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+                assert_eq!(id.0, claim.content_hash());
+                let observation = decoded
+                    .claims()
+                    .observation(claim.observations[0])
+                    .expect("Nomex 410 observation remains linked");
+                assert!(observation.method.contains("component-selection statement"));
+                assert!(
+                    observation
+                        .caveats
+                        .contains("not a generic Nomex 410 design allowable")
+                );
+            }
+            "nasa-uam-cooltherm-ep2000-180c-cure" => {
+                let completed_claims = decoded
+                    .claims()
+                    .claims_for("highest_completed_post_cure_temperature");
+                let omitted_claims = decoded
+                    .claims()
+                    .claims_for("manufacturer_recommended_final_cure_temperature");
+                assert_eq!(completed_claims.len(), 1);
+                assert_eq!(omitted_claims.len(), 1);
+
+                for (claims, source_temperature_c, step_completed) in [
+                    (&completed_claims, 180.0, 1.0),
+                    (&omitted_claims, 210.0, 0.0),
+                ] {
+                    let (id, claim) = claims[0];
+                    let PropertyValue::Scalar { value, dims } = &claim.value else {
+                        panic!("CoolTherm EP-2000 cure temperature was not scalar");
+                    };
+                    assert_eq!(*dims, Dims([0, 0, 0, 1, 0, 0]));
+                    assert!((*value - (source_temperature_c + 273.15)).abs() <= 1.0e-12);
+                    assert_eq!(
+                        claim
+                            .validity
+                            .bound("source_product_is_parker_lord_cooltherm_ep2000"),
+                        Some((1.0, 1.0))
+                    );
+                    assert_eq!(
+                        claim.validity.bound("source_step_completed"),
+                        Some((step_completed, step_completed))
+                    );
+                    for missing_axis in [
+                        "source_epoxy_lot_known",
+                        "source_cure_hold_duration_known",
+                        "source_degree_of_cure_known",
+                    ] {
+                        assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+                    }
+                    assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+                    assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+                    assert_eq!(id.0, claim.content_hash());
+                }
+                assert_eq!(
+                    completed_claims[0].1.observations,
+                    omitted_claims[0].1.observations
+                );
+                let observation = decoded
+                    .claims()
+                    .observation(completed_claims[0].1.observations[0])
+                    .expect("CoolTherm EP-2000 observation remains linked");
+                assert!(observation.caveats.contains("intentionally not completed"));
+                assert!(
+                    observation
+                        .caveats
+                        .contains("deliberately incomplete source process")
+                );
+            }
+            unexpected => panic!("unexpected NASA insulation pack {unexpected}"),
+        }
+
+        for refused_property in [
+            "partial_discharge_inception_voltage",
+            "dielectric_strength",
+            "thermal_conductivity",
+            "service_life",
+            "arrhenius_activation_energy",
+        ] {
+            assert!(
+                decoded.claims().claims_for(refused_property).is_empty(),
+                "assembly- or source-absent property must stay refused for {expected_pack_id}: {refused_property}"
+            );
+        }
+
+        let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+        assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+        assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+        assert!(
+            decisions
+                .lines()
+                .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+        );
+    }
 }
 
 #[test]
