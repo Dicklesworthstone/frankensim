@@ -479,6 +479,45 @@ Gray-cast-iron references:
 - <https://www.mdpi.com/1996-1944/11/10/1876>
 - <https://www.osti.gov/servlets/purl/1148409>
 
+## NASA-CR-115153 inhibited water/ethylene-glycol coolant tranche
+
+`nasa-cr-115153-water-ethylene-glycol/` retains the exact inhibited coolant
+specified in Table 5 of *A Fundamental Study of Sublimation Through a Porous
+Surface*, not a generic water/glycol mixture. The source identifies a
+water/ethylene-glycol solution containing `0.10..0.25 wt%` sodium nitrite,
+`1.33..1.57 wt%` sodium benzoate, and `36..38.5 wt%` water. Each printed
+formulation endpoint is a separate bound claim. No midpoint, exact batch
+composition, or ethylene-glycol balance is inferred.
+
+Table 5 also reports density `67.5 lbm/ft^3`, thermal conductivity
+`0.22 BTU/(hr ft degF)`, and the approximate relation
+`cp = 0.67 + 0.008 T_degF BTU/(lbm degF)` over `0..100 degF`. The pack stores
+deterministically converted SI density and conductivity plus heat-capacity
+evaluations at exactly `0`, `50`, and `100 degF`; it does not expose a
+continuous law. The source omits density/conductivity test temperature,
+pressure, methods, dispersion, confidence metadata, and the BTU convention.
+Those gaps remain fail-closed validity flags, every runtime uncertainty is
+`Unstated`, and the extra SI digits preserve conversion reproducibility rather
+than claiming source precision. The declared normalization uses the exact
+international pound and foot plus `Btu_IT = 1055.05585262 J`; callers still
+must acknowledge that the report itself does not distinguish International
+Table from thermochemical BTU.
+
+As coarse G3 comparison evidence only, NASA/TM-2019-220019 Table VIII lists a
+separate, composition-basis-unspecified `50-50 water ethylene glycol` fluid at
+`1082 kg/m^3` and `0.402 W/(m K)`. Those figures are within `0.1%` and `6%` of
+the retained density and conductivity transcriptions, respectively. They are
+not condition-matched observations and do not overwrite, fuse with, or assign
+uncertainty to the NASA-CR-115153 claims. Both NTRS records are public and
+permit public use; the manifest retains the primary report attribution.
+
+Water/ethylene-glycol references:
+
+- <https://ntrs.nasa.gov/citations/19710026875>
+- <https://ntrs.nasa.gov/api/citations/19710026875/downloads/19710026875.pdf>
+- <https://ntrs.nasa.gov/citations/20190001449>
+- <https://ntrs.nasa.gov/api/citations/20190001449/downloads/20190001449.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -537,6 +576,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/gray-cast-iron-s2-s/manifest.tsv \
   --out /path/to/pearlitic-gray-cast-iron-s2-s-sr-fesi.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-cr-115153-water-ethylene-glycol/manifest.tsv \
+  --out /path/to/nasa-cr-115153-inhibited-water-ethylene-glycol-coolant.fsmatpk
 ```
 
 ## No-claim boundary
@@ -659,3 +702,14 @@ temperature transport curve, thermal-expansion law, casting-section-size
 transfer, wear law, or universal engine-block/housing identity. Exact test
 temperature, statistical confidence, raw replicates, and joint covariance are
 not claimed.
+
+The NASA-CR-115153 coolant tranche is not a generic `50/50` coolant card,
+freeze/boil envelope, corrosion-inhibitor qualification, wetting system,
+electrical-conductivity model, compatibility result, degradation law, or
+service-life authority. It binds only Table 5's named water/ethylene-glycol,
+sodium-nitrite, and sodium-benzoate specification. The exact within-range
+composition, inferred glycol balance, supplier, grades, preparation history,
+test pressure, and most property temperatures remain unknown. Its approximate
+heat-capacity equation is represented only by three exact-point transcriptions;
+no interpolation or extrapolation is authorized. The comparison report has a
+different, composition-basis-unspecified fluid and remains evidence only.

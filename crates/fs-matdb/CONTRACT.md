@@ -307,7 +307,11 @@ whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
 nitrogen, oxygen, argon, carbon-dioxide, water-vapor, and carbon-monoxide seed
 manifests twice into byte-identical, identity-verified species packs, including
 retained NASA source/license/standard-state associations and separately bounded
-NIST displayed-precision agreement checks.
+NIST displayed-precision agreement checks. The material-pack battery likewise
+compiles each committed bulk tranche twice and verifies exact identity,
+condition flags, source/license linkage, no-claim exclusions, and bounded
+comparison evidence, including NASA-CR-115153's inhibited water/ethylene-glycol
+coolant specification.
 
 ## No-claim boundaries
 
@@ -348,7 +352,10 @@ NIST displayed-precision agreement checks.
   first
   pinned gray-iron tranche adds nine reported composition/carbon-equivalent
   values, four quantified microstructure fields, and two low-precision
-  graph-digitized room-state properties.
+  graph-digitized room-state properties. The NASA-CR-115153 coolant tranche
+  adds six formulation-bound endpoints, one source-condition-unspecified
+  density, one source-condition-unspecified conductivity, and three exact-point
+  transcriptions of an approximate heat-capacity law.
   The gas associations do not define air or exhaust mixture compositions,
   humidity, or combustion completeness. The Aluminum claims do not define a
   continuous constitutive curve or a general-purpose design card; their NIST
@@ -405,8 +412,17 @@ NIST displayed-precision agreement checks.
   strength and conductivity centers retain only graph-supported precision;
   one-standard-deviation bars without confidence metadata remain observation
   caveats, not runtime half-widths. Exact test temperature is absent and must
-  be acknowledged with `source_test_temperature_known = 0`. Bead 1sxe still
-  owns the remaining curated material/property and interface-system dataset.
+  be acknowledged with `source_test_temperature_known = 0`. The NASA-CR-115153
+  coolant pack binds one inhibited water/ethylene-glycol specification rather
+  than a generic mixture: printed formulation endpoints remain separate bounds,
+  and no midpoint or ethylene-glycol balance is inferred. Density and thermal
+  conductivity retain missing-temperature and missing-pressure flags; the
+  report's unstated BTU convention remains explicit for conductivity and three
+  exact-point SI evaluations of its approximate heat-capacity relation. Those
+  points do not authorize a continuous law, interpolation, a freeze/boil
+  envelope, corrosion/compatibility behavior, or service-life authority. Bead
+  1sxe still owns the remaining curated material/property and interface-system
+  dataset.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,

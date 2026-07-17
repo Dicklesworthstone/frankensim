@@ -30,6 +30,8 @@ const OFHC_COPPER_SEED_MANIFEST: &str = "data/matdb/seed-v1/ofhc-copper-rrr100/m
 const PTFE_TEFLON_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ptfe-teflon-nist-cryogenic/manifest.tsv";
 const PEEK_THERMIC_SEED_MANIFEST: &str = "data/matdb/seed-v1/peek-nasa-thermic-plate/manifest.tsv";
+const NASA_CR_115153_WATER_ETHYLENE_GLYCOL_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-cr-115153-water-ethylene-glycol/manifest.tsv";
 const AISI_4140_RC33_SEED_MANIFEST: &str = "data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv";
 const AISI_1045_COLD_DRAWN_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv";
@@ -1152,6 +1154,246 @@ fn g3_cli_compiles_committed_peek_thermic_plate_seed() {
             .contains("Netzsch report 621004797")
     );
     assert!(density_observation.caveats.contains("test temperature"));
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_nasa_cr_115153_water_ethylene_glycol_seed() {
+    let manifest = workspace_path(NASA_CR_115153_WATER_ETHYLENE_GLYCOL_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed NASA-CR-115153 water/ethylene-glycol seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("nasa-cr-115153-water-glycol-first.fsmatpk");
+    let second_path = directory.join("nasa-cr-115153-water-glycol-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first NASA-CR-115153 water/glycol seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second NASA-CR-115153 water/glycol seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "NASA-CR-115153 water/glycol decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first NASA water/glycol pack");
+    let second_bytes = fs::read(second_path).expect("read second NASA water/glycol pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "NASA-CR-115153 water/glycol pack bytes moved"
+    );
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode NASA water/glycol pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify NASA water/glycol pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "nasa-cr-115153-inhibited-water-ethylene-glycol-coolant"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("public use is permitted")
+    );
+    assert_eq!(decoded.claims().claim_count(), 11);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expected_bounds = [
+        ("sodium_nitrite_mass_fraction_lower_bound", 0.10),
+        ("sodium_nitrite_mass_fraction_upper_bound", 0.25),
+        ("sodium_benzoate_mass_fraction_lower_bound", 1.33),
+        ("sodium_benzoate_mass_fraction_upper_bound", 1.57),
+        ("water_mass_fraction_lower_bound", 36.0),
+        ("water_mass_fraction_upper_bound", 38.5),
+    ];
+    for (property, source_percent) in expected_bounds {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing unique {property} claim");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("{property} was not scalar");
+        };
+        let expected_value = source_percent * 0.01;
+        let relative_error = (*value - expected_value).abs() / expected_value;
+        assert!(
+            relative_error <= 2.0e-15,
+            "{property} moved by {relative_error:e} relative"
+        );
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        assert!(claim.provenance.source.contains("NASA-CR-115153"));
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("[source:nasa-cr-115153-table-5]")
+        );
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("composition-bound observation remains linked");
+        assert_eq!(
+            observation.specimen,
+            "nasa-cr-115153-water-ethylene-glycol-sodium-nitrite-sodium-benzoate-solution"
+        );
+        assert!(observation.method.contains("formulation specification"));
+        assert!(observation.caveats.contains("formulation bounds"));
+        assert!(observation.caveats.contains("without inventing a midpoint"));
+    }
+    assert!(
+        decoded
+            .claims()
+            .claims_for("ethylene_glycol_mass_fraction")
+            .is_empty(),
+        "an unreported ethylene-glycol balance must not be inferred"
+    );
+
+    let bulk_properties = [
+        (
+            "density",
+            1_081.246_277_742_31,
+            Dims([-3, 1, 0, 0, 0, 0]),
+            false,
+        ),
+        (
+            "thermal_conductivity",
+            0.380_761_626_601_706,
+            Dims([1, 1, -3, -1, 0, 0]),
+            true,
+        ),
+    ];
+    for (property, expected_value, expected_dims, btu_conversion) in bulk_properties {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing unique water/glycol {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("water/glycol {property} was not scalar");
+        };
+        assert_eq!(*value, expected_value);
+        assert_eq!(*dims, expected_dims);
+        assert_eq!(
+            claim.validity.bound("source_test_temperature_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_test_pressure_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(
+            claim.interpolation,
+            InterpolationPolicy::ConstantWithinValidity
+        );
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("bulk-property observation remains linked");
+        assert!(observation.caveats.contains("extra SI digits"));
+        assert!(observation.caveats.contains("not source precision"));
+        if btu_conversion {
+            assert_eq!(
+                claim.validity.bound("source_btu_convention_known"),
+                Some((0.0, 0.0))
+            );
+            assert!(observation.caveats.contains("Btu_IT=1055.05585262 J"));
+        }
+    }
+
+    let specific_heat_points = [
+        (255.372_222_222_222, 2_805.156),
+        (283.15, 4_479.876),
+        (310.927_777_777_778, 6_154.596),
+    ];
+    let specific_heat_claims = decoded.claims().claims_for("specific_heat_capacity");
+    assert_eq!(specific_heat_claims.len(), specific_heat_points.len());
+    for (temperature, expected_value) in specific_heat_points {
+        let (_, claim) = specific_heat_claims
+            .iter()
+            .copied()
+            .find(|(_, claim)| {
+                claim.validity.bound("temperature") == Some((temperature, temperature))
+            })
+            .unwrap_or_else(|| panic!("missing NASA water/glycol cp at {temperature} K"));
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("NASA water/glycol cp at {temperature} K was not scalar");
+        };
+        assert_eq!(*value, expected_value);
+        assert_eq!(*dims, Dims([2, 0, -2, -1, 0, 0]));
+        assert_eq!(
+            claim.validity.bound("source_test_pressure_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_btu_convention_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("specific-heat observation remains linked");
+        assert!(observation.method.contains("three exact temperatures"));
+        assert!(
+            observation
+                .caveats
+                .contains("approximately cp=(0.67 + 0.008*T_degF)")
+        );
+        assert!(
+            observation
+                .caveats
+                .contains("do not expose a continuous law")
+        );
+    }
+
+    // G3 comparison evidence only: NASA/TM-2019-220019 Table VIII lists a
+    // separately sourced, composition-basis-unspecified 50-50 water/ethylene-
+    // glycol fluid at 1082 kg/m3 and 0.402 W/(m K). Those condition-mismatched
+    // values do not overwrite this NASA-CR-115153 formulation; they only bound
+    // a coarse transcription plausibility check.
+    let (_, density) = decoded.claims().claims_for("density")[0];
+    let PropertyValue::Scalar {
+        value: density_value,
+        ..
+    } = &density.value
+    else {
+        panic!("NASA water/glycol density was not scalar");
+    };
+    let density_relative_difference = (*density_value - 1_082.0_f64).abs() / 1_082.0;
+    assert!(density_relative_difference <= 0.001);
+
+    let (_, conductivity) = decoded.claims().claims_for("thermal_conductivity")[0];
+    let PropertyValue::Scalar {
+        value: conductivity_value,
+        ..
+    } = &conductivity.value
+    else {
+        panic!("NASA water/glycol conductivity was not scalar");
+    };
+    let conductivity_relative_difference = (*conductivity_value - 0.402_f64).abs() / 0.402;
+    assert!(conductivity_relative_difference <= 0.06);
 
     let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
     assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
