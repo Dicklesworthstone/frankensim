@@ -14,6 +14,9 @@ layer = "L3"
 # I13.2a (ambition [F]): terminal-relative winding topology stays
 # default-off until its independent reproduction and promotion deck exist.
 terminal-relative = ["dep:fs-blake3", "dep:fs-couple"]
+# I13.2b (ambition [M]): exact integral topology remains default-off and
+# inherits the terminal-relative schema boundary.
+moonshot-integral-topology = ["terminal-relative"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3", optional = true }
@@ -34,6 +37,11 @@ fs-roofline = { path = "../fs-roofline" }
 name = "terminal_relative"
 path = "tests/terminal_relative.rs"
 required-features = ["terminal-relative"]
+
+[[test]]
+name = "integral_topology"
+path = "tests/integral_topology.rs"
+required-features = ["moonshot-integral-topology"]
 
 [lints]
 workspace = true

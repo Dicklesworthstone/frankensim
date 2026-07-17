@@ -25,6 +25,8 @@ pub mod differential_characters;
 pub mod fixtures;
 pub mod highorder;
 pub mod hodge;
+#[cfg(feature = "moonshot-integral-topology")]
+pub mod integral_topology;
 #[cfg(feature = "terminal-relative")]
 pub mod terminal_relative;
 pub mod whitney;

@@ -177,6 +177,17 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   component, phase, and terminal bijections plus a per-phase current-coordinate
   sign; no semantic permutation or orientation compensation is inferred.
 
+- `integral_topology` (I13.2b, feature `moonshot-integral-topology`, [M]) begins the
+  exact integral topology checker behind a second default-off gate. Its first
+  tranche admits bounded dense row-major `i128` matrices and verifies a complete
+  caller-supplied Smith witness only when explicit integer `U`, `U^-1`, `V`,
+  and `V^-1` matrices prove both inverse orders and `U A V = D` exactly.
+  Canonical `D` is diagonal, nonnegative, has a zero suffix, and each positive
+  invariant factor divides its successor. The opaque verified value retains
+  the exact source and all witness matrices and is unconditionally tagged
+  `AbstractAlgebraOnly`; it is not yet an `IntegralRelativeTopologyReceipt`, a
+  homology computation, or physical R3 winding authority.
+
 ## Invariants
 
 - dd = 0 EXACTLY: integer path (i64 `apply`) and f64 CSR path (sums
@@ -278,6 +289,10 @@ The feature-gated terminal-relative boundary returns structured
 `TerminalRelativeError` refusals for malformed incidence, support, topology,
 port, phase, coefficient, identity, budget, and declared-map semantics. It
 never rounds an integral cycle test or silently coerces nominal sectors.
+The feature-gated exact topology checker returns `IntegralTopologyError` for
+matrix shape, retained/workspace entry, scalar-work, allocation, cancellation,
+checked-arithmetic, inverse, transform, and canonical-diagonal refusals. No
+overflow or incomplete witness is reinterpreted as rank, torsion, or success.
 
 ## Determinism class
 
@@ -305,6 +320,10 @@ integer/byte canonical frames and strong fs-blake3 schema domains. Floating
 current/cochain values are intentionally outside those identities in this
 slice; finite-value checks are admission evidence, not cross-ISA numerical
 equivalence evidence.
+Integral-topology witness verification is integer-only, row-major, and
+fixed-order. Exact product traversal, error precedence, invariant-factor order,
+and scalar-work counts are deterministic across ISA and thread counts. The
+first tranche deliberately emits no persistent identity or promotion receipt.
 
 ## Cancellation behavior
 
@@ -318,6 +337,11 @@ constructive checkers own Cx polling, drain, checkpoint, and witness budgets.
 Terminal-relative construction and exact chain maps are synchronous and bounded
 by explicit cell, incidence, component, terminal, and canonical-byte limits.
 This schema slice performs no solver, search, or unbounded iterative work.
+Integral-topology verification preflights all six retained matrices, scratch
+entries, and exact scalar work before allocation. It polls before every output
+scalar and again before final publication, so at most `max(rows, cols)` checked
+inner-product terms occur between polls. Cancellation publishes only a typed
+refusal; no partially verified value is constructible.
 
 ## Unsafe boundary
 
@@ -335,6 +359,8 @@ other crate code inherits the workspace `unsafe_code = "deny"` policy.
 
 - `terminal-relative` — default-off [F] I13.2a schema and exact-incidence lane;
   enables the optional `fs-blake3` and `fs-couple` dependencies.
+- `moonshot-integral-topology` — default-off [M] I13.2b exact-integer checker; implies
+  `terminal-relative` and cannot promote abstract algebra to physical evidence.
 
 ## Conformance tests
 
@@ -442,6 +468,12 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
   closure, opposite codimension-one terminal patches, multi-degree exact
   boundary/coboundary pairing, and terminal/insulation overlap refusal. It is
   cellular schema evidence, not a torus, linking, manifold, or embedding claim.
+`tests/integral_topology.rs` (I13.2b tranche 1, G0/G4, feature
+`moonshot-integral-topology`) verifies a nontrivial rank-one Smith witness and refuses
+off-diagonal, negative, zero-order, divisibility, fake-inverse, transformed-
+source, shape, storage, exact-work limit+1, and checked-overflow twins. Every
+cancellation poll is injected transactionally; the empty exact matrix remains
+representable and every success is tagged abstract-algebra-only.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -595,3 +627,20 @@ trivialization enforcement; a terminal-cut loop graph checks exact integral
 - No field transfer, current-density solve, electromagnetic force, material,
   thermal, manufacturability, geometric embedding, cancellation-latency,
   performance, or authority-receipt claim follows from these types.
+
+## No-claim boundaries (integral topology)
+
+- I13.2b tranche 1 verifies a supplied Smith witness; it does not yet compute
+  Smith/Hermite normal form, kernels, images, relative homology/cohomology,
+  free or torsion generators, periods, linking pairings, long exact sequences,
+  or induced maps. A later constructive solver must emit the same complete
+  witness and pass this verifier before claiming those results.
+- `AbstractAlgebraOnly` is load-bearing. Synthetic CW/Moore/lens-space matrices
+  may test the algebra kernel but cannot establish a conductor, terminal,
+  material, embedding, winding, flux, force, or machine claim. Physical R3
+  applicability requires a separate receipt binding an admitted
+  `TerminalRelativePair`, embedding/boundary assumptions, terminal-subspace
+  premise, checker identity, budgets, and independent replay.
+- Integer inverse matrices prove unimodularity only for the retained exact
+  transform. They do not prove that a caller's complex, basis, cut, relabel,
+  refinement, remesh, or topology event has the claimed physical semantics.
