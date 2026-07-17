@@ -126,6 +126,17 @@ and RQ-* requirement-to-evidence catalog.
   source kind, locator, and exact content identity. It reads no filesystem and
   trusts no tracker status implicitly; the caller owns bounded parsing of the
   named bytes.
+- `load_traceability_source_snapshot(root, specs, limits)` is the concrete,
+  synchronous filesystem boundary. It accepts only strict root-relative
+  locators, canonicalizes every regular file beneath the configured root,
+  refuses final symlinks, bounds both individual and aggregate reads, rejects
+  metadata/read length races, and hashes the exact admitted bytes. Its receipt
+  records the adapter version, effective limits, canonical locator/class,
+  byte count, exact BLAKE3 identity, Beads record count where applicable, and
+  the resulting source-snapshot identity. Contract and registry sources must
+  be nonempty NUL-free UTF-8. Beads sources additionally receive a bounded
+  lexical JSON-object-envelope audit and a unique canonical top-level string
+  `id` audit before snapshot admission.
 - `generate_traceability_ledger_from_snapshot(rows, obligations, snapshot)`
   retains `authority: "declaration-only"` while adding three explicit roots:
   the admitted source-snapshot identity, the canonical unbound declaration
@@ -137,10 +148,11 @@ and RQ-* requirement-to-evidence catalog.
 - Inputs are hard-bounded before rendering: at most 256 requirements, exactly
   the closed 25-PO definition space, 25 PO links per requirement, 16 owners per
   PO, 16 KiB per scalar field, 512 source artifacts, and 4 KiB per source
-  locator. This pure UTIL module performs no filesystem or database I/O.
-  Tooling adapters own bounded reads from Beads, contracts, manifests, and
-  immutable artifact persistence; those sources must use this validator
-  instead of hand-maintaining a dashboard.
+  locator. The core `traceability` module remains pure. `traceability_fs` owns
+  bounded standard-filesystem reads only; it does not open the Beads database,
+  perform network I/O, or persist immutable artifacts. Higher tooling owns the
+  semantic join and persistence and must use these validators instead of
+  hand-maintaining a dashboard.
 
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
@@ -326,6 +338,12 @@ invariance; empty-scope and exact/plus-one row, PO-link, owner, scalar, id,
 summary, and reference caps; declaration-only authority enforcement; and exact
 generated JSON column/index coverage.
 
+`tests/traceability_fs.rs` (G0/G3): exact byte/hash receipts, canonical source
+order, source-mutation identity sensitivity, declaration-only ledger binding,
+bounded Beads record/line/nesting envelope and unique-id refusals, individual
+and aggregate byte caps, strict relative paths, regular-file metadata, complete
+source-class coverage, limit validation, and duplicate-locator refusal.
+
 `tests/lanes_e2e.rs` (bead rjoq.6 slice 2): the cross-crate no-mock
 composition — fs-govern admission persisted into a FrankenSQLite-backed
 fs-ledger (events + content-addressed preregistration/refutation/
@@ -362,14 +380,22 @@ identity guard has a test that fails if the guard is removed.
 - Program-risk thresholds are governance trip points over caller-supplied
   aggregates. They do not establish scientific validity, automatically execute
   a contingency, or prove that the named Bead owner has reviewed the result.
-- Bead-id owners are string references; this crate does not read the beads
-  database (that coupling is deliberately avoided).
+- Bead-id owners in governance declarations remain string references. The
+  filesystem adapter may read exact caller-selected Beads JSONL bytes, but it
+  validates only a conservative lexical object envelope and unique canonical
+  top-level ids. It does not open the Beads database or interpret status,
+  dependencies, closure, ownership, or scientific evidence semantics.
 - The canonical traceability rows are governance declarations. They do not
   attest that an owner exists in the current tracker snapshot, that a benchmark
   ran, that a milestone closed, or that a scientific claim is verified. A
-  tooling adapter must join and bind the exact Beads/contracts/manifest/V&V
-  source snapshot before persisting an immutable generated artifact; a closed
-  Bead must never be translated directly into scientific proof status.
+  filesystem receipt binds exact Beads/contracts/registry bytes but does not
+  perform that semantic join. Higher tooling must join the admitted sources and
+  V&V evidence before persisting an immutable generated artifact; a closed Bead
+  must never be translated directly into scientific proof status.
+- Filesystem loading uses bounded synchronous `std` I/O and has no `Cx`; it
+  makes no cancellation-latency, hostile-directory race resistance, sandbox,
+  signature, authorization, or durable-persistence claim. Deployments that
+  admit adversarially mutable roots need a stronger capability-scoped adapter.
 - The lane ledger is the admission STATE MACHINE, not durable storage: the
   `FinalizationReceipt`'s `ledger_artifact` and the comparison's
   preregistration artifact are content references whose durable

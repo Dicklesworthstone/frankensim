@@ -29,7 +29,8 @@
 //! mechanism per independently falsifiable proof lane (bead rjoq.6). The
 //! extension charter's generated B1--B14/RQ-* requirement-to-evidence registry,
 //! complete PO-1..PO-25 index, and fail-closed renderer live in
-//! [`traceability`].
+//! [`traceability`]. Bounded concrete source loading lives at the explicit
+//! world boundary in [`traceability_fs`].
 
 pub mod crates;
 pub mod doctrine;
@@ -37,6 +38,7 @@ pub mod lanes;
 pub mod program_risks;
 pub mod proposals;
 pub mod traceability;
+pub mod traceability_fs;
 
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
@@ -61,6 +63,15 @@ pub use traceability::{
     audit_traceability_sources, generate_traceability_ledger,
     generate_traceability_ledger_from_snapshot, proof_obligations, requirements,
     traceability_ledger_json,
+};
+pub use traceability_fs::{
+    LoadedTraceabilitySourceSnapshot, MAX_TRACEABILITY_BEADS_JSON_NESTING,
+    MAX_TRACEABILITY_BEADS_LINE_BYTES, MAX_TRACEABILITY_BEADS_RECORDS,
+    MAX_TRACEABILITY_SOURCE_FILE_BYTES, MAX_TRACEABILITY_TOTAL_SOURCE_BYTES,
+    TRACEABILITY_FILESYSTEM_ADAPTER_VERSION, TraceabilityFileSpec, TraceabilityFilesystemAudit,
+    TraceabilityFilesystemDiagnostic, TraceabilityFilesystemField, TraceabilityFilesystemLimits,
+    TraceabilityFilesystemReceipt, TraceabilityFilesystemSourceReceipt,
+    load_traceability_source_snapshot,
 };
 
 /// The ten addendum risks (Part V).
