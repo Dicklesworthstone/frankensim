@@ -9,7 +9,6 @@
 //! complete artifact; the convenience [`parse_ir`] retains a conservative
 //! 16 MiB total-input ceiling.
 
-use crate::ScenarioError;
 use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 use crate::ensemble::{SpectrumModel, StochasticEnsemble};
 use crate::frame::{Frame, FrameId, FrameMotion, FrameTree};
@@ -21,6 +20,7 @@ use crate::scenario::{
     Combination, ContactLaw, ContactModel, Environment, LoadCase, Scenario, Violation,
 };
 use crate::signal::{ChebProfile, Interp, TimeSignal};
+use crate::{IrSourceSpan, ScenarioError};
 use fs_blake3::{ContentHash, hash_bytes};
 use fs_cheb::Cheb1;
 use fs_ga::{Quat, Vec3};
@@ -624,7 +624,13 @@ pub fn write_ir(s: &Scenario) -> String {
 // ---------------------------------------------------------------- parser
 
 #[derive(Debug, Clone, PartialEq)]
-enum Sx {
+struct Sx {
+    span: IrSourceSpan,
+    kind: SxKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SxKind {
     Atom(String),
     Str(String),
     List(Vec<Sx>),
@@ -674,8 +680,58 @@ impl Default for IrParseBudget {
 
 fn err(at: usize, what: &str) -> ScenarioError {
     ScenarioError::Parse {
-        at,
+        span: IrSourceSpan { start: at, end: at },
+        path: String::new(),
         what: what.to_string(),
+    }
+}
+
+fn err_span(span: IrSourceSpan, what: &str) -> ScenarioError {
+    ScenarioError::Parse {
+        span,
+        path: String::new(),
+        what: what.to_string(),
+    }
+}
+
+fn err_node(node: &Sx, what: &str) -> ScenarioError {
+    err_span(node.span, what)
+}
+
+impl ScenarioError {
+    fn prepend_path(mut self, prefix: &str) -> Self {
+        match &mut self {
+            Self::Parse { path, .. } | Self::ReservedBoundaryRole { path, .. } => {
+                path.insert_str(0, prefix);
+            }
+            Self::Dimensions { .. } | Self::Frame { .. } | Self::Evaluate { .. } => {}
+        }
+        self
+    }
+
+    fn rooted(mut self) -> Self {
+        match &mut self {
+            Self::Parse { path, .. } | Self::ReservedBoundaryRole { path, .. } => {
+                path.insert(0, '$');
+            }
+            Self::Dimensions { .. } | Self::Frame { .. } | Self::Evaluate { .. } => {}
+        }
+        self
+    }
+}
+
+trait ParsePathExt<T> {
+    fn field(self, field: &str) -> Result<T, ScenarioError>;
+    fn index(self, index: usize) -> Result<T, ScenarioError>;
+}
+
+impl<T> ParsePathExt<T> for Result<T, ScenarioError> {
+    fn field(self, field: &str) -> Result<T, ScenarioError> {
+        self.map_err(|error| error.prepend_path(&format!(".{field}")))
+    }
+
+    fn index(self, index: usize) -> Result<T, ScenarioError> {
+        self.map_err(|error| error.prepend_path(&format!("[{index}]")))
     }
 }
 
@@ -698,8 +754,11 @@ impl<'a> SxParser<'a> {
             ));
         }
         if text.len() > budget.max_bytes {
-            return Err(err(
-                budget.max_bytes.min(text.len()),
+            return Err(err_span(
+                IrSourceSpan {
+                    start: budget.max_bytes.min(text.len()),
+                    end: text.len(),
+                },
                 &format!(
                     "IR byte budget exceeded: {} bytes > {}",
                     text.len(),
@@ -719,7 +778,13 @@ impl<'a> SxParser<'a> {
         let root = self.parse_one(1)?;
         self.skip_ws();
         if self.pos != self.bytes.len() {
-            return Err(err(self.pos, "trailing bytes after the scenario form"));
+            return Err(err_span(
+                IrSourceSpan {
+                    start: self.pos,
+                    end: self.bytes.len(),
+                },
+                "trailing bytes after the scenario form",
+            ));
         }
         Ok(root)
     }
@@ -767,6 +832,7 @@ impl<'a> SxParser<'a> {
 
     fn parse_one(&mut self, depth: usize) -> Result<Sx, ScenarioError> {
         self.skip_ws();
+        let start = self.pos;
         self.admit_node(depth)?;
         match self.bytes.get(self.pos) {
             None => Err(err(self.pos, "unexpected end of input")),
@@ -779,7 +845,13 @@ impl<'a> SxParser<'a> {
                         None => return Err(err(self.pos, "unclosed list")),
                         Some(b')') => {
                             self.pos += 1;
-                            return Ok(Sx::List(items));
+                            return Ok(Sx {
+                                span: IrSourceSpan {
+                                    start,
+                                    end: self.pos,
+                                },
+                                kind: SxKind::List(items),
+                            });
                         }
                         _ => {
                             if items.len() >= self.budget.max_list_items {
@@ -797,7 +869,13 @@ impl<'a> SxParser<'a> {
                     }
                 }
             }
-            Some(b')') => Err(err(self.pos, "unexpected ')'")),
+            Some(b')') => Err(err_span(
+                IrSourceSpan {
+                    start: self.pos,
+                    end: self.pos + 1,
+                },
+                "unexpected ')'",
+            )),
             Some(b'"') => {
                 self.pos += 1;
                 // Accumulate RAW BYTES and decode UTF-8 once at the end. The writer
@@ -812,18 +890,32 @@ impl<'a> SxParser<'a> {
                     match self.bytes.get(self.pos) {
                         None => return Err(err(self.pos, "unterminated string")),
                         Some(b'\\') => {
-                            let c = *self
-                                .bytes
-                                .get(self.pos + 1)
-                                .ok_or_else(|| err(self.pos, "bad escape"))?;
+                            let c = *self.bytes.get(self.pos + 1).ok_or_else(|| {
+                                err_span(
+                                    IrSourceSpan {
+                                        start: self.pos,
+                                        end: self.pos + 1,
+                                    },
+                                    "bad escape",
+                                )
+                            })?;
                             if !matches!(c, b'"' | b'\\') {
-                                return Err(err(
-                                    self.pos,
+                                return Err(err_span(
+                                    IrSourceSpan {
+                                        start: self.pos,
+                                        end: self.pos + 2,
+                                    },
                                     "unsupported string escape; only quote and backslash escapes are canonical",
                                 ));
                             }
                             if buf.len() >= self.budget.max_atom_bytes {
-                                return Err(err(self.pos, "IR string exceeds atom-byte budget"));
+                                return Err(err_span(
+                                    IrSourceSpan {
+                                        start: self.pos,
+                                        end: self.pos + 1,
+                                    },
+                                    "IR string exceeds atom-byte budget",
+                                ));
                             }
                             self.reserve(&mut buf, 1)?;
                             buf.push(c);
@@ -831,13 +923,32 @@ impl<'a> SxParser<'a> {
                         }
                         Some(b'"') => {
                             self.pos += 1;
-                            let s = String::from_utf8(buf)
-                                .map_err(|_| err(self.pos, "string is not valid UTF-8"))?;
-                            return Ok(Sx::Str(s));
+                            let s = String::from_utf8(buf).map_err(|_| {
+                                err_span(
+                                    IrSourceSpan {
+                                        start,
+                                        end: self.pos,
+                                    },
+                                    "string is not valid UTF-8",
+                                )
+                            })?;
+                            return Ok(Sx {
+                                span: IrSourceSpan {
+                                    start,
+                                    end: self.pos,
+                                },
+                                kind: SxKind::Str(s),
+                            });
                         }
                         Some(&c) => {
                             if buf.len() >= self.budget.max_atom_bytes {
-                                return Err(err(self.pos, "IR string exceeds atom-byte budget"));
+                                return Err(err_span(
+                                    IrSourceSpan {
+                                        start: self.pos,
+                                        end: self.pos + 1,
+                                    },
+                                    "IR string exceeds atom-byte budget",
+                                ));
                             }
                             self.reserve(&mut buf, 1)?;
                             buf.push(c);
@@ -847,7 +958,6 @@ impl<'a> SxParser<'a> {
                 }
             }
             Some(_) => {
-                let start = self.pos;
                 while self.pos < self.bytes.len()
                     && !self.bytes[self.pos].is_ascii_whitespace()
                     && self.bytes[self.pos] != b'('
@@ -855,59 +965,90 @@ impl<'a> SxParser<'a> {
                 {
                     self.pos += 1;
                     if self.pos - start > self.budget.max_atom_bytes {
-                        return Err(err(start, "IR atom exceeds atom-byte budget"));
+                        return Err(err_span(
+                            IrSourceSpan {
+                                start,
+                                end: self.pos,
+                            },
+                            "IR atom exceeds atom-byte budget",
+                        ));
                     }
                 }
-                let atom = std::str::from_utf8(&self.bytes[start..self.pos])
-                    .map_err(|_| err(start, "atom is not valid UTF-8"))?;
+                let atom = std::str::from_utf8(&self.bytes[start..self.pos]).map_err(|_| {
+                    err_span(
+                        IrSourceSpan {
+                            start,
+                            end: self.pos,
+                        },
+                        "atom is not valid UTF-8",
+                    )
+                })?;
                 let mut owned = String::new();
                 owned
                     .try_reserve_exact(atom.len())
                     .map_err(|allocation_error| {
-                        err(
-                            start,
+                        err_span(
+                            IrSourceSpan {
+                                start,
+                                end: self.pos,
+                            },
                             &format!("IR atom allocation refused: {allocation_error}"),
                         )
                     })?;
                 owned.push_str(atom);
-                Ok(Sx::Atom(owned))
+                Ok(Sx {
+                    span: IrSourceSpan {
+                        start,
+                        end: self.pos,
+                    },
+                    kind: SxKind::Atom(owned),
+                })
             }
         }
     }
 }
 
 fn parse_sx(text: &str, budget: IrParseBudget) -> Result<Sx, ScenarioError> {
-    SxParser::new(text, budget)?.parse()
+    SxParser::new(text, budget)
+        .and_then(SxParser::parse)
+        .map_err(ScenarioError::rooted)
 }
 
 // -------------------------------------------------------------- decoding
 
 fn as_list<'a>(sx: &'a Sx, head: &str) -> Result<&'a [Sx], ScenarioError> {
-    if let Sx::List(items) = sx
-        && let Some(Sx::Atom(a)) = items.first()
+    if let SxKind::List(items) = &sx.kind
+        && let Some(Sx {
+            kind: SxKind::Atom(a),
+            ..
+        }) = items.first()
         && a == head
     {
         return Ok(&items[1..]);
     }
-    Err(err(0, &format!("expected ({head} ...) form")))
+    Err(err_node(sx, &format!("expected ({head} ...) form")))
 }
 
 fn as_f64(sx: &Sx) -> Result<f64, ScenarioError> {
-    if let Sx::Atom(a) = sx
+    if let SxKind::Atom(a) = &sx.kind
         && let Ok(v) = a.parse::<f64>()
         && v.is_finite()
     {
         return Ok(canonical_float(v));
     }
-    Err(err(0, "expected a finite number"))
+    Err(err_node(sx, "expected a finite number"))
 }
 
-fn reserve_decoded_string(value: &mut String, additional: usize) -> Result<(), ScenarioError> {
+fn reserve_decoded_string(
+    value: &mut String,
+    additional: usize,
+    span: IrSourceSpan,
+) -> Result<(), ScenarioError> {
     value
         .try_reserve_exact(additional)
         .map_err(|allocation_error| {
-            err(
-                0,
+            err_span(
+                span,
                 &format!(
                     "IR decoded string allocation for {additional} bytes was refused: {allocation_error}"
                 ),
@@ -916,20 +1057,20 @@ fn reserve_decoded_string(value: &mut String, additional: usize) -> Result<(), S
 }
 
 fn as_str(sx: &Sx) -> Result<String, ScenarioError> {
-    if let Sx::Str(s) = sx {
+    if let SxKind::Str(s) = &sx.kind {
         let mut owned = String::new();
-        reserve_decoded_string(&mut owned, s.len())?;
+        reserve_decoded_string(&mut owned, s.len(), sx.span)?;
         owned.push_str(s);
         return Ok(owned);
     }
-    Err(err(0, "expected a string"))
+    Err(err_node(sx, "expected a string"))
 }
 
 fn as_str_ref(sx: &Sx) -> Result<&str, ScenarioError> {
-    if let Sx::Str(value) = sx {
+    if let SxKind::Str(value) = &sx.kind {
         Ok(value)
     } else {
-        Err(err(0, "expected a string"))
+        Err(err_node(sx, "expected a string"))
     }
 }
 
@@ -941,14 +1082,18 @@ fn lower_hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn decode_payload_hex(text: &str) -> Result<Vec<u8>, ScenarioError> {
+fn decode_payload_hex(source: &Sx) -> Result<Vec<u8>, ScenarioError> {
+    let text = as_str_ref(source)?;
     if text.len() % 2 != 0 {
-        return Err(err(0, "typed payload hex must contain complete byte pairs"));
+        return Err(err_node(
+            source,
+            "typed payload hex must contain complete byte pairs",
+        ));
     }
     let byte_count = text.len() / 2;
     if byte_count > MAX_PAYLOAD_WIRE_BYTES {
-        return Err(err(
-            0,
+        return Err(err_node(
+            source,
             &format!(
                 "typed payload requests {byte_count} bytes; hard V1 limit is {MAX_PAYLOAD_WIRE_BYTES}"
             ),
@@ -958,8 +1103,8 @@ fn decode_payload_hex(text: &str) -> Result<Vec<u8>, ScenarioError> {
     decoded
         .try_reserve_exact(byte_count)
         .map_err(|allocation_error| {
-            err(
-                0,
+            err_node(
+                source,
                 &format!(
                     "typed payload allocation for {byte_count} bytes was refused: {allocation_error}"
                 ),
@@ -967,14 +1112,20 @@ fn decode_payload_hex(text: &str) -> Result<Vec<u8>, ScenarioError> {
         })?;
     for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
         let high = lower_hex_nibble(pair[0]).ok_or_else(|| {
-            err(
-                index * 2,
+            err_span(
+                IrSourceSpan {
+                    start: source.span.start + 1 + index * 2,
+                    end: source.span.start + 2 + index * 2,
+                },
                 "typed payload hex must use canonical lowercase digits",
             )
         })?;
         let low = lower_hex_nibble(pair[1]).ok_or_else(|| {
-            err(
-                index * 2 + 1,
+            err_span(
+                IrSourceSpan {
+                    start: source.span.start + 2 + index * 2,
+                    end: source.span.start + 3 + index * 2,
+                },
                 "typed payload hex must use canonical lowercase digits",
             )
         })?;
@@ -984,53 +1135,53 @@ fn decode_payload_hex(text: &str) -> Result<Vec<u8>, ScenarioError> {
 }
 
 fn as_atom(sx: &Sx) -> Result<&str, ScenarioError> {
-    if let Sx::Atom(a) = sx {
+    if let SxKind::Atom(a) = &sx.kind {
         return Ok(a);
     }
-    Err(err(0, "expected an atom"))
+    Err(err_node(sx, "expected an atom"))
 }
 
 fn as_u64(sx: &Sx) -> Result<u64, ScenarioError> {
-    if let Sx::Atom(a) = sx
+    if let SxKind::Atom(a) = &sx.kind
         && let Ok(v) = a.parse::<u64>()
     {
         return Ok(v);
     }
-    Err(err(0, "expected an unsigned integer"))
+    Err(err_node(sx, "expected an unsigned integer"))
 }
 
 fn as_u32(sx: &Sx) -> Result<u32, ScenarioError> {
-    if let Sx::Atom(a) = sx
+    if let SxKind::Atom(a) = &sx.kind
         && let Ok(v) = a.parse::<u32>()
     {
         return Ok(v);
     }
-    Err(err(0, "expected a u32"))
+    Err(err_node(sx, "expected a u32"))
 }
 
 fn as_i8(sx: &Sx) -> Result<i8, ScenarioError> {
-    if let Sx::Atom(a) = sx
+    if let SxKind::Atom(a) = &sx.kind
         && let Ok(v) = a.parse::<i8>()
     {
         return Ok(v);
     }
-    Err(err(0, "expected a small integer exponent"))
+    Err(err_node(sx, "expected a small integer exponent"))
 }
 
-fn as_dims_at(items: &[Sx], wire: DimensionWire) -> Result<Dims, ScenarioError> {
+fn as_dims_at(container: &Sx, items: &[Sx], wire: DimensionWire) -> Result<Dims, ScenarioError> {
     let expected = match wire {
         DimensionWire::LegacyFive => 5,
         DimensionWire::CanonicalSix => 6,
     };
     if items.len() != expected {
-        return Err(err(
-            0,
+        return Err(err_node(
+            container,
             &format!("scenario IR needs exactly {expected} dimension exponents"),
         ));
     }
     let mut d = [0i8; 6];
-    for (slot, sx) in d.iter_mut().zip(items) {
-        *slot = as_i8(sx)?;
+    for (index, (slot, sx)) in d.iter_mut().zip(items).enumerate() {
+        *slot = as_i8(sx).index(index)?;
     }
     Ok(Dims(d))
 }
@@ -1042,31 +1193,32 @@ fn as_qty(sx: &Sx, wire: DimensionWire) -> Result<QtyAny, ScenarioError> {
         DimensionWire::CanonicalSix => 7,
     };
     if items.len() != expected {
-        return Err(err(
-            0,
+        return Err(err_node(
+            sx,
             &format!("qty needs a value plus {} exponents", expected - 1),
         ));
     }
     Ok(QtyAny::new(
-        as_f64(&items[0])?,
-        as_dims_at(&items[1..], wire)?,
+        as_f64(&items[0]).field("value")?,
+        as_dims_at(sx, &items[1..], wire).field("dims")?,
     ))
 }
 
 fn as_dims(sx: &Sx, wire: DimensionWire) -> Result<Dims, ScenarioError> {
-    as_dims_at(as_list(sx, "dims")?, wire)
+    as_dims_at(sx, as_list(sx, "dims")?, wire)
 }
 
 fn reserve_decoded<T>(
     values: &mut Vec<T>,
     additional: usize,
     resource: &str,
+    span: IrSourceSpan,
 ) -> Result<(), ScenarioError> {
     values
         .try_reserve_exact(additional)
         .map_err(|allocation_error| {
-            err(
-                0,
+            err_span(
+                span,
                 &format!(
                     "IR decoded {resource} allocation for {additional} elements was refused: {allocation_error}"
                 ),
@@ -1075,47 +1227,59 @@ fn reserve_decoded<T>(
 }
 
 fn decode_items<T>(
+    container: &Sx,
     items: &[Sx],
     resource: &str,
     mut decode: impl FnMut(&Sx) -> Result<T, ScenarioError>,
 ) -> Result<Vec<T>, ScenarioError> {
     let mut values = Vec::new();
-    reserve_decoded(&mut values, items.len(), resource)?;
-    for item in items {
-        values.push(decode(item)?);
+    reserve_decoded(&mut values, items.len(), resource, container.span)?;
+    for (index, item) in items.iter().enumerate() {
+        values.push(decode(item).index(index)?);
     }
     Ok(values)
 }
 
 fn as_floats(sx: &Sx, head: &str) -> Result<Vec<f64>, ScenarioError> {
-    decode_items(as_list(sx, head)?, head, as_f64)
+    decode_items(sx, as_list(sx, head)?, head, as_f64)
 }
 
 fn as_vec3(sx: &Sx) -> Result<Vec3, ScenarioError> {
     let items = as_list(sx, "vec")?;
     if items.len() != 3 {
-        return Err(err(0, "vec needs three components"));
+        return Err(err_node(sx, "vec needs three components"));
     }
     Ok(Vec3::new(
-        as_f64(&items[0])?,
-        as_f64(&items[1])?,
-        as_f64(&items[2])?,
+        as_f64(&items[0]).field("x")?,
+        as_f64(&items[1]).field("y")?,
+        as_f64(&items[2]).field("z")?,
     ))
 }
 
-fn as_profile(items: &[Sx], wire: DimensionWire) -> Result<ChebProfile, ScenarioError> {
+fn as_profile(sx: &Sx, head: &str, wire: DimensionWire) -> Result<ChebProfile, ScenarioError> {
+    let items = as_list(sx, head)?;
     if items.len() != 4 {
-        return Err(err(0, "profile needs dims, domain, coeffs"));
+        return Err(err_node(sx, "profile needs dims, domain, coeffs"));
     }
-    let dims = as_dims(&items[0], wire)?;
-    let a = as_f64(&items[1])?;
-    let b = as_f64(&items[2])?;
-    let coeffs = as_floats(&items[3], "coeffs")?;
+    let dims = as_dims(&items[0], wire).field("dims")?;
+    let a = as_f64(&items[1]).field("domain_start")?;
+    let b = as_f64(&items[2]).field("domain_end")?;
+    let coeffs = as_floats(&items[3], "coeffs").field("coeffs")?;
     if !(a < b) {
-        return Err(err(0, "profile domain must satisfy finite a < b"));
+        return Err(err_span(
+            IrSourceSpan {
+                start: items[1].span.start,
+                end: items[2].span.end,
+            },
+            "profile domain must satisfy finite a < b",
+        )
+        .prepend_path(".domain"));
     }
     if coeffs.is_empty() {
-        return Err(err(0, "profile needs at least one finite coefficient"));
+        return Err(
+            err_node(&items[3], "profile needs at least one finite coefficient")
+                .prepend_path(".coeffs"),
+        );
     }
     // `as_f64` already rejects non-finite coefficients. Check every public
     // constructor precondition before calling `fs_cheb`, whose infallible
@@ -1127,51 +1291,61 @@ fn as_profile(items: &[Sx], wire: DimensionWire) -> Result<ChebProfile, Scenario
 }
 
 fn as_signal(sx: &Sx, wire: DimensionWire) -> Result<TimeSignal, ScenarioError> {
-    let Sx::List(items) = sx else {
-        return Err(err(0, "expected a signal form"));
+    let SxKind::List(items) = &sx.kind else {
+        return Err(err_node(sx, "expected a signal form"));
     };
-    let head = as_atom(items.first().ok_or_else(|| err(0, "empty signal"))?)?;
+    let head_node = items
+        .first()
+        .ok_or_else(|| err_node(sx, "empty signal"))
+        .field("kind")?;
+    let head = as_atom(head_node).field("kind")?;
     let rest = &items[1..];
     match head {
         "constant" => {
             if rest.len() != 1 {
-                return Err(err(0, "constant needs a value"));
+                return Err(err_node(sx, "constant needs a value"));
             }
-            Ok(TimeSignal::Constant(as_qty(&rest[0], wire)?))
+            Ok(TimeSignal::Constant(as_qty(&rest[0], wire).field("value")?))
         }
         "ramp" => {
             if rest.len() != 4 {
-                return Err(err(0, "ramp needs t0 t1 from to"));
+                return Err(err_node(sx, "ramp needs t0 t1 from to"));
             }
             Ok(TimeSignal::Ramp {
-                t_start: as_f64(&rest[0])?,
-                t_end: as_f64(&rest[1])?,
-                from: as_qty(&rest[2], wire)?,
-                to: as_qty(&rest[3], wire)?,
+                t_start: as_f64(&rest[0]).field("t_start")?,
+                t_end: as_f64(&rest[1]).field("t_end")?,
+                from: as_qty(&rest[2], wire).field("from")?,
+                to: as_qty(&rest[3], wire).field("to")?,
             })
         }
         "table" => {
             if rest.len() != 4 {
-                return Err(err(0, "table needs interp dims times values"));
+                return Err(err_node(sx, "table needs interp dims times values"));
             }
-            let interp = match as_atom(&rest[0])? {
+            let interp = match as_atom(&rest[0]).field("interp")? {
                 "linear" => Interp::Linear,
                 "hold" => Interp::Hold,
-                other => return Err(err(0, &format!("unknown interp {other:?}"))),
+                other => {
+                    return Err(err_node(&rest[0], &format!("unknown interp {other:?}"))
+                        .prepend_path(".interp"));
+                }
             };
             Ok(TimeSignal::Table {
                 interp,
-                dims: as_dims(&rest[1], wire)?,
-                times: as_floats(&rest[2], "times")?,
-                values: as_floats(&rest[3], "values")?,
+                dims: as_dims(&rest[1], wire).field("dims")?,
+                times: as_floats(&rest[2], "times").field("times")?,
+                values: as_floats(&rest[3], "values").field("values")?,
             })
         }
-        "chebfun" => Ok(TimeSignal::Chebfun(as_profile(rest, wire)?)),
-        other => Err(err(0, &format!("unknown signal {other:?}"))),
+        "chebfun" => Ok(TimeSignal::Chebfun(as_profile(sx, "chebfun", wire)?)),
+        other => {
+            Err(err_node(head_node, &format!("unknown signal {other:?}")).prepend_path(".kind"))
+        }
     }
 }
 
-fn as_physics(a: &str) -> Result<Physics, ScenarioError> {
+fn as_physics(sx: &Sx) -> Result<Physics, ScenarioError> {
+    let a = as_atom(sx)?;
     match a {
         "incompressible-flow" => Ok(Physics::IncompressibleFlow),
         "thermal" => Ok(Physics::Thermal),
@@ -1179,7 +1353,7 @@ fn as_physics(a: &str) -> Result<Physics, ScenarioError> {
         "magnetics" => Ok(Physics::Magnetics),
         "electrics" => Ok(Physics::Electrics),
         "gas-exchange" => Ok(Physics::GasExchange),
-        other => Err(err(0, &format!("unknown physics {other:?}"))),
+        other => Err(err_node(sx, &format!("unknown physics {other:?}"))),
     }
 }
 
@@ -1193,9 +1367,14 @@ fn reserved_machine_role(a: &str) -> Option<&'static str> {
     }
 }
 
-fn as_kind(a: &str) -> Result<BcKind, ScenarioError> {
+fn as_kind(sx: &Sx) -> Result<BcKind, ScenarioError> {
+    let a = as_atom(sx)?;
     if let Some(role) = reserved_machine_role(a) {
-        return Err(ScenarioError::ReservedBoundaryRole { role });
+        return Err(ScenarioError::ReservedBoundaryRole {
+            role,
+            span: sx.span,
+            path: String::new(),
+        });
     }
     match a {
         "dirichlet" => Ok(BcKind::Dirichlet),
@@ -1214,77 +1393,109 @@ fn as_kind(a: &str) -> Result<BcKind, ScenarioError> {
         "species-mass-flux" => Ok(BcKind::SpeciesMassFlux),
         "gas-characteristic-inlet" => Ok(BcKind::GasCharacteristicInlet),
         "gas-characteristic-outlet" => Ok(BcKind::GasCharacteristicOutlet),
-        other => Err(err(0, &format!("unknown bc kind {other:?}"))),
+        other => Err(err_node(sx, &format!("unknown bc kind {other:?}"))),
     }
 }
 
-fn as_typed_payload(inner: &[Sx], wire: DimensionWire) -> Result<Payload, ScenarioError> {
+fn as_typed_payload(sx: &Sx, wire: DimensionWire) -> Result<Payload, ScenarioError> {
     if wire != DimensionWire::CanonicalSix {
-        return Err(err(0, "typed payloads require scenario IR version 2"));
+        return Err(err_node(sx, "typed payloads require scenario IR version 2"));
     }
-    if inner.len() != 4 || as_atom(&inner[1])? != ":version" {
-        return Err(err(
-            0,
+    let inner = as_list(sx, "typed")?;
+    if inner.len() != 3 {
+        return Err(err_node(
+            sx,
             "typed payload needs :version, version number, and canonical hex bytes",
         ));
     }
-    let version = as_u32(&inner[2])?;
+    if as_atom(&inner[0]).field("version_tag")? != ":version" {
+        return Err(
+            err_node(&inner[0], "typed payload version tag must be :version")
+                .prepend_path(".version_tag"),
+        );
+    }
+    let version = as_u32(&inner[1]).field("version")?;
     if version != u32::from(PAYLOAD_WIRE_VERSION) {
-        return Err(err(
-            0,
+        return Err(err_node(
+            &inner[1],
             &format!(
                 "unsupported typed payload version {version}; supported version is {PAYLOAD_WIRE_VERSION}"
             ),
-        ));
+        )
+        .prepend_path(".version"));
     }
-    let bytes = decode_payload_hex(as_str_ref(&inner[3])?)?;
+    let bytes = decode_payload_hex(&inner[2]).field("bytes")?;
     let limits = PayloadDecodeLimits {
         max_bytes: bytes.len(),
         ..PayloadDecodeLimits::DEFAULT
     };
-    decode_payload_with_limits(&bytes, limits)
-        .map_err(|error| err(0, &format!("typed payload refused: {error}")))
+    decode_payload_with_limits(&bytes, limits).map_err(|error| {
+        err_node(&inner[2], &format!("typed payload refused: {error}")).prepend_path(".bytes")
+    })
 }
 
 fn as_bc(sx: &Sx, wire: DimensionWire) -> Result<BoundaryCondition, ScenarioError> {
     let items = as_list(sx, "bc")?;
     if items.len() != 6 {
-        return Err(err(0, "bc needs region physics kind frame value compat"));
+        return Err(err_node(
+            sx,
+            "bc needs region physics kind frame value compat",
+        ));
     }
-    let value = match &items[4] {
-        Sx::Atom(a) if a == "none" => None,
-        Sx::List(inner) => {
-            let head = as_atom(inner.first().ok_or_else(|| err(0, "empty bc value"))?)?;
+    let value = match &items[4].kind {
+        SxKind::Atom(a) if a == "none" => None,
+        SxKind::List(inner) => {
+            let head_node = inner
+                .first()
+                .ok_or_else(|| err_node(&items[4], "empty bc value"))
+                .field("value.kind")?;
+            let head = as_atom(head_node).field("value.kind")?;
             match head {
                 "uniform" => {
                     if inner.len() != 2 {
-                        return Err(err(0, "uniform bc value needs a quantity"));
+                        return Err(err_node(&items[4], "uniform bc value needs a quantity")
+                            .prepend_path(".value"));
                     }
-                    Some(BcValue::Uniform(as_qty(&inner[1], wire)?))
+                    Some(BcValue::Uniform(
+                        as_qty(&inner[1], wire).field("value.uniform")?,
+                    ))
                 }
                 "signal" => {
                     if inner.len() != 2 {
-                        return Err(err(0, "signal bc value needs a signal form"));
+                        return Err(err_node(&items[4], "signal bc value needs a signal form")
+                            .prepend_path(".value"));
                     }
-                    Some(BcValue::Signal(as_signal(&inner[1], wire)?))
+                    Some(BcValue::Signal(
+                        as_signal(&inner[1], wire).field("value.signal")?,
+                    ))
                 }
-                "profile" => Some(BcValue::Profile(as_profile(&inner[1..], wire)?)),
-                "typed" => Some(BcValue::Typed(as_typed_payload(inner, wire)?)),
-                other => return Err(err(0, &format!("unknown bc value {other:?}"))),
+                "profile" => Some(BcValue::Profile(
+                    as_profile(&items[4], "profile", wire).field("value.profile")?,
+                )),
+                "typed" => Some(BcValue::Typed(
+                    as_typed_payload(&items[4], wire).field("value.typed")?,
+                )),
+                other => {
+                    return Err(err_node(head_node, &format!("unknown bc value {other:?}"))
+                        .prepend_path(".value.kind"));
+                }
             }
         }
-        _ => return Err(err(0, "bad bc value")),
+        _ => return Err(err_node(&items[4], "bad bc value").prepend_path(".value")),
     };
-    let compatibility = match as_atom(&items[5])? {
+    let compatibility = match as_atom(&items[5]).field("compatibility")? {
         "none" => None,
         "incompressible" => Some(Compat::Incompressible),
-        other => return Err(err(0, &format!("unknown compat {other:?}"))),
+        other => {
+            return Err(err_node(&items[5], &format!("unknown compat {other:?}"))
+                .prepend_path(".compatibility"));
+        }
     };
     Ok(BoundaryCondition {
-        region: as_str(&items[0])?,
-        physics: as_physics(as_atom(&items[1])?)?,
-        kind: as_kind(as_atom(&items[2])?)?,
-        frame: as_u32(&items[3])?,
+        region: as_str(&items[0]).field("region")?,
+        physics: as_physics(&items[1]).field("physics")?,
+        kind: as_kind(&items[2]).field("kind")?,
+        frame: as_u32(&items[3]).field("frame")?,
         value,
         compatibility,
     })
@@ -1292,167 +1503,227 @@ fn as_bc(sx: &Sx, wire: DimensionWire) -> Result<BoundaryCondition, ScenarioErro
 
 fn as_case(sx: &Sx, wire: DimensionWire) -> Result<LoadCase, ScenarioError> {
     let items = as_list(sx, "case")?;
-    let name = as_str(items.first().ok_or_else(|| err(0, "case needs a name"))?)?;
-    let bcs = decode_items(&items[1..], "case boundary conditions", |bc| {
+    let name_node = items
+        .first()
+        .ok_or_else(|| err_node(sx, "case needs a name"))
+        .field("name")?;
+    let name = as_str(name_node).field("name")?;
+    let bcs = decode_items(sx, &items[1..], "case boundary conditions", |bc| {
         as_bc(bc, wire)
-    })?;
+    })
+    .field("bcs")?;
     Ok(LoadCase { name, bcs })
 }
 
 fn as_combination(sx: &Sx) -> Result<Combination, ScenarioError> {
     let items = as_list(sx, "combo")?;
-    let name = as_str(items.first().ok_or_else(|| err(0, "combo needs a name"))?)?;
-    let terms = decode_items(&items[1..], "combination terms", |term| {
+    let name_node = items
+        .first()
+        .ok_or_else(|| err_node(sx, "combo needs a name"))
+        .field("name")?;
+    let name = as_str(name_node).field("name")?;
+    let terms = decode_items(sx, &items[1..], "combination terms", |term| {
         let term_items = as_list(term, "term")?;
         if term_items.len() != 2 {
-            return Err(err(0, "term needs case + factor"));
+            return Err(err_node(term, "term needs case + factor"));
         }
-        Ok((as_str(&term_items[0])?, as_f64(&term_items[1])?))
-    })?;
+        Ok((
+            as_str(&term_items[0]).field("case")?,
+            as_f64(&term_items[1]).field("factor")?,
+        ))
+    })
+    .field("terms")?;
     Ok(Combination { name, terms })
 }
 
 fn as_frame(sx: &Sx, wire: DimensionWire) -> Result<Frame, ScenarioError> {
     let items = as_list(sx, "frame")?;
     if items.len() != 4 {
-        return Err(err(0, "frame needs id name parent motion"));
+        return Err(err_node(sx, "frame needs id name parent motion"));
     }
-    let Sx::List(motion_items) = &items[3] else {
-        return Err(err(0, "bad frame motion"));
+    let SxKind::List(motion_items) = &items[3].kind else {
+        return Err(err_node(&items[3], "bad frame motion").prepend_path(".motion"));
     };
-    let head = as_atom(motion_items.first().ok_or_else(|| err(0, "empty motion"))?)?;
+    let head_node = motion_items
+        .first()
+        .ok_or_else(|| err_node(&items[3], "empty motion"))
+        .field("motion.kind")?;
+    let head = as_atom(head_node).field("motion.kind")?;
     let rest = &motion_items[1..];
     let motion = match head {
         "fixed" => {
             if rest.len() != 2 {
-                return Err(err(0, "fixed motion needs orientation and translation"));
+                return Err(
+                    err_node(&items[3], "fixed motion needs orientation and translation")
+                        .prepend_path(".motion"),
+                );
             }
-            let q_items = as_list(&rest[0], "quat")?;
+            let q_items = as_list(&rest[0], "quat").field("motion.orientation")?;
             if q_items.len() != 4 {
-                return Err(err(0, "quat needs four components"));
+                return Err(err_node(&rest[0], "quat needs four components")
+                    .prepend_path(".motion.orientation"));
             }
             FrameMotion::Fixed {
                 orientation: Quat {
-                    w: as_f64(&q_items[0])?,
-                    x: as_f64(&q_items[1])?,
-                    y: as_f64(&q_items[2])?,
-                    z: as_f64(&q_items[3])?,
+                    w: as_f64(&q_items[0]).field("motion.orientation.w")?,
+                    x: as_f64(&q_items[1]).field("motion.orientation.x")?,
+                    y: as_f64(&q_items[2]).field("motion.orientation.y")?,
+                    z: as_f64(&q_items[3]).field("motion.orientation.z")?,
                 },
-                translation: as_vec3(&rest[1])?,
+                translation: as_vec3(&rest[1]).field("motion.translation")?,
             }
         }
         "rotating" => {
             if rest.len() != 3 {
-                return Err(err(0, "rotating motion needs axis center rate"));
+                return Err(
+                    err_node(&items[3], "rotating motion needs axis center rate")
+                        .prepend_path(".motion"),
+                );
             }
-            let axis = as_vec3(&rest[0])?;
+            let axis = as_vec3(&rest[0]).field("motion.axis")?;
             FrameMotion::Rotating {
                 axis: [axis.x, axis.y, axis.z],
-                center: as_vec3(&rest[1])?,
-                rate: as_qty(&rest[2], wire)?,
+                center: as_vec3(&rest[1]).field("motion.center")?,
+                rate: as_qty(&rest[2], wire).field("motion.rate")?,
             }
         }
         "tilt" => {
             if rest.len() != 3 {
-                return Err(err(0, "tilt motion needs axis center angle"));
+                return Err(err_node(&items[3], "tilt motion needs axis center angle")
+                    .prepend_path(".motion"));
             }
-            let axis = as_vec3(&rest[0])?;
+            let axis = as_vec3(&rest[0]).field("motion.axis")?;
             FrameMotion::Tilt {
                 axis: [axis.x, axis.y, axis.z],
-                center: as_vec3(&rest[1])?,
-                angle: as_signal(&rest[2], wire)?,
+                center: as_vec3(&rest[1]).field("motion.center")?,
+                angle: as_signal(&rest[2], wire).field("motion.angle")?,
             }
         }
-        other => return Err(err(0, &format!("unknown motion {other:?}"))),
+        other => {
+            return Err(err_node(head_node, &format!("unknown motion {other:?}"))
+                .prepend_path(".motion.kind"));
+        }
     };
     Ok(Frame {
-        id: FrameId(as_u32(&items[0])?),
-        name: as_str(&items[1])?,
-        parent: FrameId(as_u32(&items[2])?),
+        id: FrameId(as_u32(&items[0]).field("id")?),
+        name: as_str(&items[1]).field("name")?,
+        parent: FrameId(as_u32(&items[2]).field("parent")?),
         motion,
     })
 }
 
 fn as_model(sx: &Sx, wire: DimensionWire) -> Result<SpectrumModel, ScenarioError> {
-    let Sx::List(items) = sx else {
-        return Err(err(0, "expected a spectrum model form"));
+    let SxKind::List(items) = &sx.kind else {
+        return Err(err_node(sx, "expected a spectrum model form"));
     };
-    let head = as_atom(items.first().ok_or_else(|| err(0, "empty model"))?)?;
+    let head_node = items
+        .first()
+        .ok_or_else(|| err_node(sx, "empty model"))
+        .field("kind")?;
+    let head = as_atom(head_node).field("kind")?;
     let rest = &items[1..];
     match head {
         "dryden" => {
             if rest.len() != 3 {
-                return Err(err(0, "dryden needs sigma length_scale mean_speed"));
+                return Err(err_node(sx, "dryden needs sigma length_scale mean_speed"));
             }
             Ok(SpectrumModel::Dryden {
-                sigma: as_qty(&rest[0], wire)?,
-                length_scale: as_qty(&rest[1], wire)?,
-                mean_speed: as_qty(&rest[2], wire)?,
+                sigma: as_qty(&rest[0], wire).field("sigma")?,
+                length_scale: as_qty(&rest[1], wire).field("length_scale")?,
+                mean_speed: as_qty(&rest[2], wire).field("mean_speed")?,
             })
         }
         "kanai-tajimi" => {
             if rest.len() != 3 {
-                return Err(err(0, "kanai-tajimi needs s0 omega_g zeta_g"));
+                return Err(err_node(sx, "kanai-tajimi needs s0 omega_g zeta_g"));
             }
             Ok(SpectrumModel::KanaiTajimi {
-                s0: as_f64(&rest[0])?,
-                omega_g: as_qty(&rest[1], wire)?,
-                zeta_g: as_f64(&rest[2])?,
+                s0: as_f64(&rest[0]).field("s0")?,
+                omega_g: as_qty(&rest[1], wire).field("omega_g")?,
+                zeta_g: as_f64(&rest[2]).field("zeta_g")?,
             })
         }
         "carreau" => {
             if rest.len() != 8 {
-                return Err(err(0, "carreau needs six qty bounds + two n bounds"));
+                return Err(err_node(sx, "carreau needs six qty bounds + two n bounds"));
             }
             Ok(SpectrumModel::CarreauBand {
-                eta_zero: [as_qty(&rest[0], wire)?, as_qty(&rest[1], wire)?],
-                eta_inf: [as_qty(&rest[2], wire)?, as_qty(&rest[3], wire)?],
-                lambda: [as_qty(&rest[4], wire)?, as_qty(&rest[5], wire)?],
-                n: [as_f64(&rest[6])?, as_f64(&rest[7])?],
+                eta_zero: [
+                    as_qty(&rest[0], wire).field("eta_zero[0]")?,
+                    as_qty(&rest[1], wire).field("eta_zero[1]")?,
+                ],
+                eta_inf: [
+                    as_qty(&rest[2], wire).field("eta_inf[0]")?,
+                    as_qty(&rest[3], wire).field("eta_inf[1]")?,
+                ],
+                lambda: [
+                    as_qty(&rest[4], wire).field("lambda[0]")?,
+                    as_qty(&rest[5], wire).field("lambda[1]")?,
+                ],
+                n: [
+                    as_f64(&rest[6]).field("n[0]")?,
+                    as_f64(&rest[7]).field("n[1]")?,
+                ],
             })
         }
-        other => Err(err(0, &format!("unknown model {other:?}"))),
+        other => {
+            Err(err_node(head_node, &format!("unknown model {other:?}")).prepend_path(".kind"))
+        }
     }
 }
 
 fn as_ensemble(sx: &Sx, wire: DimensionWire) -> Result<StochasticEnsemble, ScenarioError> {
     let items = as_list(sx, "ensemble")?;
     if items.len() != 6 {
-        return Err(err(0, "ensemble needs name seed members duration dt model"));
+        return Err(err_node(
+            sx,
+            "ensemble needs name seed members duration dt model",
+        ));
     }
     Ok(StochasticEnsemble {
-        name: as_str(&items[0])?,
-        seed: as_u64(&items[1])?,
-        members: as_u32(&items[2])?,
-        duration: as_qty(&items[3], wire)?,
-        dt: as_qty(&items[4], wire)?,
-        model: as_model(&items[5], wire)?,
+        name: as_str(&items[0]).field("name")?,
+        seed: as_u64(&items[1]).field("seed")?,
+        members: as_u32(&items[2]).field("members")?,
+        duration: as_qty(&items[3], wire).field("duration")?,
+        dt: as_qty(&items[4], wire).field("dt")?,
+        model: as_model(&items[5], wire).field("model")?,
     })
 }
 
 fn as_contact(sx: &Sx) -> Result<ContactLaw, ScenarioError> {
     let contact_items = as_list(sx, "contact")?;
     if contact_items.len() != 3 {
-        return Err(err(0, "contact needs two regions + model"));
+        return Err(err_node(sx, "contact needs two regions + model"));
     }
     let model = match &contact_items[2] {
-        Sx::Atom(a) if a == "frictionless" => ContactModel::Frictionless,
-        Sx::Atom(a) if a == "tied" => ContactModel::Tied,
-        other @ Sx::List(_) => {
-            let coulomb = as_list(other, "coulomb")?;
+        Sx {
+            kind: SxKind::Atom(a),
+            ..
+        } if a == "frictionless" => ContactModel::Frictionless,
+        Sx {
+            kind: SxKind::Atom(a),
+            ..
+        } if a == "tied" => ContactModel::Tied,
+        other @ Sx {
+            kind: SxKind::List(_),
+            ..
+        } => {
+            let coulomb = as_list(other, "coulomb").field("model")?;
             if coulomb.len() != 2 {
-                return Err(err(0, "coulomb needs mu_s + mu_k"));
+                return Err(err_node(other, "coulomb needs mu_s + mu_k").prepend_path(".model"));
             }
             ContactModel::Coulomb {
-                mu_s: as_f64(&coulomb[0])?,
-                mu_k: as_f64(&coulomb[1])?,
+                mu_s: as_f64(&coulomb[0]).field("model.mu_static")?,
+                mu_k: as_f64(&coulomb[1]).field("model.mu_kinetic")?,
             }
         }
-        _ => return Err(err(0, "bad contact model")),
+        _ => {
+            return Err(err_node(&contact_items[2], "bad contact model").prepend_path(".model"));
+        }
     };
     Ok(ContactLaw {
-        region_a: as_str(&contact_items[0])?,
-        region_b: as_str(&contact_items[1])?,
+        region_a: as_str(&contact_items[0]).field("region_a")?,
+        region_b: as_str(&contact_items[1]).field("region_b")?,
         model,
     })
 }
@@ -1460,38 +1731,43 @@ fn as_contact(sx: &Sx) -> Result<ContactLaw, ScenarioError> {
 fn as_environment(sx: &Sx, wire: DimensionWire) -> Result<Environment, ScenarioError> {
     let items = as_list(sx, "environment")?;
     if items.len() != 5 {
-        return Err(err(
-            0,
+        return Err(err_node(
+            sx,
             "environment needs gravity x3 + temperature + pressure",
         ));
     }
     Ok(Environment {
         gravity: [
-            as_qty(&items[0], wire)?,
-            as_qty(&items[1], wire)?,
-            as_qty(&items[2], wire)?,
+            as_qty(&items[0], wire).field("gravity[0]")?,
+            as_qty(&items[1], wire).field("gravity[1]")?,
+            as_qty(&items[2], wire).field("gravity[2]")?,
         ],
-        ambient_temperature: as_qty(&items[3], wire)?,
-        ambient_pressure: as_qty(&items[4], wire)?,
+        ambient_temperature: as_qty(&items[3], wire).field("ambient_temperature")?,
+        ambient_pressure: as_qty(&items[4], wire).field("ambient_pressure")?,
     })
 }
 
-fn scenario_wire_header(root_items: &[Sx]) -> Result<(u32, DimensionWire, &[Sx]), ScenarioError> {
-    if matches!(root_items.first(), Some(Sx::Atom(key)) if key == ":version") {
+fn scenario_wire_header<'a>(
+    root: &Sx,
+    root_items: &'a [Sx],
+) -> Result<(u32, DimensionWire, &'a [Sx]), ScenarioError> {
+    if matches!(root_items.first(), Some(Sx { kind: SxKind::Atom(key), .. }) if key == ":version") {
         let version = root_items
             .get(1)
-            .ok_or_else(|| err(0, "scenario :version needs a value"))
-            .and_then(as_u32)?;
+            .ok_or_else(|| err_node(root, "scenario :version needs a value"))
+            .and_then(as_u32)
+            .field("version")?;
         let wire = match version {
             LEGACY_SCENARIO_IR_VERSION => DimensionWire::LegacyFive,
             SCENARIO_IR_VERSION => DimensionWire::CanonicalSix,
             _ => {
-                return Err(err(
-                    0,
+                return Err(err_node(
+                    &root_items[1],
                     &format!(
                         "unsupported scenario IR version {version}; supported versions are 1 and {SCENARIO_IR_VERSION}"
                     ),
-                ));
+                )
+                .prepend_path(".version"));
             }
         };
         Ok((version, wire, &root_items[2..]))
@@ -1536,90 +1812,118 @@ pub fn parse_ir_with_budget(
     budget: IrParseBudget,
 ) -> Result<DecodedScenario, ScenarioError> {
     let root = parse_sx(text, budget)?;
-    let root_items = as_list(&root, "scenario")?;
-    let (source_version, wire, items) = scenario_wire_header(root_items)?;
-    if items.len() != 9 {
-        return Err(err(0, "scenario needs name seed + seven sections"));
-    }
-    let environment = as_environment(&items[2], wire)?;
-    let frames = FrameTree {
-        frames: decode_items(as_list(&items[3], "frames")?, "frames", |frame| {
-            as_frame(frame, wire)
-        })?,
-    };
-    let base_bcs = decode_items(
-        as_list(&items[4], "bcs")?,
-        "base boundary conditions",
-        |bc| as_bc(bc, wire),
-    )?;
-    let cases = decode_items(as_list(&items[5], "cases")?, "load cases", |case| {
-        as_case(case, wire)
-    })?;
-    let combinations = decode_items(
-        as_list(&items[6], "combos")?,
-        "load combinations",
-        as_combination,
-    )?;
-    let ensembles = decode_items(
-        as_list(&items[7], "ensembles")?,
-        "stochastic ensembles",
-        |ensemble| as_ensemble(ensemble, wire),
-    )?;
-    let contacts = decode_items(as_list(&items[8], "contacts")?, "contact laws", as_contact)?;
-    let scenario = Scenario {
-        name: as_str(&items[0])?,
-        seed: as_u64(&items[1])?,
-        frames,
-        base_bcs,
-        cases,
-        combinations,
-        ensembles,
-        contacts,
-        environment,
-    };
-    let canonical = write_ir(&scenario);
-    let (dimension_crosswalk, source_canonicalization) = if wire == DimensionWire::LegacyFive {
-        (
-            Some(DimensionCrosswalkReceipt {
-                source_version,
-                target_version: SCENARIO_IR_VERSION,
-                old_hash: hash_bytes(text.as_bytes()),
-                new_hash: hash_bytes(canonical.as_bytes()),
-                source_width: 5,
-                target_width: 6,
-                rule: FiveToSixRule::AppendMoleZero,
-            }),
-            None,
+    (|| {
+        let root_items = as_list(&root, "scenario")?;
+        let (source_version, wire, items) = scenario_wire_header(&root, root_items)?;
+        if items.len() != 9 {
+            return Err(err_node(
+                &root,
+                "scenario needs name seed + seven sections",
+            ));
+        }
+        let environment = as_environment(&items[2], wire).field("environment")?;
+        let frames = FrameTree {
+            frames: decode_items(
+                &items[3],
+                as_list(&items[3], "frames").field("frames")?,
+                "frames",
+                |frame| as_frame(frame, wire),
+            )
+            .field("frames")?,
+        };
+        let base_bcs = decode_items(
+            &items[4],
+            as_list(&items[4], "bcs").field("base_bcs")?,
+            "base boundary conditions",
+            |bc| as_bc(bc, wire),
         )
-    } else if text.as_bytes() == canonical.as_bytes() {
-        (None, None)
-    } else {
-        let rule = SourceCanonicalizationRule::for_source_version(source_version)
-            .ok_or_else(|| {
-                err(
-                    0,
-                    &format!(
-                        "scenario IR v{source_version} has no registered source-canonicalization rule"
-                    ),
+        .field("base_bcs")?;
+        let cases = decode_items(
+            &items[5],
+            as_list(&items[5], "cases").field("cases")?,
+            "load cases",
+            |case| as_case(case, wire),
+        )
+        .field("cases")?;
+        let combinations = decode_items(
+            &items[6],
+            as_list(&items[6], "combos").field("combinations")?,
+            "load combinations",
+            as_combination,
+        )
+        .field("combinations")?;
+        let ensembles = decode_items(
+            &items[7],
+            as_list(&items[7], "ensembles").field("ensembles")?,
+            "stochastic ensembles",
+            |ensemble| as_ensemble(ensemble, wire),
+        )
+        .field("ensembles")?;
+        let contacts = decode_items(
+            &items[8],
+            as_list(&items[8], "contacts").field("contacts")?,
+            "contact laws",
+            as_contact,
+        )
+        .field("contacts")?;
+        let scenario = Scenario {
+            name: as_str(&items[0]).field("name")?,
+            seed: as_u64(&items[1]).field("seed")?,
+            frames,
+            base_bcs,
+            cases,
+            combinations,
+            ensembles,
+            contacts,
+            environment,
+        };
+        let canonical = write_ir(&scenario);
+        let (dimension_crosswalk, source_canonicalization) =
+            if wire == DimensionWire::LegacyFive {
+                (
+                    Some(DimensionCrosswalkReceipt {
+                        source_version,
+                        target_version: SCENARIO_IR_VERSION,
+                        old_hash: hash_bytes(text.as_bytes()),
+                        new_hash: hash_bytes(canonical.as_bytes()),
+                        source_width: 5,
+                        target_width: 6,
+                        rule: FiveToSixRule::AppendMoleZero,
+                    }),
+                    None,
                 )
-            })?;
-        (
-            None,
-            Some(SourceCanonicalizationReceipt {
-                source_version,
-                canonical_version: SCENARIO_IR_VERSION,
-                source_hash: hash_bytes(text.as_bytes()),
-                canonical_hash: hash_bytes(canonical.as_bytes()),
-                rule,
-            }),
-        )
-    };
-    Ok(DecodedScenario {
-        scenario,
-        source_version,
-        dimension_crosswalk,
-        source_canonicalization,
-    })
+            } else if text.as_bytes() == canonical.as_bytes() {
+                (None, None)
+            } else {
+                let rule = SourceCanonicalizationRule::for_source_version(source_version)
+                    .ok_or_else(|| {
+                        err_node(
+                            &root,
+                            &format!(
+                                "scenario IR v{source_version} has no registered source-canonicalization rule"
+                            ),
+                        )
+                        .prepend_path(".version")
+                    })?;
+                (
+                    None,
+                    Some(SourceCanonicalizationReceipt {
+                        source_version,
+                        canonical_version: SCENARIO_IR_VERSION,
+                        source_hash: hash_bytes(text.as_bytes()),
+                        canonical_hash: hash_bytes(canonical.as_bytes()),
+                        rule,
+                    }),
+                )
+            };
+        Ok(DecodedScenario {
+            scenario,
+            source_version,
+            dimension_crosswalk,
+            source_canonicalization,
+        })
+    })()
+    .map_err(ScenarioError::rooted)
 }
 
 /// Round-trip helper for lints/tests: violations if reparse ≠ original.
@@ -1654,29 +1958,45 @@ pub fn check_round_trip(s: &Scenario, out: &mut Vec<Violation>) {
 #[cfg(test)]
 mod allocation_internal_tests {
     use super::{reserve_decoded, reserve_decoded_string};
-    use crate::ScenarioError;
+    use crate::{IrSourceSpan, ScenarioError};
 
     #[test]
     fn decoded_collection_allocation_refusal_is_typed() {
         let mut values = Vec::<f64>::new();
-        let error = reserve_decoded(&mut values, usize::MAX, "collection test")
-            .expect_err("impossible decoded capacity must be refused");
+        let error = reserve_decoded(
+            &mut values,
+            usize::MAX,
+            "collection test",
+            IrSourceSpan { start: 0, end: 0 },
+        )
+        .expect_err("impossible decoded capacity must be refused");
 
         assert!(matches!(
             error,
-            ScenarioError::Parse { at: 0, what }
-                if what.contains("IR decoded collection test allocation")
+            ScenarioError::Parse {
+                span: IrSourceSpan { start: 0, end: 0 },
+                path,
+                what,
+            }
+                if path.is_empty()
+                    && what.contains("IR decoded collection test allocation")
                     && what.contains("was refused")
         ));
         assert!(values.is_empty());
 
         let mut value = String::new();
-        let error = reserve_decoded_string(&mut value, usize::MAX)
-            .expect_err("impossible decoded string capacity must be refused");
+        let error =
+            reserve_decoded_string(&mut value, usize::MAX, IrSourceSpan { start: 0, end: 0 })
+                .expect_err("impossible decoded string capacity must be refused");
         assert!(matches!(
             error,
-            ScenarioError::Parse { at: 0, what }
-                if what.contains("IR decoded string allocation")
+            ScenarioError::Parse {
+                span: IrSourceSpan { start: 0, end: 0 },
+                path,
+                what,
+            }
+                if path.is_empty()
+                    && what.contains("IR decoded string allocation")
                     && what.contains("was refused")
         ));
         assert!(value.is_empty());

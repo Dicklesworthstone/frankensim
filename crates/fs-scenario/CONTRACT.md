@@ -141,7 +141,13 @@ flagships.
   panics. Syntax-tree growth, atom buffers, every decoded collection vector,
   and every decoded string-field copy reserve fallibly before population. The
   byte/node limits also bound decoder collection sizes, but are not a separately
-  metered exact heap-byte budget.
+  metered exact heap-byte budget. Every syntax node retains its exact half-open
+  source span. Semantic decoding adds a deterministic `$`-rooted structural
+  path only while unwinding a refusal, so nested field/index diagnostics do not
+  allocate on the green path. Parse and reserved-machine-role refusals expose
+  both the path and span; typed-payload hex nibble offsets are translated back
+  to absolute scenario-source bytes rather than reported relative to the
+  embedded string.
 
 ## Invariants
 
@@ -244,10 +250,13 @@ flagships.
 ## Error model
 
 `ScenarioError`: `Dimensions { context, expected, got }`, `Frame`,
-`Evaluate`, `Parse { at, what }`, and `ReservedBoundaryRole { role }` for an
-attempt to encode a Machine-IR joint, terminal, controller, or reset as a BC
-kind. Parse/evaluation errors include deterministic
-budget refusals and allocation-refusal context. `ValidationError` distinguishes
+`Evaluate`, `Parse { span, path, what }`, and
+`ReservedBoundaryRole { role, span, path }` for an attempt to encode a
+Machine-IR joint, terminal, controller, or reset as a BC kind. `span` is an
+exact half-open byte range in the supplied source and `path` is a deterministic
+structural address such as `$.cases[0].bcs[1].kind`. Parse/evaluation errors
+include deterministic budget refusals and allocation-refusal context.
+`ValidationError` distinguishes
 named limit refusal, work-plan overflow, total-work refusal, scratch-allocation
 refusal, and cancellation with phase/completed/planned work. Admitted validation produces
 `Vec<Violation>` (code + what + fix) rather than failing fast — agents get the
@@ -352,6 +361,9 @@ None.
   float, and signed-zero aliases re-emit to one canonical v2 artifact while
   retaining distinct source hashes in versioned tamper-checked receipts;
   exact canonical writer output remains receipt-free.
+- **sc-001g** nested ensemble scalars, frame-motion arity, cross-field profile
+  domains, reserved/unknown BC roles, and embedded typed-payload hex mutations
+  pin exact structural paths and absolute half-open source spans.
 - **sc-002** seeded violations caught with structured fixes: flux
   imbalance (repaired by adding an outlet), cyclic + dangling frames,
   wrong-dimension BC, undeclared inlet compatibility, unknown combo case,

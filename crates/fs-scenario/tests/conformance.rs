@@ -11,9 +11,9 @@ use fs_ga::{Motor, Point, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{
     BcKind, BcValue, BoundaryCondition, ChebProfile, Combination, Compat, ContactLaw, ContactModel,
-    Environment, Frame, FrameId, FrameMotion, FrameTree, Interp, LoadCase, Physics,
-    RealizationBudget, Scenario, SpectrumModel, StochasticEnsemble, TimeSignal, ValidationBudget,
-    ValidationError,
+    Environment, Frame, FrameId, FrameMotion, FrameTree, Interp, IrSourceSpan, LoadCase, Physics,
+    RealizationBudget, Scenario, ScenarioError, SpectrumModel, StochasticEnsemble, TimeSignal,
+    ValidationBudget, ValidationError,
     ir::{
         FiveToSixRule, IrParseBudget, LEGACY_SCENARIO_IR_VERSION, SCENARIO_IR_VERSION,
         SourceCanonicalizationRule, parse_ir, parse_ir_with_budget, write_ir,
@@ -1165,6 +1165,103 @@ fn truncate_form(ir: &str, head: &str) -> String {
     out.push(')'); // -> "(fixed)"
     out.push_str(&ir[end..]);
     out
+}
+
+#[test]
+fn sc_001g_semantic_parse_refusals_retain_exact_nested_paths_and_spans() {
+    let canonical = write_ir(&rich_scenario());
+
+    let mut nonfinite = canonical.clone();
+    let model_head = "(kanai-tajimi ";
+    let number_start = nonfinite.find(model_head).expect("KT model is present") + model_head.len();
+    let number_end = number_start
+        + nonfinite[number_start..]
+            .find(' ')
+            .expect("KT s0 terminator");
+    nonfinite.replace_range(number_start..number_end, "NaN");
+    let error = parse_ir(&nonfinite).expect_err("non-finite nested model value must refuse");
+    let ScenarioError::Parse { span, path, what } = error else {
+        panic!("expected a located parse refusal");
+    };
+    assert_eq!(
+        span,
+        IrSourceSpan {
+            start: number_start,
+            end: number_start + 3,
+        }
+    );
+    assert_eq!(path, "$.ensembles[0].model.s0");
+    assert!(what.contains("finite number"));
+
+    let truncated = truncate_form(&canonical, "(fixed");
+    let fixed_start = truncated.find("(fixed)").expect("truncated fixed form");
+    let error = parse_ir(&truncated).expect_err("truncated fixed motion must refuse");
+    let ScenarioError::Parse { span, path, what } = error else {
+        panic!("expected a located motion refusal");
+    };
+    assert_eq!(
+        span,
+        IrSourceSpan {
+            start: fixed_start,
+            end: fixed_start + "(fixed)".len(),
+        }
+    );
+    assert_eq!(path, "$.frames[2].motion");
+    assert!(what.contains("orientation and translation"));
+
+    let mut reversed_profile = canonical.clone();
+    let profile_start = reversed_profile
+        .find("(profile ")
+        .expect("profile is present");
+    let domain_marker = ") 0 1 (coeffs";
+    let domain_start = profile_start
+        + reversed_profile[profile_start..]
+            .find(domain_marker)
+            .expect("profile domain is present")
+        + 2;
+    reversed_profile.replace_range(domain_start..domain_start + 3, "2 1");
+    let error = parse_ir(&reversed_profile).expect_err("reversed profile domain must refuse");
+    let ScenarioError::Parse { span, path, what } = error else {
+        panic!("expected a located profile refusal");
+    };
+    assert_eq!(
+        span,
+        IrSourceSpan {
+            start: domain_start,
+            end: domain_start + 3,
+        }
+    );
+    assert_eq!(path, "$.base_bcs[3].value.profile.domain");
+    assert!(what.contains("finite a < b"));
+
+    let mut wrong_contact_model = canonical.clone();
+    let model_start = wrong_contact_model
+        .find("(coulomb ")
+        .expect("Coulomb contact model is present");
+    let model_end = model_start
+        + wrong_contact_model[model_start..]
+            .find(')')
+            .expect("Coulomb contact model terminator")
+        + 1;
+    wrong_contact_model.replace_range(model_start + 1..model_start + 8, "coulomx");
+    let error = parse_ir(&wrong_contact_model).expect_err("unknown contact model must refuse");
+    let ScenarioError::Parse { span, path, what } = error else {
+        panic!("expected a located contact-model refusal");
+    };
+    assert_eq!(
+        span,
+        IrSourceSpan {
+            start: model_start,
+            end: model_end,
+        }
+    );
+    assert_eq!(path, "$.contacts[0].model");
+    assert!(what.contains("expected (coulomb ...) form"));
+
+    verdict(
+        "sc-001g",
+        "nested model scalars, frame motions, profile domains, and contact models retain exact structural paths and source spans",
+    );
 }
 
 #[test]

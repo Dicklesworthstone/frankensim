@@ -35,6 +35,15 @@ pub use signal::{ChebProfile, Interp, TimeSignal};
 
 use core::fmt;
 
+/// Half-open byte span in one supplied scenario-IR source artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IrSourceSpan {
+    /// First byte belonging to the offending form or token.
+    pub start: usize,
+    /// First byte after the offending form or token.
+    pub end: usize,
+}
+
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,8 +71,10 @@ pub enum ScenarioError {
     },
     /// Canonical-IR text failed to parse.
     Parse {
-        /// Byte offset of the failure.
-        at: usize,
+        /// Exact half-open byte span of the offending form or token.
+        span: IrSourceSpan,
+        /// Deterministic structural path within the scenario form.
+        path: String,
         /// Diagnosis.
         what: String,
     },
@@ -71,6 +82,10 @@ pub enum ScenarioError {
     ReservedBoundaryRole {
         /// Exact reserved wire role that was refused.
         role: &'static str,
+        /// Exact half-open byte span of the reserved role token.
+        span: IrSourceSpan,
+        /// Deterministic structural path within the scenario form.
+        path: String,
     },
 }
 
@@ -87,10 +102,15 @@ impl fmt::Display for ScenarioError {
             ),
             ScenarioError::Frame { what } => write!(f, "frame error: {what}"),
             ScenarioError::Evaluate { what } => write!(f, "evaluation error: {what}"),
-            ScenarioError::Parse { at, what } => write!(f, "IR parse error at byte {at}: {what}"),
-            ScenarioError::ReservedBoundaryRole { role } => write!(
+            ScenarioError::Parse { span, path, what } => write!(
                 f,
-                "reserved machine-graph role {role:?} cannot be encoded as a boundary-condition kind; declare it as a typed fs-ir machine relation"
+                "IR parse error at {path} (bytes {}..{}): {what}",
+                span.start, span.end
+            ),
+            ScenarioError::ReservedBoundaryRole { role, span, path } => write!(
+                f,
+                "reserved machine-graph role {role:?} at {path} (bytes {}..{}) cannot be encoded as a boundary-condition kind; declare it as a typed fs-ir machine relation",
+                span.start, span.end
             ),
         }
     }

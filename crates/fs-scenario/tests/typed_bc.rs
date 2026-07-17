@@ -12,8 +12,8 @@ use fs_scenario::payload::{
     TableInterpolation, VectorPayload,
 };
 use fs_scenario::{
-    BcKind, BcValue, BoundaryCondition, Compat, Environment, FrameId, LoadCase, Physics, Scenario,
-    ScenarioError, ValidationBudget, ValidationError, Violation,
+    BcKind, BcValue, BoundaryCondition, Compat, Environment, FrameId, IrSourceSpan, LoadCase,
+    Physics, Scenario, ScenarioError, ValidationBudget, ValidationError, Violation,
 };
 
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
@@ -527,12 +527,39 @@ fn g0_typed_payload_scenario_ir_round_trips_and_versions_fail_closed() {
         .expect("payload magic contains a lowercase hex digit");
     uppercase[hex_start + lowercase_offset].make_ascii_uppercase();
     let uppercase = String::from_utf8(uppercase).expect("ASCII mutation remains UTF-8");
-    assert!(
-        parse_ir(&uppercase)
-            .expect_err("uppercase hex must refuse")
-            .to_string()
-            .contains("canonical lowercase digits")
+    let error = parse_ir(&uppercase).expect_err("uppercase hex must refuse");
+    let ScenarioError::Parse { span, path, what } = error else {
+        panic!("uppercase payload hex must be a located parse refusal");
+    };
+    assert_eq!(
+        span,
+        IrSourceSpan {
+            start: hex_start + lowercase_offset,
+            end: hex_start + lowercase_offset + 1,
+        }
     );
+    assert_eq!(path, "$.base_bcs[0].value.typed.bytes");
+    assert!(what.contains("canonical lowercase digits"));
+
+    let mut wrong_tag = canonical.clone();
+    let typed_start = wrong_tag
+        .find("(typed :version ")
+        .expect("typed payload header is present");
+    let tag_start = typed_start + "(typed ".len();
+    wrong_tag.replace_range(tag_start..tag_start + ":version".len(), ":versoin");
+    let error = parse_ir(&wrong_tag).expect_err("misspelled typed version tag must refuse");
+    let ScenarioError::Parse { span, path, what } = error else {
+        panic!("typed version tag must be a located parse refusal");
+    };
+    assert_eq!(
+        span,
+        IrSourceSpan {
+            start: tag_start,
+            end: tag_start + ":versoin".len(),
+        }
+    );
+    assert_eq!(path, "$.base_bcs[0].value.typed.version_tag");
+    assert!(what.contains("must be :version"));
 
     let mut trailing = canonical.clone();
     trailing.insert_str(hex_end, "00");
