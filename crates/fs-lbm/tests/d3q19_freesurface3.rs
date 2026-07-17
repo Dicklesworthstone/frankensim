@@ -376,6 +376,12 @@ fn lbm3_105_martin_moyce_front() {
     );
 }
 
+/// FROZEN 2026-07-17 (bead sxnm): all four policy quadrants reproduced
+/// this value bit-identically on the committed tree 1926b1cf — aarch64
+/// M4 Pro debug+release and x86-64 ts1 debug+release. Bump only per
+/// docs/GOLDEN_POLICY.md with the same four-quadrant evidence.
+const POUR_GOLDEN_HASH: u64 = 0xb0f1_90d6_126b_3ccc;
+
 /// FNV-1a over exact bits — golden preimage helper.
 fn fnv1a_bits(bits: &[u64]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -494,7 +500,10 @@ fn lbm3_106_minimal_pour() {
     // cells' worth of fluid genuinely outside the tank.
     verdict(
         "lbm3-106-minimal-pour",
-        partition_defect < 1e-9 && global_drift < 1e-9 && poured_mass > 8.0,
+        partition_defect < 1e-9
+            && global_drift < 1e-9
+            && poured_mass > 8.0
+            && candidate == POUR_GOLDEN_HASH,
         &detail,
     );
 }
