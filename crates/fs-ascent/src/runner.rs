@@ -16,16 +16,25 @@
 //! - RESUMABLE: [`Study`] is the checkpoint (clone = checkpoint); a
 //!   split run is BITWISE equal to a straight run (house pattern,
 //!   gated).
+//! - CANCELLABLE: `try_run_cancellable` observes `fs_exec::Cx` only at
+//!   complete iteration boundaries and returns a replay-complete typed pause.
 //! - BOUND + FORKABLE: a checkpoint retains its admitted semantic problem
 //!   identity, so cached objective state cannot cross problem meanings;
 //!   reweight steering is an explicit immutable-parent world fork.
 
 use crate::riemann::{retract, tangent_project};
 use crate::stop::{StopObservation, StopReason, StopRule};
+use fs_exec::Cx;
 use fs_opt::{
     AdmissionReport, ConstraintKind, EvalLimit, Manifold, OptError, Problem, ProblemSemanticId,
     Sense, Variable, eval,
 };
+
+/// Version of the resume-safe Study cancellation boundary and pause receipt.
+///
+/// Bump when polling placement or receipt semantics change; retained G4
+/// evidence must never silently cross a different pause protocol.
+pub const STUDY_CANCELLATION_BOUNDARY_VERSION: u16 = 1;
 
 /// One packed variable block.
 #[derive(Debug, Clone)]
@@ -259,6 +268,46 @@ pub struct StudyForkReceipt {
     pub learning_rate_bits: u64,
 }
 
+/// Replay-complete state observed at a resume-safe cancellation boundary.
+///
+/// The receipt contains every mutable numerical field that is not already
+/// fixed by `problem_id`. Cancellation observation itself does not mutate the
+/// [`Study`]; callers may retain this receipt, replace the cancelled context,
+/// and resume the same in-memory checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudyPauseReceipt {
+    /// Boundary/receipt semantics version.
+    pub boundary_version: u16,
+    /// Semantic problem identity bound to the checkpoint.
+    pub problem_id: ProblemSemanticId,
+    /// Completed projected-gradient steps.
+    pub steps: usize,
+    /// Objective evaluations spent so far.
+    pub evals: usize,
+    /// Exact packed point bits.
+    pub point_bits: Vec<u64>,
+    /// Exact objective-history bits.
+    pub history_bits: Vec<u64>,
+    /// Cached current objective, when populated.
+    pub current_objective_bits: Option<u64>,
+    /// Cached projected-gradient norm, when populated.
+    pub current_gradient_norm_bits: Option<u64>,
+    /// Finite-difference step bits.
+    pub fd_h_bits: u64,
+    /// Learning-rate bits.
+    pub learning_rate_bits: u64,
+}
+
+/// Typed outcome of a cancellation-aware study segment.
+#[derive(Debug, Clone)]
+#[must_use]
+pub enum StudyRunProgress {
+    /// The caller's stop rule, problem budget, or segment cap stopped the run.
+    Stopped(StudyReport),
+    /// The context requested cancellation at a resume-safe boundary.
+    Paused(StudyPauseReceipt),
+}
+
 /// Outcome of a study segment.
 #[derive(Debug, Clone)]
 pub struct StudyReport {
@@ -401,6 +450,21 @@ impl Study {
         Ok((child, receipt))
     }
 
+    fn pause_receipt(&self) -> StudyPauseReceipt {
+        StudyPauseReceipt {
+            boundary_version: STUDY_CANCELLATION_BOUNDARY_VERSION,
+            problem_id: self.problem_id,
+            steps: self.steps,
+            evals: self.evals,
+            point_bits: self.x.iter().map(|value| value.to_bits()).collect(),
+            history_bits: self.history.iter().map(|value| value.to_bits()).collect(),
+            current_objective_bits: self.current_f.map(f64::to_bits),
+            current_gradient_norm_bits: self.current_grad_norm.map(f64::to_bits),
+            fd_h_bits: self.fd_h.to_bits(),
+            learning_rate_bits: self.lr.to_bits(),
+        }
+    }
+
     /// Central-difference TANGENT gradient of the total objective.
     fn tangent_gradient(&mut self, problem: &Problem) -> Vec<f64> {
         let n = self.packing.dim;
@@ -440,6 +504,41 @@ impl Study {
         rule: &StopRule,
         max_steps: usize,
     ) -> Result<StudyReport, StudyError> {
+        self.ensure_problem_matches(problem)?;
+        match self.run_bound_progress(problem, rule, max_steps, None) {
+            StudyRunProgress::Stopped(report) => Ok(report),
+            StudyRunProgress::Paused(_) => {
+                unreachable!("a run without a cancellation context cannot pause")
+            }
+        }
+    }
+
+    /// Run a segment under an explicit execution context.
+    ///
+    /// Cancellation is observed only at resume-safe boundaries: before any
+    /// segment work, after the initial objective cache is complete, before an
+    /// iteration, and after a complete retract/evaluate iteration. A request
+    /// arriving inside the finite-difference gradient therefore drains the
+    /// current iteration before [`StudyRunProgress::Paused`] is returned. The
+    /// optimizer's [`StopReason`] remains reserved for optimization semantics;
+    /// cancellation is a distinct typed outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StudyError`] if the problem fails admission or its semantic
+    /// identity differs from the checkpoint's bound problem.
+    pub fn try_run_cancellable(
+        &mut self,
+        problem: &Problem,
+        rule: &StopRule,
+        max_steps: usize,
+        cx: &Cx<'_>,
+    ) -> Result<StudyRunProgress, StudyError> {
+        self.ensure_problem_matches(problem)?;
+        Ok(self.run_bound_progress(problem, rule, max_steps, Some(cx)))
+    }
+
+    fn ensure_problem_matches(&self, problem: &Problem) -> Result<(), StudyError> {
         let supplied = problem
             .admit()
             .map_err(StudyError::ProblemRejected)?
@@ -450,10 +549,19 @@ impl Study {
                 supplied,
             });
         }
-        Ok(self.run_bound(problem, rule, max_steps))
+        Ok(())
     }
 
-    fn run_bound(&mut self, problem: &Problem, rule: &StopRule, max_steps: usize) -> StudyReport {
+    fn run_bound_progress(
+        &mut self,
+        problem: &Problem,
+        rule: &StopRule,
+        max_steps: usize,
+        cx: Option<&Cx<'_>>,
+    ) -> StudyRunProgress {
+        if cx.is_some_and(Cx::is_cancel_requested) {
+            return StudyRunProgress::Paused(self.pause_receipt());
+        }
         let mut rules = vec![rule.clone()];
         if let EvalLimit::Limited(maximum) = problem.budget().limit {
             rules.push(StopRule::Budget(
@@ -470,6 +578,9 @@ impl Study {
             f
         };
         let mut gnorm = self.current_grad_norm.unwrap_or(f64::INFINITY);
+        if cx.is_some_and(Cx::is_cancel_requested) {
+            return StudyRunProgress::Paused(self.pause_receipt());
+        }
         let obs = StopObservation {
             grad_norm: gnorm,
             objective: f,
@@ -477,14 +588,17 @@ impl Study {
             history: &self.history,
         };
         if let Some(r) = combined.check(&obs) {
-            return StudyReport {
+            return StudyRunProgress::Stopped(StudyReport {
                 f,
                 grad_norm: gnorm,
                 reason: r,
                 evals: self.evals,
-            };
+            });
         }
         for _ in 0..max_steps {
+            if cx.is_some_and(Cx::is_cancel_requested) {
+                return StudyRunProgress::Paused(self.pause_receipt());
+            }
             let g = self.tangent_gradient(problem);
             gnorm = g.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
             self.current_grad_norm = Some(gnorm);
@@ -505,13 +619,16 @@ impl Study {
             f = objective(problem, &self.packing, &self.x, &mut self.evals);
             self.current_f = Some(f);
             self.current_grad_norm = None;
+            if cx.is_some_and(Cx::is_cancel_requested) {
+                return StudyRunProgress::Paused(self.pause_receipt());
+            }
         }
-        StudyReport {
+        StudyRunProgress::Stopped(StudyReport {
             f,
             grad_norm: gnorm,
             reason,
             evals: self.evals,
-        }
+        })
     }
 
     /// Constrained adapters: expose the problem's `EqZero`/`LeZero`

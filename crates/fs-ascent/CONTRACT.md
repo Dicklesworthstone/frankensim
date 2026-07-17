@@ -3,7 +3,7 @@
 ## Purpose and layer
 
 Layer: **L4 ASCENT** (deps: fs-adjoint/fs-solver L3, fs-opt L4,
-fs-la L1, fs-math L0). The gradient-based optimizer stack (plan
+fs-la L1, fs-exec/fs-math L0). The gradient-based optimizer stack (plan
 §9.2): the pipeline raw adjoint gradient → Sobolev smoothing →
 optional Riemannian projection → optimizer, with ENGINES here and
 problem STRUCTURE (typed graphs, manifold metadata) in fs-opt. Every
@@ -66,8 +66,9 @@ so converged and stalled are distinguishable outcomes.
   (identity-seeded BFGS needs curvature pairs — the gate is the
   measurement, not a wish). Large-scale SQP (sparse KKT, TR
   globalization) is recorded follow-up.
-- `runner::{Study, Packing, StudyReport, StudyError, StudyForkReceipt}`
-  (beads ijil and 7tv.21.15) — the
+- `runner::{Study, Packing, StudyReport, StudyError, StudyForkReceipt,
+  StudyPauseReceipt, StudyRunProgress}` (beads ijil, 7tv.21.15, and
+  7tv.21.21) — the
   Problem-IR study runner: ALL variables pack across the manifold
   product (per-block riemann ops keep the sphere spherical to 1e-12
   along the whole path), central-difference tangent gradients through
@@ -87,6 +88,12 @@ so converged and stalled are distinguishable outcomes.
   caches. An unchanged semantic problem is refused so a fork cannot reset the
   same problem's budget accounting. The returned receipt retains both problem
   IDs, parent accounting, branch-point float bits, and driver bits.
+  `try_run_cancellable` additionally accepts the shared `fs-exec::Cx`, polls
+  only at complete resume-safe iteration boundaries, and returns cancellation
+  as `StudyRunProgress::Paused` rather than laundering orchestration into an
+  optimizer `StopReason`. Its versioned receipt binds the problem identity,
+  complete point/history/cache bits, accounting, and driver bits; observing a
+  request is mutation-free and the same checkpoint resumes under a fresh Cx.
 
 ## Invariants
 
@@ -95,6 +102,9 @@ so converged and stalled are distinguishable outcomes.
 - Resumption cannot reinterpret cached state under a different semantic
   problem. Reweighting is an explicit world fork with immutable parent state
   and fresh branch-local accounting.
+- Cancellation is observed only at a complete Study boundary, never in a
+  partially applied gradient/retract step. Repeated observation is
+  mutation-free, and pause/resume must preserve the uninterrupted trajectory.
 - L-BFGS curvature pairs are admitted only with sᵀy above the
   roundoff floor (SPD memory preserved on nonconvex problems).
 - Riemannian iterates remain ON the manifold to roundoff (the
@@ -129,9 +139,13 @@ recorded on Apple M4 Pro, verified on Threadripper (x86_64).
 
 ## Cancellation behavior
 
-Iteration-granular (the fs-solver pattern): states are complete
-between `run` calls; budgets flow through the stop algebra. Cx
-wiring is driver scope.
+Iteration-granular (the fs-solver pattern): `try_run_cancellable` checks its
+`fs-exec::Cx` before work, after initial-objective cache completion, before an
+iteration, and after a complete retract/evaluate step. A request arriving
+inside the finite-difference gradient drains that iteration before pausing;
+there is no torn state. Legacy `run`/`try_run` remain context-free wrappers.
+Problem evaluation budgets still flow through the optimizer stop algebra;
+orchestration cancellation is a distinct typed outcome.
 
 ## Unsafe boundary
 
@@ -232,6 +246,17 @@ binds parent/child problem identities, branch-point/driver bits, parent
 accounting, terminal states, and fixed input seed zero; the aggregate
 `ConformanceCase` is emitted only after all direct assertions pass.
 
+`tests/runner_cancel_battery.rs` (bead 7tv.21.21) is the G4 in-process Study
+cancellation tranche. A real quadratic Problem-IR study first proves a
+pre-requested context performs zero work, then lands four clean prefixes and
+observes each requested cancellation twice. Every observation must leave the
+public state and complete private-cache pause receipt bit-identical. Fresh
+contexts resume through all storms to the same final point, history,
+accounting, stop report, and exact identity as both an uninterrupted run and
+an independent storm replay. A wire-validated custom receipt retains the Cx
+stream configuration, boundary version, pause roots, and final/reference
+roots before a seeded `StormAssertion` is emitted.
+
 ## No-claim boundaries
 
 - Second-order adjoints (adjoint-of-adjoint Hv) are follow-up scope;
@@ -260,15 +285,18 @@ accounting, terminal states, and fixed input seed zero; the aggregate
   IR gradients (the live IR is evaluation-only), L-BFGS/TR engines
   behind the runner (projected gradient is the v1 driver), and
   ledgered study artifacts (fs-ledger wiring) — recorded follow-ups.
-- The runner G5 receipts cover one fixed, sequential projected-gradient
-  Problem-IR fixture with in-process clone checkpoints and one finite
-  in-process two-objective reweight-fork fixture. They do not claim persisted
-  checkpoint serialization, generalized lineage replay, other optimizer-family
-  studies, `Cx` or worker-count replay, cancellation-storm recovery, cross-ISA
-  equality, fs-ledger artifact replay, or performance. The fork receipt is
-  ledger-ready data, not evidence that fs-ledger persistence is wired. Those
-  claims require their own retained study/host evidence. Expectations that fail
-  before an aggregate event remain ordinary Rust test diagnostics.
+- The runner receipts cover one fixed, sequential projected-gradient
+  Problem-IR fixture with in-process clone checkpoints, one finite in-process
+  two-objective reweight fork, and one finite in-process Cx cancellation
+  schedule. The G4 battery polls at iteration boundaries; it does not measure
+  asynchronous cancellation latency inside a finite-difference gradient or
+  prove worker-count behavior. The suite does not claim persisted checkpoint
+  serialization, generalized lineage replay, other optimizer-family studies,
+  cross-ISA equality, fs-ledger artifact replay, or performance. Fork/pause
+  receipts are ledger-ready data, not evidence that fs-ledger persistence is
+  wired. Those claims require their own retained study/host evidence.
+  Expectations that fail before an aggregate event remain ordinary Rust test
+  diagnostics.
 - Constraint Jacobian-transpose callbacks remain a mathematical trust
   boundary: fs-ascent checks exact dimensions, finite values, and the
   mandatory `J^T 0 = 0` linearity identity, but independent derivative
