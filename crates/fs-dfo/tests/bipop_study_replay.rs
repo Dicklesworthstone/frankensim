@@ -2,9 +2,11 @@
 //!
 //! The fixture captures every objective call and binds that trace together
 //! with every public `BipopReport`/`CmaReport` field.  A disclosed seeded
-//! mutation changes one returned coordinate bit, remains valid fs-obs
-//! evidence, and is refused by the test-local merge gate.  This is one finite
-//! deterministic study, not an optimizer-quality or performance claim.
+//! mutation changes one returned coordinate bit. The unsealed edit is refused
+//! as a stale payload, the self-consistently resealed edit is refused against
+//! the retained reference identity, and the resulting red fs-obs evidence is
+//! independently reproducible. This is one finite deterministic study, not an
+//! optimizer-quality or performance claim.
 
 use fs_dfo::{BipopReport, bipop_cmaes};
 use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
@@ -50,14 +52,27 @@ struct StudyRun {
     result: ReplayIdentity,
 }
 
-#[derive(Debug)]
-struct SeededCorruption {
-    run: StudyRun,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionError {
+    PayloadIdentityMismatch { declared: u64, computed: u64 },
+    ReferenceIdentityMismatch { expected: u64, found: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mutation {
     seed: u64,
     coordinate: usize,
     mantissa_bit: u32,
     before: u64,
     after: u64,
+}
+
+#[derive(Debug)]
+struct SeededCorruption {
+    run: StudyRun,
+    mutation: Mutation,
+    stale_error: AdmissionError,
+    reference_error: AdmissionError,
     mismatch: String,
 }
 
@@ -198,52 +213,160 @@ fn same_point_bits(left: &[f64], right: &[f64]) -> bool {
             .all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
-fn assert_run_shape(run: &StudyRun) {
-    assert_eq!(
-        run.report.total_evals,
-        run.evaluations.len(),
-        "the public total must equal closure-counted objective calls"
-    );
-    assert!((1..=TOTAL_BUDGET).contains(&run.report.total_evals));
-    assert!(
-        run.report.schedule.len() >= 2,
-        "the fixture must exercise a restart, not a single CMA run"
-    );
-    assert_eq!(&run.report.schedule[..2], &[BASE_LAMBDA, BASE_LAMBDA]);
-    for &lambda in &run.report.schedule {
-        assert!(lambda >= BASE_LAMBDA);
-        assert_eq!(lambda % BASE_LAMBDA, 0);
-        assert!((lambda / BASE_LAMBDA).is_power_of_two());
+#[allow(clippy::too_many_lines)] // Complete trace and public-report accounting is the oracle.
+fn accounting_mismatch(run: &StudyRun) -> Option<String> {
+    if run.report.total_evals != run.evaluations.len() {
+        return Some(format!(
+            "reported-total-evals:{}!=closure-count:{}",
+            run.report.total_evals,
+            run.evaluations.len()
+        ));
+    }
+    if !(1..=TOTAL_BUDGET).contains(&run.report.total_evals) {
+        return Some(format!(
+            "total-evals:{} not in 1..={TOTAL_BUDGET}",
+            run.report.total_evals
+        ));
+    }
+    if run.report.schedule.len() < 2 {
+        return Some(format!(
+            "schedule-too-short:{};fixture-must-exercise-a-restart",
+            run.report.schedule.len()
+        ));
+    }
+    if run.report.schedule.len() > run.report.total_evals {
+        return Some(format!(
+            "schedule-length:{}>total-evals:{}",
+            run.report.schedule.len(),
+            run.report.total_evals
+        ));
+    }
+    if run.report.schedule[..2] != [BASE_LAMBDA, BASE_LAMBDA] {
+        return Some(format!(
+            "first-two-populations:{:?}!=[{BASE_LAMBDA},{BASE_LAMBDA}]",
+            &run.report.schedule[..2]
+        ));
+    }
+    for (restart, &lambda) in run.report.schedule.iter().enumerate() {
+        if lambda < BASE_LAMBDA
+            || lambda % BASE_LAMBDA != 0
+            || !(lambda / BASE_LAMBDA).is_power_of_two()
+        {
+            return Some(format!(
+                "schedule[{restart}]={lambda};expected-base-times-power-of-two"
+            ));
+        }
     }
 
     let best = &run.report.best;
-    assert_eq!(best.x_best.len(), DIMENSION);
-    assert!(best.x_best.iter().all(|value| value.is_finite()));
-    assert!(best.f_best.is_finite() && best.f_best > F_TARGET);
-    assert!((1..=run.report.total_evals).contains(&best.evals));
-    assert!(
-        !best.converged,
-        "the deliberately impossible target stays unmet"
-    );
-    assert!(best.sigma.is_finite() && best.sigma > 0.0);
-
-    for evaluation in &run.evaluations {
-        assert_eq!(evaluation.x.len(), DIMENSION);
-        assert!(evaluation.x.iter().all(|value| value.is_finite()));
-        assert!(evaluation.value.is_finite());
-        assert_eq!(
-            evaluation.value.to_bits(),
-            shifted_rastrigin(&evaluation.x).to_bits(),
-            "retained trace values must be exactly reconstructible"
-        );
+    if best.x_best.len() != DIMENSION {
+        return Some(format!(
+            "best-point-dimension:{}!=expected-{DIMENSION}",
+            best.x_best.len()
+        ));
     }
-    assert!(
-        run.evaluations.iter().any(|evaluation| {
-            evaluation.value.to_bits() == best.f_best.to_bits()
-                && same_point_bits(&evaluation.x, &best.x_best)
-        }),
-        "the public best report must name an actually evaluated point"
-    );
+    if best.x_best.iter().any(|value| !value.is_finite()) {
+        return Some(format!(
+            "best-point-non-finite:{:016x?}",
+            best.x_best
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        ));
+    }
+    if !best.f_best.is_finite() || best.f_best <= F_TARGET {
+        return Some(format!(
+            "best-objective-invalid:0x{:016x};target=0x{:016x}",
+            best.f_best.to_bits(),
+            F_TARGET.to_bits()
+        ));
+    }
+    if !(1..=run.report.total_evals).contains(&best.evals) {
+        return Some(format!(
+            "best-run-evals:{} not in 1..={}",
+            best.evals, run.report.total_evals
+        ));
+    }
+    let generation_accounting_matches = run.report.schedule.iter().any(|&lambda| {
+        best.generations
+            .checked_mul(lambda)
+            .and_then(|population_evals| population_evals.checked_add(1))
+            == Some(best.evals)
+    });
+    if !generation_accounting_matches {
+        return Some(format!(
+            "best-run-accounting:evals-{}!=1+generations-{}*any-scheduled-population",
+            best.evals, best.generations
+        ));
+    }
+    if best.converged {
+        return Some("impossible-target-was-reported-converged".to_string());
+    }
+    if !best.sigma.is_finite() || best.sigma <= 0.0 {
+        return Some(format!(
+            "best-run-invalid-sigma:0x{:016x}",
+            best.sigma.to_bits()
+        ));
+    }
+
+    let mut trace_minimum: Option<f64> = None;
+    for (evaluation_index, evaluation) in run.evaluations.iter().enumerate() {
+        if evaluation.x.len() != DIMENSION {
+            return Some(format!(
+                "trace[{evaluation_index}]-dimension:{}!=expected-{DIMENSION}",
+                evaluation.x.len()
+            ));
+        }
+        if evaluation.x.iter().any(|value| !value.is_finite()) {
+            return Some(format!(
+                "trace[{evaluation_index}]-non-finite-point:{:016x?}",
+                evaluation
+                    .x
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            ));
+        }
+        if !evaluation.value.is_finite() {
+            return Some(format!(
+                "trace[{evaluation_index}]-non-finite-objective:0x{:016x}",
+                evaluation.value.to_bits()
+            ));
+        }
+        let recomputed = shifted_rastrigin(&evaluation.x).to_bits();
+        if evaluation.value.to_bits() != recomputed {
+            return Some(format!(
+                "trace[{evaluation_index}]-objective:recorded=0x{:016x};recomputed=0x{recomputed:016x}",
+                evaluation.value.to_bits()
+            ));
+        }
+        trace_minimum = Some(match trace_minimum {
+            Some(current) if current <= evaluation.value => current,
+            _ => evaluation.value,
+        });
+    }
+    let trace_minimum = trace_minimum.expect("positive total-eval accounting makes trace nonempty");
+    if trace_minimum.to_bits() != best.f_best.to_bits() {
+        return Some(format!(
+            "complete-trace-minimum=0x{:016x};reported-best=0x{:016x}",
+            trace_minimum.to_bits(),
+            best.f_best.to_bits()
+        ));
+    }
+    let recomputed_best = shifted_rastrigin(&best.x_best).to_bits();
+    if recomputed_best != best.f_best.to_bits() {
+        return Some(format!(
+            "best-point-objective:recomputed=0x{recomputed_best:016x};reported=0x{:016x}",
+            best.f_best.to_bits()
+        ));
+    }
+    if !run.evaluations.iter().any(|evaluation| {
+        evaluation.value.to_bits() == best.f_best.to_bits()
+            && same_point_bits(&evaluation.x, &best.x_best)
+    }) {
+        return Some("reported-best-is-not-an-evaluated-point".to_string());
+    }
+    None
 }
 
 #[allow(clippy::too_many_lines)] // Exhaustive field-by-field public-state audit.
@@ -359,6 +482,53 @@ fn first_public_mismatch(left: &StudyRun, right: &StudyRun) -> Option<String> {
     None
 }
 
+fn validate_payload(run: &StudyRun) -> Result<(), AdmissionError> {
+    let computed = result_identity(&run.fixture, &run.report, &run.evaluations);
+    if computed.canonical_bytes() == run.result.canonical_bytes() {
+        Ok(())
+    } else {
+        Err(AdmissionError::PayloadIdentityMismatch {
+            declared: run.result.root(),
+            computed: computed.root(),
+        })
+    }
+}
+
+fn admit_against(run: &StudyRun, reference: &ReplayIdentity) -> Result<(), AdmissionError> {
+    validate_payload(run)?;
+    if run.result.canonical_bytes() == reference.canonical_bytes() {
+        Ok(())
+    } else {
+        Err(AdmissionError::ReferenceIdentityMismatch {
+            expected: reference.root(),
+            found: run.result.root(),
+        })
+    }
+}
+
+fn exact_returned_bit_delta(reference: &StudyRun, mutant: &StudyRun, mutation: Mutation) -> bool {
+    let Some(mask) = 1u64.checked_shl(mutation.mantissa_bit) else {
+        return false;
+    };
+    let Some(reference_coordinate) = reference.report.best.x_best.get(mutation.coordinate) else {
+        return false;
+    };
+    let Some(mutant_coordinate) = mutant.report.best.x_best.get(mutation.coordinate) else {
+        return false;
+    };
+    if reference_coordinate.to_bits() != mutation.before
+        || mutant_coordinate.to_bits() != mutation.after
+        || mutation.before ^ mutation.after != mask
+    {
+        return false;
+    }
+
+    let mut expected = reference.clone();
+    expected.report.best.x_best[mutation.coordinate] = f64::from_bits(mutation.after);
+    expected.result = result_identity(&expected.fixture, &expected.report, &expected.evaluations);
+    first_public_mismatch(&expected, mutant).is_none()
+}
+
 fn schedule_json(schedule: &[usize]) -> String {
     let mut json = String::from("[");
     for (index, lambda) in schedule.iter().enumerate() {
@@ -469,13 +639,16 @@ fn failure_event(detail: &str, corruption_seed: u64) -> Event {
     )
 }
 
-fn assert_mergeable(event: &Event) {
+fn assert_mergeable(run: &StudyRun, reference: &ReplayIdentity, event: &Event) {
     let EventKind::ConformanceCase {
         case, pass, detail, ..
     } = &event.kind
     else {
         panic!("merge gate accepts only ConformanceCase evidence");
     };
+    if let Err(error) = admit_against(run, reference) {
+        panic!("merge gate refused {case}: {error:?}; {detail}");
+    }
     assert!(*pass, "merge gate refused {case}: {detail}");
 }
 
@@ -489,30 +662,40 @@ fn seeded_corruption(canonical: &StudyRun, seed: u64) -> SeededCorruption {
     let after = before ^ (1_u64 << mantissa_bit);
     run.report.best.x_best[coordinate] = f64::from_bits(after);
     assert!(run.report.best.x_best[coordinate].is_finite());
+    let stale_error = validate_payload(&run).expect_err("unsealed result mutation must refuse");
     run.result = result_identity(&run.fixture, &run.report, &run.evaluations);
+    validate_payload(&run).expect("resealed mutation must be internally self-consistent");
+    let reference_error = admit_against(&run, &canonical.result)
+        .expect_err("resealed semantic mutation must not match the retained reference");
 
     let mismatch = first_public_mismatch(canonical, &run)
         .expect("the disclosed mutation must change public replay state");
     SeededCorruption {
         run,
-        seed,
-        coordinate,
-        mantissa_bit,
-        before,
-        after,
+        mutation: Mutation {
+            seed,
+            coordinate,
+            mantissa_bit,
+            before,
+            after,
+        },
+        stale_error,
+        reference_error,
         mismatch,
     }
 }
 
 fn corruption_detail(canonical: &StudyRun, corruption: &SeededCorruption) -> String {
     format!(
-        "input_seed=0x{INPUT_SEED:016x}; corruption_seed=0x{:016x}; fixture={}; coordinate={}; mantissa_bit={}; before=0x{:016x}; after=0x{:016x}; first_mismatch={}; canonical={}; corrupted={}",
-        corruption.seed,
+        "input_seed=0x{INPUT_SEED:016x}; corruption_seed=0x{:016x}; fixture={}; coordinate={}; mantissa_bit={}; before=0x{:016x}; after=0x{:016x}; stale_gate={:?}; reference_gate={:?}; first_mismatch={}; canonical={}; corrupted={}",
+        corruption.mutation.seed,
         canonical.fixture.hex(),
-        corruption.coordinate,
-        corruption.mantissa_bit,
-        corruption.before,
-        corruption.after,
+        corruption.mutation.coordinate,
+        corruption.mutation.mantissa_bit,
+        corruption.mutation.before,
+        corruption.mutation.after,
+        corruption.stale_error,
+        corruption.reference_error,
         corruption.mismatch,
         canonical.result.hex(),
         corruption.run.result.hex()
@@ -523,7 +706,10 @@ fn exercise_disclosed_corruption(canonical: &StudyRun, replay: &StudyRun) {
     let first_corruption = seeded_corruption(canonical, CORRUPTION_SEED);
     let replay_corruption = seeded_corruption(replay, CORRUPTION_SEED);
     assert_eq!(
-        (first_corruption.coordinate, first_corruption.mantissa_bit),
+        (
+            first_corruption.mutation.coordinate,
+            first_corruption.mutation.mantissa_bit
+        ),
         (1, 30)
     );
     assert!(
@@ -531,6 +717,47 @@ fn exercise_disclosed_corruption(canonical: &StudyRun, replay: &StudyRun) {
         "unexpected mismatch: {}",
         first_corruption.mismatch
     );
+    assert_eq!(first_corruption.mutation, replay_corruption.mutation);
+    assert_eq!(first_corruption.stale_error, replay_corruption.stale_error);
+    assert_eq!(
+        first_corruption.reference_error,
+        replay_corruption.reference_error
+    );
+    assert_eq!(first_corruption.mismatch, replay_corruption.mismatch);
+    assert!(exact_returned_bit_delta(
+        canonical,
+        &first_corruption.run,
+        first_corruption.mutation
+    ));
+    assert!(exact_returned_bit_delta(
+        replay,
+        &replay_corruption.run,
+        replay_corruption.mutation
+    ));
+    assert!(matches!(
+        first_corruption.stale_error,
+        AdmissionError::PayloadIdentityMismatch { declared, computed }
+            if declared == canonical.result.root()
+                && computed == first_corruption.run.result.root()
+    ));
+    assert!(matches!(
+        first_corruption.reference_error,
+        AdmissionError::ReferenceIdentityMismatch { expected, found }
+            if expected == canonical.result.root()
+                && found == first_corruption.run.result.root()
+    ));
+    assert_eq!(validate_payload(&first_corruption.run), Ok(()));
+    assert!(matches!(
+        admit_against(&first_corruption.run, &canonical.result),
+        Err(AdmissionError::ReferenceIdentityMismatch { expected, found })
+            if expected == canonical.result.root()
+                && found == first_corruption.run.result.root()
+    ));
+    assert_ne!(
+        first_corruption.mutation.before,
+        first_corruption.mutation.after
+    );
+    assert!(f64::from_bits(first_corruption.mutation.after).is_finite());
     assert_ne!(canonical.result.root(), first_corruption.run.result.root());
     assert_ne!(replay.result.root(), replay_corruption.run.result.root());
     assert_eq!(
@@ -546,8 +773,8 @@ fn exercise_disclosed_corruption(canonical: &StudyRun, replay: &StudyRun) {
     let first_detail = corruption_detail(canonical, &first_corruption);
     let replay_detail = corruption_detail(replay, &replay_corruption);
     assert_eq!(first_detail, replay_detail);
-    let first_event = failure_event(&first_detail, first_corruption.seed);
-    let replay_event = failure_event(&replay_detail, replay_corruption.seed);
+    let first_event = failure_event(&first_detail, first_corruption.mutation.seed);
+    let replay_event = failure_event(&replay_detail, replay_corruption.mutation.seed);
     for event in [&first_event, &replay_event] {
         fs_obs::lint_failure_record(event)
             .expect("disclosed BIPOP corruption must retain its replay seed and detail");
@@ -568,8 +795,10 @@ fn exercise_disclosed_corruption(canonical: &StudyRun, replay: &StudyRun) {
         .expect("red evidence identity must admit exactly");
     println!("{}", first_event.to_jsonl());
 
-    let panic = catch_unwind(|| assert_mergeable(&first_event))
-        .expect_err("the merge gate must reject the disclosed returned-bit corruption");
+    let panic = catch_unwind(|| {
+        assert_mergeable(&first_corruption.run, &canonical.result, &first_event);
+    })
+    .expect_err("the merge gate must reject the disclosed returned-bit corruption");
     let message = panic
         .downcast_ref::<String>()
         .map(String::as_str)
@@ -578,14 +807,21 @@ fn exercise_disclosed_corruption(canonical: &StudyRun, replay: &StudyRun) {
     assert!(message.contains(RED_CASE));
     assert!(message.contains(&format!("0x{CORRUPTION_SEED:016x}")));
     assert!(message.contains("best.x[1]"));
+    assert!(message.contains("ReferenceIdentityMismatch"));
 }
 
 #[test]
 fn bipop_full_study_replays_and_seeded_failure_is_refused() {
     let first = run_study(INPUT_SEED);
     let replay = run_study(INPUT_SEED);
-    assert_run_shape(&first);
-    assert_run_shape(&replay);
+    let first_accounting = accounting_mismatch(&first);
+    let replay_accounting = accounting_mismatch(&replay);
+    assert_eq!(first_accounting, None, "original accounting failed");
+    assert_eq!(replay_accounting, None, "replay accounting failed");
+    assert_eq!(validate_payload(&first), Ok(()));
+    assert_eq!(validate_payload(&replay), Ok(()));
+    assert_eq!(admit_against(&first, &first.result), Ok(()));
+    assert_eq!(admit_against(&replay, &first.result), Ok(()));
 
     let mismatch = first_public_mismatch(&first, &replay);
     assert_eq!(
@@ -602,6 +838,6 @@ fn bipop_full_study_replays_and_seeded_failure_is_refused() {
 
     emit_green_receipt(&first);
     let green_verdict = emit_green_verdict(&first);
-    assert_mergeable(&green_verdict);
+    assert_mergeable(&first, &first.result, &green_verdict);
     exercise_disclosed_corruption(&first, &replay);
 }
