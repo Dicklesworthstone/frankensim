@@ -384,6 +384,20 @@ runs and the optimized f64 primal, exercises a nested Dual, and proves
 full-scalar zero plus transactional shape-refusal policy. A disclosed
 one-bit reference corruption must produce one replay-identical red record and
 make the Casebook merge assertion refuse it.
+`tests/rand_gemm_replay_casebook.rs` is the cross-crate G5 composition seam
+between fs-rand logical streams and fs-la GEMM. It materializes one exact
+finite A/B/C fixture from Philox positions keyed by logical matrix identity,
+replays those bits under several simulated generation partitions and traversal
+orders, and compares the serial kernel bitwise with the actual scoped-thread
+GEMM path for `m=257`, `n=7`, `k=9` and worker requests `{1,2,3,5,8}`.
+Request `1` is the serial-fallback control; requests `{2,3,5,8}` enter the
+current scoped-thread implementation.
+Canonical frames bind both crate
+versions, the stream and GEMM bit-semantics versions, logical keys, generation
+policy, dimensions, alpha/beta, worker schedules, and every input bit. A
+disclosed one-bit output-reference corruption must yield one replay-identical
+red record and make `assert_green` refuse it. This code-first tranche remains
+central-package-proof pending.
 `tests/gemm_suite.rs` additionally runs bead 4nh8's 600-case shrink-armed
 adjoint-consistency property (seed `0x1A_4A48_0001`) over generated 1×1 through
 4×4 dense matrices and vectors. It exercises `gemm_f64` for `Av` and the live
@@ -452,6 +466,14 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   no-claim run. Successor design notes remain in bead 9ekv.
 
 ## No-claim boundaries
+- The Philox-to-GEMM Casebook proves exact input-generation replay and
+  worker-count bit identity only for its disclosed finite fixture in the
+  executing build. It is not fresh cross-ISA execution evidence and makes no
+  randomness-quality, general-shape, throughput, scheduler-placement, NUMA,
+  cancellation, or drain-latency claim. Its finite-f64 mapping from
+  `Stream::at` words is test-defined; it does not exercise or claim sequential
+  `Stream::next_f64` advancement, checkpoint transport, or distribution
+  quality.
 - `gemm_scalar_checked` is a correctness/reference and integration surface,
   not the optimized packed microkernel. It claims no dual SIMD packing,
   roofline attainment, parallel scheduling, cancellation latency, or
