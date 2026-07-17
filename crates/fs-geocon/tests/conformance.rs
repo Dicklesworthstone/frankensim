@@ -4,7 +4,11 @@
 //! undercut detection, symmetry-by-quotient invariance for arbitrary
 //! levers, envelope containment with derivative checks, certified
 //! volume enclosures with the Hadamard validation, and the descriptor
-//! table. JSON-line verdicts; seeded cases carry seeds.
+//! table. Completed aggregate cases emit canonical fs-obs verdicts.
+//! The randomized quotient campaign carries its literal input seed while
+//! fixed cases use zero; the fixed Cx execution seed is recorded separately
+//! and is not presented as input randomness. Assertions and expectations
+//! reached before an aggregate verdict remain ordinary Rust test diagnostics.
 
 use asupersync::types::Budget;
 use fs_evidence::{NumericalCertificate, NumericalKind};
@@ -20,12 +24,32 @@ use fs_opt::{DescentOptions, EvalLimit, Manifold, descend_fn};
 use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-geocon/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const FIXED_INPUT_SEED: u64 = 0;
+const EXECUTION_SEED: u64 = 0x6C0;
+const GCP_003_INPUT_SEED: u64 = 0x1001_2026_0707_0023;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-geocon/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-geocon/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("geometry-constraint verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("geometry-constraint verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -57,7 +81,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 0x6C0,
+                seed: EXECUTION_SEED,
                 kernel_id: 1,
                 tile: 0,
                 iteration: 0,
@@ -329,8 +353,10 @@ fn gcp_001_min_thickness() {
                  to exactly the {thin_count} neck samples, the lever FD derivative is \
                  {fd:.3} (analytic 2), and the toy descent drives the neck from \
                  r=0.15 to r={final_r:.3} reaching thickness {final_t:.3} >= 0.5 — \
-                 the anti-paperclip constraint, closed loop"
+                 the anti-paperclip constraint, closed loop; fixed Cx execution seed \
+                 {EXECUTION_SEED:#x}"
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -365,8 +391,12 @@ fn gcp_001b_unbounded_thickness_requires_clip() {
                 && local.authority == fs_evidence::NumericalKind::Estimate
                 && local.violating == vec![0, 1]
                 && local.skipped == 0,
-            "unresolved extended support is a structured refusal rather than a skipped \
-             sample; an explicit finite clip yields the local cylinder thickness report",
+            &format!(
+                "unresolved extended support is a structured refusal rather than a skipped \
+                 sample; an explicit finite clip yields the local cylinder thickness report; \
+                 fixed Cx execution seed {EXECUTION_SEED:#x}"
+            ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -526,8 +556,9 @@ fn gcp_002_draft_angles() {
                  vertical walls violate any positive draft, the mushroom underside is \
                  flagged as an UNDERCUT (not low draft), and the smooth penalty's FD \
                  derivative matches the analytic hinge slope ({fd:.4} vs \
-                 {analytic:.4})"
+                 {analytic:.4}); fixed Cx execution seed {EXECUTION_SEED:#x}"
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -540,7 +571,7 @@ fn gcp_002_draft_angles() {
 #[allow(clippy::too_many_lines)] // One seeded quotient campaign shares invariance and gradient state.
 fn gcp_003_symmetry_quotient() {
     with_cx(|cx| {
-        let mut rng = Lcg(0x1001_2026_0707_0023);
+        let mut rng = Lcg(GCP_003_INPUT_SEED);
         let mut invariant = true;
         let mut grad_ok = true;
         let mut support_ok = true;
@@ -755,16 +786,19 @@ fn gcp_003_symmetry_quotient() {
         verdict(
             "gcp-003",
             invariant && grad_ok && support_ok && authority_ok,
-            "the quotient shape is invariant under its group for ARBITRARY \
-             asymmetric inner designs (bitwise for reflection; fp-scale \
-             for cyclic/periodic) across 12 random levers x 3 groups x 24 probes x full \
-             orbits, folded gradients match finite differences off-seam, and periodic \
-             support is honestly infinite along x while retaining finite transverse bounds; \
-             raw quotient fields retain only Estimate/NoClaim authority, malformed inner \
-             evidence cannot be laundered, cyclic support radii round outward, and invalid \
-             group or inner-support inputs fail closed; \
-             seed 0x1001_2026_0707_0023 — symmetry violation is structurally \
-             impossible",
+            &format!(
+                "the quotient shape is invariant under its group for ARBITRARY \
+                 asymmetric inner designs (bitwise for reflection; fp-scale \
+                 for cyclic/periodic) across 12 random levers x 3 groups x 24 probes x full \
+                 orbits, folded gradients match finite differences off-seam, and periodic \
+                 support is honestly infinite along x while retaining finite transverse bounds; \
+                 raw quotient fields retain only Estimate/NoClaim authority, malformed inner \
+                 evidence cannot be laundered, cyclic support radii round outward, and invalid \
+                 group or inner-support inputs fail closed; input seed \
+                 {GCP_003_INPUT_SEED:#x}; fixed Cx execution seed {EXECUTION_SEED:#x} — \
+                 symmetry violation is structurally impossible"
+            ),
+            GCP_003_INPUT_SEED,
         );
     });
 }
@@ -829,9 +863,11 @@ fn gcp_004_envelopes() {
                 "containment and keep-out match analytic penetrations (worst 0.2 read \
                  as {:.4}), softmax tracks the hard worst, the FD derivative is \
                  {fd:.3} (analytic 1), and the descent pulls the design from x=0.9 \
-                 back to x={:.3} inside the envelope",
+                 back to x={:.3} inside the envelope; fixed Cx execution seed \
+                 {EXECUTION_SEED:#x}",
                 out.worst, rep.x[0]
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -892,8 +928,9 @@ fn gcp_005_volume_hadamard() {
                     name: "geocon-volume-hadamard".to_string(),
                     json: format!(
                         "{{\"coarse\":[{:.4},{:.4}],\"fine\":[{:.4},{:.4}],\
-                         \"dv_dr\":{fd:.4},\"hadamard\":{hadamard:.4}}}",
-                        coarse.lo, coarse.hi, fine.lo, fine.hi
+                         \"dv_dr\":{fd:.4},\"hadamard\":{hadamard:.4},\
+                         \"execution_seed\":{EXECUTION_SEED}}}",
+                        coarse.lo, coarse.hi, fine.lo, fine.hi,
                     ),
                 },
                 None,
@@ -909,9 +946,11 @@ fn gcp_005_volume_hadamard() {
                  with h ([{:.3},{:.3}] -> [{:.3},{:.3}]), the smoothed volume's lever \
                  derivative {fd:.3} matches Hadamard 4pi r^2 = {hadamard:.3} within \
                  2%, and the descent shrinks r to meet the volume cap \
-                 (V = {final_v:.3} <= 2.05)",
+                 (V = {final_v:.3} <= 2.05); fixed Cx execution seed \
+                 {EXECUTION_SEED:#x}",
                 coarse.lo, coarse.hi, fine.lo, fine.hi
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -1046,7 +1085,10 @@ fn gcp_005b_volume_preflight_refuses_before_eval() {
                 && certified.lo <= certified.hi
                 && smooth.is_finite()
                 && evals.load(Ordering::Relaxed) == 54,
-            "volume samplers reject malformed, unbounded, invalid-spacing, and excessive grids before evaluation; certified volume also refuses weak chart theorems and weak per-sample evidence; outward count admission uses a conservative 3x3x3 grid and evaluates exactly 27 cells per API",
+            &format!(
+                "volume samplers reject malformed, unbounded, invalid-spacing, and excessive grids before evaluation; certified volume also refuses weak chart theorems and weak per-sample evidence; outward count admission uses a conservative 3x3x3 grid and evaluates exactly 27 cells per API; fixed Cx execution seed {EXECUTION_SEED:#x}"
+            ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -1115,7 +1157,7 @@ fn gcp_006_descriptor_table() {
             fs_obs::Severity::Info,
             fs_obs::EventKind::Custom {
                 name: "geocon-descriptor-table".to_string(),
-                json: format!("[{}]", rows.join(",")),
+                json: format!("{{\"rows\":[{}]}}", rows.join(",")),
             },
             None,
         )
@@ -1128,5 +1170,6 @@ fn gcp_006_descriptor_table() {
         "every primitive declares class + certificate + ASCENT kind (symmetry is \
          ExactByConstruction, volume is Enclosure, thickness maps to Fabrication), \
          and interval-proof escalations are declared exactly where they exist",
+        FIXED_INPUT_SEED,
     );
 }

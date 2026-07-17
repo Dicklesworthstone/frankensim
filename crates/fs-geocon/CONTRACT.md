@@ -141,11 +141,22 @@ None.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases gcp-001, gcp-001b, gcp-001c,
-gcp-002..gcp-005, gcp-005b, gcp-005c, and gcp-006 — JSON-line verdicts,
-seeded LCG randomness, fs-obs
-events for the volume/Hadamard table and the descriptor table. Any
-reimplementation must pass the suite unchanged.
+`tests/conformance.rs`, aggregate cases gcp-001, gcp-001b, gcp-002,
+gcp-003, gcp-004, gcp-005, gcp-005b, and gcp-006 emit canonical
+`fs_obs::EventKind::ConformanceCase` records after their direct checks complete.
+The records use `Info`/`Error` severity, pass failure-record linting and wire
+validation before printing, and print before the aggregate assertion. Seeded
+quotient campaign gcp-003 carries its literal LCG input seed
+`0x1001_2026_0707_0023`; all fixed aggregate cases use zero. Cases executed
+through `with_cx` record the fixed Cx execution seed `0x6C0` separately in
+detail rather than presenting it as input randomness. The existing
+volume/Hadamard and descriptor-table `Custom` companion events remain
+object-shaped, wire-validated, and printed; the volume event records the fixed
+execution seed separately. Assertions and expectations before aggregate
+emission remain ordinary Rust test diagnostics and can terminate a case
+without publishing a verdict. In particular, fail-closed matrices gcp-001c
+and gcp-005c are direct-assertion tests and intentionally emit no aggregate
+record. Any reimplementation must pass the suite unchanged.
 
 ## No-claim boundaries
 
