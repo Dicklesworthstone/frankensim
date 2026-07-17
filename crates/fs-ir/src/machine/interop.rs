@@ -58,8 +58,9 @@ const FOREIGN_ESTIMATED_RANK_CODE_V1: u64 = 1;
 
 const WORKFLOW_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(256 * 1_024, 128 * 1_024, 4, 64, 64);
+// max_fields must admit every ForeignExecutionIdentitySchemaV1 field (14).
 const FOREIGN_EXECUTION_IDENTITY_LIMITS: CanonicalLimits =
-    CanonicalLimits::new(8 * 1_024 * 1_024, 4 * 1_024 * 1_024, 4, 64, 8_192);
+    CanonicalLimits::new(8 * 1_024 * 1_024, 4 * 1_024 * 1_024, 14, 64, 8_192);
 
 /// Refusal from constructing an exact external interoperability artifact ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
