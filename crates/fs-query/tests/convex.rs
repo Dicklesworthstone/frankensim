@@ -10,18 +10,37 @@
 //! - gc-004 G5: identical inputs replay bit-identical enclosures.
 //! - gc-005 G0/G4: constructor refusals, zero budget, and cancellation
 //!   all fail closed with the named typed error.
+//! Aggregate outcomes use canonical fs-obs events and carry the shared
+//! deterministic execution seed.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Aabb, Point3};
 use fs_query::{ConvexBox, ConvexSphere, QueryError, convex_separation};
 
+const EXECUTION_SEED: u64 = 0xC0F;
+
 fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-query/convex\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+    let mut emitter = fs_obs::Emitter::new("fs-query/convex", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-query/convex".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed: EXECUTION_SEED,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("convex-separation verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("convex verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -33,7 +52,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 0xC0F,
+                seed: EXECUTION_SEED,
                 kernel_id: 12,
                 tile: 0,
                 iteration: 0,
@@ -226,7 +245,7 @@ fn gc_005_refusals_fail_closed() {
             &gate,
             arena,
             StreamKey {
-                seed: 0xC0F,
+                seed: EXECUTION_SEED,
                 kernel_id: 13,
                 tile: 0,
                 iteration: 0,

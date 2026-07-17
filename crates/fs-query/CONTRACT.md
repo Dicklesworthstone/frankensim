@@ -304,7 +304,10 @@ bracket contains the true unit-density integral of the chart's region.
 `tests/convex.rs`, cases gc-001..gc-005 — certified convex separation:
 analytic sphere/box distance containment, nonsmooth box-box honesty,
 touching/overlap never claiming separation, bit-identical replay, and
-constructor/budget/cancellation refusals.
+constructor/budget/cancellation refusals. Every aggregate outcome uses a
+canonical fs-obs `ConformanceCase` with the shared `0xC0F` execution seed;
+direct assertion failures before those events remain ordinary Rust test
+diagnostics.
 `tests/penetration.rs`, cases gp-001..gp-006 — analytic sphere/box depth
 containment, sealed gap-witness revalidation and cross-pair refusal, touching
 and zero-budget refusal, monotone budget prefixes, bit-identical replay, and
