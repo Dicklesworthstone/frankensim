@@ -1,8 +1,9 @@
 //! Machine-IR engineering-workflow and FMI/SSP quarantine conformance (G0/G3/G5).
 
+use core::fmt::Write as _;
 use core::num::NonZeroU64;
 
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, hash_bytes, hash_domain};
 use fs_evidence::ColorRank;
 use fs_ir::machine::interop::*;
 use fs_ir::machine::{
@@ -142,6 +143,16 @@ fn foreign_draft(
     }
 }
 
+fn bind_model_description(
+    mut draft: ForeignExecutionDraftV1,
+    bytes: &[u8],
+) -> ForeignExecutionDraftV1 {
+    draft.model_description =
+        InteropArtifactRefV1::new("external/model-description", nz(1), hash_bytes(bytes))
+            .expect("raw model-description digest is nonzero");
+    draft
+}
+
 fn terminal_target() -> ForeignOutputTargetV1 {
     ForeignOutputTargetV1::Terminal(
         TerminalId::new("terminal/position-output").expect("valid target terminal"),
@@ -152,6 +163,255 @@ fn state_target() -> ForeignOutputTargetV1 {
     ForeignOutputTargetV1::StateSlot(
         StateSlotId::new("state/position").expect("valid target state"),
     )
+}
+
+const FMI_MODEL_DESCRIPTION: &[u8] = b"\xef\xbb\xbf<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!-- bounded structural fixture -->\n\
+<fmiModelDescription instantiationToken=\"fixture-token\" modelName=\"Fixture.Model\" fmiVersion=\"3.0\">\n\
+  <CoSimulation modelIdentifier=\"Fixture_Model\"/>\n\
+</fmiModelDescription>";
+
+const SSP_MODEL_DESCRIPTION_DEFAULT_NAMESPACE: &[u8] = br#"<!-- bounded structural fixture -->
+<SystemStructureDescription name="Fixture System" version="2.0" xmlns="http://ssp-standard.org/SSP1/SystemStructureDescription">
+  <System name="Root"/>
+</SystemStructureDescription>"#;
+
+const SSP_MODEL_DESCRIPTION_PREFIXED_NAMESPACE: &[u8] = br#"<?xml version='1.0' encoding='utf-8'?>
+<?fixture deterministic?>
+<structure:SystemStructureDescription xmlns:structure="http://ssp-standard.org/SSP1/SystemStructureDescription" version="2.0" name="Fixture System">
+  <structure:System name="Root"/>
+</structure:SystemStructureDescription>"#;
+
+const SSP_MODEL_DESCRIPTION_IMPLICIT_UTF8: &[u8] = br#"<?xml version="1.0"?>
+<ssd:SystemStructureDescription name="Fixture System" xmlns:ssd="http://ssp-standard.org/SSP1/SystemStructureDescription" version="2.0">
+  <ssd:System name="Root"/>
+</ssd:SystemStructureDescription>"#;
+
+#[test]
+fn model_description_preflight_retains_exact_bytes_and_checked_type() {
+    let graph = admitted_graph(0x0f);
+    let workflow = workflow_draft(&graph, "model-preflight")
+        .admit_against(&graph)
+        .expect("workflow admits");
+
+    for (standard, bytes) in [
+        (InterchangeStandardV1::Fmi302, FMI_MODEL_DESCRIPTION),
+        (
+            InterchangeStandardV1::Ssp20,
+            SSP_MODEL_DESCRIPTION_DEFAULT_NAMESPACE,
+        ),
+        (
+            InterchangeStandardV1::Ssp20,
+            SSP_MODEL_DESCRIPTION_PREFIXED_NAMESPACE,
+        ),
+        (
+            InterchangeStandardV1::Ssp20,
+            SSP_MODEL_DESCRIPTION_IMPLICIT_UTF8,
+        ),
+    ] {
+        let draft = bind_model_description(
+            foreign_draft(
+                &graph,
+                &workflow,
+                ColorRank::Estimated,
+                standard,
+                vec![output("position", terminal_target(), "position")],
+            ),
+            bytes,
+        );
+        let nominal = draft
+            .clone()
+            .admit_against(&workflow, &graph)
+            .expect("nominal compatibility path remains available");
+        let checked = draft
+            .preflight_model_description(bytes)
+            .expect("official root coordinate passes bounded preflight");
+        let preflight = checked.preflight();
+        assert_eq!(preflight.standard(), standard);
+        assert_eq!(preflight.content_hash(), hash_bytes(bytes));
+        assert_eq!(preflight.byte_len(), bytes.len());
+        assert_eq!(preflight.root_attribute_count(), 3);
+
+        let admitted = checked
+            .admit_against(&workflow, &graph)
+            .expect("preflighted quarantine receipt admits");
+        assert_eq!(admitted.preflight(), preflight);
+        assert_eq!(admitted.execution().identity(), nominal.identity());
+        assert_eq!(admitted.execution().standard(), standard);
+        assert_eq!(
+            admitted.execution().model_description().content_hash(),
+            hash_bytes(bytes)
+        );
+        assert_eq!(admitted.execution().evidence_rank(), ColorRank::Estimated);
+    }
+}
+
+#[test]
+fn model_description_preflight_enforces_standard_root_coordinates() {
+    let graph = admitted_graph(0x1f);
+    let workflow = workflow_draft(&graph, "model-coordinate-refusals")
+        .admit_against(&graph)
+        .expect("workflow admits");
+    let error_for = |standard, bytes: &[u8]| {
+        bind_model_description(
+            foreign_draft(
+                &graph,
+                &workflow,
+                ColorRank::Estimated,
+                standard,
+                vec![output("position", terminal_target(), "position")],
+            ),
+            bytes,
+        )
+        .preflight_model_description(bytes)
+        .expect_err("fixture must refuse")
+    };
+
+    let fmi_patch_in_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<fmiModelDescription fmiVersion="3.0.2" modelName="Fixture" instantiationToken="token">
+</fmiModelDescription>"#;
+    assert_eq!(
+        error_for(InterchangeStandardV1::Fmi302, fmi_patch_in_xml),
+        ModelDescriptionPreflightRefusalV1::WrongAttributeValue {
+            name: "fmiVersion".to_owned(),
+            expected: "3.0",
+            actual: "3.0.2".to_owned(),
+        }
+    );
+
+    let ssp_root_declared_as_fmi = br#"<?xml version="1.0" encoding="UTF-8"?>
+<SystemStructureDescription xmlns="http://ssp-standard.org/SSP1/SystemStructureDescription" version="2.0" name="Fixture">
+</SystemStructureDescription>"#;
+    assert_eq!(
+        error_for(InterchangeStandardV1::Fmi302, ssp_root_declared_as_fmi),
+        ModelDescriptionPreflightRefusalV1::WrongRoot {
+            expected: "fmiModelDescription",
+            actual: "SystemStructureDescription".to_owned(),
+        }
+    );
+
+    let fmi_without_declaration =
+        br#"<fmiModelDescription fmiVersion="3.0" modelName="Fixture" instantiationToken="token">
+</fmiModelDescription>"#;
+    assert_eq!(
+        error_for(InterchangeStandardV1::Fmi302, fmi_without_declaration),
+        ModelDescriptionPreflightRefusalV1::MissingXmlDeclaration
+    );
+
+    let ssp_wrong_namespace = br#"<ssd:SystemStructureDescription xmlns:ssd="https://example.invalid/ssp" version="2.0" name="Fixture">
+</ssd:SystemStructureDescription>"#;
+    assert_eq!(
+        error_for(InterchangeStandardV1::Ssp20, ssp_wrong_namespace),
+        ModelDescriptionPreflightRefusalV1::WrongAttributeValue {
+            name: "xmlns:ssd".to_owned(),
+            expected: "http://ssp-standard.org/SSP1/SystemStructureDescription",
+            actual: "https://example.invalid/ssp".to_owned(),
+        }
+    );
+
+    let duplicate_version = br#"<SystemStructureDescription xmlns="http://ssp-standard.org/SSP1/SystemStructureDescription" version="2.0" name="Fixture" version="2.0">
+</SystemStructureDescription>"#;
+    assert_eq!(
+        error_for(InterchangeStandardV1::Ssp20, duplicate_version),
+        ModelDescriptionPreflightRefusalV1::DuplicateAttribute {
+            name: "version".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn model_description_preflight_refuses_unsafe_unbounded_or_miskeyed_bytes() {
+    let graph = admitted_graph(0x2f);
+    let workflow = workflow_draft(&graph, "model-byte-refusals")
+        .admit_against(&graph)
+        .expect("workflow admits");
+    let draft = || {
+        foreign_draft(
+            &graph,
+            &workflow,
+            ColorRank::Estimated,
+            InterchangeStandardV1::Ssp20,
+            vec![output("position", terminal_target(), "position")],
+        )
+    };
+
+    assert_eq!(
+        draft()
+            .preflight_model_description(SSP_MODEL_DESCRIPTION_DEFAULT_NAMESPACE)
+            .expect_err("nominal digest must not impersonate inspected bytes"),
+        ModelDescriptionPreflightRefusalV1::ContentHashMismatch {
+            declared: draft().model_description.content_hash(),
+            actual: hash_bytes(SSP_MODEL_DESCRIPTION_DEFAULT_NAMESPACE),
+        }
+    );
+
+    let invalid_utf8 = [0xff];
+    assert_eq!(
+        bind_model_description(draft(), &invalid_utf8)
+            .preflight_model_description(&invalid_utf8)
+            .expect_err("invalid UTF-8 must refuse"),
+        ModelDescriptionPreflightRefusalV1::InvalidUtf8 { valid_up_to: 0 }
+    );
+
+    let with_doctype = br#"<!DOCTYPE SystemStructureDescription [<!ENTITY x "expanded">]>
+<SystemStructureDescription xmlns="http://ssp-standard.org/SSP1/SystemStructureDescription" version="2.0" name="Fixture">
+</SystemStructureDescription>"#;
+    assert_eq!(
+        bind_model_description(draft(), with_doctype)
+            .preflight_model_description(with_doctype)
+            .expect_err("DTD declarations must refuse"),
+        ModelDescriptionPreflightRefusalV1::ForbiddenDeclaration {
+            kind: "DOCTYPE",
+            offset: 0,
+        }
+    );
+
+    let nul = b"<SystemStructureDescription\0>";
+    assert_eq!(
+        bind_model_description(draft(), nul)
+            .preflight_model_description(nul)
+            .expect_err("NUL must refuse"),
+        ModelDescriptionPreflightRefusalV1::NulByte { offset: 27 }
+    );
+
+    let oversized = vec![b' '; MAX_INTEROP_MODEL_DESCRIPTION_BYTES_V1 + 1];
+    assert_eq!(
+        draft()
+            .preflight_model_description(&oversized)
+            .expect_err("oversized input must refuse before hashing or parsing"),
+        ModelDescriptionPreflightRefusalV1::TooLarge {
+            actual: MAX_INTEROP_MODEL_DESCRIPTION_BYTES_V1 + 1,
+            max: MAX_INTEROP_MODEL_DESCRIPTION_BYTES_V1,
+        }
+    );
+
+    let mut oversized_prefix = vec![b' '; MAX_INTEROP_ROOT_PREFIX_BYTES_V1];
+    oversized_prefix.extend_from_slice(SSP_MODEL_DESCRIPTION_DEFAULT_NAMESPACE);
+    assert_eq!(
+        bind_model_description(draft(), &oversized_prefix)
+            .preflight_model_description(&oversized_prefix)
+            .expect_err("root prefix cap must refuse deterministically"),
+        ModelDescriptionPreflightRefusalV1::RootPrefixTooLarge {
+            max: MAX_INTEROP_ROOT_PREFIX_BYTES_V1,
+        }
+    );
+
+    let mut excessive_attributes = String::from(
+        "<SystemStructureDescription xmlns=\"http://ssp-standard.org/SSP1/SystemStructureDescription\" version=\"2.0\" name=\"Fixture\"",
+    );
+    for index in 0..(MAX_INTEROP_ROOT_ATTRIBUTES_V1 - 2) {
+        write!(excessive_attributes, " a{index}=\"x\"").expect("writing to String cannot fail");
+    }
+    excessive_attributes.push('>');
+    assert_eq!(
+        bind_model_description(draft(), excessive_attributes.as_bytes())
+            .preflight_model_description(excessive_attributes.as_bytes())
+            .expect_err("attribute cap must refuse deterministically"),
+        ModelDescriptionPreflightRefusalV1::TooManyAttributes {
+            actual: MAX_INTEROP_ROOT_ATTRIBUTES_V1 + 1,
+            max: MAX_INTEROP_ROOT_ATTRIBUTES_V1,
+        }
+    );
 }
 
 #[test]

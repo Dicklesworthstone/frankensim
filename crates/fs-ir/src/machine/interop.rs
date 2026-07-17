@@ -9,9 +9,12 @@
 //! demoted or laundered.
 //!
 //! Admission proves bounded structure, stable-ID closure, exact external
-//! artifact coordinates, and deterministic receipt identity. It does not parse
-//! FMI/SSP XML, authenticate an adapter or isolation receipt, execute an FMU,
-//! establish unit compatibility, or validate a foreign model.
+//! artifact coordinates, and deterministic receipt identity. The additive
+//! model-description preflight checks bounded UTF-8 bytes, the required root
+//! coordinate, and exact raw-byte identity before a typed checked draft can be
+//! admitted. It is not full XML/XSD or archive validation and does not
+//! authenticate an adapter or isolation receipt, execute an FMU, establish unit
+//! compatibility, or validate a foreign model.
 
 use core::fmt;
 use core::num::NonZeroU64;
@@ -22,7 +25,7 @@ use fs_blake3::identity::{
     CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, Field, FieldSpec,
     IdentityReceipt, NeverCancel, ProblemSemanticId, StrongIdentity, WireType,
 };
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, hash_bytes, hash_domain};
 use fs_evidence::{COLOR_ALGEBRA_VERSION, ColorRank};
 
 use crate::IR_VERSION;
@@ -37,9 +40,18 @@ pub const FOREIGN_EXECUTION_SCHEMA_VERSION_V1: u32 = 1;
 pub const MACHINE_WORKFLOW_STAGE_COUNT_V1: usize = 10;
 /// Maximum foreign output bindings retained by one execution receipt.
 pub const MAX_FOREIGN_OUTPUT_BINDINGS_V1: usize = 4_096;
+/// Maximum raw FMI model-description or SSP system-structure bytes preflighted.
+pub const MAX_INTEROP_MODEL_DESCRIPTION_BYTES_V1: usize = 4 * 1_024 * 1_024;
+/// Maximum bytes inspected before and through the root start tag.
+pub const MAX_INTEROP_ROOT_PREFIX_BYTES_V1: usize = 64 * 1_024;
+/// Maximum attributes accepted on an interop document root.
+pub const MAX_INTEROP_ROOT_ATTRIBUTES_V1: usize = 64;
 /// Mandatory marker bound into every foreign execution identity.
 pub const FOREIGN_EXECUTION_NO_AUTHORITY_POLICY_V1: &str =
     "foreign-execution-estimated-only-no-native-authority";
+
+const SSP20_SYSTEM_STRUCTURE_NAMESPACE_V1: &str =
+    "http://ssp-standard.org/SSP1/SystemStructureDescription";
 
 // This is an interop-schema tag, not ColorRank's Rust discriminant.
 const FOREIGN_ESTIMATED_RANK_CODE_V1: u64 = 1;
@@ -462,11 +474,296 @@ impl InterchangeStandardV1 {
         }
     }
 
+    /// Root element required by this coordinate's model-description document.
+    #[must_use]
+    pub const fn model_description_root(self) -> &'static str {
+        match self {
+            Self::Fmi302 => "fmiModelDescription",
+            Self::Ssp20 => "SystemStructureDescription",
+        }
+    }
+
+    /// Version written in this coordinate's model-description root attribute.
+    ///
+    /// FMI patch releases share the `fmiVersion="3.0"` XML schema coordinate,
+    /// so this deliberately differs from [`Self::version`] for FMI 3.0.2.
+    #[must_use]
+    pub const fn model_description_version(self) -> &'static str {
+        match self {
+            Self::Fmi302 => "3.0",
+            Self::Ssp20 => "2.0",
+        }
+    }
+
     const fn code(self) -> u64 {
         match self {
             Self::Fmi302 => 1,
             Self::Ssp20 => 2,
         }
+    }
+}
+
+/// Fail-closed refusal from bounded FMI/SSP root-coordinate preflight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelDescriptionPreflightRefusalV1 {
+    /// Raw model-description bytes exceeded the public input cap.
+    TooLarge {
+        /// Submitted byte length.
+        actual: usize,
+        /// Versioned maximum byte length.
+        max: usize,
+    },
+    /// Input was not valid UTF-8.
+    InvalidUtf8 {
+        /// First byte not known to be valid UTF-8.
+        valid_up_to: usize,
+    },
+    /// XML-forbidden NUL appeared in the input.
+    NulByte {
+        /// Exact byte offset.
+        offset: usize,
+    },
+    /// A DTD or entity declaration was refused by the structural preflight.
+    ForbiddenDeclaration {
+        /// Stable declaration kind.
+        kind: &'static str,
+        /// Exact byte offset.
+        offset: usize,
+    },
+    /// FMI modelDescription.xml omitted its required leading XML declaration.
+    MissingXmlDeclaration,
+    /// The root start tag was not reached within the public prefix bound.
+    RootPrefixTooLarge {
+        /// Versioned maximum prefix length.
+        max: usize,
+    },
+    /// The XML declaration or root start tag violated the bounded grammar.
+    Malformed {
+        /// Exact byte offset where the refusal was detected.
+        offset: usize,
+        /// Stable bounded grammar rule.
+        rule: &'static str,
+    },
+    /// The root start tag exceeded the public attribute-count cap.
+    TooManyAttributes {
+        /// Submitted attribute count at refusal.
+        actual: usize,
+        /// Versioned maximum attribute count.
+        max: usize,
+    },
+    /// Two root attributes used the same exact qualified name.
+    DuplicateAttribute {
+        /// Repeated bounded attribute name.
+        name: String,
+    },
+    /// The first element was not the standard's required root.
+    WrongRoot {
+        /// Required unqualified or local root name.
+        expected: &'static str,
+        /// Submitted bounded qualified root name.
+        actual: String,
+    },
+    /// A required root attribute was absent.
+    MissingAttribute {
+        /// Required attribute name.
+        name: &'static str,
+    },
+    /// A required identifying attribute was empty.
+    EmptyAttribute {
+        /// Required attribute name.
+        name: &'static str,
+    },
+    /// A required attribute did not have the exact standard value.
+    WrongAttributeValue {
+        /// Checked attribute name.
+        name: String,
+        /// Required exact value.
+        expected: &'static str,
+        /// Submitted bounded value.
+        actual: String,
+    },
+    /// The caller-declared artifact digest did not identify the inspected bytes.
+    ContentHashMismatch {
+        /// Digest bound by the draft's artifact coordinate.
+        declared: ContentHash,
+        /// Digest of the exact inspected bytes.
+        actual: ContentHash,
+    },
+}
+
+impl ModelDescriptionPreflightRefusalV1 {
+    /// Stable diagnostic rule code.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => "InteropModelDescriptionSize",
+            Self::InvalidUtf8 { .. } => "InteropModelDescriptionUtf8",
+            Self::NulByte { .. } => "InteropModelDescriptionNul",
+            Self::ForbiddenDeclaration { .. } => "InteropModelDescriptionDeclaration",
+            Self::MissingXmlDeclaration => "InteropModelDescriptionXmlDeclaration",
+            Self::RootPrefixTooLarge { .. } => "InteropModelDescriptionRootPrefix",
+            Self::Malformed { .. } => "InteropModelDescriptionMalformed",
+            Self::TooManyAttributes { .. } => "InteropModelDescriptionAttributeLimit",
+            Self::DuplicateAttribute { .. } => "InteropModelDescriptionDuplicateAttribute",
+            Self::WrongRoot { .. } => "InteropModelDescriptionRoot",
+            Self::MissingAttribute { .. } => "InteropModelDescriptionMissingAttribute",
+            Self::EmptyAttribute { .. } => "InteropModelDescriptionEmptyAttribute",
+            Self::WrongAttributeValue { .. } => "InteropModelDescriptionAttributeValue",
+            Self::ContentHashMismatch { .. } => "InteropModelDescriptionContentHash",
+        }
+    }
+
+    /// Actionable deterministic repair hint.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => {
+                "supply the bounded model-description XML separately from archive payloads"
+            }
+            Self::InvalidUtf8 { .. } | Self::NulByte { .. } => {
+                "encode the model-description document as valid NUL-free UTF-8"
+            }
+            Self::ForbiddenDeclaration { .. } => {
+                "remove DTD and entity declarations before structural preflight"
+            }
+            Self::MissingXmlDeclaration => {
+                "start FMI modelDescription.xml with an XML 1.0 UTF-8 declaration"
+            }
+            Self::RootPrefixTooLarge { .. } | Self::TooManyAttributes { .. } => {
+                "reduce prolog or root-tag complexity and retry"
+            }
+            Self::Malformed { .. } | Self::DuplicateAttribute { .. } => {
+                "supply a single bounded root start tag with unique quoted attributes"
+            }
+            Self::WrongRoot { .. }
+            | Self::MissingAttribute { .. }
+            | Self::EmptyAttribute { .. }
+            | Self::WrongAttributeValue { .. } => {
+                "supply the exact root, namespace, version, and identifying attributes required by the declared standard"
+            }
+            Self::ContentHashMismatch { .. } => {
+                "bind the model-description artifact coordinate to the exact inspected raw bytes"
+            }
+        }
+    }
+}
+
+impl fmt::Display for ModelDescriptionPreflightRefusalV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge { actual, max } => {
+                write!(
+                    formatter,
+                    "model-description has {actual} bytes; maximum is {max}"
+                )
+            }
+            Self::InvalidUtf8 { valid_up_to } => {
+                write!(
+                    formatter,
+                    "model-description is not UTF-8 at byte {valid_up_to}"
+                )
+            }
+            Self::NulByte { offset } => {
+                write!(formatter, "model-description contains NUL at byte {offset}")
+            }
+            Self::ForbiddenDeclaration { kind, offset } => write!(
+                formatter,
+                "model-description contains forbidden {kind} declaration at byte {offset}"
+            ),
+            Self::MissingXmlDeclaration => formatter.write_str(
+                "FMI modelDescription.xml is missing its leading XML 1.0 UTF-8 declaration",
+            ),
+            Self::RootPrefixTooLarge { max } => write!(
+                formatter,
+                "model-description root was not reached within {max} bytes"
+            ),
+            Self::Malformed { offset, rule } => {
+                write!(
+                    formatter,
+                    "malformed model-description at byte {offset}: {rule}"
+                )
+            }
+            Self::TooManyAttributes { actual, max } => write!(
+                formatter,
+                "model-description root has at least {actual} attributes; maximum is {max}"
+            ),
+            Self::DuplicateAttribute { name } => {
+                write!(
+                    formatter,
+                    "model-description root repeats attribute {name:?}"
+                )
+            }
+            Self::WrongRoot { expected, actual } => write!(
+                formatter,
+                "model-description root is {actual:?}; expected {expected:?}"
+            ),
+            Self::MissingAttribute { name } => {
+                write!(
+                    formatter,
+                    "model-description root is missing attribute {name:?}"
+                )
+            }
+            Self::EmptyAttribute { name } => {
+                write!(
+                    formatter,
+                    "model-description root attribute {name:?} is empty"
+                )
+            }
+            Self::WrongAttributeValue {
+                name,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "model-description root attribute {name:?} is {actual:?}; expected {expected:?}"
+            ),
+            Self::ContentHashMismatch { declared, actual } => write!(
+                formatter,
+                "model-description digest {} does not match inspected bytes {}",
+                declared.to_hex(),
+                actual.to_hex()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ModelDescriptionPreflightRefusalV1 {}
+
+/// Opaque evidence that exact bounded bytes passed structural root preflight.
+///
+/// This receipt proves only the checks named by this module. It is not an XML
+/// well-formedness, XSD-conformance, archive-safety, or executable-model claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteropModelDescriptionPreflightV1 {
+    standard: InterchangeStandardV1,
+    content_hash: ContentHash,
+    byte_len: usize,
+    root_attribute_count: usize,
+}
+
+impl InteropModelDescriptionPreflightV1 {
+    /// Exact declared standard whose root coordinate was checked.
+    #[must_use]
+    pub const fn standard(&self) -> InterchangeStandardV1 {
+        self.standard
+    }
+
+    /// Hash of the exact raw bytes inspected.
+    #[must_use]
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
+    /// Exact bounded raw byte length inspected.
+    #[must_use]
+    pub const fn byte_len(&self) -> usize {
+        self.byte_len
+    }
+
+    /// Number of unique attributes parsed from the root start tag.
+    #[must_use]
+    pub const fn root_attribute_count(&self) -> usize {
+        self.root_attribute_count
     }
 }
 
@@ -570,6 +867,41 @@ pub struct ForeignExecutionDraftV1 {
     pub claimed_rank: ColorRank,
     /// Opaque output artifacts and their stable Machine targets.
     pub outputs: Vec<ForeignOutputBindingV1>,
+}
+
+/// Foreign-execution draft whose exact model-description bytes were preflighted.
+///
+/// The inner draft is deliberately private so its standard and content hash
+/// cannot be rebound after the preflight receipt is minted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightedForeignExecutionDraftV1 {
+    draft: ForeignExecutionDraftV1,
+    preflight: InteropModelDescriptionPreflightV1,
+}
+
+impl PreflightedForeignExecutionDraftV1 {
+    /// Retained bounded structural-preflight evidence.
+    #[must_use]
+    pub const fn preflight(&self) -> InteropModelDescriptionPreflightV1 {
+        self.preflight
+    }
+
+    /// Admit the checked draft against one exact workflow and Machine graph.
+    ///
+    /// # Errors
+    /// Returns the same graph, workflow, output, evidence, or identity refusal
+    /// as [`ForeignExecutionDraftV1::admit_against`].
+    pub fn admit_against(
+        self,
+        workflow: &AdmittedMachineWorkflowV1,
+        graph: &AdmittedMachineGraph,
+    ) -> Result<PreflightedAdmittedForeignExecutionV1, ForeignExecutionRefusalV1> {
+        let execution = self.draft.admit_against(workflow, graph)?;
+        Ok(PreflightedAdmittedForeignExecutionV1 {
+            execution,
+            preflight: self.preflight,
+        })
+    }
 }
 
 /// Canonical identity schema for one quarantined foreign execution receipt.
@@ -788,7 +1120,62 @@ pub struct AdmittedForeignExecutionV1 {
     receipt: IdentityReceipt<ForeignExecutionIdV1>,
 }
 
+/// Admitted Estimated-only foreign execution retaining byte-preflight evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightedAdmittedForeignExecutionV1 {
+    execution: AdmittedForeignExecutionV1,
+    preflight: InteropModelDescriptionPreflightV1,
+}
+
+impl PreflightedAdmittedForeignExecutionV1 {
+    /// The ordinary quarantined execution receipt.
+    #[must_use]
+    pub const fn execution(&self) -> &AdmittedForeignExecutionV1 {
+        &self.execution
+    }
+
+    /// Retained bounded structural-preflight evidence for the exact model bytes.
+    #[must_use]
+    pub const fn preflight(&self) -> InteropModelDescriptionPreflightV1 {
+        self.preflight
+    }
+
+    /// Explicitly discard the extra preflight evidence and retain the execution.
+    #[must_use]
+    pub fn into_execution(self) -> AdmittedForeignExecutionV1 {
+        self.execution
+    }
+}
+
 impl ForeignExecutionDraftV1 {
+    /// Check exact bounded FMI/SSP model-description bytes and consume the draft.
+    ///
+    /// The preflight validates UTF-8 and a bounded root start tag, refuses DTD
+    /// and entity declarations, enforces the standard-specific root/version/
+    /// namespace/identity attributes, and checks the raw-byte content hash. It
+    /// does not validate the complete XML document, XSD, FMU/SSP archive, or
+    /// executable model.
+    ///
+    /// # Errors
+    /// Refuses oversized or malformed input, a mismatched standard coordinate,
+    /// unsafe declarations, or bytes not identified by `model_description`.
+    pub fn preflight_model_description(
+        self,
+        bytes: &[u8],
+    ) -> Result<PreflightedForeignExecutionDraftV1, ModelDescriptionPreflightRefusalV1> {
+        let preflight = preflight_model_description_bytes(self.standard, bytes)?;
+        if preflight.content_hash != self.model_description.content_hash() {
+            return Err(ModelDescriptionPreflightRefusalV1::ContentHashMismatch {
+                declared: self.model_description.content_hash(),
+                actual: preflight.content_hash,
+            });
+        }
+        Ok(PreflightedForeignExecutionDraftV1 {
+            draft: self,
+            preflight,
+        })
+    }
+
     /// Admit foreign outputs against one exact workflow and Machine graph.
     ///
     /// # Errors
@@ -975,6 +1362,471 @@ impl AdmittedForeignExecutionV1 {
     pub const fn identity_receipt(&self) -> IdentityReceipt<ForeignExecutionIdV1> {
         self.receipt
     }
+}
+
+#[derive(Debug)]
+struct XmlRootAttribute<'a> {
+    name: &'a str,
+    value: &'a str,
+}
+
+#[derive(Debug)]
+struct XmlRootStartTag<'a> {
+    name: &'a str,
+    attributes: Vec<XmlRootAttribute<'a>>,
+}
+
+fn preflight_model_description_bytes(
+    standard: InterchangeStandardV1,
+    bytes: &[u8],
+) -> Result<InteropModelDescriptionPreflightV1, ModelDescriptionPreflightRefusalV1> {
+    if bytes.len() > MAX_INTEROP_MODEL_DESCRIPTION_BYTES_V1 {
+        return Err(ModelDescriptionPreflightRefusalV1::TooLarge {
+            actual: bytes.len(),
+            max: MAX_INTEROP_MODEL_DESCRIPTION_BYTES_V1,
+        });
+    }
+    let source = core::str::from_utf8(bytes).map_err(|error| {
+        ModelDescriptionPreflightRefusalV1::InvalidUtf8 {
+            valid_up_to: error.valid_up_to(),
+        }
+    })?;
+    if let Some(offset) = bytes.iter().position(|byte| *byte == 0) {
+        return Err(ModelDescriptionPreflightRefusalV1::NulByte { offset });
+    }
+    for (needle, kind) in [
+        (b"<!DOCTYPE".as_slice(), "DOCTYPE"),
+        (b"<!ENTITY".as_slice(), "ENTITY"),
+    ] {
+        if let Some(offset) = find_bytes(bytes, needle) {
+            return Err(ModelDescriptionPreflightRefusalV1::ForbiddenDeclaration { kind, offset });
+        }
+    }
+
+    let root = scan_xml_root_start_tag(source, standard)?;
+    validate_model_description_root(standard, &root)?;
+    Ok(InteropModelDescriptionPreflightV1 {
+        standard,
+        content_hash: hash_bytes(bytes),
+        byte_len: bytes.len(),
+        root_attribute_count: root.attributes.len(),
+    })
+}
+
+fn scan_xml_root_start_tag(
+    source: &str,
+    standard: InterchangeStandardV1,
+) -> Result<XmlRootStartTag<'_>, ModelDescriptionPreflightRefusalV1> {
+    let bytes = source.as_bytes();
+    let mut cursor = usize::from(bytes.starts_with(&[0xef, 0xbb, 0xbf])) * 3;
+    let has_declaration = bytes.get(cursor..).is_some_and(|tail| {
+        tail.starts_with(b"<?xml") && tail.get(5).is_some_and(|byte| is_xml_space(*byte))
+    });
+
+    if standard == InterchangeStandardV1::Fmi302 && !has_declaration {
+        return Err(ModelDescriptionPreflightRefusalV1::MissingXmlDeclaration);
+    }
+    if has_declaration {
+        let close = find_before_root_limit(bytes, cursor + 5, b"?>")?;
+        if standard == InterchangeStandardV1::Fmi302
+            && bytes[cursor..close]
+                .iter()
+                .any(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor,
+                rule: "FMI XML declaration must remain on the first line",
+            });
+        }
+        let declaration = parse_xml_attributes(source, cursor + 5, close)?;
+        require_exact_attribute(&declaration, "version", "1.0")?;
+        let encoding = declaration
+            .iter()
+            .find(|attribute| attribute.name == "encoding")
+            .map(|attribute| attribute.value);
+        if standard == InterchangeStandardV1::Fmi302 && encoding.is_none() {
+            return Err(ModelDescriptionPreflightRefusalV1::MissingAttribute { name: "encoding" });
+        }
+        if let Some(encoding) = encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("UTF-8"))
+        {
+            return Err(ModelDescriptionPreflightRefusalV1::WrongAttributeValue {
+                name: "encoding".to_owned(),
+                expected: "UTF-8",
+                actual: encoding.to_owned(),
+            });
+        }
+        cursor = close + 2;
+    }
+
+    loop {
+        skip_xml_space(bytes, &mut cursor);
+        if cursor >= MAX_INTEROP_ROOT_PREFIX_BYTES_V1 {
+            return Err(ModelDescriptionPreflightRefusalV1::RootPrefixTooLarge {
+                max: MAX_INTEROP_ROOT_PREFIX_BYTES_V1,
+            });
+        }
+        if bytes
+            .get(cursor..)
+            .is_some_and(|tail| tail.starts_with(b"<!--"))
+        {
+            let close = find_before_root_limit(bytes, cursor + 4, b"-->")?;
+            cursor = close + 3;
+            continue;
+        }
+        if bytes
+            .get(cursor..)
+            .is_some_and(|tail| tail.starts_with(b"<?"))
+        {
+            if bytes
+                .get(cursor..)
+                .is_some_and(|tail| tail.starts_with(b"<?xml"))
+            {
+                return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                    offset: cursor,
+                    rule: "XML declaration must precede whitespace and processing instructions",
+                });
+            }
+            let close = find_before_root_limit(bytes, cursor + 2, b"?>")?;
+            cursor = close + 2;
+            continue;
+        }
+        break;
+    }
+
+    if bytes.get(cursor) != Some(&b'<') {
+        return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+            offset: cursor.min(bytes.len()),
+            rule: "expected root element start tag",
+        });
+    }
+    let close = find_root_tag_close(bytes, cursor)?;
+    let name_start = cursor + 1;
+    let name_end = parse_xml_name_end(bytes, name_start, close)?;
+    if name_end < close && !is_xml_space(bytes[name_end]) {
+        return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+            offset: name_end,
+            rule: "expected whitespace after root element name",
+        });
+    }
+    let attributes = parse_xml_attributes(source, name_end, close)?;
+    Ok(XmlRootStartTag {
+        name: &source[name_start..name_end],
+        attributes,
+    })
+}
+
+fn validate_model_description_root(
+    standard: InterchangeStandardV1,
+    root: &XmlRootStartTag<'_>,
+) -> Result<(), ModelDescriptionPreflightRefusalV1> {
+    match standard {
+        InterchangeStandardV1::Fmi302 => {
+            if root.name != standard.model_description_root() {
+                return Err(ModelDescriptionPreflightRefusalV1::WrongRoot {
+                    expected: standard.model_description_root(),
+                    actual: root.name.to_owned(),
+                });
+            }
+            if let Some(namespace) = root
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == "xmlns")
+                .map(|attribute| attribute.value)
+                .filter(|namespace| !namespace.is_empty())
+            {
+                return Err(ModelDescriptionPreflightRefusalV1::WrongAttributeValue {
+                    name: "xmlns".to_owned(),
+                    expected: "",
+                    actual: namespace.to_owned(),
+                });
+            }
+            require_exact_attribute(
+                &root.attributes,
+                "fmiVersion",
+                standard.model_description_version(),
+            )?;
+            require_nonempty_attribute(&root.attributes, "modelName")?;
+            require_nonempty_attribute(&root.attributes, "instantiationToken")?;
+        }
+        InterchangeStandardV1::Ssp20 => {
+            let namespace_attribute = match root.name.split_once(':') {
+                None if root.name == standard.model_description_root() => "xmlns".to_owned(),
+                Some((prefix, local))
+                    if !prefix.is_empty()
+                        && !matches!(prefix, "xml" | "xmlns")
+                        && !local.contains(':')
+                        && local == standard.model_description_root() =>
+                {
+                    format!("xmlns:{prefix}")
+                }
+                _ => {
+                    return Err(ModelDescriptionPreflightRefusalV1::WrongRoot {
+                        expected: standard.model_description_root(),
+                        actual: root.name.to_owned(),
+                    });
+                }
+            };
+            let namespace = root
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == namespace_attribute)
+                .map(|attribute| attribute.value)
+                .ok_or(ModelDescriptionPreflightRefusalV1::MissingAttribute {
+                    name: "root namespace declaration",
+                })?;
+            if namespace != SSP20_SYSTEM_STRUCTURE_NAMESPACE_V1 {
+                return Err(ModelDescriptionPreflightRefusalV1::WrongAttributeValue {
+                    name: namespace_attribute,
+                    expected: SSP20_SYSTEM_STRUCTURE_NAMESPACE_V1,
+                    actual: namespace.to_owned(),
+                });
+            }
+            require_exact_attribute(
+                &root.attributes,
+                "version",
+                standard.model_description_version(),
+            )?;
+            require_nonempty_attribute(&root.attributes, "name")?;
+        }
+    }
+    Ok(())
+}
+
+fn require_attribute<'a>(
+    attributes: &[XmlRootAttribute<'a>],
+    name: &'static str,
+) -> Result<&'a str, ModelDescriptionPreflightRefusalV1> {
+    attributes
+        .iter()
+        .find(|attribute| attribute.name == name)
+        .map(|attribute| attribute.value)
+        .ok_or(ModelDescriptionPreflightRefusalV1::MissingAttribute { name })
+}
+
+fn require_nonempty_attribute(
+    attributes: &[XmlRootAttribute<'_>],
+    name: &'static str,
+) -> Result<(), ModelDescriptionPreflightRefusalV1> {
+    if require_attribute(attributes, name)?.is_empty() {
+        return Err(ModelDescriptionPreflightRefusalV1::EmptyAttribute { name });
+    }
+    Ok(())
+}
+
+fn require_exact_attribute(
+    attributes: &[XmlRootAttribute<'_>],
+    name: &'static str,
+    expected: &'static str,
+) -> Result<(), ModelDescriptionPreflightRefusalV1> {
+    let actual = require_attribute(attributes, name)?;
+    if actual != expected {
+        return Err(ModelDescriptionPreflightRefusalV1::WrongAttributeValue {
+            name: name.to_owned(),
+            expected,
+            actual: actual.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_xml_attributes<'a>(
+    source: &'a str,
+    mut cursor: usize,
+    end: usize,
+) -> Result<Vec<XmlRootAttribute<'a>>, ModelDescriptionPreflightRefusalV1> {
+    let bytes = source.as_bytes();
+    let mut attributes = Vec::new();
+    while cursor < end {
+        let before_space = cursor;
+        skip_xml_space_until(bytes, &mut cursor, end);
+        if cursor == end {
+            break;
+        }
+        if cursor == before_space {
+            return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor,
+                rule: "expected whitespace before attribute",
+            });
+        }
+        if bytes[cursor] == b'/' {
+            return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor,
+                rule: "model-description root cannot be self-closing",
+            });
+        }
+        let name_start = cursor;
+        let name_end = parse_xml_name_end(bytes, name_start, end)?;
+        cursor = name_end;
+        skip_xml_space_until(bytes, &mut cursor, end);
+        if bytes.get(cursor) != Some(&b'=') {
+            return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor.min(end),
+                rule: "expected equals sign after attribute name",
+            });
+        }
+        cursor += 1;
+        skip_xml_space_until(bytes, &mut cursor, end);
+        let quote = *bytes
+            .get(cursor)
+            .ok_or(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor.min(end),
+                rule: "expected quoted attribute value",
+            })?;
+        if !matches!(quote, b'\'' | b'"') {
+            return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor,
+                rule: "expected single- or double-quoted attribute value",
+            });
+        }
+        cursor += 1;
+        let value_start = cursor;
+        while cursor < end && bytes[cursor] != quote {
+            if bytes[cursor] == b'<' {
+                return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                    offset: cursor,
+                    rule: "raw less-than sign is forbidden in an attribute value",
+                });
+            }
+            cursor += 1;
+        }
+        if cursor == end {
+            return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+                offset: cursor,
+                rule: "unterminated attribute value",
+            });
+        }
+        let name = &source[name_start..name_end];
+        if attributes
+            .iter()
+            .any(|attribute: &XmlRootAttribute<'_>| attribute.name == name)
+        {
+            return Err(ModelDescriptionPreflightRefusalV1::DuplicateAttribute {
+                name: name.to_owned(),
+            });
+        }
+        if attributes.len() == MAX_INTEROP_ROOT_ATTRIBUTES_V1 {
+            return Err(ModelDescriptionPreflightRefusalV1::TooManyAttributes {
+                actual: attributes.len() + 1,
+                max: MAX_INTEROP_ROOT_ATTRIBUTES_V1,
+            });
+        }
+        attributes.push(XmlRootAttribute {
+            name,
+            value: &source[value_start..cursor],
+        });
+        cursor += 1;
+    }
+    Ok(attributes)
+}
+
+fn parse_xml_name_end(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<usize, ModelDescriptionPreflightRefusalV1> {
+    let Some(&first) = bytes.get(start).filter(|_| start < end) else {
+        return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+            offset: start.min(end),
+            rule: "missing XML name",
+        });
+    };
+    if !is_xml_name_start(first) {
+        return Err(ModelDescriptionPreflightRefusalV1::Malformed {
+            offset: start,
+            rule: "XML name must start with an ASCII letter, underscore, or colon",
+        });
+    }
+    let mut cursor = start + 1;
+    while cursor < end && is_xml_name_continue(bytes[cursor]) {
+        cursor += 1;
+    }
+    Ok(cursor)
+}
+
+const fn is_xml_name_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':')
+}
+
+const fn is_xml_name_continue(byte: u8) -> bool {
+    is_xml_name_start(byte) || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+}
+
+fn skip_xml_space(bytes: &[u8], cursor: &mut usize) {
+    let limit = bytes.len().min(MAX_INTEROP_ROOT_PREFIX_BYTES_V1);
+    while *cursor < limit && is_xml_space(bytes[*cursor]) {
+        *cursor += 1;
+    }
+}
+
+fn skip_xml_space_until(bytes: &[u8], cursor: &mut usize, end: usize) {
+    while *cursor < end && is_xml_space(bytes[*cursor]) {
+        *cursor += 1;
+    }
+}
+
+const fn is_xml_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+fn find_root_tag_close(
+    bytes: &[u8],
+    start: usize,
+) -> Result<usize, ModelDescriptionPreflightRefusalV1> {
+    let limit = bytes.len().min(MAX_INTEROP_ROOT_PREFIX_BYTES_V1);
+    let mut cursor = start + 1;
+    let mut quote = None;
+    while cursor < limit {
+        match (quote, bytes[cursor]) {
+            (Some(open), byte) if byte == open => quote = None,
+            (None, byte @ (b'\'' | b'"')) => quote = Some(byte),
+            (None, b'>') => return Ok(cursor),
+            _ => {}
+        }
+        cursor += 1;
+    }
+    if bytes.len() >= MAX_INTEROP_ROOT_PREFIX_BYTES_V1 {
+        Err(ModelDescriptionPreflightRefusalV1::RootPrefixTooLarge {
+            max: MAX_INTEROP_ROOT_PREFIX_BYTES_V1,
+        })
+    } else {
+        Err(ModelDescriptionPreflightRefusalV1::Malformed {
+            offset: bytes.len(),
+            rule: "unterminated root start tag",
+        })
+    }
+}
+
+fn find_before_root_limit(
+    bytes: &[u8],
+    start: usize,
+    needle: &[u8],
+) -> Result<usize, ModelDescriptionPreflightRefusalV1> {
+    let limit = bytes.len().min(MAX_INTEROP_ROOT_PREFIX_BYTES_V1);
+    if start <= limit
+        && needle.len() <= limit.saturating_sub(start)
+        && let Some(relative) = find_bytes(&bytes[start..limit], needle)
+    {
+        return Ok(start + relative);
+    }
+    if bytes.len() >= MAX_INTEROP_ROOT_PREFIX_BYTES_V1 {
+        Err(ModelDescriptionPreflightRefusalV1::RootPrefixTooLarge {
+            max: MAX_INTEROP_ROOT_PREFIX_BYTES_V1,
+        })
+    } else {
+        Err(ModelDescriptionPreflightRefusalV1::Malformed {
+            offset: bytes.len(),
+            rule: "unterminated XML declaration, comment, or processing instruction",
+        })
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn encode_workflow_identity(
