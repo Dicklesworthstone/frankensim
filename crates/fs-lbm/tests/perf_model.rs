@@ -1,8 +1,10 @@
 //! D3Q19 performance-model and tropical-attribution conformance (bead 712t).
 
+use fs_lbm::d3q19::{E3, TILE};
 use fs_lbm::perf::{
     BGK_EQUILIBRIUM_FLOPS, BGK_FLOPS_PER_CELL, BGK_FORCE_RELAX_FLOPS, BGK_MACRO_VELOCITY_FLOPS,
-    D3Q19_DISTRIBUTIONS, D3Q19_PERF_MODEL_VERSION, D3q19PerfRow, D3q19TrafficModel,
+    D3Q19_DISTRIBUTIONS, D3Q19_HALO_LINKS_PER_TILE, D3Q19_LINKS_PER_TILE,
+    D3Q19_LOCAL_LINKS_PER_TILE, D3Q19_PERF_MODEL_VERSION, D3q19PerfRow, D3q19TrafficModel,
     DISTRIBUTION_BYTES, EvidenceClass, KernelClass, LaneShape, OccupancyClass, PerfGateVerdict,
     PerfModelError, RATIO_PPM, ReferenceIsa, SPARSE_TILE_CELLS, SPARSE_TILE_EDGE, TaskSample,
     ThreadingClass, attribute_critical_path, critical_path_is_stable,
@@ -122,23 +124,53 @@ fn arithmetic_intensity_header_counts_population_and_sparse_metadata() {
     assert_eq!(BGK_EQUILIBRIUM_FLOPS, 271);
     assert_eq!(BGK_FORCE_RELAX_FLOPS, 611);
     assert_eq!(BGK_FLOPS_PER_CELL, 1_024);
+    assert_eq!(D3Q19_LINKS_PER_TILE, 1_216);
+    assert_eq!(D3Q19_LOCAL_LINKS_PER_TILE, 784);
+    assert_eq!(D3Q19_HALO_LINKS_PER_TILE, 432);
+    assert_eq!(
+        D3Q19_LOCAL_LINKS_PER_TILE + D3Q19_HALO_LINKS_PER_TILE,
+        D3Q19_LINKS_PER_TILE
+    );
+    let mut independently_counted_halo_links = 0usize;
+    for lz in 0..TILE {
+        for ly in 0..TILE {
+            for lx in 0..TILE {
+                for &(ex, ey, ez) in &E3 {
+                    let sx = lx as i64 - i64::from(ex);
+                    let sy = ly as i64 - i64::from(ey);
+                    let sz = lz as i64 - i64::from(ez);
+                    let tile = TILE as i64;
+                    if !(0..tile).contains(&sx)
+                        || !(0..tile).contains(&sy)
+                        || !(0..tile).contains(&sz)
+                    {
+                        independently_counted_halo_links += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(independently_counted_halo_links, D3Q19_HALO_LINKS_PER_TILE);
     assert_eq!(
         model.population_bytes_per_cell().to_bits(),
         608.0f64.to_bits()
     );
     assert_eq!(
         model.sparse_overhead_bytes_per_cell().to_bits(),
-        304.25f64.to_bits()
+        108.25f64.to_bits()
     );
-    assert_eq!(model.bytes_per_cell().to_bits(), 912.25f64.to_bits());
+    assert_eq!(model.bytes_per_cell().to_bits(), 716.25f64.to_bits());
     assert_eq!(
         model.arithmetic_intensity().to_bits(),
-        (1_024.0f64 / 912.25).to_bits()
+        (1_024.0f64 / 716.25).to_bits()
     );
     let receipt = model.receipt_json();
     assert!(receipt.contains(D3Q19_PERF_MODEL_VERSION));
-    assert!(receipt.contains("\"bytes_per_cell\":912.250000"));
-    assert!(receipt.contains("\"sparse_overhead_bytes_per_cell\":304.250000"));
+    assert!(receipt.contains("\"links_per_tile\":1216"));
+    assert!(receipt.contains("\"local_links_per_tile\":784"));
+    assert!(receipt.contains("\"halo_links_per_tile\":432"));
+    assert!(receipt.contains("\"bytes_per_cell\":716.250000"));
+    assert!(receipt.contains("\"sparse_overhead_bytes_per_cell\":108.250000"));
 }
 
 #[test]
@@ -316,7 +348,7 @@ fn receipt_json_retains_model_shape_target_floor_admission_and_critical_path() {
     let json = row.receipt_json().expect("report-only receipt");
     for fragment in [
         "\"metric\":\"lbm-d3q19-sweep\"",
-        "\"model_version\":\"d3q19-sparse-sweep-v1\"",
+        "\"model_version\":\"d3q19-sparse-sweep-v2-local-halo\"",
         "\"dims\":[128,128,128]",
         "\"occupancy\":\"sparse-ten-percent\"",
         "\"active_tiles\":3277",

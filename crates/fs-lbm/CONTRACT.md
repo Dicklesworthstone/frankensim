@@ -729,16 +729,18 @@ freezes these workload rows before any timing result is inspected:
 - a serial row with exactly one worker and an all-core row retaining the exact
   normalized worker/placement identity.
 
-The version-1 logical traffic model is source-counted, not a compulsory-miss
+The version-2 logical traffic model is source-counted, not a compulsory-miss
 fantasy. One active BGK update performs two population reads and two population
-writes across collide and pull-stream: `19 * 8 * 4 = 608 B/cell`. The sparse
-lower-bound adds `19 * 16 = 304 B/cell` of logical source key/slot lookup and
-`16 / 64 = 0.25 B/cell` of amortized active-tile key/slot identity, for exactly
-`912.25 B/cell`. BTree node/cache-line traffic can only increase real traffic;
-it is not invented as a portable constant. The generic three-axis BGK+Guo path
-counts 142 FLOPs for density/momentum/forced velocity, 271 for equilibrium, and
-611 for force projection plus relaxation, totaling 1,024 FLOPs/update and
-approximately 1.1225 FLOP/B. Any kernel/model change must bump
+writes across collide and pull-stream: `19 * 8 * 4 = 608 B/cell`. Splitting
+same-tile pulls from cross-tile/domain halo pulls removes sparse-map lookup from
+784 of the 1,216 links in one 4³ tile. The remaining 432 halo links are exactly
+6.75 lookups/cell, adding `6.75 * 16 = 108 B/cell` of logical source key/slot
+traffic and `16 / 64 = 0.25 B/cell` of amortized active-tile identity, for
+exactly `716.25 B/cell`. BTree node/cache-line traffic can only increase real
+traffic; it is not invented as a portable constant. The generic three-axis
+BGK+Guo path counts 142 FLOPs for density/momentum/forced velocity, 271 for
+equilibrium, and 611 for force projection plus relaxation, totaling 1,024
+FLOPs/update and approximately 1.4293 FLOP/B. Any kernel/model change must bump
 `D3Q19_PERF_MODEL_VERSION` and restate this arithmetic.
 
 The plan's 1.0 GLUP/s Apple-M-class and 0.6 GLUP/s Threadripper-class values are
@@ -760,6 +762,19 @@ share. Citable rows require the same path and dominant class across
 deterministic repetitions; varying wall values remain telemetry, while
 topology/class drift fails closed.
 
+`SparseGrid3::step_pooled_observed` is the opt-in measurement seam for that
+driver. It retains the exact executor reports and whole-pass wall envelopes for
+the existing collide and combined stream/halo pool invocations. The stream
+kernel uses the same worker-count-independent groups as the ordinary path and
+partitions its writes into two disjoint loops: same-tile pulls first, then
+cross-tile/domain halo lookup and pulls. The ordinary path runs those same
+loops without clocks or timing buffers; the observed path adds one clock pair
+per completed group and returns canonical `(group, first_tile_slot, tiles,
+local_stream_wall_ns, halo_wall_ns)` rows. Group walls overlap across workers
+and therefore MUST enter max-plus task-DAG composition; summing them as serial
+time is invalid. A missing group observation refuses before the private
+destination is published, and cancellation retains the pre-step state exactly.
+
 ### No-claim boundaries (D3Q19 performance model)
 
 - `perf` performs no timing, machine probe, authority validation, baseline
@@ -771,3 +786,7 @@ topology/class drift fails closed.
 - No floor is authorized by source code alone. Both reference-ISA rows,
   pre/post admitted axes, quiet-host dispersion, retained external receipts,
   and the sealed tune-row path remain required measurement evidence.
+- The observed sweep does not yet time active-set construction, authenticate
+  machine axes, turn overlapping group walls into the final critical circuit,
+  emit a GLUP/s row, or write the ledger. It exposes truthful primitive timing
+  inputs for the ignored driver; it is not itself citable performance evidence.

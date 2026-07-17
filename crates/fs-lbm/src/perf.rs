@@ -16,7 +16,7 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Version of the D3Q19 sparse-sweep traffic and receipt semantics.
-pub const D3Q19_PERF_MODEL_VERSION: &str = "d3q19-sparse-sweep-v1";
+pub const D3Q19_PERF_MODEL_VERSION: &str = "d3q19-sparse-sweep-v2-local-halo";
 /// Parts per million used for exact occupancy/share ratios.
 pub const RATIO_PPM: u32 = 1_000_000;
 /// Edge length of the current sparse tile.
@@ -25,6 +25,17 @@ pub const SPARSE_TILE_EDGE: usize = 4;
 pub const SPARSE_TILE_CELLS: usize = SPARSE_TILE_EDGE * SPARSE_TILE_EDGE * SPARSE_TILE_EDGE;
 /// D3Q19 population count.
 pub const D3Q19_DISTRIBUTIONS: usize = 19;
+/// Total distribution links visited by one 4³ tile update.
+pub const D3Q19_LINKS_PER_TILE: usize = D3Q19_DISTRIBUTIONS * SPARSE_TILE_CELLS;
+/// Same-tile links served without a sparse key/slot lookup.
+///
+/// D3Q19 contributes 1,216 links per 4³ tile. The six face directions cross
+/// one 4×4 plane each (96 links), and the twelve edge directions cross the
+/// union of two signed planes (12 × (16 + 16 - 4) = 336 links). The remaining
+/// 784 links are local.
+pub const D3Q19_LOCAL_LINKS_PER_TILE: usize = 784;
+/// Cross-tile/domain links that enter the sparse key/slot lookup path.
+pub const D3Q19_HALO_LINKS_PER_TILE: usize = 432;
 /// Bytes in one f64 distribution value.
 pub const DISTRIBUTION_BYTES: usize = core::mem::size_of::<f64>();
 /// BGK density/momentum reductions plus forced-velocity reconstruction.
@@ -316,8 +327,8 @@ pub struct D3q19TrafficModel {
     pub distribution_writes: u8,
     /// Logical key/slot bytes amortized per active tile.
     pub tile_metadata_bytes: u16,
-    /// Logical sparse source-lookup bytes per distribution link.
-    pub lookup_bytes_per_link: u8,
+    /// Logical sparse source-lookup bytes per cross-tile/domain link.
+    pub lookup_bytes_per_halo_link: u8,
     /// Versioned scalar FLOP count for collision/equilibrium/macros.
     pub flops_per_cell: u16,
 }
@@ -328,7 +339,7 @@ impl Default for D3q19TrafficModel {
             distribution_reads: 2,
             distribution_writes: 2,
             tile_metadata_bytes: 16,
-            lookup_bytes_per_link: 16,
+            lookup_bytes_per_halo_link: 16,
             flops_per_cell: BGK_FLOPS_PER_CELL,
         }
     }
@@ -343,10 +354,13 @@ impl D3q19TrafficModel {
             * DISTRIBUTION_BYTES as f64
     }
 
-    /// Logical sparse-index traffic, including amortized tile key/slot bytes.
+    /// Logical sparse-index traffic for cross-tile/domain links, including
+    /// amortized active-tile key/slot identity. Same-tile pulls use direct
+    /// lane addressing and are deliberately excluded.
     #[must_use]
     pub fn sparse_overhead_bytes_per_cell(self) -> f64 {
-        f64::from(self.lookup_bytes_per_link) * D3Q19_DISTRIBUTIONS as f64
+        f64::from(self.lookup_bytes_per_halo_link) * D3Q19_HALO_LINKS_PER_TILE as f64
+            / SPARSE_TILE_CELLS as f64
             + f64::from(self.tile_metadata_bytes) / SPARSE_TILE_CELLS as f64
     }
 
@@ -366,11 +380,11 @@ impl D3q19TrafficModel {
     #[must_use]
     pub fn receipt_json(self) -> String {
         format!(
-            "{{\"version\":\"{D3Q19_PERF_MODEL_VERSION}\",\"q\":{D3Q19_DISTRIBUTIONS},\"distribution_bytes\":{DISTRIBUTION_BYTES},\"distribution_reads\":{},\"distribution_writes\":{},\"tile_metadata_bytes\":{},\"lookup_bytes_per_link\":{},\"population_bytes_per_cell\":{:.6},\"sparse_overhead_bytes_per_cell\":{:.6},\"bytes_per_cell\":{:.6},\"flops_per_cell\":{},\"flops_per_byte\":{:.9}}}",
+            "{{\"version\":\"{D3Q19_PERF_MODEL_VERSION}\",\"q\":{D3Q19_DISTRIBUTIONS},\"distribution_bytes\":{DISTRIBUTION_BYTES},\"distribution_reads\":{},\"distribution_writes\":{},\"tile_metadata_bytes\":{},\"lookup_bytes_per_halo_link\":{},\"links_per_tile\":{D3Q19_LINKS_PER_TILE},\"local_links_per_tile\":{D3Q19_LOCAL_LINKS_PER_TILE},\"halo_links_per_tile\":{D3Q19_HALO_LINKS_PER_TILE},\"population_bytes_per_cell\":{:.6},\"sparse_overhead_bytes_per_cell\":{:.6},\"bytes_per_cell\":{:.6},\"flops_per_cell\":{},\"flops_per_byte\":{:.9}}}",
             self.distribution_reads,
             self.distribution_writes,
             self.tile_metadata_bytes,
-            self.lookup_bytes_per_link,
+            self.lookup_bytes_per_halo_link,
             self.population_bytes_per_cell(),
             self.sparse_overhead_bytes_per_cell(),
             self.bytes_per_cell(),

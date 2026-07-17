@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::sync::Mutex;
 
-use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
+use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, RunReport, TileKernel, TilePlan};
 
 use super::{CollisionError3, CollisionModel3, E3, OPP3, Q3, TILE, Tile, equilibrium3};
 
@@ -48,7 +48,7 @@ const MORTON_COORD_LIMIT: u32 = 1 << MORTON_COORD_BITS;
 /// worker-count-INDEPENDENT constant: the tile plan (and therefore the
 /// reduction shape) is a function of the active set alone, so worker count
 /// can never change how work is grouped, only who executes it.
-const SWEEP_GROUP_TILES: usize = 8;
+pub const SPARSE_SWEEP_GROUP_TILES: usize = 8;
 
 /// Spread the low 21 bits of `v` so consecutive bits land 3 apart.
 const fn spread3(v: u64) -> u64 {
@@ -117,6 +117,59 @@ pub const fn state_bytes_per_tile() -> usize {
     3 * Q3 * core::mem::size_of::<Tile>()
 }
 
+/// Wall-clock envelope and executor facts for one pooled sparse pass.
+///
+/// `wall_ns` includes the serving runner's scheduling and drain overhead. It
+/// is measurement-only and cannot affect the published lattice state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparsePassObservation {
+    /// Executor-owned report for the exact pass invocation.
+    pub executor: RunReport,
+    /// Saturating positive wall time around the complete runner call.
+    pub wall_ns: u64,
+}
+
+/// Per-group local-stream and cross-tile halo wall envelopes.
+///
+/// Groups retain canonical Morton-slot identity. Their wall values may overlap
+/// across workers and therefore must be composed as a task DAG, not summed as
+/// if they were serial stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SparseStreamGroupObservation {
+    /// Worker-count-independent group identity.
+    pub group: u64,
+    /// First Morton-sorted active-tile slot in this group.
+    pub first_tile_slot: usize,
+    /// Active tiles covered by this group.
+    pub tiles: usize,
+    /// Saturating positive wall time for same-tile population pulls.
+    pub local_stream_wall_ns: u64,
+    /// Saturating positive wall time for cross-tile/domain lookup and pulls.
+    pub halo_wall_ns: u64,
+}
+
+/// Opt-in timing evidence from one successfully published pooled sweep.
+///
+/// The ordinary [`SparseGrid3::step_pooled`] path creates no timers or timing
+/// buffers. The observed path retains the same two executor passes and the
+/// same failure-atomic publication boundary, while conservatively measuring
+/// the split local-stream/halo loops used by both paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparseSweepObservation {
+    /// Active tile count used by both passes.
+    pub active_tiles: usize,
+    /// Normalized serving-worker count.
+    pub workers: usize,
+    /// Collide-pass executor and wall envelope.
+    pub collide: SparsePassObservation,
+    /// Combined local-stream/halo pass executor and wall envelope.
+    pub stream: SparsePassObservation,
+    /// Canonical per-group local-stream/halo observations.
+    pub stream_groups: Vec<SparseStreamGroupObservation>,
+    /// Saturating positive wall time for the final publication swap/counter.
+    pub publication_wall_ns: u64,
+}
+
 /// Typed refusal from sparse-grid construction or a sweep.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SparseError3 {
@@ -139,6 +192,13 @@ pub enum SparseError3 {
     Cancelled,
     /// The kernel pool refused the run.
     Pool(String),
+    /// A successful observed pass did not retain every canonical group row.
+    IncompleteObservation {
+        /// Groups required by the immutable active-set plan.
+        expected_groups: usize,
+        /// Complete group rows recovered before publication.
+        observed_groups: usize,
+    },
 }
 
 impl core::fmt::Display for SparseError3 {
@@ -161,6 +221,13 @@ impl core::fmt::Display for SparseError3 {
             ),
             SparseError3::Cancelled => f.write_str("sparse sweep cancelled before completion"),
             SparseError3::Pool(detail) => write!(f, "kernel pool refused the sweep: {detail}"),
+            SparseError3::IncompleteObservation {
+                expected_groups,
+                observed_groups,
+            } => write!(
+                f,
+                "sparse sweep observed {observed_groups}/{expected_groups} stream groups"
+            ),
         }
     }
 }
@@ -513,7 +580,8 @@ impl SparseGrid3 {
             )?;
         }
         for slot in 0..self.keys.len() {
-            stream_block(
+            stream_local_block(&mut self.next[slot], slot, &self.post);
+            stream_halo_block(
                 &mut self.next[slot],
                 slot,
                 &self.post,
@@ -542,14 +610,58 @@ impl SparseGrid3 {
         pool: &P,
         gate: &CancelGate,
     ) -> Result<(), SparseError3> {
-        let groups = self.keys.len().div_ceil(SWEEP_GROUP_TILES).max(1) as u64;
+        self.step_pooled_inner(pool, gate, false).map(|_| ())
+    }
 
-        {
+    /// One pooled sweep with opt-in measurement-only pass/group observation.
+    ///
+    /// This uses the same worker-count-independent group plan, collide pass,
+    /// combined stream/halo pass, and failure-atomic publication boundary as
+    /// [`SparseGrid3::step_pooled`]. Timing adds one pair of clock reads per
+    /// completed stream group and around each executor pass. The returned
+    /// values are envelope-class telemetry; no numerical result depends on
+    /// them.
+    ///
+    /// # Errors
+    /// As [`SparseGrid3::step_pooled`], plus
+    /// [`SparseError3::IncompleteObservation`] if a successful executor pass
+    /// fails to retain every canonical group row. In every refusal case the
+    /// pre-step published state remains intact.
+    pub fn step_pooled_observed<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+    ) -> Result<SparseSweepObservation, SparseError3> {
+        self.step_pooled_inner(pool, gate, true)?
+            .ok_or(SparseError3::IncompleteObservation {
+                expected_groups: self.keys.len().div_ceil(SPARSE_SWEEP_GROUP_TILES).max(1),
+                observed_groups: 0,
+            })
+    }
+
+    fn step_pooled_inner<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        observed: bool,
+    ) -> Result<Option<SparseSweepObservation>, SparseError3> {
+        let group_count = self.keys.len().div_ceil(SPARSE_SWEEP_GROUP_TILES).max(1);
+        let groups = group_count as u64;
+        let stream_timing = observed.then(|| {
+            (0..group_count)
+                .map(|_| Mutex::new(None::<SparseStreamGroupObservation>))
+                .collect::<Vec<_>>()
+        });
+        let active_tiles = self.keys.len();
+        let workers = pool.workers();
+
+        let collide_started = observed.then(std::time::Instant::now);
+        let (collide_outcome, collide_executor) = {
             let kernel = CollideKernel {
                 pre: &self.pre,
                 chunks: self
                     .post
-                    .chunks_mut(SWEEP_GROUP_TILES)
+                    .chunks_mut(SPARSE_SWEEP_GROUP_TILES)
                     .map(Mutex::new)
                     .collect(),
                 keys: &self.keys,
@@ -557,28 +669,73 @@ impl SparseGrid3 {
                 force: self.force,
                 groups,
             };
-            run_sweep(pool, gate, &kernel)?;
-        }
+            run_sweep(pool, gate, &kernel)
+        };
+        let collide_wall_ns = collide_started.map(|start| nonzero_wall_ns(start.elapsed()));
+        collide_outcome?;
 
-        let result = {
+        let stream_started = observed.then(std::time::Instant::now);
+        let (stream_outcome, stream_executor) = {
             let kernel = StreamKernel {
                 src: &self.post,
                 chunks: self
                     .next
-                    .chunks_mut(SWEEP_GROUP_TILES)
+                    .chunks_mut(SPARSE_SWEEP_GROUP_TILES)
                     .map(Mutex::new)
                     .collect(),
                 keys: &self.keys,
                 index: &self.index,
                 tile_dims: (self.ntx, self.nty, self.ntz),
                 groups,
+                timings: stream_timing.as_deref(),
             };
             run_sweep(pool, gate, &kernel)
         };
-        result?;
+        let stream_wall_ns = stream_started.map(|start| nonzero_wall_ns(start.elapsed()));
+        stream_outcome?;
+
+        let mut stream_groups = Vec::new();
+        if let Some(timing) = stream_timing {
+            stream_groups.reserve(timing.len());
+            for slot in timing {
+                if let Ok(Some(group)) = slot.into_inner() {
+                    stream_groups.push(group);
+                }
+            }
+            if stream_groups.len() != group_count {
+                return Err(SparseError3::IncompleteObservation {
+                    expected_groups: group_count,
+                    observed_groups: stream_groups.len(),
+                });
+            }
+        }
+
+        let publication_started = observed.then(std::time::Instant::now);
         std::mem::swap(&mut self.pre, &mut self.next);
         self.steps += 1;
-        Ok(())
+        let publication_wall_ns = publication_started.map(|start| nonzero_wall_ns(start.elapsed()));
+
+        Ok(
+            match (collide_wall_ns, stream_wall_ns, publication_wall_ns) {
+                (Some(collide_wall_ns), Some(stream_wall_ns), Some(publication_wall_ns)) => {
+                    Some(SparseSweepObservation {
+                        active_tiles,
+                        workers,
+                        collide: SparsePassObservation {
+                            executor: collide_executor,
+                            wall_ns: collide_wall_ns,
+                        },
+                        stream: SparsePassObservation {
+                            executor: stream_executor,
+                            wall_ns: stream_wall_ns,
+                        },
+                        stream_groups,
+                        publication_wall_ns,
+                    })
+                }
+                _ => None,
+            },
+        )
     }
 }
 
@@ -587,9 +744,9 @@ fn run_sweep<P: KernelRunner, K: TileKernel<Out = FirstRefusal>>(
     pool: &P,
     gate: &CancelGate,
     kernel: &K,
-) -> Result<(), SparseError3> {
-    let (outcome, _report) = pool.run_with_gate(kernel, gate);
-    match outcome {
+) -> (Result<(), SparseError3>, RunReport) {
+    let (outcome, report) = pool.run_with_gate(kernel, gate);
+    let outcome = match outcome {
         Ok(FirstRefusal(None)) => Ok(()),
         Ok(FirstRefusal(Some(refusal))) => Err(refusal),
         Err(err) => {
@@ -599,7 +756,8 @@ fn run_sweep<P: KernelRunner, K: TileKernel<Out = FirstRefusal>>(
                 Err(SparseError3::Pool(format!("{err:?}")))
             }
         }
-    }
+    };
+    (outcome, report)
 }
 
 /// Collide every cell of `pre` into `post` (own-tile data only).
@@ -634,11 +792,29 @@ fn collide_or_refuse(
     super::collide_cell3(populations, model, force)
 }
 
-/// Pull-stream one tile from the post-collision state of itself and its
-/// neighbors. A link whose source cell lies in an inactive tile (or outside
-/// the domain) bounces back: the cell keeps its own post-collision opposite
-/// population — inactive space is solid wall in this increment.
-fn stream_block(
+/// Same-tile half of one pull-stream group. This loop has no sparse-map
+/// lookup: every selected source lane is known to live in `slot`.
+fn stream_local_block(dst: &mut TileBlock, slot: usize, src: &[TileBlock]) {
+    for lz in 0..TILE {
+        for ly in 0..TILE {
+            for lx in 0..TILE {
+                let lane = (lz * TILE + ly) * TILE + lx;
+                for q in 0..Q3 {
+                    if let Some(src_lane) = local_source_lane(lx, ly, lz, q) {
+                        dst.f[q].0[lane] = src[slot].f[q].0[src_lane];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Cross-tile/domain half of one pull-stream group. A link whose source cell
+/// lies in an inactive tile (or outside the domain) bounces back: the cell
+/// keeps its own post-collision opposite population — inactive space is solid
+/// wall in this increment. These writes are disjoint from
+/// [`stream_local_block`].
+fn stream_halo_block(
     dst: &mut TileBlock,
     slot: usize,
     src: &[TileBlock],
@@ -655,6 +831,9 @@ fn stream_block(
                 let gy = ty as i64 * TILE as i64 + ly as i64;
                 let gz = tz as i64 * TILE as i64 + lz as i64;
                 for q in 0..Q3 {
+                    if local_source_lane(lx, ly, lz, q).is_some() {
+                        continue;
+                    }
                     let sx = gx - i64::from(E3[q].0);
                     let sy = gy - i64::from(E3[q].1);
                     let sz = gz - i64::from(E3[q].2);
@@ -666,6 +845,18 @@ fn stream_block(
             }
         }
     }
+}
+
+/// Source lane when a pull remains inside the destination tile.
+fn local_source_lane(lx: usize, ly: usize, lz: usize, q: usize) -> Option<usize> {
+    let sx = lx as i64 - i64::from(E3[q].0);
+    let sy = ly as i64 - i64::from(E3[q].1);
+    let sz = lz as i64 - i64::from(E3[q].2);
+    let tile = TILE as i64;
+    if !(0..tile).contains(&sx) || !(0..tile).contains(&sy) || !(0..tile).contains(&sz) {
+        return None;
+    }
+    Some(((sz as usize * TILE + sy as usize) * TILE) + sx as usize)
 }
 
 /// Resolve a global cell coordinate to `(active slot, lane)`, or `None` if
@@ -715,7 +906,7 @@ impl TileKernel for CollideKernel<'_> {
             return ControlFlow::Break(Cancelled);
         }
         let group = tile as usize;
-        let base = group * SWEEP_GROUP_TILES;
+        let base = group * SPARSE_SWEEP_GROUP_TILES;
         let mut chunk = self.chunks[group].lock().expect("collide chunk poisoned");
         for (offset, post) in chunk.iter_mut().enumerate() {
             let slot = base + offset;
@@ -744,6 +935,7 @@ struct StreamKernel<'a> {
     index: &'a BTreeMap<u64, usize>,
     tile_dims: (usize, usize, usize),
     groups: u64,
+    timings: Option<&'a [Mutex<Option<SparseStreamGroupObservation>>]>,
 }
 
 impl TileKernel for StreamKernel<'_> {
@@ -758,12 +950,56 @@ impl TileKernel for StreamKernel<'_> {
             return ControlFlow::Break(Cancelled);
         }
         let group = tile as usize;
-        let base = group * SWEEP_GROUP_TILES;
+        let base = group * SPARSE_SWEEP_GROUP_TILES;
         let mut chunk = self.chunks[group].lock().expect("stream chunk poisoned");
-        for (offset, dst) in chunk.iter_mut().enumerate() {
-            let slot = base + offset;
-            stream_block(dst, slot, self.src, self.keys, self.index, self.tile_dims);
+        if let Some(timings) = self.timings {
+            let local_started = std::time::Instant::now();
+            for (offset, dst) in chunk.iter_mut().enumerate() {
+                stream_local_block(dst, base + offset, self.src);
+            }
+            let local_stream_wall_ns = nonzero_wall_ns(local_started.elapsed());
+
+            let halo_started = std::time::Instant::now();
+            for (offset, dst) in chunk.iter_mut().enumerate() {
+                stream_halo_block(
+                    dst,
+                    base + offset,
+                    self.src,
+                    self.keys,
+                    self.index,
+                    self.tile_dims,
+                );
+            }
+            let halo_wall_ns = nonzero_wall_ns(halo_started.elapsed());
+            *timings[group].lock().expect("stream timing slot poisoned") =
+                Some(SparseStreamGroupObservation {
+                    group: tile,
+                    first_tile_slot: base,
+                    tiles: chunk.len(),
+                    local_stream_wall_ns,
+                    halo_wall_ns,
+                });
+        } else {
+            for (offset, dst) in chunk.iter_mut().enumerate() {
+                stream_local_block(dst, base + offset, self.src);
+            }
+            for (offset, dst) in chunk.iter_mut().enumerate() {
+                stream_halo_block(
+                    dst,
+                    base + offset,
+                    self.src,
+                    self.keys,
+                    self.index,
+                    self.tile_dims,
+                );
+            }
         }
         ControlFlow::Continue(FirstRefusal(None))
     }
+}
+
+/// Envelope-class ns from a duration. A completed non-empty phase is clamped
+/// to one nanosecond when the host clock's resolution reports zero.
+fn nonzero_wall_ns(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX).max(1)
 }

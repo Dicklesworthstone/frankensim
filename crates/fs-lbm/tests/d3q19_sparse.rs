@@ -10,7 +10,8 @@ use fs_exec::{
     CancelGate, Cancelled, Cx, KernelRunner, RunError, RunReport, TileKernel, TilePlan, TilePool,
 };
 use fs_lbm::d3q19::sparse::{
-    MORTON_COORD_BITS, SparseError3, SparseGrid3, demorton3, morton3, state_bytes_per_tile,
+    MORTON_COORD_BITS, SPARSE_SWEEP_GROUP_TILES, SparseError3, SparseGrid3, demorton3, morton3,
+    state_bytes_per_tile,
 };
 
 fn splitmix64(mut z: u64) -> u64 {
@@ -238,6 +239,95 @@ fn pooled_sweep_is_bitwise_identical_across_worker_counts() {
             "pooled sweep with {workers} workers diverged bitwise from serial"
         );
     }
+}
+
+#[test]
+fn observed_sweep_preserves_bits_and_retains_canonical_phase_geometry() {
+    let tiles = l_shaped_tiles(8, 8, 8);
+    let mut ordinary =
+        SparseGrid3::new(32, 32, 32, 0.7, [1e-6, 0.0, 0.0]).expect("dims admissible");
+    ordinary
+        .activate_tiles(&tiles)
+        .expect("activation in-domain");
+    ordinary.perturb(0x0B5E_7EED, 0.01);
+
+    let mut observed =
+        SparseGrid3::new(32, 32, 32, 0.7, [1e-6, 0.0, 0.0]).expect("dims admissible");
+    observed
+        .activate_tiles(&tiles)
+        .expect("activation in-domain");
+    observed.perturb(0x0B5E_7EED, 0.01);
+
+    let pool = TilePool::for_host(3, 0x7127);
+    let ordinary_gate = CancelGate::new();
+    ordinary
+        .step_pooled(&pool, &ordinary_gate)
+        .expect("ordinary sweep admissible");
+    let observed_gate = CancelGate::new();
+    let report = observed
+        .step_pooled_observed(&pool, &observed_gate)
+        .expect("observed sweep admissible");
+
+    assert_eq!(
+        observed.state_bits(),
+        ordinary.state_bits(),
+        "measurement-only timing changed published population bits"
+    );
+    assert_eq!(report.active_tiles, tiles.len());
+    assert_eq!(report.workers, 3);
+    assert_eq!(
+        report.collide.executor.kernel,
+        "fs-lbm/d3q19-sparse-collide"
+    );
+    assert_eq!(report.stream.executor.kernel, "fs-lbm/d3q19-sparse-stream");
+    let expected_groups = tiles.len().div_ceil(SPARSE_SWEEP_GROUP_TILES);
+    for pass in [&report.collide, &report.stream] {
+        assert_eq!(pass.executor.total, expected_groups as u64);
+        assert_eq!(pass.executor.completed, pass.executor.total);
+        assert!(pass.wall_ns > 0);
+    }
+    assert_eq!(report.stream_groups.len(), expected_groups);
+    assert_eq!(
+        report
+            .stream_groups
+            .iter()
+            .map(|group| group.tiles)
+            .sum::<usize>(),
+        tiles.len()
+    );
+    for (group_index, group) in report.stream_groups.iter().enumerate() {
+        assert_eq!(group.group, group_index as u64);
+        assert_eq!(
+            group.first_tile_slot,
+            group_index * SPARSE_SWEEP_GROUP_TILES
+        );
+        assert_eq!(
+            group.tiles,
+            (tiles.len() - group.first_tile_slot).min(SPARSE_SWEEP_GROUP_TILES)
+        );
+        assert!(group.local_stream_wall_ns > 0);
+        assert!(group.halo_wall_ns > 0);
+    }
+    assert!(report.publication_wall_ns > 0);
+}
+
+#[test]
+fn observed_sweep_cancellation_keeps_published_state_private() {
+    let tiles = l_shaped_tiles(8, 8, 8);
+    let mut grid = SparseGrid3::new(32, 32, 32, 0.8, [0.0; 3]).expect("dims admissible");
+    grid.activate_tiles(&tiles).expect("activation in-domain");
+    grid.perturb(0x0B5E_CA11, 0.01);
+    let before = grid.state_bits();
+    let pool = TilePool::for_host(3, 0x7127);
+    let gate = CancelGate::new();
+    gate.request();
+
+    assert_eq!(
+        grid.step_pooled_observed(&pool, &gate),
+        Err(SparseError3::Cancelled)
+    );
+    assert_eq!(grid.steps(), 0);
+    assert_eq!(grid.state_bits(), before);
 }
 
 #[test]
