@@ -454,8 +454,16 @@ Wankel-housing authority.
   composition claims on the source's volume-fraction basis and two separately
   provenance-linked calculated-RON claims (`94` and `93.9`) for the identical
   formulation.
-  The gas associations do not define air or exhaust mixture compositions,
-  humidity, or combustion completeness. The Aluminum claims do not define a
+  The NIST SRM 1720 tranche adds two exact and two range-endpoint information
+  claims for one expired northern-continental-air lot while leaving blank
+  cylinder-specific greenhouse-gas placeholders absent. The NIST SRM 2728
+  tranche adds the archived certificate title's three
+  nominal amount fractions plus its total-other-hydrocarbons information value
+  for one named auto-emission calibration gas. It does not fill the generic
+  template's blank cylinder-specific certified values or confidence intervals.
+  The species associations do not define air or exhaust mixture compositions,
+  humidity, or combustion completeness, and SRM 2728 is not represented as
+  engine-generated exhaust. The Aluminum claims do not define a
   continuous constitutive curve or a general-purpose design card; their NIST
   polynomial-fit errors lack the confidence metadata needed by the current
   statistical uncertainty variants and therefore remain observation caveats

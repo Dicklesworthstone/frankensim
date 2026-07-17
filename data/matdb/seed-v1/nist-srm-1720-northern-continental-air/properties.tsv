@@ -1,0 +1,58 @@
+frankensim.matdb-source.v1
+observation	srm-1720-information-values	nist-srm-1720-lot-1720-a-xx-northern-continental-air-generic-template-cylinder-and-sample-unassigned	NIST SRM 1720 archived Certificate of Analysis information-value table and mixture-preparation transcription	The lot was whole ambient air filled at Niwot Ridge Colorado in 2010 and scrubbed of moisture to represent northern continental air. The information table reports oxygen 20.93 mole percent, argon 0.935 mole percent, carbon monoxide 130 to 180 nanomoles per mole, and nitrogen as balance. These are explicitly information values that cannot establish metrological traceability; the carbon-monoxide endpoints are an observed information range, not confidence bounds. The generic archived certificate leaves cylinder-specific certified carbon-dioxide methane and nitrous-oxide values and expanded uncertainties as SAMPLE placeholders. Cylinder and sample identity, residual humidity, use-state temperature and pressure, remaining trace composition, and covariance are absent. Certification expired 2020-09-01. This one archived lot is not a universal dry-air composition or a standard-atmosphere model
+scalar	information-oxygen	srm-1720-information-values	information_oxygen_amount_fraction	20.93	%	constant
+uncertainty	information-oxygen	unstated	-	-	-	-
+validity	information-oxygen	source_value_is_information_not_certified	1	1	1
+validity	information-oxygen	source_composition_basis_is_amount_fraction	1	1	1
+validity	information-oxygen	source_nitrogen_is_balance_gas	1	1	1
+validity	information-oxygen	source_air_was_scrubbed_of_moisture	1	1	1
+validity	information-oxygen	source_remaining_humidity_quantified	0	0	1
+validity	information-oxygen	source_cylinder_identity_known	0	0	1
+validity	information-oxygen	source_certified_greenhouse_values_present	0	0	1
+validity	information-oxygen	source_use_temperature_known	0	0	1
+validity	information-oxygen	source_use_pressure_known	0	0	1
+validity	information-oxygen	source_is_northern_continental_air_lot	1	1	1
+validity	information-oxygen	source_is_universal_air_composition	0	0	1
+validity	information-oxygen	source_certificate_is_archived_and_expired	1	1	1
+scalar	information-argon	srm-1720-information-values	information_argon_amount_fraction	0.935	%	constant
+uncertainty	information-argon	unstated	-	-	-	-
+validity	information-argon	source_value_is_information_not_certified	1	1	1
+validity	information-argon	source_composition_basis_is_amount_fraction	1	1	1
+validity	information-argon	source_nitrogen_is_balance_gas	1	1	1
+validity	information-argon	source_air_was_scrubbed_of_moisture	1	1	1
+validity	information-argon	source_remaining_humidity_quantified	0	0	1
+validity	information-argon	source_cylinder_identity_known	0	0	1
+validity	information-argon	source_certified_greenhouse_values_present	0	0	1
+validity	information-argon	source_use_temperature_known	0	0	1
+validity	information-argon	source_use_pressure_known	0	0	1
+validity	information-argon	source_is_northern_continental_air_lot	1	1	1
+validity	information-argon	source_is_universal_air_composition	0	0	1
+validity	information-argon	source_certificate_is_archived_and_expired	1	1	1
+scalar	information-carbon-monoxide-lower	srm-1720-information-values	information_carbon_monoxide_amount_fraction_lower_bound	0.000013	%	constant
+uncertainty	information-carbon-monoxide-lower	unstated	-	-	-	-
+validity	information-carbon-monoxide-lower	source_value_is_information_not_certified	1	1	1
+validity	information-carbon-monoxide-lower	source_composition_basis_is_amount_fraction	1	1	1
+validity	information-carbon-monoxide-lower	source_nitrogen_is_balance_gas	1	1	1
+validity	information-carbon-monoxide-lower	source_air_was_scrubbed_of_moisture	1	1	1
+validity	information-carbon-monoxide-lower	source_remaining_humidity_quantified	0	0	1
+validity	information-carbon-monoxide-lower	source_cylinder_identity_known	0	0	1
+validity	information-carbon-monoxide-lower	source_certified_greenhouse_values_present	0	0	1
+validity	information-carbon-monoxide-lower	source_use_temperature_known	0	0	1
+validity	information-carbon-monoxide-lower	source_use_pressure_known	0	0	1
+validity	information-carbon-monoxide-lower	source_is_northern_continental_air_lot	1	1	1
+validity	information-carbon-monoxide-lower	source_is_universal_air_composition	0	0	1
+validity	information-carbon-monoxide-lower	source_certificate_is_archived_and_expired	1	1	1
+scalar	information-carbon-monoxide-upper	srm-1720-information-values	information_carbon_monoxide_amount_fraction_upper_bound	0.000018	%	constant
+uncertainty	information-carbon-monoxide-upper	unstated	-	-	-	-
+validity	information-carbon-monoxide-upper	source_value_is_information_not_certified	1	1	1
+validity	information-carbon-monoxide-upper	source_composition_basis_is_amount_fraction	1	1	1
+validity	information-carbon-monoxide-upper	source_nitrogen_is_balance_gas	1	1	1
+validity	information-carbon-monoxide-upper	source_air_was_scrubbed_of_moisture	1	1	1
+validity	information-carbon-monoxide-upper	source_remaining_humidity_quantified	0	0	1
+validity	information-carbon-monoxide-upper	source_cylinder_identity_known	0	0	1
+validity	information-carbon-monoxide-upper	source_certified_greenhouse_values_present	0	0	1
+validity	information-carbon-monoxide-upper	source_use_temperature_known	0	0	1
+validity	information-carbon-monoxide-upper	source_use_pressure_known	0	0	1
+validity	information-carbon-monoxide-upper	source_is_northern_continental_air_lot	1	1	1
+validity	information-carbon-monoxide-upper	source_is_universal_air_composition	0	0	1
+validity	information-carbon-monoxide-upper	source_certificate_is_archived_and_expired	1	1	1

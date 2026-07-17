@@ -70,6 +70,64 @@ Primary and comparison references:
 - <https://webbook.nist.gov/cgi/cbook.cgi?ID=C7732185>
 - <https://webbook.nist.gov/cgi/cbook.cgi?ID=C630080>
 
+## NIST SRM 1720 northern-continental-air tranche
+
+`nist-srm-1720-northern-continental-air/` retains the information-value table
+for NIST SRM 1720 Lot `1720-A-XX`. NOAA filled the lot from whole ambient air
+at Niwot Ridge, Colorado, in 2010 and scrubbed it of moisture to represent
+northern continental air. The table reports oxygen at `20.93 mol%`, argon at
+`0.935 mol%`, carbon monoxide from `130` through `180 nmol/mol`, and nitrogen
+as the balance gas.
+
+NIST explicitly classifies those four entries as information values that
+cannot establish metrological traceability. The carbon-monoxide endpoints are
+therefore separate observed-range claims, not a confidence interval. The
+generic archived certificate leaves the cylinder-specific certified carbon-
+dioxide, methane, and nitrous-oxide values and expanded uncertainties as
+`SAMPLE` placeholders; no runtime claims are invented for them. Residual
+humidity, use-state temperature and pressure, remaining trace composition,
+and covariance also remain unknown.
+
+The certificate was issued on 2015-09-08 and expired on 2020-09-01. The pack
+is a historical, named natural-air lot, not a current certificate, universal
+dry-air composition, or standard-atmosphere model.
+
+Northern-continental-air sources:
+
+- <https://tsapps.nist.gov/srmext/certificates/archives/1720.pdf>
+- <https://www.nist.gov/copyrights-disclaimers>
+
+## NIST SRM 2728 auto-emission reference-gas tranche
+
+`nist-srm-2728-auto-emission-reference-gas/` retains the named composition in
+NIST's archived generic Certificate of Analysis for SRM 2728, *Carbon Dioxide,
+Carbon Monoxide, and Propane in Nitrogen (Auto Emission Inspection/Maintenance
+Gas)*. The three title values are `14 mol%` carbon dioxide, `8 mol%` carbon
+monoxide, and `3000 micromol/mol` propane, with nitrogen named as the balance
+gas. The pack normalizes those title values to dimensionless amount fractions
+but leaves nitrogen as observation text: deriving a closed balance would be
+dishonest because the certificate also reports an `8 micromol/mol` estimated
+total-other-hydrocarbons information value.
+
+The archived generic certificate leaves the per-cylinder certified-value and
+95%-confidence-interval fields blank. The runtime claims therefore remain
+explicitly nominal or informational with `Unstated` uncertainty; they are not
+represented as certified values for a physical cylinder. Cylinder/sample
+identity, use temperature and pressure, and oxygen, water, and NOx fractions
+are also absent.
+
+This is a versioned synthetic reference mixture intended to calibrate mobile-
+source emissions measurements. It is not engine-generated exhaust, a
+combustion or equilibrium state, or authority for thermophysical, reaction, or
+transport properties. NIST's unmarked public-information reuse policy is
+retained with attribution.
+
+Reference-gas sources:
+
+- <https://tsapps.nist.gov/srmext/certificates/archives/2728.pdf>
+- <https://tsapps.nist.gov/srmext/certificates/archives/>
+- <https://www.nist.gov/copyrights-disclaimers>
+
 ## Aluminum 6061-T6 cryogenic exact-point tranche
 
 `aluminum-6061-t6-cryogenic/` is the first committed bulk-material tranche.
@@ -1216,6 +1274,14 @@ cargo run -p xtask -- matdb-pack \
   --out /path/to/CH4.fsspcpk
 
 cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nist-srm-1720-northern-continental-air/manifest.tsv \
+  --out /path/to/nist-srm-1720-northern-continental-air.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nist-srm-2728-auto-emission-reference-gas/manifest.tsv \
+  --out /path/to/nist-srm-2728-auto-emission-reference-gas.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/aluminum-6061-t6-cryogenic/manifest.tsv \
   --out /path/to/aluminum-6061-t6-cryogenic.fsmatpk
 
@@ -1334,14 +1400,18 @@ cargo run -p xtask -- matdb-pack \
 
 ## No-claim boundary
 
-The gas tranches are species identity/standard-state associations, not complete
-material cards. They do not specify an air or exhaust mixture, composition
-basis, humidity level, combustion state, or validity domain. In particular,
-the H2O association does not select a wet-air composition and the CO
-association does not claim incomplete combustion. They supply no heat-capacity
-coefficients, equation evaluator, uncertainty model for thermodynamic
-properties, reaction mechanism, equilibrium result, or transport data. A
-decimal agreement check is not an uncertainty estimate.
+The species-association gas tranches are identity/standard-state associations,
+not complete material cards. By themselves they do not specify an air or
+exhaust mixture, composition basis, humidity level, combustion state, or
+validity domain. The separate NIST SRM 2728 pack does define a synthetic auto-
+emission calibration mixture at its three nominal title values, but it is not
+engine-generated exhaust and does not fill the certificate's blank cylinder-
+specific certified values. In particular, the H2O association does not select
+a wet-air composition and the CO association does not claim incomplete
+combustion. None of these packs supplies heat-capacity coefficients, an
+equation evaluator, thermodynamic-property uncertainty, a reaction mechanism,
+an equilibrium result, or transport data. A decimal agreement check is not an
+uncertainty estimate.
 
 The Aluminum 6061-T6 tranche is not a general-purpose design card. It contains
 six polynomial-derived scalar points for one named temper, not density,

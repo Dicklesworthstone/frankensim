@@ -50,6 +50,10 @@ const NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv";
 const FACE_G_CDTRF_G_2023_V1_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/face-g-cdtrf-g-2023-v1/manifest.tsv";
+const NIST_SRM_1720_NORTHERN_CONTINENTAL_AIR_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nist-srm-1720-northern-continental-air/manifest.tsv";
+const NIST_SRM_2728_AUTO_EMISSION_REFERENCE_GAS_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nist-srm-2728-auto-emission-reference-gas/manifest.tsv";
 const WO2018_125520_FORMULATION_8_5W30_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/wo2018-125520-formulation-8-5w30/manifest.tsv";
 const NASA_UAM_MW16C_POLYIMIDE_WIRE_SEED_MANIFEST: &str =
@@ -1558,7 +1562,7 @@ fn g3_cli_compiles_committed_n0602_001_nitrile_jp8_compatibility_seed() {
         assert!(
             observation
                 .caveats
-                .contains("does not define service compatibility")
+                .contains("do not define service compatibility")
         );
     }
 
@@ -6024,6 +6028,283 @@ fn g3_cli_compiles_committed_air_exhaust_constituents_without_inventing_a_mixtur
 }
 
 #[test]
+fn g3_cli_compiles_committed_nist_srm_1720_northern_continental_air() {
+    let manifest = workspace_path(NIST_SRM_1720_NORTHERN_CONTINENTAL_AIR_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed NIST SRM 1720 northern-continental-air manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("nist-srm-1720-first.fsmatpk");
+    let second_path = directory.join("nist-srm-1720-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first NIST SRM 1720 compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second NIST SRM 1720 compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "NIST SRM 1720 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first NIST SRM 1720 pack");
+    let second_bytes = fs::read(second_path).expect("read second NIST SRM 1720 pack");
+    assert_eq!(first_bytes, second_bytes, "NIST SRM 1720 pack bytes moved");
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode NIST SRM 1720 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify NIST SRM 1720 pack identity");
+
+    assert_eq!(decoded.pack_id(), "nist-srm-1720-northern-continental-air");
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("NIST"));
+    assert_eq!(decoded.claims().claim_count(), 4);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expected_claims: [(&str, f64); 4] = [
+        ("information_oxygen_amount_fraction", 20.93),
+        ("information_argon_amount_fraction", 0.935),
+        (
+            "information_carbon_monoxide_amount_fraction_lower_bound",
+            0.000013,
+        ),
+        (
+            "information_carbon_monoxide_amount_fraction_upper_bound",
+            0.000018,
+        ),
+    ];
+    let mut carbon_monoxide_bounds = Vec::new();
+    for (property, source_percent) in expected_claims {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing unique SRM 1720 {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("SRM 1720 {property} was not scalar");
+        };
+        let expected_value: f64 = source_percent * 0.01;
+        let comparison_scale: f64 = expected_value.abs().max(1.0e-12);
+        assert!((*value - expected_value).abs() / comparison_scale <= 2.0e-15);
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NIST_PUBLIC_INFORMATION_LICENSE);
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("Standard Reference Material 1720")
+        );
+        assert!(claim.provenance.source.contains("[source:primary]"));
+
+        for (axis, expected) in [
+            ("source_value_is_information_not_certified", 1.0),
+            ("source_composition_basis_is_amount_fraction", 1.0),
+            ("source_nitrogen_is_balance_gas", 1.0),
+            ("source_air_was_scrubbed_of_moisture", 1.0),
+            ("source_remaining_humidity_quantified", 0.0),
+            ("source_cylinder_identity_known", 0.0),
+            ("source_certified_greenhouse_values_present", 0.0),
+            ("source_use_temperature_known", 0.0),
+            ("source_use_pressure_known", 0.0),
+            ("source_is_northern_continental_air_lot", 1.0),
+            ("source_is_universal_air_composition", 0.0),
+            ("source_certificate_is_archived_and_expired", 1.0),
+        ] {
+            assert_eq!(
+                claim.validity.bound(axis),
+                Some((expected, expected)),
+                "SRM 1720 {property} moved validity axis {axis}"
+            );
+        }
+
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("SRM 1720 information observation remains linked");
+        assert!(observation.method.contains("information-value table"));
+        assert!(
+            observation
+                .caveats
+                .contains("cannot establish metrological traceability")
+        );
+        assert!(observation.caveats.contains("SAMPLE placeholders"));
+        assert!(
+            observation
+                .caveats
+                .contains("not a universal dry-air composition")
+        );
+
+        if property.contains("carbon_monoxide") {
+            carbon_monoxide_bounds.push(*value);
+        }
+    }
+    carbon_monoxide_bounds.sort_by(f64::total_cmp);
+    assert_eq!(carbon_monoxide_bounds.len(), 2);
+    assert!(carbon_monoxide_bounds[0] < carbon_monoxide_bounds[1]);
+    for absent in [
+        "certified_carbon_dioxide_amount_fraction",
+        "certified_methane_amount_fraction",
+        "certified_nitrous_oxide_amount_fraction",
+        "information_nitrogen_amount_fraction",
+    ] {
+        assert!(
+            decoded.claims().claims_for(absent).is_empty(),
+            "SRM 1720 must not invent {absent}"
+        );
+    }
+}
+
+#[test]
+fn g3_cli_compiles_committed_nist_srm_2728_auto_emission_reference_gas() {
+    let manifest = workspace_path(NIST_SRM_2728_AUTO_EMISSION_REFERENCE_GAS_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed NIST SRM 2728 reference-gas manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("nist-srm-2728-first.fsmatpk");
+    let second_path = directory.join("nist-srm-2728-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first NIST SRM 2728 compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second NIST SRM 2728 compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "NIST SRM 2728 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first NIST SRM 2728 pack");
+    let second_bytes = fs::read(second_path).expect("read second NIST SRM 2728 pack");
+    assert_eq!(first_bytes, second_bytes, "NIST SRM 2728 pack bytes moved");
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode NIST SRM 2728 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify NIST SRM 2728 pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "nist-srm-2728-auto-emission-reference-gas"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("NIST"));
+    assert_eq!(decoded.claims().claim_count(), 4);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expected_claims: [(&str, f64, bool, bool); 4] = [
+        ("nominal_carbon_dioxide_amount_fraction", 14.0, true, false),
+        ("nominal_carbon_monoxide_amount_fraction", 8.0, true, false),
+        ("nominal_propane_amount_fraction", 0.3, true, false),
+        (
+            "information_total_other_hydrocarbons_propane_equivalent_amount_fraction",
+            0.0008,
+            false,
+            true,
+        ),
+    ];
+    for (property, source_percent, is_nominal, is_information) in expected_claims {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing unique SRM 2728 {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("SRM 2728 {property} was not scalar");
+        };
+        let expected_value: f64 = source_percent * 0.01;
+        let comparison_scale: f64 = expected_value.abs().max(1.0e-12);
+        assert!((*value - expected_value).abs() / comparison_scale <= 2.0e-15);
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NIST_PUBLIC_INFORMATION_LICENSE);
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("Standard Reference Material 2728")
+        );
+        assert!(claim.provenance.source.contains("[source:primary]"));
+
+        for (axis, expected) in [
+            ("source_composition_basis_is_amount_fraction", 1.0),
+            ("source_nitrogen_is_balance_gas", 1.0),
+            ("source_cylinder_identity_known", 0.0),
+            ("source_certified_value_and_95pct_interval_present", 0.0),
+            ("source_is_auto_emission_calibration_gas", 1.0),
+            ("source_is_engine_generated_exhaust_sample", 0.0),
+            ("source_mixture_temperature_known", 0.0),
+            ("source_mixture_pressure_known", 0.0),
+            ("source_oxygen_water_nox_fractions_known", 0.0),
+            ("source_certificate_is_archived_template", 1.0),
+        ] {
+            assert_eq!(
+                claim.validity.bound(axis),
+                Some((expected, expected)),
+                "SRM 2728 {property} moved validity axis {axis}"
+            );
+        }
+        let nominal_axis = if is_nominal { 1.0 } else { 0.0 };
+        let information_axis = if is_information { 1.0 } else { 0.0 };
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_value_is_nominal_not_cylinder_certified"),
+            Some((nominal_axis, nominal_axis))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_value_is_information_not_certified"),
+            Some((information_axis, information_axis))
+        );
+
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("SRM 2728 composition observation remains linked");
+        assert!(observation.method.contains("nominal composition"));
+        assert!(
+            observation
+                .caveats
+                .contains("95 percent confidence intervals blank")
+        );
+        assert!(
+            observation
+                .caveats
+                .contains("not a sampled or equilibrium engine exhaust")
+        );
+        assert!(
+            observation
+                .caveats
+                .contains("Nitrogen is identified only as the balance gas")
+        );
+    }
+
+    assert!(
+        decoded
+            .claims()
+            .claims_for("nominal_nitrogen_amount_fraction")
+            .is_empty(),
+        "SRM 2728 nitrogen balance must not become an inferred scalar"
+    );
+}
+
+#[test]
 fn g3_cli_refuses_malformed_species_without_publishing() {
     let malformed = SPECIES_SOURCE.replacen("28.0134\tg/mol", "28.0134\tkg", 1);
     assert_ne!(malformed, SPECIES_SOURCE);
@@ -6235,11 +6516,7 @@ fn g3_cli_compiles_committed_nasa_cr_195445_omc_ps200_rotary_coating_system() {
                 assert!(observation.specimen.contains("Test6-air-cooled-OMC"));
                 assert!(observation.caveats.contains("500 degF"));
                 assert!(observation.caveats.contains("local PS-200 breakthrough"));
-                assert!(
-                    observation
-                        .caveats
-                        .contains("does not establish a wear rate")
-                );
+                assert!(observation.caveats.contains("do not establish a wear rate"));
             }
             other => panic!("unexpected OMC PS-200 engine test number: {other}"),
         }

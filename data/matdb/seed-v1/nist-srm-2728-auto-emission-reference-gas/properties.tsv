@@ -1,0 +1,58 @@
+frankensim.matdb-source.v1
+observation	srm-2728-title-composition	nist-srm-2728-auto-emission-inspection-maintenance-gas-generic-template-cylinder-and-sample-unassigned	NIST archived SRM 2728 Certificate of Analysis title nominal composition and intended-use transcription	The certificate title states nominal amount fractions of 14 mole percent carbon dioxide, 8 mole percent carbon monoxide, and 3000 micromoles per mole propane in nitrogen. The generic archived certificate leaves the cylinder-specific certified values and their 95 percent confidence intervals blank, so these rows preserve nominal title values with Unstated uncertainty and are not certified values for a physical cylinder. Nitrogen is identified only as the balance gas and is not assigned a derived scalar because the certificate also reports an estimated 8 micromoles per mole total-other-hydrocarbons information value. This is a calibration gas for mobile-source emissions inspection and maintenance, not a sampled or equilibrium engine exhaust state. Cylinder and sample identity, use temperature and pressure, oxygen, water, NOx, thermophysical properties, reactions, and transport data are absent
+scalar	nominal-carbon-dioxide	srm-2728-title-composition	nominal_carbon_dioxide_amount_fraction	14	%	constant
+uncertainty	nominal-carbon-dioxide	unstated	-	-	-	-
+validity	nominal-carbon-dioxide	source_composition_basis_is_amount_fraction	1	1	1
+validity	nominal-carbon-dioxide	source_value_is_nominal_not_cylinder_certified	1	1	1
+validity	nominal-carbon-dioxide	source_value_is_information_not_certified	0	0	1
+validity	nominal-carbon-dioxide	source_nitrogen_is_balance_gas	1	1	1
+validity	nominal-carbon-dioxide	source_cylinder_identity_known	0	0	1
+validity	nominal-carbon-dioxide	source_certified_value_and_95pct_interval_present	0	0	1
+validity	nominal-carbon-dioxide	source_is_auto_emission_calibration_gas	1	1	1
+validity	nominal-carbon-dioxide	source_is_engine_generated_exhaust_sample	0	0	1
+validity	nominal-carbon-dioxide	source_mixture_temperature_known	0	0	1
+validity	nominal-carbon-dioxide	source_mixture_pressure_known	0	0	1
+validity	nominal-carbon-dioxide	source_oxygen_water_nox_fractions_known	0	0	1
+validity	nominal-carbon-dioxide	source_certificate_is_archived_template	1	1	1
+scalar	nominal-carbon-monoxide	srm-2728-title-composition	nominal_carbon_monoxide_amount_fraction	8	%	constant
+uncertainty	nominal-carbon-monoxide	unstated	-	-	-	-
+validity	nominal-carbon-monoxide	source_composition_basis_is_amount_fraction	1	1	1
+validity	nominal-carbon-monoxide	source_value_is_nominal_not_cylinder_certified	1	1	1
+validity	nominal-carbon-monoxide	source_value_is_information_not_certified	0	0	1
+validity	nominal-carbon-monoxide	source_nitrogen_is_balance_gas	1	1	1
+validity	nominal-carbon-monoxide	source_cylinder_identity_known	0	0	1
+validity	nominal-carbon-monoxide	source_certified_value_and_95pct_interval_present	0	0	1
+validity	nominal-carbon-monoxide	source_is_auto_emission_calibration_gas	1	1	1
+validity	nominal-carbon-monoxide	source_is_engine_generated_exhaust_sample	0	0	1
+validity	nominal-carbon-monoxide	source_mixture_temperature_known	0	0	1
+validity	nominal-carbon-monoxide	source_mixture_pressure_known	0	0	1
+validity	nominal-carbon-monoxide	source_oxygen_water_nox_fractions_known	0	0	1
+validity	nominal-carbon-monoxide	source_certificate_is_archived_template	1	1	1
+scalar	nominal-propane	srm-2728-title-composition	nominal_propane_amount_fraction	0.3	%	constant
+uncertainty	nominal-propane	unstated	-	-	-	-
+validity	nominal-propane	source_composition_basis_is_amount_fraction	1	1	1
+validity	nominal-propane	source_value_is_nominal_not_cylinder_certified	1	1	1
+validity	nominal-propane	source_value_is_information_not_certified	0	0	1
+validity	nominal-propane	source_nitrogen_is_balance_gas	1	1	1
+validity	nominal-propane	source_cylinder_identity_known	0	0	1
+validity	nominal-propane	source_certified_value_and_95pct_interval_present	0	0	1
+validity	nominal-propane	source_is_auto_emission_calibration_gas	1	1	1
+validity	nominal-propane	source_is_engine_generated_exhaust_sample	0	0	1
+validity	nominal-propane	source_mixture_temperature_known	0	0	1
+validity	nominal-propane	source_mixture_pressure_known	0	0	1
+validity	nominal-propane	source_oxygen_water_nox_fractions_known	0	0	1
+validity	nominal-propane	source_certificate_is_archived_template	1	1	1
+scalar	information-total-other-hydrocarbons	srm-2728-title-composition	information_total_other_hydrocarbons_propane_equivalent_amount_fraction	0.0008	%	constant
+uncertainty	information-total-other-hydrocarbons	unstated	-	-	-	-
+validity	information-total-other-hydrocarbons	source_composition_basis_is_amount_fraction	1	1	1
+validity	information-total-other-hydrocarbons	source_value_is_nominal_not_cylinder_certified	0	0	1
+validity	information-total-other-hydrocarbons	source_value_is_information_not_certified	1	1	1
+validity	information-total-other-hydrocarbons	source_nitrogen_is_balance_gas	1	1	1
+validity	information-total-other-hydrocarbons	source_cylinder_identity_known	0	0	1
+validity	information-total-other-hydrocarbons	source_certified_value_and_95pct_interval_present	0	0	1
+validity	information-total-other-hydrocarbons	source_is_auto_emission_calibration_gas	1	1	1
+validity	information-total-other-hydrocarbons	source_is_engine_generated_exhaust_sample	0	0	1
+validity	information-total-other-hydrocarbons	source_mixture_temperature_known	0	0	1
+validity	information-total-other-hydrocarbons	source_mixture_pressure_known	0	0	1
+validity	information-total-other-hydrocarbons	source_oxygen_water_nox_fractions_known	0	0	1
+validity	information-total-other-hydrocarbons	source_certificate_is_archived_template	1	1	1
