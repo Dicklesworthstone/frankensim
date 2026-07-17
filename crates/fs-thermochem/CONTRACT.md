@@ -121,6 +121,14 @@ behavior.
   every coefficient/Gibbs/contribution bit pattern, every nested NASA-9
   receipt, standard reaction Gibbs energy, log constant, and direct-constant
   representation state.
+- `ThermodynamicReverseRateClosureV1` binds one positive finite forward
+  reaction-progress-rate scale to that equilibrium authority. Forward and
+  reverse scales have units mol m^-3 s^-1 because the assumed mass-action
+  activities are dimensionless `p_i / p0` ratios. Its evaluation retains
+  `ln(k_reverse / k_forward)`, an optional direct ratio and reverse scale, an
+  explicit ratio/scale range status, and a receipt containing the complete
+  nested equilibrium receipt. It does not choose kinetic orders or evaluate a
+  net reaction rate.
 
 ## NASA-9 operation tree
 
@@ -266,6 +274,23 @@ identity. Finite `ln(K_p)` remains the successful representation when direct
 exponentiation overflows or underflows. This operation tree evaluates a
 standard-state constant only; it does not solve for equilibrium composition.
 
+For one positive finite forward progress-rate scale `k_forward`, version 1
+then closes the reverse scale under the same dimensionless ideal-gas activity
+convention:
+
+```text
+log_ratio = ln(k_reverse / k_forward) = -ln(K_p)
+ratio     = deterministic_exp(log_ratio) when positive finite
+k_reverse = k_forward * ratio when positive finite
+```
+
+The finite log ratio remains authoritative when either exponentiation or the
+final scale multiplication leaves binary64 range. No zero or infinite direct
+ratio/rate is published. This is only the thermodynamic coefficient relation
+for a mass-action formulation using the retained stoichiometric exponents and
+activities; it is not a rate-expression, activity, or kinetics-integrator
+implementation.
+
 ## Invariants
 
 - ONE CHEMISTRY AUTHORITY: exact bookkeeping and conservation come from
@@ -329,6 +354,14 @@ standard-state constant only; it does not solve for equilibrium composition.
 - LOG AUTHORITY SURVIVES RANGE LOSS: every successful `ln(K_p)` is finite.
   Direct `K_p` is optional and appears only when deterministic exponentiation
   is strictly positive and finite; range loss is explicit, not clamped.
+- REVERSE-RATE CONVENTION IS NOT INFERRED: reverse-rate closure consumes the
+  exact equilibrium convention and admits only a positive finite typed forward
+  progress-rate scale. It uses `k_reverse / k_forward = 1 / K_p` only for
+  dimensionless standard-state activities; it does not silently crosswalk a
+  concentration-based or dimensionful kinetic law.
+- REVERSE RANGE LOSS IS EXPLICIT: the finite log ratio and nested equilibrium
+  receipt survive ratio or final-scale overflow/underflow. A direct reverse
+  scale appears only when both operations produce positive finite values.
 
 ## Error model
 
@@ -363,6 +396,11 @@ models, convention drift, bounded allocation stage, nested species evaluation,
 and the first non-finite term/sum/`R T`/log value. No partial reaction result or
 receipt escapes.
 
+`ReverseRateClosureErrorV1` names an invalid forward progress-rate scale, the
+exact nested equilibrium refusal, or an otherwise impossible NaN reverse
+scale. Positive finite ratio/final-scale overflow or underflow is a successful
+typed log-only status rather than an error or clamp.
+
 ## Determinism class
 
 Version 1 is fixed-order deterministic for identical inputs under the same
@@ -392,6 +430,12 @@ axis, evaluates each active species once, and uses one fixed reduction and
 standard reaction Gibbs energy, log/direct constant, or receipt. Forward and
 exactly reversed columns retain opposite Gibbs/log values under the same
 models.
+
+Reverse-rate closure negates the retained equilibrium log bits, calls the same
+deterministic exponential once, and performs one fixed multiplication. Replay
+is exact on one target; exact reaction reversal negates the log ratio and makes
+representable direct ratios reciprocal to the documented elementary-math
+tolerance.
 
 Cross-ISA bit identity is not claimed until the central Gauntlet runs retain
 evidence for both reference ISA families. NASA/mixture receipts record their
@@ -435,6 +479,10 @@ at most 128 bounded NASA-9 evaluations and one canonical reduction. This first
 closure therefore has a hard work ceiling and no useful asynchronous `Cx` tile.
 Composition-equilibrium iterations, mechanism-wide kinetics, or larger sparse
 reaction systems require explicit budgets and request-drain-finalize semantics.
+
+Reverse-rate closure adds one deterministic exponential and multiplication to
+that same bounded equilibrium evaluation. It introduces no mechanism loop,
+activity product, evolving state, callback, or additional cancellation tile.
 
 ## Unsafe boundary
 
@@ -509,6 +557,13 @@ Inline tests in `src/equilibrium.rs` add:
   refusal;
 - G5 model-order replay plus forward/reverse standard Gibbs and log-constant
   polarity and reciprocal direct constants.
+- G0 exact reverse/forward log identity, finite direct closure, typed units,
+  nested-receipt equality, and direct-scale reconstruction;
+- G3 invalid forward scales, nested temperature refusal, ratio overflow and
+  underflow, and final reverse-scale overflow and underflow with retained log
+  authority;
+- G5 exact replay plus reaction-reversal log polarity and reciprocal direct
+  ratios.
 
 The newest tests are code-first and batch-verification pending. A sourced
 external NASA/Cantera numerical oracle battery, an independently tabulated
@@ -538,6 +593,10 @@ This slice does **not** claim:
 - chemical meaningfulness, reversibility, kinetic accessibility, detailed
   balance, or reverse-rate authority from exact bookkeeping and a computed
   standard-state `K_p` alone;
+- a validated kinetic order, elementary-reaction classification, activity
+  product, concentration-unit conversion, forward-law authenticity, net
+  progress rate, mechanism consistency, stiffness claim, or time integration
+  from the bounded reverse-progress-scale relation;
 - authenticity or same-state consistency of caller-supplied pure-species
   viscosities, viscosity-law validity outside their source domains, dense-gas
   corrections, or physical applicability/accuracy of the Wilke approximation;

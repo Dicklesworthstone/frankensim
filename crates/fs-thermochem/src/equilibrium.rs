@@ -10,7 +10,7 @@
 
 use core::fmt;
 
-use fs_qty::{Dimensionless, Temperature};
+use fs_qty::{Dimensionless, Qty, Temperature};
 
 use crate::{
     ConservationCertificate, ElementalReferenceIdV1, MolarEnergyQuantityV1,
@@ -21,6 +21,8 @@ use crate::{
 
 /// Version of the fixed standard-state reaction-equilibrium operation tree.
 pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 1;
+/// Version of the reverse-progress-rate consistency operation tree.
+pub const REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1: u32 = 1;
 /// Maximum species rows retained or scanned by one reaction model.
 pub const MAX_REACTION_SPECIES_V1: usize = 128;
 /// Maximum reaction columns whose matrix identity may be bound by one model.
@@ -29,6 +31,13 @@ pub const MAX_REACTION_COLUMNS_V1: usize = 128;
 pub const MAX_REACTION_MATRIX_CELLS_V1: usize = MAX_REACTION_SPECIES_V1 * MAX_REACTION_COLUMNS_V1;
 
 const MAX_EXACT_STOICHIOMETRIC_COEFFICIENT_V1: u128 = 1u128 << 53;
+
+/// Coherent-SI reaction-progress-rate scale, mol m^-3 s^-1.
+///
+/// Forward and reverse scales share these dimensions because this module's
+/// mass-action activities are dimensionless ratios to the retained standard
+/// state. This alias does not define kinetic orders or evaluate a net rate.
+pub type ReactionProgressRateQuantityV1 = Qty<-3, 0, -1, 0, 0, 1>;
 
 /// Convention field named by an exact cross-species mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -989,6 +998,397 @@ impl IdealGasReactionEquilibriumEvaluationV1 {
     }
 }
 
+/// Construction or evaluation refusal for a reverse-progress-rate closure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReverseRateClosureErrorV1 {
+    /// The forward progress-rate scale was zero, negative, or non-finite.
+    InvalidForwardProgressRateScale {
+        /// Exact rejected IEEE-754 bits.
+        bits: u64,
+    },
+    /// The nested standard-state equilibrium evaluation refused.
+    Equilibrium {
+        /// Exact nested refusal.
+        source: ReactionEquilibriumErrorV1,
+    },
+    /// Positive finite inputs produced an unexpected NaN reverse scale.
+    UnrepresentableReverseProgressRateScale {
+        /// Exact rejected IEEE-754 bits.
+        bits: u64,
+    },
+}
+
+impl fmt::Display for ReverseRateClosureErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidForwardProgressRateScale { bits } => write!(
+                formatter,
+                "forward progress-rate scale must be positive and finite (bits {bits:#018x})"
+            ),
+            Self::Equilibrium { source } => {
+                write!(
+                    formatter,
+                    "reverse-rate equilibrium evaluation refused: {source}"
+                )
+            }
+            Self::UnrepresentableReverseProgressRateScale { bits } => write!(
+                formatter,
+                "reverse progress-rate scale is unrepresentable (bits {bits:#018x})"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ReverseRateClosureErrorV1 {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Equilibrium { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Positive finite progress-rate scale for dimensionless mass-action
+/// activities.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct ReactionProgressRateScaleV1(ReactionProgressRateQuantityV1);
+
+impl ReactionProgressRateScaleV1 {
+    /// Admit a positive finite reaction-progress-rate scale.
+    ///
+    /// # Errors
+    /// Refuses zero, negative, NaN, or infinite values.
+    pub fn new(
+        quantity: ReactionProgressRateQuantityV1,
+    ) -> Result<Self, ReverseRateClosureErrorV1> {
+        let value = quantity.value();
+        if !value.is_finite() || value <= 0.0 {
+            return Err(ReverseRateClosureErrorV1::InvalidForwardProgressRateScale {
+                bits: value.to_bits(),
+            });
+        }
+        Ok(Self(quantity))
+    }
+
+    /// Raw coherent-SI scalar in mol m^-3 s^-1.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensioned coherent-SI quantity.
+    #[must_use]
+    pub const fn quantity(self) -> ReactionProgressRateQuantityV1 {
+        self.0
+    }
+}
+
+/// Dimensionless logarithmic ratio `ln(k_reverse / k_forward)`.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct LogReverseToForwardProgressRateRatioV1(Dimensionless);
+
+impl LogReverseToForwardProgressRateRatioV1 {
+    const fn new(value: f64) -> Self {
+        Self(Dimensionless::new(value))
+    }
+
+    /// Raw dimensionless scalar.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensionless quantity wrapper.
+    #[must_use]
+    pub const fn quantity(self) -> Dimensionless {
+        self.0
+    }
+}
+
+/// Positive finite direct ratio `k_reverse / k_forward`, when representable.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct ReverseToForwardProgressRateRatioV1(Dimensionless);
+
+impl ReverseToForwardProgressRateRatioV1 {
+    const fn new(value: f64) -> Self {
+        Self(Dimensionless::new(value))
+    }
+
+    /// Raw positive finite ratio.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensionless quantity wrapper.
+    #[must_use]
+    pub const fn quantity(self) -> Dimensionless {
+        self.0
+    }
+}
+
+/// Direct reverse-progress-rate representation status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReverseProgressRateStatusV1 {
+    /// The direct ratio and reverse scale are both positive and finite.
+    FinitePositive,
+    /// `exp(ln(k_reverse / k_forward))` overflowed.
+    LogOnlyRatioOverflow,
+    /// `exp(ln(k_reverse / k_forward))` underflowed to zero.
+    LogOnlyRatioUnderflow,
+    /// The direct ratio is finite but multiplying the forward scale overflowed.
+    LogOnlyScaleOverflow,
+    /// The direct ratio is finite but multiplying the forward scale underflowed.
+    LogOnlyScaleUnderflow,
+}
+
+/// One forward progress-rate scale closed against a standard-state
+/// equilibrium model.
+///
+/// The algebra assumes a mass-action formulation whose activities are the
+/// same dimensionless ideal-gas `p_i / p0` ratios named by the equilibrium
+/// model. Under that convention, thermodynamic consistency requires
+/// `k_reverse / k_forward = 1 / K_p`. This type binds and evaluates that ratio;
+/// it does not choose kinetic orders, evaluate activities, or integrate a
+/// mechanism.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermodynamicReverseRateClosureV1 {
+    equilibrium: IdealGasReactionEquilibriumV1,
+    forward_progress_rate_scale: ReactionProgressRateScaleV1,
+}
+
+impl ThermodynamicReverseRateClosureV1 {
+    /// Bind a validated forward progress-rate scale to one reaction's exact
+    /// standard-state equilibrium model.
+    #[must_use]
+    pub const fn new(
+        equilibrium: IdealGasReactionEquilibriumV1,
+        forward_progress_rate_scale: ReactionProgressRateScaleV1,
+    ) -> Self {
+        Self {
+            equilibrium,
+            forward_progress_rate_scale,
+        }
+    }
+
+    /// Bound standard-state equilibrium authority.
+    #[must_use]
+    pub const fn equilibrium(&self) -> &IdealGasReactionEquilibriumV1 {
+        &self.equilibrium
+    }
+
+    /// Positive finite forward progress-rate scale.
+    #[must_use]
+    pub const fn forward_progress_rate_scale(&self) -> ReactionProgressRateScaleV1 {
+        self.forward_progress_rate_scale
+    }
+
+    /// Evaluate the thermodynamically consistent reverse-to-forward scale
+    /// relation at one temperature.
+    ///
+    /// The logarithmic relation `ln(k_reverse / k_forward) = -ln(K_p)` is
+    /// always retained after a successful nested equilibrium evaluation.
+    /// Direct ratio or scale range loss is a successful explicit log-only
+    /// status, never a zero or infinite physical rate publication.
+    ///
+    /// # Errors
+    /// Propagates the exact nested equilibrium refusal or an impossible NaN
+    /// arithmetic result. No partial receipt escapes.
+    pub fn evaluate(
+        &self,
+        temperature: Temperature,
+    ) -> Result<ThermodynamicReverseRateEvaluationV1, ReverseRateClosureErrorV1> {
+        let equilibrium = self
+            .equilibrium
+            .evaluate(temperature)
+            .map_err(|source| ReverseRateClosureErrorV1::Equilibrium { source })?;
+        let log_ratio = -equilibrium.log_equilibrium_constant().value();
+        let raw_ratio = fs_math::det::exp(log_ratio);
+        let (status, ratio, reverse_progress_rate_scale) = if raw_ratio.is_infinite() {
+            (
+                ReverseProgressRateStatusV1::LogOnlyRatioOverflow,
+                None,
+                None,
+            )
+        } else if raw_ratio == 0.0 {
+            (
+                ReverseProgressRateStatusV1::LogOnlyRatioUnderflow,
+                None,
+                None,
+            )
+        } else {
+            let ratio = ReverseToForwardProgressRateRatioV1::new(raw_ratio);
+            let raw_reverse = self.forward_progress_rate_scale.value() * raw_ratio;
+            if raw_reverse.is_infinite() {
+                (
+                    ReverseProgressRateStatusV1::LogOnlyScaleOverflow,
+                    Some(ratio),
+                    None,
+                )
+            } else if raw_reverse == 0.0 {
+                (
+                    ReverseProgressRateStatusV1::LogOnlyScaleUnderflow,
+                    Some(ratio),
+                    None,
+                )
+            } else if raw_reverse.is_finite() {
+                (
+                    ReverseProgressRateStatusV1::FinitePositive,
+                    Some(ratio),
+                    Some(ReactionProgressRateScaleV1(
+                        ReactionProgressRateQuantityV1::new(raw_reverse),
+                    )),
+                )
+            } else {
+                return Err(
+                    ReverseRateClosureErrorV1::UnrepresentableReverseProgressRateScale {
+                        bits: raw_reverse.to_bits(),
+                    },
+                );
+            }
+        };
+        let receipt = ThermodynamicReverseRateReceiptV1 {
+            evaluator_version: REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1,
+            fs_math_version: fs_math::VERSION,
+            equilibrium_receipt: equilibrium.receipt().clone(),
+            forward_progress_rate_scale_bits: self.forward_progress_rate_scale.value().to_bits(),
+            log_reverse_to_forward_ratio_bits: log_ratio.to_bits(),
+            status,
+            reverse_to_forward_ratio_bits: ratio.map(|value| value.value().to_bits()),
+            reverse_progress_rate_scale_bits: reverse_progress_rate_scale
+                .map(|value| value.value().to_bits()),
+        };
+        Ok(ThermodynamicReverseRateEvaluationV1 {
+            equilibrium,
+            forward_progress_rate_scale: self.forward_progress_rate_scale,
+            log_reverse_to_forward_ratio: LogReverseToForwardProgressRateRatioV1::new(log_ratio),
+            reverse_to_forward_ratio: ratio,
+            reverse_progress_rate_scale,
+            status,
+            receipt,
+        })
+    }
+}
+
+/// Exact-field replay receipt for one reverse-progress-rate closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThermodynamicReverseRateReceiptV1 {
+    evaluator_version: u32,
+    fs_math_version: &'static str,
+    equilibrium_receipt: IdealGasReactionEquilibriumReceiptV1,
+    forward_progress_rate_scale_bits: u64,
+    log_reverse_to_forward_ratio_bits: u64,
+    status: ReverseProgressRateStatusV1,
+    reverse_to_forward_ratio_bits: Option<u64>,
+    reverse_progress_rate_scale_bits: Option<u64>,
+}
+
+impl ThermodynamicReverseRateReceiptV1 {
+    /// Reverse-rate operation-tree version.
+    #[must_use]
+    pub const fn evaluator_version(&self) -> u32 {
+        self.evaluator_version
+    }
+
+    /// Deterministic elementary-math crate version.
+    #[must_use]
+    pub const fn fs_math_version(&self) -> &'static str {
+        self.fs_math_version
+    }
+
+    /// Complete nested standard-state equilibrium receipt.
+    #[must_use]
+    pub const fn equilibrium_receipt(&self) -> &IdealGasReactionEquilibriumReceiptV1 {
+        &self.equilibrium_receipt
+    }
+
+    /// Exact forward progress-rate-scale bits.
+    #[must_use]
+    pub const fn forward_progress_rate_scale_bits(&self) -> u64 {
+        self.forward_progress_rate_scale_bits
+    }
+
+    /// Exact finite `ln(k_reverse / k_forward)` bits.
+    #[must_use]
+    pub const fn log_reverse_to_forward_ratio_bits(&self) -> u64 {
+        self.log_reverse_to_forward_ratio_bits
+    }
+
+    /// Direct reverse representation status.
+    #[must_use]
+    pub const fn status(&self) -> ReverseProgressRateStatusV1 {
+        self.status
+    }
+
+    /// Exact direct ratio bits, when representable.
+    #[must_use]
+    pub const fn reverse_to_forward_ratio_bits(&self) -> Option<u64> {
+        self.reverse_to_forward_ratio_bits
+    }
+
+    /// Exact direct reverse progress-rate-scale bits, when representable.
+    #[must_use]
+    pub const fn reverse_progress_rate_scale_bits(&self) -> Option<u64> {
+        self.reverse_progress_rate_scale_bits
+    }
+}
+
+/// Successful thermodynamic reverse-progress-rate closure evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermodynamicReverseRateEvaluationV1 {
+    equilibrium: IdealGasReactionEquilibriumEvaluationV1,
+    forward_progress_rate_scale: ReactionProgressRateScaleV1,
+    log_reverse_to_forward_ratio: LogReverseToForwardProgressRateRatioV1,
+    reverse_to_forward_ratio: Option<ReverseToForwardProgressRateRatioV1>,
+    reverse_progress_rate_scale: Option<ReactionProgressRateScaleV1>,
+    status: ReverseProgressRateStatusV1,
+    receipt: ThermodynamicReverseRateReceiptV1,
+}
+
+impl ThermodynamicReverseRateEvaluationV1 {
+    /// Nested standard-state equilibrium evaluation.
+    #[must_use]
+    pub const fn equilibrium(&self) -> &IdealGasReactionEquilibriumEvaluationV1 {
+        &self.equilibrium
+    }
+
+    /// Positive finite forward progress-rate scale.
+    #[must_use]
+    pub const fn forward_progress_rate_scale(&self) -> ReactionProgressRateScaleV1 {
+        self.forward_progress_rate_scale
+    }
+
+    /// Always-retained finite `ln(k_reverse / k_forward)`.
+    #[must_use]
+    pub const fn log_reverse_to_forward_ratio(&self) -> LogReverseToForwardProgressRateRatioV1 {
+        self.log_reverse_to_forward_ratio
+    }
+
+    /// Direct positive finite reverse-to-forward ratio, when representable.
+    #[must_use]
+    pub const fn reverse_to_forward_ratio(&self) -> Option<ReverseToForwardProgressRateRatioV1> {
+        self.reverse_to_forward_ratio
+    }
+
+    /// Direct positive finite reverse progress-rate scale, when representable.
+    #[must_use]
+    pub const fn reverse_progress_rate_scale(&self) -> Option<ReactionProgressRateScaleV1> {
+        self.reverse_progress_rate_scale
+    }
+
+    /// Whether direct ratio and reverse-scale representations survived range.
+    #[must_use]
+    pub const fn status(&self) -> ReverseProgressRateStatusV1 {
+        self.status
+    }
+
+    /// Exact nested-authority and arithmetic receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &ThermodynamicReverseRateReceiptV1 {
+        &self.receipt
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,6 +1528,11 @@ mod tests {
         let (stoichiometric, certificate, reaction_id) = water_stoichiometry(reversed);
         IdealGasReactionEquilibriumV1::new(stoichiometric, certificate, reaction_id, water_models())
             .expect("admitted water equilibrium")
+    }
+
+    fn progress_rate_scale(value: f64) -> ReactionProgressRateScaleV1 {
+        ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(value))
+            .expect("positive finite progress-rate scale")
     }
 
     #[test]
@@ -1426,6 +1831,207 @@ mod tests {
                 coefficient,
                 ..
             }) if coefficient == -inexact
+        ));
+    }
+
+    #[test]
+    fn g0_reverse_progress_rate_closes_against_the_exact_equilibrium_receipt() {
+        let forward_scale = progress_rate_scale(25.0);
+        let closure =
+            ThermodynamicReverseRateClosureV1::new(water_equilibrium(false), forward_scale);
+        let evaluation = closure
+            .evaluate(Temperature::new(1_200.0))
+            .expect("finite reverse-rate closure");
+
+        assert_eq!(
+            evaluation.status(),
+            ReverseProgressRateStatusV1::FinitePositive
+        );
+        assert_eq!(
+            evaluation.log_reverse_to_forward_ratio().value().to_bits(),
+            (-evaluation.equilibrium().log_equilibrium_constant().value()).to_bits()
+        );
+        let ratio = evaluation.reverse_to_forward_ratio().expect("direct ratio");
+        let reverse_scale = evaluation
+            .reverse_progress_rate_scale()
+            .expect("direct reverse scale");
+        assert_eq!(
+            reverse_scale.value().to_bits(),
+            (forward_scale.value() * ratio.value()).to_bits()
+        );
+        let equilibrium_constant = evaluation
+            .equilibrium()
+            .equilibrium_constant()
+            .expect("direct equilibrium constant");
+        assert!((ratio.value() * equilibrium_constant.value() - 1.0).abs() <= 16.0 * f64::EPSILON);
+        assert_eq!(
+            evaluation.receipt().equilibrium_receipt(),
+            evaluation.equilibrium().receipt()
+        );
+        assert_eq!(
+            evaluation.receipt().forward_progress_rate_scale_bits(),
+            forward_scale.value().to_bits()
+        );
+        assert_eq!(
+            evaluation.receipt().log_reverse_to_forward_ratio_bits(),
+            evaluation.log_reverse_to_forward_ratio().value().to_bits()
+        );
+        assert_eq!(
+            evaluation.receipt().reverse_to_forward_ratio_bits(),
+            Some(ratio.value().to_bits())
+        );
+        assert_eq!(
+            evaluation.receipt().reverse_progress_rate_scale_bits(),
+            Some(reverse_scale.value().to_bits())
+        );
+    }
+
+    #[test]
+    fn g5_reverse_rate_replays_and_reaction_reversal_inverts_the_ratio() {
+        let temperature = Temperature::new(1_200.0);
+        let scale = progress_rate_scale(3.0);
+        let closure = ThermodynamicReverseRateClosureV1::new(water_equilibrium(false), scale);
+        let first = closure
+            .evaluate(temperature)
+            .expect("first reverse-rate evaluation");
+        let replay = closure
+            .evaluate(temperature)
+            .expect("replayed reverse-rate evaluation");
+        assert_eq!(first, replay);
+
+        let reversed = ThermodynamicReverseRateClosureV1::new(water_equilibrium(true), scale)
+            .evaluate(temperature)
+            .expect("reversed reaction closure");
+        assert_eq!(
+            reversed.log_reverse_to_forward_ratio().value().to_bits(),
+            (-first.log_reverse_to_forward_ratio().value()).to_bits()
+        );
+        let ratio_product = first
+            .reverse_to_forward_ratio()
+            .expect("forward direct ratio")
+            .value()
+            * reversed
+                .reverse_to_forward_ratio()
+                .expect("reversed direct ratio")
+                .value();
+        assert!((ratio_product - 1.0).abs() <= 16.0 * f64::EPSILON);
+    }
+
+    #[test]
+    fn g3_reverse_rate_retains_log_authority_across_ratio_and_scale_range_loss() {
+        let exact = 1i128 << 53;
+        let (stoichiometric, certificate, reaction_id) = isomer_stoichiometry(exact);
+        let ratio_underflow = ThermodynamicReverseRateClosureV1::new(
+            IdealGasReactionEquilibriumV1::new(
+                stoichiometric,
+                certificate,
+                reaction_id,
+                vec![
+                    model("A", 0.01, 1.0, 0.0, 100_000.0),
+                    model("B", 0.01, 2.0, 0.0, 100_000.0),
+                ],
+            )
+            .expect("large positive log equilibrium"),
+            progress_rate_scale(1.0),
+        )
+        .evaluate(Temperature::new(500.0))
+        .expect("log-only ratio underflow");
+        assert_eq!(
+            ratio_underflow.status(),
+            ReverseProgressRateStatusV1::LogOnlyRatioUnderflow
+        );
+        assert!(ratio_underflow.reverse_to_forward_ratio().is_none());
+        assert!(ratio_underflow.reverse_progress_rate_scale().is_none());
+
+        let (stoichiometric, certificate, reaction_id) = isomer_stoichiometry(exact);
+        let ratio_overflow = ThermodynamicReverseRateClosureV1::new(
+            IdealGasReactionEquilibriumV1::new(
+                stoichiometric,
+                certificate,
+                reaction_id,
+                vec![
+                    model("A", 0.01, 2.0, 0.0, 100_000.0),
+                    model("B", 0.01, 1.0, 0.0, 100_000.0),
+                ],
+            )
+            .expect("large negative log equilibrium"),
+            progress_rate_scale(1.0),
+        )
+        .evaluate(Temperature::new(500.0))
+        .expect("log-only ratio overflow");
+        assert_eq!(
+            ratio_overflow.status(),
+            ReverseProgressRateStatusV1::LogOnlyRatioOverflow
+        );
+        assert!(ratio_overflow.reverse_to_forward_ratio().is_none());
+        assert!(ratio_overflow.reverse_progress_rate_scale().is_none());
+
+        let (stoichiometric, certificate, reaction_id) = isomer_stoichiometry(1);
+        let scale_overflow = ThermodynamicReverseRateClosureV1::new(
+            IdealGasReactionEquilibriumV1::new(
+                stoichiometric,
+                certificate,
+                reaction_id,
+                vec![
+                    model("A", 0.01, 2.0, 0.0, 100_000.0),
+                    model("B", 0.01, 1.0, 0.0, 100_000.0),
+                ],
+            )
+            .expect("finite reverse-to-forward ratio above one"),
+            progress_rate_scale(f64::MAX),
+        )
+        .evaluate(Temperature::new(500.0))
+        .expect("log-only scale overflow");
+        assert_eq!(
+            scale_overflow.status(),
+            ReverseProgressRateStatusV1::LogOnlyScaleOverflow
+        );
+        assert!(scale_overflow.reverse_to_forward_ratio().is_some());
+        assert!(scale_overflow.reverse_progress_rate_scale().is_none());
+
+        let (stoichiometric, certificate, reaction_id) = isomer_stoichiometry(1);
+        let scale_underflow = ThermodynamicReverseRateClosureV1::new(
+            IdealGasReactionEquilibriumV1::new(
+                stoichiometric,
+                certificate,
+                reaction_id,
+                vec![
+                    model("A", 0.01, 1.0, 0.0, 100_000.0),
+                    model("B", 0.01, 2.0, 0.0, 100_000.0),
+                ],
+            )
+            .expect("finite reverse-to-forward ratio below one"),
+            progress_rate_scale(f64::from_bits(1)),
+        )
+        .evaluate(Temperature::new(500.0))
+        .expect("log-only scale underflow");
+        assert_eq!(
+            scale_underflow.status(),
+            ReverseProgressRateStatusV1::LogOnlyScaleUnderflow
+        );
+        assert!(scale_underflow.reverse_to_forward_ratio().is_some());
+        assert!(scale_underflow.reverse_progress_rate_scale().is_none());
+    }
+
+    #[test]
+    fn g3_reverse_rate_refuses_invalid_forward_scale_and_nested_temperature() {
+        for value in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert!(matches!(
+                ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(value)),
+                Err(ReverseRateClosureErrorV1::InvalidForwardProgressRateScale { bits })
+                    if bits == value.to_bits()
+            ));
+        }
+
+        let error = ThermodynamicReverseRateClosureV1::new(
+            water_equilibrium(false),
+            progress_rate_scale(1.0),
+        )
+        .evaluate(Temperature::new(0.0))
+        .expect_err("nested zero-temperature equilibrium must refuse");
+        assert!(matches!(
+            error,
+            ReverseRateClosureErrorV1::Equilibrium { .. }
         ));
     }
 }
