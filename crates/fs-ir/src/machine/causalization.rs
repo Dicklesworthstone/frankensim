@@ -528,8 +528,9 @@ pub struct AuditedEscapeHatch {
     /// Separate audit/conformance receipt identity.
     pub audit: EscapeHatchAuditRef,
     /// Source identity the audit declares it checked. Admission requires exact
-    /// equality with `source`, preventing an audit for artifact A from being
-    /// attached to artifact B.
+    /// equality with `source`, making the declared source coordinate explicit
+    /// in the published artifact tuple. This structural equality check does
+    /// not authenticate the opaque audit artifact or inspect its contents.
     pub audited_source: SourceArtifactRef,
 }
 
@@ -1240,7 +1241,7 @@ impl CanonicalSchema for CausalGraphArtifactIdentitySchemaV1 {
         FieldSpec::required("causal-graph-artifact-schema-version", WireType::U64),
         FieldSpec::child_of("causal-structure-id", &CAUSAL_STRUCTURE_CHILD),
         FieldSpec::required("causal-structure-receipt-adjudication", WireType::Bytes),
-        FieldSpec::optional("machine-behavior-receipt-adjudication", WireType::Bytes),
+        FieldSpec::optional_bytes("machine-behavior-receipt-adjudication"),
         FieldSpec::required("extraction-context", WireType::Bytes),
         FieldSpec::required("equation-lineage", WireType::OrderedBytes),
         FieldSpec::required("variable-lineage", WireType::OrderedBytes),
@@ -3378,6 +3379,7 @@ fn validate_conditions(
             dependency_set.insert(dependency.clone());
             used_dependencies.insert(dependency.clone());
         }
+        let mut audit_mismatch = false;
         let source_valid = match &condition.source {
             ActivationConditionSource::GuardEquation {
                 equation,
@@ -3407,11 +3409,16 @@ fn validate_conditions(
                 }
             }
             ActivationConditionSource::AuditedPredicate(escape) => {
-                escape.source == escape.audited_source
-                    && audited_dependencies_valid
-                    && dependencies_always_available
+                audit_mismatch = escape.source != escape.audited_source;
+                audited_dependencies_valid && dependencies_always_available
             }
         };
+        if audit_mismatch {
+            findings.push(CausalGraphFinding::new(
+                CausalGraphRule::EscapeAuditMismatch,
+                subject.clone(),
+            ));
+        }
         if condition.branches.is_empty()
             || condition.dependencies.is_empty()
             || duplicate_branches
@@ -4378,10 +4385,11 @@ fn condition_row(
             push_identity_receipt_adjudication(&mut out, equation.identity_receipt());
             obligation.append_canonical(&mut out);
         }
-        ActivationConditionSource::AuditedPredicate(escape) => {
-            out.push(2);
-            escape.source.append_canonical(&mut out);
-        }
+        // `condition`, branches, and dependencies carry the normalized
+        // predicate semantics. The exact opaque implementation and its audit
+        // belong exclusively to `condition_artifact_row`, preserving the
+        // structure/artifact identity split.
+        ActivationConditionSource::AuditedPredicate(_) => out.push(2),
     }
     out.extend_from_slice(&(condition.branches.len() as u64).to_le_bytes());
     for (index, branch) in condition.branches.iter().enumerate() {
@@ -4770,9 +4778,7 @@ fn condition_canonical_len_cancellable(
             1 + IDENTITY_RECEIPT_ADJUDICATION_BYTES
                 + causal_ref_canonical_len(obligation.namespace())
         }
-        ActivationConditionSource::AuditedPredicate(escape) => {
-            1 + causal_ref_canonical_len(escape.source.namespace())
-        }
+        ActivationConditionSource::AuditedPredicate(_) => 1,
     });
     bytes = bytes.saturating_add(8);
     for (index, branch) in condition.branches.iter().enumerate() {
@@ -6346,8 +6352,8 @@ impl CanonicalSchema for CausalizationReceiptIdentitySchemaV1 {
         FieldSpec::required("unmatched-equations", WireType::OrderedBytes),
         FieldSpec::required("unmatched-variables", WireType::OrderedBytes),
         FieldSpec::required("conditional-outcomes", WireType::OrderedBytes),
-        FieldSpec::optional("maximum-matching-certificate", WireType::Bytes),
-        FieldSpec::optional("conditional-coverage", WireType::Bytes),
+        FieldSpec::optional_bytes("maximum-matching-certificate"),
+        FieldSpec::optional_bytes("conditional-coverage"),
         FieldSpec::required("unknown-axes", WireType::OrderedBytes),
         FieldSpec::required("evidence-state", WireType::Variant),
         FieldSpec::child_of("normalized-causal-outcome-id", &CAUSAL_OUTCOME_CHILD),
@@ -8605,12 +8611,38 @@ const fn migration_artifact_kind_tag(kind: CausalMigrationArtifactKind) -> u8 {
 mod internal_tests {
     use super::*;
 
-    fn single_bytes_receipt<I: StrongIdentity>(
+    /// Test-only constructor capability for the nominal identity roles used by
+    /// these law fixtures. `StrongIdentity` intentionally has no generic
+    /// constructor, so a `StrongIdentity` bound alone must not pretend that
+    /// `CanonicalEncoder::<I, _>::new` exists for every sealed role.
+    trait TestIdentityEncoder: StrongIdentity {
+        fn test_encoder(
+            limits: CanonicalLimits,
+        ) -> Result<CanonicalEncoder<Self, NeverCancel>, CanonicalError>;
+    }
+
+    impl<D: CanonicalSchema> TestIdentityEncoder for EntityId<D> {
+        fn test_encoder(
+            limits: CanonicalLimits,
+        ) -> Result<CanonicalEncoder<Self, NeverCancel>, CanonicalError> {
+            CanonicalEncoder::<EntityId<D>, _>::new(limits, NeverCancel)
+        }
+    }
+
+    impl<D: CanonicalSchema> TestIdentityEncoder for EvidenceNodeId<D> {
+        fn test_encoder(
+            limits: CanonicalLimits,
+        ) -> Result<CanonicalEncoder<Self, NeverCancel>, CanonicalError> {
+            CanonicalEncoder::<EvidenceNodeId<D>, _>::new(limits, NeverCancel)
+        }
+    }
+
+    fn single_bytes_receipt<I: TestIdentityEncoder>(
         field_name: &'static str,
         value: &[u8],
         limits: CanonicalLimits,
     ) -> IdentityReceipt<I> {
-        CanonicalEncoder::<I, _>::new(limits, NeverCancel)
+        I::test_encoder(limits)
             .expect("test encoder")
             .bytes(Field::new(0, field_name), value)
             .expect("test identity field")
@@ -8618,12 +8650,12 @@ mod internal_tests {
             .expect("test identity receipt")
     }
 
-    fn single_ordered_bytes_receipt<I: StrongIdentity>(
+    fn single_ordered_bytes_receipt<I: TestIdentityEncoder>(
         field_name: &'static str,
         value: &[u8],
         limits: CanonicalLimits,
     ) -> IdentityReceipt<I> {
-        CanonicalEncoder::<I, _>::new(limits, NeverCancel)
+        I::test_encoder(limits)
             .expect("test encoder")
             .ordered_bytes(Field::new(0, field_name), 1, core::iter::once(value))
             .expect("test ordered identity field")

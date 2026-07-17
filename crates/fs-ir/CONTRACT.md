@@ -167,9 +167,19 @@ admitted derived-geometry boundary.
   artifact identity: it additionally binds the behavior overlay, extraction
   context, generated/derived/audited source lineage, condition-source audits,
   PortSchema crosswalk audits, and clock-bridge audits. Presentation labels
-  affect neither identity. Audits are source-bound (`source == audited_source`
-  or projection/bridge equivalent), preventing an audit for artifact A from
-  being attached to artifact B.
+  affect neither identity. Admission requires each caller-declared audit target
+  to equal its source coordinate (`source == audited_source`, or the
+  projection/bridge equivalent), so the published artifact tuple cannot
+  silently name two different coordinates. This equality check does not
+  authenticate the opaque audit artifact, inspect its contents, or prove that
+  the referenced checker actually audited that source.
+- The I02.1 `v1` identity grammar stabilizes at its first buildable, centrally
+  verified minting implementation. The earlier pre-verification landing could
+  not publish receipts because it called a canonical-schema API already removed
+  by an ancestor revision; correcting its condition provenance quotient
+  therefore remains a `v1` repair rather than a migration from a mint-capable
+  predecessor. After that first green boundary, any canonical-row semantic
+  change requires a new schema version plus an explicit migration receipt.
 - Every structural incidence names an exact equation, base variable,
   derivative order, solve participation, coefficient dimensions, term signal,
   optional transform/operator, clock relation, and activation domain. Unit

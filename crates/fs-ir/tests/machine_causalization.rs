@@ -700,6 +700,103 @@ fn g3_normalized_structure_is_separate_from_producer_provenance() {
 }
 
 #[test]
+fn g3_audited_predicate_provenance_is_separate_from_normalized_structure() {
+    let (machine, owner, clock) = minimal_machine();
+    let first = with_cx(|cx| hybrid_draft(&owner, &clock).admit_against(&machine, cx))
+        .expect("first audited-predicate graph");
+
+    let mut changed_source = hybrid_draft(&owner, &clock);
+    let alternate_source = cref!(SourceArtifactRef, "test/mode-predicate/alternate", 58);
+    let ActivationConditionSource::AuditedPredicate(source_escape) =
+        &mut changed_source.conditions[0].source
+    else {
+        panic!("hybrid fixture must use an audited predicate");
+    };
+    source_escape.source = alternate_source.clone();
+    source_escape.audited_source = alternate_source;
+    let source_variant = with_cx(|cx| changed_source.admit_against(&machine, cx))
+        .expect("source-substituted audited-predicate graph");
+
+    let mut changed_audit = hybrid_draft(&owner, &clock);
+    let ActivationConditionSource::AuditedPredicate(audit_escape) =
+        &mut changed_audit.conditions[0].source
+    else {
+        panic!("hybrid fixture must use an audited predicate");
+    };
+    audit_escape.audit = cref!(
+        EscapeHatchAuditRef,
+        "test/mode-predicate-audit/alternate",
+        59
+    );
+    let audit_variant = with_cx(|cx| changed_audit.admit_against(&machine, cx))
+        .expect("audit-substituted audited-predicate graph");
+
+    assert_eq!(
+        first.structure_identity(),
+        source_variant.structure_identity(),
+        "producer-specific opaque predicate artifacts must not move normalized structure"
+    );
+    assert_eq!(
+        first.structure_identity_receipt().canonical_preimage(),
+        source_variant
+            .structure_identity_receipt()
+            .canonical_preimage(),
+        "source substitution must preserve the complete normalized preimage, not merely its digest"
+    );
+    assert_eq!(
+        first.structure_identity(),
+        audit_variant.structure_identity(),
+        "predicate audit provenance must not move normalized structure"
+    );
+    assert_eq!(
+        first.structure_identity_receipt().canonical_preimage(),
+        audit_variant
+            .structure_identity_receipt()
+            .canonical_preimage(),
+        "audit substitution must preserve the complete normalized preimage, not merely its digest"
+    );
+    assert_ne!(
+        first.artifact_identity(),
+        source_variant.artifact_identity(),
+        "the provenance artifact must bind the exact predicate source"
+    );
+    assert_ne!(
+        first.artifact_identity_receipt().canonical_preimage(),
+        source_variant
+            .artifact_identity_receipt()
+            .canonical_preimage(),
+        "source substitution must move the complete provenance preimage"
+    );
+    assert_ne!(
+        first.artifact_identity(),
+        audit_variant.artifact_identity(),
+        "the provenance artifact must bind the exact predicate audit"
+    );
+    assert_ne!(
+        first.artifact_identity_receipt().canonical_preimage(),
+        audit_variant
+            .artifact_identity_receipt()
+            .canonical_preimage(),
+        "audit substitution must move the complete provenance preimage"
+    );
+
+    let mut mismatched = hybrid_draft(&owner, &clock);
+    let ActivationConditionSource::AuditedPredicate(mismatched_escape) =
+        &mut mismatched.conditions[0].source
+    else {
+        panic!("hybrid fixture must use an audited predicate");
+    };
+    mismatched_escape.audited_source = cref!(
+        SourceArtifactRef,
+        "test/mode-predicate/mismatched-audit-target",
+        60
+    );
+    let refusal = with_cx(|cx| mismatched.admit_against(&machine, cx))
+        .expect_err("a declared audit target that differs from its source must refuse");
+    assert_graph_rules_exact(&refusal, &[CausalGraphRule::EscapeAuditMismatch]);
+}
+
+#[test]
 fn g0_matching_binds_the_exact_incidence_and_derivative_vertex() {
     let (_machine, graph) = admit_minimal();
     let mut wrong_order = complete_receipt(&graph);
