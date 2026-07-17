@@ -3,20 +3,47 @@
 //! under adversarial sampling, C¹ blend seams (with the hard-Boolean
 //! discontinuity exhibited as the contrast), DAG-sharing bitwise
 //! equality, the sphere-tracing safety harness vs a dense oracle, and
-//! metamorphic + design-lever laws. JSON-line verdicts; seeded cases
-//! carry seeds.
+//! metamorphic + design-lever laws. Aggregate verdicts use the canonical
+//! fs-obs schema; randomized cases carry their literal input seed, while
+//! fixed cases use zero.
+//! Assertions reached before those verdicts remain ordinary Rust test
+//! diagnostics.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Aabb, Chart, Differentiability, Point3, TraceStepClaim, Vec3};
 use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder, FrepError, NodeId, smin_weights};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-rep-frep/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const DETERMINISTIC_SEED: u64 = 0;
+const EXECUTION_SEED: u64 = 0xF2EB;
+const FREP_001_INPUT_SEED: u64 = 0x1001_2026_0706_0011;
+const FREP_002_INPUT_SEED: u64 = 0x1001_2026_0706_0012;
+const FREP_003_INPUT_SEED: u64 = 0x1001_2026_0706_0013;
+const FREP_004_INPUT_SEED: u64 = 0x1001_2026_0706_0014;
+const FREP_005_INPUT_SEED: u64 = 0x1001_2026_0706_0015;
+const FREP_006_INPUT_SEED: u64 = 0x1001_2026_0706_0016;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-rep-frep/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-rep-frep/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("F-rep verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("F-rep verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -52,7 +79,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 0xF2EB,
+                seed: EXECUTION_SEED,
                 kernel_id: 1,
                 tile: 0,
                 iteration: 0,
@@ -170,7 +197,7 @@ fn sample_in(rng: &mut Lcg, b: &Aabb) -> Point3 {
 /// sample, on random DAGs × random boxes. Logs bound tightness.
 #[test]
 fn frep_001_interval_containment() {
-    let mut rng = Lcg(0x1001_2026_0706_0011);
+    let mut rng = Lcg(FREP_001_INPUT_SEED);
     let mut violations = 0u64;
     let mut tightness_sum = 0.0;
     let mut tightness_n = 0u64;
@@ -216,7 +243,7 @@ fn frep_001_interval_containment() {
                 name: "rep-frep-interval-tightness".to_string(),
                 json: format!(
                     "{{\"violations\":{violations},\"mean_tightness\":{tightness:.4},\
-                     \"boxes\":{tightness_n}}}"
+                     \"boxes\":{tightness_n},\"input_seed\":{FREP_001_INPUT_SEED}}}"
                 ),
             },
             None,
@@ -230,8 +257,9 @@ fn frep_001_interval_containment() {
         &format!(
             "interval contains all samples on 12 random DAGs x 8 boxes x 25 points \
              (violations={violations}, mean observed/bound width={tightness:.3}); \
-             seed 0x1001_2026_0706_0011"
+             seed {FREP_001_INPUT_SEED:#x}"
         ),
+        FREP_001_INPUT_SEED,
     );
 }
 
@@ -239,7 +267,7 @@ fn frep_001_interval_containment() {
 /// adversarial sampling (near-pairs and far-pairs).
 #[test]
 fn frep_002_lipschitz_validity() {
-    let mut rng = Lcg(0x1001_2026_0706_0012);
+    let mut rng = Lcg(FREP_002_INPUT_SEED);
     let mut violations = 0u64;
     let mut worst_ratio = 0.0f64;
     for _ in 0..12 {
@@ -276,8 +304,9 @@ fn frep_002_lipschitz_validity() {
         &format!(
             "|f(x)-f(y)| <= L|x-y| held on 12 DAGs x 300 adversarial pairs \
              (violations={violations}, worst observed/bound ratio={worst_ratio:.4}); \
-             seed 0x1001_2026_0706_0012"
+             seed {FREP_002_INPUT_SEED:#x}"
         ),
+        FREP_002_INPUT_SEED,
     );
 }
 
@@ -338,7 +367,7 @@ fn frep_003_blend_seam_c1() {
         let fd = fd_grad(&hard, p);
         hard_worst = hard_worst.max((g.x - fd.x).abs());
     }
-    let mut rng = Lcg(0x1001_2026_0706_0013);
+    let mut rng = Lcg(FREP_003_INPUT_SEED);
     let mut convex_ok = true;
     for _ in 0..2000 {
         let (a, b, r) = (
@@ -371,9 +400,10 @@ fn frep_003_blend_seam_c1() {
         &format!(
             "blend gradients are C1 across the seam for all three ops (worst \
              FD-vs-analytic {blend_worst:.2e}) while the hard union's crease shows a \
-             {hard_worst:.2} discontinuity — the optimization poison, exhibited; \
+            {hard_worst:.2} discontinuity — the optimization poison, exhibited; \
              weights stay a convex pair over 2000 draws"
         ),
+        FREP_003_INPUT_SEED,
     );
 }
 
@@ -418,7 +448,7 @@ fn frep_004_sharing_equals_expansion() {
             .expect("root");
         b.finish(root).expect("frep")
     };
-    let mut rng = Lcg(0x1001_2026_0706_0014);
+    let mut rng = Lcg(FREP_004_INPUT_SEED);
     let dom = shared.support().inflate(0.5);
     let mut bit_equal = true;
     for _ in 0..400 {
@@ -430,8 +460,11 @@ fn frep_004_sharing_equals_expansion() {
     verdict(
         "frep-004",
         bit_equal,
-        "shared-subexpression DAG matches its expanded tree BITWISE (value and \
-         gradient) over 400 samples; seed 0x1001_2026_0706_0014",
+        &format!(
+            "shared-subexpression DAG matches its expanded tree BITWISE (value and \
+             gradient) over 400 samples; seed {FREP_004_INPUT_SEED:#x}"
+        ),
+        FREP_004_INPUT_SEED,
     );
 }
 
@@ -484,7 +517,7 @@ fn oracle(f: &Frep, o: Point3, dir: Vec3, tmax: f64) -> Option<f64> {
 #[test]
 #[allow(clippy::too_many_lines)] // One seeded safety campaign keeps its counters and oracle checks unified.
 fn frep_005_sphere_tracing_safety() {
-    let mut rng = Lcg(0x1001_2026_0706_0015);
+    let mut rng = Lcg(FREP_005_INPUT_SEED);
     let mut rays = 0u64;
     let mut hits = 0u64;
     let mut safety_violations = 0u64;
@@ -566,7 +599,9 @@ fn frep_005_sphere_tracing_safety() {
                 json: format!(
                     "{{\"rays\":{rays},\"oracle_hits\":{hits},\
                      \"safety_violations\":{safety_violations},\"stalls\":{stalls},\
-                     \"worst_standoff\":{worst_late:.2e}}}"
+                     \"worst_standoff\":{worst_late:.2e},\
+                     \"input_seed\":{FREP_005_INPUT_SEED},\
+                     \"execution_seed\":{EXECUTION_SEED}}}"
                 ),
             },
             None,
@@ -587,8 +622,9 @@ fn frep_005_sphere_tracing_safety() {
              {worst_late:.1e}); rigid chains enclose rounded exact-distance \
              evaluations, CSG keeps an Estimate relative to abstract distance \
              while exposing a separate rigorous trace enclosure, pure-blend DAGs advertise C1; \
-             seed 0x1001_2026_0706_0015"
+             input seed {FREP_005_INPUT_SEED:#x}, fixed Cx stream {EXECUTION_SEED:#x}"
         ),
+        FREP_005_INPUT_SEED,
     );
 }
 
@@ -752,11 +788,12 @@ fn frep_005b_evaluation_enclosures_do_not_overpromote_geometry() {
                 && reachable_hard_ok
                 && support_ok
                 && singular_fallback_ok,
-            "the seeded rounded sphere contains the independent residual; generic \
+            "the fixed rounded sphere contains the independent residual; generic \
              half-spaces and nontrivial rotations are Lipschitz-implicit with widened \
              bounds; differentiability follows only the root-reachable DAG; rotated \
              support encloses the certified inverse-map preimage and fails closed \
              when matrix regularity is uncertified",
+            DETERMINISTIC_SEED,
         );
     });
 }
@@ -769,7 +806,7 @@ fn frep_005b_evaluation_enclosures_do_not_overpromote_geometry() {
 #[test]
 #[allow(clippy::too_many_lines)] // one law per block; splitting hides the suite's shape
 fn frep_006_metamorphic_and_params() {
-    let mut rng = Lcg(0x1001_2026_0706_0016);
+    let mut rng = Lcg(FREP_006_INPUT_SEED);
     let sphere_at = |c: Point3, r: f64| -> Frep {
         let mut b = FrepBuilder::new();
         let s = b.sphere(c, r).expect("s");
@@ -891,11 +928,14 @@ fn frep_006_metamorphic_and_params() {
     verdict(
         "frep-006",
         laws_ok && rot_ok && lever_ok,
-        "hard idempotence/commutativity and blend-self = dilation(r/4) hold BITWISE \
-         over 200 points; rotation round-trips and dyadic translation is equivariant \
-         to 1e-12; radius/offset levers differentiate exactly (-1), the blend-radius \
-         lever is 0 far from the seam and -1/4 on it, and invalid lever values teach; \
-         seed 0x1001_2026_0706_0016",
+        &format!(
+            "hard idempotence/commutativity and blend-self = dilation(r/4) hold BITWISE \
+             over 200 points; rotation round-trips and dyadic translation is equivariant \
+             to 1e-12; radius/offset levers differentiate exactly (-1), the blend-radius \
+             lever is 0 far from the seam and -1/4 on it, and invalid lever values teach; \
+             seed {FREP_006_INPUT_SEED:#x}"
+        ),
+        FREP_006_INPUT_SEED,
     );
 }
 
@@ -1011,5 +1051,6 @@ fn frep_007_honest_unbounded_supports() {
          supports; halfspace support is whole-space, cylinder z support is infinite, and \
          hard/blended intersections with a finite box recover finite supports; constructors \
          and parameter edits reject non-finite geometry without mutating cached support",
+        DETERMINISTIC_SEED,
     );
 }

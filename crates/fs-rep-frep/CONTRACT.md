@@ -134,10 +134,19 @@ None.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases frep-001..frep-007 — JSON-line verdicts,
-seeded LCG randomness, per-case fs-obs Custom events (interval
-tightness, seam gradient stats, ray-safety counts). Any
-reimplementation must pass the suite unchanged.
+`tests/conformance.rs`, cases frep-001..frep-007. Each completed case emits a
+canonical, replay-linted, wire-validated fs-obs `ConformanceCase` aggregate
+verdict. The frep-001, frep-002, frep-003, frep-004, frep-005, and frep-006
+campaigns carry their literal LCG input seeds; the fixed frep-005b and frep-007
+cases use zero. The mixed frep-005 campaign keys its aggregate to the LCG input
+seed and records the fixed `Cx` stream separately in the detail. Randomized
+`Custom` companions embed their input seeds, with frep-005 also recording its
+fixed `Cx` execution stream separately.
+Interval tightness, seam-gradient statistics, and ray-safety counts remain
+separate fs-obs-validated `Custom` measurement companions. Assertions and
+expectations reached before aggregate emission remain ordinary Rust test
+diagnostics rather than structured verdicts. Any reimplementation must pass
+the suite unchanged.
 
 ## No-claim boundaries
 
