@@ -3327,3 +3327,39 @@ holdout/policy mutations; and targeted versus global amendment invalidation.
 - The clone-boundary assembly tests do not encode or decode durable
   checkpoints, restart a process, detect corruption, or exercise runtime
   cancellation. Those remain executable G4 campaign obligations.
+
+## VerificationManifest v1 identity core (bead i94v.7.1.1)
+
+`v1` is the stable-identity and source-authority layer: `ClaimId` names a
+conceptual lineage while `ClaimRevisionId` content-addresses one exact
+statement (kind, quantifiers, units/conventions, hypotheses, domain,
+code/contract surface, no-claim boundary, supersession pointer) — distinct
+revisions cannot collide, identical content is idempotent, supersession
+appends and never mutates. `CaseId`/`JourneyId` are the stable
+case/journey identities. `SourceAuthority` is a total lattice
+(GeneratedArtifact < TestSource < Contract < BeadObligation <
+FrozenSnapshot); conflicts resolve upward by re-pinning, and
+equal-authority conflicts refuse with ranked fixes. Typed
+`ClaimRelationReceipt`s (implication, refinement, restriction,
+counterexample, certified equivalence) carry direction, checker/TCB,
+quantifier variance, and policy version; promotion never transfers along
+counterexample or quantifier-strengthening edges; directed cycles refuse
+unless certified-equivalent, in which case the SCC canonicalizes to its
+smallest member without erasing members. `NormalizedGraph` digests are
+input-order invariant and the human/JSON/ledger renderings are tested
+semantic projections of that one digest. Migration is additive or
+breaking-with-mandatory-lossy-report; the 22-row `MANIFEST_RECORD_FIELDS`
+registry declares units, cardinality, authority, default visibility, and
+migration semantics per field, in data.
+
+### No-claim boundaries (v1 identity core)
+
+- The manifest is metadata and obligation authority, not proof; nothing
+  here adjudicates a scientific claim.
+- The frozen inventory compiler is V.1.2 scope; the lint battery V.1.3;
+  ledger persistence fs-obs/fs-ledger scope.
+- The field registry SPECIFIES the record; the typed full-record wire
+  codec lands with the V.1.2 compiler against this registry.
+- Relation soundness is structural (orientation, variance, cycles,
+  contradiction); checker/TCB strings are recorded identities, not
+  re-verified proofs.
