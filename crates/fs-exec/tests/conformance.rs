@@ -3,8 +3,10 @@
 //! Gauntlet coverage: G0 (completeness, reduction laws), G4 (cancellation
 //! storm with panic injection, drain/leak oracles), G5 (bit-identical
 //! results and stream keys across worker counts). Latency measurements are
-//! emitted as events — measured, never assumed. Every case prints one
-//! JSON-line verdict; seeded cases carry their seed.
+//! emitted as events — measured, never assumed. Every aggregate case emits
+//! one canonical fs-obs verdict; seeded cases carry their real logical input
+//! or execution seed. Those seeds do not replay OS scheduling or wall-clock
+//! timing.
 
 use core::ops::ControlFlow;
 use fs_exec::{
@@ -13,12 +15,27 @@ use fs_exec::{
 };
 use fs_substrate::affinity::CcdTopology;
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-exec/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-exec/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-exec/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("executor verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("executor verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -108,10 +125,11 @@ impl TileKernel for KeyKernel {
 
 #[test]
 fn exec_001_completeness_and_arena_hygiene() {
+    const SEED: u64 = 0xE001;
     let mut checked = 0;
     for workers in [1usize, 2, 5, 8] {
         for tiles in [0u64, 1, 7, 128] {
-            let pool = pool_with(workers, 0xE001);
+            let pool = pool_with(workers, SEED);
             let got = pool.run(&OrderKernel { tiles }).expect("run");
             let want: Vec<u64> = (0..tiles).collect();
             assert_eq!(got, want, "workers={workers} tiles={tiles}");
@@ -123,18 +141,20 @@ fn exec_001_completeness_and_arena_hygiene() {
         "exec-001",
         checked == 16,
         "every tile runs exactly once and arenas reclaim, across worker/tile counts (G0)",
+        SEED,
     );
 }
 
 #[test]
 fn exec_002_g5_bit_identical_results_across_worker_counts() {
-    let reference = pool_with(1, 0xE002)
+    const SEED: u64 = 0xE002;
+    let reference = pool_with(1, SEED)
         .run(&FloatKernel { tiles: 257 })
         .expect("reference run");
     let mut all_equal = true;
     for workers in [2usize, 3, 4, 8] {
         for _ in 0..3 {
-            let got = pool_with(workers, 0xE002)
+            let got = pool_with(workers, SEED)
                 .run(&FloatKernel { tiles: 257 })
                 .expect("run");
             all_equal &= got.to_bits() == reference.to_bits();
@@ -146,16 +166,18 @@ fn exec_002_g5_bit_identical_results_across_worker_counts() {
         &format!(
             "non-associative float reduction bit-identical across 1..8 workers (G5): {reference:e}"
         ),
+        SEED,
     );
 }
 
 #[test]
 fn exec_003_stream_keys_are_worker_independent() {
+    const SEED: u64 = 0xE003;
     let mut runs: Vec<Vec<(u64, u128)>> = Vec::new();
     for workers in [1usize, 2, 7] {
         // Fresh pool per run: iteration counters all start at 0, so the
         // ONLY varying factor is worker count — which must not matter.
-        let got = pool_with(workers, 0xE003)
+        let got = pool_with(workers, SEED)
             .run(&KeyKernel { tiles: 100 })
             .expect("run");
         runs.push(got);
@@ -172,11 +194,13 @@ fn exec_003_stream_keys_are_worker_independent() {
         identical && distinct,
         "RNG stream keys derive from logical identity only — shuffling worker counts changes \
          nothing (G5), and every tile's stream is distinct",
+        SEED,
     );
 }
 
 #[test]
 fn exec_004_external_cancellation_drains_and_ledgers_latency() {
+    const SEED: u64 = 0xE004;
     struct SlowKernel;
     impl TileKernel for SlowKernel {
         type Out = u64;
@@ -198,7 +222,7 @@ fn exec_004_external_cancellation_drains_and_ledgers_latency() {
             ControlFlow::Continue(acc & 1)
         }
     }
-    let pool = pool_with(4, 0xE004);
+    let pool = pool_with(4, SEED);
     let gate = CancelGate::new();
     let (result, report) = std::thread::scope(|s| {
         s.spawn(|| {
@@ -236,6 +260,7 @@ fn exec_004_external_cancellation_drains_and_ledgers_latency() {
              {p99} ns (measured, ledgered)",
             report.completed, report.total
         ),
+        SEED,
     );
 }
 
@@ -315,6 +340,7 @@ fn exec_005_g4_storm_random_cancels_and_panics_stay_structured() {
             "300 storm runs (seed {SEED:#x}): ok={oks} cancelled={cancels} panicked={panics}, \
              all structured, arenas quiescent throughout (G4)"
         ),
+        SEED,
     );
 }
 
@@ -346,11 +372,13 @@ fn exec_006_steal_order_and_quanta_respect_topology_fixtures() {
         ccd_local_first && proportional,
         "victim order is CCD-local-first on TR/EPYC/Apple fixtures; quantum weights split \
          tiles proportionally (the P/E hook)",
+        0,
     );
 }
 
 #[test]
 fn exec_007_latency_lane_stays_responsive_under_tile_load() {
+    const SEED: u64 = 0xE007;
     struct BusyKernel;
     impl TileKernel for BusyKernel {
         type Out = u64;
@@ -373,7 +401,7 @@ fn exec_007_latency_lane_stays_responsive_under_tile_load() {
     let lane = fs_exec::LatencyLane::new(1).expect("lane");
     let pool = pool_with(
         std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
-        0xE007,
+        SEED,
     );
     let (lane_ns, run) = std::thread::scope(|s| {
         let handle = s.spawn(|| pool.run(&BusyKernel));
@@ -407,16 +435,18 @@ fn exec_007_latency_lane_stays_responsive_under_tile_load() {
         "exec-007",
         lane_ns < 1_000_000_000,
         &format!("latency lane turnaround {lane_ns} ns while the tile pool saturates cores"),
+        SEED,
     );
 }
 
 #[test]
 fn exec_008_reduction_shape_is_scheduling_invariant() {
+    const SEED: u64 = 0xE008;
     // A non-commutative reduction (concatenation) is the sharpest witness:
     // ANY arrival-order fold would scramble it under stealing.
     for workers in [1usize, 2, 4, 8] {
         for _ in 0..5 {
-            let got = pool_with(workers, 0xE008)
+            let got = pool_with(workers, SEED)
                 .run(&OrderKernel { tiles: 300 })
                 .expect("run");
             assert!(
@@ -430,12 +460,16 @@ fn exec_008_reduction_shape_is_scheduling_invariant() {
         true,
         "non-commutative concatenation folds in ascending tile order under every schedule \
          (fixed-shape reduction law, G0/G5)",
+        SEED,
     );
 }
 
 #[test]
 fn exec_009_g5_audit_compensated_reductions_bit_stable_across_thread_counts() {
     use fs_exec::reduce::{Compensated, audit_accumulator, det_sum};
+
+    const INPUT_SEED: u64 = 0xE009_A0D1;
+    const EXECUTION_SEED: u64 = 0xE009;
 
     /// Ill-conditioned per-tile partial sums, merged compensated on the
     /// pool's fixed pairwise tree.
@@ -467,20 +501,22 @@ fn exec_009_g5_audit_compensated_reductions_bit_stable_across_thread_counts() {
     let p = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let mut hashes = Vec::new();
     for workers in [1usize, 2, p, 2 * p] {
-        let got = pool_with(workers, 0xE009).run(&CompKernel).expect("run");
+        let got = pool_with(workers, EXECUTION_SEED)
+            .run(&CompKernel)
+            .expect("run");
         hashes.push(fs_obs::fnv1a64(&got.value().to_bits().to_le_bytes()));
     }
     let bit_stable = hashes.windows(2).all(|w| w[0] == w[1]);
     // The audit half of the acceptance: a seeded arrival-order bug must be
     // caught and localized; det_sum on the same series must be order-free.
     let mut nasty: Vec<f64> = Vec::new();
-    let mut rng = Lcg(0xE009_A0D1);
+    let mut rng = Lcg(INPUT_SEED);
     for _ in 0..200 {
         nasty.push(1e16);
         nasty.push(1.0 + (rng.below(9) as f64));
         nasty.push(-1e16);
     }
-    let bug = audit_accumulator(&nasty, 0xE009, |a, x| a + x);
+    let bug = audit_accumulator(&nasty, EXECUTION_SEED, |a, x| a + x);
     let caught = matches!(&bug, Err(e) if e.witness >= 2);
     let det_is_clean = {
         let s1 = det_sum(&nasty);
@@ -496,21 +532,24 @@ fn exec_009_g5_audit_compensated_reductions_bit_stable_across_thread_counts() {
         bit_stable && caught && det_is_clean,
         &format!(
             "compensated artifact hash bit-stable across {{1,2,{p},{}}} workers (G5 audit); \
-             seeded arrival-order bug caught with witness={}",
+             seeded input {INPUT_SEED:#x}, execution/audit permutation {EXECUTION_SEED:#x}, \
+             arrival-order bug caught with witness={}",
             2 * p,
             bug.err().map_or(0, |e| e.witness)
         ),
+        INPUT_SEED,
     );
 }
 
 #[test]
 fn exec_010_race_winner_is_deterministic_and_losers_fully_drain() {
     use fs_exec::{BranchOutcome, RaceBranch, Racer, RacerConfig};
+    const SEED: u64 = 0xE010;
     // Ten repeats with jittered branch timing: the winner (index AND bits)
     // must never move in Deterministic mode.
     let mut winners = Vec::new();
     for round in 0..10u64 {
-        let racer = Racer::new(RacerConfig::new(0xE010));
+        let racer = Racer::new(RacerConfig::new(SEED));
         let run = racer
             .race(
                 vec![
@@ -553,6 +592,7 @@ fn exec_010_race_winner_is_deterministic_and_losers_fully_drain() {
              repeats (got branch {} = {:#x}); spinner killed and drained every time",
             winners[0].0, winners[0].1
         ),
+        SEED,
     );
 }
 
@@ -561,6 +601,7 @@ fn exec_011_solver_checkpoint_resume_fork_is_bit_exact() {
     use fs_exec::solver::{
         ResumableSolver, SolverProgress, SolverState, StepVerdict, codec, drive, fork,
     };
+    const SEED: u64 = 0xE011;
     /// Logistic-map style iteration: chaotic enough that ANY perturbation
     /// of the trajectory shows up in the bits.
     struct Chaotic {
@@ -610,7 +651,7 @@ fn exec_011_solver_checkpoint_resume_fork_is_bit_exact() {
                     &gate,
                     arena,
                     fs_exec::StreamKey {
-                        seed: 0xE011,
+                        seed: SEED,
                         kernel_id: 1,
                         tile: 0,
                         iteration: 0,
@@ -658,12 +699,14 @@ fn exec_011_solver_checkpoint_resume_fork_is_bit_exact() {
             "pause-serialize-resume reproduces the uninterrupted chaotic trajectory bit-exactly \
              at depths 1/137/9999 (G4 law): x = {x_ref:e}"
         ),
+        SEED,
     );
 }
 
 #[test]
 fn exec_012_kill_handles_reclaim_a_deep_candidate_tree_mid_flight() {
     use fs_exec::KillRegistry;
+    const SEED: u64 = 0xE012;
     struct GrindKernel;
     impl TileKernel for GrindKernel {
         type Out = u64;
@@ -683,7 +726,7 @@ fn exec_012_kill_handles_reclaim_a_deep_candidate_tree_mid_flight() {
     }
     let registry = KillRegistry::new();
     let gate = registry.register(42);
-    let pool = pool_with(4, 0xE012);
+    let pool = pool_with(4, SEED);
     // The candidate's "deep tree": a tile-pool run under the registry gate,
     // killed from outside mid-flight (the e-process elimination path).
     let (result, report) = std::thread::scope(|s| {
@@ -724,6 +767,7 @@ fn exec_012_kill_handles_reclaim_a_deep_candidate_tree_mid_flight() {
              harness's)",
             report.completed, report.total
         ),
+        SEED,
     );
 }
 
@@ -799,6 +843,7 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
              stale, pinned replay reproduces the recorded plan (edge={})",
             edge_reloaded.cells()
         ),
+        0,
     );
 }
 

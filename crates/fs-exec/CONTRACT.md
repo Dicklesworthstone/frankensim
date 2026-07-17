@@ -497,8 +497,8 @@ arrive as a registered capsule with a SAFETY.md.
 None. Everything here is `[S]` solid-tier.
 
 ## Conformance tests
-tests/conformance.rs, cases exec-001..exec-008 (JSON-line verdicts; seeded
-cases carry seeds): completeness/arena hygiene, G5 bit-identity across
+tests/conformance.rs, cases exec-001..exec-013 (canonical fs-obs
+`ConformanceCase` verdicts): completeness/arena hygiene, G5 bit-identity across
 worker counts, stream-key worker-independence, external-cancel drain with
 ledgered latency histogram, the 300-run G4 storm with panic injection,
 steal-order/quanta fixtures, latency-lane responsiveness under saturation,
@@ -510,6 +510,20 @@ a chaotic trajectory), exec-012 (kill-handle drains a deep tree,
 latency ledgered), and exec-013 (calibrate -> persist -> consume round
 trip; fingerprint keying and mismatch refusal; strict row domains;
 idempotent recalibration; canonical pinned replay).
+Every aggregate records its exact test-controlled logical input or execution
+seed: `exec-001` through `exec-004` use `0xE001` through `0xE004`; `exec-005`
+uses the shared storm/input seed `0xE005_2026_0706_5707`; `exec-007` and
+`exec-008` use `0xE007` and `0xE008`; `exec-010` through `exec-012` use
+`0xE010` through `0xE012`. `exec-009` records its generated-input seed
+`0xE009_A0D1`, while its detail also records the distinct pool-stream and
+audit-permutation seed `0xE009`. Only the fixed topology fixture `exec-006`
+and unseeded calibration `exec-013` use zero. In the cancellation, latency,
+race, and kill cases, the nonzero seed identifies logical streams only; it does
+not claim replay of OS thread interleavings or wall-clock timing. The existing
+`Custom`, `StormAssertion`, and `BenchmarkResult` companion events retain those
+measured or storm-specific records. Assertions that abort before an aggregate
+verdict remain ordinary Rust test diagnostics rather than structured verdict
+events.
 The `reduce` unit suite also runs bead 4nh8's G0 property harness: 512
 shrink-armed lengths in `0..=4096`, biased around powers of two, compare the
 complete `pairwise_fold` syntax tree against an independently stated
