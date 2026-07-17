@@ -141,14 +141,18 @@ than Cargo features.
 - `fe2e_mid_stages` and `fe2e_full_stages` are intentionally ignored
   lane placeholders until the perf/CI cadence lands.
 
-`tests/production_scale.rs` is the ignored first tranche for
-`frankensim-ei3b`. An explicit release-only profile selects either the M4
-128^3 or Threadripper 256^3 scalar-field rung; missing profile input produces
-a named refusal without allocating, while malformed or host-mismatched input
-fails after emitting the refusal. The stable configuration identity binds the
-shape, exact payload and fresh-chunk reservation, pool/lease limits, OS,
-architecture, bounded model string, logical CPU count, and crate versions. It
-explicitly excludes phase clocks and process RSS.
+`tests/production_scale.rs` is the ignored scale battery for
+`frankensim-ei3b`. An explicit profile admits either an M4 or Threadripper host
+only when debug assertions are off; the documented command uses Cargo release,
+but the compiled crate cannot authoritatively name its Cargo profile or
+optimization level, so the evidence calls this
+`debug-assertions-off-profile-unattested`. Missing profile input produces a
+named refusal without allocating, while malformed or host-mismatched input
+fails after emitting the refusal. The scalar-field rung selects 128^3 on M4 and
+256^3 on Threadripper. Its stable configuration identity binds the build-mode
+boundary, shape, exact payload and fresh-chunk reservation, pool/lease limits,
+OS, architecture, bounded model string, logical CPU count, and crate versions.
+It explicitly excludes phase clocks and process RSS.
 
 The tranche separately proves two memory properties. First, an exact
 fresh-pool lease limit one byte below the preflight reservation refuses before
@@ -165,11 +169,54 @@ Phase rows are report-only, object-shaped `Custom` observations named
 `allocate_initialize_first_touch_ns`, `serial_sweep_ns`, and
 `arena_drop_reclaim_ns`. They carry the workload configuration root rather than
 mislabeling it as an `fs-substrate` machine fingerprint, so cross-run
-performance comparison remains refused. On Linux only, `/proc/self/status`
+performance comparison remains refused. Elapsed durations live only in the
+`Custom` payload; they are not misreported as the event's Unix-epoch
+`wall_ns`. On Linux only, `/proc/self/status`
 `VmHWM` is recorded under its exact process-lifetime high-water semantics; it
 includes harness startup and cannot be reset, so this tranche does not use it
 as an admitted RSS budget gate. On macOS, current RSS is not relabeled as peak
 and the true peak claim is named-skipped.
+
+The companion sparse-D3Q19 rung activates a near-centered 25x25x25 cube of
+whole 4x4x4 tiles in a 200^3 domain, leaving 12 tile layers before and 13 after
+on each axis: exactly 15,625 tiles and 1,000,000 active cells.
+It builds a serial reference from ascending coordinate input and a pooled grid
+from the reverse input, then requires both to converge to the same canonical
+Morton order. After one zero-force BGK step, all 19,000,000 published f64
+population values must be finite and bit-for-bit identical between the serial
+reference and the real `TilePool` run. Both canonical mass reductions must
+remain within the emitted `8 gamma_n` roundoff envelope. The pooled receipt
+retains exactly two deterministic reports -- collide then stream -- each with
+1,954 completed kernel groups, per-worker completion accounting, an open
+cancellation gate, and a placement identity that round-trips through the
+current producer-version admission check.
+
+`allocated_state_bytes()` is used only for its exact logical meaning: three
+population buffers per active tile, 29,184 bytes per tile and 456,000,000 bytes
+per grid. The test holds a 912,000,000-byte `OperationMemoryLease` charge before
+constructing the serial and pooled grids, but labels it a shadow preflight, not
+allocation authority. `SparseGrid3` stores ordinary `Vec` and `BTreeMap`
+allocations, activation has ordinary heap temporaries, the exact-state oracle
+copies another 304,000,000 bytes transiently, and `step_pooled` uses the
+runner's legacy internal unbounded lease. None of those allocations is charged
+to the shadow receipt. The evidence therefore refuses
+`sparse-state-memory-lease-authority` and separately marks only the
+`shadow-memory-preflight-ledger` as restricted. It also refuses
+`structured-sparse-heap-oom-refusal` before allocating: ordinary infallible
+vector growth can still abort under host pressure instead of returning a typed
+error. A bounded sparse allocation claim requires a lease-backed storage API,
+fallible sparse construction, and a leased pooled-sweep entry point.
+
+Sparse phase rows are likewise report-only `Custom` observations. The stable
+configuration identity binds the active Morton-key set, dimensions, population
+layout, BGK parameters, seeds, serial/pool activation protocols, logical byte
+counts, worker count, TilePool placement identity/version, D3Q19 semantics
+version, harness versions, and the mass-acceptance policy version, formula,
+population count, multiplier, and computed-bound bits. It excludes clocks,
+process RSS, unsurfaced allocator metadata, activation temporaries, and
+observed pin success. Linux `VmHWM` and the macOS peak-RSS refusal keep the
+same semantics as the scalar rung; no quiet-host performance or attributed
+RSS-budget claim follows from them.
 
 The eight completed aggregates retain their existing case identities
 and emit canonical `ConformanceCase` records with Info/Error severity,
@@ -212,10 +259,13 @@ until their perf/CI cadence lands.
   this crate composes public APIs from those crates.
 - No production-scale full-fidelity flagship run is claimed. Mid and
   full lanes are wired as ignored tests with envelope homes. The ignored
-  scalar-field scale tranche proves only arena/lease admission, first-touch
-  initialization, serial sweep, and reclaim accounting. Sparse D3Q19 at one
-  million active cells, TilePool ownership, NUMA placement, per-CCD bandwidth,
-  CCD-shaped reductions, quiet-host timing promotion, cross-ISA comparison,
+  scalar-field rung is limited to arena/lease admission, first-touch
+  initialization, serial sweep, and reclaim accounting. The sparse rung is
+  limited to one million whole-tile cells, one serial-versus-pool exact-state
+  comparison, logical retained-state accounting, and two observed TilePool
+  passes. NUMA placement, per-CCD bandwidth, CCD-shaped reductions, a second
+  production-scale pooled worker count, scale cancellation latency, quiet-host
+  timing promotion, cross-ISA comparison, attributed total-heap/RSS coverage,
   and an admitted M4 peak-RSS budget remain explicit named skips until their
   retained host evidence exists.
 - No CI authority is claimed. DSR remains the repository automation
