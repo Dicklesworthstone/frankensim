@@ -28,9 +28,12 @@
 //! data-dependent work caps, and row-major minimum-magnitude pivots. It never
 //! publishes construction output until the independent witness verifier above
 //! accepts every inverse, product, and canonical-divisibility obligation.
-//! None of these values is yet a terminal-relative homology receipt or
-//! physical R3 winding authority. Free/torsion quotient decomposition follows
-//! in a later I13.2b tranche.
+//!
+//! The fifth tranche binds a verified Smith form byte-for-byte to the retained
+//! lower kernel image and publishes the exact phase-local cellular quotient
+//! decomposition into free rank and nontrivial torsion invariant factors.
+//! It retains both complete authorities but still makes no generator, period,
+//! naturality, embedding, or physical-R3 winding claim.
 
 use core::fmt;
 
@@ -72,6 +75,13 @@ pub const DEFAULT_MAX_CONSTRUCTION_OPERATIONS: u128 = 1_000_000;
 /// Default maximum admitted source/diagonal inspections and destination-slot
 /// updates during reduction.
 pub const DEFAULT_MAX_CONSTRUCTION_ENTRY_STEPS: u128 = DEFAULT_MAX_SCALAR_OPERATIONS;
+/// Default exact source/invariant comparisons for quotient-homology binding.
+pub const DEFAULT_MAX_HOMOLOGY_BINDING_ITEMS: usize =
+    DEFAULT_MAX_MATRIX_ENTRIES + DEFAULT_MAX_MATRIX_EXTENT;
+/// Default retained integer/cell entries across kernel transport and the
+/// lower-image Smith authority.
+pub const DEFAULT_MAX_HOMOLOGY_RETAINED_ENTRIES: usize =
+    20 * DEFAULT_MAX_MATRIX_ENTRIES + 8 * DEFAULT_MAX_MATRIX_EXTENT;
 
 /// Explicit resource envelope for exact integer witness admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,6 +393,46 @@ impl Default for SmithConstructionBudget {
             DEFAULT_MAX_CONSTRUCTION_OPERATIONS,
             DEFAULT_MAX_CONSTRUCTION_ENTRY_STEPS,
             i128::MAX.unsigned_abs(),
+        )
+    }
+}
+
+/// Resource envelope for binding a lower-image Smith authority to one verified
+/// terminal-relative kernel transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HomologyDecompositionBudget {
+    max_binding_items: usize,
+    max_retained_entries: usize,
+}
+
+impl HomologyDecompositionBudget {
+    /// Construct a quotient-decomposition envelope.
+    #[must_use]
+    pub const fn new(max_binding_items: usize, max_retained_entries: usize) -> Self {
+        Self {
+            max_binding_items,
+            max_retained_entries,
+        }
+    }
+
+    /// Maximum exact lower-source and invariant-factor inspections.
+    #[must_use]
+    pub const fn max_binding_items(self) -> usize {
+        self.max_binding_items
+    }
+
+    /// Maximum retained integer/cell entries across both complete authorities.
+    #[must_use]
+    pub const fn max_retained_entries(self) -> usize {
+        self.max_retained_entries
+    }
+}
+
+impl Default for HomologyDecompositionBudget {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_HOMOLOGY_BINDING_ITEMS,
+            DEFAULT_MAX_HOMOLOGY_RETAINED_ENTRIES,
         )
     }
 }
@@ -1440,6 +1490,10 @@ pub enum TopologyApplicability {
     /// Exact incoming image in one retained Smith witness's kernel coordinates.
     /// The coordinates are witness-dependent and are not canonical homology.
     TerminalRelativeKernelCoordinatesOnly,
+    /// Exact invariant-factor decomposition of one admitted phase-local
+    /// quotient chain homology group. No generator, period, naturality,
+    /// embedding, or physical-R3 conclusion follows.
+    TerminalRelativeChainHomologyOnly,
 }
 
 /// Authority classification for an unsuccessful exact verification.
@@ -1576,6 +1630,274 @@ impl ConstructedSmithNormalForm {
     #[must_use]
     pub const fn applicability(&self) -> TopologyApplicability {
         TopologyApplicability::AbstractAlgebraOnly
+    }
+}
+
+/// Exact invariant-factor decomposition of one admitted terminal-relative
+/// cellular chain homology group.
+///
+/// The result owns the complete adjacent-boundary/kernel authority and the
+/// complete independently verified Smith authority for its lower image. It
+/// publishes only the abstract quotient invariants, not generators or periods.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedTerminalRelativeHomology {
+    transport: VerifiedTerminalRelativeKernelTransport,
+    image_smith: VerifiedSmithNormalForm,
+    torsion_start: usize,
+    binding_items: usize,
+    retained_entries: usize,
+}
+
+impl VerifiedTerminalRelativeHomology {
+    /// Admitted terminal-relative pair identity.
+    #[must_use]
+    pub const fn pair_id(&self) -> TerminalRelativePairId {
+        self.transport.pair_id()
+    }
+
+    /// Admitted phase identity.
+    #[must_use]
+    pub const fn phase(&self) -> &PhaseId {
+        self.transport.phase()
+    }
+
+    /// Admitted phase-owned conductor component.
+    #[must_use]
+    pub const fn component(&self) -> &ConductorComponentId {
+        self.transport.component()
+    }
+
+    /// Homological degree `k` of this quotient.
+    #[must_use]
+    pub const fn degree(&self) -> u8 {
+        self.transport.degree()
+    }
+
+    /// Complete proof that the incoming image lies in the outgoing kernel.
+    #[must_use]
+    pub const fn transport(&self) -> &VerifiedTerminalRelativeKernelTransport {
+        &self.transport
+    }
+
+    /// Complete Smith authority bound byte-for-byte to the lower image.
+    #[must_use]
+    pub const fn image_smith(&self) -> &VerifiedSmithNormalForm {
+        &self.image_smith
+    }
+
+    /// Rank of `ker(A_k)` before quotienting by incoming boundaries.
+    #[must_use]
+    pub const fn cycle_rank(&self) -> usize {
+        self.transport.kernel_dimension()
+    }
+
+    /// Rank of `im(A_(k+1))` inside the verified kernel coordinates.
+    #[must_use]
+    pub const fn boundary_rank(&self) -> usize {
+        self.image_smith.rank()
+    }
+
+    /// Rank of the free summand `Z^(cycle_rank - boundary_rank)`.
+    #[must_use]
+    pub const fn free_rank(&self) -> usize {
+        self.cycle_rank() - self.boundary_rank()
+    }
+
+    /// All positive presentation factors, including factors equal to one.
+    #[must_use]
+    pub fn presentation_invariant_factors(&self) -> &[i128] {
+        self.image_smith.invariant_factors()
+    }
+
+    /// Nontrivial finite cyclic summands. Factors equal to one are omitted.
+    #[must_use]
+    pub fn torsion_invariant_factors(&self) -> &[i128] {
+        &self.image_smith.invariant_factors()[self.torsion_start..]
+    }
+
+    /// Exact source/factor inspections completed before publication.
+    #[must_use]
+    pub const fn binding_items(&self) -> usize {
+        self.binding_items
+    }
+
+    /// Retained integer/cell entries across both complete authorities.
+    #[must_use]
+    pub const fn retained_entries(&self) -> usize {
+        self.retained_entries
+    }
+
+    /// Exact phase-local cellular quotient homology only.
+    #[must_use]
+    pub const fn applicability(&self) -> TopologyApplicability {
+        TopologyApplicability::TerminalRelativeChainHomologyOnly
+    }
+}
+
+/// Bind a verified Smith form to one exact lower kernel image without injected
+/// cancellation and publish its free/torsion invariant decomposition.
+#[allow(clippy::large_types_passed_by_value)]
+pub fn verify_terminal_relative_homology(
+    transport: VerifiedTerminalRelativeKernelTransport,
+    image_smith: VerifiedSmithNormalForm,
+    budget: HomologyDecompositionBudget,
+) -> Result<VerifiedTerminalRelativeHomology, IntegralTopologyError> {
+    verify_terminal_relative_homology_with_checkpoint(transport, image_smith, budget, &mut |_| true)
+}
+
+/// Bind a lower-image Smith authority with bounded cancellation polling.
+///
+/// For lower image `L` with `q` rows and verified invariant factors
+/// `d_1 | ... | d_s`, this proves only
+/// `H_k = Z^(q-s) + direct_sum_i Z/d_i`, omitting factors `d_i = 1` from the
+/// reported torsion slice. The result retains the authorities needed to replay
+/// every byte of this statement.
+#[allow(clippy::large_types_passed_by_value)]
+#[allow(clippy::too_many_lines)]
+pub fn verify_terminal_relative_homology_with_checkpoint(
+    transport: VerifiedTerminalRelativeKernelTransport,
+    image_smith: VerifiedSmithNormalForm,
+    budget: HomologyDecompositionBudget,
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+) -> Result<VerifiedTerminalRelativeHomology, IntegralTopologyError> {
+    let lower = transport.kernel_image();
+    let source = image_smith.source();
+    if source.rows != lower.rows || source.cols != lower.cols {
+        return Err(IntegralTopologyError::HomologySmithSourceShapeMismatch {
+            expected_rows: lower.rows,
+            expected_cols: lower.cols,
+            actual_rows: source.rows,
+            actual_cols: source.cols,
+        });
+    }
+    if image_smith.rank > lower.rows || image_smith.rank != image_smith.invariant_factors.len() {
+        return Err(IntegralTopologyError::HomologyDecompositionInvariantLost {
+            field: "lower-image Smith rank",
+        });
+    }
+    let binding_items = lower
+        .entries
+        .len()
+        .checked_add(image_smith.invariant_factors.len())
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative homology binding items",
+        })?;
+    if binding_items > budget.max_binding_items {
+        return Err(IntegralTopologyError::HomologyBindingBudgetExceeded {
+            requested: binding_items,
+            max: budget.max_binding_items,
+        });
+    }
+    let retained_entries = retained_terminal_relative_homology_entries(&transport, &image_smith)?;
+    if retained_entries > budget.max_retained_entries {
+        return Err(IntegralTopologyError::RetainedEntryBudgetExceeded {
+            requested: retained_entries,
+            max: budget.max_retained_entries,
+        });
+    }
+
+    let mut completed = 0_usize;
+    poll_homology_decomposition(
+        checkpoint,
+        "terminal-relative homology preflight",
+        completed,
+        binding_items,
+    )?;
+    for (index, (expected, actual)) in lower.entries.iter().zip(&source.entries).enumerate() {
+        poll_homology_decomposition(
+            checkpoint,
+            "terminal-relative homology source binding",
+            completed,
+            binding_items,
+        )?;
+        if expected != actual {
+            return Err(IntegralTopologyError::HomologySmithSourceEntryMismatch {
+                row: index / lower.cols.max(1),
+                col: index % lower.cols.max(1),
+                expected: *expected,
+                actual: *actual,
+            });
+        }
+        completed += 1;
+    }
+
+    let mut torsion_start = image_smith.invariant_factors.len();
+    for (index, factor) in image_smith.invariant_factors.iter().copied().enumerate() {
+        poll_homology_decomposition(
+            checkpoint,
+            "terminal-relative homology invariant factors",
+            completed,
+            binding_items,
+        )?;
+        if factor <= 0 {
+            return Err(IntegralTopologyError::HomologyDecompositionInvariantLost {
+                field: "nonpositive verified invariant factor",
+            });
+        }
+        if factor > 1 && torsion_start == image_smith.invariant_factors.len() {
+            torsion_start = index;
+        }
+        completed += 1;
+    }
+    poll_homology_decomposition(
+        checkpoint,
+        "terminal-relative homology finalize",
+        completed,
+        binding_items,
+    )?;
+    debug_assert_eq!(completed, binding_items);
+
+    Ok(VerifiedTerminalRelativeHomology {
+        transport,
+        image_smith,
+        torsion_start,
+        binding_items: completed,
+        retained_entries,
+    })
+}
+
+fn retained_terminal_relative_homology_entries(
+    transport: &VerifiedTerminalRelativeKernelTransport,
+    image_smith: &VerifiedSmithNormalForm,
+) -> Result<usize, IntegralTopologyError> {
+    let transport_entries = retained_kernel_transport_entries(
+        &transport.outgoing,
+        &transport.incoming,
+        &transport.outgoing_smith,
+        transport.kernel_image.entries.len(),
+    )?;
+    [
+        image_smith.source.entries.len(),
+        image_smith.witness.diagonal.entries.len(),
+        image_smith.witness.left.entries.len(),
+        image_smith.witness.left_inverse.entries.len(),
+        image_smith.witness.right.entries.len(),
+        image_smith.witness.right_inverse.entries.len(),
+        image_smith.invariant_factors.len(),
+    ]
+    .into_iter()
+    .try_fold(transport_entries, |total, entries| {
+        total.checked_add(entries)
+    })
+    .ok_or(IntegralTopologyError::WorkPlanOverflow {
+        phase: "terminal-relative homology retained entries",
+    })
+}
+
+fn poll_homology_decomposition(
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+    phase: &'static str,
+    completed_binding_items: usize,
+    planned_binding_items: usize,
+) -> Result<(), IntegralTopologyError> {
+    if checkpoint(phase) {
+        Ok(())
+    } else {
+        Err(IntegralTopologyError::HomologyDecompositionCancelled {
+            phase,
+            completed_binding_items,
+            planned_binding_items,
+        })
     }
 }
 
@@ -3242,6 +3564,51 @@ pub enum IntegralTopologyError {
         /// updates.
         max_entry_steps: u128,
     },
+    /// The supplied lower-image Smith authority described another matrix
+    /// shape.
+    HomologySmithSourceShapeMismatch {
+        /// Required kernel-image rows.
+        expected_rows: usize,
+        /// Required incoming-chain columns.
+        expected_cols: usize,
+        /// Smith-bound source rows.
+        actual_rows: usize,
+        /// Smith-bound source columns.
+        actual_cols: usize,
+    },
+    /// The supplied lower-image Smith authority described different matrix
+    /// bytes.
+    HomologySmithSourceEntryMismatch {
+        /// First differing row.
+        row: usize,
+        /// First differing column.
+        col: usize,
+        /// Kernel-transport entry.
+        expected: i128,
+        /// Smith-bound source entry.
+        actual: i128,
+    },
+    /// Exact source/factor binding work exceeded its envelope.
+    HomologyBindingBudgetExceeded {
+        /// Required binding items.
+        requested: usize,
+        /// Maximum admitted binding items.
+        max: usize,
+    },
+    /// Opaque verified inputs violated an internal quotient invariant.
+    HomologyDecompositionInvariantLost {
+        /// Broken invariant.
+        field: &'static str,
+    },
+    /// Cancellation was observed before quotient-homology publication.
+    HomologyDecompositionCancelled {
+        /// Observation phase.
+        phase: &'static str,
+        /// Completed source/factor inspections.
+        completed_binding_items: usize,
+        /// Planned source/factor inspections.
+        planned_binding_items: usize,
+    },
     /// Matrix extent exceeded its explicit envelope.
     MatrixExtentExceeded {
         /// Supplied rows.
@@ -3410,6 +3777,8 @@ impl IntegralTopologyError {
             | Self::OutgoingSmithSourceShapeMismatch { .. }
             | Self::OutgoingSmithSourceEntryMismatch { .. }
             | Self::IncomingImageOutsideKernel { .. }
+            | Self::HomologySmithSourceShapeMismatch { .. }
+            | Self::HomologySmithSourceEntryMismatch { .. }
             | Self::MatrixEntryCount { .. }
             | Self::WitnessShape { .. }
             | Self::WitnessProductMismatch { .. }
@@ -3432,6 +3801,9 @@ impl IntegralTopologyError {
             | Self::SmithConstructionArithmeticOverflow { .. }
             | Self::SmithConstructionInvariantLost { .. }
             | Self::SmithConstructionCancelled { .. }
+            | Self::HomologyBindingBudgetExceeded { .. }
+            | Self::HomologyDecompositionInvariantLost { .. }
+            | Self::HomologyDecompositionCancelled { .. }
             | Self::MatrixExtentExceeded { .. }
             | Self::MatrixEntryBudgetExceeded { .. }
             | Self::RetainedMatrixExceedsBudget { .. }

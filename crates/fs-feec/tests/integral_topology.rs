@@ -4,13 +4,15 @@
 
 use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
 use fs_feec::integral_topology::{
-    ExactAlgebraBudget, ExactIntegerMatrix, IntegralTopologyError, IntegralTopologyFailureClass,
-    KernelCoordinateBudget, MatrixRole, SmithConstructionBudget, SmithNormalFormWitness,
-    SmithWitnessStage, TerminalRelativeBoundaryBudget, TerminalRelativeBoundaryMatrix,
-    TopologyApplicability, VerifiedSmithNormalForm, construct_smith_normal_form,
-    construct_smith_normal_form_with_checkpoint, extract_terminal_relative_boundary_matrix,
+    ExactAlgebraBudget, ExactIntegerMatrix, HomologyDecompositionBudget, IntegralTopologyError,
+    IntegralTopologyFailureClass, KernelCoordinateBudget, MatrixRole, SmithConstructionBudget,
+    SmithNormalFormWitness, SmithWitnessStage, TerminalRelativeBoundaryBudget,
+    TerminalRelativeBoundaryMatrix, TopologyApplicability, VerifiedSmithNormalForm,
+    construct_smith_normal_form, construct_smith_normal_form_with_checkpoint,
+    extract_terminal_relative_boundary_matrix,
     extract_terminal_relative_boundary_matrix_with_checkpoint, verify_smith_normal_form,
-    verify_smith_normal_form_with_checkpoint, verify_terminal_relative_kernel_transport,
+    verify_smith_normal_form_with_checkpoint, verify_terminal_relative_homology,
+    verify_terminal_relative_homology_with_checkpoint, verify_terminal_relative_kernel_transport,
     verify_terminal_relative_kernel_transport_with_checkpoint,
 };
 use fs_feec::terminal_relative::{
@@ -488,6 +490,137 @@ fn centered_surface_pair() -> TerminalRelativePair {
     .expect("centered terminal-relative surface")
 }
 
+fn torsion_terminal(
+    ambient: &FiniteCellComplex,
+    edge: u32,
+    id: &str,
+    role: TerminalRole,
+    orientation: TerminalOrientation,
+    sign: OrientationMapSign,
+) -> PhysicalTerminal {
+    let port = PortKind::ElectricalVoltageCurrent
+        .scalar_seed_schema(
+            stable(&format!("port/{id}")),
+            CoordinateBinding::new(
+                stable("basis/abstract-torsion"),
+                stable("frame/abstract-torsion"),
+                PortOrientation::OutwardFromOwner,
+            ),
+            PortTimestamp::new(stable("clock/electrical"), 53),
+        )
+        .expect("torsion-fixture electrical port");
+    PhysicalTerminal::new(
+        PhysicalTerminalId::new(format!("terminal/{id}")).expect("terminal id"),
+        subcomplex(ambient, &format!("support/{id}"), [CellRef::new(1, edge)]),
+        ConductorComponentId::new("component/torsion").expect("component id"),
+        PhaseId::new("phase/torsion").expect("phase id"),
+        role,
+        orientation,
+        TerminalPortCoordinate::Flow,
+        port.clone(),
+        PresentedMachinePortRef::try_new(
+            stable("org.frankensim.fs-ir.machine.graph.v1"),
+            1,
+            [0x6d; 32],
+            stable("machine-owner/abstract-torsion"),
+            stable(&format!("port/{id}")),
+            stable(&format!("machine-terminal/{id}-voltage")),
+            stable(&format!("machine-terminal/{id}-current")),
+        )
+        .expect("presented Machine-IR port"),
+        TerminalPortTrivialization::new(
+            TrivializationId::new(format!("trivialization/{id}")).expect("trivialization id"),
+            port.id().clone(),
+            sign,
+            stable("voltage-reference/abstract-torsion"),
+            stable(&format!("current-reference/{id}")),
+        ),
+    )
+    .expect("torsion-fixture terminal")
+}
+
+/// Abstract finite-CW algebra fixture only: after removing terminal edges 2
+/// and 3, the degree-two boundary is `[[1,1],[-1,1]]`, whose cokernel is Z/2.
+fn abstract_torsion_pair() -> TerminalRelativePair {
+    let complex = FiniteCellComplex::try_new(
+        2,
+        vec![0, 4, 2],
+        vec![
+            BoundaryIncidence::new(
+                CellRef::new(1, 0),
+                CellRef::new(2, 0),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 1),
+                CellRef::new(2, 0),
+                IncidenceSign::Negative,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 2),
+                CellRef::new(2, 0),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 0),
+                CellRef::new(2, 1),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 1),
+                CellRef::new(2, 1),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 3),
+                CellRef::new(2, 1),
+                IncidenceSign::Positive,
+            ),
+        ],
+    )
+    .expect("abstract torsion finite CW complex");
+    let all_cells = (0..4)
+        .map(|ordinal| CellRef::new(1, ordinal))
+        .chain((0..2).map(|ordinal| CellRef::new(2, ordinal)))
+        .collect::<Vec<_>>();
+    let conductor = subcomplex(&complex, "support/torsion-conductor", all_cells.clone());
+    let component = ConductorComponent::new(
+        ConductorComponentId::new("component/torsion").expect("component id"),
+        subcomplex(&complex, "support/torsion-component", all_cells),
+    )
+    .expect("torsion component");
+    TerminalRelativePair::try_new(
+        complex.clone(),
+        conductor,
+        subcomplex(
+            &complex,
+            "support/torsion-relative",
+            [CellRef::new(1, 2), CellRef::new(1, 3)],
+        ),
+        subcomplex(&complex, "support/torsion-insulation-empty", []),
+        vec![component],
+        vec![
+            torsion_terminal(
+                &complex,
+                2,
+                "torsion-driven",
+                TerminalRole::Driven,
+                TerminalOrientation::OutOfConductor,
+                OrientationMapSign::Preserve,
+            ),
+            torsion_terminal(
+                &complex,
+                3,
+                "torsion-return",
+                TerminalRole::ReturnReference,
+                TerminalOrientation::IntoConductor,
+                OrientationMapSign::Reverse,
+            ),
+        ],
+    )
+    .expect("abstract torsion terminal-relative pair")
+}
+
 fn boundary_budget(
     max_rows: usize,
     max_cols: usize,
@@ -534,6 +667,13 @@ fn construction_budget(
         max_entry_steps,
         max_abs_coefficient,
     )
+}
+
+fn homology_budget(
+    max_binding_items: usize,
+    max_retained_entries: usize,
+) -> HomologyDecompositionBudget {
+    HomologyDecompositionBudget::new(max_binding_items, max_retained_entries)
 }
 
 fn centered_kernel_inputs() -> (
@@ -584,6 +724,28 @@ fn centered_kernel_inputs() -> (
     )
     .expect("surface outgoing Smith witness");
     (outgoing, incoming, smith)
+}
+
+fn centered_homology_inputs() -> (
+    fs_feec::integral_topology::VerifiedTerminalRelativeKernelTransport,
+    VerifiedSmithNormalForm,
+) {
+    let (outgoing, incoming, smith) = centered_kernel_inputs();
+    let transport = verify_terminal_relative_kernel_transport(
+        outgoing,
+        incoming,
+        smith,
+        kernel_budget(6, 20, 154, 12, 144),
+    )
+    .expect("centered kernel transport");
+    let image_smith = construct_smith_normal_form(
+        transport.kernel_image().clone(),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("centered lower-image Smith form")
+    .into_verified();
+    (transport, image_smith)
 }
 
 #[test]
@@ -1699,6 +1861,215 @@ fn it_026_constructive_smith_exhausts_small_two_by_two_oracle() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn it_027_terminal_relative_homology_binds_complete_quotient_authority() {
+    let (transport, image_smith) = centered_homology_inputs();
+    let homology =
+        verify_terminal_relative_homology(transport, image_smith, homology_budget(24, 280))
+            .expect("centered surface quotient homology");
+
+    assert_eq!(homology.phase().as_str(), "phase/surface");
+    assert_eq!(homology.component().as_str(), "component/surface");
+    assert_eq!(homology.degree(), 1);
+    assert_eq!(homology.cycle_rank(), 5);
+    assert_eq!(homology.boundary_rank(), 4);
+    assert_eq!(homology.free_rank(), 1);
+    assert_eq!(homology.presentation_invariant_factors(), &[1, 1, 1, 1]);
+    assert!(homology.torsion_invariant_factors().is_empty());
+    assert_eq!(homology.binding_items(), 24);
+    assert_eq!(homology.retained_entries(), 280);
+    assert_eq!(
+        homology.applicability(),
+        TopologyApplicability::TerminalRelativeChainHomologyOnly
+    );
+    assert_eq!(
+        homology.image_smith().source(),
+        homology.transport().kernel_image()
+    );
+}
+
+#[test]
+fn it_028_abstract_torsion_fixture_reports_nontrivial_factor_without_r3_claim() {
+    let pair = abstract_torsion_pair();
+    let phase = PhaseId::new("phase/torsion").expect("phase id");
+    let outgoing = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        1,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("abstract torsion outgoing zero map");
+    let incoming = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        2,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("abstract torsion incoming map");
+    assert_eq!((outgoing.matrix().rows(), outgoing.matrix().cols()), (0, 2));
+    assert_eq!(incoming.matrix().entries(), &[1, 1, -1, 1]);
+
+    let outgoing_smith = construct_smith_normal_form(
+        outgoing.matrix().clone(),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("outgoing zero-map Smith form")
+    .into_verified();
+    let transport = verify_terminal_relative_kernel_transport(
+        outgoing,
+        incoming,
+        outgoing_smith,
+        kernel_budget(2, 4, 22, 2, 8),
+    )
+    .expect("torsion lower image");
+    assert_eq!(transport.kernel_image().entries(), &[1, 1, -1, 1]);
+    let image_smith = construct_smith_normal_form(
+        transport.kernel_image().clone(),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("torsion image Smith form")
+    .into_verified();
+    let homology =
+        verify_terminal_relative_homology(transport, image_smith, homology_budget(6, 48))
+            .expect("abstract Z/2 quotient");
+
+    assert_eq!(homology.cycle_rank(), 2);
+    assert_eq!(homology.boundary_rank(), 2);
+    assert_eq!(homology.free_rank(), 0);
+    assert_eq!(homology.presentation_invariant_factors(), &[1, 2]);
+    assert_eq!(homology.torsion_invariant_factors(), &[2]);
+    assert_eq!(homology.binding_items(), 6);
+    assert_eq!(homology.retained_entries(), 48);
+    assert_eq!(
+        homology.applicability(),
+        TopologyApplicability::TerminalRelativeChainHomologyOnly
+    );
+}
+
+#[test]
+fn it_029_homology_binding_refuses_mutation_shape_and_every_resource_limit() {
+    let (transport, _) = centered_homology_inputs();
+    let wrong_source = matrix(5, 4, &[0; 20]);
+    let wrong_smith = construct_smith_normal_form(
+        wrong_source,
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("same-shape wrong Smith source")
+    .into_verified();
+    let error =
+        verify_terminal_relative_homology(transport.clone(), wrong_smith, homology_budget(24, 280))
+            .expect_err("same-shape lower-image mutation must refuse");
+    assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Refuted);
+    assert!(matches!(
+        error,
+        IntegralTopologyError::HomologySmithSourceEntryMismatch {
+            row: 0,
+            col: 1,
+            expected: 1,
+            actual: 0,
+        }
+    ));
+
+    let empty_smith = construct_smith_normal_form(
+        matrix(0, 0, &[]),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("empty Smith authority")
+    .into_verified();
+    let error =
+        verify_terminal_relative_homology(transport.clone(), empty_smith, homology_budget(24, 280))
+            .expect_err("empty bytes with wrong shape must refuse");
+    assert!(matches!(
+        error,
+        IntegralTopologyError::HomologySmithSourceShapeMismatch {
+            expected_rows: 5,
+            expected_cols: 4,
+            actual_rows: 0,
+            actual_cols: 0,
+        }
+    ));
+
+    let (_, image_smith) = centered_homology_inputs();
+    for (limits, expected) in [
+        (homology_budget(23, 280), "binding"),
+        (homology_budget(24, 279), "retained"),
+    ] {
+        let error =
+            verify_terminal_relative_homology(transport.clone(), image_smith.clone(), limits)
+                .expect_err("homology limit minus one must refuse");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        match expected {
+            "binding" => assert!(matches!(
+                error,
+                IntegralTopologyError::HomologyBindingBudgetExceeded {
+                    requested: 24,
+                    max: 23,
+                }
+            )),
+            "retained" => assert!(matches!(
+                error,
+                IntegralTopologyError::RetainedEntryBudgetExceeded {
+                    requested: 280,
+                    max: 279,
+                }
+            )),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn it_030_homology_cancellation_is_transactional_through_final_publication() {
+    let (transport, image_smith) = centered_homology_inputs();
+    let mut poll_count = 0_usize;
+    let homology = verify_terminal_relative_homology_with_checkpoint(
+        transport.clone(),
+        image_smith.clone(),
+        homology_budget(24, 280),
+        &mut |_| {
+            poll_count += 1;
+            true
+        },
+    )
+    .expect("uninterrupted homology binding");
+    assert_eq!(homology.binding_items(), 24);
+    assert_eq!(poll_count, 26);
+
+    for stop_at in 0..poll_count {
+        let mut observed = 0_usize;
+        let error = verify_terminal_relative_homology_with_checkpoint(
+            transport.clone(),
+            image_smith.clone(),
+            homology_budget(24, 280),
+            &mut |_| {
+                let keep_running = observed != stop_at;
+                observed += 1;
+                keep_running
+            },
+        )
+        .expect_err("every homology cancellation poll must refuse");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        assert!(matches!(
+            &error,
+            IntegralTopologyError::HomologyDecompositionCancelled { .. }
+        ));
+        if stop_at + 1 == poll_count {
+            assert!(matches!(
+                error,
+                IntegralTopologyError::HomologyDecompositionCancelled {
+                    phase: "terminal-relative homology finalize",
+                    completed_binding_items: 24,
+                    planned_binding_items: 24,
+                }
+            ));
         }
     }
 }

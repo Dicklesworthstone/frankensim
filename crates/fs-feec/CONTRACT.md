@@ -206,6 +206,13 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   first-tranche verifier rechecks the complete witness. Construction work stays
   attached to the returned construction receipt alongside the opaque verified
   authority.
+  Its fifth tranche binds a complete Smith authority byte-for-byte to the
+  retained lower kernel image and owns both complete inputs. For lower image
+  rank `s` in a verified kernel of rank `q`, it publishes free rank `q-s`, all
+  positive presentation factors, and only factors greater than one as
+  nontrivial torsion summands. This is exact phase-local cellular chain
+  homology, not generator, period, naturality, embedding, or physical-R3
+  authority.
 
 ## Invariants
 
@@ -325,6 +332,10 @@ invariant failure as typed Unknown. In particular, `i128::MIN` is refused
 because its positive invariant magnitude is not representable. A constructor-
 generated witness that fails independent structural verification is an internal
 Unknown, not a Refuted judgment against the caller's valid source matrix.
+Quotient-homology binding refuses lower-image Smith shape or source-byte drift
+as Refuted. Binding/retention limits, cancellation, and opaque-input invariant
+loss remain Unknown; factors equal to one reduce boundary rank but never appear
+as nontrivial torsion.
 
 ## Determinism class
 
@@ -367,6 +378,10 @@ with row-major tie-breaking, uses checked Euclidean quotients, and records exact
 operation/entry counts. Identical source bytes and budgets replay the complete
 constructed witness and counters byte-for-byte; relabeled inputs are promised
 only the same canonical invariant factors, not the same transforms.
+Homology binding compares lower-image source bytes and verified invariant
+factors in fixed row-major/factor order. It retains no separately normalized
+generator basis, so witness-dependent lower coordinates remain replay authority
+rather than being mislabeled canonical representatives.
 
 ## Cancellation behavior
 
@@ -397,6 +412,9 @@ entries, while shears and sign normalization update at most half that bound.
 It polls at the verification handoff and then reuses every poll, including final
 publication, from the exact witness verifier. Cancellation discards the private
 partial reduction and publishes only a typed Unknown.
+Homology decomposition preflights source/factor comparisons and retained
+authority entries, polls every comparison, and polls again immediately before
+allocation-free publication.
 
 ## Unsafe boundary
 
@@ -545,6 +563,12 @@ data-dependent limit-minus-one, unrepresentable coefficient refusal,
 cancellation across construction and final verification, and an exhaustive
 625-matrix `2 x 2` oracle over entries `-2..=2` using independent gcd/determinant
 invariant-factor identities.
+Tranche 5 binds the centered-surface lower image to `[1,1,1,1]` and free rank
+one, plus an explicitly abstract finite-CW pair whose lower image
+`[[1,1],[-1,1]]` yields presentation factors `[1,2]` and torsion `[2]`.
+Same-shape mutation, empty-shape substitution, both resource limit-minus-one
+cases, complete authority retention counts, and every publication poll are
+pinned.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -714,8 +738,14 @@ invariant-factor identities.
   outgoing kernel and records its witness-relative coordinates. It does not
   itself claim homology, torsion, free generators, periods, linking, long exact
   sequences, naturality, or physical winding. The generic tranche-4 constructor
-  can reduce that lower matrix, but a later authority-binding tranche must own
-  and byte-compare both values before publishing the quotient decomposition.
+  can reduce that lower matrix, and tranche 5 now owns and byte-compares both
+  values before publishing only the quotient invariant decomposition.
+- I13.2b tranche 5 computes free rank and torsion invariant factors of the
+  admitted phase-local cellular quotient. It does not publish canonical free
+  or torsion generators, cycle representatives, integer periods, cocycles,
+  linking pairings, long exact sequences, induced maps, relabel/remesh
+  naturality, or physical winding. Those require checked representative
+  construction and separate physical-realizability authority.
 - `AbstractAlgebraOnly` is load-bearing. Synthetic CW/Moore/lens-space matrices
   may test the algebra kernel but cannot establish a conductor, terminal,
   material, embedding, winding, flux, force, or machine claim. Physical R3
