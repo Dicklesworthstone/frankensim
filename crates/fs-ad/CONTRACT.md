@@ -88,6 +88,10 @@ Layer: L1.
   documented forward-AD semantics).
 - Conventions at non-smooth points: abs'(0) = 0 (subgradient choice);
   sqrt'(0) = +inf (honestly unbounded, never clamped).
+- Endpoint and full-exponent conventions: asin'(1) = +inf; acos'(-1) =
+  -inf; and `powi(i32::MIN)` at x = 1 returns primal 1 with derivative
+  -2147483648. These singularities and the full i32 exponent domain are
+  represented honestly, never clamped or wrapped.
 
 ## Error model
 Total functions; derivative singularities produce inf/NaN honestly.
@@ -112,6 +116,18 @@ ft-core constellation path dependencies — the workspace's first ft-*
 wiring. Default builds stay forward-dual only with zero new deps.
 
 ## Conformance tests
+The shared `fs-casebook` runner records three bounded G0 cases: exact value,
+gradient, JVP, and second-directional known answers for a two-variable
+polynomial; selected documented abs/sqrt/inverse-trig/powi boundary conventions;
+and treeverse bit equality with full storage, resource bounds, and insufficient-
+budget refusal. Canonical frames bind operation identities, formulas, inputs,
+directions, expected outputs, schedules, budgets, and refusal policy. Disclosed
+seed `0xF5AD_0001` corrupts one exact gradient bit and must produce one
+structured red record plus `assert_green` refusal. This portable tranche adds
+no torch-bridge, spill-store, binomial, IFT, or gradcheck claim, no performance
+claim, and no fresh dual-ISA execution proof; it remains central-package-proof
+pending.
+
 Gradient-vs-central-FD on 500 random points of a 3-deep composite (rel
 < 5e-9); primal bitwise fidelity battery; analytic first+second derivatives
 (sin x²); JVP ≡ grad·v; GENERIC NEWTON differentiated through convergence

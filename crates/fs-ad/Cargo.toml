@@ -23,6 +23,7 @@ ft-core = { path = "../../../frankentorch/crates/ft-core", optional = true }
 torch-bridge = ["dep:ft-autograd", "dep:ft-core"]
 
 [dev-dependencies]
+fs-casebook = { path = "../fs-casebook" }
 
 [lints]
 workspace = true
