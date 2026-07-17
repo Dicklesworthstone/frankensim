@@ -29,20 +29,20 @@ pub const MAX_REGION_BOUNDARY_REFERENCES_V1: usize = 4096;
 
 /// Domain-separated identity schema for a canonical set-valued spectral
 /// result before whole-result evidence is attached.
-pub enum SpectralResultSetIdentitySchemaV1 {}
+pub enum SpectralResultSetIdentitySchemaV2 {}
 
-impl CanonicalSchema for SpectralResultSetIdentitySchemaV1 {
-    const DOMAIN: &'static str = "org.frankensim.fs-spectral.result-set.v1";
+impl CanonicalSchema for SpectralResultSetIdentitySchemaV2 {
+    const DOMAIN: &'static str = "org.frankensim.fs-spectral.result-set.v2";
     const NAME: &'static str = "spectral-result-set";
-    const VERSION: u32 = 1;
-    const CONTEXT: &'static str =
-        "canonical spectral clusters, enclosures, multiplicities, and internal states";
+    const VERSION: u32 = 2;
+    const CONTEXT: &'static str = "canonical spectral clusters, enclosures, multiplicities, and distinct no-claim, unknown, or undefined internal states";
     const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("clusters", WireType::CanonicalSet)];
 }
 
-/// Typed semantic identity of a canonical result set. Identity is not result
-/// authority.
-pub type SpectralResultSetIdV1 = ProblemSemanticId<SpectralResultSetIdentitySchemaV1>;
+/// Typed semantic identity used by the v1 truth data model. Its canonical
+/// codec is schema v2 because undefined-separation semantics were corrected
+/// before RB.1a admission closed. Identity is not result authority.
+pub type SpectralResultSetIdV1 = ProblemSemanticId<SpectralResultSetIdentitySchemaV2>;
 
 fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
@@ -467,6 +467,24 @@ impl UnknownSeparationReasonV1 {
     }
 }
 
+/// Why an internal-separation proposition is mathematically undefined in the
+/// stated coordinate semantics, rather than merely unresolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndefinedSeparationReasonV1 {
+    /// A projective-infinity cluster has no finite affine coordinate whose
+    /// pairwise difference could carry the requested separation. A future
+    /// projective-chart proposition is a distinct semantic axis.
+    ProjectiveInfinityInAffineCoordinates,
+}
+
+impl UndefinedSeparationReasonV1 {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::ProjectiveInfinityInAffineCoordinates => 0,
+        }
+    }
+}
+
 /// Unvalidated internal-resolution claim carried by a cluster draft.
 /// Favorable variants become inspectable as truth only through
 /// [`ValidatedSpectralClusterV1::internal`].
@@ -483,11 +501,14 @@ pub enum InternalClusterStateV1 {
         /// Why the internal-resolution proposition could not be decided.
         reason: UnknownSeparationReasonV1,
     },
-    /// Explicit no-claim state used when the producer declines to assign
-    /// internal-separation semantics. This makes no proposition that
-    /// separation is mathematically inapplicable; [`Self::Unknown`] instead
-    /// says a chosen separation proposition is meaningful but unresolved.
-    NoClaimUndefined,
+    /// Internal separation is mathematically undefined in the stated
+    /// coordinate semantics. Unlike [`Self::NoClaim`], this is a positive
+    /// semantic assertion and is admitted only when the cluster enclosure and
+    /// multiplicity evidence establish the named reason.
+    UndefinedSeparation {
+        /// Exact reason the proposition has no value.
+        reason: UndefinedSeparationReasonV1,
+    },
     /// Exact algebraic multiplicity one makes internal separation vacuous.
     Simple,
     /// Repetition/zero internal separation is positively established.
@@ -565,9 +586,20 @@ impl SpectralClusterV1 {
             {
                 return Err(SpectralTruthErrorV1::InvalidInternalClusterState);
             }
+            InternalClusterStateV1::UndefinedSeparation {
+                reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+            } if !matches!(
+                localization.enclosure,
+                SpectralEnclosureV1::ProjectiveInfinity
+            ) || algebraic_multiplicity
+                .minimum()
+                .is_none_or(|value| value < 2) =>
+            {
+                return Err(SpectralTruthErrorV1::InvalidInternalClusterState);
+            }
             InternalClusterStateV1::NoClaim
             | InternalClusterStateV1::Unknown { .. }
-            | InternalClusterStateV1::NoClaimUndefined
+            | InternalClusterStateV1::UndefinedSeparation { .. }
             | InternalClusterStateV1::Simple
             | InternalClusterStateV1::ProvenDegenerate { .. }
             | InternalClusterStateV1::Resolved { .. } => {}
@@ -1389,7 +1421,10 @@ fn push_cluster_semantics(out: &mut Vec<u8>, cluster: &SpectralClusterV1) {
             out.push(1);
             out.push(reason.tag());
         }
-        InternalClusterStateV1::NoClaimUndefined => out.push(2),
+        InternalClusterStateV1::UndefinedSeparation { reason } => {
+            out.push(2);
+            out.push(reason.tag());
+        }
         InternalClusterStateV1::Simple => out.push(3),
         InternalClusterStateV1::ProvenDegenerate { .. } => out.push(4),
         InternalClusterStateV1::Resolved { lower, norm, .. } => {
@@ -1412,7 +1447,8 @@ fn cluster_semantics(cluster: &SpectralClusterV1) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns [`CanonicalError`] when the cluster count or canonical payload
-/// exceeds the v1 identity envelope, or when a length cannot be represented.
+/// exceeds the result-set identity envelope, or when a length cannot be
+/// represented.
 pub fn spectral_result_set_receipt(
     clusters: &[SpectralClusterV1],
 ) -> Result<IdentityReceipt<SpectralResultSetIdV1>, CanonicalError> {
@@ -1472,7 +1508,7 @@ impl SpectralTruthDraftV1 {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpectralTruthV1 {
     problem_id: SpectralProblemId,
-    result_set_id: SpectralResultSetIdV1,
+    result_set_receipt: IdentityReceipt<SpectralResultSetIdV1>,
     authority: SpectralResultAuthorityV1,
     coverage: SpectralCoverageV1,
     clusters: Vec<ValidatedSpectralClusterV1>,
@@ -1504,7 +1540,14 @@ impl SpectralTruthV1 {
     /// Canonical identity of the validated set-valued cluster collection.
     #[must_use]
     pub const fn result_set_id(&self) -> SpectralResultSetIdV1 {
-        self.result_set_id
+        self.result_set_receipt.id()
+    }
+
+    /// Complete canonical result-set producer receipt retained for ledger
+    /// collision adjudication and deterministic replay.
+    #[must_use]
+    pub const fn result_set_identity_receipt(&self) -> IdentityReceipt<SpectralResultSetIdV1> {
+        self.result_set_receipt
     }
 
     /// Evidence-bearing authority of the complete returned result set.
@@ -1642,6 +1685,7 @@ fn projective_cluster_has_favorable_claim(cluster: &SpectralClusterV1) -> bool {
         || matches!(
             cluster.internal,
             InternalClusterStateV1::Simple
+                | InternalClusterStateV1::UndefinedSeparation { .. }
                 | InternalClusterStateV1::ProvenDegenerate { .. }
                 | InternalClusterStateV1::Resolved { .. }
         )
@@ -1724,7 +1768,7 @@ fn validate_cluster_evidence(
             ),
             InternalClusterStateV1::NoClaim
             | InternalClusterStateV1::Unknown { .. }
-            | InternalClusterStateV1::NoClaimUndefined
+            | InternalClusterStateV1::UndefinedSeparation { .. }
             | InternalClusterStateV1::Simple => {}
         }
     }
@@ -1799,14 +1843,14 @@ pub fn validate_truth_v1(
             issues.push(SpectralTruthErrorV1::DanglingClusterReference);
         }
     }
-    let result_receipt = spectral_result_set_receipt(&draft.clusters);
-    let result_set_id = match result_receipt {
-        Ok(receipt) => receipt.id(),
+    let result_set_receipt = match spectral_result_set_receipt(&draft.clusters) {
+        Ok(receipt) => receipt,
         Err(error) => {
             issues.push(SpectralTruthErrorV1::Identity(error));
             return Err(SpectralTruthReportV1::new(issues));
         }
     };
+    let result_set_id = result_set_receipt.id();
     let problem_id = problem.problem_id();
     validate_cluster_evidence(problem_id, &draft.clusters, &mut issues);
     if problem.requires_real_spectrum_truth()
@@ -2182,12 +2226,12 @@ pub fn validate_truth_v1(
     if complete && draft.termination != SpectralTerminationV1::Completed {
         issues.push(SpectralTruthErrorV1::CompleteCoverageRequiresCompletion);
     }
-    finish_truth(problem_id, result_set_id, draft, issues)
+    finish_truth(problem_id, result_set_receipt, draft, issues)
 }
 
 fn finish_truth(
     problem_id: SpectralProblemId,
-    result_set_id: SpectralResultSetIdV1,
+    result_set_receipt: IdentityReceipt<SpectralResultSetIdV1>,
     draft: SpectralTruthDraftV1,
     issues: Vec<SpectralTruthErrorV1>,
 ) -> Result<SpectralTruthV1, SpectralTruthReportV1> {
@@ -2201,7 +2245,7 @@ fn finish_truth(
         } = draft;
         Ok(SpectralTruthV1 {
             problem_id,
-            result_set_id,
+            result_set_receipt,
             authority,
             coverage,
             clusters: clusters

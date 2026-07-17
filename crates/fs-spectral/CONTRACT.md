@@ -284,6 +284,13 @@ Authority-bearing consumers accept the complete
 `ValidatedSpectralProblemV1`, preserving its problem identity and all
 cross-axis validation.
 
+The sealed problem token retains the complete canonical producer receipt, not
+only its digest. `identity_receipt()` exposes the independently adjudicable
+canonical-frame root, exact byte length, field/collection counts, and limits
+needed by a ledger boundary. Recomputing the digest later is deterministic,
+but it is not a substitute for retaining the producer observation when
+collision adjudication is required.
+
 `SpectralSubjectId` identifies the actual induced operator whose spectrum is
 requested; metric and form IDs identify the actual supporting artifacts.
 Changing that induced operator, metric, or form requires a new ID. Structure
@@ -303,7 +310,17 @@ to coincide.
 dimension-derived ID produced by `SpectralMetricV1::euclidean`. Caller-chosen
 IDs cannot acquire positive definiteness by selecting the Euclidean variant.
 Other positive-definite, indefinite, and singular metric claims require an
-admitted exact proposition.
+admitted exact proposition. `Unknown` definiteness does not establish the
+nondegenerate form needed to define a unique adjoint.
+
+Self-adjoint, normal, nonnormal, and Hermitian-definite-pencil propositions are
+endomorphism/weighted-endomorphism statements in v1: their inner-product
+support must be the same complete metric descriptor on both the domain and
+codomain. Matching only one endpoint is insufficient and cannot unlock
+theorem closure, real ordering, regularity, or a method-family token. A future
+inter-space adjoint or duality theorem must carry an explicit identification
+artifact and a separately versioned proposition instead of weakening this
+common-space invariant.
 
 Approximate structure claims remain representable for diagnostics and future
 budget-aware routing. V1 structure-preserving method tokens require a
@@ -326,6 +343,10 @@ self-adjointness and approximate propositions do not discharge this gate.
 V1 applies a small exact-theorem closure before minting any problem token. For
 a standard-linear equation on one exact support, self-adjoint implies normal,
 and self-adjoint or normal excludes an admitted nonnormal proposition.
+Normal and nonnormal are exact logical complements on one admitted inner
+product: both cannot be witnessed, and both cannot be contradicted. The latter
+case is checked explicitly rather than slipping through the same-property
+duplicate scan.
 Self-adjointness on an admitted positive-definite metric additionally implies
 real spectrum. An exact Hermitian-definite pencil requires that its named
 metric descriptor is itself admitted positive-definite; it then implies
@@ -485,9 +506,17 @@ An unvalidated `SpectralClusterV1` draft carries:
 - candidate, estimated, or enclosed localization authority;
 - independent algebraic and geometric multiplicity claims; and
 - per-cluster internal state: no claim, unknown, simple, proven degenerate, or
-  positively resolved, plus explicit `NoClaimUndefined` when the producer
-  declines to assign internal-separation semantics. The latter does not forge
-  a theorem that separation is mathematically inapplicable.
+  positively resolved, plus explicit `UndefinedSeparation` when a repeated
+  projective-infinity cluster has no finite affine coordinate in which the
+  separation proposition could take a value.
+
+`NoClaim`, `Unknown`, and `UndefinedSeparation` are non-interchangeable.
+No-claim is silence; unknown says a meaningful proposition remains unresolved;
+undefined is a positive applicability statement. V1 admits the latter only for
+a projective-infinity enclosure with proposition-validated algebraic
+multiplicity at least two. A finite enclosure, singleton, or replayed
+multiplicity witness fails closed. A future projective-chart separation is a
+new proposition, not a reinterpretation of affine undefinedness.
 
 Favorable localization, multiplicity, and internal-state draft claims carry
 admitted evidence, but construction alone does not establish that the evidence
@@ -503,6 +532,16 @@ represented member set requires a new ID. Internal degeneracy/resolution
 receipts additionally bind witness-free algebraic and geometric multiplicity
 semantics, so changing `Exact(2)` to `Bounds(2,2)`, changing either axis, or
 changing membership/enclosure invalidates the retained internal witness.
+
+`SpectralTruthV1` likewise retains the complete canonical result-set producer
+receipt. `result_set_identity_receipt()` is the ledger-facing observation;
+`result_set_id()` is its narrow semantic digest. The result-set identity covers
+the canonical cluster collection before whole-result authority, coverage,
+boundary, and termination evidence is attached; it is not yet a whole-truth
+artifact identity. Correcting the former duplicate-no-claim tag to a positive
+undefinedness proposition changes canonical semantics, so the result-set
+identity uses domain/schema v2; no v1 result-set receipt is silently
+reinterpreted.
 
 ### Orthogonal truth axes
 
@@ -664,7 +703,7 @@ no numerical or theorem-authority path is promoted into default execution.
   repeated-cluster closure overruns, ordinary and descriptor full accounting,
   regularity-gated partial/region/full truth, theorem-constrained infinity
   accounting, projective-prefix placement, algebraic/geometric capacity,
-  explicit undefined-separation no-claim, impossible cluster states, and
+  explicit proposition-gated undefined separation, impossible cluster states, and
   deterministic malformed-input reports.
 - `tests/bridge.rs`: G0/G3/G5 battery covering canonical statement replay,
   exact orientation/endpoint transforms, required hypothesis/falsifier gates,
@@ -698,6 +737,15 @@ RB.1a does not implement or claim:
   cancellation, or convergence;
 - sparse production sheaf-Laplacian eigensolving; or
 - completeness merely because a requested scope exists.
+
+V1 truth propositions bind the domain-separated v2 result-set digest, while
+the validated truth separately retains the complete v2 result-set observation
+for ledger adjudication. They do not yet embed that child observation's schema
+descriptor, canonical-preimage root, and byte length inside every outer
+proposition receipt. Therefore local nested validation remains conditional on
+the strong domain-separated digest; synthetic same-digest/different-observation
+adjudication belongs at the retaining ledger boundary until the global
+strong-identity migration rotates the outer proposition family.
 
 RB.M1 additionally does not prove a Maslov--Krein--Evans equality, validate an
 opaque witness/proof/checker scientifically, derive a physical instability

@@ -8,8 +8,8 @@
 
 use fs_blake3::identity::{
     AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ByteObservation, CanonicalSchema,
-    ContentId, ExternalAnchorRef, IdentityReceipt, NoClaimState, ObservedIdentity,
-    PromotionRefusal, TrustState,
+    ContentId, ExternalAnchorRef, IdentityAdjudication, IdentityReceipt, NoClaimState,
+    ObservedIdentity, PromotionRefusal, TrustState, adjudicate,
 };
 use fs_qty::{Angle, Dims, QtyAny, Time};
 use fs_spectral::admission::*;
@@ -1782,6 +1782,269 @@ fn metric_gauge_and_zero_padding_evidence_cannot_be_rebound() {
 }
 
 #[test]
+fn inner_product_structure_requires_one_shared_admitted_operator_space() {
+    let standard = standard_axes(17, 4);
+    let codomain_id = SpectralMetricId::from_bytes([0xA1; 32]);
+    let codomain_receipt = metric_proposition_receipt(
+        codomain_id,
+        4,
+        MetricDefinitenessPropositionV1::PositiveDefinite {
+            lower: 0.5,
+            upper: 2.0,
+        },
+    )
+    .unwrap();
+    let cross_space = Axes {
+        codomain: SpectralMetricV1::new(
+            codomain_id,
+            4,
+            MetricDefinitenessV1::PositiveDefinite {
+                lower: 0.5,
+                upper: 2.0,
+                witness: admit_receipt(codomain_receipt, 18),
+            },
+        ),
+        ..standard
+    };
+    let self_adjoint = structure_claim(
+        cross_space,
+        StructurePropertyV1::SelfAdjoint,
+        StructureSupportV1::InnerProduct(cross_space.domain.id()),
+        WitnessDispositionV1::Witnessed,
+        0.0,
+        17,
+    );
+    let report = validate_problem(default_spec(
+        cross_space,
+        vec![self_adjoint],
+        Vec::new(),
+        SpectralOrderingV1::RealAscending,
+        CompletenessScopeV1::CandidateOnly,
+    ))
+    .unwrap_err();
+    assert!(
+        has_admission_issue(&report, |issue| matches!(
+            issue,
+            SpectralAdmissionIssueV1::InvalidStructureSupport {
+                property: StructurePropertyV1::SelfAdjoint,
+                support: StructureSupportV1::InnerProduct(found),
+            } if *found == cross_space.domain.id()
+        )),
+        "a one-sided metric witness must not admit cross-space self-adjointness: {report:?}"
+    );
+    assert!(
+        report
+            .issues()
+            .contains(&SpectralAdmissionIssueV1::OrderingUnavailable),
+        "cross-space self-adjointness must not manufacture real-spectrum ordering authority: {report:?}"
+    );
+
+    for (property, seed) in [
+        (StructurePropertyV1::Normal, 19),
+        (StructurePropertyV1::Nonnormal, 20),
+    ] {
+        let claim = structure_claim(
+            cross_space,
+            property,
+            StructureSupportV1::InnerProduct(cross_space.domain.id()),
+            WitnessDispositionV1::Witnessed,
+            0.0,
+            seed,
+        );
+        let report = validate_problem(default_spec(
+            cross_space,
+            vec![claim],
+            Vec::new(),
+            SpectralOrderingV1::SetValued,
+            CompletenessScopeV1::CandidateOnly,
+        ))
+        .unwrap_err();
+        assert!(
+            has_admission_issue(&report, |issue| matches!(
+                issue,
+                SpectralAdmissionIssueV1::InvalidStructureSupport {
+                    property: found,
+                    ..
+                } if *found == property
+            )),
+            "{property:?} must be bound to a common domain/codomain inner product: {report:?}"
+        );
+    }
+
+    let generalized_class = SpectralProblemClassV1::new(
+        SpectralRepresentationV1::GeneralizedPencil,
+        DescriptorRoleV1::Ordinary,
+        SpectralOperatorOriginV1::Direct,
+    );
+    let generalized = axes(
+        21,
+        generalized_class,
+        SpectralScalarFieldV1::Real,
+        Dims::NONE,
+        4,
+    );
+    let pencil_codomain_id = SpectralMetricId::from_bytes([0xA2; 32]);
+    let pencil_codomain_receipt = metric_proposition_receipt(
+        pencil_codomain_id,
+        4,
+        MetricDefinitenessPropositionV1::PositiveDefinite {
+            lower: 0.25,
+            upper: 4.0,
+        },
+    )
+    .unwrap();
+    let cross_pencil = Axes {
+        codomain: SpectralMetricV1::new(
+            pencil_codomain_id,
+            4,
+            MetricDefinitenessV1::PositiveDefinite {
+                lower: 0.25,
+                upper: 4.0,
+                witness: admit_receipt(pencil_codomain_receipt, 21),
+            },
+        ),
+        ..generalized
+    };
+    let hermitian_definite = structure_claim(
+        cross_pencil,
+        StructurePropertyV1::HermitianDefinitePencil,
+        StructureSupportV1::InnerProduct(cross_pencil.domain.id()),
+        WitnessDispositionV1::Witnessed,
+        0.0,
+        22,
+    );
+    let report = validate_problem(default_spec(
+        cross_pencil,
+        vec![hermitian_definite],
+        Vec::new(),
+        SpectralOrderingV1::RealAscending,
+        CompletenessScopeV1::CandidateOnly,
+    ))
+    .unwrap_err();
+    assert!(
+        has_admission_issue(&report, |issue| matches!(
+            issue,
+            SpectralAdmissionIssueV1::InvalidStructureSupport {
+                property: StructurePropertyV1::HermitianDefinitePencil,
+                ..
+            }
+        )),
+        "one positive endpoint must not admit a Hermitian-definite pencil: {report:?}"
+    );
+    assert!(
+        report
+            .issues()
+            .contains(&SpectralAdmissionIssueV1::OrderingUnavailable),
+        "the invalid pencil witness must not manufacture real-spectrum ordering authority: {report:?}"
+    );
+    assert!(
+        report.issues().contains(
+            &SpectralAdmissionIssueV1::OrdinaryFiniteSpectrumWitnessRequired {
+                required: RegularityClassV1::InvertiblePencilWeight,
+            },
+        ),
+        "the invalid pencil witness must not manufacture invertibility or regularity: {report:?}"
+    );
+}
+
+#[test]
+fn unresolved_metric_definiteness_cannot_admit_adjoint_structure() {
+    let base = standard_axes(20, 3);
+    let unresolved = SpectralMetricV1::new(
+        SpectralMetricId::from_bytes([0xA3; 32]),
+        3,
+        MetricDefinitenessV1::Unknown,
+    );
+    let axes = Axes {
+        domain: unresolved,
+        codomain: unresolved,
+        ..base
+    };
+    let claim = structure_claim(
+        axes,
+        StructurePropertyV1::Normal,
+        StructureSupportV1::InnerProduct(unresolved.id()),
+        WitnessDispositionV1::Witnessed,
+        0.0,
+        20,
+    );
+    let report = validate_problem(default_spec(
+        axes,
+        vec![claim],
+        Vec::new(),
+        SpectralOrderingV1::SetValued,
+        CompletenessScopeV1::CandidateOnly,
+    ))
+    .unwrap_err();
+    assert!(
+        has_admission_issue(&report, |issue| matches!(
+            issue,
+            SpectralAdmissionIssueV1::InvalidStructureSupport {
+                property: StructurePropertyV1::Normal,
+                ..
+            }
+        )),
+        "unknown definiteness cannot establish the nondegenerate inner product needed for an adjoint: {report:?}"
+    );
+}
+
+#[test]
+fn exact_normality_complements_cannot_both_be_contradicted() {
+    let axes = standard_axes(23, 3);
+    let support = StructureSupportV1::InnerProduct(axes.domain.id());
+    let normal_refuted = structure_claim(
+        axes,
+        StructurePropertyV1::Normal,
+        support,
+        WitnessDispositionV1::Contradicted,
+        0.0,
+        23,
+    );
+    let nonnormal_refuted = structure_claim(
+        axes,
+        StructurePropertyV1::Nonnormal,
+        support,
+        WitnessDispositionV1::Contradicted,
+        0.0,
+        24,
+    );
+    let report = validate_problem(default_spec(
+        axes,
+        vec![normal_refuted, nonnormal_refuted],
+        Vec::new(),
+        SpectralOrderingV1::SetValued,
+        CompletenessScopeV1::CandidateOnly,
+    ))
+    .unwrap_err();
+    assert!(
+        report
+            .issues()
+            .contains(&SpectralAdmissionIssueV1::ComplementaryStructureConflict { support }),
+        "logical complements Normal and Nonnormal cannot both be exactly false: {report:?}"
+    );
+
+    let nonnormal_witnessed = structure_claim(
+        axes,
+        StructurePropertyV1::Nonnormal,
+        support,
+        WitnessDispositionV1::Witnessed,
+        0.0,
+        25,
+    );
+    assert!(
+        validate_problem(default_spec(
+            axes,
+            vec![normal_refuted, nonnormal_witnessed],
+            Vec::new(),
+            SpectralOrderingV1::SetValued,
+            CompletenessScopeV1::CandidateOnly,
+        ))
+        .is_ok(),
+        "a witnessed Nonnormal proposition is consistent with refuted Normal"
+    );
+}
+
+#[test]
 fn gap_interpretation_requires_explicit_gauge_and_zero_serialization_semantics() {
     let axes = standard_axes(17, 4);
     let unknown = validate_problem(default_spec(
@@ -2165,6 +2428,30 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     ))
     .unwrap();
     assert_eq!(first.problem_id(), permuted.problem_id());
+    assert_eq!(first.identity_receipt(), permuted.identity_receipt());
+    assert_eq!(
+        first.problem_id().as_bytes(),
+        first.identity_receipt().id().as_bytes(),
+        "the narrow problem ID and retained producer receipt must name the same canonical observation"
+    );
+    assert_eq!(first.identity_receipt().field_count(), 9);
+    assert_eq!(first.identity_receipt().collection_items(), 4);
+    assert!(first.identity_receipt().canonical_bytes() > 0);
+    let retained = ObservedIdentity::from_receipt(first.identity_receipt());
+    let synthetic_collision = ObservedIdentity::presented(
+        first.identity_receipt().id(),
+        ByteObservation::new(
+            first.identity_receipt().canonical_preimage(),
+            first.identity_receipt().canonical_bytes() + 1,
+        ),
+    );
+    assert!(
+        matches!(
+            adjudicate(retained, synthetic_collision),
+            IdentityAdjudication::Refused(_)
+        ),
+        "retaining the producer observation must permit same-digest/different-bytes refusal"
+    );
     assert_eq!(first.spec(), permuted.spec());
     assert_eq!(first.problem_id().to_hex().len(), 64);
 
@@ -2179,6 +2466,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     ))
     .unwrap();
     assert_ne!(first.problem_id(), retargeted.problem_id());
+    assert_ne!(first.identity_receipt(), retargeted.identity_receipt());
 
     let reanchored_gyroscopic = structure_claim_with_seed(
         axes,
@@ -2198,6 +2486,7 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     ))
     .unwrap();
     assert_ne!(first.problem_id(), reanchored.problem_id());
+    assert_ne!(first.identity_receipt(), reanchored.identity_receipt());
 
     let descriptor_receipt = regularity_proposition_receipt(
         axes.subject,
@@ -5538,6 +5827,11 @@ fn projective_partial_prefix_requires_chart_and_infinity_placement() {
 
 #[test]
 fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
+    assert_eq!(SpectralResultSetIdentitySchemaV2::VERSION, 2);
+    assert_eq!(
+        SpectralResultSetIdentitySchemaV2::DOMAIN,
+        "org.frankensim.fs-spectral.result-set.v2"
+    );
     let problem = validate_problem(default_spec(
         standard_axes(80, 2),
         Vec::new(),
@@ -5741,16 +6035,162 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
         } if found_lower == lower && found_norm == norm
     ));
 
-    let undefined = SpectralClusterV1::new(
-        cluster_id(81),
-        SpectralLocalizationV1::candidate(enclosure),
+    assert_eq!(
+        SpectralClusterV1::new(
+            cluster_id(81),
+            SpectralLocalizationV1::candidate(enclosure),
+            resolved_algebraic,
+            MultiplicityClaimV1::Unknown,
+            InternalClusterStateV1::UndefinedSeparation {
+                reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+            },
+        ),
+        Err(SpectralTruthErrorV1::InvalidInternalClusterState),
+        "a finite enclosure has a mathematically defined affine separation proposition"
+    );
+
+    let projective_problem =
+        descriptor_full_problem(86, InfiniteEigenvaluePolicyV1::IncludeProjective);
+    let projective_id = cluster_id(86);
+    let projective_enclosure = SpectralEnclosureV1::ProjectiveInfinity;
+    assert_eq!(
+        SpectralClusterV1::new(
+            projective_id,
+            SpectralLocalizationV1::candidate(projective_enclosure),
+            MultiplicityClaimV1::Unknown,
+            MultiplicityClaimV1::Unknown,
+            InternalClusterStateV1::UndefinedSeparation {
+                reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+            },
+        ),
+        Err(SpectralTruthErrorV1::InvalidInternalClusterState),
+        "undefined internal separation requires evidence that the projective cluster is repeated"
+    );
+    let singleton_id = cluster_id(85);
+    let singleton_multiplicity = MultiplicityClaimV1::Exact {
+        value: 1,
+        witness: truth_witness(
+            projective_problem.problem_id(),
+            SpectralTruthPropositionV1::Multiplicity {
+                cluster: singleton_id,
+                enclosure: projective_enclosure,
+                kind: MultiplicityKindV1::Algebraic,
+                assertion: MultiplicityAssertionV1::Exact,
+                lower: 1,
+                upper: Some(1),
+            },
+            85,
+        ),
+    };
+    assert_eq!(
+        SpectralClusterV1::new(
+            singleton_id,
+            SpectralLocalizationV1::candidate(projective_enclosure),
+            singleton_multiplicity,
+            MultiplicityClaimV1::Unknown,
+            InternalClusterStateV1::UndefinedSeparation {
+                reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+            },
+        ),
+        Err(SpectralTruthErrorV1::InvalidInternalClusterState),
+        "a singleton has vacuous internal separation and must use Simple rather than UndefinedSeparation"
+    );
+    let replayed_multiplicity = MultiplicityClaimV1::Exact {
+        value: 2,
+        witness: truth_witness(
+            problem.problem_id(),
+            SpectralTruthPropositionV1::Multiplicity {
+                cluster: resolved_id,
+                enclosure,
+                kind: MultiplicityKindV1::Algebraic,
+                assertion: MultiplicityAssertionV1::Exact,
+                lower: 2,
+                upper: Some(2),
+            },
+            86,
+        ),
+    };
+    let replayed_undefined = SpectralClusterV1::new(
+        projective_id,
+        SpectralLocalizationV1::candidate(projective_enclosure),
+        replayed_multiplicity,
         MultiplicityClaimV1::Unknown,
-        MultiplicityClaimV1::Unknown,
-        InternalClusterStateV1::NoClaimUndefined,
+        InternalClusterStateV1::UndefinedSeparation {
+            reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+        },
     )
     .unwrap();
+    let report = SpectralTruthV1::new(
+        &projective_problem,
+        SpectralTruthDraftV1::new(
+            SpectralResultAuthorityV1::NoClaim,
+            SpectralCoverageV1::Candidates,
+            vec![replayed_undefined],
+            ScopeBoundaryStateV1::NoClaim,
+            SpectralTerminationV1::Completed,
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        has_truth_issue(&report, |issue| matches!(
+            issue,
+            SpectralTruthErrorV1::WitnessPropositionMismatch { .. }
+        )),
+        "undefined separation must not launder replayed cluster/multiplicity evidence: {report:?}"
+    );
+
+    let projective_multiplicity = MultiplicityClaimV1::Exact {
+        value: 2,
+        witness: truth_witness(
+            projective_problem.problem_id(),
+            SpectralTruthPropositionV1::Multiplicity {
+                cluster: projective_id,
+                enclosure: projective_enclosure,
+                kind: MultiplicityKindV1::Algebraic,
+                assertion: MultiplicityAssertionV1::Exact,
+                lower: 2,
+                upper: Some(2),
+            },
+            87,
+        ),
+    };
+    let no_claim = SpectralClusterV1::new(
+        projective_id,
+        SpectralLocalizationV1::candidate(projective_enclosure),
+        projective_multiplicity,
+        MultiplicityClaimV1::Unknown,
+        InternalClusterStateV1::NoClaim,
+    )
+    .unwrap();
+    let unknown = SpectralClusterV1::new(
+        projective_id,
+        SpectralLocalizationV1::candidate(projective_enclosure),
+        projective_multiplicity,
+        MultiplicityClaimV1::Unknown,
+        InternalClusterStateV1::Unknown {
+            reason: UnknownSeparationReasonV1::MissingEvidence,
+        },
+    )
+    .unwrap();
+    let undefined = SpectralClusterV1::new(
+        projective_id,
+        SpectralLocalizationV1::candidate(projective_enclosure),
+        projective_multiplicity,
+        MultiplicityClaimV1::Unknown,
+        InternalClusterStateV1::UndefinedSeparation {
+            reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+        },
+    )
+    .unwrap();
+    let no_claim_receipt = spectral_result_set_receipt(&[no_claim]).unwrap();
+    let unknown_receipt = spectral_result_set_receipt(&[unknown]).unwrap();
+    let undefined_receipt = spectral_result_set_receipt(&[undefined]).unwrap();
+    assert_ne!(no_claim_receipt, unknown_receipt);
+    assert_ne!(no_claim_receipt, undefined_receipt);
+    assert_ne!(unknown_receipt, undefined_receipt);
+
     let truth = SpectralTruthV1::new(
-        &problem,
+        &projective_problem,
         SpectralTruthDraftV1::new(
             SpectralResultAuthorityV1::NoClaim,
             SpectralCoverageV1::Candidates,
@@ -5760,8 +6200,27 @@ fn internal_separation_receipts_bind_membership_and_both_multiplicity_axes() {
         ),
     )
     .unwrap();
+    assert_eq!(truth.result_set_identity_receipt(), undefined_receipt);
+    assert_eq!(truth.result_set_id(), undefined_receipt.id());
+    let retained = ObservedIdentity::from_receipt(truth.result_set_identity_receipt());
+    let synthetic_collision = ObservedIdentity::presented(
+        truth.result_set_id(),
+        ByteObservation::new(
+            undefined_receipt.canonical_preimage(),
+            undefined_receipt.canonical_bytes() + 1,
+        ),
+    );
+    assert!(
+        matches!(
+            adjudicate(retained, synthetic_collision),
+            IdentityAdjudication::Refused(_)
+        ),
+        "the validated truth must retain enough result-set observation data for collision adjudication"
+    );
     assert!(matches!(
         truth.clusters()[0].internal(),
-        InternalClusterStateV1::NoClaimUndefined
+        InternalClusterStateV1::UndefinedSeparation {
+            reason: UndefinedSeparationReasonV1::ProjectiveInfinityInAffineCoordinates,
+        }
     ));
 }

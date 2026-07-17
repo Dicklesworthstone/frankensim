@@ -413,6 +413,15 @@ impl SpectralProblemId {
     }
 }
 
+/// Complete producer receipt for one canonical spectral-problem identity.
+///
+/// The public [`SpectralProblemId`] remains a narrow semantic identifier. This
+/// receipt additionally retains the independently adjudicable canonical-frame
+/// root, exact byte length, field count, collection cardinality, and limits
+/// that produced those digest bytes.
+pub type SpectralProblemIdentityReceiptV2 =
+    IdentityReceipt<ProblemSemanticId<SpectralProblemIdentitySchemaV2>>;
+
 /// Scalar field of the admitted operator spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SpectralScalarFieldV1 {
@@ -977,7 +986,10 @@ impl MetricDefinitenessV1 {
     }
 
     const fn is_adjoint_compatible(self) -> bool {
-        !matches!(self, Self::Singular { .. })
+        matches!(
+            self,
+            Self::Euclidean | Self::PositiveDefinite { .. } | Self::Indefinite { .. }
+        )
     }
 }
 
@@ -2026,6 +2038,13 @@ pub enum SpectralAdmissionIssueV1 {
         /// Metric/form support on which the contradiction occurs.
         support: StructureSupportV1,
     },
+    /// Exact normality and exact nonnormality are logical complements, yet
+    /// both were explicitly contradicted on the same admitted support.
+    ComplementaryStructureConflict {
+        /// Shared inner product on which both complement propositions were
+        /// contradicted.
+        support: StructureSupportV1,
+    },
     /// Exact theorem closure from one admitted structure proposition conflicts
     /// with another admitted proposition.
     StructureTheoremConflict {
@@ -2211,6 +2230,9 @@ impl SpectralAdmissionIssueV1 {
             Self::ProjectivePrefixOrderingRequired => (13, 0, 1),
             Self::DuplicateStructure { property, .. } => (14, u16::from(property.tag()), 0),
             Self::ContradictoryStructure { property, .. } => (15, u16::from(property.tag()), 0),
+            Self::ComplementaryStructureConflict { .. } => {
+                (15, u16::from(StructurePropertyV1::Normal.tag()), 1)
+            }
             Self::StructureTheoremConflict {
                 premise,
                 consequence,
@@ -2342,6 +2364,10 @@ impl fmt::Display for SpectralAdmissionIssueV1 {
             Self::ContradictoryStructure { property, support } => write!(
                 f,
                 "{property:?} is both supported and contradicted on {support:?}"
+            ),
+            Self::ComplementaryStructureConflict { support } => write!(
+                f,
+                "exact Normal and exact Nonnormal were both contradicted on {support:?}; logical complements cannot both be false"
             ),
             Self::StructureTheoremConflict {
                 premise,
@@ -2545,7 +2571,7 @@ pub struct ValidatedSpectralProblemV1 {
     spec: SpectralProblemSpecV1,
     canonical_claims: Vec<StructureClaimV1>,
     canonical_regularity: Vec<RegularityClaimV1>,
-    problem_id: SpectralProblemId,
+    problem_receipt: SpectralProblemIdentityReceiptV2,
 }
 
 impl ValidatedSpectralProblemV1 {
@@ -2574,7 +2600,17 @@ impl ValidatedSpectralProblemV1 {
     /// Typed semantic identity binding every authority-bearing field.
     #[must_use]
     pub const fn problem_id(&self) -> SpectralProblemId {
-        self.problem_id
+        SpectralProblemId(self.problem_receipt.id())
+    }
+
+    /// Complete canonical producer receipt retained for ledger adjudication.
+    ///
+    /// Digest equality alone is not collision adjudication. Durable consumers
+    /// should retain this observation (or an equivalent ledger record) when
+    /// the admitted descriptor crosses a trust boundary.
+    #[must_use]
+    pub const fn identity_receipt(&self) -> SpectralProblemIdentityReceiptV2 {
+        self.problem_receipt
     }
 
     /// Exact algebraic cardinality implied by the admitted finite-dimensional
@@ -3287,11 +3323,11 @@ fn scope_payload(scope: CompletenessScopeV1) -> Vec<u8> {
     out
 }
 
-fn canonical_problem_id(
+fn canonical_problem_receipt(
     spec: &SpectralProblemSpecV1,
     claims: &[StructureClaimV1],
     regularity_claims: &[RegularityClaimV1],
-) -> Result<SpectralProblemId, CanonicalError> {
+) -> Result<SpectralProblemIdentityReceiptV2, CanonicalError> {
     let class = class_bytes(spec.class);
     let scaling = scaling_bytes(spec.scaling);
     let spaces = spaces_bytes(spec.spaces);
@@ -3331,7 +3367,6 @@ fn canonical_problem_id(
         &scope,
     )?
     .finish()
-    .map(|receipt| SpectralProblemId(receipt.id()))
 }
 
 fn validate_witness_receipt(
@@ -3472,24 +3507,28 @@ fn support_matches_property(property: StructurePropertyV1, support: StructureSup
 }
 
 fn support_is_positive_definite(spec: &SpectralProblemSpecV1, support: StructureSupportV1) -> bool {
-    let StructureSupportV1::InnerProduct(metric_id) = support else {
-        return false;
-    };
-    [spec.spaces.domain, spec.spaces.codomain]
-        .into_iter()
-        .any(|metric| metric.id == metric_id && metric.definiteness.is_positive_definite())
+    shared_inner_product(spec, support)
+        .is_some_and(|metric| metric.definiteness.is_positive_definite())
 }
 
 fn support_is_adjoint_compatible(
     spec: &SpectralProblemSpecV1,
     support: StructureSupportV1,
 ) -> bool {
+    shared_inner_product(spec, support)
+        .is_some_and(|metric| metric.definiteness.is_adjoint_compatible())
+}
+
+fn shared_inner_product(
+    spec: &SpectralProblemSpecV1,
+    support: StructureSupportV1,
+) -> Option<SpectralMetricV1> {
     let StructureSupportV1::InnerProduct(metric_id) = support else {
-        return false;
+        return None;
     };
-    [spec.spaces.domain, spec.spaces.codomain]
-        .into_iter()
-        .any(|metric| metric.id == metric_id && metric.definiteness.is_adjoint_compatible())
+    let domain = spec.spaces.domain;
+    let codomain = spec.spaces.codomain;
+    (domain == codomain && domain.id == metric_id).then_some(domain)
 }
 
 fn property_matches_representation(
@@ -3554,6 +3593,22 @@ fn validate_exact_structure_theorems(
                 }
         })
     };
+    for normal_refutation in claims.iter().filter(|claim| {
+        claim.property == StructurePropertyV1::Normal
+            && claim.disposition == WitnessDispositionV1::Contradicted
+            && canonical_f64_bits(claim.tolerance) == 0.0f64.to_bits()
+    }) {
+        let support = normal_refutation.support;
+        let nonnormal_also_refuted = claims.iter().any(|claim| {
+            claim.property == StructurePropertyV1::Nonnormal
+                && claim.support == support
+                && claim.disposition == WitnessDispositionV1::Contradicted
+                && canonical_f64_bits(claim.tolerance) == 0.0f64.to_bits()
+        });
+        if nonnormal_also_refuted && support_is_adjoint_compatible(spec, support) {
+            issues.push(SpectralAdmissionIssueV1::ComplementaryStructureConflict { support });
+        }
+    }
     for premise in claims.iter().filter(|claim| exact_witness(claim)) {
         let standard_linear = matches!(
             spec.class.representation,
@@ -4530,14 +4585,15 @@ pub fn validate_problem(
     }
     spec.structures = StructureProfileV1::new(claims.clone());
     spec.regularity = RegularityProfileV1::new(regularity_claims.clone());
-    let problem_id = canonical_problem_id(&spec, &claims, &regularity_claims).map_err(|error| {
-        SpectralAdmissionReportV1::new(vec![SpectralAdmissionIssueV1::Identity(error)])
-    })?;
+    let problem_receipt =
+        canonical_problem_receipt(&spec, &claims, &regularity_claims).map_err(|error| {
+            SpectralAdmissionReportV1::new(vec![SpectralAdmissionIssueV1::Identity(error)])
+        })?;
     Ok(ValidatedSpectralProblemV1 {
         spec,
         canonical_claims: claims,
         canonical_regularity: regularity_claims,
-        problem_id,
+        problem_receipt,
     })
 }
 
@@ -4935,7 +4991,7 @@ pub fn assess_method_class(
 
     if issues.is_empty() {
         Ok(AdmittedSpectralMethodClassV1 {
-            problem_id: problem.problem_id,
+            problem_id: problem.problem_id(),
             method,
             selected_support,
         })
@@ -4989,7 +5045,7 @@ pub fn assess_gap_semantics(
     }
     if issues.is_empty() {
         Ok(AdmittedSpectralGapSemanticsV1 {
-            problem_id: problem.problem_id,
+            problem_id: problem.problem_id(),
             gauge,
             zero_padding,
         })
