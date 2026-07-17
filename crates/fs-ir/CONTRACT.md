@@ -1431,5 +1431,11 @@ program bytes, never on prose.
   refusal/drift) with caller-supplied logical timestamps — never a clock
   read; `fs_ledger::travel::replay_verdict` over two runs is the one
   replay/compare mechanism for conformance and features alike.
-- IR-level cross-crate contract checking is the bead's remaining slice,
-  tracked there — not claimed here.
+- IR-level cross-crate contracts ARE claimed (slice 3): `cross_contract`
+  checks provider-certifies/consumer-requires seams from the PROGRAM
+  alone — let-binding dataflow resolution (iterative, hop-capped), exact
+  missing-query gaps, fail-closed on unresolved or undeclared producers,
+  catalog SigType cross-checks where positionally resolvable (and an
+  honest "unchecked" note where not). Contracts govern program shape;
+  whether a provider's implementation honors its certified queries is
+  that crate's own conformance suite's burden.

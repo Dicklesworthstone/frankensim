@@ -246,3 +246,88 @@ fn conformance_runs_are_golden_ledgers_replayed_via_timetravel() {
         "artifact drift must break the ledger replay: {verdict:?}"
     );
 }
+
+/// Slice 3 — cross-crate IR contracts: "the consumer requires certified
+/// queries of its input" checked from the PROGRAM alone, without
+/// compiling either crate; every gap named, nothing silently sound.
+#[test]
+fn cross_crate_contracts_check_from_the_program_alone() {
+    use fs_ir::catalog::Catalog;
+    use fs_ir::cross_contract::{
+        ConsumerContract, ContractRegistry, ProviderContract, SeamVerdict, check_program,
+    };
+    use std::collections::BTreeSet;
+
+    let catalog = Catalog::builtin();
+    let queries =
+        |qs: &[&str]| -> BTreeSet<String> { qs.iter().map(|q| (*q).to_owned()).collect() };
+    let mut registry = ContractRegistry::default();
+    registry.providers.insert(
+        "frep".to_owned(),
+        ProviderContract {
+            head: "frep".to_owned(),
+            certifies: queries(&["signed-distance", "gradient"]),
+        },
+    );
+    registry.consumers.insert(
+        "flux.free-surface-lbm".to_owned(),
+        ConsumerContract {
+            head: "flux.free-surface-lbm".to_owned(),
+            arg_index: 0,
+            requires: queries(&["signed-distance"]),
+        },
+    );
+
+    // The SPOUT program satisfies the seam: vessel = (frep …) flows into
+    // flux.free-surface-lbm through the let binding.
+    let report = check_program(SPOUT, &registry, &catalog).expect("program lowers");
+    assert!(report.clean(), "satisfied seam: {:?}", report.seams);
+    let seam = &report.seams[0];
+    assert_eq!(seam.provider.as_deref(), Some("frep"));
+    assert!(matches!(seam.verdict, SeamVerdict::Satisfied { .. }));
+
+    // Requiring a query the provider does not certify names the exact gap.
+    registry
+        .consumers
+        .get_mut("flux.free-surface-lbm")
+        .expect("registered")
+        .requires = queries(&["signed-distance", "closest-point"]);
+    let report = check_program(SPOUT, &registry, &catalog).expect("program lowers");
+    assert!(!report.clean());
+    match &report.seams[0].verdict {
+        SeamVerdict::MissingQueries { missing } => {
+            assert_eq!(missing, &queries(&["closest-point"]));
+        }
+        other => panic!("expected the exact missing query, got {other:?}"),
+    }
+
+    // An undeclared provider fails closed.
+    registry
+        .consumers
+        .get_mut("flux.free-surface-lbm")
+        .expect("registered")
+        .requires = queries(&["signed-distance"]);
+    registry.providers.clear();
+    let report = check_program(SPOUT, &registry, &catalog).expect("program lowers");
+    assert!(!report.clean());
+    assert!(matches!(
+        report.seams[0].verdict,
+        SeamVerdict::UndeclaredProvider
+    ));
+
+    // A program with no registered seams proves nothing about them.
+    let empty = check_program(SPOUT, &ContractRegistry::default(), &catalog).expect("lowers");
+    assert!(!empty.clean(), "no seams checked is not clean");
+
+    // Deterministic: two runs produce identical seam lists.
+    registry.providers.insert(
+        "frep".to_owned(),
+        ProviderContract {
+            head: "frep".to_owned(),
+            certifies: queries(&["signed-distance", "gradient"]),
+        },
+    );
+    let a = check_program(SPOUT, &registry, &catalog).expect("lowers");
+    let b = check_program(SPOUT, &registry, &catalog).expect("lowers");
+    assert_eq!(a.seams, b.seams);
+}
