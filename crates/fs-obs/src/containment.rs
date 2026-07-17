@@ -597,3 +597,210 @@ pub fn check_embedding_root(
         })
     }
 }
+
+/// One containment line parsed back off the wire (i94v.7.3.2
+/// cross-process propagation): either a tree node or a gap-ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedContainmentLine {
+    /// A `containment_node` line: the record plus its attempt root.
+    Node {
+        /// Attempt root named on the line.
+        attempt: AttemptId,
+        /// Reconstructed typed record.
+        record: ContainmentRecord,
+    },
+    /// A `containment_gap` line.
+    Gap {
+        /// Attempt root named on the line.
+        attempt: AttemptId,
+        /// Reconstructed gap entry.
+        gap: IntegrityGap,
+    },
+}
+
+/// Refusals when reading containment lines off the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainmentWireError {
+    /// The line's wire schema version is not the one this build reads.
+    UnsupportedWireVersion {
+        /// Version declared on the line.
+        declared: u64,
+    },
+    /// The line is not a containment kind at all.
+    NotAContainmentLine,
+    /// A required field is missing or malformed.
+    MalformedField {
+        /// Field key that failed.
+        key: &'static str,
+    },
+}
+
+impl fmt::Display for ContainmentWireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedWireVersion { declared } => write!(
+                f,
+                "containment reader accepts wire schema v{} exactly; line declares v{declared}",
+                crate::SCHEMA_VERSION
+            ),
+            Self::NotAContainmentLine => {
+                write!(f, "line is not a containment_node/containment_gap event")
+            }
+            Self::MalformedField { key } => {
+                write!(f, "containment line field {key:?} is missing or malformed")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ContainmentWireError {}
+
+fn wire_str(line: &str, key: &str) -> Option<String> {
+    let tag = format!("\"{key}\":\"");
+    let start = line.find(&tag)? + tag.len();
+    let rest = &line[start..];
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                _ => return None,
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+fn wire_u64(line: &str, key: &str) -> Option<u64> {
+    let tag = format!("\"{key}\":");
+    let start = line.find(&tag)? + tag.len();
+    let digits: String = line[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+fn node_id(role: &str, raw: &str) -> Result<LocalNodeId, ContainmentWireError> {
+    let malformed = |key| ContainmentWireError::MalformedField { key };
+    match role {
+        "op" => Ok(LocalNodeId::Op(
+            ExecutionOpId::new(raw).map_err(|_| malformed("node"))?,
+        )),
+        "scope" => Ok(LocalNodeId::Scope(
+            ExecutionScopeId::new(raw).map_err(|_| malformed("node"))?,
+        )),
+        "tile" => Ok(LocalNodeId::Tile(
+            TileId::new(raw).map_err(|_| malformed("node"))?,
+        )),
+        _ => Err(malformed("role")),
+    }
+}
+
+/// Parse one JSONL line produced by [`SealedAttemptTree::to_events`] back
+/// into its typed form. Fail-closed: unknown wire versions and malformed
+/// identity fields refuse; non-containment kinds refuse with
+/// [`ContainmentWireError::NotAContainmentLine`] so callers can skip
+/// interleaved event traffic explicitly.
+///
+/// # Errors
+/// [`ContainmentWireError`] as described above.
+pub fn parse_containment_line(line: &str) -> Result<ParsedContainmentLine, ContainmentWireError> {
+    let malformed = |key| ContainmentWireError::MalformedField { key };
+    let declared = wire_u64(line, "v").ok_or(ContainmentWireError::MalformedField { key: "v" })?;
+    if declared != u64::from(crate::SCHEMA_VERSION) {
+        return Err(ContainmentWireError::UnsupportedWireVersion { declared });
+    }
+    let kind = wire_str(line, "kind").ok_or(malformed("kind"))?;
+    // Payload keys can collide with envelope keys (the envelope carries its
+    // own "seq"), so payload fields are extracted from the payload object
+    // only.
+    let payload_start = line.find("\"payload\":{").ok_or(malformed("payload"))?;
+    let line = &line[payload_start..];
+    match kind.as_str() {
+        "containment_node" => {
+            let attempt = AttemptId::new(wire_str(line, "attempt").ok_or(malformed("attempt"))?)
+                .map_err(|_| malformed("attempt"))?;
+            let role = wire_str(line, "role").ok_or(malformed("role"))?;
+            let node_raw = wire_str(line, "node").ok_or(malformed("node"))?;
+            let node = node_id(&role, &node_raw)?;
+            let parent_role = wire_str(line, "parent_role").ok_or(malformed("parent_role"))?;
+            let parent_raw = wire_str(line, "parent").ok_or(malformed("parent"))?;
+            let parent = if parent_role == "attempt" {
+                LocalParent::AttemptRoot
+            } else {
+                LocalParent::Node(node_id(&parent_role, &parent_raw)?)
+            };
+            let seq = wire_u64(line, "seq").ok_or(malformed("seq"))?;
+            let opt = |key: &'static str| -> Result<Option<String>, ContainmentWireError> {
+                let raw =
+                    wire_str(line, key).ok_or(ContainmentWireError::MalformedField { key })?;
+                Ok(if raw.is_empty() { None } else { Some(raw) })
+            };
+            let context = ContainmentContext {
+                dsr_run: opt("dsr_run")?
+                    .map(DsrRunId::new)
+                    .transpose()
+                    .map_err(|_| malformed("dsr_run"))?,
+                campaign_run: opt("campaign_run")?
+                    .map(CampaignRunId::new)
+                    .transpose()
+                    .map_err(|_| malformed("campaign_run"))?,
+                shard: opt("shard")?
+                    .map(ShardId::new)
+                    .transpose()
+                    .map_err(|_| malformed("shard"))?,
+                journey: opt("journey")?
+                    .map(JourneyId::new)
+                    .transpose()
+                    .map_err(|_| malformed("journey"))?,
+                case: opt("case")?
+                    .map(CaseId::new)
+                    .transpose()
+                    .map_err(|_| malformed("case"))?,
+            };
+            Ok(ParsedContainmentLine::Node {
+                attempt,
+                record: ContainmentRecord {
+                    node,
+                    parent,
+                    seq,
+                    context,
+                },
+            })
+        }
+        "containment_gap" => {
+            let attempt = AttemptId::new(wire_str(line, "attempt").ok_or(malformed("attempt"))?)
+                .map_err(|_| malformed("attempt"))?;
+            let node_role = wire_str(line, "node_role").ok_or(malformed("node_role"))?;
+            let missing_parent_role =
+                wire_str(line, "missing_parent_role").ok_or(malformed("missing_parent_role"))?;
+            let role_static = |r: &str| -> Result<&'static str, ContainmentWireError> {
+                match r {
+                    "op" => Ok("op"),
+                    "scope" => Ok("scope"),
+                    "tile" => Ok("tile"),
+                    _ => Err(malformed("node_role")),
+                }
+            };
+            Ok(ParsedContainmentLine::Gap {
+                attempt,
+                gap: IntegrityGap {
+                    node_role: role_static(&node_role)?,
+                    node: wire_str(line, "node").ok_or(malformed("node"))?,
+                    missing_parent_role: role_static(&missing_parent_role)?,
+                    missing_parent: wire_str(line, "missing_parent")
+                        .ok_or(malformed("missing_parent"))?,
+                },
+            })
+        }
+        _ => Err(ContainmentWireError::NotAContainmentLine),
+    }
+}

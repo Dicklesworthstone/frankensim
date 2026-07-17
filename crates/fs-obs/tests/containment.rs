@@ -371,3 +371,106 @@ fn sealed_trees_project_to_wire_valid_lossless_jsonl() {
         "sealed nodes and gaps project to wire-valid typed containment lines with full context",
     );
 }
+
+#[test]
+fn cross_process_propagation_round_trips_ids_without_redefinition() {
+    // PROCESS A: build, seal, and project the tree to wire lines.
+    let root = AttemptId::new("attempt-9").unwrap();
+    let mut a = AttemptTree::new(root.clone());
+    let solve = op("solve", LocalParent::AttemptRoot, 0);
+    let kernel = scope("kernel-lbm", node(&solve), 0);
+    a.ingest(solve).unwrap();
+    a.ingest(kernel.clone()).unwrap();
+    a.ingest(tile("tile-42", node(&kernel), 0)).unwrap();
+    a.ingest(tile(
+        "tile-9",
+        LocalParent::Node(LocalNodeId::Scope(ExecutionScopeId::new("gone").unwrap())),
+        0,
+    ))
+    .unwrap();
+    let sealed_a = a.seal();
+    let wire: Vec<String> = sealed_a
+        .to_events("study-x", "attempt-9")
+        .iter()
+        .map(fs_obs::Event::to_jsonl)
+        .collect();
+
+    // PROCESS B: parse the lines back — every ID arrives typed, none
+    // redefined — rebuild the tree, and re-seal. Node records rebuild the
+    // tree; gap lines are compared against the re-derived ledger.
+    let mut b: Option<AttemptTree> = None;
+    let mut parsed_gaps = Vec::new();
+    for line in &wire {
+        match fs_obs::containment::parse_containment_line(line).expect("wire lines parse") {
+            fs_obs::containment::ParsedContainmentLine::Node { attempt, record } => {
+                let tree = b.get_or_insert_with(|| AttemptTree::new(attempt.clone()));
+                assert_eq!(tree.root(), &attempt, "one attempt root per stream");
+                tree.ingest(record).expect("records re-admit");
+            }
+            fs_obs::containment::ParsedContainmentLine::Gap { attempt, gap } => {
+                assert_eq!(attempt.as_str(), "attempt-9");
+                parsed_gaps.push(gap);
+            }
+        }
+    }
+    let sealed_b = b.expect("stream carried nodes").seal();
+    assert_eq!(
+        sealed_b.nodes(),
+        sealed_a.nodes(),
+        "the receiving process reconstructs the identical sealed tree"
+    );
+    assert_eq!(
+        parsed_gaps,
+        sealed_a.gaps().to_vec(),
+        "gap-ledger lines round-trip losslessly"
+    );
+
+    // Non-containment traffic interleaved in the stream refuses explicitly
+    // (callers skip it deliberately, never silently).
+    let mut em = fs_obs::Emitter::new("study-x", "attempt-9");
+    let other = em
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Heartbeat {
+                worker: "worker-1".into(),
+                beat: 1,
+            },
+            None,
+        )
+        .to_jsonl();
+    assert!(matches!(
+        fs_obs::containment::parse_containment_line(&other),
+        Err(fs_obs::containment::ContainmentWireError::NotAContainmentLine)
+    ));
+    verdict(
+        "cross-process-round-trip",
+        "sealed tree and gap ledger reconstruct identically from wire lines alone",
+    );
+}
+
+#[test]
+fn wire_reader_fails_closed_on_unknown_versions_and_malformed_ids() {
+    let root = AttemptId::new("attempt-9").unwrap();
+    let mut tree = AttemptTree::new(root);
+    tree.ingest(op("solve", LocalParent::AttemptRoot, 0))
+        .unwrap();
+    let line = tree.seal().to_events("study-x", "attempt-9")[0].to_jsonl();
+
+    // Future wire version: refuse, never guess.
+    let bumped = line.replacen("{\"v\":1,", "{\"v\":2,", 1);
+    assert!(matches!(
+        fs_obs::containment::parse_containment_line(&bumped),
+        Err(fs_obs::containment::ContainmentWireError::UnsupportedWireVersion { declared: 2 })
+    ));
+
+    // A role outside the vocabulary refuses as malformed.
+    let bad_role = line.replacen("\"role\":\"op\"", "\"role\":\"job\"", 1);
+    assert!(matches!(
+        fs_obs::containment::parse_containment_line(&bad_role),
+        Err(fs_obs::containment::ContainmentWireError::MalformedField { key: "role" })
+    ));
+    verdict(
+        "wire-version-migration",
+        "unknown wire versions and out-of-vocabulary roles refuse fail-closed",
+    );
+}
