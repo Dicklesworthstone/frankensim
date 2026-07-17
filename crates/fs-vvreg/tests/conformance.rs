@@ -10,7 +10,8 @@
 
 use fs_vvreg::{
     AcceptanceEnvelope, CitationRefusal, ColorRank, ConsumptionRecord, ConsumptionRefusal,
-    ConsumptionStatus, DeckPin, Edition, IntegrityFinding, LicenseState, MAX_BEAD_ID_LEN,
+    ConsumptionStatus, DeckPin, ENVELOPE_VERDICT_SCHEMA_VERSION, Edition, EnvelopeEvaluation,
+    EnvelopeGateError, EnvelopeObservation, IntegrityFinding, LicenseState, MAX_BEAD_ID_LEN,
     MAX_LOOKUP_ID_LEN, MAX_QOIS_PER_ENTRY, OracleBinding, Qoi, Registry, RegistryEntry,
     RegistryTier, VVREG_VERSION, canonical_row, entry_digest, registry, validate_entry,
 };
@@ -475,6 +476,288 @@ fn invalid_envelopes_are_refused_with_reasons() {
             other => panic!("envelope {envelope:?} must refuse, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn executable_tolerance_gate_pins_boundary_and_seeded_violation_verdicts() {
+    let reg = registry();
+    let entry = reg
+        .entry("g1-block-incline-stick-slip")
+        .expect("seeded entry");
+    let boundary = 1e-12_f64;
+    let admitted = reg
+        .check_acceptance_envelope(
+            "g1-block-incline-stick-slip",
+            "critical_angle",
+            EnvelopeObservation::AgainstReference {
+                reference: 0.0,
+                computed: boundary,
+            },
+        )
+        .expect("the inclusive tolerance boundary must pass");
+    assert_eq!(admitted.attempt().entry_id(), entry.id);
+    assert_eq!(admitted.attempt().qoi(), "critical_angle");
+    assert_eq!(admitted.attempt().unit(), "rad");
+    assert_eq!(admitted.attempt().entry_digest(), entry_digest(entry));
+    assert_eq!(admitted.attempt().registry_digest(), reg.digest());
+    assert_eq!(admitted.attempt().registry_version(), VVREG_VERSION);
+    assert_eq!(admitted.margin(), 0.0);
+    assert!(admitted.passed());
+    assert_eq!(
+        admitted.evaluation(),
+        EnvelopeEvaluation::Tolerance {
+            reference: 0.0,
+            atol: boundary,
+            rtol: 0.0,
+            allowed: boundary,
+            deviation: boundary,
+        }
+    );
+    let boundary_bits = boundary.to_bits();
+    let expected = format!(
+        concat!(
+            "{{\"vvreg\":\"acceptance-envelope-verdict\",\"schema\":{},",
+            "\"registry_version\":{},\"registry_digest\":\"{}\",",
+            "\"entry\":\"g1-block-incline-stick-slip\",\"entry_digest\":\"{}\",",
+            "\"qoi\":\"critical_angle\",\"unit\":\"rad\",\"mode\":\"tolerance\",",
+            "\"reference\":\"0x0000000000000000\",\"computed\":\"0x{:016x}\",",
+            "\"atol\":\"0x{:016x}\",\"rtol\":\"0x0000000000000000\",",
+            "\"allowed\":\"0x{:016x}\",\"deviation\":\"0x{:016x}\",",
+            "\"margin\":\"0x0000000000000000\",\"pass\":true}}"
+        ),
+        ENVELOPE_VERDICT_SCHEMA_VERSION,
+        VVREG_VERSION,
+        reg.digest().to_hex(),
+        entry_digest(entry).to_hex(),
+        boundary_bits,
+        boundary_bits,
+        boundary_bits,
+        boundary_bits,
+    );
+    assert_eq!(
+        admitted.json_line(),
+        expected,
+        "fixed-field exact-bit golden"
+    );
+
+    let lower = reg
+        .check_acceptance_envelope(
+            "g1-block-incline-stick-slip",
+            "critical_angle",
+            EnvelopeObservation::AgainstReference {
+                reference: 0.0,
+                computed: -boundary,
+            },
+        )
+        .expect("the negative inclusive tolerance boundary must pass");
+    assert_eq!(lower.margin(), 0.0);
+
+    // A disclosed deterministic seed chooses a positive 1..=8 ULP
+    // perturbation beyond the exact boundary. This is the G2 meta-test: a
+    // seeded QoI corruption must turn the executable envelope red.
+    let seed = 0x6E_B3_2026_0717_u64;
+    let ulps = (seed.rotate_left(17) ^ seed.rotate_right(9)) % 8 + 1;
+    assert_eq!(ulps, 4, "the disclosed seed pins the corruption distance");
+    let corrupted = f64::from_bits(boundary.to_bits() + ulps);
+    let refusal = reg
+        .check_acceptance_envelope(
+            "g1-block-incline-stick-slip",
+            "critical_angle",
+            EnvelopeObservation::AgainstReference {
+                reference: 0.0,
+                computed: corrupted,
+            },
+        )
+        .expect_err("a seeded boundary+ULP perturbation must fail the gate");
+    let EnvelopeGateError::Violation { verdict } = refusal else {
+        panic!("finite outside-envelope candidate must retain a failing verdict");
+    };
+    assert!(!verdict.passed());
+    assert!(verdict.margin() < 0.0);
+    let line = verdict.json_line();
+    assert!(line.contains("\"entry\":\"g1-block-incline-stick-slip\""));
+    assert!(line.contains("\"reference\":\"0x0000000000000000\""));
+    assert!(line.contains(&format!("\"computed\":\"0x{:016x}\"", corrupted.to_bits())));
+    assert!(line.contains("\"allowed\":"));
+    assert!(line.contains("\"deviation\":"));
+    assert!(line.contains("\"margin\":"));
+    assert!(line.ends_with("\"pass\":false}"));
+}
+
+#[test]
+fn executable_interval_gate_is_inclusive_and_mode_explicit() {
+    let reg = registry();
+    let boundary = 1.0_f64;
+    let verdict = reg
+        .check_acceptance_envelope(
+            "g1-bennett-linkage-mobility",
+            "mobility_dof",
+            EnvelopeObservation::AgainstInterval { computed: boundary },
+        )
+        .expect("the singleton interval endpoint is inclusive");
+    assert_eq!(verdict.margin(), 0.0);
+    assert!(verdict.passed());
+    assert!(verdict.json_line().contains("\"reference\":null"));
+    assert_eq!(verdict.attempt().qoi(), "mobility_dof");
+
+    let outside = f64::from_bits(1.0_f64.to_bits() + 1);
+    let refusal = reg
+        .check_acceptance_envelope(
+            "g1-bennett-linkage-mobility",
+            "mobility_dof",
+            EnvelopeObservation::AgainstInterval { computed: outside },
+        )
+        .expect_err("one ULP beyond the singleton interval must refuse");
+    assert!(matches!(
+        refusal,
+        EnvelopeGateError::Violation { verdict }
+            if !verdict.passed() && verdict.margin() < 0.0
+    ));
+
+    let mismatch = reg
+        .check_acceptance_envelope(
+            "g1-bennett-linkage-mobility",
+            "mobility_dof",
+            EnvelopeObservation::AgainstReference {
+                reference: 0.0,
+                computed: 0.0,
+            },
+        )
+        .expect_err("an interval cannot consume a reference observation");
+    assert!(matches!(
+        &mismatch,
+        EnvelopeGateError::ModeMismatch {
+            attempt,
+            expected: "interval",
+            got: "tolerance",
+        } if attempt.entry_id() == "g1-bennett-linkage-mobility"
+    ));
+    let mismatch_line = mismatch.json_line();
+    assert!(mismatch_line.contains("\"envelope_mode\":\"interval\""));
+    assert!(mismatch_line.contains("\"observation_mode\":\"reference\""));
+    assert!(mismatch_line.contains("\"outcome\":\"mode-mismatch\""));
+}
+
+#[test]
+fn executable_envelope_gate_retains_nonfinite_and_overflow_attempts() {
+    let reg = registry();
+    for (reference, computed, field) in [
+        (f64::NAN, 1.0, "reference"),
+        (1.0, f64::INFINITY, "computed"),
+    ] {
+        let refusal = reg
+            .check_acceptance_envelope(
+                "g1-block-incline-stick-slip",
+                "critical_angle",
+                EnvelopeObservation::AgainstReference {
+                    reference,
+                    computed,
+                },
+            )
+            .expect_err("non-finite observations must refuse");
+        let EnvelopeGateError::NonFiniteInput {
+            attempt,
+            field: got,
+        } = &refusal
+        else {
+            panic!("non-finite input must retain its registry-bound attempt");
+        };
+        assert_eq!(*got, field);
+        let EnvelopeObservation::AgainstReference {
+            reference: retained_reference,
+            computed: retained_computed,
+        } = attempt.observation()
+        else {
+            panic!("tolerance attempt must retain reference observation mode");
+        };
+        assert_eq!(retained_reference.to_bits(), reference.to_bits());
+        assert_eq!(retained_computed.to_bits(), computed.to_bits());
+        let line = refusal.json_line();
+        assert!(line.contains("\"outcome\":\"non-finite-input\""));
+        assert!(line.contains(&format!("\"reference\":\"0x{:016x}\"", reference.to_bits())));
+        assert!(line.contains(&format!("\"computed\":\"0x{:016x}\"", computed.to_bits())));
+    }
+
+    let overflow = reg
+        .check_acceptance_envelope(
+            "g1-block-incline-stick-slip",
+            "critical_angle",
+            EnvelopeObservation::AgainstReference {
+                reference: -f64::MAX,
+                computed: f64::MAX,
+            },
+        )
+        .expect_err("finite subtraction overflow must refuse");
+    assert!(matches!(
+        &overflow,
+        EnvelopeGateError::ArithmeticOverflow {
+            attempt,
+            operation: "computed - reference",
+        } if attempt.entry_digest()
+            == entry_digest(reg.entry("g1-block-incline-stick-slip").expect("seeded"))
+    ));
+    let overflow_line = overflow.json_line();
+    assert!(overflow_line.contains("\"reference\":\"0xffefffffffffffff\""));
+    assert!(overflow_line.contains("\"computed\":\"0x7fefffffffffffff\""));
+    assert!(overflow_line.contains("\"outcome\":\"arithmetic-overflow\""));
+}
+
+#[test]
+fn executable_envelope_gate_refuses_unpinned_and_untrusted_bindings() {
+    let reg = registry();
+    assert!(matches!(
+        reg.check_acceptance_envelope(
+            "g2-team-10",
+            "average_flux_density_probe",
+            EnvelopeObservation::AgainstInterval { computed: 0.0 },
+        ),
+        Err(EnvelopeGateError::Registry(
+            CitationRefusal::UnpinnedEnvelope {
+                id: "g2-team-10",
+                qoi: "average_flux_density_probe",
+            }
+        ))
+    ));
+
+    assert!(matches!(
+        reg.check_acceptance_envelope(
+            "g1-block-incline-stick-slip",
+            "forged_looser_qoi",
+            EnvelopeObservation::AgainstReference {
+                reference: 0.0,
+                computed: 0.0,
+            },
+        ),
+        Err(EnvelopeGateError::UnknownQoi { id, qoi })
+            if id == "g1-block-incline-stick-slip" && qoi == "forged_looser_qoi"
+    ));
+    assert!(matches!(
+        reg.check_acceptance_envelope(
+            "g1-does-not-exist",
+            "critical_angle",
+            EnvelopeObservation::AgainstReference {
+                reference: 0.0,
+                computed: 0.0,
+            },
+        ),
+        Err(EnvelopeGateError::Registry(CitationRefusal::UnknownEntry { id }))
+            if id == "g1-does-not-exist"
+    ));
+
+    let untrusted = Registry::build(vec![pinned_probe()], Vec::new());
+    assert!(matches!(
+        untrusted.check_acceptance_envelope(
+            "probe-pinned",
+            "probe_qoi",
+            EnvelopeObservation::AgainstReference {
+                reference: 1.0,
+                computed: 1.0,
+            },
+        ),
+        Err(EnvelopeGateError::Registry(
+            CitationRefusal::UnauthoritativeRegistry
+        ))
+    ));
 }
 
 #[test]

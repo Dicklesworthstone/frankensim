@@ -40,6 +40,8 @@ pub const VVREG_VERSION: u32 = 1;
 pub const MAX_QOIS_PER_ENTRY: usize = 64;
 /// Canonical length-framed registry-identity schema version.
 pub const REGISTRY_IDENTITY_SCHEMA_VERSION: u32 = 1;
+/// Canonical executable-envelope diagnostic schema version.
+pub const ENVELOPE_VERDICT_SCHEMA_VERSION: u32 = 1;
 
 const REGISTRY_IDENTITY_DOMAIN: &str = "org.frankensim.fs-vvreg.registry.v1";
 const ENTRY_IDENTITY_DOMAIN: &str = "org.frankensim.fs-vvreg.entry.v1";
@@ -197,6 +199,398 @@ pub struct Qoi {
     /// Acceptance envelope for this QoI.
     pub envelope: AcceptanceEnvelope,
 }
+
+/// One computed quantity offered to an [`AcceptanceEnvelope`]. The variant is
+/// explicit so a tolerance gate cannot silently treat an interval bound as an
+/// oracle reference (or vice versa).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EnvelopeObservation {
+    /// Compare a computed value with an independently supplied reference.
+    AgainstReference {
+        /// Reference/oracle value for this exact QoI.
+        reference: f64,
+        /// Computed value being gated.
+        computed: f64,
+    },
+    /// Compare a computed value directly with the registered interval.
+    AgainstInterval {
+        /// Computed value being gated.
+        computed: f64,
+    },
+}
+
+impl EnvelopeObservation {
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::AgainstReference { .. } => "tolerance",
+            Self::AgainstInterval { .. } => "interval",
+        }
+    }
+}
+
+/// Fully evaluated envelope rule retained in an [`EnvelopeVerdict`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EnvelopeEvaluation {
+    /// Absolute-relative comparison and its derived allowed deviation.
+    Tolerance {
+        /// Independent reference value.
+        reference: f64,
+        /// Registered absolute tolerance.
+        atol: f64,
+        /// Registered relative tolerance.
+        rtol: f64,
+        /// `atol + rtol * abs(reference)`.
+        allowed: f64,
+        /// `abs(computed - reference)`.
+        deviation: f64,
+    },
+    /// Inclusive registered interval.
+    Interval {
+        /// Inclusive lower bound.
+        lo: f64,
+        /// Inclusive upper bound.
+        hi: f64,
+    },
+}
+
+/// Registry-bound inputs retained before arithmetic evaluation.
+///
+/// The fields are sealed: callers can inspect an attempt returned in a typed
+/// refusal, but cannot manufacture a registry identity through this type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvelopeAttempt {
+    entry_id: &'static str,
+    qoi: &'static str,
+    unit: &'static str,
+    envelope: AcceptanceEnvelope,
+    observation: EnvelopeObservation,
+    entry_digest: ContentHash,
+    registry_digest: ContentHash,
+    registry_version: u32,
+}
+
+impl EnvelopeAttempt {
+    /// Bound registry entry id.
+    #[must_use]
+    pub const fn entry_id(&self) -> &'static str {
+        self.entry_id
+    }
+
+    /// Bound QoI name.
+    #[must_use]
+    pub const fn qoi(&self) -> &'static str {
+        self.qoi
+    }
+
+    /// Bound QoI unit.
+    #[must_use]
+    pub const fn unit(&self) -> &'static str {
+        self.unit
+    }
+
+    /// Exact envelope stored on the registry QoI.
+    #[must_use]
+    pub const fn envelope(&self) -> AcceptanceEnvelope {
+        self.envelope
+    }
+
+    /// Exact caller observation, including non-finite bit patterns.
+    #[must_use]
+    pub const fn observation(&self) -> EnvelopeObservation {
+        self.observation
+    }
+
+    /// Computed scalar offered by the observation.
+    #[must_use]
+    pub const fn computed(&self) -> f64 {
+        match self.observation {
+            EnvelopeObservation::AgainstReference { computed, .. }
+            | EnvelopeObservation::AgainstInterval { computed } => computed,
+        }
+    }
+
+    /// Content identity of the bound registry entry.
+    #[must_use]
+    pub const fn entry_digest(&self) -> ContentHash {
+        self.entry_digest
+    }
+
+    /// Content identity of the seeded registry used for lookup.
+    #[must_use]
+    pub const fn registry_digest(&self) -> ContentHash {
+        self.registry_digest
+    }
+
+    /// Registry payload version used for lookup.
+    #[must_use]
+    pub const fn registry_version(&self) -> u32 {
+        self.registry_version
+    }
+
+    fn push_identity_json(&self, line: &mut String, kind: &str) {
+        use fmt::Write as _;
+
+        line.push_str("{\"vvreg\":");
+        push_json_str(line, kind);
+        let _ = write!(
+            line,
+            ",\"schema\":{ENVELOPE_VERDICT_SCHEMA_VERSION},\"registry_version\":{}",
+            self.registry_version
+        );
+        line.push_str(",\"registry_digest\":");
+        push_json_str(line, &self.registry_digest.to_hex());
+        line.push_str(",\"entry\":");
+        push_json_str(line, self.entry_id);
+        line.push_str(",\"entry_digest\":");
+        push_json_str(line, &self.entry_digest.to_hex());
+        line.push_str(",\"qoi\":");
+        push_json_str(line, self.qoi);
+        line.push_str(",\"unit\":");
+        push_json_str(line, self.unit);
+    }
+
+    fn push_definition_json(&self, line: &mut String) {
+        match self.envelope {
+            AcceptanceEnvelope::Tolerance { atol, rtol } => {
+                line.push_str(",\"envelope_mode\":\"tolerance\",\"atol\":");
+                push_f64_bits(line, atol);
+                line.push_str(",\"rtol\":");
+                push_f64_bits(line, rtol);
+            }
+            AcceptanceEnvelope::Interval { lo, hi } => {
+                line.push_str(",\"envelope_mode\":\"interval\",\"lo\":");
+                push_f64_bits(line, lo);
+                line.push_str(",\"hi\":");
+                push_f64_bits(line, hi);
+            }
+            AcceptanceEnvelope::Unpinned => {
+                line.push_str(",\"envelope_mode\":\"unpinned\"");
+            }
+        }
+        match self.observation {
+            EnvelopeObservation::AgainstReference {
+                reference,
+                computed,
+            } => {
+                line.push_str(",\"observation_mode\":\"reference\",\"reference\":");
+                push_f64_bits(line, reference);
+                line.push_str(",\"computed\":");
+                push_f64_bits(line, computed);
+            }
+            EnvelopeObservation::AgainstInterval { computed } => {
+                line.push_str(",\"observation_mode\":\"interval\",\"computed\":");
+                push_f64_bits(line, computed);
+            }
+        }
+    }
+
+    /// Canonical replay record with exact IEEE-754 bit tokens.
+    #[must_use]
+    pub fn json_line(&self) -> String {
+        let mut line = String::new();
+        self.push_identity_json(&mut line, "acceptance-envelope-attempt");
+        self.push_definition_json(&mut line);
+        line.push('}');
+        line
+    }
+}
+
+/// Deterministic arithmetic verdict for one seeded-registry QoI.
+///
+/// This record is diagnostic data, not an evidence color or citation receipt.
+/// It is sealed and can only be returned by
+/// [`Registry::check_acceptance_envelope`]. A failing verdict is retained
+/// inside [`EnvelopeGateError::Violation`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvelopeVerdict {
+    attempt: EnvelopeAttempt,
+    evaluation: EnvelopeEvaluation,
+    margin: f64,
+    pass: bool,
+}
+
+impl EnvelopeVerdict {
+    /// Registry-bound inputs and identities used by the evaluation.
+    #[must_use]
+    pub const fn attempt(&self) -> &EnvelopeAttempt {
+        &self.attempt
+    }
+
+    /// Fully evaluated tolerance or interval.
+    #[must_use]
+    pub const fn evaluation(&self) -> EnvelopeEvaluation {
+        self.evaluation
+    }
+
+    /// Signed admission margin: zero or positive passes, negative refuses.
+    #[must_use]
+    pub const fn margin(&self) -> f64 {
+        self.margin
+    }
+
+    /// Whether the candidate is inside the inclusive envelope.
+    #[must_use]
+    pub const fn passed(&self) -> bool {
+        self.pass
+    }
+
+    /// Canonical diagnostic JSON line with exact IEEE-754 bit tokens.
+    #[must_use]
+    pub fn json_line(&self) -> String {
+        let mut line = String::new();
+        self.attempt
+            .push_identity_json(&mut line, "acceptance-envelope-verdict");
+        match self.evaluation {
+            EnvelopeEvaluation::Tolerance {
+                reference,
+                atol,
+                rtol,
+                allowed,
+                deviation,
+            } => {
+                line.push_str(",\"mode\":\"tolerance\",\"reference\":");
+                push_f64_bits(&mut line, reference);
+                line.push_str(",\"computed\":");
+                push_f64_bits(&mut line, self.attempt.computed());
+                line.push_str(",\"atol\":");
+                push_f64_bits(&mut line, atol);
+                line.push_str(",\"rtol\":");
+                push_f64_bits(&mut line, rtol);
+                line.push_str(",\"allowed\":");
+                push_f64_bits(&mut line, allowed);
+                line.push_str(",\"deviation\":");
+                push_f64_bits(&mut line, deviation);
+            }
+            EnvelopeEvaluation::Interval { lo, hi } => {
+                line.push_str(",\"mode\":\"interval\",\"reference\":null,\"computed\":");
+                push_f64_bits(&mut line, self.attempt.computed());
+                line.push_str(",\"lo\":");
+                push_f64_bits(&mut line, lo);
+                line.push_str(",\"hi\":");
+                push_f64_bits(&mut line, hi);
+            }
+        }
+        line.push_str(",\"margin\":");
+        push_f64_bits(&mut line, self.margin);
+        line.push_str(if self.pass {
+            ",\"pass\":true}"
+        } else {
+            ",\"pass\":false}"
+        });
+        line
+    }
+}
+
+/// Why an executable acceptance-envelope comparison refused.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnvelopeGateError {
+    /// The seeded-registry lookup or stored envelope definition refused.
+    Registry(CitationRefusal),
+    /// The named QoI is absent from the uniquely selected registry entry.
+    UnknownQoi {
+        /// Registry entry id.
+        id: &'static str,
+        /// Requested QoI name.
+        qoi: String,
+    },
+    /// The observation mode does not match the stored envelope variant.
+    ModeMismatch {
+        /// Complete registry-bound attempted evaluation.
+        attempt: Box<EnvelopeAttempt>,
+        /// Envelope mode required by the registry row.
+        expected: &'static str,
+        /// Mode the caller supplied.
+        got: &'static str,
+    },
+    /// A reference or computed value was non-finite.
+    NonFiniteInput {
+        /// Complete registry-bound attempted evaluation.
+        attempt: Box<EnvelopeAttempt>,
+        /// Non-finite input field.
+        field: &'static str,
+    },
+    /// Finite inputs overflowed a derived comparison quantity.
+    ArithmeticOverflow {
+        /// Complete registry-bound attempted evaluation.
+        attempt: Box<EnvelopeAttempt>,
+        /// Derived operation that overflowed.
+        operation: &'static str,
+    },
+    /// The finite comparison completed outside the inclusive envelope.
+    Violation {
+        /// Complete failing diagnostic record.
+        verdict: Box<EnvelopeVerdict>,
+    },
+}
+
+impl EnvelopeGateError {
+    /// Canonical refusal/verdict JSON. Arithmetic refusals retain the exact
+    /// registry definition and caller observation needed for replay.
+    #[must_use]
+    pub fn json_line(&self) -> String {
+        let (attempt, outcome, detail_key, detail) = match self {
+            Self::ModeMismatch {
+                attempt,
+                expected,
+                got,
+            } => {
+                let detail = format!("expected {expected}; got {got}");
+                (attempt, "mode-mismatch", "detail", detail)
+            }
+            Self::NonFiniteInput { attempt, field } => {
+                (attempt, "non-finite-input", "field", (*field).to_string())
+            }
+            Self::ArithmeticOverflow { attempt, operation } => (
+                attempt,
+                "arithmetic-overflow",
+                "operation",
+                (*operation).to_string(),
+            ),
+            Self::Violation { verdict } => return verdict.json_line(),
+            Self::Registry(refusal) => {
+                let mut line =
+                    String::from("{\"vvreg\":\"acceptance-envelope-refusal\",\"schema\":");
+                use fmt::Write as _;
+                let _ = write!(line, "{ENVELOPE_VERDICT_SCHEMA_VERSION}");
+                line.push_str(",\"outcome\":\"registry\",\"reason\":");
+                push_json_str(&mut line, &refusal.to_string());
+                line.push('}');
+                return line;
+            }
+            Self::UnknownQoi { id, qoi } => {
+                let mut line =
+                    String::from("{\"vvreg\":\"acceptance-envelope-refusal\",\"schema\":");
+                use fmt::Write as _;
+                let _ = write!(line, "{ENVELOPE_VERDICT_SCHEMA_VERSION}");
+                line.push_str(",\"outcome\":\"unknown-qoi\",\"entry\":");
+                push_json_str(&mut line, id);
+                line.push_str(",\"qoi\":");
+                push_json_str(&mut line, qoi);
+                line.push('}');
+                return line;
+            }
+        };
+        let mut line = String::new();
+        attempt.push_identity_json(&mut line, "acceptance-envelope-refusal");
+        attempt.push_definition_json(&mut line);
+        line.push_str(",\"outcome\":");
+        push_json_str(&mut line, outcome);
+        line.push(',');
+        push_json_str(&mut line, detail_key);
+        line.push(':');
+        push_json_str(&mut line, &detail);
+        line.push('}');
+        line
+    }
+}
+
+impl fmt::Display for EnvelopeGateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.json_line())
+    }
+}
+
+impl std::error::Error for EnvelopeGateError {}
 
 /// One registry row: an executable (or not-yet-executable) benchmark
 /// definition. Incomplete rows may exist in the registry — recording a
@@ -682,6 +1076,144 @@ fn check_envelope(id: &'static str, qoi: &Qoi) -> Result<(), CitationRefusal> {
     Ok(())
 }
 
+fn evaluate_envelope_attempt(
+    attempt: EnvelopeAttempt,
+) -> Result<EnvelopeVerdict, EnvelopeGateError> {
+    match (attempt.envelope, attempt.observation) {
+        (
+            AcceptanceEnvelope::Tolerance { atol, rtol },
+            EnvelopeObservation::AgainstReference {
+                reference,
+                computed,
+            },
+        ) => evaluate_tolerance_attempt(attempt, reference, computed, atol, rtol),
+        (
+            AcceptanceEnvelope::Interval { lo, hi },
+            EnvelopeObservation::AgainstInterval { computed },
+        ) => evaluate_interval_attempt(attempt, computed, lo, hi),
+        (AcceptanceEnvelope::Tolerance { .. }, observation) => {
+            Err(EnvelopeGateError::ModeMismatch {
+                attempt: Box::new(attempt),
+                expected: "tolerance",
+                got: observation.tag(),
+            })
+        }
+        (AcceptanceEnvelope::Interval { .. }, observation) => {
+            Err(EnvelopeGateError::ModeMismatch {
+                attempt: Box::new(attempt),
+                expected: "interval",
+                got: observation.tag(),
+            })
+        }
+        (AcceptanceEnvelope::Unpinned, _) => Err(EnvelopeGateError::Registry(
+            CitationRefusal::UnpinnedEnvelope {
+                id: attempt.entry_id,
+                qoi: attempt.qoi,
+            },
+        )),
+    }
+}
+
+fn evaluate_tolerance_attempt(
+    attempt: EnvelopeAttempt,
+    reference: f64,
+    computed: f64,
+    atol: f64,
+    rtol: f64,
+) -> Result<EnvelopeVerdict, EnvelopeGateError> {
+    if !reference.is_finite() {
+        return Err(EnvelopeGateError::NonFiniteInput {
+            attempt: Box::new(attempt),
+            field: "reference",
+        });
+    }
+    if !computed.is_finite() {
+        return Err(EnvelopeGateError::NonFiniteInput {
+            attempt: Box::new(attempt),
+            field: "computed",
+        });
+    }
+    let relative = rtol * reference.abs();
+    if !relative.is_finite() {
+        return Err(EnvelopeGateError::ArithmeticOverflow {
+            attempt: Box::new(attempt),
+            operation: "rtol * abs(reference)",
+        });
+    }
+    let allowed = atol + relative;
+    if !allowed.is_finite() {
+        return Err(EnvelopeGateError::ArithmeticOverflow {
+            attempt: Box::new(attempt),
+            operation: "atol + relative tolerance",
+        });
+    }
+    let delta = computed - reference;
+    if !delta.is_finite() {
+        return Err(EnvelopeGateError::ArithmeticOverflow {
+            attempt: Box::new(attempt),
+            operation: "computed - reference",
+        });
+    }
+    let deviation = delta.abs();
+    let margin = allowed - deviation;
+    if !margin.is_finite() {
+        return Err(EnvelopeGateError::ArithmeticOverflow {
+            attempt: Box::new(attempt),
+            operation: "allowed - deviation",
+        });
+    }
+    finish_envelope_verdict(EnvelopeVerdict {
+        attempt,
+        evaluation: EnvelopeEvaluation::Tolerance {
+            reference,
+            atol,
+            rtol,
+            allowed,
+            deviation,
+        },
+        margin,
+        pass: deviation <= allowed,
+    })
+}
+
+fn evaluate_interval_attempt(
+    attempt: EnvelopeAttempt,
+    computed: f64,
+    lo: f64,
+    hi: f64,
+) -> Result<EnvelopeVerdict, EnvelopeGateError> {
+    if !computed.is_finite() {
+        return Err(EnvelopeGateError::NonFiniteInput {
+            attempt: Box::new(attempt),
+            field: "computed",
+        });
+    }
+    let lower_margin = computed - lo;
+    let upper_margin = hi - computed;
+    if !lower_margin.is_finite() || !upper_margin.is_finite() {
+        return Err(EnvelopeGateError::ArithmeticOverflow {
+            attempt: Box::new(attempt),
+            operation: "interval signed margin",
+        });
+    }
+    finish_envelope_verdict(EnvelopeVerdict {
+        attempt,
+        evaluation: EnvelopeEvaluation::Interval { lo, hi },
+        margin: lower_margin.min(upper_margin),
+        pass: computed >= lo && computed <= hi,
+    })
+}
+
+fn finish_envelope_verdict(verdict: EnvelopeVerdict) -> Result<EnvelopeVerdict, EnvelopeGateError> {
+    if verdict.pass {
+        Ok(verdict)
+    } else {
+        Err(EnvelopeGateError::Violation {
+            verdict: Box::new(verdict),
+        })
+    }
+}
+
 /// Appendix-D consumption discipline: how a consuming bead has engaged with
 /// a registry artifact. All five states are recordable — honesty about
 /// `Unread` is the point.
@@ -953,6 +1485,81 @@ impl Registry {
     #[must_use]
     pub fn entry(&self, id: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// Execute the exact acceptance envelope stored on one uniquely selected
+    /// QoI in the seeded workspace registry.
+    ///
+    /// The returned diagnostic binds both the entry and registry content
+    /// digests. Caller-built registries refuse before lookup, and callers name
+    /// only the QoI: they cannot substitute a looser envelope or different
+    /// unit. This is still an arithmetic gate, not a citation receipt or
+    /// evidence color; reference/run provenance remains the consuming lane's
+    /// responsibility.
+    ///
+    /// # Errors
+    ///
+    /// [`EnvelopeGateError::Registry`] for an unauthoritative registry,
+    /// malformed/unknown/duplicate entry, duplicate QoI, or invalid/unpinned
+    /// stored envelope; [`EnvelopeGateError::UnknownQoi`] for an absent QoI;
+    /// the remaining variants retain the complete bound attempt or verdict.
+    pub fn check_acceptance_envelope(
+        &self,
+        id: &str,
+        qoi_name: &str,
+        observation: EnvelopeObservation,
+    ) -> Result<EnvelopeVerdict, EnvelopeGateError> {
+        if self.authority != RegistryAuthority::Seeded {
+            return Err(EnvelopeGateError::Registry(
+                CitationRefusal::UnauthoritativeRegistry,
+            ));
+        }
+        validate_registry_id(id).map_err(EnvelopeGateError::Registry)?;
+        let mut entries = self.entries.iter().filter(|entry| entry.id == id);
+        let entry = entries.next().ok_or_else(|| {
+            EnvelopeGateError::Registry(CitationRefusal::UnknownEntry { id: id.to_string() })
+        })?;
+        if entries.next().is_some() {
+            return Err(EnvelopeGateError::Registry(
+                CitationRefusal::DuplicateEntry { id: id.to_string() },
+            ));
+        }
+
+        let mut qois = entry.qois.iter().filter(|qoi| qoi.name == qoi_name);
+        let qoi = qois.next().ok_or_else(|| EnvelopeGateError::UnknownQoi {
+            id: entry.id,
+            qoi: qoi_name.to_string(),
+        })?;
+        if qois.next().is_some() {
+            return Err(EnvelopeGateError::Registry(CitationRefusal::DuplicateQoi {
+                id: entry.id,
+                qoi: qoi.name,
+            }));
+        }
+        if qoi.name.trim().is_empty() {
+            return Err(EnvelopeGateError::Registry(CitationRefusal::EmptyField {
+                id: entry.id,
+                field: "qoi.name",
+            }));
+        }
+        if qoi.unit.trim().is_empty() {
+            return Err(EnvelopeGateError::Registry(CitationRefusal::EmptyField {
+                id: entry.id,
+                field: "qoi.unit",
+            }));
+        }
+        check_envelope(entry.id, qoi).map_err(EnvelopeGateError::Registry)?;
+
+        evaluate_envelope_attempt(EnvelopeAttempt {
+            entry_id: entry.id,
+            qoi: qoi.name,
+            unit: qoi.unit,
+            envelope: qoi.envelope,
+            observation,
+            entry_digest: entry_digest(entry),
+            registry_digest: self.digest(),
+            registry_version: VVREG_VERSION,
+        })
     }
 
     /// Look up one primary reference by key.

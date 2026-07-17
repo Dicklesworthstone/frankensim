@@ -21,6 +21,18 @@ QoIs, and acceptance envelopes before any solver claims against it.
   `DeckPin`, `OracleBinding`, QoIs (`Qoi` + `AcceptanceEnvelope`), notes.
   Incomplete rows may EXIST (recording a known target is honest) but
   refuse citation.
+- `Registry::check_acceptance_envelope` — arithmetic-only executable QoI gate
+  on the seeded registry. Callers name an entry and QoI; the gate uniquely
+  selects the stored unit/envelope, refuses caller-built registries, and binds
+  the entry + registry digests. A tolerance observation supplies independent
+  reference + computed values and uses
+  `abs(computed-reference) <= atol + rtol*abs(reference)`; an interval
+  observation supplies the computed value and uses inclusive `[lo, hi]`.
+  Passing calls return a sealed `EnvelopeVerdict`; violations retain the same
+  full verdict, while pre-verdict arithmetic refusals retain a sealed,
+  replay-complete `EnvelopeAttempt`. All diagnostics have canonical exact-bit
+  JSON. Modes cannot be mixed, non-finite inputs and derived overflow fail
+  closed, and zero signed margin passes exactly on the boundary.
 - `validate_entry` — the citation gates as a validation-only probe: it
   returns `Ok(())` or a typed `CitationRefusal` naming the first failing
   gate, in documented order: id shape/size, QoI-count cap, blank text
@@ -96,20 +108,34 @@ QoIs, and acceptance envelopes before any solver claims against it.
   are not mnemonic-formula oracles.
 - G2 seeds stay uncitable until edition/license/deck/oracle/QoIs/envelopes
   are pinned; pinning them is downstream work, not a tolerance relaxation.
+- EXECUTABLE ENVELOPES ARE FAILURE GATES, NOT AUTHORITY: every finite
+  completed comparison retains the seeded entry/QoI/unit, exact entry and
+  registry identities, reference or interval, computed value, derived
+  tolerance/deviation, signed margin, and pass state. The attempt/verdict fields
+  are private, so callers cannot forge a passing registry record. Negative
+  margins return `EnvelopeGateError::Violation`; malformed or unpinned stored
+  definitions, mismatched modes, NaN/infinity, and arithmetic overflow never
+  produce a passing verdict. Pre-verdict arithmetic failures retain the exact
+  definition and observation needed for replay. The gate cannot mint
+  `CitationReceipt`, `ColorRank`, or trust.
 
 ## Error model
 
 Total functions; no panics in library paths. Citation failures are
-`CitationRefusal` values (recoverable, typed, actionable); consumption
-binding failures are `ConsumptionRefusal`; seed-authoring defects surface
-as `IntegrityFinding`s from `lint()`, not as crashes.
+`CitationRefusal` values (recoverable, typed, actionable); executable-envelope
+failures are `EnvelopeGateError` values retaining either the complete sealed
+failing verdict or the exact registry-bound definition, observation, and
+non-finite-input/arithmetic-overflow refusal; consumption binding failures are
+`ConsumptionRefusal`; seed-authoring defects surface as `IntegrityFinding`s
+from `lint()`, not as crashes.
 
 ## Determinism class
 
 Fully deterministic: all seed data is `const`; serialization renders
 floats as bit tokens (never locale/formatting dependent); digests are
 domain-separated BLAKE3 over length-framed canonical bytes. Bitwise
-reproducible across runs, thread counts, and ISAs.
+reproducible across runs, thread counts, and ISAs. Envelope-verdict JSON uses a
+fixed field order and exact IEEE-754 bit tokens for every floating-point value.
 
 ## Cancellation behavior
 
@@ -118,12 +144,15 @@ cost model for caller-supplied data: `Registry::build` sorts
 (`O(n log n)` comparisons over rows and references, with one content
 digest per row for the canonical tie-break); `lint`/`canonical_rows`/
 `digest` are linear in rows plus per-entry gate cost; the
+executable-envelope gate performs a linear entry/QoI lookup and one registry
+digest before constant-cost scalar arithmetic; the
 `MAX_QOIS_PER_ENTRY` cap is checked before any QoI traversal, so QoI-count
 work and the quadratic name-comparison count are capped at 64 and 64².
 String byte lengths outside registry ids remain uncapped.
 Enforced input caps: `MAX_QOIS_PER_ENTRY` on gate checks,
 `MAX_LOOKUP_ID_LEN` plus lowercase-ASCII-slug validation on
-entry validation and `Registry::cite`, and `MAX_BEAD_ID_LEN` on
+entry validation, `Registry::cite`, and `Registry::check_acceptance_envelope`,
+and `MAX_BEAD_ID_LEN` on
 `ConsumptionRecord::bind` (validated before any trim or copy).
 Row/reference COUNTS are uncapped — see no-claim boundaries.
 
@@ -147,7 +176,11 @@ unknown-id refusal, duplicate-id fail-closed citation and lint exclusion,
 bounded/malformed lookup-id refusal before input copies,
 duplicate reference keys at non-adjacent indices, gate ordering probes
 (including oracle-before-QoI and dedup-before-envelope), invalid-envelope
-reasons, the canonical-row golden for the unpinned TEAM 10 row,
+reasons, executable tolerance and interval gates with inclusive endpoints,
+disclosed seeded boundary-plus-ULP corruption, exact-bit JSON verdicts, and
+fail-closed mode-mismatch/non-finite/overflow/unpinned probes, seeded
+entry/QoI/digest binding, unknown-entry/QoI refusal, and caller-built-registry
+forgery refusal, the canonical-row golden for the unpinned TEAM 10 row,
 sorted/deterministic serialization with bit-token floats and variant-
 tagged 64-hex deck digests, deck row/identity agreement (case
 normalization, malformed-vs-unpinned distinction, authored-vs-external
@@ -165,6 +198,11 @@ digest).
   result, and it does not verify that an external deck's bytes exist or
   match their registered digest — artifact retrieval/verification is the
   consuming lane's job.
+- An executable envelope proves only that a caller-supplied scalar satisfies
+  the exact arithmetic rule stored on the named seeded-registry QoI. It does not
+  bind a reference to an oracle, bind a computed value to a deck/run, establish
+  that the whole entry is citable, or grant evidence authority; the consuming
+  lane must bind those identities and provenance.
 - The 15 G2 seeds are targets, not benchmarks: no claim may cite them
   until their decks are pinned (exact edition, license, deck hash, oracle,
   QoIs, acceptance data).
