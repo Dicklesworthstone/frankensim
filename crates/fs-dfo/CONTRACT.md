@@ -173,6 +173,27 @@ diagnostics, and is refused by the test-local merge gate. This battery claims
 only exact same-build replay for that recorded fixture: it does not claim
 optimizer quality, other objectives/dimensions/budgets/seeds, refreshed
 cross-ISA equality, cancellation, checkpoint/resume, or performance.
+tests/nelder_mead_study_replay.rs adds the corresponding standalone-family
+receipt for production `nelder_mead`. It reuses the fixed two-dimensional
+Rosenbrock leg from the crate golden (`x0 = [0.3, -0.2]`, simplex scale `0.2`,
+soft maximum `2,000`, impossible target `-1.0`) and retains every ordered
+objective callback plus all three public tuple outputs. The accounting gate
+reconstructs the initial simplex, recomputes every objective bit, requires the
+reported evaluation count to equal the closure count, admits only the bounded
+overshoot of one already-started Nelder–Mead transition, and proves the returned
+best is the global minimum of the retained evaluated trace. Separate canonical
+fixture and result identities bind the units, arguments, standard coefficients,
+ordering/budget semantics, dependency versions, complete callback stream, and
+returned bits; independent runs must reproduce the complete result frame. A
+disclosed `StreamKey` selects one returned coordinate and low mantissa bit. The
+test first proves the unsealed edit fails payload validation, then reseals it,
+proves exactly that bit and no callback or other output field changed, emits two
+byte-identical wire-valid red `ConformanceCase` events, and catches the local
+merge gate refusing the typed reference-identity mismatch. This is fixed-input
+same-build evidence: the mutation seed is not an optimizer seed, the maximum is
+a soft loop-entry budget rather than a strict callback cap, and the receipt adds
+no optimizer-quality, broad-input, refreshed cross-ISA, cancellation,
+checkpoint, authenticated-ledger, or performance claim.
 tests/dro_battery.rs (4 cases): the one-sample kink LP recovers the
 fractional q = [0.5, 0.5] and worst-case value 0.5; tiny-scale kinks
 use scale-relative recovery rather than an absolute lambda cutoff;
@@ -266,6 +287,13 @@ remain assertion-only and silent.
   assertions at the recorded input roots. They do not promote the frozen hash
   measurement to a verdict or claim coverage of other seeds, external benchmark
   corpora, scheduler determinism, or unmeasured success probabilities.
+- The standalone Nelder–Mead study receipt covers one fixed two-dimensional
+  same-build run. Its mutation seed belongs only to the red evidence generator;
+  the optimizer itself has no randomness. The reported maximum is a soft
+  loop-entry budget and may be exceeded only while the already-started
+  reflection/expansion/contraction/shrink transition drains. The fixture makes
+  no strict-budget, quality, all-objective/dimension/configuration, refreshed
+  cross-ISA, `Cx`, checkpoint, authenticated-ledger, or performance claim.
 - NSGA-III normalization uses the ideal point with FIRST-front
   per-objective maxima as the nadir estimate; the full ASF
   extreme-point construction is the recorded refinement.
