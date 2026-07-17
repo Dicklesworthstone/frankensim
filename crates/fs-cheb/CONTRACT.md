@@ -206,6 +206,23 @@ golden and adds no fresh adaptive-build, root, colleague, Fourier, Cheb2,
 Orr-Sommerfeld, performance, or dual-ISA execution proof; central package
 proof remains pending.
 
+`tests/frankenscipy_integrate_oracle_casebook.rs`, the dev-only quadrature
+oracle Casebook, adds an exact polynomial KAT and finite exp, Runge, and
+oscillatory comparisons against the declared
+`fsci-integrate = 0.1.0` Rust oracle. Canonical input frames record the
+authoritative `constellation.lock` sibling pin and exact integration options;
+the path dependency does not itself attest the live checkout identity. Each
+agreement bound is the disclosed numerical floor plus eight times the
+oracle-reported error, and an independent absolute ceiling rejects oracle
+bounds above `1e-11` as too loose for this Casebook. Output
+receipts bind crate and record versions, fixture inputs, complete Chebyshev
+coefficient bits, computed and oracle outputs, reported errors, derived bounds,
+and output digests. The green receipt must replay exactly, while a disclosed
+seeded reference mutation must reproduce a stable red receipt that the
+`assert_green` merge gate refuses. This is not Python SciPy evidence or a
+forward-error certificate, and makes no claim for extreme, discontinuous, or
+improper integrals, ODEs, performance, or fresh dual-ISA execution.
+
 tests/cheb_battery.rs (recovery, calculus, plateau robustness, roots,
 collocation accuracy, eigen demo, golden hash).
 
@@ -280,7 +297,7 @@ structs.
 - No 3D low-rank (2D ships; tensor-train is the successor), no
   complex-root REPORTING policy (real-only surfaced, documented), no
   Fourier rootfinding-on-the-circle, no Qty-dimensioned functions,
-  no FrankenScipy cross-checks yet.
+  and no FrankenScipy cross-checks beyond the finite quadrature tranche above.
 - `mul` may overshoot the minimal degree (resample-based); fine for
   correctness, recorded for the perf lane.
 - Budget coverage after cb-010: EVERY module now has an exact-u128

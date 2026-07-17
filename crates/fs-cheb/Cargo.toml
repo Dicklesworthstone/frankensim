@@ -21,6 +21,7 @@ fs-math = { path = "../fs-math" }
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-casebook = { path = "../fs-casebook" }
+fsci-integrate = { path = "../../../frankenscipy/crates/fsci-integrate", version = "=0.1.0" }
 
 [lints]
 workspace = true
