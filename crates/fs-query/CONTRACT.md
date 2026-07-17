@@ -322,7 +322,10 @@ cancellation refusals, and no normal claim without gradients.
 bracket containment with all three verdicts on their exact sides,
 shelled-sphere composition against analytic offset-body geometry with
 hull-only contact downgrades, thickening monotonicity, and refusal
-drills.
+drills. Aggregate outcomes use canonical fs-obs `ConformanceCase` events;
+gd-002 carries its `0xC0D1` execution seed and the three deterministic cases
+use zero. Direct assertion failures before those aggregate events remain
+ordinary Rust test diagnostics.
 `tests/deform.rs`, cases gh-001..gh-004 — deformation hook: sign and
 safe-step transfer under scale+shift against the analytic deformed
 sphere, rigorous enclosure pass-through with Estimate collapse,

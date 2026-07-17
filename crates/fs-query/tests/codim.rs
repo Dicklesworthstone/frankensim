@@ -9,6 +9,8 @@
 //!   turns a contact verdict into a clear one, and the bracket only
 //!   moves down.
 //! - gd-004 G0: thickness/distance refusals fail closed typed.
+//! Aggregate outcomes use canonical fs-obs events; the convex-composition
+//! case carries its execution seed and deterministic cases use zero.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -18,12 +20,27 @@ use fs_query::{
     convex_separation,
 };
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-query/codim\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-query/codim", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-query/codim".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("codimensional verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("codimensional verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -88,6 +105,7 @@ fn gd_001_effective_gap_brackets_and_verdicts() {
             "clear [{:.3}, {:.3}], contact [{:.3}, {:.3}], straddle unresolved",
             clear.lo, clear.hi, contact.lo, contact.hi
         ),
+        0,
     );
 }
 
@@ -138,6 +156,7 @@ fn gd_002_composition_matches_offset_body_geometry() {
              hull-only downgraded",
             clear.lo, clear.hi, contact.lo, contact.hi
         ),
+        0xC0D1,
     );
 }
 
@@ -169,6 +188,7 @@ fn gd_003_thickening_is_monotone() {
         "gd-003",
         true,
         "brackets move monotonically down; contact never reverts",
+        0,
     );
 }
 
@@ -199,5 +219,6 @@ fn gd_004_refusals_fail_closed() {
         "gd-004",
         true,
         "thickness and distance-enclosure refusals all typed",
+        0,
     );
 }
