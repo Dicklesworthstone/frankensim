@@ -4,8 +4,9 @@
 //! with the existing NASA-9 standard-state models. It evaluates standard
 //! reaction Gibbs energy and the dimensionless pressure-activity equilibrium
 //! constant under one exact gas/ideal-gas/reference-pressure convention. It
-//! does not define activities away from that standard-state model, evaluate a
-//! reacting mixture, integrate kinetics, infer a reverse rate, or prove that a
+//! also supports an explicitly caller-declared stoichiometric mass-action
+//! closure over positive dimensionless ideal-gas activities. It does not
+//! establish empirical kinetic orders, integrate kinetics, or prove that a
 //! named reaction is physically meaningful.
 
 use core::fmt;
@@ -23,6 +24,8 @@ use crate::{
 pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the reverse-progress-rate consistency operation tree.
 pub const REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1: u32 = 1;
+/// Version of the declared stoichiometric mass-action operation tree.
+pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 1;
 /// Maximum species rows retained or scanned by one reaction model.
 pub const MAX_REACTION_SPECIES_V1: usize = 128;
 /// Maximum reaction columns whose matrix identity may be bound by one model.
@@ -1389,6 +1392,889 @@ impl ThermodynamicReverseRateEvaluationV1 {
     }
 }
 
+/// Explicit source of the forward and reverse mass-action exponents.
+///
+/// Version 1 supports only a caller declaration that the exact
+/// stoichiometric coefficients are the kinetic orders. The declaration is
+/// retained because exact reaction bookkeeping does not establish this
+/// empirical kinetic-law choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MassActionKineticOrderConventionV1 {
+    /// Negative coefficients define forward orders and positive coefficients
+    /// define reverse orders.
+    CallerDeclaredStoichiometricCoefficients,
+}
+
+/// Direction named by a mass-action arithmetic refusal or status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MassActionDirectionV1 {
+    /// Reactant-to-product direction.
+    Forward,
+    /// Product-to-reactant direction.
+    Reverse,
+}
+
+/// Allocation stage named by a bounded mass-action reservation refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MassActionAllocationStageV1 {
+    /// Canonical per-species term receipts.
+    TermReceipts,
+}
+
+/// Fixed-order value named by a non-finite mass-action refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MassActionArithmeticValueV1 {
+    /// Natural logarithm of one positive dimensionless activity.
+    LogActivity,
+    /// Exact stoichiometric exponent multiplied by one log activity.
+    LogActivityContribution,
+    /// Canonical partial sum of one directional log activity product.
+    LogActivityProduct,
+    /// Deterministic exponential of one log activity product.
+    ActivityProduct,
+    /// Directional scale multiplied by its direct activity product.
+    DirectionalProgressRate,
+    /// Forward progress rate minus reverse progress rate.
+    NetProgressRate,
+}
+
+/// Direct representation status for one directional mass-action rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MassActionDirectionalRateStatusV1 {
+    /// Activity product and directional progress rate are positive and finite.
+    FinitePositive,
+    /// The log product is finite but direct exponentiation overflowed.
+    LogOnlyActivityProductOverflow,
+    /// The log product is finite but direct exponentiation underflowed.
+    LogOnlyActivityProductUnderflow,
+    /// The direct activity product exists, but the thermodynamic reverse scale
+    /// is log-only and cannot be multiplied directly.
+    ProgressRateScaleUnavailable,
+    /// Direct activity product exists, but multiplication by the scale
+    /// overflowed.
+    ProgressRateOverflow,
+    /// Direct activity product exists, but multiplication by the scale
+    /// underflowed.
+    ProgressRateUnderflow,
+}
+
+/// Construction or evaluation refusal for declared stoichiometric
+/// mass-action progress.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoichiometricMassActionErrorV1 {
+    /// One activity was zero, negative, or non-finite.
+    InvalidActivity {
+        /// Affected species.
+        species: SpeciesId,
+        /// Exact rejected IEEE-754 bits.
+        bits: u64,
+    },
+    /// More activity entries were offered than the hard reaction bound.
+    TooManyActivities {
+        /// Offered activity entries.
+        offered: usize,
+        /// Hard limit.
+        limit: usize,
+    },
+    /// Activity count differs from the exact active reaction-term count.
+    ActivityCountMismatch {
+        /// Required active terms.
+        expected: usize,
+        /// Offered activity entries.
+        found: usize,
+    },
+    /// Two activity entries name the same species.
+    DuplicateActivitySpecies {
+        /// Repeated species identity.
+        species: SpeciesId,
+    },
+    /// One active reaction term has no activity.
+    MissingSpeciesActivity {
+        /// Missing active species.
+        species: SpeciesId,
+    },
+    /// One supplied activity is not active in the selected reaction.
+    UnexpectedSpeciesActivity {
+        /// Extraneous species identity.
+        species: SpeciesId,
+    },
+    /// A bounded vector reservation failed before publication.
+    AllocationRefused {
+        /// Failed allocation stage.
+        stage: MassActionAllocationStageV1,
+        /// Requested element capacity.
+        requested: usize,
+    },
+    /// The nested thermodynamic reverse-rate closure refused.
+    ReverseRateClosure {
+        /// Exact nested refusal.
+        source: ReverseRateClosureErrorV1,
+    },
+    /// Fixed-order arithmetic produced an unexpected non-finite value.
+    UnrepresentableArithmeticValue {
+        /// Species for a term-local refusal.
+        species: Option<SpeciesId>,
+        /// Direction for a directional refusal.
+        direction: Option<MassActionDirectionV1>,
+        /// First failed operation-tree value.
+        value: MassActionArithmeticValueV1,
+        /// Exact rejected IEEE-754 bits.
+        bits: u64,
+    },
+}
+
+impl fmt::Display for StoichiometricMassActionErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidActivity { species, bits } => write!(
+                formatter,
+                "ideal-gas activity for {species} must be positive and finite (bits {bits:#018x})"
+            ),
+            Self::TooManyActivities { offered, limit } => write!(
+                formatter,
+                "mass-action evaluation offered {offered} activities, exceeding limit {limit}"
+            ),
+            Self::ActivityCountMismatch { expected, found } => write!(
+                formatter,
+                "mass-action evaluation requires {expected} activities but received {found}"
+            ),
+            Self::DuplicateActivitySpecies { species } => {
+                write!(formatter, "mass-action activities repeat species {species}")
+            }
+            Self::MissingSpeciesActivity { species } => {
+                write!(
+                    formatter,
+                    "mass-action evaluation lacks activity for {species}"
+                )
+            }
+            Self::UnexpectedSpeciesActivity { species } => write!(
+                formatter,
+                "mass-action evaluation received inactive species activity {species}"
+            ),
+            Self::AllocationRefused { stage, requested } => write!(
+                formatter,
+                "mass-action {stage:?} allocation refused for {requested} elements"
+            ),
+            Self::ReverseRateClosure { source } => {
+                write!(
+                    formatter,
+                    "mass-action reverse-rate closure refused: {source}"
+                )
+            }
+            Self::UnrepresentableArithmeticValue {
+                species,
+                direction,
+                value,
+                bits,
+            } => write!(
+                formatter,
+                "mass-action {value:?} for {species:?} in {direction:?} is non-finite (bits {bits:#018x})"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for StoichiometricMassActionErrorV1 {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::ReverseRateClosure { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// One positive finite dimensionless ideal-gas activity `p_i / p0`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdealGasSpeciesActivityV1 {
+    species: SpeciesId,
+    activity: Dimensionless,
+}
+
+impl IdealGasSpeciesActivityV1 {
+    /// Admit one positive finite dimensionless activity.
+    ///
+    /// # Errors
+    /// Refuses zero, negative, NaN, or infinite values.
+    pub fn new(
+        species: SpeciesId,
+        activity: Dimensionless,
+    ) -> Result<Self, StoichiometricMassActionErrorV1> {
+        let value = activity.value();
+        if !value.is_finite() || value <= 0.0 {
+            return Err(StoichiometricMassActionErrorV1::InvalidActivity {
+                species,
+                bits: value.to_bits(),
+            });
+        }
+        Ok(Self { species, activity })
+    }
+
+    /// Canonical species identity.
+    #[must_use]
+    pub const fn species(&self) -> &SpeciesId {
+        &self.species
+    }
+
+    /// Positive finite dimensionless activity.
+    #[must_use]
+    pub const fn activity(&self) -> Dimensionless {
+        self.activity
+    }
+
+    /// Raw dimensionless scalar.
+    #[must_use]
+    pub const fn value(&self) -> f64 {
+        self.activity.value()
+    }
+}
+
+/// Finite logarithm of one directional dimensionless activity product.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct LogMassActionActivityProductV1(Dimensionless);
+
+impl LogMassActionActivityProductV1 {
+    const fn new(value: f64) -> Self {
+        Self(Dimensionless::new(value))
+    }
+
+    /// Raw dimensionless logarithm.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensionless quantity wrapper.
+    #[must_use]
+    pub const fn quantity(self) -> Dimensionless {
+        self.0
+    }
+}
+
+/// Positive finite direct directional activity product, when representable.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct MassActionActivityProductV1(Dimensionless);
+
+impl MassActionActivityProductV1 {
+    const fn new(value: f64) -> Self {
+        Self(Dimensionless::new(value))
+    }
+
+    /// Raw positive finite dimensionless product.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensionless quantity wrapper.
+    #[must_use]
+    pub const fn quantity(self) -> Dimensionless {
+        self.0
+    }
+}
+
+/// Positive finite forward or reverse reaction-progress rate.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct DirectionalReactionProgressRateV1(ReactionProgressRateQuantityV1);
+
+impl DirectionalReactionProgressRateV1 {
+    const fn new(value: f64) -> Self {
+        Self(ReactionProgressRateQuantityV1::new(value))
+    }
+
+    /// Raw coherent-SI scalar in mol m^-3 s^-1.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensioned coherent-SI quantity.
+    #[must_use]
+    pub const fn quantity(self) -> ReactionProgressRateQuantityV1 {
+        self.0
+    }
+}
+
+/// Finite signed net reaction-progress rate, forward minus reverse.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct NetReactionProgressRateV1(ReactionProgressRateQuantityV1);
+
+impl NetReactionProgressRateV1 {
+    const fn new(value: f64) -> Self {
+        Self(ReactionProgressRateQuantityV1::new(value))
+    }
+
+    /// Raw coherent-SI scalar in mol m^-3 s^-1.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.0.value()
+    }
+
+    /// Dimensioned coherent-SI quantity.
+    #[must_use]
+    pub const fn quantity(self) -> ReactionProgressRateQuantityV1 {
+        self.0
+    }
+}
+
+/// One caller-declared stoichiometric mass-action law closed against exact
+/// standard-state equilibrium authority.
+///
+/// This type deliberately requires an explicit kinetic-order convention. It
+/// evaluates only one already-admitted reaction and does not infer that the
+/// reaction is elementary, validate a forward scale against source data, or
+/// own mechanism evolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredStoichiometricMassActionV1 {
+    reverse_rate_closure: ThermodynamicReverseRateClosureV1,
+    kinetic_order_convention: MassActionKineticOrderConventionV1,
+}
+
+impl DeclaredStoichiometricMassActionV1 {
+    /// Bind one thermodynamically closed progress-rate scale to an explicit
+    /// kinetic-order declaration.
+    #[must_use]
+    pub const fn new(
+        reverse_rate_closure: ThermodynamicReverseRateClosureV1,
+        kinetic_order_convention: MassActionKineticOrderConventionV1,
+    ) -> Self {
+        Self {
+            reverse_rate_closure,
+            kinetic_order_convention,
+        }
+    }
+
+    /// Bound thermodynamic reverse-rate closure.
+    #[must_use]
+    pub const fn reverse_rate_closure(&self) -> &ThermodynamicReverseRateClosureV1 {
+        &self.reverse_rate_closure
+    }
+
+    /// Explicit source of the kinetic exponents.
+    #[must_use]
+    pub const fn kinetic_order_convention(&self) -> MassActionKineticOrderConventionV1 {
+        self.kinetic_order_convention
+    }
+
+    /// Evaluate forward, reverse, and net progress for one activity state.
+    ///
+    /// Activities are canonicalized by `SpeciesId` and must cover all and only
+    /// the selected reaction's active terms. Version 1 evaluates directional
+    /// products in log space using the exact coefficient magnitudes, retains
+    /// finite log products across direct range loss, and publishes a signed
+    /// net rate only when both directional rates are directly representable.
+    ///
+    /// # Errors
+    /// Refuses activity count/identity drift, bounded receipt allocation,
+    /// nested thermodynamic closure failure, or an impossible non-finite
+    /// fixed-order intermediate. Expected exponential and multiplication
+    /// range loss is a successful explicit status.
+    pub fn evaluate(
+        &self,
+        temperature: Temperature,
+        mut activities: Vec<IdealGasSpeciesActivityV1>,
+    ) -> Result<DeclaredStoichiometricMassActionEvaluationV1, StoichiometricMassActionErrorV1> {
+        if activities.len() > MAX_REACTION_SPECIES_V1 {
+            return Err(StoichiometricMassActionErrorV1::TooManyActivities {
+                offered: activities.len(),
+                limit: MAX_REACTION_SPECIES_V1,
+            });
+        }
+        let terms = self.reverse_rate_closure.equilibrium().terms();
+        if activities.len() != terms.len() {
+            return Err(StoichiometricMassActionErrorV1::ActivityCountMismatch {
+                expected: terms.len(),
+                found: activities.len(),
+            });
+        }
+
+        activities.sort_unstable_by(|left, right| left.species().cmp(right.species()));
+        for pair in activities.windows(2) {
+            let [first, second] = pair else {
+                continue;
+            };
+            if first.species() == second.species() {
+                return Err(StoichiometricMassActionErrorV1::DuplicateActivitySpecies {
+                    species: first.species().clone(),
+                });
+            }
+        }
+        for (term, activity) in terms.iter().zip(&activities) {
+            match term.species().cmp(activity.species()) {
+                core::cmp::Ordering::Less => {
+                    return Err(StoichiometricMassActionErrorV1::MissingSpeciesActivity {
+                        species: term.species().clone(),
+                    });
+                }
+                core::cmp::Ordering::Greater => {
+                    return Err(StoichiometricMassActionErrorV1::UnexpectedSpeciesActivity {
+                        species: activity.species().clone(),
+                    });
+                }
+                core::cmp::Ordering::Equal => {}
+            }
+        }
+
+        let mut term_receipts = Vec::new();
+        term_receipts.try_reserve_exact(terms.len()).map_err(|_| {
+            StoichiometricMassActionErrorV1::AllocationRefused {
+                stage: MassActionAllocationStageV1::TermReceipts,
+                requested: terms.len(),
+            }
+        })?;
+        let mut log_forward_activity_product = 0.0f64;
+        let mut log_reverse_activity_product = 0.0f64;
+        for (term, activity) in terms.iter().zip(&activities) {
+            let log_activity = fs_math::det::ln(activity.value());
+            if !log_activity.is_finite() {
+                return Err(
+                    StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                        species: Some(activity.species().clone()),
+                        direction: None,
+                        value: MassActionArithmeticValueV1::LogActivity,
+                        bits: log_activity.to_bits(),
+                    },
+                );
+            }
+            let exponent = term.coefficient().unsigned_abs() as f64;
+            let contribution = exponent * log_activity;
+            let direction = if term.coefficient() < 0 {
+                MassActionDirectionV1::Forward
+            } else {
+                MassActionDirectionV1::Reverse
+            };
+            if !contribution.is_finite() {
+                return Err(
+                    StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                        species: Some(activity.species().clone()),
+                        direction: Some(direction),
+                        value: MassActionArithmeticValueV1::LogActivityContribution,
+                        bits: contribution.to_bits(),
+                    },
+                );
+            }
+            let directional_sum = if direction == MassActionDirectionV1::Forward {
+                &mut log_forward_activity_product
+            } else {
+                &mut log_reverse_activity_product
+            };
+            *directional_sum += contribution;
+            if !directional_sum.is_finite() {
+                return Err(
+                    StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                        species: Some(activity.species().clone()),
+                        direction: Some(direction),
+                        value: MassActionArithmeticValueV1::LogActivityProduct,
+                        bits: directional_sum.to_bits(),
+                    },
+                );
+            }
+            term_receipts.push(StoichiometricMassActionTermReceiptV1 {
+                species: activity.species().clone(),
+                coefficient: term.coefficient(),
+                activity_bits: activity.value().to_bits(),
+                log_activity_bits: log_activity.to_bits(),
+                direction,
+                log_contribution_bits: contribution.to_bits(),
+            });
+        }
+
+        let reverse_rate = self
+            .reverse_rate_closure
+            .evaluate(temperature)
+            .map_err(|source| StoichiometricMassActionErrorV1::ReverseRateClosure { source })?;
+        let (forward_status, forward_activity_product, forward_progress_rate) =
+            evaluate_mass_action_direction(
+                log_forward_activity_product,
+                Some(reverse_rate.forward_progress_rate_scale()),
+                MassActionDirectionV1::Forward,
+            )?;
+        let (reverse_status, reverse_activity_product, reverse_progress_rate) =
+            evaluate_mass_action_direction(
+                log_reverse_activity_product,
+                reverse_rate.reverse_progress_rate_scale(),
+                MassActionDirectionV1::Reverse,
+            )?;
+        let net_progress_rate = match (forward_progress_rate, reverse_progress_rate) {
+            (Some(forward), Some(reverse)) => {
+                let value = forward.value() - reverse.value();
+                if !value.is_finite() {
+                    return Err(
+                        StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                            species: None,
+                            direction: None,
+                            value: MassActionArithmeticValueV1::NetProgressRate,
+                            bits: value.to_bits(),
+                        },
+                    );
+                }
+                Some(NetReactionProgressRateV1::new(value))
+            }
+            _ => None,
+        };
+        let receipt = DeclaredStoichiometricMassActionReceiptV1 {
+            evaluator_version: STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1,
+            fs_math_version: fs_math::VERSION,
+            fs_qty_version: fs_qty::VERSION,
+            kinetic_order_convention: self.kinetic_order_convention,
+            reverse_rate_receipt: reverse_rate.receipt().clone(),
+            term_receipts,
+            log_forward_activity_product_bits: log_forward_activity_product.to_bits(),
+            log_reverse_activity_product_bits: log_reverse_activity_product.to_bits(),
+            forward_status,
+            reverse_status,
+            forward_activity_product_bits: forward_activity_product
+                .map(|value| value.value().to_bits()),
+            reverse_activity_product_bits: reverse_activity_product
+                .map(|value| value.value().to_bits()),
+            forward_progress_rate_bits: forward_progress_rate.map(|value| value.value().to_bits()),
+            reverse_progress_rate_bits: reverse_progress_rate.map(|value| value.value().to_bits()),
+            net_progress_rate_bits: net_progress_rate.map(|value| value.value().to_bits()),
+        };
+        Ok(DeclaredStoichiometricMassActionEvaluationV1 {
+            reverse_rate,
+            log_forward_activity_product: LogMassActionActivityProductV1::new(
+                log_forward_activity_product,
+            ),
+            log_reverse_activity_product: LogMassActionActivityProductV1::new(
+                log_reverse_activity_product,
+            ),
+            forward_activity_product,
+            reverse_activity_product,
+            forward_progress_rate,
+            reverse_progress_rate,
+            net_progress_rate,
+            forward_status,
+            reverse_status,
+            receipt,
+        })
+    }
+}
+
+fn evaluate_mass_action_direction(
+    log_activity_product: f64,
+    progress_rate_scale: Option<ReactionProgressRateScaleV1>,
+    direction: MassActionDirectionV1,
+) -> Result<
+    (
+        MassActionDirectionalRateStatusV1,
+        Option<MassActionActivityProductV1>,
+        Option<DirectionalReactionProgressRateV1>,
+    ),
+    StoichiometricMassActionErrorV1,
+> {
+    let raw_product = fs_math::det::exp(log_activity_product);
+    if raw_product.is_infinite() {
+        return Ok((
+            MassActionDirectionalRateStatusV1::LogOnlyActivityProductOverflow,
+            None,
+            None,
+        ));
+    }
+    if raw_product == 0.0 {
+        return Ok((
+            MassActionDirectionalRateStatusV1::LogOnlyActivityProductUnderflow,
+            None,
+            None,
+        ));
+    }
+    if !raw_product.is_finite() || raw_product < 0.0 {
+        return Err(
+            StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                species: None,
+                direction: Some(direction),
+                value: MassActionArithmeticValueV1::ActivityProduct,
+                bits: raw_product.to_bits(),
+            },
+        );
+    }
+    let product = MassActionActivityProductV1::new(raw_product);
+    let Some(scale) = progress_rate_scale else {
+        return Ok((
+            MassActionDirectionalRateStatusV1::ProgressRateScaleUnavailable,
+            Some(product),
+            None,
+        ));
+    };
+    let raw_rate = scale.value() * raw_product;
+    if raw_rate.is_infinite() {
+        return Ok((
+            MassActionDirectionalRateStatusV1::ProgressRateOverflow,
+            Some(product),
+            None,
+        ));
+    }
+    if raw_rate == 0.0 {
+        return Ok((
+            MassActionDirectionalRateStatusV1::ProgressRateUnderflow,
+            Some(product),
+            None,
+        ));
+    }
+    if !raw_rate.is_finite() || raw_rate < 0.0 {
+        return Err(
+            StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                species: None,
+                direction: Some(direction),
+                value: MassActionArithmeticValueV1::DirectionalProgressRate,
+                bits: raw_rate.to_bits(),
+            },
+        );
+    }
+    Ok((
+        MassActionDirectionalRateStatusV1::FinitePositive,
+        Some(product),
+        Some(DirectionalReactionProgressRateV1::new(raw_rate)),
+    ))
+}
+
+/// Canonical exact-field receipt for one active mass-action term.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoichiometricMassActionTermReceiptV1 {
+    species: SpeciesId,
+    coefficient: i128,
+    activity_bits: u64,
+    log_activity_bits: u64,
+    direction: MassActionDirectionV1,
+    log_contribution_bits: u64,
+}
+
+impl StoichiometricMassActionTermReceiptV1 {
+    /// Canonical active species.
+    #[must_use]
+    pub const fn species(&self) -> &SpeciesId {
+        &self.species
+    }
+
+    /// Exact signed stoichiometric coefficient.
+    #[must_use]
+    pub const fn coefficient(&self) -> i128 {
+        self.coefficient
+    }
+
+    /// Exact positive dimensionless activity bits.
+    #[must_use]
+    pub const fn activity_bits(&self) -> u64 {
+        self.activity_bits
+    }
+
+    /// Exact deterministic log-activity bits.
+    #[must_use]
+    pub const fn log_activity_bits(&self) -> u64 {
+        self.log_activity_bits
+    }
+
+    /// Direction selected by the coefficient sign.
+    #[must_use]
+    pub const fn direction(&self) -> MassActionDirectionV1 {
+        self.direction
+    }
+
+    /// Exact exponent-times-log contribution bits.
+    #[must_use]
+    pub const fn log_contribution_bits(&self) -> u64 {
+        self.log_contribution_bits
+    }
+}
+
+/// Complete replay receipt for one declared stoichiometric mass-action
+/// evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredStoichiometricMassActionReceiptV1 {
+    evaluator_version: u32,
+    fs_math_version: &'static str,
+    fs_qty_version: &'static str,
+    kinetic_order_convention: MassActionKineticOrderConventionV1,
+    reverse_rate_receipt: ThermodynamicReverseRateReceiptV1,
+    term_receipts: Vec<StoichiometricMassActionTermReceiptV1>,
+    log_forward_activity_product_bits: u64,
+    log_reverse_activity_product_bits: u64,
+    forward_status: MassActionDirectionalRateStatusV1,
+    reverse_status: MassActionDirectionalRateStatusV1,
+    forward_activity_product_bits: Option<u64>,
+    reverse_activity_product_bits: Option<u64>,
+    forward_progress_rate_bits: Option<u64>,
+    reverse_progress_rate_bits: Option<u64>,
+    net_progress_rate_bits: Option<u64>,
+}
+
+impl DeclaredStoichiometricMassActionReceiptV1 {
+    /// Mass-action operation-tree version.
+    #[must_use]
+    pub const fn evaluator_version(&self) -> u32 {
+        self.evaluator_version
+    }
+
+    /// Deterministic elementary-math crate version.
+    #[must_use]
+    pub const fn fs_math_version(&self) -> &'static str {
+        self.fs_math_version
+    }
+
+    /// Quantity-system crate version.
+    #[must_use]
+    pub const fn fs_qty_version(&self) -> &'static str {
+        self.fs_qty_version
+    }
+
+    /// Explicit kinetic-order declaration.
+    #[must_use]
+    pub const fn kinetic_order_convention(&self) -> MassActionKineticOrderConventionV1 {
+        self.kinetic_order_convention
+    }
+
+    /// Complete nested thermodynamic reverse-rate receipt.
+    #[must_use]
+    pub const fn reverse_rate_receipt(&self) -> &ThermodynamicReverseRateReceiptV1 {
+        &self.reverse_rate_receipt
+    }
+
+    /// Canonical per-species activity and contribution receipts.
+    #[must_use]
+    pub fn terms(&self) -> &[StoichiometricMassActionTermReceiptV1] {
+        &self.term_receipts
+    }
+
+    /// Exact finite forward log-product bits.
+    #[must_use]
+    pub const fn log_forward_activity_product_bits(&self) -> u64 {
+        self.log_forward_activity_product_bits
+    }
+
+    /// Exact finite reverse log-product bits.
+    #[must_use]
+    pub const fn log_reverse_activity_product_bits(&self) -> u64 {
+        self.log_reverse_activity_product_bits
+    }
+
+    /// Forward direct representation status.
+    #[must_use]
+    pub const fn forward_status(&self) -> MassActionDirectionalRateStatusV1 {
+        self.forward_status
+    }
+
+    /// Reverse direct representation status.
+    #[must_use]
+    pub const fn reverse_status(&self) -> MassActionDirectionalRateStatusV1 {
+        self.reverse_status
+    }
+
+    /// Direct forward activity-product bits, when representable.
+    #[must_use]
+    pub const fn forward_activity_product_bits(&self) -> Option<u64> {
+        self.forward_activity_product_bits
+    }
+
+    /// Direct reverse activity-product bits, when representable.
+    #[must_use]
+    pub const fn reverse_activity_product_bits(&self) -> Option<u64> {
+        self.reverse_activity_product_bits
+    }
+
+    /// Direct forward progress-rate bits, when representable.
+    #[must_use]
+    pub const fn forward_progress_rate_bits(&self) -> Option<u64> {
+        self.forward_progress_rate_bits
+    }
+
+    /// Direct reverse progress-rate bits, when representable.
+    #[must_use]
+    pub const fn reverse_progress_rate_bits(&self) -> Option<u64> {
+        self.reverse_progress_rate_bits
+    }
+
+    /// Signed net progress-rate bits when both directions are representable.
+    #[must_use]
+    pub const fn net_progress_rate_bits(&self) -> Option<u64> {
+        self.net_progress_rate_bits
+    }
+}
+
+/// Successful evaluation of one declared stoichiometric mass-action law.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredStoichiometricMassActionEvaluationV1 {
+    reverse_rate: ThermodynamicReverseRateEvaluationV1,
+    log_forward_activity_product: LogMassActionActivityProductV1,
+    log_reverse_activity_product: LogMassActionActivityProductV1,
+    forward_activity_product: Option<MassActionActivityProductV1>,
+    reverse_activity_product: Option<MassActionActivityProductV1>,
+    forward_progress_rate: Option<DirectionalReactionProgressRateV1>,
+    reverse_progress_rate: Option<DirectionalReactionProgressRateV1>,
+    net_progress_rate: Option<NetReactionProgressRateV1>,
+    forward_status: MassActionDirectionalRateStatusV1,
+    reverse_status: MassActionDirectionalRateStatusV1,
+    receipt: DeclaredStoichiometricMassActionReceiptV1,
+}
+
+impl DeclaredStoichiometricMassActionEvaluationV1 {
+    /// Nested equilibrium and reverse-scale evaluation.
+    #[must_use]
+    pub const fn reverse_rate(&self) -> &ThermodynamicReverseRateEvaluationV1 {
+        &self.reverse_rate
+    }
+
+    /// Always-retained finite forward log activity product.
+    #[must_use]
+    pub const fn log_forward_activity_product(&self) -> LogMassActionActivityProductV1 {
+        self.log_forward_activity_product
+    }
+
+    /// Always-retained finite reverse log activity product.
+    #[must_use]
+    pub const fn log_reverse_activity_product(&self) -> LogMassActionActivityProductV1 {
+        self.log_reverse_activity_product
+    }
+
+    /// Direct positive finite forward activity product, when representable.
+    #[must_use]
+    pub const fn forward_activity_product(&self) -> Option<MassActionActivityProductV1> {
+        self.forward_activity_product
+    }
+
+    /// Direct positive finite reverse activity product, when representable.
+    #[must_use]
+    pub const fn reverse_activity_product(&self) -> Option<MassActionActivityProductV1> {
+        self.reverse_activity_product
+    }
+
+    /// Direct positive finite forward progress rate, when representable.
+    #[must_use]
+    pub const fn forward_progress_rate(&self) -> Option<DirectionalReactionProgressRateV1> {
+        self.forward_progress_rate
+    }
+
+    /// Direct positive finite reverse progress rate, when representable.
+    #[must_use]
+    pub const fn reverse_progress_rate(&self) -> Option<DirectionalReactionProgressRateV1> {
+        self.reverse_progress_rate
+    }
+
+    /// Signed net progress rate when both directions are directly
+    /// representable.
+    #[must_use]
+    pub const fn net_progress_rate(&self) -> Option<NetReactionProgressRateV1> {
+        self.net_progress_rate
+    }
+
+    /// Forward direct representation status.
+    #[must_use]
+    pub const fn forward_status(&self) -> MassActionDirectionalRateStatusV1 {
+        self.forward_status
+    }
+
+    /// Reverse direct representation status.
+    #[must_use]
+    pub const fn reverse_status(&self) -> MassActionDirectionalRateStatusV1 {
+        self.reverse_status
+    }
+
+    /// Complete nested-authority, declaration, activity, arithmetic, and
+    /// result receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &DeclaredStoichiometricMassActionReceiptV1 {
+        &self.receipt
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1533,6 +2419,21 @@ mod tests {
     fn progress_rate_scale(value: f64) -> ReactionProgressRateScaleV1 {
         ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(value))
             .expect("positive finite progress-rate scale")
+    }
+
+    fn activity(species_id: &str, value: f64) -> IdealGasSpeciesActivityV1 {
+        IdealGasSpeciesActivityV1::new(species(species_id), Dimensionless::new(value))
+            .expect("positive finite activity")
+    }
+
+    fn water_mass_action(scale: f64) -> DeclaredStoichiometricMassActionV1 {
+        DeclaredStoichiometricMassActionV1::new(
+            ThermodynamicReverseRateClosureV1::new(
+                water_equilibrium(false),
+                progress_rate_scale(scale),
+            ),
+            MassActionKineticOrderConventionV1::CallerDeclaredStoichiometricCoefficients,
+        )
     }
 
     #[test]
@@ -2033,5 +2934,321 @@ mod tests {
             error,
             ReverseRateClosureErrorV1::Equilibrium { .. }
         ));
+    }
+
+    #[test]
+    fn g0_declared_mass_action_evaluates_canonical_forward_reverse_and_net_progress() {
+        let model = water_mass_action(7.0);
+        let evaluation = model
+            .evaluate(
+                Temperature::new(1_200.0),
+                vec![
+                    activity("O2", 3.0),
+                    activity("H2", 2.0),
+                    activity("H2O", 5.0),
+                ],
+            )
+            .expect("finite declared mass-action evaluation");
+
+        let expected_forward_log = 2.0 * fs_math::det::ln(2.0) + fs_math::det::ln(3.0);
+        let expected_reverse_log = 2.0 * fs_math::det::ln(5.0);
+        assert_eq!(
+            evaluation.log_forward_activity_product().value().to_bits(),
+            expected_forward_log.to_bits()
+        );
+        assert_eq!(
+            evaluation.log_reverse_activity_product().value().to_bits(),
+            expected_reverse_log.to_bits()
+        );
+        assert_eq!(
+            evaluation.forward_status(),
+            MassActionDirectionalRateStatusV1::FinitePositive
+        );
+        assert_eq!(
+            evaluation.reverse_status(),
+            MassActionDirectionalRateStatusV1::FinitePositive
+        );
+
+        let forward_product = evaluation
+            .forward_activity_product()
+            .expect("direct forward activity product");
+        let reverse_product = evaluation
+            .reverse_activity_product()
+            .expect("direct reverse activity product");
+        assert_eq!(
+            forward_product.value().to_bits(),
+            fs_math::det::exp(expected_forward_log).to_bits()
+        );
+        assert_eq!(
+            reverse_product.value().to_bits(),
+            fs_math::det::exp(expected_reverse_log).to_bits()
+        );
+
+        let forward_rate = evaluation
+            .forward_progress_rate()
+            .expect("direct forward rate");
+        let reverse_rate = evaluation
+            .reverse_progress_rate()
+            .expect("direct reverse rate");
+        let reverse_scale = evaluation
+            .reverse_rate()
+            .reverse_progress_rate_scale()
+            .expect("direct reverse scale");
+        assert_eq!(
+            forward_rate.value().to_bits(),
+            (7.0 * forward_product.value()).to_bits()
+        );
+        assert_eq!(
+            reverse_rate.value().to_bits(),
+            (reverse_scale.value() * reverse_product.value()).to_bits()
+        );
+        assert_eq!(
+            evaluation
+                .net_progress_rate()
+                .expect("direct net rate")
+                .value()
+                .to_bits(),
+            (forward_rate.value() - reverse_rate.value()).to_bits()
+        );
+
+        assert_eq!(
+            evaluation.receipt().kinetic_order_convention(),
+            MassActionKineticOrderConventionV1::CallerDeclaredStoichiometricCoefficients
+        );
+        assert_eq!(
+            evaluation.receipt().reverse_rate_receipt(),
+            evaluation.reverse_rate().receipt()
+        );
+        assert_eq!(
+            evaluation
+                .receipt()
+                .terms()
+                .iter()
+                .map(|term| (
+                    term.species().as_str(),
+                    term.coefficient(),
+                    term.direction()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("H2", -2, MassActionDirectionV1::Forward),
+                ("H2O", 2, MassActionDirectionV1::Reverse),
+                ("O2", -1, MassActionDirectionV1::Forward),
+            ]
+        );
+    }
+
+    #[test]
+    fn g5_declared_mass_action_permutation_replays_exactly() {
+        let model = water_mass_action(2.5);
+        let temperature = Temperature::new(900.0);
+        let first = model
+            .evaluate(
+                temperature,
+                vec![
+                    activity("H2", 0.75),
+                    activity("O2", 1.25),
+                    activity("H2O", 0.5),
+                ],
+            )
+            .expect("first mass-action evaluation");
+        let replay = model
+            .evaluate(
+                temperature,
+                vec![
+                    activity("H2O", 0.5),
+                    activity("H2", 0.75),
+                    activity("O2", 1.25),
+                ],
+            )
+            .expect("permuted mass-action evaluation");
+        assert_eq!(first, replay);
+        assert_eq!(first.receipt(), replay.receipt());
+    }
+
+    #[test]
+    fn g3_declared_mass_action_refuses_activity_and_coverage_drift() {
+        for value in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert!(matches!(
+                IdealGasSpeciesActivityV1::new(species("H2"), Dimensionless::new(value)),
+                Err(StoichiometricMassActionErrorV1::InvalidActivity { bits, .. })
+                    if bits == value.to_bits()
+            ));
+        }
+
+        let model = water_mass_action(1.0);
+        assert!(matches!(
+            model.evaluate(
+                Temperature::new(1_000.0),
+                vec![activity("H2", 1.0), activity("O2", 1.0)],
+            ),
+            Err(StoichiometricMassActionErrorV1::ActivityCountMismatch {
+                expected: 3,
+                found: 2,
+            })
+        ));
+        assert!(matches!(
+            model.evaluate(
+                Temperature::new(1_000.0),
+                vec![
+                    activity("H2", 1.0),
+                    activity("H2", 2.0),
+                    activity("H2O", 1.0),
+                ],
+            ),
+            Err(StoichiometricMassActionErrorV1::DuplicateActivitySpecies { ref species })
+                if species.as_str() == "H2"
+        ));
+        assert!(matches!(
+            model.evaluate(
+                Temperature::new(1_000.0),
+                vec![
+                    activity("A", 1.0),
+                    activity("H2O", 1.0),
+                    activity("O2", 1.0),
+                ],
+            ),
+            Err(StoichiometricMassActionErrorV1::UnexpectedSpeciesActivity { ref species })
+                if species.as_str() == "A"
+        ));
+        assert!(matches!(
+            model.evaluate(
+                Temperature::new(1_000.0),
+                vec![
+                    activity("H2", 1.0),
+                    activity("H2O", 1.0),
+                    activity("X", 1.0),
+                ],
+            ),
+            Err(StoichiometricMassActionErrorV1::MissingSpeciesActivity { ref species })
+                if species.as_str() == "O2"
+        ));
+        assert!(matches!(
+            model.evaluate(
+                Temperature::new(0.0),
+                vec![
+                    activity("H2", 1.0),
+                    activity("H2O", 1.0),
+                    activity("O2", 1.0),
+                ],
+            ),
+            Err(StoichiometricMassActionErrorV1::ReverseRateClosure {
+                source: ReverseRateClosureErrorV1::Equilibrium { .. },
+            })
+        ));
+    }
+
+    fn isomer_mass_action(coefficient: i128, scale: f64) -> DeclaredStoichiometricMassActionV1 {
+        let (stoichiometric, certificate, reaction_id) = isomer_stoichiometry(coefficient);
+        let equilibrium = IdealGasReactionEquilibriumV1::new(
+            stoichiometric,
+            certificate,
+            reaction_id,
+            vec![
+                model("A", 0.01, 1.0, 0.0, 100_000.0),
+                model("B", 0.01, 1.0, 0.0, 100_000.0),
+            ],
+        )
+        .expect("thermoneutral isomer equilibrium");
+        DeclaredStoichiometricMassActionV1::new(
+            ThermodynamicReverseRateClosureV1::new(equilibrium, progress_rate_scale(scale)),
+            MassActionKineticOrderConventionV1::CallerDeclaredStoichiometricCoefficients,
+        )
+    }
+
+    #[test]
+    fn g3_declared_mass_action_retains_log_products_across_direct_range_loss() {
+        let exact = 1i128 << 53;
+        let overflow = isomer_mass_action(exact, 1.0)
+            .evaluate(
+                Temperature::new(500.0),
+                vec![activity("A", 2.0), activity("B", 1.0)],
+            )
+            .expect("log-only forward product overflow");
+        assert_eq!(
+            overflow.forward_status(),
+            MassActionDirectionalRateStatusV1::LogOnlyActivityProductOverflow
+        );
+        assert!(overflow.log_forward_activity_product().value().is_finite());
+        assert!(overflow.forward_activity_product().is_none());
+        assert!(overflow.forward_progress_rate().is_none());
+        assert!(overflow.net_progress_rate().is_none());
+        assert_eq!(
+            overflow.reverse_status(),
+            MassActionDirectionalRateStatusV1::FinitePositive
+        );
+
+        let underflow = isomer_mass_action(exact, 1.0)
+            .evaluate(
+                Temperature::new(500.0),
+                vec![activity("A", f64::MIN_POSITIVE), activity("B", 1.0)],
+            )
+            .expect("log-only forward product underflow");
+        assert_eq!(
+            underflow.forward_status(),
+            MassActionDirectionalRateStatusV1::LogOnlyActivityProductUnderflow
+        );
+        assert!(underflow.log_forward_activity_product().value().is_finite());
+        assert!(underflow.forward_activity_product().is_none());
+
+        let rate_overflow = isomer_mass_action(1, f64::MAX)
+            .evaluate(
+                Temperature::new(500.0),
+                vec![activity("A", 2.0), activity("B", 1.0)],
+            )
+            .expect("direct forward-rate overflow status");
+        assert_eq!(
+            rate_overflow.forward_status(),
+            MassActionDirectionalRateStatusV1::ProgressRateOverflow
+        );
+        assert!(rate_overflow.forward_activity_product().is_some());
+        assert!(rate_overflow.forward_progress_rate().is_none());
+
+        let rate_underflow = isomer_mass_action(1, f64::from_bits(1))
+            .evaluate(
+                Temperature::new(500.0),
+                vec![activity("A", 0.5), activity("B", 1.0)],
+            )
+            .expect("direct forward-rate underflow status");
+        assert_eq!(
+            rate_underflow.forward_status(),
+            MassActionDirectionalRateStatusV1::ProgressRateUnderflow
+        );
+        assert!(rate_underflow.forward_activity_product().is_some());
+        assert!(rate_underflow.forward_progress_rate().is_none());
+
+        let (stoichiometric, certificate, reaction_id) = isomer_stoichiometry(exact);
+        let reverse_scale_unavailable = DeclaredStoichiometricMassActionV1::new(
+            ThermodynamicReverseRateClosureV1::new(
+                IdealGasReactionEquilibriumV1::new(
+                    stoichiometric,
+                    certificate,
+                    reaction_id,
+                    vec![
+                        model("A", 0.01, 1.0, 0.0, 100_000.0),
+                        model("B", 0.01, 2.0, 0.0, 100_000.0),
+                    ],
+                )
+                .expect("large-log equilibrium"),
+                progress_rate_scale(1.0),
+            ),
+            MassActionKineticOrderConventionV1::CallerDeclaredStoichiometricCoefficients,
+        )
+        .evaluate(
+            Temperature::new(500.0),
+            vec![activity("A", 1.0), activity("B", 1.0)],
+        )
+        .expect("direct activities with log-only reverse scale");
+        assert_eq!(
+            reverse_scale_unavailable.reverse_status(),
+            MassActionDirectionalRateStatusV1::ProgressRateScaleUnavailable
+        );
+        assert!(
+            reverse_scale_unavailable
+                .reverse_activity_product()
+                .is_some()
+        );
+        assert!(reverse_scale_unavailable.reverse_progress_rate().is_none());
+        assert!(reverse_scale_unavailable.net_progress_rate().is_none());
     }
 }

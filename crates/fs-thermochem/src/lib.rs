@@ -8,9 +8,11 @@
 //! frozen-composition ideal-gas mixture evaluator, the positive-state
 //! mechanical ideal-gas `p`-`rho`-`T` closure, and a bounded Wilke dilute-gas
 //! viscosity mixing closure, plus bounded ideal-gas standard-state reaction
-//! equilibrium. Derived identities remain scoped to explicit ideal-gas
-//! conventions. This crate owns no transport solver, evolving state,
-//! composition-equilibrium solve, kinetics integrator, or L3 protocol.
+//! equilibrium and a caller-declared single-reaction stoichiometric
+//! mass-action closure. Derived identities remain scoped to explicit
+//! ideal-gas conventions. This crate owns no transport solver, evolving state,
+//! composition-equilibrium solve, mechanism evolution, kinetics integrator,
+//! or L3 protocol.
 
 pub mod eos;
 pub mod equilibrium;

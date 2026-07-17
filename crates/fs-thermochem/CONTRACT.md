@@ -4,7 +4,8 @@
 > provenance-bound NASA-9 ideal-gas standard-state evaluation and bounded
 > frozen-composition ideal-gas mixture evaluation, plus a positive-state
 > mechanical ideal-gas EOS rung and a bounded Wilke dilute-gas viscosity
-> mixing closure, plus bounded standard-state ideal-gas reaction equilibrium.
+> mixing closure, plus bounded standard-state ideal-gas reaction equilibrium
+> and a caller-declared single-reaction stoichiometric mass-action closure.
 > Central batch compilation and test execution for the newest slice are
 > pending; the parent thermochemistry bead remains in progress.
 
@@ -26,7 +27,10 @@ fourth combines up to 128 positive caller-supplied pure-species viscosities by
 Wilke's dilute-gas rule at one explicitly declared common temperature. The
 fifth combines one exactly conserved `fs-qty` stoichiometric column with all
 and only its active NASA-9 models to evaluate standard reaction Gibbs energy,
-`ln(K_p)`, and `K_p` when directly representable.
+`ln(K_p)`, and `K_p` when directly representable. The sixth evaluates
+forward, reverse, and optional net progress for that one reaction only after
+the caller explicitly declares stoichiometric coefficients as kinetic orders
+and supplies positive dimensionless ideal-gas activities.
 
 Direct runtime dependencies are L1 or lower: `fs-qty`, `fs-matdb`, and
 `fs-math`. The direct `fs-evidence` edge is development-only so conformance
@@ -129,6 +133,16 @@ behavior.
   explicit ratio/scale range status, and a receipt containing the complete
   nested equilibrium receipt. It does not choose kinetic orders or evaluate a
   net reaction rate.
+- `DeclaredStoichiometricMassActionV1` binds that reverse-rate closure to the
+  explicit
+  `MassActionKineticOrderConventionV1::CallerDeclaredStoichiometricCoefficients`
+  choice. Its input activities are positive finite dimensionless `p_i / p0`
+  ratios covering all and only the active reaction species. Its evaluation
+  retains canonical forward/reverse log activity products, optional direct
+  activity products and directional progress rates, an optional signed net
+  progress rate, per-direction range statuses, and the complete nested
+  thermodynamic receipt. The type records a caller's law declaration; it does
+  not infer or certify elementary-reaction kinetics.
 
 ## NASA-9 operation tree
 
@@ -287,9 +301,33 @@ k_reverse = k_forward * ratio when positive finite
 The finite log ratio remains authoritative when either exponentiation or the
 final scale multiplication leaves binary64 range. No zero or infinite direct
 ratio/rate is published. This is only the thermodynamic coefficient relation
-for a mass-action formulation using the retained stoichiometric exponents and
-activities; it is not a rate-expression, activity, or kinetics-integrator
-implementation.
+for a mass-action formulation using the retained standard-state activities;
+it does not itself select kinetic orders.
+
+## Declared stoichiometric mass-action operation tree
+
+After the caller explicitly selects stoichiometric coefficients as kinetic
+orders and supplies all positive dimensionless activities `a_i = p_i / p0`,
+version 1 evaluates one reaction in canonical species order:
+
+```text
+ell_i       = deterministic_ln(a_i)
+ell_f       = fixed_order_sum_(nu_i < 0)((-nu_i) * ell_i)
+ell_r       = fixed_order_sum_(nu_i > 0)(nu_i * ell_i)
+A_forward   = deterministic_exp(ell_f) when positive finite
+A_reverse   = deterministic_exp(ell_r) when positive finite
+q_forward   = k_forward * A_forward when positive finite
+q_reverse   = k_reverse * A_reverse when positive finite
+q_net       = q_forward - q_reverse when both directions are direct
+```
+
+Finite `ell_f` and `ell_r` remain authoritative if a direct product or
+directional multiplication leaves binary64 range. Every missing direct value
+has a per-direction status; zero and infinity are never published as physical
+products or directional rates. `q_net` is absent unless both directional
+rates are representable. This bounded tree is a declared algebraic closure,
+not evidence that stoichiometric coefficients are physically valid kinetic
+orders for the named reaction.
 
 ## Invariants
 
@@ -362,6 +400,18 @@ implementation.
 - REVERSE RANGE LOSS IS EXPLICIT: the finite log ratio and nested equilibrium
   receipt survive ratio or final-scale overflow/underflow. A direct reverse
   scale appears only when both operations produce positive finite values.
+- MASS-ACTION ORDERS ARE EXPLICIT: constructing the mass-action closure binds
+  the caller-declared stoichiometric-order convention in the model and every
+  receipt. Exact conservation bookkeeping is never treated as kinetic-law
+  evidence.
+- EXACT ACTIVITY COVERAGE: positive finite dimensionless activities cover all
+  and only the active reaction terms. Input order is irrelevant; duplicates,
+  omissions, and inactive species refuse before thermodynamic evaluation.
+- MASS-ACTION RANGE LOSS IS EXPLICIT: finite canonical forward and reverse
+  log products survive direct-product and rate multiplication range loss.
+  Per-direction statuses distinguish product overflow/underflow, unavailable
+  reverse scale, and final rate overflow/underflow. Net progress appears only
+  when both directional rates are direct and finite.
 
 ## Error model
 
@@ -401,6 +451,12 @@ exact nested equilibrium refusal, or an otherwise impossible NaN reverse
 scale. Positive finite ratio/final-scale overflow or underflow is a successful
 typed log-only status rather than an error or clamp.
 
+`StoichiometricMassActionErrorV1` names invalid activity values, count and
+canonical species-coverage drift, duplicate activity identities, bounded
+receipt allocation, the exact nested reverse-rate refusal, or an otherwise
+impossible non-finite fixed-order intermediate. Expected activity-product or
+directional-rate range loss is a successful typed status, not a clamp.
+
 ## Determinism class
 
 Version 1 is fixed-order deterministic for identical inputs under the same
@@ -436,6 +492,13 @@ deterministic exponential once, and performs one fixed multiplication. Replay
 is exact on one target; exact reaction reversal negates the log ratio and makes
 representable direct ratios reciprocal to the documented elementary-math
 tolerance.
+
+Declared mass action canonicalizes activities by `SpeciesId`, calls
+`fs_math::det::ln` once per active term, accumulates separate directional log
+products in fixed species order, and uses the fixed direct-product and scale
+multiplication tree above. Caller permutation therefore cannot change the
+evaluation or receipt; repeated same-target evaluation is expected to be
+bit-identical.
 
 Cross-ISA bit identity is not claimed until the central Gauntlet runs retain
 evidence for both reference ISA families. NASA/mixture receipts record their
@@ -483,6 +546,11 @@ reaction systems require explicit budgets and request-drain-finalize semantics.
 Reverse-rate closure adds one deterministic exponential and multiplication to
 that same bounded equilibrium evaluation. It introduces no mechanism loop,
 activity product, evolving state, callback, or additional cancellation tile.
+
+Declared mass action adds at most 128 deterministic logarithms, two bounded
+fixed-order reductions, two exponentials, and three scalar rate operations.
+It introduces no mechanism loop, evolving state, callback, or useful
+asynchronous cancellation tile.
 
 ## Unsafe boundary
 
@@ -564,6 +632,14 @@ Inline tests in `src/equilibrium.rs` add:
   authority;
 - G5 exact replay plus reaction-reversal log polarity and reciprocal direct
   ratios.
+- G0 canonical declared stoichiometric activity exponents, forward/reverse
+  products and typed directional/net progress, plus complete nested receipt
+  binding;
+- G3 invalid activities, count/duplicate/missing/inactive coverage drift,
+  nested thermodynamic refusal, log-only reverse-scale unavailability,
+  activity-product overflow/underflow, and final progress-rate
+  overflow/underflow with retained log authority;
+- G5 caller-permutation invariance and bit-identical evaluation/receipt replay.
 
 The newest tests are code-first and batch-verification pending. A sourced
 external NASA/Cantera numerical oracle battery, an independently tabulated
@@ -587,16 +663,17 @@ This slice does **not** claim:
   fugacity, departure functions, cubic/tabular real-gas or multiphase EOS
   behavior;
 - a physical phase-stability verdict from the positive ideal-gas model-domain
-  check, flash calculations, equilibrium-composition solves, reaction rates,
-  kinetics integration, thermal conductivity, diffusion coefficients, or
-  transport solves;
+  check, flash calculations, equilibrium-composition solves,
+  source-authenticated reaction rates, mechanism evolution or kinetics
+  integration, thermal conductivity, diffusion coefficients, or transport
+  solves;
 - chemical meaningfulness, reversibility, kinetic accessibility, detailed
   balance, or reverse-rate authority from exact bookkeeping and a computed
   standard-state `K_p` alone;
-- a validated kinetic order, elementary-reaction classification, activity
-  product, concentration-unit conversion, forward-law authenticity, net
-  progress rate, mechanism consistency, stiffness claim, or time integration
-  from the bounded reverse-progress-scale relation;
+- a validated kinetic order, elementary-reaction classification,
+  concentration-unit conversion, forward-law authenticity, mechanism
+  consistency, stiffness claim, or time integration from the caller-declared
+  single-reaction mass-action result;
 - authenticity or same-state consistency of caller-supplied pure-species
   viscosities, viscosity-law validity outside their source domains, dense-gas
   corrections, or physical applicability/accuracy of the Wilke approximation;
