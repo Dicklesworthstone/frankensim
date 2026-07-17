@@ -308,13 +308,16 @@ documented release invocation. Each executed rung emits one failure-linted,
 wire-validated `Custom` event under session `fs-mesh/perf-lane` at the dynamic
 scope `mesh-perf/n-{n}/measurement`, so the 10⁴, 10⁵, 10⁶, and optional
 10⁷ rows cannot reuse a sequence-zero identity. A compound row retains the
-wall seconds, points/s, tet count, audit mode, actual build profile, escaped
-machine label, and its FNV-1a-64 label fingerprint. It records cloud input seed
-`0xBEAD5EED` separately from the Cx execution provenance (seed 41, kernel 77,
-tile 0, iteration 0). The wall-clock values are finite-safe and explicitly
-non-replayable, scoped only to that run and machine; `Custom` is intentional
-because `BenchmarkResult` cannot bind the compound audit and provenance
-receipt in one row. Without `FS_MESH_PERF_FULL=1`, the 10⁷ cloud, execution,
+wall seconds, points/s, tet count, audit mode, the exact `debug_assertions`
+mode, an escaped machine-configuration label, and its FNV-1a-64 label
+fingerprint. The label uses OS, architecture, a best-effort CPU model, and
+logical-CPU count; it identifies the recorded configuration and is not a
+unique physical-host identity. It records cloud input seed `0xBEAD5EED`
+separately from the Cx execution provenance (seed 41, kernel 77, tile 0,
+iteration 0). The wall-clock values are finite-safe and explicitly
+non-replayable, scoped only to that run and recorded configuration; `Custom`
+is intentional because `BenchmarkResult` cannot bind the compound audit and
+provenance receipt in one row. Without `FS_MESH_PERF_FULL=1`, the 10⁷ cloud, execution,
 timing, and audit do not run; a Warn event instead records normalized status
 `skipped`, the human instruction, null input/execution provenance, and the
 configured seed at the distinct `mesh-perf/n-10000000/skip` identity. Event

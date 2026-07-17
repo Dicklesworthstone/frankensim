@@ -1,6 +1,6 @@
 //! The fs-mesh PERF LANE (bead uee3, item 5): large-point-count
 //! Delaunay throughput, MEASURED and ledgered with a machine
-//! fingerprint per the perf program (no "fast" without a benchmark).
+//! configuration fingerprint per the perf program (no "fast" without a benchmark).
 //!
 //! Run explicitly, in release:
 //! `cargo test -p fs-mesh --release --test perf_lane -- --ignored --nocapture`
@@ -59,15 +59,46 @@ fn cloud(n: usize, seed: u64) -> Vec<Point3> {
         .collect()
 }
 
-fn machine_fingerprint() -> String {
-    let model = std::process::Command::new("sysctl")
-        .args(["-n", "hw.model"])
+fn command_value(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
         .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string());
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn linux_cpu_model() -> Option<String> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    cpuinfo.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        matches!(key.trim(), "model name" | "Hardware" | "Model")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn machine_configuration_label() -> String {
+    let model = if cfg!(target_os = "macos") {
+        command_value("sysctl", &["-n", "hw.model"])
+            .or_else(|| command_value("sysctl", &["-n", "machdep.cpu.brand_string"]))
+    } else if cfg!(target_os = "linux") {
+        linux_cpu_model().or_else(|| {
+            std::fs::read_to_string("/sys/firmware/devicetree/base/model")
+                .ok()
+                .map(|value| value.trim_matches(char::from(0)).trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    } else {
+        None
+    }
+    .unwrap_or_else(|| "unknown".to_string());
+    let logical_cpus = std::thread::available_parallelism().map_or(1, usize::from);
     format!(
-        "{}-{}-{model}",
+        "os={};arch={};cpu={model};logical_cpus={logical_cpus}",
         std::env::consts::OS,
         std::env::consts::ARCH
     )
@@ -132,12 +163,8 @@ fn run_rung(n: usize, full_insphere_audit: bool) -> (f64, usize) {
     let tets = tetra.tets().len();
     #[allow(clippy::cast_precision_loss)]
     let rate = n as f64 / secs;
-    let build = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let machine = machine_fingerprint();
+    let debug_assertions = cfg!(debug_assertions);
+    let machine = machine_configuration_label();
     let machine_id = fs_obs::fnv1a64(machine.as_bytes());
     emit_custom(
         &format!("mesh-perf/n-{n}/measurement"),
@@ -146,16 +173,19 @@ fn run_rung(n: usize, full_insphere_audit: bool) -> (f64, usize) {
         format!(
             "{{\"metric\":\"mesh-perf\",\"n\":{n},\"secs\":{},\
              \"points_per_s\":{},\"tets\":{tets},\
-             \"insphere_audit\":{full_insphere_audit},\"build\":{build_json},\
-             \"machine\":{machine_json},\"machine_fingerprint\":{machine_id},\
-             \"machine_fingerprint_domain\":\"fnv1a64(os-arch-hw.model-label)\",\
+             \"insphere_audit\":{full_insphere_audit},\
+             \"debug_assertions\":{debug_assertions},\
+             \"machine_configuration\":{machine_json},\
+             \"machine_configuration_fingerprint\":{machine_id},\
+             \"machine_configuration_fingerprint_domain\":\
+             \"fnv1a64(os,arch,cpu-model,logical-cpus)\",\
              \"input_seed\":{CLOUD_INPUT_SEED},\
              \"cx_execution_seed\":{CX_EXECUTION_SEED},\
              \"cx_kernel_id\":{CX_KERNEL_ID},\"cx_tile\":0,\"cx_iteration\":0,\
-             \"timing_replayable\":false,\"claim_scope\":\"this-run-this-machine\"}}",
+             \"timing_replayable\":false,\
+             \"claim_scope\":\"this-run-this-configuration\"}}",
             finite_json(secs, 3),
             finite_json(rate, 0),
-            build_json = json_string(build),
             machine_json = json_string(&machine),
         ),
     );
