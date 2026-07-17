@@ -110,6 +110,27 @@ reference and proves both the typed report and `assert_green` merge gate turn
 red with the seed, word, bit, computed block, and corrupted reference retained
 in the failure record.
 
+`tests/qmc_replay_casebook.rs` extends that structured boundary over the QMC
+surface named by the BEDROCK parent. Its exact Sobol case binds an eight-point
+Gray-code KAT, independent random-access/materialized replay, all returned bits
+for a finite five-dimensional 64-point frame, and exact per-dimension `m=6`
+stratification, with exact frame shapes refused before comparison. Its Owen case
+binds both logical seeds, the nested-prefix Philox
+kernel and stream-semantics domain, exact replay of both output frames, a
+domain-separated digest over both frames, distinct-seed separation, and exact
+four-dimensional `m=7` stratification, again with exact frame-shape refusal. Its
+CBC case binds the public lattice size and complete generator, exact error bits,
+all 257×5 public point bits against the modular construction, residue
+permutations, and a five-value Baker-transform KAT. Canonical input frames name
+the fs-rand version, stream semantics, dimensions, counts, seeds, and algorithm
+regimes, while output digests make passing rows comparable. A disclosed
+corruption seed independently rebuilds the same one-bit finite Sobol reference
+mutation twice, proves byte-identical red Casebook records, and proves
+`assert_green` refuses the actionable point/bit/frame diagnostic. These are
+finite G0/G5 replay fixtures, not claims over all dimensions, seeds, Owen trees,
+lattice sizes/weights, integrands, both-ISA execution, discrepancy bounds, or
+performance.
+
 Random123 KATs (3 vectors), avalanche battery, random-access≡sequential,
 16-tile×3-order shuffle invariance, adjacent-identity decorrelation,
 chi-square/moment gates (uniform/normal/exponential), Lemire bias +
