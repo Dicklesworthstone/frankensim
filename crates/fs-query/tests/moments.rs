@@ -34,15 +34,15 @@ use std::f64::consts::PI;
 const SUITE: &str = "fs-query/moments";
 const FIXED_INPUT_SEED: u64 = 0;
 const EXECUTION_SEED: u64 = 0x60E5;
-const MOMENTS_KERNEL_ID: u32 = 9;
-const CANCELLATION_KERNEL_ID: u32 = 10;
+const MOMENTS_KERNEL_ID: u64 = 9;
+const CANCELLATION_KERNEL_ID: u64 = 10;
 
 fn emit_verdict(
     emitter: &mut fs_obs::Emitter,
     case: &str,
     pass: bool,
     detail: &str,
-    execution_kernel: u32,
+    execution_kernel: u64,
 ) {
     let severity = if pass {
         fs_obs::Severity::Info
@@ -70,7 +70,7 @@ fn emit_verdict(
     assert!(pass, "case {case}: {detail}");
 }
 
-fn verdict(case: &str, pass: bool, detail: &str, execution_kernel: u32) {
+fn verdict(case: &str, pass: bool, detail: &str, execution_kernel: u64) {
     let mut emitter = fs_obs::Emitter::new(SUITE, case);
     emit_verdict(&mut emitter, case, pass, detail, execution_kernel);
 }
