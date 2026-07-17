@@ -36,18 +36,18 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// Exact typed event-content identity semantics. Version 2 replaces the
 /// legacy display-JSON hash, which collapsed distinct NaN payload bits.
-pub const EVENT_CONTENT_IDENTITY_VERSION: u32 = 2;
+pub const EVENT_CONTENT_IDENTITY_VERSION: u32 = 3;
 
 /// Domain-separated artifact kind framed into the typed event identity.
-pub const EVENT_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-obs.event-content.v2";
+pub const EVENT_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-obs.event-content.v3";
 
 /// Owner-local declaration consumed by `xtask check-identities`.
 pub const EVENT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-obs:event-content",
     "version_const=EVENT_CONTENT_IDENTITY_VERSION",
-    "version=2",
-    "domain=org.frankensim.fs-obs.event-content.v2",
+    "version=3",
+    "domain=org.frankensim.fs-obs.event-content.v3",
     "domain_const=EVENT_CONTENT_IDENTITY_DOMAIN",
     "encoder=Event::content_identity",
     "encoder_helpers=Event::content_identity_with_versions,Event::content_identity_with_schema,Severity::name,EventKind::kind_name",
@@ -58,12 +58,12 @@ pub const EVENT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoding=typed-binary",
     "sources=Event,EventIdentityReceipt",
     "source_fields=Event.session:semantic,Event.scope:semantic,Event.seq:semantic,Event.severity:semantic,Event.kind:semantic,Event.wall_ns:nonsemantic:wall-clock-envelope-only,EventIdentityReceipt.declared_identity_version:semantic,EventIdentityReceipt.canonical_bytes:semantic,EventIdentityReceipt.root:derived:validated-fnv-root-of-retained-canonical-bytes",
-    "source_bindings=Event.session>session,Event.scope>scope,Event.seq>seq,Event.severity>severity,Event.kind>kind+solver-residual-solver+solver-residual-iter+solver-residual-residual+tile-complete-tile+tile-complete-kernel+cancellation-reason+budget-delta-resource+budget-delta-spent+budget-delta-remaining+gradient-check-op+gradient-check-max-rel-err+gradient-check-pass+conformance-case-suite+conformance-case-case+conformance-case-pass+conformance-case-detail+conformance-case-seed+benchmark-result-kernel+benchmark-result-metric+benchmark-result-value+benchmark-result-machine+storm-assertion-name+storm-assertion-pass+storm-assertion-seed+custom-name+custom-json-exact-opaque-utf8,EventIdentityReceipt.declared_identity_version>retained-producer-version,EventIdentityReceipt.canonical_bytes>retained-canonical-bytes",
+    "source_bindings=Event.session>session,Event.scope>scope,Event.seq>seq,Event.severity>severity,Event.kind>kind+solver-residual-solver+solver-residual-iter+solver-residual-residual+tile-complete-tile+tile-complete-kernel+cancellation-reason+budget-delta-resource+budget-delta-spent+budget-delta-remaining+gradient-check-op+gradient-check-max-rel-err+gradient-check-pass+conformance-case-suite+conformance-case-case+conformance-case-pass+conformance-case-detail+conformance-case-seed+benchmark-result-kernel+benchmark-result-metric+benchmark-result-value+benchmark-result-machine+storm-assertion-name+storm-assertion-pass+storm-assertion-seed+race-record-resource+race-record-schedule+race-record-pass+race-record-seed+degradation-event-resource+degradation-event-limit+degradation-event-observed+degradation-event-action+import-receipt-format+import-receipt-artifact+import-receipt-accepted+import-receipt-detail+certificate-verdict-certificate+certificate-verdict-pass+certificate-verdict-bound+certificate-verdict-detail+custom-name+custom-json-exact-opaque-utf8,EventIdentityReceipt.declared_identity_version>retained-producer-version,EventIdentityReceipt.canonical_bytes>retained-canonical-bytes",
     "external_semantic_fields=artifact-domain,identity-version,wire-schema",
-    "semantic_fields=artifact-domain,identity-version,wire-schema,session,scope,seq,severity,kind,solver-residual-solver,solver-residual-iter,solver-residual-residual,tile-complete-tile,tile-complete-kernel,cancellation-reason,budget-delta-resource,budget-delta-spent,budget-delta-remaining,gradient-check-op,gradient-check-max-rel-err,gradient-check-pass,conformance-case-suite,conformance-case-case,conformance-case-pass,conformance-case-detail,conformance-case-seed,benchmark-result-kernel,benchmark-result-metric,benchmark-result-value,benchmark-result-machine,storm-assertion-name,storm-assertion-pass,storm-assertion-seed,custom-name,custom-json-exact-opaque-utf8,retained-producer-version,retained-canonical-bytes",
+    "semantic_fields=artifact-domain,identity-version,wire-schema,session,scope,seq,severity,kind,solver-residual-solver,solver-residual-iter,solver-residual-residual,tile-complete-tile,tile-complete-kernel,cancellation-reason,budget-delta-resource,budget-delta-spent,budget-delta-remaining,gradient-check-op,gradient-check-max-rel-err,gradient-check-pass,conformance-case-suite,conformance-case-case,conformance-case-pass,conformance-case-detail,conformance-case-seed,benchmark-result-kernel,benchmark-result-metric,benchmark-result-value,benchmark-result-machine,storm-assertion-name,storm-assertion-pass,storm-assertion-seed,race-record-resource,race-record-schedule,race-record-pass,race-record-seed,degradation-event-resource,degradation-event-limit,degradation-event-observed,degradation-event-action,import-receipt-format,import-receipt-artifact,import-receipt-accepted,import-receipt-detail,certificate-verdict-certificate,certificate-verdict-pass,certificate-verdict-bound,certificate-verdict-detail,custom-name,custom-json-exact-opaque-utf8,retained-producer-version,retained-canonical-bytes",
     "excluded_fields=to-jsonl:display-transport-only",
     "consumers=Event::content_hash,EventIdentityReceipt,Event::admit_content_identity,ledger-event-sinks,replay-comparison",
-    "mutations=artifact-domain:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,identity-version:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,wire-schema:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,session:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,scope:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,seq:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,severity:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,kind:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,solver-residual-solver:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-iter:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-residual:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-tile:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,cancellation-reason:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-spent:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-remaining:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-op:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-max-rel-err:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-suite:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-case:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-metric:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-value:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-machine:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-json-exact-opaque-utf8:crates/fs-obs/src/lib.rs#custom_payload_identity_is_exact_opaque_utf8,retained-producer-version:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed,retained-canonical-bytes:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed",
+    "mutations=artifact-domain:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,identity-version:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,wire-schema:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,session:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,scope:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,seq:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,severity:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,kind:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,solver-residual-solver:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-iter:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-residual:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-tile:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,cancellation-reason:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-spent:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-remaining:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-op:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-max-rel-err:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-suite:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-case:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-metric:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-value:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-machine:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-schedule:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-limit:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-observed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-action:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-format:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-artifact:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-accepted:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-certificate:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-bound:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-json-exact-opaque-utf8:crates/fs-obs/src/lib.rs#custom_payload_identity_is_exact_opaque_utf8,retained-producer-version:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed,retained-canonical-bytes:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed",
     "nonsemantic_mutations=Event.wall_ns:crates/fs-obs/src/lib.rs#wall_clock_is_envelope_only,to-jsonl:crates/fs-obs/src/lib.rs#content_identity_preserves_bits_that_display_json_collapses",
     "field_guard=classify_event_identity_fields",
     "transport_guard=Event::admit_content_identity",
@@ -306,6 +306,51 @@ pub enum EventKind {
         /// Storm seed for replay.
         seed: u64,
     },
+    /// A concurrency-race observation from a G4 race/storm harness.
+    RaceRecord {
+        /// Contended resource or invariant ("arena-slot", "tune-row", ...).
+        resource: String,
+        /// Interleaving/schedule descriptor sufficient to replay the race.
+        schedule: String,
+        /// Verdict.
+        pass: bool,
+        /// Replay seed for the schedule (lint: required non-zero on fail).
+        seed: u64,
+    },
+    /// A graceful-degradation decision at a bounded resource.
+    DegradationEvent {
+        /// Resource that hit its bound ("retained_bytes_per_scope", ...).
+        resource: String,
+        /// Bound in force.
+        limit: u64,
+        /// Observed demand when the bound fired.
+        observed: u64,
+        /// Action taken ("rotate-lane", "flush", "refuse", ...).
+        action: String,
+    },
+    /// An external-artifact import decision (STEP/mesh/dataset quarantine).
+    ImportReceipt {
+        /// Import format ("step", "gltf", "csv-dataset", ...).
+        format: String,
+        /// Content hash of the imported artifact (hex).
+        artifact: String,
+        /// Whether the importer admitted the artifact.
+        accepted: bool,
+        /// Refusal/quarantine detail; REQUIRED non-empty when
+        /// `accepted=false` (lint-enforced).
+        detail: String,
+    },
+    /// A certificate check outcome (enclosure/trim/conversion verdicts).
+    CertificateVerdict {
+        /// Certificate family ("ivl-enclosure", "trim-cert", ...).
+        certificate: String,
+        /// Verdict.
+        pass: bool,
+        /// Certified numeric bound (0.0 when the certificate is non-numeric).
+        bound: f64,
+        /// Detail; REQUIRED non-empty when `pass=false` (lint-enforced).
+        detail: String,
+    },
     /// Escape hatch for kinds not yet in the registry. `json` is exact opaque
     /// UTF-8: whitespace and object-member order are semantic identity bytes;
     /// fs-obs never claims to canonicalize unchecked JSON. The caller must
@@ -329,6 +374,10 @@ impl EventKind {
             EventKind::ConformanceCase { .. } => "conformance_case",
             EventKind::BenchmarkResult { .. } => "benchmark_result",
             EventKind::StormAssertion { .. } => "storm_assertion",
+            EventKind::RaceRecord { .. } => "race_record",
+            EventKind::DegradationEvent { .. } => "degradation_event",
+            EventKind::ImportReceipt { .. } => "import_receipt",
+            EventKind::CertificateVerdict { .. } => "certificate_verdict",
             EventKind::Custom { .. } => "custom",
         }
     }
@@ -487,6 +536,51 @@ impl Event {
                 push_str_field(&mut s, "name", name);
                 let _ = write!(s, ",\"pass\":{pass},\"seed\":{seed}");
             }
+            EventKind::RaceRecord {
+                resource,
+                schedule,
+                pass,
+                seed,
+            } => {
+                push_str_field(&mut s, "resource", resource);
+                s.push(',');
+                push_str_field(&mut s, "schedule", schedule);
+                let _ = write!(s, ",\"pass\":{pass},\"seed\":{seed}");
+            }
+            EventKind::DegradationEvent {
+                resource,
+                limit,
+                observed,
+                action,
+            } => {
+                push_str_field(&mut s, "resource", resource);
+                let _ = write!(s, ",\"limit\":{limit},\"observed\":{observed},");
+                push_str_field(&mut s, "action", action);
+            }
+            EventKind::ImportReceipt {
+                format,
+                artifact,
+                accepted,
+                detail,
+            } => {
+                push_str_field(&mut s, "format", format);
+                s.push(',');
+                push_str_field(&mut s, "artifact", artifact);
+                let _ = write!(s, ",\"accepted\":{accepted},");
+                push_str_field(&mut s, "detail", detail);
+            }
+            EventKind::CertificateVerdict {
+                certificate,
+                pass,
+                bound,
+                detail,
+            } => {
+                push_str_field(&mut s, "certificate", certificate);
+                let _ = write!(s, ",\"pass\":{pass},");
+                push_f64(&mut s, "bound", *bound);
+                s.push(',');
+                push_str_field(&mut s, "detail", detail);
+            }
             EventKind::Custom { name, json } => {
                 push_str_field(&mut s, "name", name);
                 let _ = write!(s, ",\"data\":{json}");
@@ -604,6 +698,46 @@ impl Event {
                 .str("name", name)
                 .flag("pass", *pass)
                 .u64("seed", *seed),
+            EventKind::RaceRecord {
+                resource,
+                schedule,
+                pass,
+                seed,
+            } => builder
+                .str("resource", resource)
+                .str("schedule", schedule)
+                .flag("pass", *pass)
+                .u64("seed", *seed),
+            EventKind::DegradationEvent {
+                resource,
+                limit,
+                observed,
+                action,
+            } => builder
+                .str("resource", resource)
+                .u64("limit", *limit)
+                .u64("observed", *observed)
+                .str("action", action),
+            EventKind::ImportReceipt {
+                format,
+                artifact,
+                accepted,
+                detail,
+            } => builder
+                .str("format", format)
+                .str("artifact", artifact)
+                .flag("accepted", *accepted)
+                .str("detail", detail),
+            EventKind::CertificateVerdict {
+                certificate,
+                pass,
+                bound,
+                detail,
+            } => builder
+                .str("certificate", certificate)
+                .flag("pass", *pass)
+                .f64_bits("bound", *bound)
+                .str("detail", detail),
             EventKind::Custom { name, json } => builder
                 .str("name", name)
                 .bytes("custom_json_opaque_utf8", json.as_bytes()),
@@ -758,6 +892,10 @@ pub const KNOWN_KINDS: &[&str] = &[
     "conformance_case",
     "benchmark_result",
     "storm_assertion",
+    "race_record",
+    "degradation_event",
+    "import_receipt",
+    "certificate_verdict",
     "custom",
 ];
 
@@ -871,6 +1009,32 @@ pub fn lint_failure_record(event: &Event) -> Result<(), SchemaError> {
         } if op.is_empty() => Err(SchemaError {
             at: 0,
             message: "failing gradient check must name its operator".to_string(),
+        }),
+        EventKind::RaceRecord {
+            pass: false, seed, ..
+        } if *seed == 0 => Err(SchemaError {
+            at: 0,
+            message: "failing race record must carry its schedule replay seed".to_string(),
+        }),
+        EventKind::ImportReceipt {
+            accepted: false,
+            detail,
+            ..
+        } if detail.is_empty() => Err(SchemaError {
+            at: 0,
+            message: "refused import must carry a non-empty quarantine detail \
+                          (reproduce-from-log-alone doctrine)"
+                .to_string(),
+        }),
+        EventKind::CertificateVerdict {
+            pass: false,
+            detail,
+            ..
+        } if detail.is_empty() => Err(SchemaError {
+            at: 0,
+            message: "failing certificate verdict must carry a non-empty detail \
+                          (reproduce-from-log-alone doctrine)"
+                .to_string(),
         }),
         _ => Ok(()),
     }
@@ -1380,6 +1544,194 @@ mod tests {
             &mut observed,
         );
         assert_payload_mutations(
+            EventKind::RaceRecord {
+                resource: "arena-slot".into(),
+                schedule: "a-b-a".into(),
+                pass: true,
+                seed: 31,
+            },
+            vec![
+                (
+                    "race_record.resource",
+                    EventKind::RaceRecord {
+                        resource: "tune-row".into(),
+                        schedule: "a-b-a".into(),
+                        pass: true,
+                        seed: 31,
+                    },
+                ),
+                (
+                    "race_record.schedule",
+                    EventKind::RaceRecord {
+                        resource: "arena-slot".into(),
+                        schedule: "b-a-b".into(),
+                        pass: true,
+                        seed: 31,
+                    },
+                ),
+                (
+                    "race_record.pass",
+                    EventKind::RaceRecord {
+                        resource: "arena-slot".into(),
+                        schedule: "a-b-a".into(),
+                        pass: false,
+                        seed: 31,
+                    },
+                ),
+                (
+                    "race_record.seed",
+                    EventKind::RaceRecord {
+                        resource: "arena-slot".into(),
+                        schedule: "a-b-a".into(),
+                        pass: true,
+                        seed: 32,
+                    },
+                ),
+            ],
+            &mut observed,
+        );
+        assert_payload_mutations(
+            EventKind::DegradationEvent {
+                resource: "retained_bytes_per_scope".into(),
+                limit: 4096,
+                observed: 5000,
+                action: "rotate-lane".into(),
+            },
+            vec![
+                (
+                    "degradation_event.resource",
+                    EventKind::DegradationEvent {
+                        resource: "events_per_scope".into(),
+                        limit: 4096,
+                        observed: 5000,
+                        action: "rotate-lane".into(),
+                    },
+                ),
+                (
+                    "degradation_event.limit",
+                    EventKind::DegradationEvent {
+                        resource: "retained_bytes_per_scope".into(),
+                        limit: 8192,
+                        observed: 5000,
+                        action: "rotate-lane".into(),
+                    },
+                ),
+                (
+                    "degradation_event.observed",
+                    EventKind::DegradationEvent {
+                        resource: "retained_bytes_per_scope".into(),
+                        limit: 4096,
+                        observed: 6000,
+                        action: "rotate-lane".into(),
+                    },
+                ),
+                (
+                    "degradation_event.action",
+                    EventKind::DegradationEvent {
+                        resource: "retained_bytes_per_scope".into(),
+                        limit: 4096,
+                        observed: 5000,
+                        action: "refuse".into(),
+                    },
+                ),
+            ],
+            &mut observed,
+        );
+        assert_payload_mutations(
+            EventKind::ImportReceipt {
+                format: "step".into(),
+                artifact: "ab12".into(),
+                accepted: true,
+                detail: "clean".into(),
+            },
+            vec![
+                (
+                    "import_receipt.format",
+                    EventKind::ImportReceipt {
+                        format: "gltf".into(),
+                        artifact: "ab12".into(),
+                        accepted: true,
+                        detail: "clean".into(),
+                    },
+                ),
+                (
+                    "import_receipt.artifact",
+                    EventKind::ImportReceipt {
+                        format: "step".into(),
+                        artifact: "cd34".into(),
+                        accepted: true,
+                        detail: "clean".into(),
+                    },
+                ),
+                (
+                    "import_receipt.accepted",
+                    EventKind::ImportReceipt {
+                        format: "step".into(),
+                        artifact: "ab12".into(),
+                        accepted: false,
+                        detail: "clean".into(),
+                    },
+                ),
+                (
+                    "import_receipt.detail",
+                    EventKind::ImportReceipt {
+                        format: "step".into(),
+                        artifact: "ab12".into(),
+                        accepted: true,
+                        detail: "quarantined".into(),
+                    },
+                ),
+            ],
+            &mut observed,
+        );
+        assert_payload_mutations(
+            EventKind::CertificateVerdict {
+                certificate: "ivl-enclosure".into(),
+                pass: true,
+                bound: 0.125,
+                detail: "ok".into(),
+            },
+            vec![
+                (
+                    "certificate_verdict.certificate",
+                    EventKind::CertificateVerdict {
+                        certificate: "trim-cert".into(),
+                        pass: true,
+                        bound: 0.125,
+                        detail: "ok".into(),
+                    },
+                ),
+                (
+                    "certificate_verdict.pass",
+                    EventKind::CertificateVerdict {
+                        certificate: "ivl-enclosure".into(),
+                        pass: false,
+                        bound: 0.125,
+                        detail: "ok".into(),
+                    },
+                ),
+                (
+                    "certificate_verdict.bound",
+                    EventKind::CertificateVerdict {
+                        certificate: "ivl-enclosure".into(),
+                        pass: true,
+                        bound: 0.25,
+                        detail: "ok".into(),
+                    },
+                ),
+                (
+                    "certificate_verdict.detail",
+                    EventKind::CertificateVerdict {
+                        certificate: "ivl-enclosure".into(),
+                        pass: true,
+                        bound: 0.125,
+                        detail: "different".into(),
+                    },
+                ),
+            ],
+            &mut observed,
+        );
+        assert_payload_mutations(
             EventKind::Custom {
                 name: "opaque".into(),
                 json: r#"{"a":1,"b":2}"#.into(),
@@ -1428,13 +1780,29 @@ mod tests {
             "storm_assertion.name",
             "storm_assertion.pass",
             "storm_assertion.seed",
+            "race_record.resource",
+            "race_record.schedule",
+            "race_record.pass",
+            "race_record.seed",
+            "degradation_event.resource",
+            "degradation_event.limit",
+            "degradation_event.observed",
+            "degradation_event.action",
+            "import_receipt.format",
+            "import_receipt.artifact",
+            "import_receipt.accepted",
+            "import_receipt.detail",
+            "certificate_verdict.certificate",
+            "certificate_verdict.pass",
+            "certificate_verdict.bound",
+            "certificate_verdict.detail",
             "custom.name",
             "custom.json",
         ];
         assert_eq!(
             observed.as_slice(),
             expected.as_slice(),
-            "all 26 payload fields stay enumerated"
+            "all 42 payload fields stay enumerated"
         );
     }
 
@@ -1556,14 +1924,26 @@ mod tests {
             identity_field(current.canonical_bytes(), "event_wire_schema_version");
         assert_eq!(identity_tag, 0x02);
         assert_eq!(schema_tag, 0x02);
+        // Canonical bytes carry the shared replay-identity framing —
+        // "fsid" + u32 ident-schema version + u64 kind length — and bind the
+        // event artifact domain as the length-framed identity kind, so the
+        // domain begins after the fixed 16-byte frame header rather than at
+        // byte zero (length framing is what makes prefix collisions
+        // unrepresentable; see ident_003).
+        const FRAME_HEADER_LEN: usize = ident::REPLAY_IDENTITY_DOMAIN.len()
+            + core::mem::size_of::<u32>()
+            + core::mem::size_of::<u64>();
         assert!(
             current
                 .canonical_bytes()
+                .starts_with(ident::REPLAY_IDENTITY_DOMAIN.as_bytes())
+        );
+        assert!(
+            current.canonical_bytes()[FRAME_HEADER_LEN..]
                 .starts_with(EVENT_CONTENT_IDENTITY_DOMAIN.as_bytes())
         );
         assert!(
-            domain_mutation
-                .canonical_bytes()
+            domain_mutation.canonical_bytes()[FRAME_HEADER_LEN..]
                 .starts_with(b"org.frankensim.fs-obs.event-content.v2.alternate")
         );
         assert_eq!(
