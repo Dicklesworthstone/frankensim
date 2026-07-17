@@ -110,7 +110,6 @@
 ],
 "exemptions": [
 {"path":"crates/fs-session/src/governor.rs","symbol":"Governor::flush_scope_to_ledger","reason":"identity-consumer-not-producer","covered_by":"none"},
-{"path":"crates/fs-ir/src/machine/causalization.rs","symbol":"admit_causalization_receipt","reason":"identity-consumer-not-producer","covered_by":"none"},
 {"path":"crates/fs-ir/src/machine/interop.rs","symbol":"ForeignExecutionDraftV1::admit_against","reason":"identity-consumer-not-producer","covered_by":"none"},
 {"path":"crates/fs-ir/src/planner.rs","symbol":"MemCache::insert","reason":"identity-consumer-not-producer","covered_by":"none"},
 {"path":"crates/fs-ir/src/planner.rs","symbol":"plan_observed","reason":"identity-consumer-not-producer","covered_by":"none"},
