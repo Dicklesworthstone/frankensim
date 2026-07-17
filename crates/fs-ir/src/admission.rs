@@ -75,6 +75,129 @@ pub struct SessionCapability {
     pub wall_s: f64,
 }
 
+/// Provenance class of the capability evidence admission consumed
+/// (bead aeq7, mirroring the sealed cost-model classes): the class is
+/// stamped into findings, so nothing downstream can mistake a
+/// caller-declared token for issuer-granted authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityEvidenceClass {
+    /// Verified against an issuing-policy grant by an injected
+    /// [`CapabilityIssuerVerifier`].
+    GrantBacked,
+    /// Caller-declared data; visibly unaudited. Every admission that
+    /// authorizes through it carries a Warn finding naming the class.
+    CallerDeclared,
+}
+
+/// The grant identity a sealed capability claims to descend from.
+/// Plain data — constructible by anyone; authority lives in the
+/// verifier, exactly like the waiver/source-origin/color-admission
+/// capabilities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityReceipt {
+    /// Stable issuer identifier.
+    pub issuer_id: String,
+    /// Exact policy revision fingerprint.
+    pub policy_fingerprint: String,
+    /// The granted session id.
+    pub session: u64,
+    /// The grant's canonical digest (hex).
+    pub grant_digest: String,
+}
+
+/// Injected authority that authenticates a (capability, receipt) pair
+/// against the issuing session layer. fs-session implements the real
+/// verifier over its opaque grants; the default refuses everything.
+pub trait CapabilityIssuerVerifier {
+    /// Whether this exact admitted view descends from the receipt's grant.
+    fn verify(&self, capability: &SessionCapability, receipt: &CapabilityReceipt) -> bool;
+}
+
+/// Deny-all default: at this layer nothing mints grant-backed evidence.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoCapabilityIssuerVerifier;
+
+impl CapabilityIssuerVerifier for NoCapabilityIssuerVerifier {
+    fn verify(&self, _capability: &SessionCapability, _receipt: &CapabilityReceipt) -> bool {
+        false
+    }
+}
+
+/// Sealing refusal: the verifier did not vouch for the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilitySealRefused;
+
+impl core::fmt::Display for CapabilitySealRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("capability seal refused: the injected issuer verifier did not vouch for the (capability, receipt) pair")
+    }
+}
+
+impl std::error::Error for CapabilitySealRefused {}
+
+/// Capability evidence whose provenance survived the admission
+/// boundary. Private fields: the [`CapabilityEvidenceClass::GrantBacked`]
+/// class is mintable only through [`Self::grant_backed`] with a
+/// verifier that accepts — a lying verifier is visible at the
+/// composition root, the established trust model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SealedSessionCapability {
+    capability: SessionCapability,
+    class: CapabilityEvidenceClass,
+    receipt: Option<CapabilityReceipt>,
+}
+
+impl SealedSessionCapability {
+    /// Seal an admitted view under its grant receipt, authenticated by
+    /// the injected issuer verifier.
+    ///
+    /// # Errors
+    /// [`CapabilitySealRefused`] when the verifier does not vouch.
+    pub fn grant_backed(
+        capability: SessionCapability,
+        receipt: CapabilityReceipt,
+        verifier: &dyn CapabilityIssuerVerifier,
+    ) -> Result<SealedSessionCapability, CapabilitySealRefused> {
+        if !verifier.verify(&capability, &receipt) {
+            return Err(CapabilitySealRefused);
+        }
+        Ok(SealedSessionCapability {
+            capability,
+            class: CapabilityEvidenceClass::GrantBacked,
+            receipt: Some(receipt),
+        })
+    }
+
+    /// Wrap caller-declared data as EXPLICITLY unaudited evidence.
+    /// Admission accepts it and stamps a Warn finding naming the class.
+    #[must_use]
+    pub fn caller_declared(capability: SessionCapability) -> SealedSessionCapability {
+        SealedSessionCapability {
+            capability,
+            class: CapabilityEvidenceClass::CallerDeclared,
+            receipt: None,
+        }
+    }
+
+    /// The admitted (or declared) capability view.
+    #[must_use]
+    pub fn capability(&self) -> &SessionCapability {
+        &self.capability
+    }
+
+    /// The provenance class.
+    #[must_use]
+    pub fn evidence_class(&self) -> CapabilityEvidenceClass {
+        self.class
+    }
+
+    /// The claimed grant identity (grant-backed class only).
+    #[must_use]
+    pub fn receipt(&self) -> Option<&CapabilityReceipt> {
+        self.receipt.as_ref()
+    }
+}
+
 /// What to do when a solver choice violates the regime report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegimePolicy {
@@ -118,8 +241,9 @@ pub struct AdmissionContext<'a> {
     /// provisional evidence and every admission that costs through one
     /// carries a Warn finding naming the class.
     pub cost_models: BTreeMap<String, SealedCostModel>,
-    /// The session capability token.
-    pub capability: Option<SessionCapability>,
+    /// The session capability evidence (bead aeq7): grant-backed or
+    /// visibly caller-declared.
+    pub capability: Option<SealedSessionCapability>,
     /// The regime report for the study's physics, when computed.
     pub regime: Option<&'a RegimeReport>,
     /// Violation policy for regime gating.
@@ -764,7 +888,7 @@ fn wall_budget_s(study: &Study<'_>, cx: &AdmissionContext<'_>) -> Option<f64> {
             }
         }
     }
-    cx.capability.as_ref().map(|c| c.wall_s)
+    cx.capability.as_ref().map(|c| c.capability().wall_s)
 }
 
 /// Size feature for a verb call: exactly one numeric
@@ -1148,7 +1272,26 @@ fn namespaced_verbs<'a>(node: &'a Node, out: &mut Vec<(&'a str, Span)>) {
 
 #[allow(clippy::too_many_lines)] // One ordered, fail-closed capability admission matrix.
 fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
-    let token = cx.capability.as_ref();
+    let token = cx.capability.as_ref().map(SealedSessionCapability::capability);
+    if let Some(sealed) = cx.capability.as_ref()
+        && sealed.evidence_class() == CapabilityEvidenceClass::CallerDeclared
+    {
+        out.push(Finding {
+            check: "capability",
+            severity: Severity::Warn,
+            span: Span::default(),
+            what: "capability evidence is caller-declared, not grant-backed: this \
+                   session's authority was never admitted by an issuer policy"
+                .to_string(),
+            fixes: vec![RankedFix {
+                action: "mint a SessionGrant through the deployment issuer policy and seal \
+                         the admitted view with SealedSessionCapability::grant_backed"
+                    .to_string(),
+                predicted_wall_s: None,
+                qoi_impact: "provenance change; no QoI impact".to_string(),
+            }],
+        });
+    }
     if let Some(token) = token {
         if !token.wall_s.is_finite() || token.wall_s < 0.0 {
             out.push(invalid_resource_value(

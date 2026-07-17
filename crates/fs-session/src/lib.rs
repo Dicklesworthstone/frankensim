@@ -49,8 +49,8 @@ pub use governor::{
     SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
 };
 pub use grant::{
-    CoreLease, CoreLeaseBook, IssuerIdentity, IssuerPolicy, MAX_ISSUER_FIELD_BYTES, NoIssuerPolicy,
-    PolicyDecision, SessionGrant, mint_grant,
+    CoreLease, CoreLeaseBook, GrantCapabilityVerifier, IssuerIdentity, IssuerPolicy,
+    MAX_ISSUER_FIELD_BYTES, NoIssuerPolicy, PolicyDecision, SessionGrant, mint_grant,
 };
 pub use guidance::Guidance;
 pub use long_job::{

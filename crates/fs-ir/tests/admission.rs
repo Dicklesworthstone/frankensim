@@ -7,7 +7,8 @@
 //! panics.
 
 use fs_ir::admission::{
-    AdmissionContext, AdmissionReport, ChartRequirement, RankedFix, RegimePolicy,
+    AdmissionContext, AdmissionReport, CapabilityEvidenceClass, CapabilityReceipt,
+    ChartRequirement, NoCapabilityIssuerVerifier, RankedFix, RegimePolicy, SealedSessionCapability,
     SessionCapability, Severity, admit, admit_versioned,
 };
 use fs_ir::sexpr;
@@ -155,7 +156,7 @@ fn full_context(regime: &fs_regime::RegimeReport) -> AdmissionContext<'_> {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models,
-        capability: Some(token()),
+        capability: Some(SealedSessionCapability::caller_declared(token())),
         regime: Some(regime),
         regime_policy: RegimePolicy::Reject,
     }
@@ -171,12 +172,12 @@ fn authority_context<'a>(
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SessionCapability {
+        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
             ops: ops.iter().map(|op| (*op).to_string()).collect(),
             cores: 1,
             mem_bytes: 1 << 30,
             wall_s: 3_600.0,
-        }),
+        })),
         regime,
         regime_policy,
     }
@@ -372,11 +373,14 @@ fn ad_001c_lowering_refuses_atomically_before_authority_checks() {
         max_abs_error: 1e-3,
         max_cost_s: 1.0,
     });
-    hostile_context
-        .capability
-        .as_mut()
-        .expect("test token")
-        .wall_s = f64::INFINITY;
+    // Sealed evidence is immutable by design: rebuild the declared view
+    // with the hostile wall grant instead of mutating in place.
+    hostile_context.capability = Some(SealedSessionCapability::caller_declared(
+        SessionCapability {
+            wall_s: f64::INFINITY,
+            ..token()
+        },
+    ));
 
     let study = |body: &str| {
         format!(
@@ -714,12 +718,12 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SessionCapability {
+        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
             ops: vec!["flux.*".to_string()],
             cores: 0,
             mem_bytes: 0,
             wall_s: f64::INFINITY,
-        }),
+        })),
         regime: None,
         regime_policy: RegimePolicy::Warn,
     };
@@ -741,12 +745,12 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SessionCapability {
+        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
             ops: vec!["flux*".to_string()],
             cores: 1,
             mem_bytes: 0,
             wall_s: 1.0,
-        }),
+        })),
         regime: None,
         regime_policy: RegimePolicy::Warn,
     };
@@ -848,12 +852,12 @@ fn ad_002c_exact_count_authority_boundaries_do_not_alias() {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SessionCapability {
+        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
             ops: vec!["flux.*".to_string()],
             cores,
             mem_bytes,
             wall_s: 3_600.0,
-        }),
+        })),
         regime: None,
         regime_policy: RegimePolicy::Warn,
     };
@@ -1416,5 +1420,94 @@ fn ad_016_dimension_overflow_refuses_typed_instead_of_clamping() {
             .iter()
             .all(|f| !(f.check == "dimensional" && f.what.contains("overflow"))),
         "40 pressure factors stay within i8 exponents"
+    );
+}
+
+// ── Sealed capability evidence (bead aeq7, increment 2 slice B) ─────────────
+
+/// A fixture standing in for fs-session's grant bridge at the
+/// composition root.
+struct FixtureIssuer;
+impl fs_ir::admission::CapabilityIssuerVerifier for FixtureIssuer {
+    fn verify(&self, capability: &SessionCapability, receipt: &CapabilityReceipt) -> bool {
+        receipt.issuer_id == "ops/fixture" && capability.cores == 128
+    }
+}
+
+#[test]
+fn grant_backed_evidence_is_mintable_only_through_an_accepting_verifier() {
+    let receipt = CapabilityReceipt {
+        issuer_id: "ops/fixture".to_string(),
+        policy_fingerprint: "policy-v1".to_string(),
+        session: 41,
+        grant_digest: "aa".repeat(32),
+    };
+    // Deny-all default: nothing mints.
+    assert!(
+        SealedSessionCapability::grant_backed(
+            token(),
+            receipt.clone(),
+            &NoCapabilityIssuerVerifier,
+        )
+        .is_err()
+    );
+    // A refusing pair (wrong issuer) also fails.
+    let foreign = CapabilityReceipt {
+        issuer_id: "ops/other".to_string(),
+        ..receipt.clone()
+    };
+    assert!(SealedSessionCapability::grant_backed(token(), foreign, &FixtureIssuer).is_err());
+    // The accepting verifier mints, and the class + receipt survive.
+    let sealed = SealedSessionCapability::grant_backed(token(), receipt.clone(), &FixtureIssuer)
+        .expect("fixture issuer vouches");
+    assert_eq!(
+        sealed.evidence_class(),
+        CapabilityEvidenceClass::GrantBacked
+    );
+    assert_eq!(sealed.receipt(), Some(&receipt));
+    assert_eq!(sealed.capability(), &token());
+}
+
+#[test]
+fn caller_declared_capability_admits_with_a_provenance_warning() {
+    let regime = spout_regime();
+    let cx = full_context(&regime);
+    let report = admit_src(SPOUT, &cx);
+    assert!(report.admitted, "{}", report.diagnosis());
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.check == "capability"
+                && finding.severity == Severity::Warn
+                && finding.what.contains("caller-declared")
+        }),
+        "declared evidence must carry the provenance warning: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn grant_backed_capability_admits_without_the_provenance_warning() {
+    let regime = spout_regime();
+    let mut cx = full_context(&regime);
+    let receipt = CapabilityReceipt {
+        issuer_id: "ops/fixture".to_string(),
+        policy_fingerprint: "policy-v1".to_string(),
+        session: 41,
+        grant_digest: "aa".repeat(32),
+    };
+    cx.capability = Some(
+        SealedSessionCapability::grant_backed(token(), receipt, &FixtureIssuer)
+            .expect("fixture issuer vouches"),
+    );
+    let report = admit_src(SPOUT, &cx);
+    assert!(report.admitted, "{}", report.diagnosis());
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|finding| finding.check == "capability"
+                && finding.severity == Severity::Warn
+                && finding.what.contains("caller-declared")),
+        "grant-backed evidence must not carry the declared-provenance warning"
     );
 }

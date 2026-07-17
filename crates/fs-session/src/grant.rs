@@ -316,6 +316,51 @@ impl SessionGrant {
         }
     }
 
+    /// The grant identity as an fs-ir capability receipt (bead aeq7,
+    /// increment 2): plain data naming issuer, policy revision,
+    /// session, and the grant's canonical digest.
+    #[must_use]
+    pub fn admission_receipt(&self) -> fs_ir::admission::CapabilityReceipt {
+        fs_ir::admission::CapabilityReceipt {
+            issuer_id: self.issuer.issuer_id.clone(),
+            policy_fingerprint: self.issuer.policy_fingerprint.clone(),
+            session: self.session.0,
+            grant_digest: self.digest.clone(),
+        }
+    }
+
+    /// Seal the ADMITTED view as grant-backed fs-ir capability
+    /// evidence, re-verified against the issuing policy at `now_ns`.
+    /// This is the only path from session authority into
+    /// [`fs_ir::admission::CapabilityEvidenceClass::GrantBacked`]:
+    /// admission contexts built from anything else carry the visibly
+    /// caller-declared class and its Warn finding.
+    ///
+    /// # Errors
+    /// Freshness refusals from [`SessionGrant::verify_fresh`].
+    ///
+    /// # Panics
+    /// Never: the bridge verifier vouches for exactly the projection
+    /// this method just built from the verified grant.
+    pub fn sealed_admission(
+        &self,
+        policy: &dyn IssuerPolicy,
+        now_ns: i64,
+    ) -> Result<fs_ir::admission::SealedSessionCapability, SessionError> {
+        self.verify_fresh(policy, now_ns)?;
+        let bridge = GrantCapabilityVerifier {
+            grant: self,
+            policy,
+            now_ns,
+        };
+        Ok(fs_ir::admission::SealedSessionCapability::grant_backed(
+            self.to_admission(),
+            self.admission_receipt(),
+            &bridge,
+        )
+        .expect("the bridge vouches for its own verified grant projection"))
+    }
+
     /// The ADMITTED authority as a registration token (bead aeq7,
     /// increment 2). This is the only shape the governor registers on
     /// the granted open path: it is projected from the grant's private
@@ -356,6 +401,35 @@ impl SessionGrant {
     #[must_use]
     pub fn cores(&self) -> u64 {
         self.cores
+    }
+}
+
+/// The fs-ir capability-issuer bridge (bead aeq7): vouches for exactly
+/// one grant's admitted projection. Acceptance re-derives everything —
+/// the receipt must name this grant's issuer/policy/session/digest, the
+/// grant must still verify fresh against the issuing policy, and the
+/// capability must equal the grant's admitted view field-for-field.
+pub struct GrantCapabilityVerifier<'a> {
+    /// The vouched-for grant.
+    pub grant: &'a SessionGrant,
+    /// The issuing policy to re-verify freshness against.
+    pub policy: &'a dyn IssuerPolicy,
+    /// Verification time (ledger nanoseconds).
+    pub now_ns: i64,
+}
+
+impl fs_ir::admission::CapabilityIssuerVerifier for GrantCapabilityVerifier<'_> {
+    fn verify(
+        &self,
+        capability: &fs_ir::admission::SessionCapability,
+        receipt: &fs_ir::admission::CapabilityReceipt,
+    ) -> bool {
+        receipt.issuer_id == self.grant.issuer.issuer_id
+            && receipt.policy_fingerprint == self.grant.issuer.policy_fingerprint
+            && receipt.session == self.grant.session.0
+            && receipt.grant_digest == self.grant.digest
+            && self.grant.verify_fresh(self.policy, self.now_ns).is_ok()
+            && *capability == self.grant.to_admission()
     }
 }
 

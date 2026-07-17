@@ -282,7 +282,7 @@ fn ss_001_token_bridges_into_static_admission() {
         router: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(cap),
+        capability: Some(fs_ir::admission::SealedSessionCapability::caller_declared(cap)),
         regime: None,
         regime_policy: fs_ir::admission::RegimePolicy::Warn,
     };
@@ -2733,11 +2733,11 @@ fn ss_006_budget_infeasible_surfaces_as_ranked_guidance() {
         router: None,
         chart_requirements: Vec::new(),
         cost_models,
-        capability: Some(
+        capability: Some(fs_ir::admission::SealedSessionCapability::caller_declared(
             token(9, 1e9, 1e9)
                 .to_admission()
                 .expect("bounded grants project"),
-        ),
+        )),
         regime: None,
         regime_policy: fs_ir::admission::RegimePolicy::Warn,
     };

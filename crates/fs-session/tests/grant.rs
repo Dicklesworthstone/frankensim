@@ -348,3 +348,51 @@ fn sg_008_wildcard_confusion_cannot_escalate_after_granted_open() {
         Err(SessionError::CoreLeaseExceeded { .. })
     ));
 }
+
+/// sg-009: the fs-ir bridge — sealed_admission mints GrantBacked evidence
+/// whose receipt names this exact grant; stale grants refuse; a receipt
+/// naming a different grant digest is not vouched for; an inflated
+/// capability projection is not vouched for.
+#[test]
+fn sg_009_sealed_admission_bridges_grant_authority_into_fs_ir() {
+    use fs_ir::admission::{CapabilityEvidenceClass, CapabilityIssuerVerifier as _};
+    use fs_session::GrantCapabilityVerifier;
+
+    let policy = TestPolicy::new(1_000_000);
+    let grant = mint_grant(&policy, &request(), 10).expect("policy admits");
+
+    let sealed = grant
+        .sealed_admission(&policy, 20)
+        .expect("fresh grant seals");
+    assert_eq!(
+        sealed.evidence_class(),
+        CapabilityEvidenceClass::GrantBacked
+    );
+    let receipt = sealed.receipt().expect("grant-backed carries receipt");
+    assert_eq!(receipt.grant_digest, grant.digest());
+    assert_eq!(receipt.issuer_id, "ops/test-issuer");
+    assert_eq!(sealed.capability(), &grant.to_admission());
+
+    // Stale authority refuses at the bridge.
+    policy.revoke();
+    assert!(matches!(
+        grant.sealed_admission(&policy, 30),
+        Err(SessionError::GrantRevoked { .. })
+    ));
+
+    // The verifier vouches only for its exact grant: a tampered digest or
+    // an inflated projection is refused.
+    let fresh_policy = TestPolicy::new(1_000_000);
+    let fresh_grant = mint_grant(&fresh_policy, &request(), 10).expect("policy admits");
+    let bridge = GrantCapabilityVerifier {
+        grant: &fresh_grant,
+        policy: &fresh_policy,
+        now_ns: 20,
+    };
+    let mut tampered = fresh_grant.admission_receipt();
+    tampered.grant_digest = "bb".repeat(32);
+    assert!(!bridge.verify(&fresh_grant.to_admission(), &tampered));
+    let mut inflated = fresh_grant.to_admission();
+    inflated.cores = u64::MAX;
+    assert!(!bridge.verify(&inflated, &fresh_grant.admission_receipt()));
+}

@@ -1062,7 +1062,7 @@ fn admission_cx() -> admission::AdmissionContext<'static> {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(token),
+        capability: Some(admission::SealedSessionCapability::caller_declared(token)),
         regime: None,
         regime_policy: admission::RegimePolicy::Warn,
     }
