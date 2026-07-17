@@ -17,6 +17,7 @@ fs-obs = { path = "../fs-obs" }
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite" }
 
 [dev-dependencies]
+fs-propcheck = { path = "../fs-propcheck" }
 
 [lints]
 workspace = true

@@ -4,8 +4,8 @@
 
 use fs_propcheck::metamorphic::{
     CanonicalRelation, RelationCase, Tolerance, ToleranceError, adjoint_finite_difference,
-    check_relation, conversion_path_independence, refinement_monotonicity, rigid_motion,
-    unit_rescaling,
+    check_relation, conversion_path_independence, refinement_monotonicity,
+    regime_scaling_coherence, rigid_motion, unit_rescaling,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -26,11 +26,13 @@ fn canonical_relation_labels_and_tolerances_are_fail_closed() {
     let refine = refinement_monotonicity("refine", Tolerance::Exact, transform, compare);
     let adjoint = adjoint_finite_difference("adjoint-fd", Tolerance::Exact, transform, compare);
     let paths = conversion_path_independence("paths", Tolerance::Exact, transform, compare);
+    let regimes = regime_scaling_coherence("regimes", Tolerance::Exact, transform, compare);
     assert_eq!(rigid.kind(), CanonicalRelation::RigidMotion);
     assert_eq!(units.kind(), CanonicalRelation::UnitRescaling);
     assert_eq!(refine.kind(), CanonicalRelation::RefinementMonotonicity);
     assert_eq!(adjoint.kind(), CanonicalRelation::AdjointFiniteDifference);
     assert_eq!(paths.kind(), CanonicalRelation::ConversionPathIndependence);
+    assert_eq!(regimes.kind(), CanonicalRelation::RegimeScalingCoherence);
 
     assert!(Tolerance::Exact.evaluate_scalar(1.0, 1.0).admitted());
     assert!(
@@ -75,7 +77,7 @@ fn canonical_relation_labels_and_tolerances_are_fail_closed() {
     );
     verdict(
         "canonical-tolerances",
-        "five stable relation kinds; exact/absolute/relative/monotone limits fail closed",
+        "six stable relation kinds; exact/absolute/relative/monotone limits fail closed",
     );
 }
 

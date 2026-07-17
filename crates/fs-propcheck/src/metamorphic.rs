@@ -22,6 +22,9 @@ pub enum CanonicalRelation {
     AdjointFiniteDifference,
     /// Compare two admissible representation-conversion paths.
     ConversionPathIndependence,
+    /// Map dimensional and nondimensionalized formulations of one problem
+    /// onto each other through the declared scaling (6nb.4 patch Rev A).
+    RegimeScalingCoherence,
 }
 
 impl CanonicalRelation {
@@ -34,6 +37,7 @@ impl CanonicalRelation {
             Self::RefinementMonotonicity => "refinement-monotonicity",
             Self::AdjointFiniteDifference => "adjoint-finite-difference",
             Self::ConversionPathIndependence => "conversion-path-independence",
+            Self::RegimeScalingCoherence => "regime-scaling-coherence",
         }
     }
 }
@@ -436,6 +440,11 @@ canonical_constructor!(
     conversion_path_independence,
     ConversionPathIndependence,
     "Declare a representation path-independence relation. Route certificates stay in the consumer."
+);
+canonical_constructor!(
+    regime_scaling_coherence,
+    RegimeScalingCoherence,
+    "Declare a regime-scaling coherence relation. The declared scaling map stays in the consumer."
 );
 
 /// Run one declared relation through the standard deterministic case stream,
