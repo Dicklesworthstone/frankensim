@@ -16,6 +16,7 @@ fs-math = { path = "../fs-math" }
 [dev-dependencies]
 fs-obs = { path = "../fs-obs" }
 fs-rand = { path = "../fs-rand" }
+fs-surrogate = { path = "../fs-surrogate" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule (bead 7tv.9).
@@ -28,4 +29,8 @@ workspace = true
 # feature is off, never a zero-test pass.
 [[test]]
 name = "hardening"
+required-features = ["conformal-hardening"]
+
+[[test]]
+name = "conformal_shift_receipt"
 required-features = ["conformal-hardening"]

@@ -159,6 +159,31 @@ The result identity and object-shaped `fs-obs` receipt retain exact rejection,
 false-rejection, marginal-validity, and first-shape-failure fields before four
 linted, wire-validated `ConformanceCase` verdicts are emitted.
 
+`tests/conformal_shift_receipt.rs`, behind `conformal-hardening`, is the exact
+finite conformal-shift and surrogate-policy tranche in
+`frankensim-epic-ascent-7tv.21.19`. It exhausts all 20 leave-one-out ranks in
+each of two separated residual regimes at alpha 0.1. Per-regime Mondrian bands
+must cover exactly 18/20 ranks in both buckets. The pooled band covers 36/40
+overall while covering only 16/20 shock ranks, so nominal marginal coverage
+cannot conceal that conditional failure. Every pooled width is required to be
+bit-identical to `fs_surrogate::conformal_band`; the production
+`certify_or_escalate` seam must authorize finite calibrated bands and escalate
+both unseen/unbounded and drift-invalid queries. A fixed in-support control
+sequence must not fire the scalar PIT drift monitor, a fixed above-support
+shift must fire within 64 observations, and recalibration with 19 shock
+residuals must restore an admissible bucket. The caller mapping from a drift or
+refusal verdict to `in_validity_domain = false` is exercised and recorded here;
+it is not automatic library wiring.
+
+One fs-rand draw chooses a cyclic regime/rank presentation rotation; the full
+rank laws are still enumerated rather than sampled. Canonical configuration,
+campaign, policy, replay, and result identities bind the residual lattices,
+quantile rule, alpha, bucket geometry, RNG coordinates and semantics, drift
+grid/order/budget, refusal and refresh policy, implementation versions, every
+retained band and policy decision, exact coverage counts, and first mismatch.
+An object-shaped `fs-obs` receipt is emitted before five statistical rows and
+five linted, wire-validated `ConformanceCase` verdicts.
+
 ## No-claim boundaries
 - Empirical-Bernstein/hedged closed-form CS for bounded means (mixture CS
   covers sub-Gaussian; EB variant is follow-up scope with its consumers).
@@ -175,6 +200,12 @@ linted, wire-validated `ConformanceCase` verdicts are emitted.
   mutation, not a replacement for the arbitrary-dependence theorem. It makes
   no nightly-refresh, cross-ISA, scheduler/Cx, wall-clock, or throughput claim;
   central Cargo/RCH/DSR proof is pending for the code-first landing.
+- The conformal-shift receipt is one exact two-bucket, no-tie, alpha-0.1 finite
+  orbit and one scalar drift projection. It does not prove arbitrary
+  distributions, ties, alpha/sample-size combinations, bucket schemes, shift
+  magnitudes, weighted conformal validity, or automatic caller wiring. It
+  makes no cross-ISA, Cx/cancellation, or performance claim; central batch
+  proof is pending for the code-first landing.
 - Two-sided betting tests; asymptotic variants; sub-exponential extensions.
 - A caller-supplied finite span is a checked assumption, not a certificate that
   the underlying stochastic process has that support. Runtime breach refuses
