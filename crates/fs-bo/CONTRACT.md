@@ -182,6 +182,21 @@ directions).
 `tests/mf_battery.rs`: multi-fidelity correlation recovery and
 variance reduction, dimension/fidelity mismatch fail-fast behavior,
 cost-aware allocation and replay, and MF golden.
+`tests/bo_study_replay.rs` (3 Casebook cases plus a seeded red
+self-test): runs the production sequential-EI loop on the short Branin
+golden configuration (`n_init = 6`, two one-point iterations), records
+all eight objective callbacks and every public `BoReport` bit, and
+independently reconstructs the callback/report correspondence,
+objective values, and three-point best-so-far trace. The complete
+canonical output frame replays exactly under the same configuration,
+seed, crate-version set, RNG stream-semantics version, and Casebook
+record version. A disclosed `StreamKey` selects one initial reported
+coordinate and one low mantissa bit, changes only that result bit, and
+reseals the payload: payload validation still succeeds, while the
+reference-output identity gate returns a typed mismatch. The red
+Casebook record is byte-stable across regeneration and its
+`assert_green` refusal is caught and retained before the final green
+three-case report.
 
 ## No-claim boundaries
 
@@ -209,3 +224,10 @@ cost-aware allocation and replay, and MF golden.
   here.
 - No hyperparameter marginalization (point estimates by LML); no
   input warping.
+- The short-study replay receipt covers one finite Branin
+  configuration and same-process same-ISA execution. It makes no
+  optimizer-quality, all-objective, all-configuration, all-seed,
+  cross-ISA, cancellation/`Cx`, persistence, authenticated-ledger, or
+  performance claim. Its FNV identity and local reference gate are
+  evidence-fixture plumbing, not a cryptographic artifact seal or a
+  production admission service.

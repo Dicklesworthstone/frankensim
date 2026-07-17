@@ -23,6 +23,7 @@ fs-ad = { path = "../fs-ad", optional = true }
 tape-acq = ["dep:fs-ad", "fs-ad/torch-bridge"]
 
 [dev-dependencies]
+fs-casebook = { path = "../fs-casebook" }
 fs-eproc = { path = "../fs-eproc" }
 fs-uq = { path = "../fs-uq" }
 
