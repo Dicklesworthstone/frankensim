@@ -221,6 +221,12 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   Unit-factor columns are omitted. The complete prior Smith authorities remain
   attached, making finite orders exact while keeping representative bytes
   explicitly witness-relative.
+  Its seventh tranche constructs free integer cocycle columns as
+  `V_A^-T[:, rank(A_k)..] U_L^T[:, rank(L)..]` in the induced dual of the
+  retained pair-bound `C_k` basis. It checks `A_(k+1)^T Omega = 0` and retains
+  the exact generator-by-cocycle period matrix `G^T Omega = [0 | I]^T`. This is
+  only the witness-relative free `Hom(H_k,Z)` dual; integer periods kill the
+  torsion generators and do not stand in for torsion cohomology or linking.
 
 ## Invariants
 
@@ -348,6 +354,10 @@ Generator lifting consumes only opaque verified homology. Aggregate output,
 retention, scalar-work, allocation, arithmetic, cancellation, and internal
 shape/equation failures are therefore typed Unknowns, not counterexamples to
 caller-supplied topology. No partially checked representative is published.
+Free-cocycle construction likewise consumes only opaque verified generators;
+output/retention/work, allocation, arithmetic, cancellation, invariant, and
+coboundary/pairing failures are typed Unknowns. It never narrows `i128`
+cocycles into the existing `i64` relative-cochain type implicitly.
 
 ## Determinism class
 
@@ -399,6 +409,11 @@ verified Smith order and evaluates every checked `i128` product row-major.
 Identical retained authorities and budgets replay generator, filling-chain,
 work-count, and scalar-count bytes exactly. Alternate valid Smith witnesses may
 and generally do select different representatives of the same quotient.
+Free-cocycle lifting visits the original dual basis and free presentation rows
+in fixed order, then checks incoming columns and generator columns row-major.
+The cocycle and generator representatives transform together under alternate
+valid Smith witnesses, while the retained zero-then-identity period matrix and
+all counters replay exactly for identical authorities.
 
 ## Cancellation behavior
 
@@ -438,6 +453,10 @@ each output coefficient or chain-equation row, and immediately before final
 publication. Between polls it performs at most
 `max(cycle_rank, dim(C_k), dim(C_(k+1)) + 1)` checked scalar terms; cancellation
 discards both private matrices and returns exact completed/planned counters.
+Free-cocycle construction preflights its cocycle and period matrices, retained
+authority, and scalar work before allocation. It polls each cocycle coefficient,
+incoming-boundary equation, and generator pairing plus final publication, with
+at most `max(cycle_rank, dim(C_k))` checked terms between polls.
 
 ## Unsafe boundary
 
@@ -599,7 +618,13 @@ counts, every resource limit-minus-one, and every cancellation point. A second
 valid sheared Smith witness distinguishes `U_L^-1` from the incorrect `U_L`
 lift and demonstrates explicitly noncanonical but byte-replayable output. A
 connected relative `H_0 = 0` fixture preserves the distinct `dim(C_0) x 0`
-generator and `dim(C_1) x 0` filling shapes with zero arithmetic work.
+generator, `dim(C_1) x 0` filling, dual `dim(C_0) x 0` cocycle, and `0 x 0`
+period shapes with zero arithmetic work.
+Tranche 7 pins the centered free cocycle `[1,-1,0,0,1,1]`, its unit period,
+torsion-only `2 x 0` cocycles, a mixed `Z/2 + Z` zero-then-identity period
+matrix, and a sign-changed complete Smith witness whose generator and cocycle
+both change while their period remains one. Every resource limit-minus-one and
+all 14 cancellation polls through final publication are covered.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -778,6 +803,12 @@ generator and `dim(C_1) x 0` filling shapes with zero arithmetic work.
   canonical across valid witnesses. No integer periods, cocycles, linking
   pairings, long exact sequences, induced maps, relabel/remesh naturality,
   embedding, physical realizability, or physical winding follows.
+- I13.2b tranche 7 supplies witness-relative integer cocycles dual to the free
+  generator sector and an exact integer period matrix. It is not complete
+  integral cohomology: the universal-coefficient `Ext` sector, torsion
+  characters, `Q/Z` or `R/Z` linking, cup/Poincare pairings, harmonic or de
+  Rham representatives, continuum units, naturality, and physical circulation,
+  flux, current, winding, or embedding authority remain absent.
 - `AbstractAlgebraOnly` is load-bearing. Synthetic CW/Moore/lens-space matrices
   may test the algebra kernel but cannot establish a conductor, terminal,
   material, embedding, winding, flux, force, or machine claim. Physical R3

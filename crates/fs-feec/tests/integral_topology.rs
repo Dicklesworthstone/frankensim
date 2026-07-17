@@ -4,16 +4,18 @@
 
 use fs_couple::{CoordinateBinding, PortKind, PortOrientation, PortTimestamp, StableId};
 use fs_feec::integral_topology::{
-    ExactAlgebraBudget, ExactIntegerMatrix, HomologyDecompositionBudget, HomologyGeneratorBudget,
-    HomologyGeneratorKind, IntegralTopologyError, IntegralTopologyFailureClass,
-    KernelCoordinateBudget, MatrixRole, SmithConstructionBudget, SmithNormalFormWitness,
-    SmithWitnessStage, TerminalRelativeBoundaryBudget, TerminalRelativeBoundaryMatrix,
-    TopologyApplicability, VerifiedSmithNormalForm, VerifiedTerminalRelativeHomology,
+    ExactAlgebraBudget, ExactIntegerMatrix, HomologyCocycleBudget, HomologyDecompositionBudget,
+    HomologyGeneratorBudget, HomologyGeneratorKind, IntegralTopologyError,
+    IntegralTopologyFailureClass, KernelCoordinateBudget, MatrixRole, SmithConstructionBudget,
+    SmithNormalFormWitness, SmithWitnessStage, TerminalRelativeBoundaryBudget,
+    TerminalRelativeBoundaryMatrix, TopologyApplicability, VerifiedSmithNormalForm,
+    VerifiedTerminalRelativeHomology, VerifiedTerminalRelativeHomologyGenerators,
     VerifiedTerminalRelativeKernelTransport, construct_smith_normal_form,
     construct_smith_normal_form_with_checkpoint, extract_terminal_relative_boundary_matrix,
     extract_terminal_relative_boundary_matrix_with_checkpoint, verify_smith_normal_form,
-    verify_smith_normal_form_with_checkpoint, verify_terminal_relative_homology,
-    verify_terminal_relative_homology_generators,
+    verify_smith_normal_form_with_checkpoint, verify_terminal_relative_free_cocycle_periods,
+    verify_terminal_relative_free_cocycle_periods_with_checkpoint,
+    verify_terminal_relative_homology, verify_terminal_relative_homology_generators,
     verify_terminal_relative_homology_generators_with_checkpoint,
     verify_terminal_relative_homology_with_checkpoint, verify_terminal_relative_kernel_transport,
     verify_terminal_relative_kernel_transport_with_checkpoint,
@@ -624,6 +626,88 @@ fn abstract_torsion_pair() -> TerminalRelativePair {
     .expect("abstract torsion terminal-relative pair")
 }
 
+/// Abstract finite-CW mixed fixture only: the retained degree-two boundary is
+/// `[[1,1],[-1,1],[0,0]]`, whose cokernel is `Z/2 + Z`.
+fn abstract_mixed_torsion_free_pair() -> TerminalRelativePair {
+    let complex = FiniteCellComplex::try_new(
+        2,
+        vec![0, 5, 2],
+        vec![
+            BoundaryIncidence::new(
+                CellRef::new(1, 0),
+                CellRef::new(2, 0),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 1),
+                CellRef::new(2, 0),
+                IncidenceSign::Negative,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 3),
+                CellRef::new(2, 0),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 0),
+                CellRef::new(2, 1),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 1),
+                CellRef::new(2, 1),
+                IncidenceSign::Positive,
+            ),
+            BoundaryIncidence::new(
+                CellRef::new(1, 4),
+                CellRef::new(2, 1),
+                IncidenceSign::Positive,
+            ),
+        ],
+    )
+    .expect("mixed torsion/free finite CW complex");
+    let all_cells = (0..5)
+        .map(|ordinal| CellRef::new(1, ordinal))
+        .chain((0..2).map(|ordinal| CellRef::new(2, ordinal)))
+        .collect::<Vec<_>>();
+    let conductor = subcomplex(&complex, "support/mixed-conductor", all_cells.clone());
+    let component = ConductorComponent::new(
+        ConductorComponentId::new("component/torsion").expect("component id"),
+        subcomplex(&complex, "support/mixed-component", all_cells),
+    )
+    .expect("mixed component");
+    TerminalRelativePair::try_new(
+        complex.clone(),
+        conductor,
+        subcomplex(
+            &complex,
+            "support/mixed-relative",
+            [CellRef::new(1, 3), CellRef::new(1, 4)],
+        ),
+        subcomplex(&complex, "support/mixed-insulation-empty", []),
+        vec![component],
+        vec![
+            torsion_terminal(
+                &complex,
+                3,
+                "mixed-driven",
+                TerminalRole::Driven,
+                TerminalOrientation::OutOfConductor,
+                OrientationMapSign::Preserve,
+            ),
+            torsion_terminal(
+                &complex,
+                4,
+                "mixed-return",
+                TerminalRole::ReturnReference,
+                TerminalOrientation::IntoConductor,
+                OrientationMapSign::Reverse,
+            ),
+        ],
+    )
+    .expect("mixed torsion/free terminal-relative pair")
+}
+
 fn boundary_budget(
     max_rows: usize,
     max_cols: usize,
@@ -685,6 +769,18 @@ fn generator_budget(
     max_scalar_operations: u128,
 ) -> HomologyGeneratorBudget {
     HomologyGeneratorBudget::new(
+        max_output_entries,
+        max_retained_entries,
+        max_scalar_operations,
+    )
+}
+
+fn cocycle_budget(
+    max_output_entries: usize,
+    max_retained_entries: usize,
+    max_scalar_operations: u128,
+) -> HomologyCocycleBudget {
+    HomologyCocycleBudget::new(
         max_output_entries,
         max_retained_entries,
         max_scalar_operations,
@@ -812,6 +908,23 @@ fn abstract_torsion_homology() -> VerifiedTerminalRelativeHomology {
     .into_verified();
     verify_terminal_relative_homology(transport, image_smith, homology_budget(6, 48))
         .expect("abstract Z/2 quotient")
+}
+
+fn centered_homology_generators() -> VerifiedTerminalRelativeHomologyGenerators {
+    let (transport, image_smith) = centered_homology_inputs();
+    let homology =
+        verify_terminal_relative_homology(transport, image_smith, homology_budget(24, 280))
+            .expect("centered quotient homology");
+    verify_terminal_relative_homology_generators(homology, generator_budget(6, 286, 36))
+        .expect("centered original-chain generator")
+}
+
+fn abstract_torsion_generators() -> VerifiedTerminalRelativeHomologyGenerators {
+    verify_terminal_relative_homology_generators(
+        abstract_torsion_homology(),
+        generator_budget(4, 52, 10),
+    )
+    .expect("abstract torsion generator")
 }
 
 #[test]
@@ -2375,7 +2488,7 @@ fn it_035_generator_cancellation_is_transactional_through_final_publication() {
 }
 
 #[test]
-fn it_036_zero_homology_preserves_empty_generator_and_filling_shapes() {
+fn it_036_zero_homology_preserves_all_empty_certificate_shapes() {
     let pair = terminal_cut_loop_pair(false);
     let phase = PhaseId::new("phase/a").expect("phase id");
     let outgoing = extract_terminal_relative_boundary_matrix(
@@ -2456,4 +2569,353 @@ fn it_036_zero_homology_preserves_empty_generator_and_filling_shapes() {
     assert_eq!(generators.scalar_operations(), 0);
     assert_eq!(generators.retained_entries(), retained_entries);
     assert_eq!(poll_count, 3);
+
+    let mut period_polls = 0_usize;
+    let periods = verify_terminal_relative_free_cocycle_periods_with_checkpoint(
+        generators,
+        cocycle_budget(0, retained_entries, 0),
+        &mut |_| {
+            period_polls += 1;
+            true
+        },
+    )
+    .expect("zero group has a complete empty period receipt");
+    assert_eq!(
+        (
+            periods.cocycle_representatives().rows(),
+            periods.cocycle_representatives().cols(),
+        ),
+        (2, 0)
+    );
+    assert_eq!(
+        (
+            periods.period_pairing().rows(),
+            periods.period_pairing().cols(),
+        ),
+        (0, 0)
+    );
+    assert_eq!(periods.retained_entries(), retained_entries);
+    assert_eq!(periods.work_items(), 0);
+    assert_eq!(periods.scalar_operations(), 0);
+    assert_eq!(period_polls, 3);
+}
+
+#[test]
+fn it_037_free_integral_cocycle_is_dual_to_the_centered_generator() {
+    let periods = verify_terminal_relative_free_cocycle_periods(
+        centered_homology_generators(),
+        cocycle_budget(7, 293, 60),
+    )
+    .expect("centered free integral period dual");
+
+    assert_eq!(
+        periods.cochain_basis(),
+        &[
+            CellRef::new(1, 1),
+            CellRef::new(1, 3),
+            CellRef::new(1, 4),
+            CellRef::new(1, 5),
+            CellRef::new(1, 6),
+            CellRef::new(1, 7),
+        ]
+    );
+    assert_eq!(
+        (
+            periods.cocycle_representatives().rows(),
+            periods.cocycle_representatives().cols(),
+        ),
+        (6, 1)
+    );
+    assert_eq!(
+        periods.cocycle_representatives().entries(),
+        &[1, -1, 0, 0, 1, 1]
+    );
+    assert_eq!(
+        (
+            periods.period_pairing().rows(),
+            periods.period_pairing().cols(),
+        ),
+        (1, 1)
+    );
+    assert_eq!(periods.period_pairing().entries(), &[1]);
+    assert_eq!(periods.free_cocycle_count(), 1);
+    assert_eq!(periods.paired_generator_column(0), Some(0));
+    assert_eq!(periods.paired_generator_column(1), None);
+    assert_eq!(periods.work_items(), 11);
+    assert_eq!(periods.scalar_operations(), 60);
+    assert_eq!(periods.retained_entries(), 293);
+    assert_eq!(
+        periods.applicability(),
+        TopologyApplicability::TerminalRelativeFreeCocyclePeriodsOnly
+    );
+}
+
+#[test]
+fn it_038_integer_periods_do_not_invent_a_dual_for_torsion() {
+    let generators = abstract_torsion_generators();
+    let mut poll_count = 0_usize;
+    let periods = verify_terminal_relative_free_cocycle_periods_with_checkpoint(
+        generators,
+        cocycle_budget(0, 52, 0),
+        &mut |_| {
+            poll_count += 1;
+            true
+        },
+    )
+    .expect("torsion-only homology has an empty free period dual");
+
+    assert_eq!(
+        (
+            periods.cocycle_representatives().rows(),
+            periods.cocycle_representatives().cols(),
+        ),
+        (2, 0)
+    );
+    assert_eq!(
+        (
+            periods.period_pairing().rows(),
+            periods.period_pairing().cols(),
+        ),
+        (1, 0)
+    );
+    assert!(periods.cocycle_representatives().entries().is_empty());
+    assert!(periods.period_pairing().entries().is_empty());
+    assert_eq!(periods.free_cocycle_count(), 0);
+    assert_eq!(periods.work_items(), 0);
+    assert_eq!(periods.scalar_operations(), 0);
+    assert_eq!(periods.retained_entries(), 52);
+    assert_eq!(poll_count, 3);
+}
+
+#[test]
+fn it_039_mixed_torsion_and_free_period_pairing_is_zero_then_identity() {
+    let pair = abstract_mixed_torsion_free_pair();
+    let phase = PhaseId::new("phase/torsion").expect("phase id");
+    let outgoing = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        1,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("mixed outgoing zero map");
+    let incoming = extract_terminal_relative_boundary_matrix(
+        &pair,
+        &phase,
+        2,
+        TerminalRelativeBoundaryBudget::default(),
+    )
+    .expect("mixed incoming map");
+    assert_eq!((outgoing.matrix().rows(), outgoing.matrix().cols()), (0, 3));
+    assert_eq!(incoming.matrix().entries(), &[1, 1, -1, 1, 0, 0]);
+    let outgoing_smith = construct_smith_normal_form(
+        outgoing.matrix().clone(),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("mixed outgoing Smith form")
+    .into_verified();
+    let transport = verify_terminal_relative_kernel_transport(
+        outgoing,
+        incoming,
+        outgoing_smith,
+        KernelCoordinateBudget::default(),
+    )
+    .expect("mixed kernel transport");
+    assert_eq!(transport.kernel_image().entries(), &[1, 1, -1, 1, 0, 0]);
+    let image_smith = construct_smith_normal_form(
+        transport.kernel_image().clone(),
+        SmithConstructionBudget::default(),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("mixed image Smith form")
+    .into_verified();
+    let homology = verify_terminal_relative_homology(
+        transport,
+        image_smith,
+        HomologyDecompositionBudget::default(),
+    )
+    .expect("mixed quotient homology");
+    assert_eq!(homology.presentation_invariant_factors(), &[1, 2]);
+    assert_eq!(homology.torsion_invariant_factors(), &[2]);
+    assert_eq!(homology.free_rank(), 1);
+    let generators =
+        verify_terminal_relative_homology_generators(homology, HomologyGeneratorBudget::default())
+            .expect("mixed torsion/free generators");
+    assert_eq!(generators.generator_count(), 2);
+    assert_eq!(
+        generators.generator_kind(0),
+        Some(HomologyGeneratorKind::Torsion { order: 2 })
+    );
+    assert_eq!(
+        generators.generator_kind(1),
+        Some(HomologyGeneratorKind::Free)
+    );
+    let prior_retained = generators.retained_entries();
+    let periods =
+        verify_terminal_relative_free_cocycle_periods(generators, HomologyCocycleBudget::default())
+            .expect("mixed free period dual");
+    assert_eq!(
+        (
+            periods.cocycle_representatives().rows(),
+            periods.cocycle_representatives().cols(),
+        ),
+        (3, 1)
+    );
+    assert_eq!(
+        (
+            periods.period_pairing().rows(),
+            periods.period_pairing().cols()
+        ),
+        (2, 1)
+    );
+    assert_eq!(periods.period_pairing().entries(), &[0, 1]);
+    assert_eq!(periods.paired_generator_column(0), Some(1));
+    assert_eq!(periods.work_items(), 7);
+    assert_eq!(periods.scalar_operations(), 21);
+    assert_eq!(periods.retained_entries(), prior_retained + 5);
+}
+
+#[test]
+fn it_040_period_duals_follow_a_sign_changed_complete_smith_witness() {
+    let (outgoing, incoming, outgoing_smith) = centered_kernel_inputs();
+    let transport = verify_terminal_relative_kernel_transport(
+        outgoing,
+        incoming,
+        outgoing_smith,
+        kernel_budget(6, 20, 154, 12, 144),
+    )
+    .expect("centered kernel transport");
+    let image_smith = verify_smith_normal_form(
+        transport.kernel_image().clone(),
+        SmithNormalFormWitness::new(
+            matrix(
+                5,
+                4,
+                &[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            ),
+            matrix(
+                5,
+                5,
+                &[
+                    1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1, 0, 0, 1, 0, 0, 1, 0, -1, 1, 0, -1, -1,
+                ],
+            ),
+            matrix(
+                5,
+                5,
+                &[
+                    1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1, 0, 0, -1, 0, 0, 1, 0, 0, 1, 0, -1, -1,
+                ],
+            ),
+            matrix(4, 4, &[0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0]),
+            matrix(4, 4, &[0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0]),
+        ),
+        ExactAlgebraBudget::default(),
+    )
+    .expect("sign-changed complete image Smith witness");
+    let homology =
+        verify_terminal_relative_homology(transport, image_smith, homology_budget(24, 280))
+            .expect("sign-changed quotient homology");
+    let generators =
+        verify_terminal_relative_homology_generators(homology, generator_budget(6, 286, 36))
+            .expect("sign-changed generator");
+    assert_eq!(
+        generators.cycle_representatives().entries(),
+        &[0, 0, 1, 0, 0, -1]
+    );
+    let periods =
+        verify_terminal_relative_free_cocycle_periods(generators, cocycle_budget(7, 293, 60))
+            .expect("sign-changed free period dual");
+    assert_eq!(
+        periods.cocycle_representatives().entries(),
+        &[-1, 1, 0, 0, -1, -1]
+    );
+    assert_eq!(periods.period_pairing().entries(), &[1]);
+}
+
+#[test]
+fn it_041_free_cocycle_periods_preflight_every_resource_limit() {
+    let generators = centered_homology_generators();
+    for (limits, expected) in [
+        (cocycle_budget(6, 293, 60), "output"),
+        (cocycle_budget(7, 292, 60), "retained"),
+        (cocycle_budget(7, 293, 59), "scalar"),
+    ] {
+        let error = verify_terminal_relative_free_cocycle_periods(generators.clone(), limits)
+            .expect_err("limit minus one must refuse free-cocycle publication");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        match expected {
+            "output" => assert!(matches!(
+                error,
+                IntegralTopologyError::HomologyCocycleOutputBudgetExceeded {
+                    requested: 7,
+                    max: 6,
+                }
+            )),
+            "retained" => assert!(matches!(
+                error,
+                IntegralTopologyError::RetainedEntryBudgetExceeded {
+                    requested: 293,
+                    max: 292,
+                }
+            )),
+            "scalar" => assert!(matches!(
+                error,
+                IntegralTopologyError::ScalarWorkBudgetExceeded {
+                    requested: 60,
+                    max: 59,
+                }
+            )),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn it_042_free_cocycle_cancellation_is_transactional_through_publication() {
+    let generators = centered_homology_generators();
+    let mut poll_count = 0_usize;
+    let complete = verify_terminal_relative_free_cocycle_periods_with_checkpoint(
+        generators.clone(),
+        cocycle_budget(7, 293, 60),
+        &mut |_| {
+            poll_count += 1;
+            true
+        },
+    )
+    .expect("uninterrupted free-cocycle period verification");
+    assert_eq!(complete.work_items(), 11);
+    assert_eq!(complete.scalar_operations(), 60);
+    assert_eq!(poll_count, 14);
+
+    for stop_at in 0..poll_count {
+        let mut observed = 0_usize;
+        let error = verify_terminal_relative_free_cocycle_periods_with_checkpoint(
+            generators.clone(),
+            cocycle_budget(7, 293, 60),
+            &mut |_| {
+                let keep_running = observed != stop_at;
+                observed += 1;
+                keep_running
+            },
+        )
+        .expect_err("every free-cocycle cancellation poll must refuse");
+        assert_eq!(error.failure_class(), IntegralTopologyFailureClass::Unknown);
+        assert!(matches!(
+            &error,
+            IntegralTopologyError::HomologyCocycleCancelled { .. }
+        ));
+        if stop_at + 1 == poll_count {
+            assert!(matches!(
+                error,
+                IntegralTopologyError::HomologyCocycleCancelled {
+                    phase: "terminal-relative free-cocycle finalize",
+                    completed_work_items: 11,
+                    planned_work_items: 11,
+                    completed_scalar_operations: 60,
+                    planned_scalar_operations: 60,
+                }
+            ));
+        }
+    }
 }

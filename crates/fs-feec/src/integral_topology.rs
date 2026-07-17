@@ -41,6 +41,12 @@
 //! boundary equations before publication. These generators remain relative
 //! to the admitted Smith witnesses; no canonical-basis or physical claim is
 //! added.
+//!
+//! The seventh tranche constructs the integral cocycles dual to the retained
+//! free generators and checks their complete integer period-pairing matrix.
+//! This is the witness-relative free `Hom(H_k, Z)` sector only: torsion
+//! cohomology, linking, harmonic representatives, continuum periods, and
+//! physical winding remain outside its authority.
 
 use core::fmt;
 
@@ -95,6 +101,13 @@ pub const DEFAULT_MAX_GENERATOR_OUTPUT_ENTRIES: usize = DEFAULT_MAX_MATRIX_ENTRI
 /// Default retained entries across homology authority and generator lift.
 pub const DEFAULT_MAX_GENERATOR_RETAINED_ENTRIES: usize =
     DEFAULT_MAX_HOMOLOGY_RETAINED_ENTRIES + DEFAULT_MAX_GENERATOR_OUTPUT_ENTRIES;
+/// Default maximum free-cocycle and period-pairing coefficients retained at
+/// once.
+pub const DEFAULT_MAX_COCYCLE_OUTPUT_ENTRIES: usize = 2 * DEFAULT_MAX_MATRIX_ENTRIES;
+/// Default retained entries across generator authority, free cocycles, and
+/// their period-pairing matrix.
+pub const DEFAULT_MAX_COCYCLE_RETAINED_ENTRIES: usize =
+    DEFAULT_MAX_GENERATOR_RETAINED_ENTRIES + DEFAULT_MAX_COCYCLE_OUTPUT_ENTRIES;
 
 /// Explicit resource envelope for exact integer witness admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -500,6 +513,58 @@ impl Default for HomologyGeneratorBudget {
         Self::new(
             DEFAULT_MAX_GENERATOR_OUTPUT_ENTRIES,
             DEFAULT_MAX_GENERATOR_RETAINED_ENTRIES,
+            DEFAULT_MAX_SCALAR_OPERATIONS,
+        )
+    }
+}
+
+/// Resource envelope for exact free integral cocycles and their period duals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HomologyCocycleBudget {
+    max_output_entries: usize,
+    max_retained_entries: usize,
+    max_scalar_operations: u128,
+}
+
+impl HomologyCocycleBudget {
+    /// Construct a free-cocycle/period envelope.
+    #[must_use]
+    pub const fn new(
+        max_output_entries: usize,
+        max_retained_entries: usize,
+        max_scalar_operations: u128,
+    ) -> Self {
+        Self {
+            max_output_entries,
+            max_retained_entries,
+            max_scalar_operations,
+        }
+    }
+
+    /// Maximum entries across cocycle and period-pairing matrices.
+    #[must_use]
+    pub const fn max_output_entries(self) -> usize {
+        self.max_output_entries
+    }
+
+    /// Maximum retained entries including the complete generator authority.
+    #[must_use]
+    pub const fn max_retained_entries(self) -> usize {
+        self.max_retained_entries
+    }
+
+    /// Maximum checked cocycle-lift, coboundary, and pairing scalar terms.
+    #[must_use]
+    pub const fn max_scalar_operations(self) -> u128 {
+        self.max_scalar_operations
+    }
+}
+
+impl Default for HomologyCocycleBudget {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_COCYCLE_OUTPUT_ENTRIES,
+            DEFAULT_MAX_COCYCLE_RETAINED_ENTRIES,
             DEFAULT_MAX_SCALAR_OPERATIONS,
         )
     }
@@ -1508,6 +1573,18 @@ pub enum HomologyGeneratorKind {
     Free,
 }
 
+/// Exact free-cocycle construction or verification phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomologyCocycleStage {
+    /// `V_A^-T[:, rank..] * U_L^T[:, boundary_rank..]` lift into the
+    /// pair-bound dual `C^k` basis.
+    OriginalCochainLift,
+    /// Exact cocycle check `A_(k+1)^T * Omega = 0`.
+    CocycleVerification,
+    /// Exact free-period check `G^T * Omega = [0 | I]^T`.
+    PeriodDualVerification,
+}
+
 /// Untrusted complete Smith-normal-form witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmithNormalFormWitness {
@@ -1589,6 +1666,10 @@ pub enum TopologyApplicability {
     /// order boundary witnesses. No period, naturality, embedding, or
     /// physical-R3 conclusion follows.
     TerminalRelativeHomologyGeneratorsOnly,
+    /// Exact integer cocycles dual to the witness-relative free homology
+    /// generators. No torsion-cohomology, metric, continuum, or physical
+    /// period conclusion follows.
+    TerminalRelativeFreeCocyclePeriodsOnly,
 }
 
 /// Authority classification for an unsuccessful exact verification.
@@ -1887,6 +1968,123 @@ impl VerifiedTerminalRelativeHomologyGenerators {
     #[must_use]
     pub const fn applicability(&self) -> TopologyApplicability {
         TopologyApplicability::TerminalRelativeHomologyGeneratorsOnly
+    }
+}
+
+/// Exact free integral cocycles and their periods on the retained homology
+/// generators.
+///
+/// Each column of [`Self::cocycle_representatives`] is expressed in the dual
+/// of [`Self::cochain_basis`]; evaluating a chain column `x` means
+/// `Omega^T x`. Rows of [`Self::period_pairing`] follow the generator order
+/// (torsion, then free), and columns follow the free cocycle order. The checked
+/// matrix is exactly `[0 | I]^T`: integer-valued cocycles kill finite torsion
+/// and pair primitively with the selected free generators.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedTerminalRelativeFreeCocyclePeriods {
+    generators: VerifiedTerminalRelativeHomologyGenerators,
+    cocycle_representatives: ExactIntegerMatrix,
+    period_pairing: ExactIntegerMatrix,
+    work_items: u128,
+    scalar_operations: u128,
+    retained_entries: usize,
+}
+
+impl VerifiedTerminalRelativeFreeCocyclePeriods {
+    /// Complete generator authority to which these cocycles are dual.
+    #[must_use]
+    pub const fn generators(&self) -> &VerifiedTerminalRelativeHomologyGenerators {
+        &self.generators
+    }
+
+    /// Admitted terminal-relative pair identity.
+    #[must_use]
+    pub const fn pair_id(&self) -> TerminalRelativePairId {
+        self.generators.pair_id()
+    }
+
+    /// Admitted phase identity.
+    #[must_use]
+    pub const fn phase(&self) -> &PhaseId {
+        self.generators.phase()
+    }
+
+    /// Admitted phase-owned conductor component.
+    #[must_use]
+    pub const fn component(&self) -> &ConductorComponentId {
+        self.generators.component()
+    }
+
+    /// Homological/cohomological degree `k` represented by the pairing.
+    #[must_use]
+    pub const fn degree(&self) -> u8 {
+        self.generators.degree()
+    }
+
+    /// Pair-bound ordered `C_k` cells whose induced dual basis supplies the
+    /// cocycle rows.
+    #[must_use]
+    pub fn cochain_basis(&self) -> &[CellRef] {
+        self.generators.original_chain_basis()
+    }
+
+    /// Integer cocycle columns in the pair-bound dual `C^k` basis.
+    #[must_use]
+    pub const fn cocycle_representatives(&self) -> &ExactIntegerMatrix {
+        &self.cocycle_representatives
+    }
+
+    /// Exact generator-by-cocycle integer period matrix `[0 | I]^T`.
+    #[must_use]
+    pub const fn period_pairing(&self) -> &ExactIntegerMatrix {
+        &self.period_pairing
+    }
+
+    /// Rank of the verified free period lattice.
+    #[must_use]
+    pub const fn free_cocycle_count(&self) -> usize {
+        self.cocycle_representatives.cols
+    }
+
+    /// Generator column paired to one free cocycle, or `None` outside the
+    /// retained free-cocycle range.
+    #[must_use]
+    pub fn paired_generator_column(&self, cocycle: usize) -> Option<usize> {
+        if cocycle >= self.free_cocycle_count() {
+            return None;
+        }
+        Some(self.generators.torsion_count + cocycle)
+    }
+
+    /// Deterministic output and equation-verification work units completed.
+    #[must_use]
+    pub const fn work_items(&self) -> u128 {
+        self.work_items
+    }
+
+    /// Checked cocycle-lift, coboundary, and period-pairing terms completed.
+    #[must_use]
+    pub const fn scalar_operations(&self) -> u128 {
+        self.scalar_operations
+    }
+
+    /// Retained integer/cell entries across generators, cocycles, and periods.
+    #[must_use]
+    pub const fn retained_entries(&self) -> usize {
+        self.retained_entries
+    }
+
+    /// Consume the period receipt while preserving its complete generator
+    /// authority.
+    #[must_use]
+    pub fn into_generators(self) -> VerifiedTerminalRelativeHomologyGenerators {
+        self.generators
+    }
+
+    /// Exact witness-relative free integral period duals only.
+    #[must_use]
+    pub const fn applicability(&self) -> TopologyApplicability {
+        TopologyApplicability::TerminalRelativeFreeCocyclePeriodsOnly
     }
 }
 
@@ -2632,6 +2830,423 @@ fn poll_homology_generators(
         Ok(())
     } else {
         Err(IntegralTopologyError::HomologyGeneratorCancelled {
+            phase,
+            completed_work_items,
+            planned_work_items,
+            completed_scalar_operations,
+            planned_scalar_operations,
+        })
+    }
+}
+
+/// Construct the exact integer cocycles dual to the retained free generators
+/// without injected cancellation.
+#[allow(clippy::large_types_passed_by_value)]
+pub fn verify_terminal_relative_free_cocycle_periods(
+    generators: VerifiedTerminalRelativeHomologyGenerators,
+    budget: HomologyCocycleBudget,
+) -> Result<VerifiedTerminalRelativeFreeCocyclePeriods, IntegralTopologyError> {
+    verify_terminal_relative_free_cocycle_periods_with_checkpoint(generators, budget, &mut |_| true)
+}
+
+/// Construct and independently replay the free integer period dual under
+/// bounded cancellation polling.
+///
+/// For outgoing `U_A A_k V_A = D_A` of rank `r` and lower-image
+/// `U_L L V_L = D_L` of rank `s`, the cocycle columns are
+/// `Omega = V_A^-T[:, r..] U_L^T[:, s..]`. Publication requires both
+/// `A_(k+1)^T Omega = 0` and `G^T Omega = [0 | I]^T` exactly. This proves the
+/// free `Hom(H_k, Z)` dual selected by the retained witnesses; it does not
+/// compute the universal-coefficient `Ext` sector or torsion linking.
+#[allow(clippy::large_types_passed_by_value)]
+#[allow(clippy::too_many_lines)]
+pub fn verify_terminal_relative_free_cocycle_periods_with_checkpoint(
+    generators: VerifiedTerminalRelativeHomologyGenerators,
+    budget: HomologyCocycleBudget,
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+) -> Result<VerifiedTerminalRelativeFreeCocyclePeriods, IntegralTopologyError> {
+    let homology = generators.homology();
+    let transport = homology.transport();
+    let incoming = transport.incoming_boundary().matrix();
+    let outgoing_smith = transport.outgoing_smith();
+    let image_smith = homology.image_smith();
+    let generator_matrix = generators.cycle_representatives();
+
+    let chain_extent = transport.chain_extent();
+    let incoming_cols = incoming.cols;
+    let outgoing_rank = transport.outgoing_rank();
+    let cycle_rank = homology.cycle_rank();
+    let boundary_rank = homology.boundary_rank();
+    let torsion_count = generators.torsion_count;
+    let generator_count = generators.generator_count();
+    let free_count = generators.free_generator_count();
+
+    let internal_shapes_hold = incoming.rows == chain_extent
+        && outgoing_rank <= chain_extent
+        && cycle_rank == chain_extent - outgoing_rank
+        && boundary_rank <= cycle_rank
+        && free_count == cycle_rank - boundary_rank
+        && generator_count == torsion_count + free_count
+        && generator_matrix.rows == chain_extent
+        && generator_matrix.cols == generator_count
+        && generators.original_chain_basis().len() == chain_extent
+        && outgoing_smith.right_inverse().rows == chain_extent
+        && outgoing_smith.right_inverse().cols == chain_extent
+        && image_smith.left_transform().rows == cycle_rank
+        && image_smith.left_transform().cols == cycle_rank;
+    if !internal_shapes_hold {
+        return Err(IntegralTopologyError::HomologyCocycleInvariantLost {
+            field: "retained free-cocycle shapes and ranks",
+        });
+    }
+
+    let cocycle_entries =
+        chain_extent
+            .checked_mul(free_count)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "terminal-relative free-cocycle output entries",
+            })?;
+    let pairing_entries =
+        generator_count
+            .checked_mul(free_count)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "terminal-relative period-pairing output entries",
+            })?;
+    let output_entries = cocycle_entries.checked_add(pairing_entries).ok_or(
+        IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative free-cocycle aggregate output entries",
+        },
+    )?;
+    if output_entries > budget.max_output_entries {
+        return Err(IntegralTopologyError::HomologyCocycleOutputBudgetExceeded {
+            requested: output_entries,
+            max: budget.max_output_entries,
+        });
+    }
+    let retained_entries = generators
+        .retained_entries
+        .checked_add(output_entries)
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative free-cocycle retained entries",
+        })?;
+    if retained_entries > budget.max_retained_entries {
+        return Err(IntegralTopologyError::RetainedEntryBudgetExceeded {
+            requested: retained_entries,
+            max: budget.max_retained_entries,
+        });
+    }
+    let scalar_operations = planned_homology_cocycle_scalar_operations(
+        chain_extent,
+        incoming_cols,
+        cycle_rank,
+        generator_count,
+        free_count,
+    )?;
+    if scalar_operations > budget.max_scalar_operations {
+        return Err(IntegralTopologyError::ScalarWorkBudgetExceeded {
+            requested: scalar_operations,
+            max: budget.max_scalar_operations,
+        });
+    }
+    let work_items = planned_homology_cocycle_work_items(
+        chain_extent,
+        incoming_cols,
+        generator_count,
+        free_count,
+    )?;
+
+    let mut completed_work = 0_u128;
+    let mut completed_scalar = 0_u128;
+    poll_homology_cocycles(
+        checkpoint,
+        "terminal-relative free-cocycle preflight",
+        completed_work,
+        work_items,
+        completed_scalar,
+        scalar_operations,
+    )?;
+    poll_homology_cocycles(
+        checkpoint,
+        "terminal-relative free-cocycle output allocation",
+        completed_work,
+        work_items,
+        completed_scalar,
+        scalar_operations,
+    )?;
+    let mut cocycle_values = allocate_zeroed(cocycle_entries, "free cocycle representatives")?;
+    let mut pairing_values = allocate_zeroed(pairing_entries, "free period pairing")?;
+
+    let outgoing_right_inverse = outgoing_smith.right_inverse();
+    let image_left = image_smith.left_transform();
+    for row in 0..chain_extent {
+        for cocycle in 0..free_count {
+            poll_homology_cocycles(
+                checkpoint,
+                "terminal-relative original-cocycle lift",
+                completed_work,
+                work_items,
+                completed_scalar,
+                scalar_operations,
+            )?;
+            let presentation_row = boundary_rank + cocycle;
+            let mut sum = 0_i128;
+            for term in 0..cycle_rank {
+                sum = checked_homology_cocycle_accumulate(
+                    sum,
+                    outgoing_right_inverse.entry(outgoing_rank + term, row),
+                    image_left.entry(presentation_row, term),
+                    HomologyCocycleStage::OriginalCochainLift,
+                    row,
+                    cocycle,
+                    term,
+                    &mut completed_scalar,
+                )?;
+            }
+            cocycle_values[row * free_count + cocycle] = sum;
+            completed_work =
+                completed_work
+                    .checked_add(1)
+                    .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                        phase: "completed terminal-relative free-cocycle work",
+                    })?;
+        }
+    }
+    let cocycle_representatives = ExactIntegerMatrix {
+        rows: chain_extent,
+        cols: free_count,
+        entries: cocycle_values,
+    };
+
+    for incoming_column in 0..incoming_cols {
+        for cocycle in 0..free_count {
+            poll_homology_cocycles(
+                checkpoint,
+                "terminal-relative cocycle verification",
+                completed_work,
+                work_items,
+                completed_scalar,
+                scalar_operations,
+            )?;
+            let actual = checked_homology_cocycle_transposed_dot(
+                &cocycle_representatives,
+                cocycle,
+                incoming,
+                incoming_column,
+                HomologyCocycleStage::CocycleVerification,
+                &mut completed_scalar,
+            )?;
+            if actual != 0 {
+                return Err(IntegralTopologyError::HomologyCocycleVerificationMismatch {
+                    stage: HomologyCocycleStage::CocycleVerification,
+                    row: incoming_column,
+                    col: cocycle,
+                    expected: 0,
+                    actual,
+                });
+            }
+            completed_work =
+                completed_work
+                    .checked_add(1)
+                    .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                        phase: "completed terminal-relative free-cocycle work",
+                    })?;
+        }
+    }
+
+    for generator in 0..generator_count {
+        for cocycle in 0..free_count {
+            poll_homology_cocycles(
+                checkpoint,
+                "terminal-relative period-dual verification",
+                completed_work,
+                work_items,
+                completed_scalar,
+                scalar_operations,
+            )?;
+            let actual = checked_homology_cocycle_transposed_dot(
+                &cocycle_representatives,
+                cocycle,
+                generator_matrix,
+                generator,
+                HomologyCocycleStage::PeriodDualVerification,
+                &mut completed_scalar,
+            )?;
+            let expected = i128::from(generator == torsion_count + cocycle);
+            if actual != expected {
+                return Err(IntegralTopologyError::HomologyCocycleVerificationMismatch {
+                    stage: HomologyCocycleStage::PeriodDualVerification,
+                    row: generator,
+                    col: cocycle,
+                    expected,
+                    actual,
+                });
+            }
+            pairing_values[generator * free_count + cocycle] = actual;
+            completed_work =
+                completed_work
+                    .checked_add(1)
+                    .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                        phase: "completed terminal-relative free-cocycle work",
+                    })?;
+        }
+    }
+    let period_pairing = ExactIntegerMatrix {
+        rows: generator_count,
+        cols: free_count,
+        entries: pairing_values,
+    };
+
+    poll_homology_cocycles(
+        checkpoint,
+        "terminal-relative free-cocycle finalize",
+        completed_work,
+        work_items,
+        completed_scalar,
+        scalar_operations,
+    )?;
+    debug_assert_eq!(completed_work, work_items);
+    debug_assert_eq!(completed_scalar, scalar_operations);
+
+    Ok(VerifiedTerminalRelativeFreeCocyclePeriods {
+        generators,
+        cocycle_representatives,
+        period_pairing,
+        work_items: completed_work,
+        scalar_operations: completed_scalar,
+        retained_entries,
+    })
+}
+
+fn planned_homology_cocycle_scalar_operations(
+    chain_extent: usize,
+    incoming_cols: usize,
+    cycle_rank: usize,
+    generator_count: usize,
+    free_count: usize,
+) -> Result<u128, IntegralTopologyError> {
+    let lift = checked_homology_generator_plan_product(
+        &[chain_extent, cycle_rank, free_count],
+        "terminal-relative free-cocycle lift scalar operations",
+    )?;
+    let cocycle_checks = checked_homology_generator_plan_product(
+        &[incoming_cols, chain_extent, free_count],
+        "terminal-relative cocycle-check scalar operations",
+    )?;
+    let period_checks = checked_homology_generator_plan_product(
+        &[generator_count, chain_extent, free_count],
+        "terminal-relative period-check scalar operations",
+    )?;
+    [lift, cocycle_checks, period_checks]
+        .into_iter()
+        .try_fold(0_u128, u128::checked_add)
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative free-cocycle scalar operations",
+        })
+}
+
+fn planned_homology_cocycle_work_items(
+    chain_extent: usize,
+    incoming_cols: usize,
+    generator_count: usize,
+    free_count: usize,
+) -> Result<u128, IntegralTopologyError> {
+    let cocycle_output = checked_homology_generator_plan_product(
+        &[chain_extent, free_count],
+        "terminal-relative free-cocycle output work",
+    )?;
+    let cocycle_checks = checked_homology_generator_plan_product(
+        &[incoming_cols, free_count],
+        "terminal-relative cocycle-check work",
+    )?;
+    let period_checks = checked_homology_generator_plan_product(
+        &[generator_count, free_count],
+        "terminal-relative period-check work",
+    )?;
+    [cocycle_output, cocycle_checks, period_checks]
+        .into_iter()
+        .try_fold(0_u128, u128::checked_add)
+        .ok_or(IntegralTopologyError::WorkPlanOverflow {
+            phase: "terminal-relative free-cocycle work items",
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checked_homology_cocycle_accumulate(
+    sum: i128,
+    left: i128,
+    right: i128,
+    stage: HomologyCocycleStage,
+    row: usize,
+    col: usize,
+    term: usize,
+    completed_scalar: &mut u128,
+) -> Result<i128, IntegralTopologyError> {
+    let product = left.checked_mul(right).ok_or(
+        IntegralTopologyError::HomologyCocycleArithmeticOverflow {
+            stage,
+            row,
+            col,
+            term,
+        },
+    )?;
+    let next = sum.checked_add(product).ok_or(
+        IntegralTopologyError::HomologyCocycleArithmeticOverflow {
+            stage,
+            row,
+            col,
+            term,
+        },
+    )?;
+    *completed_scalar =
+        completed_scalar
+            .checked_add(1)
+            .ok_or(IntegralTopologyError::WorkPlanOverflow {
+                phase: "completed terminal-relative free-cocycle scalar operations",
+            })?;
+    Ok(next)
+}
+
+fn checked_homology_cocycle_transposed_dot(
+    left: &ExactIntegerMatrix,
+    left_col: usize,
+    right: &ExactIntegerMatrix,
+    right_col: usize,
+    stage: HomologyCocycleStage,
+    completed_scalar: &mut u128,
+) -> Result<i128, IntegralTopologyError> {
+    if left.rows != right.rows {
+        return Err(IntegralTopologyError::HomologyCocycleInvariantLost {
+            field: "free-cocycle verification row extent",
+        });
+    }
+    let mut sum = 0_i128;
+    for term in 0..left.rows {
+        sum = checked_homology_cocycle_accumulate(
+            sum,
+            left.entry(term, left_col),
+            right.entry(term, right_col),
+            stage,
+            right_col,
+            left_col,
+            term,
+            completed_scalar,
+        )?;
+    }
+    Ok(sum)
+}
+
+fn poll_homology_cocycles(
+    checkpoint: &mut impl FnMut(&'static str) -> bool,
+    phase: &'static str,
+    completed_work_items: u128,
+    planned_work_items: u128,
+    completed_scalar_operations: u128,
+    planned_scalar_operations: u128,
+) -> Result<(), IntegralTopologyError> {
+    if checkpoint(phase) {
+        Ok(())
+    } else {
+        Err(IntegralTopologyError::HomologyCocycleCancelled {
             phase,
             completed_work_items,
             planned_work_items,
@@ -4404,6 +5019,58 @@ pub enum IntegralTopologyError {
         /// Planned checked scalar terms.
         planned_scalar_operations: u128,
     },
+    /// Free-cocycle and period-pairing output exceeded its aggregate envelope.
+    HomologyCocycleOutputBudgetExceeded {
+        /// Required retained output coefficients.
+        requested: usize,
+        /// Maximum admitted output coefficients.
+        max: usize,
+    },
+    /// An opaque generator authority violated a free-cocycle invariant.
+    HomologyCocycleInvariantLost {
+        /// Broken invariant field.
+        field: &'static str,
+    },
+    /// Checked cocycle construction or pairing arithmetic overflowed.
+    HomologyCocycleArithmeticOverflow {
+        /// Cocycle calculation or verification phase.
+        stage: HomologyCocycleStage,
+        /// Output or equation row.
+        row: usize,
+        /// Cocycle column.
+        col: usize,
+        /// Inner-product term.
+        term: usize,
+    },
+    /// A constructed cocycle violated its exact coboundary or period equation.
+    ///
+    /// The input generator authority is already opaque and verified, so this
+    /// indicates an internal composition failure rather than refuted user data.
+    HomologyCocycleVerificationMismatch {
+        /// Equation that disagreed.
+        stage: HomologyCocycleStage,
+        /// Equation row.
+        row: usize,
+        /// Cocycle column.
+        col: usize,
+        /// Exact required value.
+        expected: i128,
+        /// Exact observed value.
+        actual: i128,
+    },
+    /// Cancellation was observed before free-cocycle publication.
+    HomologyCocycleCancelled {
+        /// Observation phase.
+        phase: &'static str,
+        /// Completed deterministic output/check work items.
+        completed_work_items: u128,
+        /// Planned deterministic output/check work items.
+        planned_work_items: u128,
+        /// Completed checked scalar terms.
+        completed_scalar_operations: u128,
+        /// Planned checked scalar terms.
+        planned_scalar_operations: u128,
+    },
     /// Matrix extent exceeded its explicit envelope.
     MatrixExtentExceeded {
         /// Supplied rows.
@@ -4604,6 +5271,11 @@ impl IntegralTopologyError {
             | Self::HomologyGeneratorArithmeticOverflow { .. }
             | Self::HomologyGeneratorVerificationMismatch { .. }
             | Self::HomologyGeneratorCancelled { .. }
+            | Self::HomologyCocycleOutputBudgetExceeded { .. }
+            | Self::HomologyCocycleInvariantLost { .. }
+            | Self::HomologyCocycleArithmeticOverflow { .. }
+            | Self::HomologyCocycleVerificationMismatch { .. }
+            | Self::HomologyCocycleCancelled { .. }
             | Self::MatrixExtentExceeded { .. }
             | Self::MatrixEntryBudgetExceeded { .. }
             | Self::RetainedMatrixExceedsBudget { .. }
