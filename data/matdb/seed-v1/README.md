@@ -303,6 +303,39 @@ NASA/NAPC gear-oil reference:
 - <https://ntrs.nasa.gov/citations/19910020285>
 - <https://ntrs.nasa.gov/api/citations/19910020285/downloads/19910020285.pdf>
 
+## Rheolube 2000 Pennzane bearing-grease tranche
+
+`rheolube-2000-pennzane-grease/` pins the named rolling-bearing grease in Paul
+A. Bessette's NASA-CP-3350 paper. The source identifies Rheolube 2000 as the
+then-available grease prepared from Pennzane SHF X-2000 multiply alkylated
+cyclopentane base oil. Its sodium octadecylterephthalamate thickener is
+described as approximately `20%` of the formulation and as suitable for
+high-speed rolling-element-bearing applications.
+
+Table 7 contributes three bounded claims: NLGI consistency grade `2`, density
+`0.89 g/cm3` at exactly `25 degC`, and oil separation `3.3%` after exactly
+`24 h` at `100 degC`. NLGI grade is a named empirical consistency scale, not a
+ratio quantity. The table labels its values typical and reports no lot,
+manufacturing or vacuum-hardening state, measurement standards, replicates,
+dispersion, or confidence metadata, so all three claims carry `Unstated`
+uncertainty.
+
+The prose gives an approximate `260 degC` dropping point and the table prints
+unworked/60-stroke worked penetrations without a unit or method. Those values
+remain observation-only. The wear-scar, oxidation-pressure-drop, and
+extrapolated vapor-pressure rows also stay outside the bulk card: the first two
+are conditioned test-system outcomes, while the PDF text does not preserve an
+unambiguous vapor-pressure exponent. Color, odor, and ultrafiltration status
+remain descriptive provenance rather than quantitative claims.
+
+The NASA proceedings record is public with public use permitted. The manifest
+retains the paper, proceedings, table, and NTRS identifier.
+
+Rheolube 2000 reference:
+
+- <https://ntrs.nasa.gov/citations/19970021613>
+- <https://ntrs.nasa.gov/api/citations/19970021613/downloads/19970021613.pdf>
+
 ## S2-S pearlitic gray-cast-iron tranche
 
 `gray-cast-iron-s2-s/` retains one engine-relevant experimental ingot from
@@ -389,6 +422,10 @@ cargo run -p xtask -- matdb-pack \
   --out /path/to/napc-pe-5-l-1307-1553-mil-l-23699-gear-oil.fsmatpk
 
 cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/rheolube-2000-pennzane-grease/manifest.tsv \
+  --out /path/to/rheolube-2000-pennzane-shf-x-2000-bearing-grease.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/gray-cast-iron-s2-s/manifest.tsv \
   --out /path/to/pearlitic-gray-cast-iron-s2-s-sr-fesi.fsmatpk
 ```
@@ -467,6 +504,16 @@ model is inferred. The report's EHD film thickness, lambda ratio, and
 surface-pitting lives belong to the tested oil/gear/roughness/load/temperature
 system and are deliberately excluded from these bulk-oil packs. The two B
 batch columns remain distinct where the source reports distinct values.
+
+The Rheolube 2000 tranche is not a universal bearing-grease card or a complete
+formulation. It binds the public product name, Pennzane SHF X-2000 base-oil
+association, thickener identity, and the three admitted typical values, but
+does not claim exact thickener fraction, dropping point, penetration,
+volatility, wear, oxidation life, torque, friction, EHD film, bearing life,
+vacuum-hardening state, contamination state, compatibility, or service
+temperature range. NLGI grade is retained as an ordinal named-scale reading.
+Application admission still requires the actual bearing, load, speed,
+temperature, atmosphere, preparation, and life-test evidence.
 
 The S2-S gray-iron tranche applies only to the reported charge, composition,
 Sr-FeSi inoculation, mould, and fully pearlitic/type-A-graphite state. Its

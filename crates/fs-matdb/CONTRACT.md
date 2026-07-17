@@ -336,7 +336,9 @@ NIST displayed-precision agreement checks.
   and one carburized case-depth claim. Two named NASA/NAPC gear-oil packs add
   nine explicitly unit-bearing flash-point, pour-point, specific-gravity, and
   total-acid-number claims while refusing the source's unitless viscosity
-  numbers. The first
+  numbers. The named Rheolube 2000 bearing-grease pack adds one NLGI
+  named-scale reading, one exact-temperature density, and one time/temperature-
+  bound oil-separation fraction. The first
   pinned gray-iron tranche adds nine reported composition/carbon-equivalent
   values, four quantified microstructure fields, and two low-precision
   graph-digitized room-state properties.
@@ -376,7 +378,10 @@ NIST displayed-precision agreement checks.
   specification context, but the source says formulation chemistry is
   proprietary and omits the viscosity unit. No viscosity claim, formulation
   identity, or gear-system fatigue/EHD result is laundered into those bulk-oil
-  cards. The gray-
+  cards. The Rheolube 2000 pack binds its Pennzane base-oil association,
+  thickener identity, and three typical source values, but refuses approximate,
+  unitless, extrapolated, or test-system rows as exact bulk claims. It supplies
+  no generic bearing-life or service-envelope authority. The gray-
   iron claims bind Wang et al.'s S2-S charge, chemistry, Sr-FeSi inoculation,
   EN-1561 Type II mould, and fully pearlitic/type-A-graphite state. Its Figure 8
   strength and conductivity centers retain only graph-supported precision;

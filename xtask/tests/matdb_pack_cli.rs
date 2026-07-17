@@ -38,9 +38,12 @@ const NAPC_PE_5_L_1274_GEAR_OIL_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/napc-pe-5-l-1274-gear-oil/manifest.tsv";
 const NAPC_PE_5_L_1307_1553_GEAR_OIL_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/napc-pe-5-l-1307-1553-gear-oil/manifest.tsv";
+const RHEOLUBE_2000_PENNZANE_GREASE_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/rheolube-2000-pennzane-grease/manifest.tsv";
 const GRAY_CAST_IRON_S2_S_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/gray-cast-iron-s2-s/manifest.tsv";
 const NASA_SEED_LICENSE: &str = "Work-of-the-US-Government-Public-Use-Permitted";
+const PUBLIC_USE_PERMITTED_LICENSE: &str = "Public-Use-Permitted";
 const CC_BY_4_0_LICENSE: &str = "CC-BY-4.0";
 const NIST_PUBLIC_INFORMATION_LICENSE: &str = "NIST-Public-Information-Attribution-Requested";
 const NASA_METHANE_MOLAR_MASS_G_PER_MOL: f64 = 16.042_46;
@@ -1989,6 +1992,163 @@ fn g3_cli_compiles_committed_napc_gear_oils_without_fusing_batches() {
                 .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
         );
     }
+}
+
+#[test]
+fn g3_cli_compiles_committed_rheolube_2000_bearing_grease_seed() {
+    let manifest = workspace_path(RHEOLUBE_2000_PENNZANE_GREASE_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed Rheolube 2000 bearing-grease seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("rheolube-2000-first.fsmatpk");
+    let second_path = directory.join("rheolube-2000-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Rheolube 2000 seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Rheolube 2000 seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Rheolube 2000 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Rheolube 2000 pack");
+    let second_bytes = fs::read(second_path).expect("read second Rheolube 2000 pack");
+    assert_eq!(first_bytes, second_bytes, "Rheolube 2000 pack bytes moved");
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode Rheolube 2000 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Rheolube 2000 pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "rheolube-2000-pennzane-shf-x-2000-bearing-grease"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("public use permitted")
+    );
+    assert_eq!(decoded.claims().claim_count(), 3);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let dimensionless = Dims([0, 0, 0, 0, 0, 0]);
+    let density_dims = Dims([-3, 1, 0, 0, 0, 0]);
+    let expected = [
+        ("nlgi_consistency_grade", 2.0, dimensionless, None, None),
+        ("density", 890.0, density_dims, Some(298.15), None),
+        (
+            "oil_separation_mass_fraction",
+            0.033,
+            dimensionless,
+            Some(373.15),
+            Some(86_400.0),
+        ),
+    ];
+    let mut shared_observation = None;
+
+    for (property, expected_value, expected_dims, temperature_k, duration_s) in expected {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(
+            claims.len(),
+            1,
+            "expected one Rheolube 2000 {property} claim"
+        );
+        let (id, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Rheolube 2000 {property} was not scalar");
+        };
+        assert_eq!(*dims, expected_dims);
+        let relative_error = (*value - expected_value).abs() / expected_value.abs().max(1.0);
+        assert!(
+            relative_error <= 2.0e-15,
+            "Rheolube 2000 {property} moved by {relative_error:e} relative"
+        );
+        match temperature_k {
+            Some(temperature_k) => assert_eq!(
+                claim.validity.bound("temperature"),
+                Some((temperature_k, temperature_k))
+            ),
+            None => assert_eq!(claim.validity.bound("temperature"), None),
+        }
+        match duration_s {
+            Some(duration_s) => assert_eq!(
+                claim.validity.bound("duration"),
+                Some((duration_s, duration_s))
+            ),
+            None => assert_eq!(claim.validity.bound("duration"), None),
+        }
+        assert_eq!(
+            claim.validity.bounds().len(),
+            temperature_k.is_some() as usize + duration_s.is_some() as usize
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(
+            claim.interpolation,
+            InterpolationPolicy::ConstantWithinValidity
+        );
+        assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+        assert!(claim.provenance.source.contains("NASA-CP-3350"));
+        assert!(claim.provenance.source.contains("[source:primary]"));
+        assert_eq!(claim.observations.len(), 1);
+        match shared_observation {
+            Some(observation) => assert_eq!(claim.observations[0], observation),
+            None => shared_observation = Some(claim.observations[0]),
+        }
+
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("Rheolube 2000 observation remains linked");
+        assert_eq!(
+            observation.specimen,
+            "Rheolube-2000-Pennzane-SHF-X-2000-sodium-octadecylterephthalamate-bearing-grease"
+        );
+        assert!(observation.method.contains("Bessette Table 7"));
+        assert!(observation.method.contains("typical grease properties"));
+        assert!(observation.caveats.contains("approximately 20 percent"));
+        assert!(observation.caveats.contains("approximately 260 degC"));
+        assert!(observation.caveats.contains("labels results typical"));
+        assert!(observation.caveats.contains("vacuum-hardening state"));
+        assert!(observation.caveats.contains("no printed unit or method"));
+        assert!(observation.caveats.contains("not admitted as bulk claims"));
+        assert_eq!(claim.observations[0].0, observation.content_hash());
+        assert_eq!(id.0, claim.content_hash());
+    }
+
+    for refused_property in [
+        "dropping_point_temperature",
+        "penetration_scale_reading",
+        "wear_scar_diameter",
+        "oxidation_pressure_drop",
+        "vapor_pressure",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "Rheolube 2000 {refused_property} crossed the no-claim boundary"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
 }
 
 #[test]
