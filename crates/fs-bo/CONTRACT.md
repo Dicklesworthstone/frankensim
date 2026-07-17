@@ -212,6 +212,25 @@ one low mantissa bit in one finite reported best-high trace value and
 reseals the payload. Payload validation therefore succeeds while the
 typed reference-output gate, stable red Casebook record, and caught
 `assert_green` merge gate all retain the mismatch.
+`tests/turbo_study_replay.rs` (3 Casebook cases plus a seeded red
+self-test): runs production `turbo_minimize` on a two-dimensional
+constant plateau configured for three initial points, one-failure
+halving, and collapse after the second adaptive callback. The ten-call
+budget therefore spans exactly two independently reconstructible rounds
+and counts a collapse at the end of each; no third initializer runs. The
+configured `refit_every = 2` cadence is bound into the receipt, and a
+fresh scrambled-Sobol initializer is independently regenerated for each
+round. The canonical receipt binds every `TurboConfig` field, dependency
+and RNG-semantics versions,
+every callback point and value, and all five public `TurboReport`
+fields. Independent accounting regenerates each initializer, objective
+value, strict-tie earliest best, full best-so-far trace, evaluation
+count, collapse cadence, and aggregate restart count; a second full run
+must reproduce the complete frame exactly. A disclosed `StreamKey`
+changes one low mantissa bit in one finite `x_best` coordinate and
+reseals the payload, after which the callback/report audit, typed
+reference-output gate, stable red Casebook record, and caught
+`assert_green` merge gate all retain the mismatch.
 
 ## No-claim boundaries
 
@@ -239,11 +258,14 @@ typed reference-output gate, stable red Casebook record, and caught
   here.
 - No hyperparameter marginalization (point estimates by LML); no
   input warping.
-- The short-study replay receipts cover two finite Branin
-  configurations (sequential EI and two-fidelity cost-aware allocation)
-  and same-process same-ISA execution. They make no optimizer-quality,
-  all-objective, all-configuration, all-seed, cross-ISA,
-  cancellation/`Cx`, persistence, authenticated-ledger, or performance
-  claim. Their FNV identities and local reference gates are
-  evidence-fixture plumbing, not cryptographic artifact seals or a
-  production admission service.
+- The short-study replay receipts cover three finite fixtures
+  (sequential Branin EI, two-fidelity Branin allocation, and TuRBO
+  plateau collapse/restart) and same-process same-ISA execution. They
+  make no optimizer-quality, all-objective, all-configuration,
+  all-seed, cross-ISA, cancellation/`Cx`, persistence,
+  authenticated-ledger, or performance claim. The TuRBO receipt infers
+  round boundaries only from its fixed plateau and configuration; it
+  makes no general claim about internal trust-region length histories,
+  expansion branches, or replacement decisions. These receipts' FNV
+  identities and local reference gates are evidence-fixture plumbing,
+  not cryptographic artifact seals or a production admission service.
