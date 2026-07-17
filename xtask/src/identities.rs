@@ -12325,7 +12325,8 @@ fn admit_candidate_receipt(cache: &mut Cache, value: Value) {
                 concat!(
                     "{{\"id\":\"{tracking_issue}\",\"status\":\"in_progress\",\"title\":\"Ratify demo identity\"}}\n",
                     "{{\"id\":\"frankensim-demo\\u002e1\",\"status\":\"closed\",\"title\":\"Escaped duplicate\"}}\n",
-                )
+                ),
+                tracking_issue = tracking_issue,
             ),
         )
         .expect("escaped duplicate tracking beads");
