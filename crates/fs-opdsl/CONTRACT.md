@@ -249,6 +249,17 @@ documented in the bead close); cross-ISA golden hash.
   exposes that identity, the re-derived dimensional proof, exact sign,
   role/ownership, generated `SystemId`, structural-generated authority, and
   explicit no-claim language.
+- `PortEquationSpec::from_storage`, `from_dissipation`, and
+  `from_source_or_reservoir` derive the accounting role and unique concrete
+  owner from an already-admitted closed `fs-couple` primitive instead of
+  accepting caller-repeated metadata. Storage state schema/dimension,
+  potential, and constitutive-gradient ID; dissipation law, constitutive
+  operator, and mandatory sign evidence; and source class, boundary identity,
+  signed coordinates, and included/external treatment are appended to the
+  generated semantic identity. Receipts expose the closed primitive family and
+  relation ID. Changing an operator, evidence kind/receipt, or boundary
+  treatment therefore changes the `SystemId`; owned loss identities also bind
+  the retained constitutive evidence.
 - `compile_stream_equation` imports an already-admitted `fs_couple::StreamPort`
   and lowers its mass, canonical constituent amount, momentum, energy, and
   entropy rates into five typed external boundary field blocks. The generated
@@ -267,17 +278,20 @@ documented in the bead close); cross-ISA golden hash.
   do not establish this cross-kind exclusivity claim.
 - `tests/ports.rs` supplies G0/G3 scalar, field-duality, and stream generation;
   orientation reversal; canonical same-kind and mixed batch order; ownership
-  uniqueness; stream-energy double-count adversaries; component shape;
-  empty-input; and metadata-resource-bomb fixtures. The test target is
-  explicitly gated by `required-features = ["port-equations"]`.
+  uniqueness; primitive operator/evidence/boundary identity adversaries;
+  stream-energy double-count adversaries; component shape; empty-input; and
+  metadata-resource-bomb fixtures. The test target is explicitly gated by
+  `required-features = ["port-equations"]`.
 - NO-CLAIM: this slice generates structural equations; it does not execute the
   scalar/vector/tensor/field contraction, quadrature, trace pullback, numeric
   port adapter, source/dissipation law, or closed-window audit. Stream-bundle
   lowering and stream-vs-effort/flow exclusivity are structural only: no
   numeric boundary application, pullback, chart-evidence authentication, or
-  window recomposition is claimed. Junction permutations, storage/source
-  operator lowering, and reversible skew-block preservation remain subsequent
-  I01.3 slices. A receipt
+  window recomposition is claimed. Primitive operator IDs and evidence are
+  identity-bound but are not executed; typed storage-state action lowering is
+  pending because the neutral primitive does not yet expose state-coordinate
+  dimensions. Junction permutations and reversible skew-block preservation
+  remain subsequent I01.3 slices. A receipt
   proves that the supplied schema lowered consistently, not that the schema or
   its referenced physical evidence is true. The [F] baseline deck, activation
   threshold, kill criterion, cost percentiles, and independent reproduction

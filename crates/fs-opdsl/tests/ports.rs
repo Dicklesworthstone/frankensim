@@ -1,20 +1,24 @@
 //! G0/G3 fixtures for feature-gated I01.3 port equation lowering.
 
+use core::num::NonZeroUsize;
+
 use fs_couple::{
-    AmountFlowRate, ChemicalEnergyAccounting, ChemicalEnergyInput, ConservationRole,
-    CoordinateBinding, DeviatoricStressWork, EntropyFlowRate, FieldMeasureSide,
+    AccountingBoundary, AmountFlowRate, BoundaryTreatment, ChemicalEnergyAccounting,
+    ChemicalEnergyInput, ConservationRole, CoordinateBinding, DeviatoricStressWork,
+    DissipationEvidence, DissipationLaw, DissipativeRelation, EntropyFlowRate, FieldMeasureSide,
     MovingStreamEnthalpyChart, PortKind, PortOrientation, PortSchema, PortTimestamp,
-    PortValueShape, PowerPairing, SpecificEnergy, StableId, StreamChartBinding,
-    StreamConstituentFlow, StreamConstituentId, StreamEnergyChart, StreamKinematics, StreamPort,
+    PortValueShape, PowerPairing, SourceClass, SourceOrReservoir, SpecificEnergy, StableId,
+    StorageElement, StoragePotential, StreamChartBinding, StreamConstituentFlow,
+    StreamConstituentId, StreamEnergyChart, StreamKinematics, StreamPort,
     StreamStressWorkConvention,
 };
 use fs_iface::SpaceType;
 use fs_opdsl::{
     AccountingTermKind, CompiledInterfaceEquation, InterfaceEquationSpec, LossOwnershipId,
     OwnershipDisposition, PortDiscretization, PortEquationError, PortEquationSense,
-    PortEquationSpec, SpatialSupport, StreamEnergyChartKind, StreamEnergyOwnership,
-    StreamEquationSpec, SystemExpr, compile_interface_equations, compile_port_equation,
-    compile_port_equations, compile_stream_equation,
+    PortEquationSpec, PortPrimitiveKind, SpatialSupport, StreamEnergyChartKind,
+    StreamEnergyOwnership, StreamEquationSpec, SystemExpr, compile_interface_equations,
+    compile_port_equation, compile_port_equations, compile_stream_equation,
 };
 use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Dims, Force, MassFlowRate, Power, Velocity};
@@ -114,6 +118,60 @@ fn stream_spec(port: &str, owner: &str) -> StreamEquationSpec {
         admitted_stream(port),
         stable(&format!("receipt-{port}")),
         StreamEnergyOwnership::Owned(stable(owner)),
+    )
+}
+
+fn storage_spec(gradient: &str) -> PortEquationSpec {
+    let primitive = StorageElement::new(
+        stable("storage-relation"),
+        scalar_schema("storage-port", PortOrientation::OutwardFromOwner),
+        StoragePotential::Hamiltonian,
+        stable("storage-state-v1"),
+        NonZeroUsize::new(3).expect("nonzero storage state"),
+        stable(gradient),
+    )
+    .expect("admitted storage primitive");
+    PortEquationSpec::from_storage(
+        primitive,
+        PortDiscretization::lumped(),
+        PortEquationSense::AsDeclared,
+    )
+}
+
+fn dissipation_spec(evidence: DissipationEvidence) -> PortEquationSpec {
+    let primitive = DissipativeRelation::new(
+        stable("dissipation-relation"),
+        scalar_schema("dissipation-port", PortOrientation::OutwardFromOwner),
+        DissipationLaw::Viscous,
+        stable("operator-viscous-v1"),
+        evidence,
+    )
+    .expect("admitted dissipation primitive");
+    PortEquationSpec::from_dissipation(
+        primitive,
+        PortDiscretization::lumped(),
+        PortEquationSense::AsDeclared,
+    )
+}
+
+fn source_spec(treatment: BoundaryTreatment) -> PortEquationSpec {
+    let schema = scalar_schema("source-port", PortOrientation::OutwardFromOwner);
+    let boundary = AccountingBoundary::new(
+        stable("source-boundary"),
+        schema.coordinates().clone(),
+        treatment,
+    );
+    let primitive = SourceOrReservoir::new(
+        stable("source-relation"),
+        schema,
+        SourceClass::Reservoir,
+        boundary,
+    )
+    .expect("admitted source primitive");
+    PortEquationSpec::from_source_or_reservoir(
+        primitive,
+        PortDiscretization::lumped(),
+        PortEquationSense::AsDeclared,
     )
 }
 
@@ -574,4 +632,68 @@ fn g3_mixed_batch_is_permutation_stable_and_refuses_stream_energy_double_count()
             && first_port == "port-owned"
             && second_port == "stream-owned"
     ));
+}
+
+#[test]
+fn g3_closed_primitive_metadata_is_identity_bearing_and_owner_derived() {
+    let storage_a = compile_port_equation(storage_spec("gradient-storage-a"))
+        .expect("storage primitive lowers");
+    let storage_b = compile_port_equation(storage_spec("gradient-storage-b"))
+        .expect("alternate storage operator lowers");
+    assert_ne!(
+        storage_a.receipt().system_identity(),
+        storage_b.receipt().system_identity(),
+        "constitutive-gradient identity is semantic"
+    );
+    assert_eq!(
+        storage_a.receipt().primitive_kind(),
+        Some(PortPrimitiveKind::Storage)
+    );
+    assert_eq!(storage_a.receipt().primitive_id(), Some("storage-relation"));
+    assert!(matches!(
+        storage_a.receipt().ownership(),
+        OwnershipDisposition::Owned(owner) if owner.as_str() == "storage-relation"
+    ));
+
+    let monotone = compile_port_equation(dissipation_spec(DissipationEvidence::Monotonicity(
+        stable("evidence-monotone-v1"),
+    )))
+    .expect("monotone dissipation lowers");
+    let production = compile_port_equation(dissipation_spec(
+        DissipationEvidence::NonnegativeProduction(stable("evidence-production-v1")),
+    ))
+    .expect("production-evidenced dissipation lowers");
+    assert_ne!(
+        monotone.receipt().system_identity(),
+        production.receipt().system_identity(),
+        "evidence kind and receipt are semantic"
+    );
+    assert_ne!(
+        monotone.receipt().loss_ownership_id(),
+        production.receipt().loss_ownership_id(),
+        "nominal loss ownership binds its constitutive evidence"
+    );
+    assert_eq!(
+        monotone.receipt().primitive_kind(),
+        Some(PortPrimitiveKind::Dissipation)
+    );
+
+    let included = compile_port_equation(source_spec(BoundaryTreatment::IncludedSourceTerm))
+        .expect("included source lowers");
+    let reservoir =
+        compile_port_equation(source_spec(BoundaryTreatment::ExternalReservoirExchange))
+            .expect("external reservoir lowers");
+    assert_ne!(
+        included.receipt().system_identity(),
+        reservoir.receipt().system_identity(),
+        "accounting-boundary treatment is semantic"
+    );
+    assert_eq!(
+        reservoir.receipt().primitive_kind(),
+        Some(PortPrimitiveKind::SourceOrReservoir)
+    );
+    assert_eq!(reservoir.receipt().primitive_id(), Some("source-relation"));
+    let json = reservoir.receipt().to_json();
+    assert!(json.contains("\"primitive_kind\":\"source-or-reservoir\""));
+    assert!(json.contains("\"primitive_id\":\"source-relation\""));
 }

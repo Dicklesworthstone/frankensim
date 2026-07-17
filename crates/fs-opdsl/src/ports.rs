@@ -13,9 +13,11 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use fs_couple::{
-    ConservationRole, FieldMeasureSide, PORT_SCHEMA_VERSION, PortKind, PortOrientation, PortSchema,
-    PortValueShape, PowerPairing, STREAM_PORT_VERSION, StableId, StreamConstituentId,
-    StreamEnergyChart, StreamPort, StreamStressWorkConvention,
+    BoundaryTreatment, ConservationRole, DissipationEvidence, DissipationLaw, DissipativeRelation,
+    FieldMeasureSide, PORT_SCHEMA_VERSION, PortKind, PortOrientation, PortSchema, PortValueShape,
+    PowerPairing, STREAM_PORT_VERSION, SourceClass, SourceOrReservoir, StableId, StorageElement,
+    StoragePotential, StreamConstituentId, StreamEnergyChart, StreamPort,
+    StreamStressWorkConvention,
 };
 use fs_iface::SpaceType;
 use fs_qty::Dims;
@@ -43,6 +45,7 @@ const AMOUNT_FLOW_DIMS: Dims = Dims([0, 0, -1, 0, 0, 1]);
 const MOMENTUM_FLOW_DIMS: Dims = Dims([1, 1, -2, 0, 0, 0]);
 const ENTROPY_FLOW_DIMS: Dims = Dims([2, 1, -3, -1, 0, 0]);
 const PORT_EXTENSION_VERSION: u32 = 1;
+const PRIMITIVE_BINDING_VERSION: u32 = 1;
 const STREAM_EXTENSION_VERSION: u32 = 1;
 const LOSS_OWNERSHIP_DOMAIN_V1: &str = "org.frankensim.fs-opdsl.loss-ownership.v1";
 
@@ -206,6 +209,52 @@ impl PortDiscretization {
     }
 }
 
+/// Closed one-port primitive family retained by a compiled equation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortPrimitiveKind {
+    /// Stored-energy descriptor with a named constitutive gradient.
+    Storage,
+    /// Evidence-bound irreversible constitutive relation.
+    Dissipation,
+    /// Included source or external reservoir boundary.
+    SourceOrReservoir,
+}
+
+impl PortPrimitiveKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Dissipation => "dissipation",
+            Self::SourceOrReservoir => "source-or-reservoir",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PortPrimitiveBinding {
+    Storage(StorageElement),
+    Dissipation(DissipativeRelation),
+    SourceOrReservoir(SourceOrReservoir),
+}
+
+impl PortPrimitiveBinding {
+    fn kind(&self) -> PortPrimitiveKind {
+        match self {
+            Self::Storage(_) => PortPrimitiveKind::Storage,
+            Self::Dissipation(_) => PortPrimitiveKind::Dissipation,
+            Self::SourceOrReservoir(_) => PortPrimitiveKind::SourceOrReservoir,
+        }
+    }
+
+    fn id(&self) -> &StableId {
+        match self {
+            Self::Storage(primitive) => primitive.id(),
+            Self::Dissipation(primitive) => primitive.id(),
+            Self::SourceOrReservoir(primitive) => primitive.id(),
+        }
+    }
+}
+
 /// Complete request to compile one admitted port schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortEquationSpec {
@@ -214,6 +263,7 @@ pub struct PortEquationSpec {
     sense: PortEquationSense,
     term_kind: AccountingTermKind,
     ownership: OwnershipDisposition,
+    primitive: Option<PortPrimitiveBinding>,
 }
 
 impl PortEquationSpec {
@@ -234,6 +284,61 @@ impl PortEquationSpec {
             sense,
             term_kind,
             ownership,
+            primitive: None,
+        }
+    }
+
+    /// Construct a stored-energy port equation whose owner, state schema, and
+    /// constitutive-gradient reference come from one admitted primitive.
+    #[must_use]
+    pub fn from_storage(
+        primitive: StorageElement,
+        discretization: PortDiscretization,
+        sense: PortEquationSense,
+    ) -> Self {
+        Self {
+            schema: primitive.port().clone(),
+            discretization,
+            sense,
+            term_kind: AccountingTermKind::Storage,
+            ownership: OwnershipDisposition::Owned(primitive.id().clone()),
+            primitive: Some(PortPrimitiveBinding::Storage(primitive)),
+        }
+    }
+
+    /// Construct an irreversible port equation whose constitutive operator and
+    /// sign evidence are bound into semantic identity.
+    #[must_use]
+    pub fn from_dissipation(
+        primitive: DissipativeRelation,
+        discretization: PortDiscretization,
+        sense: PortEquationSense,
+    ) -> Self {
+        Self {
+            schema: primitive.port().clone(),
+            discretization,
+            sense,
+            term_kind: AccountingTermKind::Dissipation,
+            ownership: OwnershipDisposition::Owned(primitive.id().clone()),
+            primitive: Some(PortPrimitiveBinding::Dissipation(primitive)),
+        }
+    }
+
+    /// Construct a source/reservoir port equation whose class and explicit
+    /// signed accounting boundary are bound into semantic identity.
+    #[must_use]
+    pub fn from_source_or_reservoir(
+        primitive: SourceOrReservoir,
+        discretization: PortDiscretization,
+        sense: PortEquationSense,
+    ) -> Self {
+        Self {
+            schema: primitive.port().clone(),
+            discretization,
+            sense,
+            term_kind: AccountingTermKind::Source,
+            ownership: OwnershipDisposition::Owned(primitive.id().clone()),
+            primitive: Some(PortPrimitiveBinding::SourceOrReservoir(primitive)),
         }
     }
 
@@ -241,6 +346,19 @@ impl PortEquationSpec {
     #[must_use]
     pub const fn schema(&self) -> &PortSchema {
         &self.schema
+    }
+
+    /// Retained admitted primitive family, when constructed from a closed
+    /// `fs-couple` one-port descriptor.
+    #[must_use]
+    pub fn primitive_kind(&self) -> Option<PortPrimitiveKind> {
+        self.primitive.as_ref().map(PortPrimitiveBinding::kind)
+    }
+
+    /// Stable relation identity of the retained primitive, if present.
+    #[must_use]
+    pub fn primitive_id(&self) -> Option<&StableId> {
+        self.primitive.as_ref().map(PortPrimitiveBinding::id)
     }
 }
 
@@ -586,6 +704,8 @@ pub struct PortEquationReceipt {
     term_kind: AccountingTermKind,
     ownership: OwnershipDisposition,
     loss_ownership_id: Option<LossOwnershipId>,
+    primitive_kind: Option<PortPrimitiveKind>,
+    primitive_id: Option<String>,
 }
 
 impl PortEquationReceipt {
@@ -668,6 +788,19 @@ impl PortEquationReceipt {
         self.loss_ownership_id
     }
 
+    /// Retained closed primitive family, if this request was constructed from
+    /// an admitted `fs-couple` storage/loss/source descriptor.
+    #[must_use]
+    pub const fn primitive_kind(&self) -> Option<PortPrimitiveKind> {
+        self.primitive_kind
+    }
+
+    /// Stable relation identity of the retained primitive.
+    #[must_use]
+    pub fn primitive_id(&self) -> Option<&str> {
+        self.primitive_id.as_deref()
+    }
+
     /// Re-derived power dimensions after the pairing measure is applied.
     #[must_use]
     pub const fn product_dims(&self) -> Dims {
@@ -681,6 +814,15 @@ impl PortEquationReceipt {
         let loss_ownership_id = self
             .loss_ownership_id
             .map_or_else(|| "null".to_string(), |id| format!("\"{}\"", id.to_hex()));
+        let primitive_fields = self
+            .primitive_kind
+            .zip(self.primitive_id.as_ref())
+            .map_or_else(String::new, |(kind, id)| {
+                format!(
+                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"",
+                    kind.as_str()
+                )
+            });
         format!(
             "{{\"schema\":\"{}\",\"port_id\":\"{}\",\
              \"compiler_version\":\"{}\",\"feature\":\"port-equations\",\
@@ -689,7 +831,7 @@ impl PortEquationReceipt {
              \"effort_dims\":{},\"flow_dims\":{},\"measure_dims\":{},\
              \"product_dims\":{},\"sense\":\"{}\",\"sign\":{},\
              \"term_kind\":\"{}\",\"ownership\":\"{}\",\
-             \"loss_ownership_id\":{},\
+             \"loss_ownership_id\":{}{},\
              \"authority\":\"structural-generated\",\
              \"no_claim\":\"numeric contraction, quadrature, adapter truth, and closed-window conservation remain external\"}}",
             PORT_EQUATION_RECEIPT_SCHEMA_V1,
@@ -708,6 +850,7 @@ impl PortEquationReceipt {
             self.term_kind.as_str(),
             self.ownership.diagnostic(),
             loss_ownership_id,
+            primitive_fields,
         )
     }
 }
@@ -1178,6 +1321,8 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
         rhs,
     })?;
     let system = system.admit()?;
+    let primitive_kind = spec.primitive_kind();
+    let primitive_id = spec.primitive_id().map(|id| id.as_str().to_string());
     let receipt = PortEquationReceipt {
         port_id: spec.schema.id().as_str().to_string(),
         port_schema_version: spec.schema.version(),
@@ -1192,6 +1337,8 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
         term_kind: spec.term_kind,
         ownership: spec.ownership,
         loss_ownership_id,
+        primitive_kind,
+        primitive_id,
     };
     Ok(CompiledPortEquation { system, receipt })
 }
@@ -1560,6 +1707,9 @@ fn encode_extension(
     bytes.extend_from_slice(&(effort_space.n as u64).to_le_bytes());
     bytes.push(flow_space.degree);
     bytes.extend_from_slice(&(flow_space.n as u64).to_le_bytes());
+    if let Some(primitive) = &spec.primitive {
+        encode_primitive_binding(&mut bytes, primitive);
+    }
     if bytes.len() > MAX_SYSTEM_EXTENSION_BYTES {
         return Err(PortEquationError::CompilerMetadataTooLarge {
             bytes: bytes.len(),
@@ -1592,6 +1742,10 @@ fn extension_estimate(spec: &PortEquationSpec) -> Result<usize, PortEquationErro
                     cap: MAX_SYSTEM_EXTENSION_BYTES,
                 })?;
     }
+    if let Some(primitive) = &spec.primitive {
+        variable_bytes =
+            checked_metadata_add(variable_bytes, primitive_binding_variable_bytes(primitive)?)?;
+    }
     let estimated =
         variable_bytes
             .checked_add(256)
@@ -1606,6 +1760,84 @@ fn extension_estimate(spec: &PortEquationSpec) -> Result<usize, PortEquationErro
         });
     }
     Ok(estimated)
+}
+
+fn encode_primitive_binding(bytes: &mut Vec<u8>, primitive: &PortPrimitiveBinding) {
+    bytes.push(0x80);
+    bytes.extend_from_slice(&PRIMITIVE_BINDING_VERSION.to_le_bytes());
+    match primitive {
+        PortPrimitiveBinding::Storage(storage) => {
+            bytes.push(0);
+            push_text(bytes, storage.id().as_str());
+            bytes.push(match storage.potential() {
+                StoragePotential::Hamiltonian => 0,
+                StoragePotential::FreeEnergy => 1,
+            });
+            push_text(bytes, storage.state_schema().as_str());
+            bytes.extend_from_slice(&(storage.state_dimension().get() as u64).to_le_bytes());
+            push_text(bytes, storage.constitutive_gradient().as_str());
+        }
+        PortPrimitiveBinding::Dissipation(dissipation) => {
+            bytes.push(1);
+            push_text(bytes, dissipation.id().as_str());
+            bytes.push(dissipation_law_tag(dissipation.law()));
+            push_text(bytes, dissipation.constitutive_operator().as_str());
+            match dissipation.evidence() {
+                DissipationEvidence::Monotonicity(evidence) => {
+                    bytes.push(0);
+                    push_text(bytes, evidence.as_str());
+                }
+                DissipationEvidence::NonnegativeProduction(evidence) => {
+                    bytes.push(1);
+                    push_text(bytes, evidence.as_str());
+                }
+            }
+        }
+        PortPrimitiveBinding::SourceOrReservoir(source) => {
+            bytes.push(2);
+            push_text(bytes, source.id().as_str());
+            bytes.push(source_class_tag(source.class()));
+            push_text(bytes, source.boundary().id().as_str());
+            bytes.push(boundary_treatment_tag(source.boundary().treatment()));
+            push_text(bytes, source.boundary().coordinates().basis().as_str());
+            push_text(bytes, source.boundary().coordinates().frame().as_str());
+            bytes.push(orientation_tag(
+                source.boundary().coordinates().orientation(),
+            ));
+        }
+    }
+}
+
+fn primitive_binding_variable_bytes(
+    primitive: &PortPrimitiveBinding,
+) -> Result<usize, PortEquationError> {
+    match primitive {
+        PortPrimitiveBinding::Storage(storage) => [
+            storage.id().as_str().len(),
+            storage.state_schema().as_str().len(),
+            storage.constitutive_gradient().as_str().len(),
+        ]
+        .into_iter()
+        .try_fold(64usize, checked_metadata_add),
+        PortPrimitiveBinding::Dissipation(dissipation) => [
+            dissipation.id().as_str().len(),
+            dissipation.constitutive_operator().as_str().len(),
+            match dissipation.evidence() {
+                DissipationEvidence::Monotonicity(evidence)
+                | DissipationEvidence::NonnegativeProduction(evidence) => evidence.as_str().len(),
+            },
+        ]
+        .into_iter()
+        .try_fold(64usize, checked_metadata_add),
+        PortPrimitiveBinding::SourceOrReservoir(source) => [
+            source.id().as_str().len(),
+            source.boundary().id().as_str().len(),
+            source.boundary().coordinates().basis().as_str().len(),
+            source.boundary().coordinates().frame().as_str().len(),
+        ]
+        .into_iter()
+        .try_fold(64usize, checked_metadata_add),
+    }
 }
 
 fn push_text(bytes: &mut Vec<u8>, value: &str) {
@@ -1720,6 +1952,31 @@ const fn accounting_kind_tag(kind: AccountingTermKind) -> u8 {
         AccountingTermKind::Storage => 1,
         AccountingTermKind::Source => 2,
         AccountingTermKind::Dissipation => 3,
+    }
+}
+
+const fn dissipation_law_tag(law: DissipationLaw) -> u8 {
+    match law {
+        DissipationLaw::Resistive => 0,
+        DissipationLaw::Frictional => 1,
+        DissipationLaw::Viscous => 2,
+        DissipationLaw::Conductive => 3,
+        DissipationLaw::Plastic => 4,
+    }
+}
+
+const fn source_class_tag(class: SourceClass) -> u8 {
+    match class {
+        SourceClass::PrescribedEffort => 0,
+        SourceClass::PrescribedFlow => 1,
+        SourceClass::Reservoir => 2,
+    }
+}
+
+const fn boundary_treatment_tag(treatment: BoundaryTreatment) -> u8 {
+    match treatment {
+        BoundaryTreatment::IncludedSourceTerm => 0,
+        BoundaryTreatment::ExternalReservoirExchange => 1,
     }
 }
 
