@@ -1618,6 +1618,99 @@ fn rust_string_literals(source: &str) -> Result<Vec<RustStringLiteral<'_>>, Stri
     Ok(literals)
 }
 
+fn rust_offset_is_code(source: &str, offset: usize, literals: &[RustStringLiteral<'_>]) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut literal_index = 0usize;
+    while cursor <= offset && cursor < bytes.len() {
+        while literals
+            .get(literal_index)
+            .is_some_and(|literal| literal.end <= cursor)
+        {
+            literal_index += 1;
+        }
+        if let Some(literal) = literals.get(literal_index)
+            && literal.start == cursor
+        {
+            if offset < literal.end {
+                return false;
+            }
+            cursor = literal.end;
+            literal_index += 1;
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            let end = source[cursor..]
+                .find('\n')
+                .map_or(bytes.len(), |relative| cursor + relative + 1);
+            if offset < end {
+                return false;
+            }
+            cursor = end;
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < bytes.len() && depth > 0 {
+                if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes.get(cursor..cursor + 2) == Some(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            if offset < cursor || depth != 0 {
+                return false;
+            }
+            continue;
+        }
+        if bytes[cursor] == b'\''
+            && let Some(end) = char_literal_end(bytes, cursor)
+        {
+            if offset < end {
+                return false;
+            }
+            cursor = end;
+            continue;
+        }
+        cursor += 1;
+    }
+    cursor > offset
+}
+
+fn rust_declaration_start(
+    source: &str,
+    literals: &[RustStringLiteral<'_>],
+    declaration: &str,
+) -> Option<usize> {
+    let mut line_start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let leading = line
+            .bytes()
+            .take_while(|byte| matches!(*byte, b' ' | b'\t'))
+            .count();
+        let candidate = line_start + leading;
+        let trimmed = &line[leading..];
+        if let Some(after) = trimmed.strip_prefix(declaration)
+            && after.as_bytes().first().is_some_and(|byte| {
+                matches!(
+                    *byte,
+                    b':' | b'<' | b';' | b'{' | b' ' | b'\t' | b'\r' | b'\n'
+                )
+            })
+            && rust_offset_is_code(source, candidate, literals)
+        {
+            return Some(candidate);
+        }
+        line_start += line.len();
+    }
+    None
+}
+
 fn declared_function_name(raw: &str) -> Option<String> {
     let mut line = raw.trim_start();
     if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
@@ -1699,21 +1792,49 @@ fn literal_is_citation_field(literal: RustStringLiteral<'_>) -> bool {
 /// the field name so the guard does not inventory its policy data as an output
 /// sink. Only this declaration region is exempt; executable xtask functions
 /// remain subject to the same producer scan as every other Rust source.
-fn citable_guard_metadata_literal(
+#[derive(Debug, Clone, Copy)]
+struct CitableGuardMetadataRanges {
+    field: (usize, usize),
+    allowlist: (usize, usize),
+}
+
+fn citable_guard_metadata_ranges(
     path: &str,
     source: &str,
-    literal: RustStringLiteral<'_>,
-) -> bool {
+    literals: &[RustStringLiteral<'_>],
+) -> Option<CitableGuardMetadataRanges> {
     if path != "xtask/src/main.rs" {
-        return false;
+        return None;
     }
-    let Some(start) = source.find("const CITATION_FIELD_NAME") else {
+    let field_start = rust_declaration_start(source, literals, "const CITATION_FIELD_NAME")?;
+    let allowlist_start =
+        rust_declaration_start(source, literals, "const CITABLE_PRODUCER_ALLOWLIST")?;
+    let struct_start = rust_declaration_start(source, literals, "struct RustStringLiteral")?;
+    if !(field_start < allowlist_start && allowlist_start < struct_start) {
+        return None;
+    }
+    let field_end = source[field_start..allowlist_start]
+        .find(';')
+        .map(|relative| field_start + relative + 1)?;
+    let allowlist_end = source[allowlist_start..struct_start]
+        .find("];")
+        .map(|relative| allowlist_start + relative + 2)?;
+    Some(CitableGuardMetadataRanges {
+        field: (field_start, field_end),
+        allowlist: (allowlist_start, allowlist_end),
+    })
+}
+
+fn citable_guard_metadata_literal(
+    source: &str,
+    literal: RustStringLiteral<'_>,
+    ranges: Option<CitableGuardMetadataRanges>,
+) -> bool {
+    let Some(ranges) = ranges else {
         return false;
     };
-    let Some(relative_end) = source[start..].find("struct RustStringLiteral") else {
-        return false;
-    };
-    (start..start + relative_end).contains(&literal.start)
+    ((ranges.field.0..ranges.field.1).contains(&literal.start)
+        || (ranges.allowlist.0..ranges.allowlist.1).contains(&literal.start))
         && matches!(
             enclosing_function(source, literal.start).1,
             RustOwnerScope::Module
@@ -1728,6 +1849,26 @@ fn citable_guard_metadata_literal(
 struct CitationFragmentState<'a> {
     prefix: Option<RustStringLiteral<'a>>,
     suffix: Option<RustStringLiteral<'a>>,
+}
+
+fn literal_has_dynamic_citation_fragments(
+    content: &str,
+    citation_prefix: &str,
+    citation_suffix: &str,
+) -> bool {
+    if !content.contains(citation_prefix) || !content.contains(citation_suffix) {
+        return false;
+    }
+    if content.contains(CITATION_FIELD_NAME) {
+        // Remove every complete spelling first. This keeps ordinary diagnostic
+        // repetitions and format captures such as `{citation_eligible}` from
+        // masquerading as split producers, while an unmatched extra half
+        // remains visible and fail-closed.
+        let residual = content.replace(CITATION_FIELD_NAME, "");
+        residual.contains(citation_prefix) || residual.contains(citation_suffix)
+    } else {
+        true
+    }
 }
 
 /// Whether `offset` is still inside the braced scope beginning at `open`.
@@ -1873,19 +2014,26 @@ fn scan_citable_producer_source(
     let mut occurrences = Vec::new();
     let mut fragment_states = BTreeMap::<RustOwnerScope, CitationFragmentState<'_>>::new();
     let (citation_prefix, citation_suffix) = CITATION_FIELD_NAME.split_at(CITATION_FIELD_SEAM);
-    for literal in rust_string_literals(source)? {
+    let literals = rust_string_literals(source)?;
+    let guard_metadata = citable_guard_metadata_ranges(path, source, &literals);
+    for literal in literals {
         if matcher_only_literal(source, literal.start)
             || parser_key_literal(source, literal)
             || cfg_test_only_literal(source, literal.start)?
-            || citable_guard_metadata_literal(path, source, literal)
+            || citable_guard_metadata_literal(source, literal, guard_metadata)
         {
             continue;
         }
         let (owner, owner_scope) = enclosing_function(source, literal.start);
+        let dynamic_fragments = literal_has_dynamic_citation_fragments(
+            literal.content,
+            citation_prefix,
+            citation_suffix,
+        );
         if literal_is_citation_field(literal) {
             occurrences.push(CitationFieldOccurrence {
                 path: path.to_string(),
-                owner,
+                owner: owner.clone(),
                 anchor_text: literal.content.to_string(),
                 mode: citation_field_mode(source, literal),
                 line: source[..literal.start]
@@ -1894,15 +2042,43 @@ fn scan_citable_producer_source(
                     .count()
                     + 1,
             });
+            if dynamic_fragments {
+                occurrences.push(CitationFieldOccurrence {
+                    path: path.to_string(),
+                    owner,
+                    anchor_text: CITATION_FIELD_NAME.to_string(),
+                    mode: CitationFieldMode::PositiveCapable,
+                    line: source[..literal.start]
+                        .bytes()
+                        .filter(|byte| *byte == b'\n')
+                        .count()
+                        + 1,
+                });
+            }
             continue;
         }
 
         let state = fragment_states.entry(owner_scope).or_default();
+        // A diagnostic or parser message may spell the whole vocabulary in
+        // one CONTIGUOUS literal without emitting it as a field. Noncontiguous
+        // halves inside one literal can be split and rejoined dynamically, so
+        // they are themselves a positive-capable occurrence.
+        if dynamic_fragments {
+            occurrences.push(CitationFieldOccurrence {
+                path: path.to_string(),
+                owner,
+                anchor_text: CITATION_FIELD_NAME.to_string(),
+                mode: CitationFieldMode::PositiveCapable,
+                line: source[..literal.start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1,
+            });
+            continue;
+        }
         let has_prefix = literal.content.contains(citation_prefix);
         let has_suffix = literal.content.contains(citation_suffix);
-        // A diagnostic or parser message may spell the whole vocabulary in
-        // one literal without emitting it as a field. The split-key hazard is
-        // specifically two distinct literals that can be joined dynamically.
         if has_prefix && has_suffix {
             continue;
         }
@@ -3709,6 +3885,59 @@ mod tests {
     }
 
     #[test]
+    fn citable_producer_scanner_rejects_one_literal_runtime_reassembly() {
+        let source = concat!(
+            "fn reassembled(value: bool) -> String {\n",
+            "    let (prefix, suffix) = \"citation_|eligible\".split_once('|').unwrap();\n",
+            "    let key = format!(\"{prefix}{suffix}\");\n",
+            "    format!(\"{{\\\"{key}\\\":{value}}}\")\n",
+            "}\n",
+            "fn compound(value: bool) -> String {\n",
+            "    let (field, suffix) = \"citation_eligible|eligible\".split_once('|').unwrap();\n",
+            "    let key = format!(\"{}{suffix}\", &field[..9]);\n",
+            "    format!(\"{{\\\"{key}\\\":{value}}}\")\n",
+            "}\n",
+            "fn direct_compound(value: bool) -> String {\n",
+            "    let (field, suffix) = \"{\\\"citation_eligible\\\":false}|eligible\".split_once('|').unwrap();\n",
+            "    let key = format!(\"{}{suffix}\", &field[2..11]);\n",
+            "    format!(\"{field} {{\\\"{key}\\\":{value}}}\")\n",
+            "}\n",
+        );
+        let occurrences = scan_citable_producer_source("crates/fs-new/src/lib.rs", source)
+            .expect("valid Rust-shaped fixture");
+        assert_eq!(occurrences.len(), 4, "one-literal split producers");
+        assert_eq!(occurrences[0].owner, "reassembled");
+        assert_eq!(occurrences[1].owner, "compound");
+        assert_eq!(occurrences[2].owner, "direct_compound");
+        assert_eq!(occurrences[3].owner, "direct_compound");
+        assert_eq!(occurrences[2].mode, CitationFieldMode::ReportOnlyFalse);
+        assert!(
+            occurrences[0..2]
+                .iter()
+                .chain(&occurrences[3..4])
+                .all(|occurrence| occurrence.mode == CitationFieldMode::PositiveCapable)
+        );
+    }
+
+    #[test]
+    fn citable_producer_complete_format_capture_remains_one_direct_sink() {
+        let source = concat!(
+            "fn admitted(citation_eligible: bool) -> String {\n",
+            "    format!(\"{{\\\"citation_eligible\\\":{citation_eligible}}}\")\n",
+            "}\n",
+        );
+        let occurrences = scan_citable_producer_source("crates/fs-new/src/lib.rs", source)
+            .expect("valid Rust-shaped fixture");
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "the value capture repeats vocabulary but emits no second key"
+        );
+        assert_eq!(occurrences[0].owner, "admitted");
+        assert_eq!(occurrences[0].mode, CitationFieldMode::PositiveCapable);
+    }
+
+    #[test]
     fn citable_producer_fragments_do_not_join_across_functions() {
         let source = concat!(
             "fn prefix_only() { let _ = \"citation_\"; }\n",
@@ -3734,7 +3963,12 @@ mod tests {
     #[test]
     fn citable_producer_guard_metadata_exemption_never_hides_executable_code() {
         let source = concat!(
+            "// const CITATION_FIELD_NAME: &str = \"spoof\";\n",
+            "static COMMENT_HIDDEN: &str = \"{\\\"citation_eligible\\\":true}\";\n",
             "const CITATION_FIELD_NAME: &str = concat!(\"citation_\", \"eligible\");\n",
+            "static HIDDEN: &str = \"{\\\"citation_eligible\\\":true}\";\n",
+            "const CITABLE_PRODUCER_ALLOWLIST: &[()] = &[];\n",
+            "static AFTER: [&str; 1] = [\"{\\\"citation_eligible\\\":true}\"];\n",
             "fn hidden(value: bool) -> String {\n",
             "    let prefix = \"citation_\";\n",
             "    let suffix = \"eligible\";\n",
@@ -3745,9 +3979,20 @@ mod tests {
         );
         let occurrences = scan_citable_producer_source("xtask/src/main.rs", source)
             .expect("valid Rust-shaped guard fixture");
-        assert_eq!(occurrences.len(), 1, "executable guard-region producer");
-        assert_eq!(occurrences[0].owner, "hidden");
-        assert_eq!(occurrences[0].mode, CitationFieldMode::PositiveCapable);
+        assert_eq!(
+            occurrences.len(),
+            4,
+            "module and executable guard-region producers"
+        );
+        assert_eq!(occurrences[0].owner, "<module>");
+        assert_eq!(occurrences[1].owner, "<module>");
+        assert_eq!(occurrences[2].owner, "<module>");
+        assert_eq!(occurrences[3].owner, "hidden");
+        assert!(
+            occurrences
+                .iter()
+                .all(|occurrence| occurrence.mode == CitationFieldMode::PositiveCapable)
+        );
     }
 
     fn manifest(name: &str, layer: &str, deps: &[&str]) -> Manifest {
