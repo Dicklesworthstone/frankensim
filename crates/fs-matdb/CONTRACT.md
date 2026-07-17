@@ -539,7 +539,19 @@ Wankel-housing authority.
   protocol, temperature-control details, field sweep, repeats, uncertainty,
   recoil permeability, and irreversible-loss boundary remain fail-closed.
   Neither the two endpoint states nor the interval-average coefficients are a
-  continuous law or extrapolation authority. The NACA TN 2680 claims bind a
+  continuous law or extrapolation authority. The Kim and Baek Y30 claims are
+  application-model evidence for one optimized `750 W` axial-flux
+  consequent-pole motor, not a supplier-qualified material card. The `1.654%`
+  at `20 degC` and `22.396%` at `-40 degC` values are spatial maxima from 3-D
+  FEA at five times rated current, unchanged `6000 rpm`, and a modeled maximum
+  stator field of `256.49 kA/m`. They remain bound to the model's
+  `60.16 cm^3` magnet volume and Equation 5 definition using post-field recoil
+  flux density. Manufacturer, grade specification, chemistry, process, lot,
+  magnetization state, B-H curve points/provenance, FEA software, mesh
+  convergence, uncertainty, and prototype validation remain absent. No
+  remanence/coercivity endpoint, recoil permeability, intrinsic irreversible
+  limit, continuous temperature law, or extrapolation authority follows.
+  The NACA TN 2680 claims bind a
   supplier-claimed `99.6 mol%` minimum-purity 2,2,4-trimethylpentane fuel and
   fifteen Table I
   maximum-flame-speed rows to the reported atmospheric Bunsen-flame apparatus.

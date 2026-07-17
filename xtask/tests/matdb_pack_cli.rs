@@ -40,6 +40,8 @@ const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
 const JINSHAN_N42_PRISTINE_TEMPERATURE_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/jinshan-n42-pristine-temperature/manifest.tsv";
+const KIM_BAEK_2026_Y30_AFCP_DEMAGNETIZATION_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/kim-baek-2026-y30-afcp-demagnetization/manifest.tsv";
 const NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv";
 const FACE_G_CDTRF_G_2023_V1_SEED_MANIFEST: &str =
@@ -2309,6 +2311,149 @@ fn g3_cli_compiles_committed_jinshan_n42_pristine_temperature_endpoints() {
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "source-absent Jinshan N42 property must remain refused: {refused_property}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_y30_afcp_application_demagnetization_without_intrinsic_transfer() {
+    let manifest = workspace_path(KIM_BAEK_2026_Y30_AFCP_DEMAGNETIZATION_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed Kim-Baek Y30 application-demagnetization manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("kim-baek-y30-demagnetization-first.fsmatpk");
+    let second_path = directory.join("kim-baek-y30-demagnetization-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Kim-Baek Y30 seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Kim-Baek Y30 seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Kim-Baek Y30 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Kim-Baek Y30 pack");
+    let second_bytes = fs::read(second_path).expect("read second Kim-Baek Y30 pack");
+    assert_eq!(first_bytes, second_bytes, "Kim-Baek Y30 pack bytes moved");
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode Kim-Baek Y30 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Kim-Baek Y30 pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "kim-baek-2026-y30-afcp-application-demagnetization"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("Creative Commons"));
+    assert_eq!(decoded.claims().claim_count(), 2);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expected: [(f64, f64); 2] = [(20.0, 1.654 * 0.01), (-40.0, 22.396 * 0.01)];
+    let mut observation_ids = Vec::new();
+    for (source_temperature_c, expected_fraction) in expected {
+        let temperature_k = source_temperature_c + 273.15;
+        let claims = decoded
+            .claims()
+            .claims_for("application_model_maximum_demagnetization_fraction");
+        let (id, claim) = claims
+            .into_iter()
+            .find(|(_, claim)| {
+                claim.validity.bound("temperature") == Some((temperature_k, temperature_k))
+            })
+            .unwrap_or_else(|| {
+                panic!("missing Y30 application result at {source_temperature_c} degC")
+            });
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Y30 application demagnetization claim {id} was not scalar");
+        };
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        assert_eq!(*value, expected_fraction);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, CC_BY_4_0_LICENSE);
+        assert!(claim.provenance.source.contains("10.3390/app16021094"));
+        assert!(claim.provenance.source.contains("[source:primary]"));
+
+        for (axis, expected_bound) in [
+            ("rotational_frequency", (100.0, 100.0)),
+            ("source_motor_output_power", (750.0, 750.0)),
+            (
+                "source_optimal_model_magnet_volume",
+                (0.00006016, 0.00006016),
+            ),
+            ("source_current_multiplier_relative_to_rated", (5.0, 5.0)),
+            (
+                "source_maximum_stator_magnetic_field_strength",
+                (256_490.0, 256_490.0),
+            ),
+            ("source_grade_label_y30", (1.0, 1.0)),
+            ("source_result_is_3d_fea", (1.0, 1.0)),
+            ("source_coefficient_is_spatial_maximum", (1.0, 1.0)),
+            (
+                "source_equation_uses_post_field_recoil_flux_density",
+                (1.0, 1.0),
+            ),
+        ] {
+            assert_eq!(claim.validity.bound(axis), Some(expected_bound));
+        }
+        for missing_axis in [
+            "source_magnet_supplier_process_composition_lot_known",
+            "source_fea_software_mesh_convergence_known",
+            "source_bh_curve_points_tabulated",
+            "source_recoil_relative_permeability_known",
+            "source_experimental_prototype_validation_performed",
+            "source_intrinsic_material_limit_claimed",
+            "source_uncertainty_dispersion_known",
+        ] {
+            assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+        }
+        observation_ids.push(claim.observations[0]);
+    }
+    assert_eq!(observation_ids[0], observation_ids[1]);
+    let observation = decoded
+        .claims()
+        .observation(observation_ids[0])
+        .expect("Kim-Baek Y30 observation remains linked");
+    assert!(observation.method.contains("five times rated current"));
+    assert!(
+        observation
+            .caveats
+            .contains("not intrinsic Y30 material allowables")
+    );
+    assert!(observation.caveats.contains("no tabulated points"));
+
+    for refused_property in [
+        "remanent_flux_density",
+        "intrinsic_coercive_field_strength",
+        "recoil_relative_permeability",
+        "demagnetization_curve",
+        "irreversible_demagnetization_loss_boundary",
+        "continuous_demagnetization_temperature_law",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "application model crossed the intrinsic {refused_property} no-claim boundary"
         );
     }
 

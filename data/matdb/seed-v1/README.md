@@ -689,6 +689,42 @@ Jinshan N42 reference:
 - <https://www.sciencedirect.com/science/article/pii/S2238785424030382>
 - <https://creativecommons.org/licenses/by/4.0/>
 
+## Y30 optimized-motor application-demagnetization tranche
+
+`kim-baek-2026-y30-afcp-demagnetization/` retains two exact
+temperature-conditioned outputs from Kim and Baek's optimized axial-flux
+consequent-pole pump-motor model. At five times rated current and unchanged
+`6000 rpm`, the modeled stator field reaches a spatial maximum of
+`256.49 kA/m`. The reported maximum demagnetization coefficient is `1.654%`
+at `20 degC` and `22.396%` at `-40 degC`.
+
+The source defines that coefficient as `1 - Br1/Br0`, where `Br1` is the recoil
+flux density recovered after the external field. Each claim is bound to the
+optimized model's `750 W` output, `60.16 cm^3` magnet volume, five-times-rated
+current, `100 Hz` rotational frequency, exact temperature, and maximum modeled
+field. The two values are application-level 3-D FEA spatial maxima, not generic
+Y30 material limits or a continuous temperature law.
+
+Figure 13 plots the Y30 input B-H curves at both temperatures, but no points are
+tabulated or digitized. The source does not identify the magnet manufacturer,
+grade specification, chemistry, process, lot, magnetization state, or curve
+provenance. It also omits FEA software, mesh-convergence evidence, complete
+boundary-condition detail, numerical uncertainty, repeats, dispersion, and
+prototype validation. The pack therefore admits no remanence or coercivity
+endpoint, recoil permeability, reversible recoil line, standalone irreversible
+loss boundary, extrapolation, or supplier-qualified Y30 card. This tranche is
+useful overload-demagnetization evidence for one fully named motor model; it
+does not complete bead `1sxe`'s supplier/process-pinned Y30 requirement.
+
+The article is distributed under CC-BY-4.0; the manifest retains its authors,
+title, journal, DOI, publisher notice, and license identifier.
+
+Y30 optimized-motor application-demagnetization references:
+
+- <https://doi.org/10.3390/app16021094>
+- <https://www.mdpi.com/2076-3417/16/2/1094>
+- <https://creativecommons.org/licenses/by/4.0/>
+
 ## NACA TN 2680 iso-octane flame-speed tranche
 
 `naca-tn-2680-isooctane-flame-speed/` retains the
