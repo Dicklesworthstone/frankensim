@@ -2,19 +2,35 @@
 //! pass). Tile-layout coverage: G0 (Morton bijection + backend equivalence,
 //! halo laws, iteration permutations), G5 (deterministic orders, ids, and
 //! affinity tables), plus the layout stencil smoke with measured — never
-//! assumed — timings emitted as benchmark events.
+//! assumed — timings emitted as benchmark events. Aggregate verdicts use
+//! the canonical fs-obs schema; randomized cases carry their input seed.
 
 use fs_substrate::affinity::{AffinityMap, CcdTopology};
 use fs_substrate::field::{Boundary, TiledField};
 use fs_substrate::morton::{MORTON_COORD_LIMIT, morton_backend, morton3_decode, morton3_encode};
 use fs_substrate::tile::{TileCoord, TileEdge, TileGrid};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-substrate/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-substrate/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-substrate/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("substrate verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("substrate verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -53,6 +69,7 @@ fn sub_001_morton_bijection_and_backend_equivalence() {
             "morton bijection over 200k seeded cases (seed {SEED:#x}), backend={}",
             morton_backend()
         ),
+        SEED,
     );
 }
 
@@ -92,6 +109,7 @@ fn sub_002_tile_world_maps_and_iteration_orders() {
         "sub-002",
         seen.iter().all(|&s| s),
         "cell/tile maps bijective; linear, z-order, boundary-first orders are permutations",
+        0,
     );
 }
 
@@ -128,6 +146,7 @@ fn sub_003_halo_fast_path_equals_reference_on_all_tiles_and_bcs() {
         "sub-003",
         checked > 0,
         &format!("fast halo == reference on {checked} (tile, bc) cases (seed {SEED:#x})"),
+        SEED,
     );
 }
 
@@ -170,17 +189,19 @@ fn sub_004_affinity_fixtures_respect_ccd_boundaries_deterministically() {
         "sub-004",
         true,
         "TR/EPYC/Apple fixtures: balanced contiguous z-ranges, CCD-respecting core ranges",
+        0,
     );
 }
 
 #[test]
 fn sub_005_stencil_layout_smoke_documents_measurements() {
     const N: u32 = 48;
+    const SEED: u64 = 0x0005_57E4_2026_0706;
     let g = TileGrid::new([N, N, N], TileEdge::E8).expect("grid");
     let mut f = TiledField::new(g, 0.0f32);
     let mut linear = vec![0.0f32; (N * N * N) as usize];
     let idx = |x: u32, y: u32, z: u32| ((z * N + y) * N + x) as usize;
-    let mut rng = Lcg(0x0005_57E4_2026_0706);
+    let mut rng = Lcg(SEED);
     for z in 0..N {
         for y in 0..N {
             for x in 0..N {
@@ -257,10 +278,9 @@ fn sub_005_stencil_layout_smoke_documents_measurements() {
     verdict(
         "sub-005",
         identical,
-        &format!(
-            "tiled and linear stencils agree bitwise; measured tiled={ns_t}ns linear={ns_l}ns \
-             (documentation, not a perf claim)"
-        ),
+        "tiled and linear stencils agree bitwise; timings are separate benchmark events \
+         (documentation, not a perf claim)",
+        SEED,
     );
 }
 
@@ -307,5 +327,6 @@ fn sub_006_first_touch_shard_views_are_disjoint_and_complete() {
         "sub-006",
         equal && tags_ok,
         "parallel per-shard first-touch equals serial fill; owner tags match the affinity map",
+        0,
     );
 }

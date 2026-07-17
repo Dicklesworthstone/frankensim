@@ -105,16 +105,20 @@ None. SME/AMX-class matrix units: deliberately NOT claimed; future probes
 gate the fs-simd `frontier-sme2` tier.
 
 ## Conformance tests
-tests/conformance.rs, cases sub-001..sub-006 (JSON-line verdicts; seeded
-cases carry their seed): Morton bijection + backend equivalence, tile/world
-map bijection + iteration permutations, halo fast-vs-reference equivalence
+tests/conformance.rs, cases sub-001..sub-006. Each case's aggregate verdict
+uses the canonical fs-obs `ConformanceCase` schema; randomized cases carry
+their input seed. Morton bijection + backend equivalence, tile/world map
+bijection + iteration permutations, halo fast-vs-reference equivalence
 across boundary policies and partial tiles, affinity fixtures (balance,
 coverage, CCD-respecting core ranges, deterministic tables), the tiled-vs-
-linear stencil smoke (bitwise agreement + timings emitted as
+linear stencil smoke (bitwise agreement + timings emitted separately as
 `benchmark_result` events — documentation, not claims), and parallel
-first-touch ≡ serial with owner tags recorded. In-module suites cover the
-probe battery, Morton known answers, tile geometry edge cases, halo
-boundary semantics, and 128-byte tile-base alignment.
+first-touch ≡ serial with owner tags recorded. The first-touch case has
+deterministic input and output but makes no exact thread-interleaving replay
+claim. Assertions that abort before the aggregate verdict remain ordinary
+Rust test diagnostics. In-module suites cover the probe battery, Morton
+known answers, tile geometry edge cases, halo boundary semantics, and
+128-byte tile-base alignment.
 
 ## No-claim boundaries
 - Per-core-CLASS bandwidth (P vs E pinning) — needs QoS/affinity outside safe
