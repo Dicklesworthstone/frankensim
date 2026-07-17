@@ -28,7 +28,7 @@
 //! pinned at the dense core's 4³ (the 4³→8³ autotune sweep is follow-on
 //! work recorded through the fs-exec tune path when the perf lane lands).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::sync::Mutex;
 
@@ -291,6 +291,58 @@ impl SparseGrid3 {
         self.post = post;
         self.index = index;
         Ok(())
+    }
+
+    /// Deactivate tiles, dropping their state and returning the exact mass
+    /// removed (summed in canonical Morton/q/lane order) — the WS1-E
+    /// mass-ledger hook: a free-surface activation rule that retires tiles
+    /// must account for this mass, never silently drop it. Deactivating a
+    /// tile that is not active is a no-op contributing zero mass. Surviving
+    /// tiles keep their state bit-exactly; the active list stays
+    /// Morton-sorted.
+    ///
+    /// # Errors
+    /// [`SparseError3::TileOutOfDomain`] if any coordinate lies outside the
+    /// domain (no partial deactivation is applied).
+    pub fn deactivate_tiles(&mut self, tiles: &[(u32, u32, u32)]) -> Result<f64, SparseError3> {
+        for &(tx, ty, tz) in tiles {
+            if tx as usize >= self.ntx || ty as usize >= self.nty || tz as usize >= self.ntz {
+                return Err(SparseError3::TileOutOfDomain { tx, ty, tz });
+            }
+        }
+        let mut retire: BTreeSet<u64> = BTreeSet::new();
+        for &(tx, ty, tz) in tiles {
+            retire.insert(morton3(tx, ty, tz));
+        }
+        let mut removed_mass = 0.0;
+        for &key in &retire {
+            if let Some(&slot) = self.index.get(&key) {
+                let block = &self.pre[slot];
+                for q in 0..Q3 {
+                    for lane in 0..TILE_CELLS {
+                        removed_mass += block.f[q].0[lane];
+                    }
+                }
+            }
+        }
+        let survivors: Vec<usize> = (0..self.keys.len())
+            .filter(|&slot| !retire.contains(&self.keys[slot]))
+            .collect();
+        let mut keys = Vec::with_capacity(survivors.len());
+        let mut pre = Vec::with_capacity(survivors.len());
+        let mut post = Vec::with_capacity(survivors.len());
+        let mut index = BTreeMap::new();
+        for (new_slot, &old_slot) in survivors.iter().enumerate() {
+            keys.push(self.keys[old_slot]);
+            pre.push(self.pre[old_slot].clone());
+            post.push(self.post[old_slot].clone());
+            index.insert(self.keys[old_slot], new_slot);
+        }
+        self.keys = keys;
+        self.pre = pre;
+        self.post = post;
+        self.index = index;
+        Ok(removed_mass)
     }
 
     /// Number of active tiles.

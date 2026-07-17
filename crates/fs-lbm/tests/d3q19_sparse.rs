@@ -324,3 +324,116 @@ fn out_of_domain_activation_refuses_without_partial_application() {
         }
     );
 }
+
+#[test]
+fn deactivation_returns_exact_mass_and_preserves_survivors() {
+    let mut grid = SparseGrid3::new(32, 32, 32, 0.8, [0.0; 3]).expect("dims admissible");
+    grid.activate_tiles(&[(1, 1, 1), (2, 1, 1), (3, 1, 1)])
+        .expect("activation in-domain");
+    grid.perturb(0xFEED, 0.02);
+    for _ in 0..3 {
+        grid.step_serial().expect("sweep admissible");
+    }
+    let total_before = grid.total_mass();
+    let bits_before = grid.state_bits();
+    let bits_per_tile = state_bytes_per_tile() / 2 / 8;
+
+    // Retire the middle tile: the ledger must receive exactly its mass.
+    let removed = grid
+        .deactivate_tiles(&[(2, 1, 1)])
+        .expect("deactivation in-domain");
+    assert_eq!(grid.active_tiles(), 2);
+    let total_after = grid.total_mass();
+    // Ledger conservation: removed + remaining == before. NOT bitwise —
+    // the three sums group the same ~3.7k cell values differently
+    // (whole-sequence vs per-subset), so reassociation moves a few ULPs
+    // (~1e-16 relative each); 1e-13 leaves margin while still catching a
+    // single dropped cell (~1/192 ≈ 5e-3 relative) by ten orders.
+    assert!(
+        ((total_after + removed) - total_before).abs() / total_before < 1e-13,
+        "deactivation mass ledger leaked: {total_before} != {total_after} + {removed}"
+    );
+
+    // Survivors keep their bits exactly; Morton order preserved.
+    let old_keys = [morton3(1, 1, 1), morton3(2, 1, 1), morton3(3, 1, 1)];
+    let kept = [morton3(1, 1, 1), morton3(3, 1, 1)];
+    let bits_after = grid.state_bits();
+    for (new_slot, key) in kept.iter().enumerate() {
+        let old_slot = old_keys.iter().position(|k| k == key).expect("was active");
+        assert_eq!(
+            &bits_before[old_slot * bits_per_tile..(old_slot + 1) * bits_per_tile],
+            &bits_after[new_slot * bits_per_tile..(new_slot + 1) * bits_per_tile],
+            "deactivation moved bits of surviving tile {key:#x}"
+        );
+    }
+
+    // Deactivating an inactive tile is a zero-mass no-op.
+    let removed = grid
+        .deactivate_tiles(&[(7, 7, 7)])
+        .expect("deactivation in-domain");
+    assert_eq!(removed, 0.0);
+    assert_eq!(grid.active_tiles(), 2);
+
+    // Out-of-domain deactivation refuses atomically.
+    let refusal = grid
+        .deactivate_tiles(&[(1, 1, 1), (0, 0, 40)])
+        .expect_err("tile (0,0,40) lies outside an 8-tile domain");
+    assert!(matches!(refusal, SparseError3::TileOutOfDomain { .. }));
+    assert_eq!(
+        grid.active_tiles(),
+        2,
+        "refused deactivation must be atomic"
+    );
+}
+
+/// FNV-1a over the exact state bits — the golden preimage.
+fn fnv1a_bits(bits: &[u64]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &word in bits {
+        for byte in word.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// Candidate golden fixture: the exact G5 configuration (L-shaped
+/// ~10%-active set in a 32^3 box, tau 0.7, x-force 1e-6, seeded
+/// perturbation, 25 serial sweeps) plus one mass-ledgered deactivation
+/// and 5 more sweeps — so the frozen surface covers activation,
+/// sweeping, AND retirement arithmetic.
+fn sparse_candidate_hash() -> u64 {
+    let tiles = l_shaped_tiles(8, 8, 8);
+    let mut grid = SparseGrid3::new(32, 32, 32, 0.7, [1e-6, 0.0, 0.0]).expect("dims admissible");
+    grid.activate_tiles(&tiles).expect("activation in-domain");
+    grid.perturb(0x5EED_CA51, 0.01);
+    for _ in 0..25 {
+        grid.step_serial().expect("sweep admissible");
+    }
+    let removed = grid
+        .deactivate_tiles(&[(4, 4, 0)])
+        .expect("deactivation in-domain");
+    for _ in 0..5 {
+        grid.step_serial().expect("sweep admissible");
+    }
+    let mut bits = grid.state_bits();
+    bits.push(removed.to_bits());
+    bits.push(grid.total_mass().to_bits());
+    fnv1a_bits(&bits)
+}
+
+#[test]
+fn d3q19_sparse_candidate_hash_is_replay_stable() {
+    let first = sparse_candidate_hash();
+    let second = sparse_candidate_hash();
+    assert_eq!(
+        first, second,
+        "sparse candidate hash is not replay-stable on one host"
+    );
+    // UNFROZEN: four-quadrant ceremony pending (M4 + ts1, debug + release).
+    // Once all four quadrants agree, freeze this value as
+    // SPARSE_GOLDEN_HASH and register the row in golden-couplings.json
+    // per docs/GOLDEN_POLICY.md.
+    println!("d3q19-sparse candidate hash: {first:#018x}");
+}
