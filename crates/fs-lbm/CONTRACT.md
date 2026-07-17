@@ -159,6 +159,38 @@ dimension checks. Pure, deterministic (fixed tile/cell/link order).
   (Morton key + lane + the underlying `CollisionError3`), `Cancelled`
   (pre-step state intact; re-issue is deterministic), `Pool`.
 
+### 3-D free surface on sparse tiles (`d3q19::freesurface3`, bead sxnm)
+
+- `FreeSurface3::new(nx, ny, nz, tau, gravity, sigma, contact, fluid)` /
+  `with_solid_tiles(..., solid_tiles, fluid)` — the 2-D Körner VOF
+  machinery ported onto the sparse grid: per-lane `Cell3`
+  (fluid/interface/gas) and tracked mass keyed by MORTON KEY
+  (activation-reshuffle-proof), interface inserted between fluid and gas,
+  closure asserted. Solid tiles are permanent walls that advance-driven
+  activation refuses to open (fluid declared inside one panics).
+- `step()` — refresh smoothed fill, collide wet lanes via the shared
+  `collide_cell3`, pairwise-antisymmetric mass exchange, pull-stream with
+  gas reconstruction at the `σκ/cs²` reference density, conversion
+  cascade with the conservation carry. ACTIVATION INVARIANT: every newly
+  created interface cell immediately activates every inactive in-domain
+  tile in its 18-neighborhood (activate-on-fluid-arrival deadlocks: an
+  interface backed by the activation frontier pins as fluid-against-wall).
+- Probes: `fill`, `ledger_mass` (fluid Σf + interface m + carry),
+  `region_mass(pred)` + `carry()` (ledger partitioning), `cell`,
+  `wet_extent`, `surge_front_x(z_below)`, `conversions()`,
+  `worst_step_violation()` (per-step ledger violation, logged not
+  assumed), `retire_gas_tiles()` (ledger-neutral memory maintenance).
+- `FreeSurfaceError3` typed refusals: `Grid`, `Collision` (Morton key +
+  lane + source), `NoFluid`.
+- Goldens: `fs-lbm:d3q19-pour` frozen four-quadrant (see
+  golden-couplings.json). Batteries: G0 ledger algebra, G2 Martin-Moyce
+  envelope (reference data in `data/reference/martin-moyce-1952.jsonl`,
+  report-only curve comparison), G5 bitwise replay.
+- No-claims: conservation and determinism only — no throughput claim
+  (712t), no turbulence or contact-angle physics beyond the 2-D
+  neutral/wetting ghost, quantitative Martin-Moyce central band is
+  fine-lattice scope, solid geometry is tile-granular.
+
 ## Invariants
 
 - The equilibrium recovers its density + momentum moments exactly.
