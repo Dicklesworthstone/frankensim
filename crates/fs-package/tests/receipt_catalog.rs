@@ -436,7 +436,7 @@ fn receipt_schema_catalog_input_order_is_nonsemantic_and_lookup_is_exact() {
         .expect("exact row");
     assert_eq!(exact, &v2);
     assert!(matches!(
-        forward.require_exact("fs-unknown:receipt", 1, fingerprint(0x99)),
+        forward.require_exact("fs-absent:receipt", 1, fingerprint(0x99)),
         Err(ReceiptSchemaCatalogError::UnknownFamily { .. })
     ));
     assert!(matches!(
