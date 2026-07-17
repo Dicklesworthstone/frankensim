@@ -119,13 +119,13 @@ impl FieldPolicy {
             }
             ExportRealm::Unrestricted | ExportRealm::Controlled(_) | ExportRealm::LocalOnly => {}
         }
-        if let RetentionClass::LegalHold(hold) = &self.retention {
-            if !valid_token(hold, 256) {
-                return Err(FieldError::InvalidRealm {
-                    kind: "legal_hold",
-                    realm: hold.clone(),
-                });
-            }
+        if let RetentionClass::LegalHold(hold) = &self.retention
+            && !valid_token(hold, 256)
+        {
+            return Err(FieldError::InvalidRealm {
+                kind: "legal_hold",
+                realm: hold.clone(),
+            });
         }
         Ok(())
     }
@@ -225,10 +225,16 @@ impl core::error::Error for FieldError {}
 pub enum ExternalCorrelationMethod {
     /// Salted digest. Not sufficient for PII/secrets vulnerable to dictionary
     /// attack; policy rejects those combinations.
-    Salted { salt_id: String },
+    Salted {
+        /// Non-secret identity of the externally managed salt.
+        salt_id: String,
+    },
     /// Keyed opaque token suitable for PII/secret correlation when admitted by
     /// the caller's trust boundary.
-    Keyed { key_id: String },
+    Keyed {
+        /// Non-secret identity of the externally managed key.
+        key_id: String,
+    },
 }
 
 /// Already-computed external correlation token.
@@ -753,7 +759,6 @@ fn realm_block(
         return Some(ShareBlock::Expired);
     }
     match &policy.license {
-        LicenseRealm::Redistributable => {}
         LicenseRealm::Restricted(realm) => match request.audience {
             ShareAudience::Local => {}
             ShareAudience::Organization if request.licensed_realms.binary_search(realm).is_ok() => {
@@ -765,17 +770,16 @@ fn realm_block(
         LicenseRealm::LocalOnly if request.audience != ShareAudience::Local => {
             return Some(ShareBlock::License);
         }
-        LicenseRealm::LocalOnly => {}
+        LicenseRealm::Redistributable | LicenseRealm::LocalOnly => {}
     }
     match &policy.export {
-        ExportRealm::Unrestricted => {}
         ExportRealm::Controlled(realm)
             if request.export_authorizations.binary_search(realm).is_ok() => {}
         ExportRealm::Controlled(_) => return Some(ShareBlock::Export),
         ExportRealm::LocalOnly if request.audience != ShareAudience::Local => {
             return Some(ShareBlock::Export);
         }
-        ExportRealm::LocalOnly => {}
+        ExportRealm::Unrestricted | ExportRealm::LocalOnly => {}
     }
     None
 }
@@ -853,9 +857,9 @@ fn correlation_for(
 
 const fn degrade(support: OperationalSupport) -> OperationalSupport {
     match support {
-        OperationalSupport::Supported => OperationalSupport::Degraded,
-        OperationalSupport::Degraded => OperationalSupport::Degraded,
         OperationalSupport::Unsupported => OperationalSupport::Unsupported,
-        OperationalSupport::NotApplicable => OperationalSupport::Degraded,
+        OperationalSupport::Supported
+        | OperationalSupport::Degraded
+        | OperationalSupport::NotApplicable => OperationalSupport::Degraded,
     }
 }

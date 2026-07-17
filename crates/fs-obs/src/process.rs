@@ -546,7 +546,7 @@ impl ProcessGap {
             && self.last_ordinal.checked_add(1) == Some(next.first_ordinal)
     }
 
-    fn coalesce(&mut self, next: Self) {
+    fn coalesce(&mut self, next: &Self) {
         self.last_ordinal = next.last_ordinal;
         self.original_count += next.original_count;
         self.emitted_count += next.emitted_count;
@@ -758,19 +758,19 @@ impl ProcessCapture {
         cancellation: CaptureCancellation,
         sink: SinkAvailability,
     ) -> CaptureDecision {
-        if let Some(previous) = self.last_ordinal(frame.stream) {
-            if frame.ordinal <= previous {
-                let error = CaptureOrderError {
-                    stream: frame.stream,
-                    previous,
-                    received: frame.ordinal,
-                };
-                return CaptureDecision::Rejected { frame, error };
-            }
+        if let Some(previous) = self.last_ordinal(frame.stream)
+            && frame.ordinal <= previous
+        {
+            let error = CaptureOrderError {
+                stream: frame.stream,
+                previous,
+                received: frame.ordinal,
+            };
+            return CaptureDecision::Rejected { frame, error };
         }
 
         if frame.class == ProcessEventClass::Telemetry
-            && (frame.ordinal - 1) % self.policy.telemetry_sample_every != 0
+            && !(frame.ordinal - 1).is_multiple_of(self.policy.telemetry_sample_every)
         {
             return self.drop_with_gap(frame, LossReason::PolicySampling);
         }
@@ -933,11 +933,11 @@ impl ProcessCapture {
     }
 
     fn record_gap(&mut self, gap: ProcessGap) -> bool {
-        if let Some(last) = self.gaps.back_mut() {
-            if last.can_coalesce(&gap) {
-                last.coalesce(gap);
-                return true;
-            }
+        if let Some(last) = self.gaps.back_mut()
+            && last.can_coalesce(&gap)
+        {
+            last.coalesce(&gap);
+            return true;
         }
         if self.gaps.len() == self.policy.gap_capacity {
             return false;

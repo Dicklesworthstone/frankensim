@@ -1264,6 +1264,7 @@ fn bind_outcome_identity(
 impl Event {
     /// Serialize the CONTENT portion (everything except `wall_ns`) in
     /// canonical field order.
+    #[allow(clippy::too_many_lines)] // One exhaustive table preserves canonical JSON field order.
     fn content_json(&self) -> String {
         let mut s = String::with_capacity(160);
         let _ = write!(s, "{{\"v\":{SCHEMA_VERSION},");
@@ -1672,6 +1673,7 @@ impl Event {
         )
     }
 
+    #[allow(clippy::too_many_lines)] // One exhaustive mirror keeps identity field order auditable against JSON.
     fn content_identity_with_schema(
         &self,
         artifact_domain: &str,
@@ -2343,6 +2345,7 @@ pub fn validate_line(line: &str) -> Result<(), SchemaError> {
 ///
 /// # Errors
 /// Returns [`SchemaError`] describing the missing reproduction ingredient.
+#[allow(clippy::too_many_lines)] // One fail-closed policy table keeps every refusal and precedence visible.
 pub fn lint_failure_record(event: &Event) -> Result<(), SchemaError> {
     match &event.kind {
         EventKind::ConformanceCase {
