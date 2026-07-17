@@ -1007,6 +1007,48 @@ PTFE CF10/steel-bore references:
 - <https://www.mdpi.com/2073-4360/12/1/155>
 - <https://creativecommons.org/licenses/by/4.0/>
 
+## MAHLE PTFE/nickel-SiC-coated-bore patent tranche
+
+`mahle-wo2019072721-ptfe-nickel-sic-coated-bore-interface/` records an actual
+coated-cylinder/PTFE-ring pairing disclosed by MAHLE. Surface A is the patent's
+PTFE piston ring. Surface B is the cylinder running surface with a liner layer
+whose main component is nickel and which contains silicon carbide. Claims 9 and
+10 specify that surface as honed to an approximate arithmetic mean roughness of
+`0.1 micrometer`.
+
+The runtime claims are design-disclosure facts, not test results. They retain
+the claim-defined approximate SiC window of `2..6 wt%`, the strict
+`1 < particle diameter < 4 micrometers` window and preferred
+`2.5 micrometer` particle diameter, and the strict
+`40 < liner thickness < 100 micrometers` window and preferred
+`50 micrometer` thickness. The disclosed embodiment separately says
+`2..4 wt%` SiC. That narrower statement and claim 5's wider `2..6 wt%`
+statement remain distinct rather than being fused into a fabricated assay.
+
+This card establishes a named PTFE/coated-bore design interface, but its
+boundary is deliberately narrow. The patent gives no manufactured specimen,
+PTFE grade or filler, cylinder substrate, nickel-alloy chemistry, coating
+application process, as-built metrology, working-gas state, operating point,
+uncertainty, or quantitative friction, wear, leakage, or lifetime result. It is
+also explicitly oil-free: no lubricant is present or identified. Consequently
+the card does not complete bead `1sxe`'s lubricant-qualified coated-bore
+requirement and authorizes no transfer of the patent's qualitative low-friction
+or durability language into a constitutive law.
+
+The German Patent and Trade Mark Office states that officially published patent
+documents are excluded from copyright protection under Section 5(2) UrhG,
+subject to source acknowledgement and the prohibition on altering the patent
+document. The manifest retains inventor, assignee, title, and the DE and WO
+family identifiers. That narrow redistribution basis is not a license to
+practice patent claims, use trademarks, qualify a product, or claim performance.
+
+MAHLE PTFE/nickel-SiC-coated-bore references:
+
+- <https://patents.google.com/patent/WO2019072721A1/en>
+- <https://patents.google.com/patent/DE102017218156A1/en>
+- <https://www.dpma.de/english/services/customer_care_services/faq/index.html>
+- <https://www.gesetze-im-internet.de/urhg/__5.html>
+
 ## A2017/Seiken long-life-coolant/air wetting tranches
 
 `yilmaz-2026-a2017-seiken-llc-ra005-wetting/` and

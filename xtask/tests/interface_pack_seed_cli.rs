@@ -20,6 +20,8 @@ const CARBON_PTFE_CR_ROD_MANIFEST: &str =
     "data/matdb/seed-v1/zhang-2021-carbon-ptfe-cr-piston-rod/manifest.tsv";
 const PTFE_CF10_STEEL_BORE_MANIFEST: &str =
     "data/matdb/seed-v1/deaconescu-2020-ptfe-cf10-steel-bore-interface/manifest.tsv";
+const MAHLE_PTFE_NICKEL_SIC_COATED_BORE_MANIFEST: &str =
+    "data/matdb/seed-v1/mahle-wo2019072721-ptfe-nickel-sic-coated-bore-interface/manifest.tsv";
 const A2017_LLC_RA005_MANIFEST: &str =
     "data/matdb/seed-v1/yilmaz-2026-a2017-seiken-llc-ra005-wetting/manifest.tsv";
 const A2017_LLC_RA3_MANIFEST: &str =
@@ -570,6 +572,221 @@ fn g3_cli_compiles_committed_ptfe_cf10_steel_bore_iso_vg32_interface() {
         assert!(
             pack.card().claims_for(refused_property).is_empty(),
             "steel-bore source crossed the {refused_property} no-claim boundary"
+        );
+    }
+    assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
+}
+
+#[test]
+fn g3_cli_compiles_committed_mahle_ptfe_nickel_sic_coated_bore_patent_interface() {
+    let (pack, decisions) = compile_twice(MAHLE_PTFE_NICKEL_SIC_COATED_BORE_MANIFEST);
+
+    assert_eq!(
+        pack.pack_id(),
+        "mahle-wo2019072721-ptfe-nickel-sic-coated-bore-interface"
+    );
+    assert_eq!(
+        pack.card().surface_a().material.chemistry,
+        "polytetrafluoroethylene PTFE piston ring"
+    );
+    assert_eq!(
+        pack.card().surface_b().material.chemistry,
+        "cylinder running surface with nickel-main-component liner layer containing silicon carbide"
+    );
+    assert_eq!(
+        pack.card().surface_b().texture_frame,
+        "honed-nickel-sic-liner-patent-claimed-ra-approx-0.1um-not-measured"
+    );
+    assert_eq!(
+        pack.card().medium(),
+        "oil-free-compressor-working-gas-composition-pressure-humidity-and-temperature-unstated"
+    );
+    assert_eq!(pack.card().third_body(), None);
+    assert_eq!(
+        pack.card().history(),
+        "patent-disclosed-ptfe-piston-ring-against-nickel-sic-coated-cylinder-running-surface"
+    );
+    assert_eq!(pack.claims_pack().claims().claim_count(), 11);
+
+    let dimensionless = Dims([0, 0, 0, 0, 0, 0]);
+    let length = Dims([1, 0, 0, 0, 0, 0]);
+    for (property, expected_value, expected_dims, scope, semantic_axis) in [
+        (
+            "patent_claim_liner_silicon_carbide_mass_fraction_approximate_lower_bound",
+            2.0 * 0.01,
+            dimensionless,
+            "claims",
+            "source_value_is_approximate",
+        ),
+        (
+            "patent_claim_liner_silicon_carbide_mass_fraction_approximate_upper_bound",
+            6.0 * 0.01,
+            dimensionless,
+            "claims",
+            "source_value_is_approximate",
+        ),
+        (
+            "patent_claim_silicon_carbide_particle_diameter_lower_exclusive_bound",
+            1.0e-6,
+            length,
+            "claims",
+            "source_bound_is_strict_exclusive",
+        ),
+        (
+            "patent_claim_silicon_carbide_particle_diameter_preferred",
+            2.5e-6,
+            length,
+            "claims",
+            "source_value_is_preferred",
+        ),
+        (
+            "patent_claim_silicon_carbide_particle_diameter_upper_exclusive_bound",
+            4.0e-6,
+            length,
+            "claims",
+            "source_bound_is_strict_exclusive",
+        ),
+        (
+            "patent_claim_liner_layer_thickness_lower_exclusive_bound",
+            40.0e-6,
+            length,
+            "claims",
+            "source_bound_is_strict_exclusive",
+        ),
+        (
+            "patent_claim_liner_layer_thickness_preferred",
+            50.0e-6,
+            length,
+            "claims",
+            "source_value_is_preferred",
+        ),
+        (
+            "patent_claim_liner_layer_thickness_upper_exclusive_bound",
+            100.0e-6,
+            length,
+            "claims",
+            "source_bound_is_strict_exclusive",
+        ),
+        (
+            "patent_claim_honed_liner_arithmetic_mean_roughness_approximate",
+            0.1e-6,
+            length,
+            "claims",
+            "source_value_is_approximate",
+        ),
+        (
+            "patent_embodiment_liner_silicon_carbide_mass_fraction_lower_bound",
+            2.0 * 0.01,
+            dimensionless,
+            "embodiment",
+            "source_statement_scope_embodiment_description",
+        ),
+        (
+            "patent_embodiment_liner_silicon_carbide_mass_fraction_upper_bound",
+            4.0 * 0.01,
+            dimensionless,
+            "embodiment",
+            "source_statement_scope_embodiment_description",
+        ),
+    ] {
+        let claims = pack.card().claims_for(property);
+        assert_eq!(
+            claims.len(),
+            1,
+            "missing or duplicate patent claim {property}"
+        );
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("MAHLE patent claim {property} was not scalar");
+        };
+        assert_eq!(*value, expected_value);
+        assert_eq!(*dims, expected_dims);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert!(claim.provenance.source.contains("WO 2019/072721 A1"));
+        assert!(claim.provenance.source.contains("[source:primary]"));
+        assert!(
+            claim.provenance.license.contains(
+                "German-UrhG-Section-5-2-Published-Patent-Document-No-Copyright-Protection"
+            )
+        );
+
+        for (axis, expected) in [
+            (
+                "source_is_patent_design_statement_not_measured_specimen",
+                (1.0, 1.0),
+            ),
+            ("source_lubricant_present", (0.0, 0.0)),
+            (
+                "source_ptfe_grade_filler_manufacturing_finish_known",
+                (0.0, 0.0),
+            ),
+            (
+                "source_cylinder_substrate_liner_alloy_application_process_known",
+                (0.0, 0.0),
+            ),
+            (
+                "source_operating_pressure_speed_temperature_gas_known",
+                (0.0, 0.0),
+            ),
+            (
+                "source_quantitative_friction_wear_leakage_lifetime_measured",
+                (0.0, 0.0),
+            ),
+            ("source_patent_practice_license_granted", (0.0, 0.0)),
+        ] {
+            assert_eq!(claim.validity.bound(axis), Some(expected));
+        }
+        assert_eq!(claim.validity.bound(semantic_axis), Some((1.0, 1.0)));
+
+        let observation = pack
+            .claims_pack()
+            .claims()
+            .observation(claim.observations[0])
+            .expect("MAHLE patent observation remains linked");
+        match scope {
+            "claims" => {
+                assert!(observation.method.contains("claims 1 and 4 through 10"));
+                assert_eq!(
+                    claim.validity.bound("source_statement_scope_patent_claims"),
+                    Some((1.0, 1.0))
+                );
+                assert_eq!(
+                    claim
+                        .validity
+                        .bound("source_statement_scope_embodiment_description"),
+                    Some((0.0, 0.0))
+                );
+            }
+            "embodiment" => {
+                assert!(observation.method.contains("disclosed embodiment"));
+                assert_eq!(
+                    claim.validity.bound("source_statement_scope_patent_claims"),
+                    Some((0.0, 0.0))
+                );
+            }
+            _ => panic!("unexpected patent-statement scope {scope}"),
+        }
+    }
+
+    let roughness = pack
+        .card()
+        .claims_for("patent_claim_honed_liner_arithmetic_mean_roughness_approximate");
+    assert_eq!(
+        roughness[0].1.validity.bound("source_surface_is_honed"),
+        Some((1.0, 1.0))
+    );
+
+    for refused_property in [
+        "kinetic-friction-coefficient",
+        "wear-rate",
+        "leakage-rate",
+        "seal-life",
+        "lubricated-coated-bore-performance",
+        "transferable-friction-or-durability-law",
+    ] {
+        assert!(
+            pack.card().claims_for(refused_property).is_empty(),
+            "patent design disclosure crossed the {refused_property} no-claim boundary"
         );
     }
     assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));

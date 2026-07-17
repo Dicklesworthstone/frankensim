@@ -321,7 +321,7 @@ context, and claim reconstruction; and fail-closed missing-context and
 noncanonical-revision cases.
 
 `xtask/tests/interface_pack_seed_cli.rs`: G3 two-pass compilation of the first
-seven source-bound interface seeds into byte-identical, externally pinned packs.
+eight source-bound interface seeds into byte-identical, externally pinned packs.
 The battery checks the NASA 52100 dry-air rider/disk identity and `0.45` value,
 the NASA GXL-320A vacuum four-ball identity and distinct `0.11` mean plus
 `0.09..0.23` observed extrema, and NASA-TN-D-2223's SAE 4340/high-lead-bronze
@@ -333,6 +333,10 @@ mislabeling the rod as a coated bore. The PTFE CF10 piston-seal pack retains
 seven Table 2 film-thickness rows against the source's steel cylinder bore in
 source-linked ISO VG 32 oil, including the same-condition `8.3`, `8.3`, and
 `8.1 micrometer` rows without inventing a bore coating or uncertainty band.
+The MAHLE patent card separately records a genuine PTFE piston-ring / honed
+nickel-SiC-coated-cylinder pairing and its disclosed composition, particle-size,
+liner-thickness, and roughness windows while marking every value as patent
+design language rather than specimen metrology or tribology evidence.
 Two further packs bind Seiken long-life coolant free surfaces to distinct
 `Ra = 0.05 micrometer` and EDM
 `Ra = 3 micrometer` A2017 aluminum states in measured ambient air, retaining
@@ -632,6 +636,20 @@ Wankel-housing authority.
   calibration uncertainty, friction force, leakage, wear, and life remain
   no-claims. Because the tested bore's coating state is absent, this card does
   not satisfy or authorize a coated-bore interface.
+  The MAHLE WO 2019/072721 A1 card supplies the complementary coated-bore
+  identity boundary: PTFE piston ring against a cylinder running surface with
+  a nickel-main-component, SiC-containing liner layer, honed to a patent-claimed
+  approximate `Ra = 0.1 micrometer`. Claim 5's approximate `2..6 wt%` SiC
+  window remains separate from the disclosed embodiment's `2..4 wt%` window;
+  strict particle-diameter and liner-thickness bounds remain distinct from
+  their preferred values. These are patent design statements, not measurements
+  of a manufactured specimen. PTFE grade/filler/process, cylinder substrate,
+  nickel alloy, coating process, as-built metrology, operating conditions,
+  uncertainty, friction, leakage, wear, and life remain no-claims. The source
+  is expressly oil-free and identifies no lubricant, so this card still does
+  not complete the lubricant-qualified coated-bore requirement. Source-text
+  redistribution grants no patent-practice, trademark, qualification, or
+  performance license.
   The Yilmaz et al. wetting packs represent the liquid as surface B and the
   medium, with ambient air as the environment, exactly matching the
   solid-liquid-gas contract. Each A2017 roughness state receives a separate
