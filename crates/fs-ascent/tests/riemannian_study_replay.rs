@@ -224,12 +224,9 @@ fn rayleigh(matrix: &[f64], x: &[f64]) -> (f64, Vec<f64>) {
 
 fn run_once(matrix: &[f64], start: &[f64]) -> RunRecord {
     let mut objective = |x: &[f64]| rayleigh(matrix, x);
-    let mut state = RiemannianLbfgs::new(
-        Manifold::Sphere { ambient: DIMENSION },
-        start,
-        MEMORY,
-        &mut objective,
-    );
+    let ambient = u32::try_from(DIMENSION).expect("fixture dimension must fit the manifold API");
+    let mut state =
+        RiemannianLbfgs::new(Manifold::Sphere { ambient }, start, MEMORY, &mut objective);
     let stop = StopRule::Any(vec![
         StopRule::GradNorm(GRADIENT_TOLERANCE),
         StopRule::Budget(EVALUATION_BUDGET),
@@ -239,9 +236,10 @@ fn run_once(matrix: &[f64], start: &[f64]) -> RunRecord {
 }
 
 fn receipt(matrix: &[f64], start: &[f64], run: &RunRecord) -> RetainedReceipt {
+    let ambient = u32::try_from(DIMENSION).expect("fixture dimension must fit the manifold API");
     assert!(matches!(
         &run.state.manifold,
-        Manifold::Sphere { ambient } if *ambient == DIMENSION
+        Manifold::Sphere { ambient: actual } if *actual == ambient
     ));
     RetainedReceipt::new(ReceiptPayload {
         input_seed: INPUT_SEED,
