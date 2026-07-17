@@ -4,7 +4,8 @@
 //! numbers on the fixture solids, true 0-dim persistence with planted
 //! features under noise, the stability theorem as a property test, and
 //! chart-level topology verification with determinism and a ledgered
-//! scale run. JSON-line verdicts; seeded cases carry seeds.
+//! scale run. Verdicts use the canonical fs-obs schema; seeded cases carry
+//! replay seeds.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -18,12 +19,27 @@ use fs_topo::cubical::{
 use fs_topo::{IntersectKind, ManifoldDefect, manifold_certificate, self_intersection_certificate};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-topo/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-topo/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-topo/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("topology verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("topology verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -189,6 +205,7 @@ fn topo_001_manifold_zoo() {
         "the clean icosphere certifies (manifold, closed, outward); a punched hole \
          localizes exactly 3 boundary edges; a duplicated face reads use-count 3; a \
          flipped patch reads misoriented edges; degenerate faces are named by index",
+        0,
     );
 }
 
@@ -254,6 +271,7 @@ fn topo_002_self_intersection() {
              near-tangent spheres at 1e-4 separation do NOT false-FAIL",
             rep.pairs_tested
         ),
+        0,
     );
 }
 
@@ -305,6 +323,7 @@ fn topo_003_cubical_betti() {
                  {torus:?} = (1,1,0) [the tunnel via Euler duality], hollow ball \
                  {hollow:?} = (1,0,1) [the cavity], two balls {two:?} = (2,0,0)"
             ),
+            0,
         );
     });
 }
@@ -338,6 +357,7 @@ fn topo_007_diagonal_contact_is_not_a_phantom_tunnel() {
             "diagonal voxel contacts are ONE 26-connected contractible component — \
              edge {be:?} and corner {bc:?} both = (1,0,0), no phantom tunnel"
         ),
+        0,
     );
 }
 
@@ -403,6 +423,7 @@ fn topo_004_persistence_planted() {
              bars; seed 0x1001_2026_0707_0034",
             shallow.map_or(f64::NAN, |b| b.birth)
         ),
+        0x1001_2026_0707_0034,
     );
 }
 
@@ -450,6 +471,7 @@ fn topo_005_stability() {
              stability theorem, spot-verified); seed 0x1001_2026_0707_0035/36",
             sa.len()
         ),
+        0x1001_2026_0707_0035,
     );
 }
 
@@ -518,6 +540,7 @@ fn topo_006_determinism_and_scale() {
              chunked-parallel is the contract no-claim); seed 0x1001_2026_0707_0038",
             bars.len()
         ),
+        0x1001_2026_0707_0038,
     );
 }
 
@@ -629,6 +652,7 @@ fn topo_008_chart_sampling_domain_is_explicit_and_preflighted() {
         "topo-008",
         true,
         "voxelize and verify_topology reject unresolved extended support and invalid/excessive resolution before evaluation; paired clipped APIs sample source-intersection-clip and preserve occupancy and Betti numbers under translation (G3); ratio-first centers remain finite and inside extreme-aspect admitted domains, and realized widths stay within reported h across near-integer quotients",
+        0,
     );
 }
 
