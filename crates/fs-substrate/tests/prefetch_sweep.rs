@@ -9,6 +9,33 @@
 use fs_substrate::prefetch::read_ahead;
 use std::time::Instant;
 
+const SUITE: &str = "fs-substrate/prefetch-sweep";
+const GATHER_INPUT_SEED: u64 = 0x5EED_5EED;
+
+fn measurement(identity: &str, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("prefetch sweep row must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("prefetch sweep row must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64, precision: usize) -> String {
+    if value.is_finite() {
+        format!("{value:.precision$}")
+    } else {
+        "null".to_string()
+    }
+}
+
 #[test]
 #[ignore = "perf harness: run explicitly in release with --ignored"]
 fn gather_prefetch_distance_sweep() {
@@ -18,7 +45,7 @@ fn gather_prefetch_distance_sweep() {
         .map(|i| (i as u64).wrapping_mul(0x9E37_79B9))
         .collect();
     let m = 8usize << 20;
-    let mut seed = 0x5EED_5EEDu64;
+    let mut seed = GATHER_INPUT_SEED;
     let idx: Vec<u32> = (0..m)
         .map(|_| {
             seed = seed
@@ -58,13 +85,31 @@ fn gather_prefetch_distance_sweep() {
             winner = (dist, gbs);
         }
     }
+    let machine = fs_substrate::CapabilityProbe::topology_only().fingerprint();
     for (dist, gbs) in &rows {
-        println!("{{\"metric\":\"prefetch-sweep\",\"distance\":{dist},\"gather_gbs\":{gbs:.2}}}");
+        measurement(
+            &format!("prefetch-sweep/distance-{dist}/measurement"),
+            "prefetch-sweep",
+            format!(
+                "{{\"metric\":\"prefetch-sweep\",\"distance\":{dist},\"gather_gbs\":{},\
+                 \"machine\":{machine},\"input_seed\":{GATHER_INPUT_SEED},\"trials\":3,\
+                 \"timing_seed\":null,\"timing_replay\":false}}",
+                finite_json(*gbs, 2),
+            ),
+        );
     }
-    println!(
-        "{{\"metric\":\"prefetch-winner\",\"distance\":{},\"gather_gbs\":{:.2},\"over_no_prefetch\":{:.2}}}",
-        winner.0,
-        winner.1,
-        winner.1 / base_gbs.max(1e-9)
+    let over_no_prefetch = winner.1 / base_gbs.max(1e-9);
+    measurement(
+        "prefetch-winner/measurement",
+        "prefetch-winner",
+        format!(
+            "{{\"metric\":\"prefetch-winner\",\"distance\":{},\"gather_gbs\":{},\
+             \"over_no_prefetch\":{},\"machine\":{machine},\
+             \"input_seed\":{GATHER_INPUT_SEED},\"trials\":3,\"timing_seed\":null,\
+             \"timing_replay\":false}}",
+            winner.0,
+            finite_json(winner.1, 2),
+            finite_json(over_no_prefetch, 2),
+        ),
     );
 }

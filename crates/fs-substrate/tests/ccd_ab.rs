@@ -13,6 +13,74 @@ use fs_substrate::affinity::{CcdTopology, measured_l3_groups};
 use fs_substrate::os_affinity::{OsAffinityError, current_cpu, page_nodes, pin_current_thread};
 use std::time::Instant;
 
+const SUITE: &str = "fs-substrate/ccd-ab";
+
+fn measurement(identity: &str, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("CCD A/B row must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("CCD A/B row must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64, precision: usize) -> String {
+    if value.is_finite() {
+        format!("{value:.precision$}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn json_string(value: &str) -> String {
+    use core::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn option_json(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".to_string(), json_string)
+}
+
+fn node_counts_json(per_node: &std::collections::BTreeMap<i32, usize>) -> String {
+    use core::fmt::Write as _;
+
+    let mut out = String::from("{");
+    for (index, (node, pages)) in per_node.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "\"{node}\":{pages}");
+    }
+    out.push('}');
+    out
+}
+
 /// Stream-sum over a buffer; returns (checksum, GB/s aggregate for one pass).
 fn stream_pass(buf: &[u64]) -> u64 {
     let mut acc = 0u64;
@@ -50,16 +118,22 @@ fn measure(buffers: &mut [Vec<u64>], pins: &[Vec<u32>], reps: usize) -> f64 {
 fn ccd_locality_ab() {
     // --- Topology: measured where possible, heuristic otherwise. ---
     let groups = measured_l3_groups();
+    let probe = fs_substrate::CapabilityProbe::topology_only();
+    let machine = probe.fingerprint();
     let (topo, source) = match CcdTopology::from_l3_groups(&groups) {
         Some(t) => (t, "measured-sysfs"),
-        None => (
-            CcdTopology::from_probe(&fs_substrate::CapabilityProbe::topology_only()),
-            "heuristic-probe",
-        ),
+        None => (CcdTopology::from_probe(&probe), "heuristic-probe"),
     };
-    println!(
-        "{{\"metric\":\"ccd-topology\",\"source\":\"{source}\",\"groups\":{},\"cores_per_group\":{}}}",
-        topo.ccds, topo.cores_per_ccd
+    measurement(
+        "ccd-topology/measurement",
+        "ccd-topology",
+        format!(
+            "{{\"metric\":\"ccd-topology\",\"source\":{},\"groups\":{},\
+             \"cores_per_group\":{},\"machine\":{machine},\"input_seed\":null}}",
+            json_string(source),
+            topo.ccds,
+            topo.cores_per_ccd,
+        ),
     );
 
     // --- Pin verification (structural: refusal or proof, never a no-op). ---
@@ -69,10 +143,25 @@ fn ccd_locality_ab() {
             pin_current_thread(&[target]).expect("pin to first core of group 0");
             let now = current_cpu().expect("getcpu");
             assert_eq!(now, target, "pinned thread must run on its target CPU");
-            println!("{{\"metric\":\"pin-verify\",\"verdict\":\"pass\",\"cpu\":{now}}}");
+            measurement(
+                "pin-verify/measurement",
+                "pin-verify",
+                format!(
+                    "{{\"metric\":\"pin-verify\",\"verdict\":\"pass\",\"cpu\":{now},\
+                     \"machine\":{machine},\"input_seed\":null,\"os_schedule_replay\":false}}"
+                ),
+            );
         }
         Err(OsAffinityError::Unsupported(why)) => {
-            println!("{{\"metric\":\"pin-verify\",\"verdict\":\"skip\",\"why\":{why:?}}}");
+            measurement(
+                "pin-verify/measurement",
+                "pin-verify",
+                format!(
+                    "{{\"metric\":\"pin-verify\",\"verdict\":\"skip\",\"why\":{},\
+                     \"machine\":{machine},\"input_seed\":null,\"os_schedule_replay\":false}}",
+                    json_string(why),
+                ),
+            );
         }
         Err(e) => panic!("getcpu failed structurally: {e}"),
     }
@@ -93,9 +182,15 @@ fn ccd_locality_ab() {
             for &n in &nodes {
                 *per_node.entry(n).or_default() += 1;
             }
-            println!(
-                "{{\"metric\":\"first-touch-audit\",\"pages\":{},\"per_node\":{per_node:?}}}",
-                nodes.len()
+            measurement(
+                "first-touch-audit/measurement",
+                "first-touch-audit",
+                format!(
+                    "{{\"metric\":\"first-touch-audit\",\"pages\":{},\"per_node\":{},\
+                     \"machine\":{machine},\"input_seed\":null,\"os_placement_replay\":false}}",
+                    nodes.len(),
+                    node_counts_json(&per_node),
+                ),
             );
             assert!(
                 per_node.keys().all(|&n| n >= 0),
@@ -103,7 +198,15 @@ fn ccd_locality_ab() {
             );
         }
         Err(OsAffinityError::Unsupported(why)) => {
-            println!("{{\"metric\":\"first-touch-audit\",\"verdict\":\"skip\",\"why\":{why:?}}}");
+            measurement(
+                "first-touch-audit/measurement",
+                "first-touch-audit",
+                format!(
+                    "{{\"metric\":\"first-touch-audit\",\"verdict\":\"skip\",\"why\":{},\
+                     \"machine\":{machine},\"input_seed\":null,\"os_placement_replay\":false}}",
+                    json_string(why),
+                ),
+            );
         }
         Err(e) => panic!("move_pages query failed structurally: {e}"),
     }
@@ -111,8 +214,14 @@ fn ccd_locality_ab() {
 
     // --- L3-island A/B (needs >= 2 measured groups + working pinning). ---
     if groups.len() < 2 || current_cpu().is_err() {
-        println!(
-            "{{\"metric\":\"l3-island-ab\",\"verdict\":\"skip\",\"why\":\"needs >=2 measured L3 groups + pinning\"}}"
+        measurement(
+            "l3-island-ab/measurement",
+            "l3-island-ab",
+            format!(
+                "{{\"metric\":\"l3-island-ab\",\"verdict\":\"skip\",\
+                 \"why\":\"needs >=2 measured L3 groups + pinning\",\"machine\":{machine},\
+                 \"input_seed\":null,\"timing_seed\":null,\"timing_replay\":false}}"
+            ),
         );
         return;
     }
@@ -141,12 +250,23 @@ fn ccd_locality_ab() {
     let spread = best(&mut buffers, &spread_pins);
     let packed = best(&mut buffers, &packed_pins);
     let free = best(&mut buffers, &free_pins);
-    println!(
-        "{{\"metric\":\"l3-island-ab\",\"groups\":{g},\"ws_mib_per_worker\":24,\
-         \"spread_gbs\":{spread:.1},\"packed_gbs\":{packed:.1},\"unpinned_gbs\":{free:.1},\
-         \"spread_over_packed\":{:.2},\"spread_over_unpinned\":{:.2}}}",
-        spread / packed.max(1e-9),
-        spread / free.max(1e-9),
+    let spread_over_packed = spread / packed.max(1e-9);
+    let spread_over_unpinned = spread / free.max(1e-9);
+    measurement(
+        "l3-island-ab/measurement",
+        "l3-island-ab",
+        format!(
+            "{{\"metric\":\"l3-island-ab\",\"groups\":{g},\"ws_mib_per_worker\":24,\
+             \"spread_gbs\":{},\"packed_gbs\":{},\"unpinned_gbs\":{},\
+             \"spread_over_packed\":{},\"spread_over_unpinned\":{},\
+             \"machine\":{machine},\"input_seed\":null,\"trials\":3,\
+             \"timing_seed\":null,\"timing_replay\":false}}",
+            finite_json(spread, 1),
+            finite_json(packed, 1),
+            finite_json(free, 1),
+            finite_json(spread_over_packed, 2),
+            finite_json(spread_over_unpinned, 2),
+        ),
     );
     assert!(
         spread > packed,
@@ -168,7 +288,16 @@ fn hugepage_ab() {
     use fs_substrate::os_affinity::advise_hugepages_words;
 
     let mode = thp_mode();
-    println!("{{\"metric\":\"thp-mode\",\"mode\":{mode:?}}}");
+    let machine = fs_substrate::CapabilityProbe::topology_only().fingerprint();
+    measurement(
+        "thp-mode/measurement",
+        "thp-mode",
+        format!(
+            "{{\"metric\":\"thp-mode\",\"mode\":{},\"machine\":{machine},\
+             \"input_seed\":null}}",
+            option_json(mode.as_deref()),
+        ),
+    );
     let words = (1usize << 30) / 8;
     let walk = |buf: &[u64]| -> f64 {
         // One touch per >4 KiB stride, wrapping: TLB misses dominate
@@ -204,14 +333,32 @@ fn hugepage_ab() {
         Ok(bytes) => {
             fill(&mut adv);
             let adv_gbs = walk(&adv);
-            println!(
-                "{{\"metric\":\"hugepage-ab\",\"advised_bytes\":{bytes},\"plain_gbs\":{base_gbs:.2},\"advised_gbs\":{adv_gbs:.2},\"speedup\":{:.3}}}",
-                adv_gbs / base_gbs.max(1e-9)
+            let speedup = adv_gbs / base_gbs.max(1e-9);
+            measurement(
+                "hugepage-ab/measurement",
+                "hugepage-ab",
+                format!(
+                    "{{\"metric\":\"hugepage-ab\",\"advised_bytes\":{bytes},\
+                     \"plain_gbs\":{},\"advised_gbs\":{},\"speedup\":{},\
+                     \"machine\":{machine},\"input_seed\":null,\"trials\":3,\
+                     \"timing_seed\":null,\"timing_replay\":false}}",
+                    finite_json(base_gbs, 2),
+                    finite_json(adv_gbs, 2),
+                    finite_json(speedup, 3),
+                ),
             );
         }
         Err(e) => {
-            println!(
-                "{{\"metric\":\"hugepage-ab\",\"verdict\":\"skip\",\"why\":\"{e}\",\"plain_gbs\":{base_gbs:.2}}}"
+            measurement(
+                "hugepage-ab/measurement",
+                "hugepage-ab",
+                format!(
+                    "{{\"metric\":\"hugepage-ab\",\"verdict\":\"skip\",\"why\":{},\
+                     \"plain_gbs\":{},\"machine\":{machine},\"input_seed\":null,\
+                     \"trials\":3,\"timing_seed\":null,\"timing_replay\":false}}",
+                    json_string(&e.to_string()),
+                    finite_json(base_gbs, 2),
+                ),
             );
         }
     }

@@ -120,6 +120,38 @@ Rust test diagnostics. In-module suites cover the probe battery, Morton
 known answers, tile geometry edge cases, halo boundary semantics, and
 128-byte tile-base alignment.
 
+The ignored release-only locality harness `tests/ccd_ab.rs` emits validated
+compound `fs-obs` `Custom` events under suite `fs-substrate/ccd-ab`. Its rows
+remain ordered as `ccd-topology/measurement`, `pin-verify/measurement`,
+`first-touch-audit/measurement`, and `l3-island-ab/measurement`; the separate
+hugepage test emits `thp-mode/measurement` followed by
+`hugepage-ab/measurement`. Pass and unsupported-platform skip paths share the
+same stable row identity because they are mutually exclusive outcomes. The
+NUMA node histogram is encoded as an RFC 8259 object with quoted node keys,
+THP absence is JSON `null`, and diagnostic strings are escaped before entering
+the opaque custom payload.
+
+The ignored `tests/prefetch_sweep.rs` lane uses suite
+`fs-substrate/prefetch-sweep`. Its nine candidate rows are
+`prefetch-sweep/distance-{0,2,4,8,16,32,64,128,256}/measurement`, in that
+order, followed by `prefetch-winner/measurement`. All ten rows record the
+logical gather-index seed `0x5EED_5EED`; it reproduces the index vector and is
+not a seed for wall time, OS scheduling, placement, or hardware prefetch
+state. Every locality and prefetch row records the stable machine fingerprint.
+Three-trial timing rows retain their legacy decimal precision, encode
+non-finite values as JSON `null`, and explicitly mark their timing seed null
+and timing replay false.
+
+These migrations preserve the ignored/platform behavior, benchmark allocation
+shapes, existing topology and OS probes, timing boundaries, best-of-three
+calculations, gates, skip ordering, and panic diagnostics. Topology-only
+fingerprint capture stays outside every measured interval. They wrap only the
+harnesses' former ad-hoc diagnostic objects; no external canonical artifact is
+re-encoded and no deterministic aggregate verdict is synthesized. The
+measurements remain machine-local documentation: they do not establish
+portable bandwidth, pinning success beyond the observed CPU receipt, NUMA/THP
+placement replay, prefetch optimality, repeatability, or statistical confidence.
+
 ## No-claim boundaries
 - Per-core-CLASS bandwidth (P vs E pinning) — needs QoS/affinity outside safe
   std; per-class COUNTS are reported, aggregate bandwidth measured; real
