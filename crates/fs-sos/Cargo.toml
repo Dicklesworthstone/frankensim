@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Proof-carrying optimization (fs-sos): sum-of-squares certificates as executable PROOFS of polynomial lower bounds — a certificate is verified by matching polynomial coefficients, so a claimed bound above the true minimum simply fails (zero false certificates). Includes exact quadratic global optima, a PSD-feasibility checker (the SDP feasibility core), and a Lyapunov stability certificate for linear systems."
+description = "Proof-carrying optimization (fs-sos): sum-of-squares decomposition diagnostics, exact-global and radius-scoped certified value bounds, quadratic certificate construction, PSD feasibility, and linear Lyapunov verification."
 
 [package.metadata.frankensim]
 layer = "L4"
@@ -15,6 +15,7 @@ fs-ivl = { path = "../fs-ivl" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
+fs-obs = { path = "../fs-obs" }
 
 [lints]
 workspace = true

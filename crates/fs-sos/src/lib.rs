@@ -1,19 +1,21 @@
 //! fs-sos — proof-carrying optimization (sum-of-squares certificates). Layer: L4.
 //!
 //! A lower bound proven by SAMPLING can be wrong (it can miss the true minimum).
-//! A SUM-OF-SQUARES certificate cannot: if `p(x) − γ = Σ qᵢ(x)²` as an identity
-//! of polynomials, then `p(x) ≥ γ` for EVERY `x`, because a square is
-//! nonnegative. This crate makes that certificate executable — [`SosCertificate`]
-//! is verified by matching polynomial coefficients, so a claimed bound ABOVE the
-//! true minimum simply fails to verify. Certificates over vibes; zero false
-//! certificates.
+//! A SUM-OF-SQUARES identity `p(x) − γ = Σ qᵢ(x)²` instead proves `p(x) ≥ γ`.
+//! This crate separates a tolerance-based coefficient diagnostic
+//! ([`SosCertificate::verify`]) from APIs that may make value claims:
+//! [`SosCertificate::certified_bound_global`] admits only exact non-constant
+//! residual cancellation, while [`SosCertificate::certified_bound_on`] encloses
+//! residual error on one finite radius.
 //!
-//! Included: univariate [`Poly`] arithmetic; [`certify_quadratic`] (an exact
-//! global optimum + its SOS certificate); [`is_psd`] (the SDP-feasibility core,
-//! by an in-house Jacobi eigensolver); and [`lyapunov_certifies_stability`] (an
-//! SOS/quadratic Lyapunov stability certificate for a linear system).
+//! Included: univariate [`Poly`] arithmetic; [`certify_quadratic`] (a
+//! completed-square `f64` result + its SOS certificate); [`is_psd`] (the
+//! SDP-feasibility core, by an in-house Jacobi eigensolver); and
+//! [`lyapunov_certifies_stability`] (an SOS/quadratic Lyapunov stability
+//! certificate for a linear system).
 //!
-//! Deterministic; no dependencies.
+//! Deterministic for a fixed build and ISA; exact residual accounting uses
+//! `fs-ivl` expansions and `fs-math` error-free transforms.
 
 /// A univariate polynomial, coefficients ascending (`coeffs[i]` multiplies `xⁱ`).
 #[derive(Debug, Clone, PartialEq)]
@@ -256,8 +258,9 @@ impl SosCertificate {
     }
 }
 
-/// The exact global minimum of `a·x² + b·x + c` (`a > 0`) with its SOS
-/// certificate: `p(x) − (c − b²/4a) = (√a·x + b/2√a)²`.
+/// The completed-square `f64` result for `a·x² + b·x + c` (`a > 0`) with its
+/// SOS certificate:
+/// `p(x) − (c − b²/4a) = (√a·x + b/2√a)²` in exact arithmetic.
 ///
 /// Returns `None` when the coefficients or derived certificate values are
 /// non-finite, or when `a <= 0` (not bounded below by a square).

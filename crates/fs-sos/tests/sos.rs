@@ -1,7 +1,7 @@
-//! Battery for proof-carrying optimization (fs-sos). The load-bearing property
-//! is ZERO FALSE CERTIFICATES: a sum-of-squares certificate is verified by a
-//! polynomial identity, so a claimed bound above the true minimum fails, while a
-//! verified bound is sound (holds for every sampled point).
+//! Battery for proof-carrying optimization (fs-sos). The load-bearing split is
+//! between coefficient-residual diagnostics and sound value claims: exact
+//! non-constant cancellation admits a global bound, while arbitrary residuals
+//! are enclosed only on an explicit finite radius.
 
 use fs_sos::{
     Poly, SosCertificate, certify_quadratic, is_psd, lyapunov_certifies_stability, square,
@@ -244,8 +244,9 @@ fn exact_zero_residual_certifies_globally() {
     let bound = cert
         .certified_bound_global(&p)
         .expect("exact dyadic cert must certify globally");
-    assert!(
-        (bound - 2.0).abs() < 1e-12,
+    assert_eq!(
+        bound.to_bits(),
+        2.0_f64.to_bits(),
         "the global bound is the exact lower bound: {bound}"
     );
 }
