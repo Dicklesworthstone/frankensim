@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	nasa-tn-d-8184-m19-silicon-steel-material-deck
+redistribution	permitted	NASA NTRS record 19760013282 marks NASA-TN-D-8184 public and a work of the U.S. Government whose public use is permitted; NASA attribution retained; factual data only, no figure reproduction
+citation	Bollenbacher, G. (1976), FORTRAN Program for Induction Motor Analysis, NASA-TN-D-8184, NASA Lewis Research Center, NTRS 19760013282, Figures 9-11 and material-deck instructions
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

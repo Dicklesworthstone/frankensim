@@ -576,6 +576,42 @@ N0602-001 reference:
 - <https://ntrs.nasa.gov/citations/20080003822>
 - <https://ntrs.nasa.gov/api/citations/20080003822/downloads/20080003822.pdf>
 
+## NASA-TN-D-8184 M-19 material-deck tranche
+
+`nasa-tn-d-8184-m19-material-deck/` retains the public M-19 silicon-steel
+example that Bollenbacher used to document NASA Lewis's induction-motor
+analysis program. Figure 10 prints `14` magnetization points. The pack converts
+magnetizing force from ampere-turns per inch to `A/m` and magnetic flux density
+from kilolines per square inch to `T`, then stores those exact printed points as
+a tabulated-only curve. The report's program reconstructed between points with
+straight lines on semilog paper; the current runtime has no semilog policy, so
+the pack deliberately does not substitute ordinary linear interpolation.
+
+Figure 11 and the printed `FELOSS` card supply a separate fixed-condition
+frequency-loss approximation: `9.4 W/lb` at `400 Hz`,
+`64.5 kilolines/in^2`, and `0.014 in` lamination thickness, with frequency
+exponent `1.47`. Exact SI normalization yields
+`20.723452645378494 W/kg`, `0.9997519995039992 T`, and `0.0003556 m`.
+The report defines only
+`WFE = WCORE * (frequency/FCORE)^SLOPE` at that fixed flux density and
+thickness. It supplies neither a flux-density exponent nor a separable
+Steinmetz coefficient, so the pack does not label this as a complete
+Steinmetz law.
+
+The source identifies no manufacturer, chemistry, fully/semi-processed state,
+anneal, magnetic test method, specimen preparation, waveform, direction,
+temperature, repeats, dispersion, or measurement uncertainty. It also does not
+bind Figure 10's magnetization curve to a lamination thickness. Those gaps are
+explicit fail-closed axes and all runtime uncertainties are `Unstated`. This is
+therefore a source-faithful public M-19 material-deck tranche, not the fully
+pinned M-19 design card required by bead `1sxe`; process/test-method-matched
+curve and loss evidence remains open.
+
+NASA-TN-D-8184 M-19 references:
+
+- <https://ntrs.nasa.gov/citations/19760013282>
+- <https://ntrs.nasa.gov/api/citations/19760013282/downloads/19760013282.pdf>
+
 ## NGYC N42 sintered NdFeB magnet tranche
 
 `ngyc-n42-sintered-nickel-coated/` retains the N42 sintered NdFeB magnets

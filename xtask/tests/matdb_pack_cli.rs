@@ -34,6 +34,8 @@ const NASA_CR_115153_WATER_ETHYLENE_GLYCOL_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/nasa-cr-115153-water-ethylene-glycol/manifest.tsv";
 const N0602_001_NITRILE_JP8_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/n0602-001-nitrile-jp8-compatibility/manifest.tsv";
+const NASA_TN_D_8184_M19_MATERIAL_DECK_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-tn-d-8184-m19-material-deck/manifest.tsv";
 const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
 const JINSHAN_N42_PRISTINE_TEMPERATURE_SEED_MANIFEST: &str =
@@ -1683,6 +1685,234 @@ fn g3_cli_compiles_committed_n0602_001_nitrile_jp8_compatibility_seed() {
             .is_empty(),
         "the source's approximate 57% overlap must remain observation-only"
     );
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_nasa_tn_d_8184_m19_material_deck_without_inventing_process_state() {
+    let manifest = workspace_path(NASA_TN_D_8184_M19_MATERIAL_DECK_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed NASA-TN-D-8184 M-19 seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("nasa-tn-d-8184-m19-first.fsmatpk");
+    let second_path = directory.join("nasa-tn-d-8184-m19-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first NASA-TN-D-8184 M-19 seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second NASA-TN-D-8184 M-19 seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "NASA-TN-D-8184 M-19 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first NASA-TN-D-8184 M-19 pack");
+    let second_bytes = fs::read(second_path).expect("read second NASA-TN-D-8184 M-19 pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "NASA-TN-D-8184 M-19 pack bytes moved"
+    );
+    let decoded =
+        NormalizedPack::from_bytes(&first_bytes).expect("decode NASA-TN-D-8184 M-19 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify NASA-TN-D-8184 M-19 pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "nasa-tn-d-8184-m19-silicon-steel-material-deck"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("public use"));
+    assert_eq!(decoded.claims().claim_count(), 6);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let magnetization = decoded.claims().claims_for("magnetic_flux_density");
+    assert_eq!(magnetization.len(), 1);
+    let magnetization = magnetization[0].1;
+    let PropertyValue::Curve {
+        abscissa,
+        abscissa_dims,
+        knots,
+        dims,
+    } = &magnetization.value
+    else {
+        panic!("NASA-TN-D-8184 M-19 magnetization data was not a curve");
+    };
+    assert_eq!(abscissa, "magnetic_field_strength");
+    assert_eq!(*abscissa_dims, Dims([-1, 0, 0, 0, 1, 0]));
+    assert_eq!(*dims, Dims([0, 1, -2, 0, -1, 0]));
+    assert_eq!(knots.len(), 14);
+    assert_eq!(
+        magnetization.interpolation,
+        InterpolationPolicy::TabulatedOnly
+    );
+    assert_eq!(magnetization.uncertainty, UncertaintyModel::Unstated);
+    assert_eq!(magnetization.provenance.license, NASA_SEED_LICENSE);
+    assert!(magnetization.provenance.source.contains("NASA-TN-D-8184"));
+    assert!(magnetization.provenance.source.contains("[source:primary]"));
+    for missing_axis in [
+        "source_manufacturer_known",
+        "source_processing_anneal_state_known",
+        "source_lamination_thickness_known",
+        "source_magnetic_test_method_known",
+        "source_test_frequency_known",
+        "source_test_temperature_known",
+        "source_chemistry_known",
+        "source_waveform_known",
+        "source_direction_known",
+    ] {
+        assert_eq!(
+            magnetization.validity.bound(missing_axis),
+            Some((0.0, 0.0)),
+            "M-19 B-H curve must retain missing identity axis {missing_axis}"
+        );
+    }
+    assert_eq!(
+        magnetization
+            .validity
+            .bound("source_curve_points_printed_not_digitized"),
+        Some((1.0, 1.0))
+    );
+
+    let source_b_kilolines_per_square_inch = [
+        26.0_f64, 30.0, 40.0, 50.0, 60.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0, 110.0, 116.0,
+    ];
+    let source_h_ampere_turns_per_inch = [
+        1.30_f64, 1.45, 1.95, 2.55, 3.50, 5.1, 6.5, 8.8, 13.0, 21.0, 37.0, 60.0, 130.0, 185.0,
+    ];
+    for ((actual_h, actual_b), (source_h, source_b)) in knots.iter().zip(
+        source_h_ampere_turns_per_inch
+            .iter()
+            .zip(source_b_kilolines_per_square_inch.iter()),
+    ) {
+        let expected_h = source_h / 0.0254_f64;
+        let expected_b = source_b * 1.0e-5_f64 / 0.0254_f64.powi(2);
+        assert!((actual_h - expected_h).abs() / expected_h <= 2.0e-14);
+        assert!((actual_b - expected_b).abs() / expected_b <= 2.0e-14);
+    }
+
+    let scalar_expectations = [
+        (
+            "specific_core_loss",
+            9.4_f64 / 0.453_592_37_f64,
+            Dims([2, 0, -3, 0, 0, 0]),
+        ),
+        (
+            "core_loss_frequency_power_law_exponent",
+            1.47_f64,
+            Dims([0, 0, 0, 0, 0, 0]),
+        ),
+        (
+            "lamination_thickness",
+            0.014_f64 * 0.0254_f64,
+            Dims([1, 0, 0, 0, 0, 0]),
+        ),
+        (
+            "core_loss_reference_frequency",
+            400.0_f64,
+            Dims([0, 0, -1, 0, 0, 0]),
+        ),
+        (
+            "core_loss_reference_flux_density",
+            64.5_f64 * 1.0e-5_f64 / 0.0254_f64.powi(2),
+            Dims([0, 1, -2, 0, -1, 0]),
+        ),
+    ];
+    let mut scalar_observations = Vec::new();
+    for (property, expected_value, expected_dims) in scalar_expectations {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing NASA M-19 {property}");
+        let claim = claims[0].1;
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("NASA M-19 {property} was not scalar");
+        };
+        assert_eq!(*dims, expected_dims);
+        let scale = expected_value.abs().max(1.0e-12_f64);
+        assert!((*value - expected_value).abs() / scale <= 2.0e-15);
+        assert_eq!(
+            claim.interpolation,
+            InterpolationPolicy::ConstantWithinValidity
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        assert!(claim.provenance.source.contains("NASA-TN-D-8184"));
+        assert_eq!(
+            claim.validity.bound("source_material_grade_m19"),
+            Some((1.0, 1.0))
+        );
+        for missing_axis in [
+            "source_manufacturer_known",
+            "source_chemistry_known",
+            "source_processing_anneal_state_known",
+            "source_magnetic_test_method_known",
+            "source_test_temperature_known",
+            "source_waveform_known",
+            "source_direction_known",
+        ] {
+            assert_eq!(
+                claim.validity.bound(missing_axis),
+                Some((0.0, 0.0)),
+                "NASA M-19 {property} must retain missing identity axis {missing_axis}"
+            );
+        }
+        scalar_observations.push(claim.observations[0]);
+    }
+    assert!(
+        scalar_observations
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]),
+        "NASA M-19 frequency-loss parameters must share one source observation"
+    );
+
+    let curve_observation = decoded
+        .claims()
+        .observation(magnetization.observations[0])
+        .expect("NASA M-19 curve observation remains linked");
+    assert!(curve_observation.method.contains("Figure 10"));
+    assert!(curve_observation.caveats.contains("tabulated-only"));
+    assert!(curve_observation.caveats.contains("anneal"));
+    let loss_observation = decoded
+        .claims()
+        .observation(scalar_observations[0])
+        .expect("NASA M-19 frequency-loss observation remains linked");
+    assert!(loss_observation.method.contains("WCORE=9.4 W/lb"));
+    assert!(
+        loss_observation
+            .caveats
+            .contains("not a complete Steinmetz law")
+    );
+    assert!(loss_observation.caveats.contains("test method"));
+
+    for refused_property in [
+        "steinmetz_coefficient",
+        "core_loss_flux_density_power_law_exponent",
+        "recoil_relative_permeability",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "source-absent NASA M-19 property must remain refused: {refused_property}"
+        );
+    }
 
     let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
     assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));

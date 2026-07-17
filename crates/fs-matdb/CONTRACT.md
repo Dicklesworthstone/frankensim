@@ -346,14 +346,17 @@ compiles each committed bulk tranche twice and verifies exact identity,
 condition flags, source/license linkage, no-claim exclusions, and bounded
 comparison evidence, including NASA-CR-115153's inhibited water/ethylene-glycol
 coolant specification and the conflict-preserving N0602-001 nitrile O-ring
-compatibility tranche. The NGYC N42 battery additionally pins supplier, sintered
-grade, and coating identity while proving that incompatible SI/CGS energy-product
-prints survive as distinct claims. The NACA TN 2680 battery compiles the
-supplier-minimum-purity 2,2,4-trimethylpentane tranche and verifies all fifteen
-apparatus-bound Table I maximum-flame-speed rows without promoting the report's
-empirical fit to a bulk-material law. The FACE G CDTRF-G 2023 v1 battery checks
-five exact volume fractions, their unit sum, and two conflict-preserving
-calculated-RON prints for the same named formulation.
+compatibility tranche. The NASA-TN-D-8184 M-19 battery preserves all fourteen
+printed magnetization points plus the fixed-flux frequency-loss reference and
+exponent, while proving that absent process, anneal, test-method, and full
+Steinmetz identity remain fail-closed. The NGYC N42 battery additionally pins
+supplier, sintered grade, and coating identity while proving that incompatible
+SI/CGS energy-product prints survive as distinct claims. The NACA TN 2680
+battery compiles the supplier-minimum-purity 2,2,4-trimethylpentane tranche and
+verifies all fifteen apparatus-bound Table I maximum-flame-speed rows without
+promoting the report's empirical fit to a bulk-material law. The FACE G
+CDTRF-G 2023 v1 battery checks five exact volume fractions, their unit sum, and
+two conflict-preserving calculated-RON prints for the same named formulation.
 The NASA UAM winding-insulation battery compiles the source-linked MW-16C
 polyimide-wire thermal-class pair, the selected 0.08 mm Nomex 410 slot liner,
 and the CoolTherm EP-2000 actual/omitted cure steps as three separate packs. It
@@ -411,6 +414,12 @@ Wankel-housing authority.
   tranche adds one TGA semi-volatile claim, two aromatic-content-keyed
   absorbed-fuel claims, three partitioning statistics, two conflicting printed
   swell slopes, one regression intercept, and one coefficient of determination.
+  The NASA-TN-D-8184 M-19 tranche adds one fourteen-point tabulated
+  magnetization curve, one fixed-condition specific-core-loss reference, its
+  frequency exponent, and the associated reference frequency, flux density,
+  and lamination thickness. Missing process, anneal, test method, temperature,
+  and full Steinmetz identity remain explicit rather than being inferred from
+  the grade name.
   The first supplier-pinned N42 tranche adds one remanence, one coercivity, and
   two conflict-preserving maximum-energy-product claims for NGYC sintered,
   nickel-coated cubes. A separate Jinshan N42 tranche adds exact `25 degC` and
@@ -496,12 +505,20 @@ Wankel-housing authority.
   (`0.451` and `0.463`) coexist without fusion; the approximate prediction-
   interval overlap remains observation-only, and the regression intercept is
   not a certified shrinkage value. No generic seal, ozone/aging, permeability,
-  compression-set, compatibility, or service-life authority follows. The NGYC
-  N42 claims bind the supplier-named sintered grade and nickel-coated
-  cube family from one CC-BY-4.0 article. The source does not say whether the
-  values were measured or supplier-nominal and omits test temperature, method,
-  lot, chemistry, detailed process, intrinsic coercivity, recoil permeability,
-  demagnetization curves, and temperature coefficients. Its printed
+  compression-set, compatibility, or service-life authority follows. The
+  NASA-TN-D-8184 M-19 claims retain a public program material deck, not a fully
+  identified electrical-steel condition. The tabulated curve does not acquire
+  linear interpolation authority, and the fixed-flux frequency exponent is not
+  a complete Steinmetz model. Manufacturer, chemistry, fully/semi-processed
+  state, anneal, curve thickness, test method, waveform, direction,
+  temperature, fitted range, repeats, and uncertainty remain absent; the pack
+  cannot qualify a motor lamination or satisfy the bead's pinned M-19 card by
+  itself. The NGYC N42 claims bind the supplier-named sintered grade and
+  nickel-coated cube family from one CC-BY-4.0 article. The source does not say
+  whether the values were measured or supplier-nominal and omits test
+  temperature, method, lot, chemistry, detailed process, intrinsic coercivity,
+  recoil permeability, demagnetization curves, and temperature coefficients.
+  Its printed
   `318.3 kJ/m^3` and `42 MGOe` maximum-energy-product representations normalize
   to different SI values and therefore remain separate claims; neither is a
   resolved design allowable. The Jinshan N42 claims remain a separate material
