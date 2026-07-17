@@ -1335,6 +1335,7 @@ fn check_terminology(root: &Path) -> Vec<Violation> {
 
 const CITABLE_PRODUCER_CHECK: &str = "citable-producer-inventory";
 const CITATION_FIELD_NAME: &str = concat!("citation_", "eligible");
+const CITATION_FIELD_SEAM: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CitationFieldMode {
@@ -1617,36 +1618,55 @@ fn rust_string_literals(source: &str) -> Result<Vec<RustStringLiteral<'_>>, Stri
     Ok(literals)
 }
 
-fn enclosing_function_name(source: &str, offset: usize) -> String {
-    for raw in source[..offset].lines().rev() {
-        let mut line = raw.trim_start();
-        if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
-            continue;
-        }
-        if line.starts_with("pub(")
-            && let Some(close) = line.find(')')
-        {
-            line = line[close + 1..].trim_start();
-        } else if let Some(rest) = line.strip_prefix("pub ") {
+fn declared_function_name(raw: &str) -> Option<String> {
+    let mut line = raw.trim_start();
+    if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+        return None;
+    }
+    if line.starts_with("pub(")
+        && let Some(close) = line.find(')')
+    {
+        line = line[close + 1..].trim_start();
+    } else if let Some(rest) = line.strip_prefix("pub ") {
+        line = rest.trim_start();
+    }
+    for qualifier in ["async ", "const ", "unsafe "] {
+        if let Some(rest) = line.strip_prefix(qualifier) {
             line = rest.trim_start();
         }
-        for qualifier in ["async ", "const ", "unsafe "] {
-            if let Some(rest) = line.strip_prefix(qualifier) {
-                line = rest.trim_start();
+    }
+    let rest = line.strip_prefix("fn ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RustOwnerScope {
+    Module,
+    Function(usize),
+}
+
+fn enclosing_function(source: &str, offset: usize) -> (String, RustOwnerScope) {
+    let mut line_end = offset;
+    loop {
+        let line_start = source[..line_end].rfind('\n').map_or(0, |index| index + 1);
+        if let Some(name) = declared_function_name(&source[line_start..line_end])
+            && let Some(relative_open) = source[line_start..offset].find('{')
+        {
+            let open = line_start + relative_open;
+            if matches!(rust_scope_contains(source, open, offset), Ok(true)) {
+                return (name, RustOwnerScope::Function(line_start));
             }
         }
-        let Some(rest) = line.strip_prefix("fn ") else {
-            continue;
-        };
-        let name: String = rest
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .collect();
-        if !name.is_empty() {
-            return name;
+        if line_start == 0 {
+            break;
         }
+        line_end = line_start - 1;
     }
-    "<module>".to_string()
+    ("<module>".to_string(), RustOwnerScope::Module)
 }
 
 fn matcher_only_literal(source: &str, offset: usize) -> bool {
@@ -1673,6 +1693,41 @@ fn literal_is_citation_field(literal: RustStringLiteral<'_>) -> bool {
     let escaped_key = format!("\\\"{CITATION_FIELD_NAME}\\\":");
     let raw_key = format!("\"{CITATION_FIELD_NAME}\":");
     compact.contains(&escaped_key) || compact.contains(&raw_key)
+}
+
+/// The scanner's own protected-name lexicon and allowlist deliberately split
+/// the field name so the guard does not inventory its policy data as an output
+/// sink. Only this declaration region is exempt; executable xtask functions
+/// remain subject to the same producer scan as every other Rust source.
+fn citable_guard_metadata_literal(
+    path: &str,
+    source: &str,
+    literal: RustStringLiteral<'_>,
+) -> bool {
+    if path != "xtask/src/main.rs" {
+        return false;
+    }
+    let Some(start) = source.find("const CITATION_FIELD_NAME") else {
+        return false;
+    };
+    let Some(relative_end) = source[start..].find("struct RustStringLiteral") else {
+        return false;
+    };
+    (start..start + relative_end).contains(&literal.start)
+        && matches!(
+            enclosing_function(source, literal.start).1,
+            RustOwnerScope::Module
+        )
+}
+
+/// Conservative per-function state for the field's fixed semantic seam:
+/// `citation_` + `eligible`. Seeing both halves in distinct non-consumer
+/// literals is enough to inventory a positive-capable dynamic construction;
+/// declaration order does not matter.
+#[derive(Debug, Clone, Copy, Default)]
+struct CitationFragmentState<'a> {
+    prefix: Option<RustStringLiteral<'a>>,
+    suffix: Option<RustStringLiteral<'a>>,
 }
 
 /// Whether `offset` is still inside the braced scope beginning at `open`.
@@ -1816,25 +1871,68 @@ fn scan_citable_producer_source(
     source: &str,
 ) -> Result<Vec<CitationFieldOccurrence>, String> {
     let mut occurrences = Vec::new();
+    let mut fragment_states = BTreeMap::<RustOwnerScope, CitationFragmentState<'_>>::new();
+    let (citation_prefix, citation_suffix) = CITATION_FIELD_NAME.split_at(CITATION_FIELD_SEAM);
     for literal in rust_string_literals(source)? {
-        if !literal_is_citation_field(literal)
-            || matcher_only_literal(source, literal.start)
+        if matcher_only_literal(source, literal.start)
             || parser_key_literal(source, literal)
             || cfg_test_only_literal(source, literal.start)?
+            || citable_guard_metadata_literal(path, source, literal)
         {
             continue;
         }
-        occurrences.push(CitationFieldOccurrence {
-            path: path.to_string(),
-            owner: enclosing_function_name(source, literal.start),
-            anchor_text: literal.content.to_string(),
-            mode: citation_field_mode(source, literal),
-            line: source[..literal.start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count()
-                + 1,
-        });
+        let (owner, owner_scope) = enclosing_function(source, literal.start);
+        if literal_is_citation_field(literal) {
+            occurrences.push(CitationFieldOccurrence {
+                path: path.to_string(),
+                owner,
+                anchor_text: literal.content.to_string(),
+                mode: citation_field_mode(source, literal),
+                line: source[..literal.start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1,
+            });
+            continue;
+        }
+
+        let state = fragment_states.entry(owner_scope).or_default();
+        let has_prefix = literal.content.contains(citation_prefix);
+        let has_suffix = literal.content.contains(citation_suffix);
+        // A diagnostic or parser message may spell the whole vocabulary in
+        // one literal without emitting it as a field. The split-key hazard is
+        // specifically two distinct literals that can be joined dynamically.
+        if has_prefix && has_suffix {
+            continue;
+        }
+        if state.prefix.is_none() && has_prefix {
+            state.prefix = Some(literal);
+        }
+        if state.suffix.is_none() && has_suffix {
+            state.suffix = Some(literal);
+        }
+        if let (Some(prefix), Some(suffix)) = (state.prefix.take(), state.suffix.take()) {
+            let start = if prefix.start <= suffix.start {
+                prefix
+            } else {
+                suffix
+            };
+            occurrences.push(CitationFieldOccurrence {
+                path: path.to_string(),
+                owner,
+                anchor_text: CITATION_FIELD_NAME.to_string(),
+                // A fragmented construction cannot earn the direct
+                // literal's fixed-false classification: dynamic use is
+                // conservatively positive-capable.
+                mode: CitationFieldMode::PositiveCapable,
+                line: source[..start.start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1,
+            });
+        }
     }
     Ok(occurrences)
 }
@@ -3558,11 +3656,98 @@ mod tests {
     }
 
     #[test]
+    fn citable_producer_scanner_rejects_split_and_variable_backed_fields() {
+        let source = concat!(
+            "fn split_concat(value: bool) -> String {\n",
+            "    let key = concat!(\"citation_\", \"eligible\");\n",
+            "    format!(\"{{\\\"{key}\\\":{value}}}\")\n",
+            "}\n\n",
+            "fn variable_backed(value: bool) -> String {\n",
+            "    let suffix = \"eligible\";\n",
+            "    let prefix = \"citation_\";\n",
+            "    let key = format!(\"{prefix}{suffix}\");\n",
+            "    format!(\"{{\\\"{key}\\\":{value}}}\")\n",
+            "}\n",
+        );
+        let occurrences = scan_citable_producer_source("crates/fs-new/src/lib.rs", source)
+            .expect("valid Rust-shaped fixture");
+        assert_eq!(
+            occurrences.len(),
+            2,
+            "both dynamic protected-key constructions must enter the inventory"
+        );
+        assert_eq!(occurrences[0].owner, "split_concat");
+        assert_eq!(occurrences[1].owner, "variable_backed");
+        assert!(
+            occurrences
+                .iter()
+                .all(|occurrence| occurrence.mode == CitationFieldMode::PositiveCapable),
+            "dynamic assembly can never claim the fixed-false exemption"
+        );
+    }
+
+    #[test]
+    fn citable_producer_fragments_survive_an_intervening_direct_sink() {
+        let source = concat!(
+            "fn mixed(value: bool) -> String {\n",
+            "    let prefix = \"citation_\";\n",
+            "    let report = \"{\\\"citation_eligible\\\":false}\";\n",
+            "    let suffix = \"eligible\";\n",
+            "    let key = format!(\"{prefix}{suffix}\");\n",
+            "    format!(\"{report} {{\\\"{key}\\\":{value}}}\")\n",
+            "}\n",
+        );
+        let occurrences = scan_citable_producer_source("crates/fs-new/src/lib.rs", source)
+            .expect("valid Rust-shaped fixture");
+        assert_eq!(
+            occurrences.len(),
+            2,
+            "the audited-looking direct field must not erase a hidden split producer"
+        );
+        assert_eq!(occurrences[0].mode, CitationFieldMode::ReportOnlyFalse);
+        assert_eq!(occurrences[1].mode, CitationFieldMode::PositiveCapable);
+    }
+
+    #[test]
+    fn citable_producer_fragments_do_not_join_across_functions() {
+        let source = concat!(
+            "fn prefix_only() { let _ = \"citation_\"; }\n",
+            "const MODULE_SUFFIX: &str = \"eligible\";\n",
+            "fn suffix_only() { let _ = \"eligible\"; }\n",
+        );
+        let occurrences = scan_citable_producer_source("crates/fs-new/src/lib.rs", source)
+            .expect("valid Rust-shaped fixture");
+        assert!(
+            occurrences.is_empty(),
+            "closed functions and module constants cannot assemble one runtime field: {occurrences:?}"
+        );
+    }
+
+    #[test]
     fn citable_producer_guard_does_not_inventory_its_own_literals() {
         let source = include_str!("main.rs");
         let occurrences = scan_citable_producer_source("xtask/src/main.rs", source)
             .expect("the guard source is valid Rust");
         assert!(occurrences.is_empty(), "guard self-match: {occurrences:?}");
+    }
+
+    #[test]
+    fn citable_producer_guard_metadata_exemption_never_hides_executable_code() {
+        let source = concat!(
+            "const CITATION_FIELD_NAME: &str = concat!(\"citation_\", \"eligible\");\n",
+            "fn hidden(value: bool) -> String {\n",
+            "    let prefix = \"citation_\";\n",
+            "    let suffix = \"eligible\";\n",
+            "    let key = format!(\"{prefix}{suffix}\");\n",
+            "    format!(\"{{\\\"{key}\\\":{value}}}\")\n",
+            "}\n",
+            "struct RustStringLiteral;\n",
+        );
+        let occurrences = scan_citable_producer_source("xtask/src/main.rs", source)
+            .expect("valid Rust-shaped guard fixture");
+        assert_eq!(occurrences.len(), 1, "executable guard-region producer");
+        assert_eq!(occurrences[0].owner, "hidden");
+        assert_eq!(occurrences[0].mode, CitationFieldMode::PositiveCapable);
     }
 
     fn manifest(name: &str, layer: &str, deps: &[&str]) -> Manifest {
