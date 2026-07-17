@@ -1,0 +1,23 @@
+[package]
+name = "fs-detaudit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "G5 determinism-audit harness: worker-matrix bit-identity audits with first-divergence localization over staged hash traces, cross-ISA divergence classification reports, and measured ExecMode fast/deterministic deltas."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[dependencies]
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+fs-oed-e2e = { path = "../fs-oed-e2e" }
+fs-rand = { path = "../fs-rand" }
+fs-substrate = { path = "../fs-substrate" }
+
+[lints]
+workspace = true

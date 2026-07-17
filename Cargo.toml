@@ -93,6 +93,7 @@ members = [
     "crates/fs-spectral",
     "crates/fs-symmetry",
     "crates/fs-conform",
+    "crates/fs-detaudit",
     "crates/fs-wedge",
     "crates/fs-robust",
     "crates/fs-benchmark",

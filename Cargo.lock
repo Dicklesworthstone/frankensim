@@ -993,6 +993,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-detaudit"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-exec",
+ "fs-oed-e2e",
+ "fs-rand",
+ "fs-substrate",
+]
+
+[[package]]
 name = "fs-dfo"
 version = "0.0.1"
 dependencies = [
