@@ -2110,7 +2110,9 @@ fn scan_citable_producer_source(
         if state.suffix.is_none() && has_suffix {
             state.suffix = Some(literal);
         }
-        if let (Some(prefix), Some(suffix)) = (state.prefix.take(), state.suffix.take()) {
+        if let (Some(prefix), Some(suffix)) = (state.prefix, state.suffix) {
+            state.prefix = None;
+            state.suffix = None;
             let start = if prefix.start <= suffix.start {
                 prefix
             } else {
