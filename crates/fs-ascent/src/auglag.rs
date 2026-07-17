@@ -186,17 +186,52 @@ pub(crate) fn validate_problem_at_start(
     (ce.len(), ci.len())
 }
 
-/// Run the PHR augmented-Lagrangian loop from `x0`.
+/// Run the PHR augmented-Lagrangian loop from `x0` with cold (zero)
+/// multipliers.
 pub fn augmented_lagrangian(
     problem: &mut ConstrainedProblem<'_>,
     x0: &[f64],
     tol: f64,
     max_outer: usize,
 ) -> AugLagReport {
+    let (ne, ni) = validate_problem_at_start(problem, x0);
+    augmented_lagrangian_warm(problem, x0, tol, max_outer, &vec![0.0; ne], &vec![0.0; ni])
+}
+
+/// Run the PHR augmented-Lagrangian loop from `x0` with WARM-STARTED
+/// multipliers (continuation solves, e.g. ε-constraint sweeps). Cold
+/// starts on an objective whose unconstrained descent runs to an
+/// asymptote can escape before the penalty activates; carrying the
+/// previous solve's multipliers keeps constraint pressure alive from
+/// the first inner iteration.
+pub fn augmented_lagrangian_warm(
+    problem: &mut ConstrainedProblem<'_>,
+    x0: &[f64],
+    tol: f64,
+    max_outer: usize,
+    lambda0: &[f64],
+    nu0: &[f64],
+) -> AugLagReport {
     validate_tolerance(tol);
     let (ne, ni) = validate_problem_at_start(problem, x0);
-    let mut lambda = vec![0.0f64; ne];
-    let mut nu = vec![0.0f64; ni];
+    assert_eq!(
+        lambda0.len(),
+        ne,
+        "warm equality multipliers must match the constraint dimension"
+    );
+    assert_eq!(
+        nu0.len(),
+        ni,
+        "warm inequality multipliers must match the constraint dimension"
+    );
+    assert_finite("warm equality multiplier", lambda0);
+    assert_finite("warm inequality multiplier", nu0);
+    assert!(
+        nu0.iter().all(|v| *v >= 0.0),
+        "warm inequality multipliers must be nonnegative"
+    );
+    let mut lambda = lambda0.to_vec();
+    let mut nu = nu0.to_vec();
     let mut mu = 10.0f64;
     let mut x = x0.to_vec();
     let mut evals = 0usize;
