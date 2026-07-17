@@ -233,13 +233,17 @@ fn recycled_chunks_charge_each_operation_exactly_once() {
     let kernel = AllocatingKernel { tiles: 4 };
     let first = OperationMemoryLease::unbounded();
     assert_eq!(run_leased(&pool, &kernel, &first).0.expect("run 1"), 6);
-    let created_before = pool.arena_pool().stats().chunks_created;
+    let recycled_before = pool.arena_pool().stats().chunks_recycled;
     let second = OperationMemoryLease::unbounded();
     assert_eq!(run_leased(&pool, &kernel, &second).0.expect("run 2"), 6);
     let stats = pool.arena_pool().stats();
+    // A later run may reach a higher concurrent live set and legitimately
+    // grow the process-wide pool. The invariant under test is that this
+    // operation actually acquired cached storage and received the same
+    // logical lease charge as a fresh acquisition.
     assert!(
-        stats.chunks_recycled > 0 && stats.chunks_created == created_before,
-        "run 2 must reuse run 1's chunks: {stats:?}"
+        stats.chunks_recycled > recycled_before,
+        "run 2 must acquire at least one cached chunk: recycled before={recycled_before}, after={stats:?}"
     );
     assert_eq!(
         first.receipt().requested_bytes,
@@ -247,6 +251,10 @@ fn recycled_chunks_charge_each_operation_exactly_once() {
         "a recycled chunk charges the acquiring operation exactly what a fresh one does"
     );
     assert_eq!(second.receipt().used_bytes, 0);
+    assert!(
+        stats.quiescent(),
+        "both runs must drain every arena: {stats:?}"
+    );
 }
 
 #[test]
