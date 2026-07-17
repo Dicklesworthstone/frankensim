@@ -24,9 +24,9 @@ use fs_qty::Dims;
 
 use crate::expr::Space;
 use crate::system::{
-    AdmittedSystem, BlockEquation, ConventionRef, CoordinateConvention, FieldDecl, FieldQuantity,
-    MAX_SYSTEM_EXTENSION_BYTES, SpatialSupport, StateOwnership, SystemDef, SystemExpr, SystemId,
-    SystemTypeError,
+    AdmittedSystem, AtomSignature, BlockEquation, ConventionRef, CoordinateConvention, FieldDecl,
+    FieldQuantity, MAX_SYSTEM_EXTENSION_BYTES, SpatialSupport, StateOwnership, SystemDef,
+    SystemExpr, SystemId, SystemTypeError,
 };
 
 /// Canonical schema label for [`PortEquationReceipt::to_json`].
@@ -47,6 +47,7 @@ const ENTROPY_FLOW_DIMS: Dims = Dims([2, 1, -3, -1, 0, 0]);
 const PORT_EXTENSION_VERSION: u32 = 1;
 const PRIMITIVE_BINDING_VERSION: u32 = 1;
 const STREAM_EXTENSION_VERSION: u32 = 1;
+const STORAGE_ACTION_BINDING_VERSION: u32 = 1;
 const LOSS_OWNERSHIP_DOMAIN_V1: &str = "org.frankensim.fs-opdsl.loss-ownership.v1";
 
 /// Nominal content identity for one concretely owned dissipative term.
@@ -206,6 +207,66 @@ impl PortDiscretization {
             effort_dofs,
             flow_dofs,
         })
+    }
+}
+
+/// Which power-conjugate coordinate is produced by a storage gradient.
+///
+/// The neutral [`StorageElement`] identifies the state schema, coordinate
+/// count, and constitutive-gradient operator, but it deliberately does not
+/// guess whether a domain's co-energy variable is the port effort or flow.
+/// The compiler caller must make that binding explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageGradientTarget {
+    /// The constitutive gradient produces the port effort coordinate.
+    Effort,
+    /// The constitutive gradient produces the port flow coordinate.
+    Flow,
+}
+
+impl StorageGradientTarget {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Effort => "effort",
+            Self::Flow => "flow",
+        }
+    }
+}
+
+/// Compiler-side type declaration for one storage constitutive-gradient
+/// action.
+///
+/// `state_coordinate_dims` supplies the physical dimensions omitted by the
+/// neutral storage descriptor. The state coordinate count still comes from
+/// [`StorageElement::state_dimension`], and the output space comes from the
+/// selected admitted port side, so neither cardinality is caller-repeated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageStateAction {
+    state_coordinate_dims: Dims,
+    gradient_target: StorageGradientTarget,
+}
+
+impl StorageStateAction {
+    /// Declare the state-coordinate dimensions and the port side produced by
+    /// the constitutive gradient.
+    #[must_use]
+    pub const fn new(state_coordinate_dims: Dims, gradient_target: StorageGradientTarget) -> Self {
+        Self {
+            state_coordinate_dims,
+            gradient_target,
+        }
+    }
+
+    /// Physical dimensions shared by the opaque state coordinates.
+    #[must_use]
+    pub const fn state_coordinate_dims(self) -> Dims {
+        self.state_coordinate_dims
+    }
+
+    /// Port coordinate produced by the external gradient action.
+    #[must_use]
+    pub const fn gradient_target(self) -> StorageGradientTarget {
+        self.gradient_target
     }
 }
 
@@ -377,7 +438,10 @@ enum PortPrimitiveBinding {
         coupling: ReversibleSkewCoupling,
         side: ReversibleSkewSide,
     },
-    Storage(StorageElement),
+    Storage {
+        primitive: StorageElement,
+        action: StorageStateAction,
+    },
     Dissipation(DissipativeRelation),
     SourceOrReservoir(SourceOrReservoir),
 }
@@ -387,7 +451,7 @@ impl PortPrimitiveBinding {
         match self {
             Self::ConservativeJunction { .. } => PortPrimitiveKind::ConservativeJunction,
             Self::ReversibleSkewCoupling { .. } => PortPrimitiveKind::ReversibleSkewCoupling,
-            Self::Storage(_) => PortPrimitiveKind::Storage,
+            Self::Storage { .. } => PortPrimitiveKind::Storage,
             Self::Dissipation(_) => PortPrimitiveKind::Dissipation,
             Self::SourceOrReservoir(_) => PortPrimitiveKind::SourceOrReservoir,
         }
@@ -397,7 +461,7 @@ impl PortPrimitiveBinding {
         match self {
             Self::ConservativeJunction { junction, .. } => junction.id(),
             Self::ReversibleSkewCoupling { coupling, .. } => coupling.id(),
-            Self::Storage(primitive) => primitive.id(),
+            Self::Storage { primitive, .. } => primitive.id(),
             Self::Dissipation(primitive) => primitive.id(),
             Self::SourceOrReservoir(primitive) => primitive.id(),
         }
@@ -407,7 +471,7 @@ impl PortPrimitiveBinding {
         match self {
             Self::ConservativeJunction { side, .. } => Some(*side),
             Self::ReversibleSkewCoupling { .. }
-            | Self::Storage(_)
+            | Self::Storage { .. }
             | Self::Dissipation(_)
             | Self::SourceOrReservoir(_) => None,
         }
@@ -417,7 +481,7 @@ impl PortPrimitiveBinding {
         match self {
             Self::ReversibleSkewCoupling { side, .. } => Some(*side),
             Self::ConservativeJunction { .. }
-            | Self::Storage(_)
+            | Self::Storage { .. }
             | Self::Dissipation(_)
             | Self::SourceOrReservoir(_) => None,
         }
@@ -427,7 +491,17 @@ impl PortPrimitiveBinding {
         match self {
             Self::ReversibleSkewCoupling { coupling, .. } => Some(coupling),
             Self::ConservativeJunction { .. }
-            | Self::Storage(_)
+            | Self::Storage { .. }
+            | Self::Dissipation(_)
+            | Self::SourceOrReservoir(_) => None,
+        }
+    }
+
+    fn storage(&self) -> Option<(&StorageElement, StorageStateAction)> {
+        match self {
+            Self::Storage { primitive, action } => Some((primitive, *action)),
+            Self::ConservativeJunction { .. }
+            | Self::ReversibleSkewCoupling { .. }
             | Self::Dissipation(_)
             | Self::SourceOrReservoir(_) => None,
         }
@@ -551,11 +625,19 @@ impl PortEquationSpec {
         ]
     }
 
-    /// Construct a stored-energy port equation whose owner, state schema, and
-    /// constitutive-gradient reference come from one admitted primitive.
+    /// Construct a stored-energy port equation whose owner, state schema,
+    /// coordinate count, and constitutive-gradient reference come from one
+    /// admitted primitive.
+    ///
+    /// The compiler caller supplies the physical dimensions of the opaque
+    /// state coordinates and explicitly selects whether the gradient produces
+    /// effort or flow. Compilation turns that declaration into an owned state
+    /// field and a typed external atom application; it does not execute or
+    /// authenticate the referenced operator.
     #[must_use]
     pub fn from_storage(
         primitive: StorageElement,
+        action: StorageStateAction,
         discretization: PortDiscretization,
         sense: PortEquationSense,
     ) -> Self {
@@ -565,7 +647,7 @@ impl PortEquationSpec {
             sense,
             term_kind: AccountingTermKind::Storage,
             ownership: OwnershipDisposition::Owned(primitive.id().clone()),
-            primitive: Some(PortPrimitiveBinding::Storage(primitive)),
+            primitive: Some(PortPrimitiveBinding::Storage { primitive, action }),
         }
     }
 
@@ -645,6 +727,12 @@ impl PortEquationSpec {
         self.primitive
             .as_ref()
             .and_then(PortPrimitiveBinding::reversible_skew_coupling)
+    }
+
+    fn storage(&self) -> Option<(&StorageElement, StorageStateAction)> {
+        self.primitive
+            .as_ref()
+            .and_then(PortPrimitiveBinding::storage)
     }
 }
 
@@ -1008,6 +1096,10 @@ pub struct PortEquationReceipt {
     reversible_skew_forward_operator: Option<String>,
     reversible_skew_adjoint_operator: Option<String>,
     reversible_skew_evidence: Option<String>,
+    storage_state_schema: Option<String>,
+    storage_state_dimension: Option<usize>,
+    storage_state_action: Option<StorageStateAction>,
+    storage_gradient_operator: Option<String>,
 }
 
 impl PortEquationReceipt {
@@ -1134,6 +1226,32 @@ impl PortEquationReceipt {
         self.reversible_skew_evidence.as_deref()
     }
 
+    /// State-schema identity retained by a closed storage action.
+    #[must_use]
+    pub fn storage_state_schema(&self) -> Option<&str> {
+        self.storage_state_schema.as_deref()
+    }
+
+    /// Exact upstream state-coordinate count consumed by the storage
+    /// gradient.
+    #[must_use]
+    pub const fn storage_state_dimension(&self) -> Option<usize> {
+        self.storage_state_dimension
+    }
+
+    /// Compiler-side physical state dimensions and explicit effort/flow
+    /// gradient target.
+    #[must_use]
+    pub const fn storage_state_action(&self) -> Option<StorageStateAction> {
+        self.storage_state_action
+    }
+
+    /// External constitutive-gradient operator bound into the generated atom.
+    #[must_use]
+    pub fn storage_gradient_operator(&self) -> Option<&str> {
+        self.storage_gradient_operator.as_deref()
+    }
+
     /// Re-derived power dimensions after the pairing measure is applied.
     #[must_use]
     pub const fn product_dims(&self) -> Dims {
@@ -1162,6 +1280,23 @@ impl PortEquationReceipt {
             ),
             _ => String::new(),
         };
+        let storage_fields = match (
+            self.storage_state_schema.as_ref(),
+            self.storage_state_dimension,
+            self.storage_state_action,
+            self.storage_gradient_operator.as_ref(),
+        ) {
+            (Some(schema), Some(dimension), Some(action), Some(operator)) => format!(
+                ",\"storage_state_schema\":\"{schema}\",\
+                 \"storage_state_dimension\":{dimension},\
+                 \"storage_state_dims\":{},\
+                 \"storage_gradient_target\":\"{}\",\
+                 \"storage_gradient_operator\":\"{operator}\"",
+                dims_json(action.state_coordinate_dims()),
+                action.gradient_target().as_str(),
+            ),
+            _ => String::new(),
+        };
         let primitive_fields = self
             .primitive_kind
             .zip(self.primitive_id.as_ref())
@@ -1172,7 +1307,7 @@ impl PortEquationReceipt {
                         format!(",\"conservative_junction_side\":\"{}\"", side.as_str())
                     });
                 format!(
-                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"{side}{reversible_skew_fields}",
+                    ",\"primitive_kind\":\"{}\",\"primitive_id\":\"{id}\"{side}{reversible_skew_fields}{storage_fields}",
                     kind.as_str()
                 )
             });
@@ -1653,8 +1788,8 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
             dims: POWER_DIMS,
         },
         quantity: FieldQuantity::Dimensional(POWER_DIMS),
-        coordinates,
-        clock,
+        coordinates: coordinates.clone(),
+        clock: clock.clone(),
         support: SpatialSupport::BoundaryTrace,
         state: StateOwnership::External,
     })?;
@@ -1673,6 +1808,40 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
         target: power,
         rhs,
     })?;
+    if let Some((storage, action)) = spec.storage() {
+        let state_space = Space {
+            degree: RAW_VECTOR_DEGREE,
+            n: storage.state_dimension().get(),
+            dims: action.state_coordinate_dims(),
+        };
+        let state = system.declare_field(FieldDecl {
+            name: "storage-state".to_string(),
+            space: state_space,
+            quantity: FieldQuantity::Dimensional(state_space.dims),
+            coordinates: coordinates.clone(),
+            clock: clock.clone(),
+            support: SpatialSupport::Interior,
+            state: StateOwnership::Owned { slot: 0 },
+        })?;
+        let (gradient_target, gradient_space) = match action.gradient_target() {
+            StorageGradientTarget::Effort => (effort, effort_space),
+            StorageGradientTarget::Flow => (flow, flow_space),
+        };
+        let gradient_atom = system.register_atom(AtomSignature {
+            name: "storage-constitutive-gradient".to_string(),
+            content: ConventionRef::new(storage.constitutive_gradient().as_str().to_string())?,
+            in_space: state_space,
+            out_space: gradient_space,
+        });
+        system.add_equation(BlockEquation {
+            name: "storage-constitutive-gradient".to_string(),
+            target: gradient_target,
+            rhs: SystemExpr::Apply {
+                atom: gradient_atom,
+                arg: Box::new(SystemExpr::FieldRef(state)),
+            },
+        })?;
+    }
     let system = system.admit()?;
     let primitive_kind = spec.primitive_kind();
     let primitive_id = spec.primitive_id().map(|id| id.as_str().to_string());
@@ -1689,6 +1858,21 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
                 Some(coupling.forward_operator().as_str().to_string()),
                 Some(coupling.adjoint_operator().as_str().to_string()),
                 Some(coupling.skew_adjoint_evidence().as_str().to_string()),
+            )
+        });
+    let (
+        storage_state_schema,
+        storage_state_dimension,
+        storage_state_action,
+        storage_gradient_operator,
+    ) = spec
+        .storage()
+        .map_or((None, None, None, None), |(storage, action)| {
+            (
+                Some(storage.state_schema().as_str().to_string()),
+                Some(storage.state_dimension().get()),
+                Some(action),
+                Some(storage.constitutive_gradient().as_str().to_string()),
             )
         });
     let receipt = PortEquationReceipt {
@@ -1712,6 +1896,10 @@ fn compile_one(spec: PortEquationSpec) -> Result<CompiledPortEquation, PortEquat
         reversible_skew_forward_operator,
         reversible_skew_adjoint_operator,
         reversible_skew_evidence,
+        storage_state_schema,
+        storage_state_dimension,
+        storage_state_action,
+        storage_gradient_operator,
     };
     Ok(CompiledPortEquation { system, receipt })
 }
@@ -2164,16 +2352,25 @@ fn encode_primitive_binding(bytes: &mut Vec<u8>, primitive: &PortPrimitiveBindin
             push_text(bytes, coupling.adjoint_operator().as_str());
             push_text(bytes, coupling.skew_adjoint_evidence().as_str());
         }
-        PortPrimitiveBinding::Storage(storage) => {
-            bytes.push(0);
-            push_text(bytes, storage.id().as_str());
-            bytes.push(match storage.potential() {
+        PortPrimitiveBinding::Storage { primitive, action } => {
+            // Tag 5 is the first storage binding that carries a typed state
+            // action. Legacy tag 0 bound only opaque metadata and is never
+            // emitted by this compiler revision.
+            bytes.push(5);
+            bytes.extend_from_slice(&STORAGE_ACTION_BINDING_VERSION.to_le_bytes());
+            push_text(bytes, primitive.id().as_str());
+            bytes.push(match primitive.potential() {
                 StoragePotential::Hamiltonian => 0,
                 StoragePotential::FreeEnergy => 1,
             });
-            push_text(bytes, storage.state_schema().as_str());
-            bytes.extend_from_slice(&(storage.state_dimension().get() as u64).to_le_bytes());
-            push_text(bytes, storage.constitutive_gradient().as_str());
+            push_text(bytes, primitive.state_schema().as_str());
+            bytes.extend_from_slice(&(primitive.state_dimension().get() as u64).to_le_bytes());
+            push_dims(bytes, action.state_coordinate_dims());
+            bytes.push(match action.gradient_target() {
+                StorageGradientTarget::Effort => 0,
+                StorageGradientTarget::Flow => 1,
+            });
+            push_text(bytes, primitive.constitutive_gradient().as_str());
         }
         PortPrimitiveBinding::Dissipation(dissipation) => {
             bytes.push(1);
@@ -2233,10 +2430,10 @@ fn primitive_binding_variable_bytes(
             .into_iter()
             .try_fold(64usize, checked_metadata_add)
         }
-        PortPrimitiveBinding::Storage(storage) => [
-            storage.id().as_str().len(),
-            storage.state_schema().as_str().len(),
-            storage.constitutive_gradient().as_str().len(),
+        PortPrimitiveBinding::Storage { primitive, .. } => [
+            primitive.id().as_str().len(),
+            primitive.state_schema().as_str().len(),
+            primitive.constitutive_gradient().as_str().len(),
         ]
         .into_iter()
         .try_fold(64usize, checked_metadata_add),

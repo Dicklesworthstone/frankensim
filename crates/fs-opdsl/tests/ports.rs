@@ -17,14 +17,16 @@ use fs_opdsl::{
     AccountingTermKind, CompiledInterfaceEquation, ConservativeJunctionSide, InterfaceEquationSpec,
     LossOwnershipId, OwnershipDisposition, PortDiscretization, PortEquationError,
     PortEquationSense, PortEquationSpec, PortPrimitiveKind, ReversibleSkewCoupling,
-    ReversibleSkewSide, SpatialSupport, StreamEnergyChartKind, StreamEnergyOwnership,
-    StreamEquationSpec, SystemExpr, compile_interface_equations, compile_port_equation,
-    compile_port_equations, compile_stream_equation,
+    ReversibleSkewSide, SpatialSupport, StateOwnership, StorageGradientTarget, StorageStateAction,
+    StreamEnergyChartKind, StreamEnergyOwnership, StreamEquationSpec, SystemExpr,
+    compile_interface_equations, compile_port_equation, compile_port_equations,
+    compile_stream_equation,
 };
 use fs_qty::chemistry::SpeciesId;
 use fs_qty::{Dims, Force, MassFlowRate, Power, Velocity};
 
 const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
+const STORAGE_STATE_DIMS: Dims = Dims([1, 0, 0, 0, 0, 0]);
 
 fn stable(value: &str) -> StableId {
     StableId::new(value).expect("fixture stable id")
@@ -122,7 +124,11 @@ fn stream_spec(port: &str, owner: &str) -> StreamEquationSpec {
     )
 }
 
-fn storage_spec(gradient: &str) -> PortEquationSpec {
+fn storage_spec_with_action(
+    gradient: &str,
+    state_dims: Dims,
+    gradient_target: StorageGradientTarget,
+) -> PortEquationSpec {
     let primitive = StorageElement::new(
         stable("storage-relation"),
         scalar_schema("storage-port", PortOrientation::OutwardFromOwner),
@@ -134,9 +140,14 @@ fn storage_spec(gradient: &str) -> PortEquationSpec {
     .expect("admitted storage primitive");
     PortEquationSpec::from_storage(
         primitive,
+        StorageStateAction::new(state_dims, gradient_target),
         PortDiscretization::lumped(),
         PortEquationSense::AsDeclared,
     )
+}
+
+fn storage_spec(gradient: &str) -> PortEquationSpec {
+    storage_spec_with_action(gradient, STORAGE_STATE_DIMS, StorageGradientTarget::Effort)
 }
 
 fn dissipation_spec(evidence: DissipationEvidence) -> PortEquationSpec {
@@ -684,6 +695,75 @@ fn g3_closed_primitive_metadata_is_identity_bearing_and_owner_derived() {
         storage_a.receipt().ownership(),
         OwnershipDisposition::Owned(owner) if owner.as_str() == "storage-relation"
     ));
+    assert_eq!(storage_a.system().fields().len(), 4);
+    assert_eq!(storage_a.system().atoms().len(), 1);
+    assert_eq!(storage_a.system().equations().len(), 2);
+    let state = &storage_a.system().fields()[3];
+    assert_eq!(state.space.degree, 255);
+    assert_eq!(state.space.n, 3);
+    assert_eq!(state.space.dims, STORAGE_STATE_DIMS);
+    assert_eq!(state.support, SpatialSupport::Interior);
+    assert!(matches!(state.state, StateOwnership::Owned { slot: 0 }));
+    let gradient = &storage_a.system().atoms()[0];
+    assert_eq!(gradient.content.as_str(), "gradient-storage-a");
+    assert_eq!(gradient.in_space, state.space);
+    assert_eq!(gradient.out_space, storage_a.system().fields()[0].space);
+    let gradient_equation = &storage_a.system().equations()[1];
+    assert_eq!(gradient_equation.target.0, 0, "gradient binds effort");
+    assert!(matches!(
+        &gradient_equation.rhs,
+        SystemExpr::Apply { atom: 0, arg }
+            if matches!(arg.as_ref(), SystemExpr::FieldRef(field) if field.0 == 3)
+    ));
+    assert_eq!(
+        storage_a.receipt().storage_state_schema(),
+        Some("storage-state-v1")
+    );
+    assert_eq!(storage_a.receipt().storage_state_dimension(), Some(3));
+    assert_eq!(
+        storage_a.receipt().storage_state_action(),
+        Some(StorageStateAction::new(
+            STORAGE_STATE_DIMS,
+            StorageGradientTarget::Effort,
+        ))
+    );
+    assert_eq!(
+        storage_a.receipt().storage_gradient_operator(),
+        Some("gradient-storage-a")
+    );
+    let storage_json = storage_a.receipt().to_json();
+    assert!(storage_json.contains("\"storage_state_dimension\":3"));
+    assert!(storage_json.contains("\"storage_state_dims\":[1,0,0,0,0,0]"));
+    assert!(storage_json.contains("\"storage_gradient_target\":\"effort\""));
+
+    let flow_target = compile_port_equation(storage_spec_with_action(
+        "gradient-storage-a",
+        STORAGE_STATE_DIMS,
+        StorageGradientTarget::Flow,
+    ))
+    .expect("flow-producing storage gradient lowers");
+    assert_ne!(
+        storage_a.receipt().system_identity(),
+        flow_target.receipt().system_identity(),
+        "effort/flow target is semantic"
+    );
+    assert_eq!(flow_target.system().equations()[1].target.0, 1);
+    assert_eq!(
+        flow_target.system().atoms()[0].out_space,
+        flow_target.system().fields()[1].space
+    );
+
+    let alternate_state_dims = compile_port_equation(storage_spec_with_action(
+        "gradient-storage-a",
+        Dims([0, 1, 0, 0, 0, 0]),
+        StorageGradientTarget::Effort,
+    ))
+    .expect("alternate state dimensions lower explicitly");
+    assert_ne!(
+        storage_a.receipt().system_identity(),
+        alternate_state_dims.receipt().system_identity(),
+        "state-coordinate dimensions are semantic"
+    );
 
     let monotone = compile_port_equation(dissipation_spec(DissipationEvidence::Monotonicity(
         stable("evidence-monotone-v1"),

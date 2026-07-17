@@ -271,6 +271,17 @@ documented in the bead close); cross-ISA golden hash.
   relation ID. Changing an operator, evidence kind/receipt, or boundary
   treatment therefore changes the `SystemId`; owned loss identities also bind
   the retained constitutive evidence.
+- Closed storage lowering additionally requires a `StorageStateAction`: the
+  compiler caller declares the shared physical dimensions of the opaque state
+  coordinates and explicitly selects whether the constitutive gradient
+  produces the port effort or flow. The coordinate count comes only from
+  `StorageElement::state_dimension`, while the output space comes only from the
+  selected admitted port discretization. Compilation adds one interior
+  `StateOwnership::Owned { slot: 0 }` state field, one external atom whose
+  content reference is the primitive's constitutive-gradient ID, and one
+  checked atom-application equation targeting the selected port coordinate.
+  State schema, coordinate count and dimensions, selected side, operator, and
+  typed atom spaces all bind the generated identity and appear in the receipt.
 - `PortEquationSpec::from_conservative_junction` imports both sides of an
   admitted `fs_couple::ConservativeJunction` without asking the caller to
   repeat its sign convention. Side A lowers as declared, side B lowers through
@@ -315,17 +326,24 @@ documented in the bead close); cross-ISA golden hash.
   reversible-skew fixture checks opposite structural polarity, distinct
   non-dissipative classification, absent loss ownership, ordered-role
   permutation, operator/evidence identity mutation, and relation/port alias
-  refusal. The test target is explicitly gated by `required-features =
-  ["port-equations"]`.
+  refusal. The storage fixture checks owned-state cardinality/dimensions,
+  typed atom domains and codomains, effort-versus-flow selection, operator and
+  state-dimension identity mutation, and the receipt projection. The test
+  target is explicitly gated by `required-features = ["port-equations"]`.
 - NO-CLAIM: this slice generates structural equations; it does not execute the
   scalar/vector/tensor/field contraction, quadrature, trace pullback, numeric
   port adapter, source/dissipation law, or closed-window audit. Stream-bundle
   lowering and stream-vs-effort/flow exclusivity are structural only: no
   numeric boundary application, pullback, chart-evidence authentication, or
   window recomposition is claimed. Primitive operator IDs and evidence are
-  identity-bound but are not executed; typed storage-state action lowering is
-  pending because the neutral primitive does not yet expose state-coordinate
-  dimensions. Conservative-junction side lowering binds the upstream
+  identity-bound but are not executed. Storage-state action lowering types the
+  declared coordinate count, common dimensions, and selected port codomain;
+  it does not prove that heterogeneous state coordinates share those
+  dimensions, authenticate the gradient operator, execute it, derive the
+  effort/flow choice, or supply an interior-to-boundary trace/pullback. The v1
+  action uses the port-local basis, frame, and clock; a differently coordinated
+  state requires a future explicit transform-bearing adapter rather than an
+  implicit conversion. Conservative-junction side lowering binds the upstream
   shared-effort/opposite-flow admission and emits balancing power signs, but it
   does not re-emit or execute that topology constraint inside one system.
   Reversible-skew lowering likewise preserves signed action structure and
