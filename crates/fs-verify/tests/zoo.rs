@@ -5,7 +5,10 @@
 //! prolongation with the fp16 precision-discipline demo, the
 //! adversarial-surrogate falsifier with zero incorrect accepts and
 //! auto-demotion, and the end-to-end economics loop with ledger rows.
-//! JSON-line verdicts; seeded cases carry seeds.
+//! Completed aggregates emit canonical fs-obs verdicts. The two randomized
+//! campaigns carry their literal root seeds; fixed inputs use zero, and this
+//! suite has no execution seed. Assertions and expectations reached before a
+//! verdict remain ordinary Rust test diagnostics.
 
 use fs_math::eft::two_sum;
 use fs_verify::estimator::verify;
@@ -42,12 +45,32 @@ fn speculate(
     try_speculate(query, registry, telemetry).expect("zoo speculation must execute")
 }
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-verify/zoo\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const SUITE: &str = "fs-verify/zoo";
+const FIXED_INPUT_SEED: u64 = 0;
+const ZOO_004_INPUT_SEED: u64 = 0x1001_2026_0707_00A4;
+const ZOO_005_INPUT_SEED: u64 = 0x1001_2026_0707_00A5;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("proposer-zoo verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("proposer-zoo verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -190,6 +213,7 @@ fn zoo_001_interface_and_safety() {
          carry the verifier's bound and VERIFIED color (no other constructor \
          exists), and a NaN-confidence good proposer is ordered last yet still \
          accepted — confidence is advisory in both directions",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -258,6 +282,7 @@ fn zoo_002_neighbor_extrapolation() {
              verified accepts at honest tolerances, and the equidistant tie \
              resolves deterministically to the smaller theta"
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -293,6 +318,7 @@ fn zoo_003_coarse_rung_and_precision() {
              mesh-too-small declines honestly",
             loose.bound.hi
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -308,7 +334,7 @@ fn zoo_004_adversarial_falsifier() {
         .expect("register adversarial proposer");
     reg.register(Box::new(CoarseRungProlongation))
         .expect("register coarse proposer");
-    let mut rng = Lcg(0x1001_2026_0707_00A4);
+    let mut rng = Lcg(ZOO_004_INPUT_SEED);
     let mut incorrect_accepts = 0u32;
     for _ in 0..25 {
         let theta = 0.2 + 0.6 * rng.unit();
@@ -352,8 +378,9 @@ fn zoo_004_adversarial_falsifier() {
             "zero incorrect accepts over 25 adversarial-first speculations (the \
              verifier gates everything), the adversary's accept rate is {adv_rate:.2}, \
              the collapse AUTO-DEMOTES it in the regime, and demoted proposers stop \
-             being consulted; seed 0x1001_2026_0707_00A4"
+             being consulted; seed {ZOO_004_INPUT_SEED:#x}"
         ),
+        ZOO_004_INPUT_SEED,
     );
 }
 
@@ -376,7 +403,7 @@ fn zoo_005_economics_loop() {
     reg.register(Box::new(AdversarialSurrogate))
         .expect("register adversarial proposer");
     let mut telemetry = ZooTelemetry::default();
-    let mut rng = Lcg(0x1001_2026_0707_00A5);
+    let mut rng = Lcg(ZOO_005_INPUT_SEED);
     let mut accepted = 0u32;
     for _ in 0..30 {
         let theta = 0.25 + 0.5 * rng.unit();
@@ -396,7 +423,10 @@ fn zoo_005_economics_loop() {
             fs_obs::Severity::Info,
             fs_obs::EventKind::Custom {
                 name: "speculation-accept-rates".to_string(),
-                json: format!("[{}]", rows.join(",")),
+                json: format!(
+                    "{{\"rows\":[{}],\"input_seed\":{ZOO_005_INPUT_SEED}}}",
+                    rows.join(",")
+                ),
             },
             None,
         )
@@ -418,8 +448,9 @@ fn zoo_005_economics_loop() {
             "{accepted}/30 speculations accepted with certified bounds, the \
              adversary landed nothing, honest proposers out-rate it, and the \
              per-proposer-per-regime rows ship to the ledger; \
-             seed 0x1001_2026_0707_00A5"
+             seed {ZOO_005_INPUT_SEED:#x}"
         ),
+        ZOO_005_INPUT_SEED,
     );
 }
 
@@ -473,6 +504,7 @@ fn zoo_006_invalid_queries_refuse_before_proposal_work() {
         "zoo-006",
         true,
         "non-finite query coordinates and poisoned neighbor identities return structured errors before ordering, solving, or verification; malformed meshes cannot construct a query problem",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -506,10 +538,12 @@ fn zoo_007_telemetry_rows_escape_identities() {
         )
         .to_jsonl();
     fs_obs::validate_line(&line).expect("escaped identity row is valid JSON");
+    println!("{line}");
     verdict(
         "zoo-007",
         true,
         "quoted and backslashed proposer/regime identities remain one valid JSON object with no field or line injection",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -552,5 +586,6 @@ fn zoo_008_coarse_rung_routes_large_nonuniform_mesh() {
         "zoo-008",
         true,
         "the monotone segment cursor prolongated 4,097 strongly nonuniform nodes and preserved every injected coarse-node value bitwise",
+        FIXED_INPUT_SEED,
     );
 }

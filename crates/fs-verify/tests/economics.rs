@@ -3,7 +3,10 @@
 //! with the worse-than-cold clamp, drift injection with localized
 //! demotion and no-flap hysteresis, conservative zero-telemetry
 //! priors, deterministic decisions, and the kernel × regime dashboard.
-//! JSON-line verdicts; seeded cases carry seeds.
+//! Completed aggregates emit canonical fs-obs verdicts. Every fixture is
+//! fixed-input and records seed zero; this suite has no execution seed.
+//! Assertions and expectations reached before a verdict remain ordinary
+//! Rust test diagnostics.
 
 use fs_math::eft::two_sum;
 use fs_verify::economics::{
@@ -43,12 +46,30 @@ fn run_speculative(
         .expect("economics solve must converge")
 }
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-verify/economics\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const SUITE: &str = "fs-verify/economics";
+const FIXED_INPUT_SEED: u64 = 0;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("economics verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("economics verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -227,6 +248,7 @@ fn econ_001_outright_and_warm() {
              savings ({d2:?}); the solve-node record carries all four schema \
              fields: {row}"
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -252,6 +274,7 @@ fn econ_002_worse_than_cold_clamps() {
              savings clamp to 0 (never a win) while the raw delta stays negative \
              for the ledger: {d:?}"
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -294,6 +317,7 @@ fn econ_003_drift_localized() {
              LOCALIZATION: demoted in regime-b (rate {rate_b:.2}) and untouched in \
              regime-a (rate {rate_a:.2})"
         ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -345,6 +369,7 @@ fn econ_004_hysteresis_no_flap() {
         "one unlucky reject cannot demote; collapse with samples does; a failed \
          probation doubles the next evidence bar (no flapping); genuine recovery \
          re-promotes with a reset window that prevents instant re-demotion",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -388,7 +413,7 @@ fn econ_005_priors_determinism_dashboard() {
             fs_obs::Severity::Info,
             fs_obs::EventKind::Custom {
                 name: "speculation-economics-dashboard".to_string(),
-                json: format!("[{rows1}]"),
+                json: format!("{{\"rows\":[{rows1}],\"input_seed\":{FIXED_INPUT_SEED}}}"),
             },
             None,
         )
@@ -404,6 +429,7 @@ fn econ_005_priors_determinism_dashboard() {
         "zero-telemetry regimes report the conservative 0.0 prior, identical runs \
          give identical decisions and dashboard rows, and the kernel x regime x \
          proposer dashboard ships via fs-obs",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -468,6 +494,7 @@ fn econ_006_nonconvergence_never_counts_as_savings() {
         "econ-006",
         true,
         "zero-budget nonconvergence returns a structured error without drift observations; malformed problems cannot be constructed, and an oversized iteration budget refuses before proposal work or zoo telemetry",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -493,6 +520,7 @@ fn econ_007_all_rejected_does_not_rerun_proposers() {
         "econ-007",
         true,
         "the all-rejected outcome retained its verified best candidate and proposer identity; economics warm-started it with exactly one proposer invocation",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -524,11 +552,13 @@ fn econ_008_telemetry_json_is_injection_safe() {
             )
             .to_jsonl();
         fs_obs::validate_line(&line).expect("escaped economics row is valid JSON");
+        println!("{line}");
     }
     verdict(
         "econ-008",
         true,
         "solve-node and dashboard rows escape hostile identities and serialize non-finite diagnostic bounds as null",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -564,5 +594,6 @@ fn econ_009_accepted_run_retains_prior_rejections() {
         "econ-009",
         true,
         "the certified winner shipped without a solve while the earlier verifier rejection remained visible to the regime-local drift detector",
+        FIXED_INPUT_SEED,
     );
 }

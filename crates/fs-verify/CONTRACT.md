@@ -351,6 +351,22 @@ structured refusal row. Assertions and expectations that abort during setup or
 per-input checking precede aggregate verdict emission and remain ordinary Rust
 test diagnostics; the suite does not claim a canonical aggregate record for
 those early exits. Any reimplementation must pass the suite unchanged.
+
+The same aggregate contract covers zoo-001..zoo-008 and econ-001..econ-009.
+Every economics fixture and fixed zoo-001..003/zoo-006..008 fixture records
+input seed zero. Zoo-004 records its literal 25-draw LCG root
+`0x1001_2026_0707_00A4`; zoo-005 records its literal 30-draw root
+`0x1001_2026_0707_00A5`. Neither suite has an execution/Cx seed. The econ-005
+dashboard and zoo-005 accept-rate companions are validated, object-shaped
+`Custom` events under their distinct dashboard/economics scopes and carry the
+same input seed as their aggregate. Econ-008 prints its two hostile-identity
+objects from one shared emitter in seq-0/seq-1 order, and zoo-007 prints its
+validated hostile-identity object; their scopes remain distinct from the
+aggregate verdicts. Setup, per-iteration assertions, and operation expectations
+remain outside the aggregate boundary. Both integration targets require an
+explicit `fs-verify/certified-speculation` proof; the default-feature workspace
+does not exercise them.
+
 The G4 additions specifically cover exact work-plan formulas, sparse callback
 traces, legacy equivalence, invocation-global boundaries, refusal progress,
 callback errors, and publication distinct from a boundary at the same count.
