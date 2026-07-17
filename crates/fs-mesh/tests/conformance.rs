@@ -3,8 +3,8 @@
 //! degenerate adversarial battery (grids, cospherical shells, collinear
 //! runs, coplanar refusals, duplicates), determinism/relabeling/G3
 //! translation, hull integration with fs-rep-mesh, radius-edge
-//! refinement, and a scale run. JSON-line verdicts; seeded cases carry
-//! seeds.
+//! refinement, and a scale run. Canonical fs-obs verdicts; seeded cases
+//! carry input seeds.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -15,13 +15,63 @@ use fs_mesh::{
 };
 use fs_rep_mesh::{assess_quality, winding_exact};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-mesh/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const SUITE: &str = "fs-mesh/conformance";
+const FIXED_INPUT_SEED: u64 = 0;
+const TMESH_001_INPUT_SEED: u64 = 0x1001_2026_0706_0021;
+const TMESH_002_DUPLICATE_INPUT_SEED: u64 = 0x1001_2026_0706_0022;
+const TMESH_002B_SWEEP_INPUT_SEED: u64 = 0x7115_ED00_C0B1_A11E;
+const TMESH_003_INPUT_SEED: u64 = 0x1001_2026_0706_0023;
+const TMESH_004_INPUT_SEED: u64 = 0x1001_2026_0706_0024;
+const TMESH_005_INPUT_SEED: u64 = 0x1001_2026_0706_0025;
+const TMESH_006_INPUT_SEED: u64 = 0x1001_2026_0706_0026;
+const TMESH_008_INPUT_SEED: u64 = 0x1001_2026_0706_0028;
+const TMESH_011_INPUT_SEED: u64 = 0x1001_2026_0708_0011;
+const TMESH_012_INPUT_SEED: u64 = 0x1001_2026_0708_0012;
+const TMESH_013_INPUT_SEED: u64 = 0x1001_2026_0708_0013;
+const TMESH_014_INPUT_SEED: u64 = 0x1001_2026_0708_0014;
+const TMESH_015_INPUT_SEED: u64 = 0x1001_2026_0709_0015;
+const TMESH_016_INPUT_SEED: u64 = 0x160B_2026_0709_0016;
+const TMESH_017_INPUT_SEED: u64 = TMESH_011_INPUT_SEED;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("fs-mesh verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("fs-mesh verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, name: &str, json: String) {
+    let identity = format!("{case}/measurement");
+    let mut emitter = fs_obs::Emitter::new(SUITE, &identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("fs-mesh measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("fs-mesh measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 struct Lcg(u64);
@@ -93,23 +143,11 @@ fn geometric_keys(t: &Tetrahedralization) -> std::collections::BTreeSet<[[u64; 3
 #[test]
 fn tmesh_001_general_position_full_audit() {
     with_cx(|cx| {
-        let pts = cloud(0x1001_2026_0706_0021, 200);
+        let pts = cloud(TMESH_001_INPUT_SEED, 200);
         let t = delaunay(&pts, cx).expect("general position builds");
         let report = t.audit(true);
         let stats = t.stats();
-        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-001/kernel");
-        let line = em
-            .emit(
-                fs_obs::Severity::Info,
-                fs_obs::EventKind::Custom {
-                    name: "mesh-delaunay-stats".to_string(),
-                    json: stats.to_json(),
-                },
-                None,
-            )
-            .to_jsonl();
-        fs_obs::validate_line(&line).expect("kernel stats validate");
-        println!("{line}");
+        measurement("tmesh-001", "mesh-delaunay-stats", stats.to_json());
         verdict(
             "tmesh-001",
             report.clean() && stats.tets_final > 400 && stats.exhaustive_locates == 0,
@@ -120,6 +158,7 @@ fn tmesh_001_general_position_full_audit() {
                 stats.tets_final,
                 report.violations.first()
             ),
+            TMESH_001_INPUT_SEED,
         );
     });
 }
@@ -177,7 +216,7 @@ fn tmesh_002_degeneracy_battery() {
         let line_report = t.audit(true);
 
         // Bitwise duplicates: counted, skipped, mesh stays clean.
-        let mut dup = cloud(0x1001_2026_0706_0022, 100);
+        let mut dup = cloud(TMESH_002_DUPLICATE_INPUT_SEED, 100);
         for i in 0..30 {
             dup.push(dup[i * 3]);
         }
@@ -204,9 +243,11 @@ fn tmesh_002_degeneracy_battery() {
                 "4x4x4 grid clean under FULL audit ({} growth repairs absorbed \
                  degenerate visibility), exactly-cospherical shell clean, collinear \
                  run clean, 30/30 bitwise duplicates skipped with receipts, and the \
-                 all-coplanar grid refuses with teaching text",
+                 all-coplanar grid refuses with teaching text; the only stochastic input is \
+                 the duplicate-cloud root 0x1001_2026_0706_0022",
                 grid_stats.growth_repairs
             ),
+            TMESH_002_DUPLICATE_INPUT_SEED,
         );
     });
 }
@@ -264,7 +305,7 @@ fn tmesh_002b_tilted_coplanar_delaunay_is_exact() {
         // (z = -x, so every base pair is coplanar bitwise) plus four off-plane
         // apexes — the exact tilted-coplanar configuration the old projection
         // mishandled. Every built mesh must pass the exact empty-sphere audit.
-        let mut seed = Lcg(0x7115_ED00_C0B1_A11E);
+        let mut seed = Lcg(TMESH_002B_SWEEP_INPUT_SEED);
         let coord = |s: &mut Lcg| -> f64 { ((s.next() >> 40) % 13) as f64 - 6.0 };
         let (mut sweep_clean, mut sweep_total) = (0u32, 0u32);
         for _ in 0..300 {
@@ -291,8 +332,10 @@ fn tmesh_002b_tilted_coplanar_delaunay_is_exact() {
             rep_a.clean() && rep_b.clean() && sweep_clean == sweep_total && sweep_total > 200,
             &format!(
                 "tilted + collinear-run reproducers audit-clean; {sweep_clean}/{sweep_total} \
-                 tilted-coplanar (x+z=0) sweep configs pass the exact empty-sphere audit"
+                 tilted-coplanar (x+z=0) sweep configs pass the exact empty-sphere audit; \
+                 the only stochastic input is sweep root 0x7115_ED00_C0B1_A11E"
             ),
+            TMESH_002B_SWEEP_INPUT_SEED,
         );
     });
 }
@@ -300,7 +343,7 @@ fn tmesh_002b_tilted_coplanar_delaunay_is_exact() {
 #[test]
 fn tmesh_003_determinism_relabeling_translation() {
     with_cx(|cx| {
-        let pts = cloud(0x1001_2026_0706_0023, 150);
+        let pts = cloud(TMESH_003_INPUT_SEED, 150);
         let a = delaunay(&pts, cx).expect("build a");
         let b = delaunay(&pts, cx).expect("build b");
         let bitwise = a.tets() == b.tets() && a.points() == b.points();
@@ -326,6 +369,7 @@ fn tmesh_003_determinism_relabeling_translation() {
              the identical geometric tet set; a dyadic translation preserves \
              connectivity exactly with exactly-shifted coordinates (G3/G5); \
              seed 0x1001_2026_0706_0023",
+            TMESH_003_INPUT_SEED,
         );
     });
 }
@@ -336,7 +380,7 @@ fn tmesh_003_determinism_relabeling_translation() {
 #[test]
 fn tmesh_004_hull_and_complex_integration() {
     with_cx(|cx| {
-        let pts = cloud(0x1001_2026_0706_0024, 120);
+        let pts = cloud(TMESH_004_INPUT_SEED, 120);
         let t = delaunay(&pts, cx).expect("build");
         let hull = t.hull();
         let quality = assess_quality(&hull);
@@ -360,8 +404,9 @@ fn tmesh_004_hull_and_complex_integration() {
             &format!(
                 "hull is closed 2-manifold with winding {w:.6} at an interior point \
                  (outward-oriented) and the oriented tet complex satisfies dd=0 \
-                 exactly; seed 0x1001_2026_0706_0024"
+                exactly; seed 0x1001_2026_0706_0024"
             ),
+            TMESH_004_INPUT_SEED,
         );
     });
 }
@@ -373,7 +418,7 @@ fn tmesh_004_hull_and_complex_integration() {
 fn tmesh_005_refinement_quality() {
     with_cx(|cx| {
         // A stretched cloud manufactures bad radius-edge ratios.
-        let mut rng = Lcg(0x1001_2026_0706_0025);
+        let mut rng = Lcg(TMESH_005_INPUT_SEED);
         let pts: Vec<Point3> = (0..120)
             .map(|_| Point3::new(rng.dyadic() * 4.0, rng.dyadic(), rng.dyadic() * 0.25))
             .collect();
@@ -392,19 +437,7 @@ fn tmesh_005_refinement_quality() {
         // whose circumcenter escapes the hull (boundary handling is the
         // successor bead); nothing interior-refinable remains.
         let exhausted = stats.refinable_remaining == 0;
-        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-005/refine");
-        let line = em
-            .emit(
-                fs_obs::Severity::Info,
-                fs_obs::EventKind::Custom {
-                    name: "mesh-refine-stats".to_string(),
-                    json: stats.to_json(),
-                },
-                None,
-            )
-            .to_jsonl();
-        fs_obs::validate_line(&line).expect("refine stats validate");
-        println!("{line}");
+        measurement("tmesh-005", "mesh-refine-stats", stats.to_json());
         verdict(
             "tmesh-005",
             exhausted && report.clean() && deterministic && stats.steiner_inserted > 0,
@@ -420,6 +453,7 @@ fn tmesh_005_refinement_quality() {
                 stats.worst_after,
                 stats.unrefinable_remaining,
             ),
+            TMESH_005_INPUT_SEED,
         );
     });
 }
@@ -429,27 +463,19 @@ fn tmesh_005_refinement_quality() {
 #[test]
 fn tmesh_006_scale_run() {
     with_cx(|cx| {
-        let pts = cloud(0x1001_2026_0706_0026, 10_000);
+        let pts = cloud(TMESH_006_INPUT_SEED, 10_000);
         let t = delaunay(&pts, cx).expect("scale build");
         let report = t.audit(false);
         let stats = t.stats();
         let walk_per_point = stats.walk_steps as f64 / stats.points_in as f64;
-        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-006/scale");
-        let line = em
-            .emit(
-                fs_obs::Severity::Info,
-                fs_obs::EventKind::Custom {
-                    name: "mesh-scale-stats".to_string(),
-                    json: format!(
-                        "{{\"stats\":{},\"walk_per_point\":{walk_per_point:.2}}}",
-                        stats.to_json()
-                    ),
-                },
-                None,
-            )
-            .to_jsonl();
-        fs_obs::validate_line(&line).expect("scale stats validate");
-        println!("{line}");
+        measurement(
+            "tmesh-006",
+            "mesh-scale-stats",
+            format!(
+                "{{\"stats\":{},\"walk_per_point\":{walk_per_point:.2}}}",
+                stats.to_json()
+            ),
+        );
         verdict(
             "tmesh-006",
             report.clean() && stats.exhaustive_locates == 0 && walk_per_point < 64.0,
@@ -460,6 +486,7 @@ fn tmesh_006_scale_run() {
                  seed 0x1001_2026_0706_0026",
                 stats.tets_final
             ),
+            TMESH_006_INPUT_SEED,
         );
     });
 }
@@ -592,23 +619,15 @@ fn tmesh_007_isotropic_sphere() {
             && (frac_s - frac_base).abs() < 0.08
             && stats_s.worst_chart_drift < 1e-6
             && count_gap < 0.10;
-        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-007/isotropic");
-        let line = em
-            .emit(
-                fs_obs::Severity::Info,
-                fs_obs::EventKind::Custom {
-                    name: "mesh-remesh-iso".to_string(),
-                    json: format!(
-                        "{{\"ops\":{},\"edge_band_frac\":{frac:.3},\"tris\":{}}}",
-                        stats.to_json(),
-                        out.triangles.len()
-                    ),
-                },
-                None,
-            )
-            .to_jsonl();
-        fs_obs::validate_line(&line).expect("iso event validates");
-        println!("{line}");
+        measurement(
+            "tmesh-007",
+            "mesh-remesh-iso",
+            format!(
+                "{{\"ops\":{},\"edge_band_frac\":{frac:.3},\"tris\":{}}}",
+                stats.to_json(),
+                out.triangles.len()
+            ),
+        );
         verdict(
             "tmesh-007",
             validity.is_ok()
@@ -631,6 +650,7 @@ fn tmesh_007_isotropic_sphere() {
                 drift_s = stats_s.worst_chart_drift,
                 ops = stats.to_json(),
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -641,7 +661,7 @@ fn tmesh_007_isotropic_sphere() {
 #[test]
 fn tmesh_008_op_storm_validity() {
     with_cx(|cx| {
-        let mut rng = Lcg(0x1001_2026_0706_0028);
+        let mut rng = Lcg(TMESH_008_INPUT_SEED);
         let chart = fs_geom::fixtures::SphereChart {
             center: Point3::new(0.0, 0.0, 0.0),
             radius: 1.0,
@@ -681,6 +701,7 @@ fn tmesh_008_op_storm_validity() {
                  invariants, closed-manifold status, and Euler = 2 after every round \
                  {detail}; seed 0x1001_2026_0706_0028"
             ),
+            TMESH_008_INPUT_SEED,
         );
     });
 }
@@ -769,6 +790,7 @@ fn tmesh_009_cube_crease_preservation() {
                  and outward ({:?})",
                 stats.worst_chart_drift, validity
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -866,25 +888,17 @@ fn tmesh_010_anisotropic_boundary_layer() {
         };
         let (r_aniso, r_iso) = (residual(&aniso), residual(&iso));
         let counts_comparable = (t_iso - t_aniso).abs() / t_aniso < 0.4;
-        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-010/aniso");
-        let line = em
-            .emit(
-                fs_obs::Severity::Info,
-                fs_obs::EventKind::Custom {
-                    name: "mesh-remesh-aniso".to_string(),
-                    json: format!(
-                        "{{\"ops\":{},\"band_frac\":{frac:.3},\"mean_aspect\":{mean_aspect:.2},\
-                         \"mean_align_z\":{mean_align:.3},\"tris_aniso\":{t_aniso},\
-                         \"tris_iso\":{t_iso},\"residual_aniso\":{r_aniso:.4},\
-                         \"residual_iso\":{r_iso:.4}}}",
-                        stats.to_json()
-                    ),
-                },
-                None,
-            )
-            .to_jsonl();
-        fs_obs::validate_line(&line).expect("aniso event validates");
-        println!("{line}");
+        measurement(
+            "tmesh-010",
+            "mesh-remesh-aniso",
+            format!(
+                "{{\"ops\":{},\"band_frac\":{frac:.3},\"mean_aspect\":{mean_aspect:.2},\
+                 \"mean_align_z\":{mean_align:.3},\"tris_aniso\":{t_aniso},\
+                 \"tris_iso\":{t_iso},\"residual_aniso\":{r_aniso:.4},\
+                 \"residual_iso\":{r_iso:.4}}}",
+                stats.to_json()
+            ),
+        );
         verdict(
             "tmesh-010",
             validity.is_ok()
@@ -902,6 +916,7 @@ fn tmesh_010_anisotropic_boundary_layer() {
                 frac * 100.0,
                 validity
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -912,7 +927,7 @@ fn tmesh_010_anisotropic_boundary_layer() {
 #[test]
 fn tmesh_011_policy_floor_and_hull_split_evidence() {
     with_cx(|cx| {
-        let mut rng = Lcg(0x1001_2026_0708_0011);
+        let mut rng = Lcg(TMESH_011_INPUT_SEED);
         let points: Vec<Point3> = (0..220)
             .map(|_| Point3::new(rng.dyadic(), rng.dyadic(), rng.dyadic()))
             .collect();
@@ -956,12 +971,16 @@ fn tmesh_011_policy_floor_and_hull_split_evidence() {
             // encroachment protection kept the blowup below the old ~2.8e18 ledger
             && st_a.worst_after < 1.0e18;
         let pass = default_ok && split_infra_ok;
-        println!(
-            "{{\"test\":\"tmesh-011\",\"verdict\":\"{}\",\"default\":{},\
-             \"split_evidence\":{},\"split_regression_documented\":true}}",
-            if pass { "pass" } else { "fail" },
-            stats.to_json(),
-            st_a.to_json()
+        measurement(
+            "tmesh-011",
+            "mesh-hull-split-evidence",
+            format!(
+                "{{\"case\":\"tmesh-011\",\"default\":{},\"split_evidence\":{},\
+                 \"split_regression_documented\":true,\"checks_pass\":{pass},\
+                 \"input_seed\":{TMESH_011_INPUT_SEED}}}",
+                stats.to_json(),
+                st_a.to_json()
+            ),
         );
         assert!(
             pass,
@@ -969,13 +988,20 @@ fn tmesh_011_policy_floor_and_hull_split_evidence() {
             stats.to_json(),
             st_a.to_json()
         );
+        verdict(
+            "tmesh-011",
+            true,
+            "default refinement and deterministic hull splitting satisfy the exact-audit, \
+             accounting, and documented-regression gates",
+            TMESH_011_INPUT_SEED,
+        );
     });
 }
 
 #[test]
 fn tmesh_012_sliver_exudation() {
     with_cx(|cx| {
-        let mut rng = Lcg(0x1001_2026_0708_0012);
+        let mut rng = Lcg(TMESH_012_INPUT_SEED);
         let points: Vec<Point3> = (0..200)
             .map(|_| Point3::new(rng.dyadic(), rng.dyadic(), rng.dyadic()))
             .collect();
@@ -1022,14 +1048,25 @@ fn tmesh_012_sliver_exudation() {
             || movable_after * 2 <= movable_before
             || stats.slivers_after < stats.slivers_before;
         let pass = audit.clean() && improved && inputs_frozen && deterministic;
-        println!(
-            "{{\"test\":\"tmesh-012\",\"verdict\":\"{}\",\"stats\":{},\"audit_clean\":{},\
-             \"inputs_frozen\":{inputs_frozen},\"deterministic\":{deterministic}}}",
-            if pass { "pass" } else { "fail" },
-            stats.to_json(),
-            audit.clean()
+        measurement(
+            "tmesh-012",
+            "mesh-sliver-exudation-evidence",
+            format!(
+                "{{\"case\":\"tmesh-012\",\"stats\":{},\"audit_clean\":{},\
+                 \"inputs_frozen\":{inputs_frozen},\"deterministic\":{deterministic},\
+                 \"checks_pass\":{pass},\"input_seed\":{TMESH_012_INPUT_SEED}}}",
+                stats.to_json(),
+                audit.clean()
+            ),
         );
         assert!(pass, "tmesh-012: {}", stats.to_json());
+        verdict(
+            "tmesh-012",
+            true,
+            "sliver exudation preserves the exact audit and input points, improves the \
+             movable census, and replays deterministically",
+            TMESH_012_INPUT_SEED,
+        );
     });
 }
 
@@ -1058,7 +1095,7 @@ fn canonical_tets(t: &Tetrahedralization) -> Vec<[u32; 4]> {
 #[test]
 fn tmesh_013_parallel_coloring() {
     with_cx(|cx| {
-        let pts = cloud(0x1001_2026_0708_0013, 2000);
+        let pts = cloud(TMESH_013_INPUT_SEED, 2000);
         let seq = delaunay(&pts, cx).expect("sequential kernel");
         // Colors reorder only across provably disjoint pairs, so the
         // kernel merge is CANONICAL (allocation order legitimately
@@ -1082,12 +1119,14 @@ fn tmesh_013_parallel_coloring() {
                     seq_canon.len(),
                     stats.to_json()
                 ),
+                TMESH_013_INPUT_SEED,
             );
             let audit = colored.audit(true);
             verdict(
                 &format!("tmesh-013-audit-{threads}"),
                 audit.clean(),
                 "exact audit clean on the colored build",
+                TMESH_013_INPUT_SEED,
             );
             if threads == 1 {
                 stats1 = Some(stats);
@@ -1105,6 +1144,7 @@ fn tmesh_013_parallel_coloring() {
             "tmesh-013-batch-width",
             s1.largest_batch >= 4 && s1.batches < s1.points,
             &format!("parallel batch evidence (window 256): {}", s1.to_json()),
+            TMESH_013_INPUT_SEED,
         );
         let (_, s_wide) = delaunay_colored(&pts, 4, 1024, cx).expect("wide window");
         verdict(
@@ -1116,6 +1156,7 @@ fn tmesh_013_parallel_coloring() {
                 s_wide.largest_batch,
                 s_wide.to_json()
             ),
+            TMESH_013_INPUT_SEED,
         );
         // Adversarial commutativity: reversed within-batch application
         // (allocation order legitimately differs — compare canonically).
@@ -1124,6 +1165,7 @@ fn tmesh_013_parallel_coloring() {
             "tmesh-013-commutativity",
             canonical_tets(&rev) == seq_canon,
             "reversed within-batch insertion order yields the identical canonical mesh",
+            TMESH_013_INPUT_SEED,
         );
         // Degenerate adversary: a structured grid (massively cospherical)
         // through the colored path.
@@ -1150,6 +1192,7 @@ fn tmesh_013_parallel_coloring() {
                 gcol.tets().len(),
                 gstats.to_json()
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -1177,7 +1220,7 @@ fn tmesh_014_segment_recovery() {
                 }
             }
         }
-        let mut rng = Lcg(0x1001_2026_0708_0014);
+        let mut rng = Lcg(TMESH_014_INPUT_SEED);
         for _ in 0..48 {
             let d = |r: &mut Lcg| 0.44f64.mul_add(r.dyadic(), 0.5); // (0.06, 0.94)
             pts.push(Point3::new(d(&mut rng), d(&mut rng), d(&mut rng)));
@@ -1201,6 +1244,7 @@ fn tmesh_014_segment_recovery() {
             "tmesh-014-recovered",
             stats.recovered == 4 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
             &format!("segment recovery ledger: {}", stats.to_json()),
+            TMESH_014_INPUT_SEED,
         );
         // Correspondence: each segment's rows form a path from a to b
         // (endpoints degree 1, interior degree 2), and every sub-edge
@@ -1250,6 +1294,7 @@ fn tmesh_014_segment_recovery() {
                 "{} sub-edge rows; chain degrees valid; worst off-line residual {on_line:.2e}",
                 rows.len()
             ),
+            TMESH_014_INPUT_SEED,
         );
         // Audit + hull-facet conformity (box planes, exact).
         let audit = t1.audit(true);
@@ -1275,6 +1320,7 @@ fn tmesh_014_segment_recovery() {
                 "exact audit clean; all {} hull triangles exactly on the 6 box planes",
                 hull.triangles.len()
             ),
+            TMESH_014_INPUT_SEED,
         );
         // Bitwise replay.
         let (t2, stats2, rows2) = run(cx);
@@ -1284,6 +1330,7 @@ fn tmesh_014_segment_recovery() {
                 && rows == rows2
                 && stats.to_json() == stats2.to_json(),
             "recovery replays bitwise (mesh, correspondence, ledger)",
+            TMESH_014_INPUT_SEED,
         );
     });
 }
@@ -1319,6 +1366,7 @@ fn tmesh_015_facet_recovery_accepts_existing_face_at_zero_depth() {
                 "already-present face recovers without bisection: {}",
                 stats.to_json()
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -1353,7 +1401,7 @@ fn tmesh_015_facet_recovery() {
         pts.push(Point3::new(1.0, 0.0, z)); // 9
         pts.push(Point3::new(1.0, 1.0, z)); // 10
         pts.push(Point3::new(0.0, 1.0, z)); // 11
-        let mut rng = Lcg(0x1001_2026_0709_0015);
+        let mut rng = Lcg(TMESH_015_INPUT_SEED);
         for s in 0..40 {
             let d = |r: &mut Lcg| 0.8f64.mul_add(r.dyadic(), 0.1); // (0.1, 0.9)
             let zz = if s % 2 == 0 {
@@ -1380,6 +1428,7 @@ fn tmesh_015_facet_recovery() {
             "tmesh-015-recovered",
             stats.recovered == 1 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
             &format!("facet recovery ledger: {}", stats.to_json()),
+            TMESH_015_INPUT_SEED,
         );
         // Correspondence: every recorded sub-face vertex sits EXACTLY
         // on the diaphragm plane (bitwise z), and rows are nonempty.
@@ -1392,6 +1441,7 @@ fn tmesh_015_facet_recovery() {
             "tmesh-015-coplanar",
             !rows.is_empty() && coplanar,
             &format!("{} sub-faces, all vertices bitwise on z = 0.5", rows.len()),
+            TMESH_015_INPUT_SEED,
         );
         // Exact audit stays clean after facet Steiner insertion.
         let audit = t1.audit(true);
@@ -1399,6 +1449,7 @@ fn tmesh_015_facet_recovery() {
             "tmesh-015-audit",
             audit.clean(),
             &format!("exact audit after recovery: {audit:?}"),
+            TMESH_015_INPUT_SEED,
         );
         // Bitwise replay.
         let (t2, stats2, rows2) = run(cx);
@@ -1408,6 +1459,7 @@ fn tmesh_015_facet_recovery() {
             "tmesh-015-replay",
             bitwise,
             "mesh, correspondence, and ledger replay bitwise",
+            TMESH_015_INPUT_SEED,
         );
         // Honesty drill: a starved Steiner budget must REPORT, not lie.
         let mut t3 = delaunay(&pts, cx).expect("delaunay");
@@ -1425,6 +1477,7 @@ fn tmesh_015_facet_recovery() {
             "tmesh-015-honest-caps",
             starved.unrecovered == 1 && starved.recovered == 0,
             &format!("starved ledger: {}", starved.to_json()),
+            TMESH_015_INPUT_SEED,
         );
     });
 }
@@ -1463,7 +1516,7 @@ fn tmesh_016_non_convex_facet_recovery() {
         pts.push(Point3::new(1.0, 1.0, z)); // 11 (reflex)
         pts.push(Point3::new(1.0, 2.0, z)); // 12
         pts.push(Point3::new(0.0, 2.0, z)); // 13
-        let mut rng = Lcg(0x160B_2026_0709_0016);
+        let mut rng = Lcg(TMESH_016_INPUT_SEED);
         for s in 0..48 {
             let d = |r: &mut Lcg| 1.7f64.mul_add(r.dyadic(), 0.15); // (0.15, 1.85)
             let zz = if s % 2 == 0 {
@@ -1490,6 +1543,7 @@ fn tmesh_016_non_convex_facet_recovery() {
             "tmesh-016-recovered",
             stats.recovered == 1 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
             &format!("non-convex L recovery ledger: {}", stats.to_json()),
+            TMESH_016_INPUT_SEED,
         );
         let ptsv = t1.points();
         // Every recorded sub-face vertex sits bitwise on the z = 1.0 plane.
@@ -1516,18 +1570,21 @@ fn tmesh_016_non_convex_facet_recovery() {
                 "{} sub-faces tile the L, area {area:.6} (want 3.0)",
                 rows.len()
             ),
+            TMESH_016_INPUT_SEED,
         );
         let audit = t1.audit(true);
         verdict(
             "tmesh-016-audit",
             audit.clean(),
             &format!("exact audit after non-convex recovery: {audit:?}"),
+            TMESH_016_INPUT_SEED,
         );
         let (t2, stats2, rows2) = run(cx);
         verdict(
             "tmesh-016-replay",
             t1.tets() == t2.tets() && rows == rows2 && stats.to_json() == stats2.to_json(),
             "mesh, correspondence, and ledger replay bitwise",
+            TMESH_016_INPUT_SEED,
         );
     });
 }
@@ -1545,7 +1602,7 @@ fn tmesh_016_non_convex_facet_recovery() {
 fn tmesh_017_boundary_layer_pipeline() {
     use fs_mesh::{ExudeOptions, exude};
     with_cx(|cx| {
-        let mut rng = Lcg(0x1001_2026_0708_0011);
+        let mut rng = Lcg(TMESH_017_INPUT_SEED);
         let points: Vec<Point3> = (0..220)
             .map(|_| Point3::new(rng.dyadic(), rng.dyadic(), rng.dyadic()))
             .collect();
@@ -1625,16 +1682,33 @@ fn tmesh_017_boundary_layer_pipeline() {
             ),
         ];
         let ok = checks.iter().all(|(_, c)| *c);
-        println!(
-            "{{\"test\":\"tmesh-017\",\"verdict\":\"{}\",\
-             \"refine\":{},\"exude\":{},\
-             \"worst_aspect_lower_bound\":{worst:.3}}}",
-            if ok { "pass" } else { "fail" },
-            rstats.to_json(),
-            estats.to_json()
+        measurement(
+            "tmesh-017",
+            "mesh-boundary-layer-pipeline-evidence",
+            format!(
+                "{{\"case\":\"tmesh-017\",\"refine\":{},\"exude\":{},\
+                 \"worst_aspect_lower_bound\":{worst:.3},\"audit_clean\":{},\
+                 \"census_non_increasing\":{},\"refine_accounted\":{},\
+                 \"checks_pass\":{ok},\"input_seed\":{TMESH_017_INPUT_SEED}}}",
+                rstats.to_json(),
+                estats.to_json(),
+                checks[0].1,
+                checks[1].1,
+                checks[2].1,
+            ),
         );
         for (name, c) in checks {
             assert!(c, "{name}");
         }
+        verdict(
+            "tmesh-017",
+            true,
+            &format!(
+                "boundary-layer refine/exude pipeline keeps the exact audit clean, \
+                 the sliver census non-increasing, and the refinement ledger accounted; \
+                 worst aspect lower bound {worst:.3}"
+            ),
+            TMESH_017_INPUT_SEED,
+        );
     });
 }

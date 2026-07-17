@@ -232,10 +232,60 @@ None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases tmesh-001..tmesh-010 — JSON-line
-verdicts, seeded LCG randomness, fs-obs Custom events for kernel
-stats, refinement stats, and scale/walk-locality stats. Any
-reimplementation must pass the suite unchanged.
+`tests/conformance.rs` defines 40 schema-validated fs-obs `ConformanceCase`
+aggregates in a green run. The exact identities are the one-row cases `tmesh-001`,
+`tmesh-002`, `tmesh-002b`, `tmesh-003` through `tmesh-012`, and `tmesh-017`;
+`tmesh-013-threads-{1,2,4,8}`, `tmesh-013-audit-{1,2,4,8}`,
+`tmesh-013-batch-width`, `tmesh-013-width-scaling`,
+`tmesh-013-commutativity`, and `tmesh-013-degenerate-grid`;
+`tmesh-014-{recovered,correspondence,audit-and-hull,replay}`;
+`tmesh-015-zero-depth-existing-face` and
+`tmesh-015-{recovered,coplanar,audit,replay,honest-caps}`; and
+`tmesh-016-{recovered,tiles-L,audit,replay}`. Any reimplementation must pass
+the suite unchanged.
+
+Input-seed attribution follows the fixture, not the executor. `tmesh-001`,
+`tmesh-002`, `tmesh-002b`, `tmesh-003`, `tmesh-004`, `tmesh-005`,
+`tmesh-006`, and `tmesh-008` retain respectively
+`0x1001_2026_0706_0021`, `0x1001_2026_0706_0022`,
+`0x7115_ED00_C0B1_A11E`, `0x1001_2026_0706_0023`,
+`0x1001_2026_0706_0024`, `0x1001_2026_0706_0025`,
+`0x1001_2026_0706_0026`, and `0x1001_2026_0706_0028`. The
+`tmesh-002` and `tmesh-002b` details name those roots because each aggregate
+also contains fixed adversarial fixtures; each has only one stochastic input
+root. `tmesh-011` and `tmesh-017` intentionally share
+`0x1001_2026_0708_0011`; `tmesh-012` uses
+`0x1001_2026_0708_0012`; every non-grid `tmesh-013-*` row uses
+`0x1001_2026_0708_0013`; every `tmesh-014-*` row uses
+`0x1001_2026_0708_0014`; the five non-zero-depth `tmesh-015-*` rows use
+`0x1001_2026_0709_0015`; and every `tmesh-016-*` row uses
+`0x160B_2026_0709_0016`. Fixed fixtures `tmesh-007`, `tmesh-009`,
+`tmesh-010`, `tmesh-013-degenerate-grid`, and
+`tmesh-015-zero-depth-existing-face` record input seed zero. Each listed LCG
+root owns one sequentially derived fixture stream; no subordinate input stream
+is silently replaced by the shared `Cx` provenance
+(`0x7E7`, kernel 1, tile 0, iteration 0).
+
+Eight object-shaped `Custom` companions retain the structured forensics:
+`tmesh-001/measurement` (`mesh-delaunay-stats`),
+`tmesh-005/measurement` (`mesh-refine-stats`),
+`tmesh-006/measurement` (`mesh-scale-stats`),
+`tmesh-007/measurement` (`mesh-remesh-iso`),
+`tmesh-010/measurement` (`mesh-remesh-aniso`),
+`tmesh-011/measurement` (`mesh-hull-split-evidence`),
+`tmesh-012/measurement` (`mesh-sliver-exudation-evidence`), and
+`tmesh-017/measurement` (`mesh-boundary-layer-pipeline-evidence`). Each has a
+scope distinct from its aggregate, so fresh emitters cannot duplicate a
+`(session, scope, sequence=0)` identity. Both companions and aggregates are
+failure-linted, serialized, wire-validated, then printed. Ordinary aggregates
+select Info/Error from their pass bit and perform the pre-existing terminal
+assertion only after printing. For tmesh-011, tmesh-012, and tmesh-017, the
+diagnostic remains at the old pre-assert boundary; their canonical passing
+aggregate is deliberately withheld until all old gates have passed. Custom
+measurements are diagnostic, not aggregate verdict authority, and this
+observability migration does not enlarge any geometric, quality, determinism,
+or performance claim. The primary target is default-feature compatible and
+does not exercise `frontier-hexmesh`.
 `tests/adaptivity.rs` adds G0/G3 admission, QoI-regression visibility,
 state/lineage/accounting retention, effect and trigger coverage, a byte-pinned
 schema-v1 JSON fixture, exact replay tests for the adaptivity receipt seam, and
