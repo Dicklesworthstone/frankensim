@@ -1,0 +1,49 @@
+frankensim.matdb-source.v1
+observation	section-3-1-3-tempel-24n208-rating	tempel-steel-company-24n208-nonoriented-annealed-nominal-3pct-silicon-steel-aisi-m19-lot-unspecified	NASA-CR-4538 Section 3.1.3 Hysteresis Loss, Laminations; Tempel Steel Company manufacturer data selected for the report's laminated compressor return-path iron	The report identifies Tempel Steel Company product 24N208 as 0.025 in thick non-oriented annealed nominal 3 percent silicon steel of AISI M19 grade and prints a 2.08 W/lbm rating at 15 kG, 60 Hz, and 50 percent w/ the grain. Exact SI normalization uses 1 lbm=0.45359237 kg, 1 G=1e-4 T, and 1 in=0.0254 m. The phrase 50 percent w/ the grain is preserved as source context because the report does not define its sampling or orientation semantics. The report attributes the input to manufacturer data and does not identify the manufacturer sheet or revision, product lot, heat chemistry, anneal schedule, surface insulation or coating, magnetic test method, waveform, test temperature, repeats, dispersion, uncertainty, or whether the printed rating is a maximum, typical, mean, or single result. It also does not say whether the rating is hysteresis-only or total core loss. The report authors' later 8 W core and 10 W shell assembly estimates are model outputs and are not admitted as material claims. This state is not fused with NASA-TN-D-8184's anonymous M19 material deck
+scalar	specific-hysteresis-loss-rating	section-3-1-3-tempel-24n208-rating	specific_hysteresis_loss_rating	4.585615053445453	W/kg	constant
+uncertainty	specific-hysteresis-loss-rating	unstated	-	-	-	-
+validity	specific-hysteresis-loss-rating	frequency	60	60	Hz
+validity	specific-hysteresis-loss-rating	magnetic_flux_density	1.5	1.5	T
+validity	specific-hysteresis-loss-rating	lamination_thickness	0.000635	0.000635	m
+validity	specific-hysteresis-loss-rating	source_with_grain_fraction	50	50	%
+validity	specific-hysteresis-loss-rating	source_manufacturer_tempel_steel	1	1	1
+validity	specific-hysteresis-loss-rating	source_product_24n208	1	1	1
+validity	specific-hysteresis-loss-rating	source_material_grade_m19	1	1	1
+validity	specific-hysteresis-loss-rating	source_nonoriented_state	1	1	1
+validity	specific-hysteresis-loss-rating	source_annealed_state	1	1	1
+validity	specific-hysteresis-loss-rating	source_nominal_silicon_mass_fraction	3	3	%
+validity	specific-hysteresis-loss-rating	source_manufacturer_rating	1	1	1
+validity	specific-hysteresis-loss-rating	source_report_author_measurement	0	0	1
+validity	specific-hysteresis-loss-rating	source_product_lot_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_anneal_schedule_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_surface_insulation_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_magnetic_test_method_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_waveform_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_test_temperature_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_rating_bound_semantics_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_loss_includes_eddy_current_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_loss_is_hysteresis_only_known	0	0	1
+validity	specific-hysteresis-loss-rating	source_repeats_and_dispersion_known	0	0	1
+scalar	lamination-thickness	section-3-1-3-tempel-24n208-rating	lamination_thickness	0.000635	m	constant
+uncertainty	lamination-thickness	unstated	-	-	-	-
+validity	lamination-thickness	source_manufacturer_tempel_steel	1	1	1
+validity	lamination-thickness	source_product_24n208	1	1	1
+validity	lamination-thickness	source_material_grade_m19	1	1	1
+validity	lamination-thickness	source_nonoriented_state	1	1	1
+validity	lamination-thickness	source_annealed_state	1	1	1
+validity	lamination-thickness	source_nominal_silicon_mass_fraction	3	3	%
+validity	lamination-thickness	source_dimension_is_nominal_product_thickness	1	1	1
+validity	lamination-thickness	source_product_lot_known	0	0	1
+validity	lamination-thickness	source_anneal_schedule_known	0	0	1
+validity	lamination-thickness	source_surface_insulation_known	0	0	1
+scalar	nominal-silicon-mass-fraction	section-3-1-3-tempel-24n208-rating	nominal_silicon_mass_fraction	3	%	constant
+uncertainty	nominal-silicon-mass-fraction	unstated	-	-	-	-
+validity	nominal-silicon-mass-fraction	source_manufacturer_tempel_steel	1	1	1
+validity	nominal-silicon-mass-fraction	source_product_24n208	1	1	1
+validity	nominal-silicon-mass-fraction	source_material_grade_m19	1	1	1
+validity	nominal-silicon-mass-fraction	source_nonoriented_state	1	1	1
+validity	nominal-silicon-mass-fraction	source_annealed_state	1	1	1
+validity	nominal-silicon-mass-fraction	source_composition_is_nominal_grade_description	1	1	1
+validity	nominal-silicon-mass-fraction	source_heat_chemistry_known	0	0	1
+validity	nominal-silicon-mass-fraction	source_product_lot_known	0	0	1
+validity	nominal-silicon-mass-fraction	source_anneal_schedule_known	0	0	1

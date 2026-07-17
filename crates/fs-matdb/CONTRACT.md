@@ -357,7 +357,11 @@ coolant specification and the conflict-preserving N0602-001 nitrile O-ring
 compatibility tranche. The NASA-TN-D-8184 M-19 battery preserves all fourteen
 printed magnetization points plus the fixed-flux frequency-loss reference and
 exponent, while proving that absent process, anneal, test-method, and full
-Steinmetz identity remain fail-closed. The NGYC N42 battery additionally pins
+Steinmetz identity remain fail-closed. The separate NASA-CR-4538 battery pins
+Tempel Steel Company product `24N208`, its non-oriented annealed nominal
+`3%`-silicon M19 description, `0.025 in` thickness, and one manufacturer loss
+rating while refusing to invent rating semantics, a test method, a waveform,
+or a complete core-loss model. The NGYC N42 battery additionally pins
 supplier, sintered grade, and coating identity while proving that incompatible
 SI/CGS energy-product prints survive as distinct claims. The Y30 catalog-input
 battery verifies the four source-used Table II midpoints and Equation 2 model
@@ -431,7 +435,9 @@ Wankel-housing authority.
   frequency exponent, and the associated reference frequency, flux density,
   and lamination thickness. Missing process, anneal, test method, temperature,
   and full Steinmetz identity remain explicit rather than being inferred from
-  the grade name.
+  the grade name. A separate NASA-CR-4538 tranche adds the Tempel Steel Company
+  `24N208` identity, non-oriented/annealed description, nominal `3%` silicon,
+  `0.025 in` thickness, and one fixed-condition manufacturer loss rating.
   The first supplier-pinned N42 tranche adds one remanence, one coercivity, and
   two conflict-preserving maximum-energy-product claims for NGYC sintered,
   nickel-coated cubes. A separate Jinshan N42 tranche adds exact `25 degC` and
@@ -528,8 +534,17 @@ Wankel-housing authority.
   state, anneal, curve thickness, test method, waveform, direction,
   temperature, fitted range, repeats, and uncertainty remain absent; the pack
   cannot qualify a motor lamination or satisfy the bead's pinned M-19 card by
-  itself. The NGYC N42 claims bind the supplier-named sintered grade and
-  nickel-coated cube family from one CC-BY-4.0 article. The source does not say
+  itself. The NASA-CR-4538 Tempel state is not fused into that anonymous deck:
+  it identifies a different source artifact and retains only one
+  `2.08 W/lbm` manufacturer rating at `15 kG`, `60 Hz`, and source-undefined
+  `50% w/ the grain`. Because the report does not say whether that rating is
+  hysteresis-only or total core loss, the claim uses the narrow
+  `specific_hysteresis_loss_rating` property. Manufacturer sheet/revision,
+  lot, heat chemistry, anneal schedule, surface insulation, test method,
+  waveform, test temperature, bound semantics, repeats, dispersion, B-H curve,
+  and Steinmetz model remain absent. The NGYC N42 claims bind the
+  supplier-named sintered grade and nickel-coated cube family from one
+  CC-BY-4.0 article. The source does not say
   whether the values were measured or supplier-nominal and omits test
   temperature, method, lot, chemistry, detailed process, intrinsic coercivity,
   recoil permeability, demagnetization curves, and temperature coefficients.

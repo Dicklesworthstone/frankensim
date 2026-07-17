@@ -36,6 +36,8 @@ const N0602_001_NITRILE_JP8_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/n0602-001-nitrile-jp8-compatibility/manifest.tsv";
 const NASA_TN_D_8184_M19_MATERIAL_DECK_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/nasa-tn-d-8184-m19-material-deck/manifest.tsv";
+const NASA_CR_4538_TEMPEL_24N208_M19_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-cr-4538-tempel-24n208-m19/manifest.tsv";
 const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
 const JINSHAN_N42_PRISTINE_TEMPERATURE_SEED_MANIFEST: &str =
@@ -1915,6 +1917,194 @@ fn g3_cli_compiles_committed_nasa_tn_d_8184_m19_material_deck_without_inventing_
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "source-absent NASA M-19 property must remain refused: {refused_property}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_tempel_24n208_m19_rating_without_fusing_material_deck() {
+    let manifest = workspace_path(NASA_CR_4538_TEMPEL_24N208_M19_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed NASA-CR-4538 Tempel 24N208 M19 manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("nasa-cr-4538-tempel-24n208-first.fsmatpk");
+    let second_path = directory.join("nasa-cr-4538-tempel-24n208-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Tempel 24N208 M19 compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Tempel 24N208 M19 compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Tempel 24N208 M19 decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Tempel 24N208 M19 pack");
+    let second_bytes = fs::read(second_path).expect("read second Tempel 24N208 M19 pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "Tempel 24N208 M19 pack bytes moved"
+    );
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode Tempel 24N208 M19 pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Tempel 24N208 M19 pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "nasa-cr-4538-tempel-24n208-annealed-m19-rating"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("public use"));
+    assert_eq!(decoded.claims().claim_count(), 3);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let expectations = [
+        (
+            "specific_hysteresis_loss_rating",
+            2.08_f64 / 0.453_592_37_f64,
+            Dims([2, 0, -3, 0, 0, 0]),
+        ),
+        (
+            "lamination_thickness",
+            0.025_f64 * 0.0254_f64,
+            Dims([1, 0, 0, 0, 0, 0]),
+        ),
+        (
+            "nominal_silicon_mass_fraction",
+            3.0_f64 * 0.01_f64,
+            Dims::NONE,
+        ),
+    ];
+    let mut observation_ids = Vec::new();
+    for (property, expected_value, expected_dims) in expectations {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing Tempel 24N208 {property}");
+        let claim = claims[0].1;
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Tempel 24N208 {property} was not scalar");
+        };
+        assert_eq!(*dims, expected_dims);
+        let scale = expected_value.abs().max(1.0e-12);
+        assert!((*value - expected_value).abs() / scale <= 2.0e-15);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        assert!(claim.provenance.source.contains("NASA-CR-4538"));
+        assert!(claim.provenance.source.contains("[source:primary]"));
+        for identity_axis in [
+            "source_manufacturer_tempel_steel",
+            "source_product_24n208",
+            "source_material_grade_m19",
+            "source_nonoriented_state",
+            "source_annealed_state",
+        ] {
+            assert_eq!(claim.validity.bound(identity_axis), Some((1.0, 1.0)));
+        }
+        for missing_axis in ["source_product_lot_known", "source_anneal_schedule_known"] {
+            assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+        }
+        observation_ids.push(claim.observations[0]);
+    }
+    assert!(
+        observation_ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "Tempel identity, thickness, and rating must share one source observation"
+    );
+
+    let loss_claim = decoded
+        .claims()
+        .claims_for("specific_hysteresis_loss_rating")[0]
+        .1;
+    assert_eq!(loss_claim.validity.bound("frequency"), Some((60.0, 60.0)));
+    assert_eq!(
+        loss_claim.validity.bound("magnetic_flux_density"),
+        Some((1.5, 1.5))
+    );
+    assert_eq!(
+        loss_claim.validity.bound("lamination_thickness"),
+        Some((0.000_635, 0.000_635))
+    );
+    assert_eq!(
+        loss_claim.validity.bound("source_with_grain_fraction"),
+        Some((0.5, 0.5))
+    );
+    assert_eq!(
+        loss_claim
+            .validity
+            .bound("source_nominal_silicon_mass_fraction"),
+        Some((0.03, 0.03))
+    );
+    assert_eq!(
+        loss_claim.validity.bound("source_manufacturer_rating"),
+        Some((1.0, 1.0))
+    );
+    for missing_axis in [
+        "source_report_author_measurement",
+        "source_surface_insulation_known",
+        "source_magnetic_test_method_known",
+        "source_waveform_known",
+        "source_test_temperature_known",
+        "source_rating_bound_semantics_known",
+        "source_loss_includes_eddy_current_known",
+        "source_loss_is_hysteresis_only_known",
+        "source_repeats_and_dispersion_known",
+    ] {
+        assert_eq!(loss_claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+    }
+
+    let observation = decoded
+        .claims()
+        .observation(observation_ids[0])
+        .expect("Tempel 24N208 observation remains linked");
+    assert_eq!(
+        observation.specimen,
+        "tempel-steel-company-24n208-nonoriented-annealed-nominal-3pct-silicon-steel-aisi-m19-lot-unspecified"
+    );
+    assert!(observation.method.contains("Hysteresis Loss, Laminations"));
+    for retained_source_text in ["2.08 W/lbm", "15 kG", "60 Hz", "50 percent w/ the grain"] {
+        assert!(observation.caveats.contains(retained_source_text));
+    }
+    assert!(
+        observation
+            .caveats
+            .contains("does not say whether the rating")
+    );
+    assert!(
+        observation
+            .caveats
+            .contains("not fused with NASA-TN-D-8184")
+    );
+
+    for refused_property in [
+        "specific_core_loss",
+        "magnetic_flux_density",
+        "steinmetz_coefficient",
+        "core_loss_frequency_power_law_exponent",
+        "core_loss_flux_density_power_law_exponent",
+        "core_loss_curve",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "Tempel point rating crossed the {refused_property} no-claim boundary"
         );
     }
 

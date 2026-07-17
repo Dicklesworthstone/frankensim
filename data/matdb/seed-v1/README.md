@@ -612,6 +612,43 @@ NASA-TN-D-8184 M-19 references:
 - <https://ntrs.nasa.gov/citations/19760013282>
 - <https://ntrs.nasa.gov/api/citations/19760013282/downloads/19760013282.pdf>
 
+## NASA-CR-4538 Tempel 24N208 M19 rating tranche
+
+`nasa-cr-4538-tempel-24n208-m19/` retains the separate M19 state selected for
+the laminated return path of Longsworth's split-Stirling cryocooler compressor.
+Unlike the anonymous NASA-TN-D-8184 material deck, this report identifies the
+manufacturer as Tempel Steel Company and the product as `24N208`, and describes
+it as `0.025 in` thick, non-oriented, annealed, nominal `3%` silicon steel of
+AISI M19 grade. Exact normalization stores the thickness as `0.000635 m` and
+the nominal silicon fraction as `0.03`.
+
+Section 3.1.3 prints one manufacturer-data rating: `2.08 W/lbm` at `15 kG`,
+`60 Hz`, and `50% w/ the grain`. Exact SI normalization gives
+`4.585615053445453 W/kg` at `1.5 T`. The report does not define the
+`50% w/ the grain` phrase, so the pack retains it as a dimensionless source
+condition rather than generalizing it to a direction-independent property.
+
+The heading and surrounding text discuss hysteresis loss, but the report does
+not state whether the manufacturer rating is hysteresis-only or total core
+loss. The property is therefore deliberately named
+`specific_hysteresis_loss_rating`, not `specific_core_loss`. Its bound
+semantics, test method, excitation waveform, test temperature, repeats,
+dispersion, and uncertainty are absent. The manufacturer sheet/revision,
+product lot, heat chemistry, anneal schedule, and surface insulation state are
+also missing. The report authors' later `8 W` core and `10 W` shell assembly
+estimates are model outputs and are not admitted as material claims.
+
+This pack remains separate from NASA-TN-D-8184. It improves manufacturer,
+product, orientation class, nominal composition, annealed-state, and thickness
+identity, but supplies no B-H curve, anneal schedule, magnetic test method, or
+complete Steinmetz model. The fully pinned M19 card required by bead `1sxe`
+therefore remains open.
+
+NASA-CR-4538 Tempel 24N208 references:
+
+- <https://ntrs.nasa.gov/citations/19940009424>
+- <https://ntrs.nasa.gov/api/citations/19940009424/downloads/19940009424.pdf>
+
 ## NGYC N42 sintered NdFeB magnet tranche
 
 `ngyc-n42-sintered-nickel-coated/` retains the N42 sintered NdFeB magnets
