@@ -255,15 +255,41 @@ pub enum Decision {
     },
 }
 
-/// The mechanical certify-or-escalate policy: use the surrogate iff the query is
-/// inside the validity domain AND the conformal band is at least as tight as the
-/// decision tolerance; otherwise escalate.
+/// The mechanical certify-or-escalate policy: use the surrogate iff every
+/// numeric policy input is valid, the query is inside the validity domain, and
+/// the conformal band is at least as tight as the decision tolerance; otherwise
+/// escalate.
+///
+/// [`ConformalBand`] has public fields, and an honestly unbounded conformal band
+/// uses `half_width = +∞`. Revalidate the complete policy at this decision
+/// boundary so caller-constructed malformed or unbounded values cannot
+/// authorize a surrogate through IEEE-754 comparisons such as `+∞ <= +∞`.
 #[must_use]
 pub fn certify_or_escalate(
     band: &ConformalBand,
     in_validity_domain: bool,
     decision_tolerance: f64,
 ) -> Decision {
+    if band.half_width == f64::INFINITY {
+        return Decision::Escalate {
+            reason: "conformal band is unbounded".to_string(),
+        };
+    }
+    if !band.half_width.is_finite() || band.half_width < 0.0 {
+        return Decision::Escalate {
+            reason: "conformal band half-width must be finite and non-negative".to_string(),
+        };
+    }
+    if !band.alpha.is_finite() || !(band.alpha > 0.0 && band.alpha < 1.0) {
+        return Decision::Escalate {
+            reason: "conformal band alpha must be finite and in (0, 1)".to_string(),
+        };
+    }
+    if !decision_tolerance.is_finite() || decision_tolerance < 0.0 {
+        return Decision::Escalate {
+            reason: "decision tolerance must be finite and non-negative".to_string(),
+        };
+    }
     if !in_validity_domain {
         return Decision::Escalate {
             reason: "query outside the surrogate's validity domain".to_string(),

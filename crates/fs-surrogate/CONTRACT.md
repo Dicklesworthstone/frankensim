@@ -23,8 +23,11 @@ execution, memory admission, and live task cancellation.
   split-conformal band (the `⌈(1−α)(n+1)⌉`-th smallest residual); `covers`,
   `half_width`. `empirical_coverage(&ConformalBand, &[(pred, truth)])`.
 - `certify_or_escalate(&ConformalBand, in_validity_domain, decision_tolerance)
-  -> Decision` — `UseSurrogate` iff inside the domain AND the band is at least as
-  tight as the decision tolerance, else `Escalate`.
+  -> Decision` — revalidates the public band fields and decision tolerance at
+  evaluation time. `UseSurrogate` iff `alpha ∈ (0, 1)`, the width and tolerance
+  are finite and non-negative, the query is inside the domain, AND the band is
+  at least as tight as the tolerance; every unbounded or malformed policy state
+  returns `Escalate`.
 - Root `SurrogateError` — `NoSnapshots` / `DimMismatch` / `BadThreshold`.
 
 - `ladder` module (addendum Proposal A, bead knh1.4; [F], behind
@@ -54,9 +57,12 @@ execution, memory admission, and live task cancellation.
   its modes are orthonormal; the retained rank captures `>= energy_threshold`.
 - The conformal band achieves at least its nominal `(1−α)` empirical coverage on
   exchangeable held-out data.
-- `certify_or_escalate` uses the surrogate ONLY when trustworthy (in-domain +
-  band tight enough), so a fleet of queries costs strictly less than
-  all-high-fidelity whenever any query is served by the surrogate.
+- `certify_or_escalate` uses the surrogate ONLY when trustworthy (finite valid
+  policy + in-domain + band tight enough). In particular, the intentionally
+  unbounded `+∞` band and every non-finite or negative decision tolerance fail
+  closed even when an IEEE-754 comparison such as `+∞ <= +∞` would be true. A
+  fleet of queries costs strictly less than all-high-fidelity whenever any query
+  is served by the surrogate.
 - Every ladder-emitted color is `Estimated` and passes the shared
   `fs-evidence` payload validator. RB answers carry the f64-evaluated
   QoI estimator as dispersion; concept answers carry the larger of the probe
@@ -164,11 +170,12 @@ None. `#![deny(unsafe_code)]` via the workspace lint.
 
 ## Conformance tests
 
-`tests/surrogate.rs` (9 cases): POD reproduces a low-rank set exactly;
+`tests/surrogate.rs` (10 cases): POD reproduces a low-rank set exactly;
 orthonormal modes; energy-based rank + reduced error; bad-input rejection; the
 conformal band achieves nominal coverage; certify-or-escalate uses the surrogate
-only when trustworthy; the policy reduces cost vs all-high-fidelity;
-determinism.
+only when trustworthy; malformed/unbounded policy inputs fail closed while the
+finite inclusive tolerance boundary remains admissible; the policy reduces cost
+vs all-high-fidelity; determinism.
 
 `tests/ladder.rs` (feature-gated): f64 RB estimator containment on the
 elliptic fixture, bounded descent, Estimated-only payload authority,

@@ -4,7 +4,8 @@
 //! certify-or-escalate policy (including cost reduction vs all-high-fidelity).
 
 use fs_surrogate::{
-    Decision, SurrogateError, certify_or_escalate, conformal_band, empirical_coverage, pod,
+    ConformalBand, Decision, SurrogateError, certify_or_escalate, conformal_band,
+    empirical_coverage, pod,
 };
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -158,6 +159,106 @@ fn certify_or_escalate_uses_the_surrogate_only_when_trustworthy() {
     assert!(matches!(
         certify_or_escalate(&narrow, false, 0.1),
         Decision::Escalate { .. }
+    ));
+}
+
+#[test]
+fn certify_or_escalate_rejects_unbounded_and_malformed_numeric_policy() {
+    // Below 1/(n+1), conformal_band deliberately returns the only honest band:
+    // an unbounded one. IEEE-754 makes +inf <= +inf true, so validating the
+    // decision boundary is essential when a caller supplies an infinite
+    // tolerance. The old comparison-only policy incorrectly used the surrogate.
+    let unbounded = conformal_band(&[0.1; 8], 0.1);
+    assert_eq!(unbounded.half_width, f64::INFINITY);
+    assert!(matches!(
+        certify_or_escalate(&unbounded, true, f64::INFINITY),
+        Decision::Escalate { .. }
+    ));
+
+    // ConformalBand fields are public, so the policy must reject malformed
+    // caller-constructed state rather than relying only on conformal_band.
+    let malformed_bands = [
+        (
+            ConformalBand {
+                half_width: f64::NAN,
+                alpha: 0.1,
+            },
+            "NaN half-width",
+        ),
+        (
+            ConformalBand {
+                half_width: f64::NEG_INFINITY,
+                alpha: 0.1,
+            },
+            "negative-infinite half-width",
+        ),
+        (
+            ConformalBand {
+                half_width: -0.1,
+                alpha: 0.1,
+            },
+            "negative half-width",
+        ),
+        (
+            ConformalBand {
+                half_width: 0.1,
+                alpha: f64::NAN,
+            },
+            "NaN alpha",
+        ),
+        (
+            ConformalBand {
+                half_width: 0.1,
+                alpha: 0.0,
+            },
+            "zero alpha",
+        ),
+        (
+            ConformalBand {
+                half_width: 0.1,
+                alpha: 1.0,
+            },
+            "unit alpha",
+        ),
+    ];
+    for (band, label) in malformed_bands {
+        assert!(
+            matches!(
+                certify_or_escalate(&band, true, 0.1),
+                Decision::Escalate { .. }
+            ),
+            "{label} must fail closed"
+        );
+    }
+
+    let valid_band = ConformalBand {
+        half_width: 0.1,
+        alpha: 0.1,
+    };
+    for invalid_tolerance in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -f64::EPSILON] {
+        assert!(matches!(
+            certify_or_escalate(&valid_band, true, invalid_tolerance),
+            Decision::Escalate { .. }
+        ));
+    }
+
+    // The finite inclusive boundary remains intentional: a band exactly as
+    // tight as the decision tolerance is admissible.
+    assert!(matches!(
+        certify_or_escalate(&valid_band, true, 0.1),
+        Decision::UseSurrogate {
+            band_half_width: 0.1
+        }
+    ));
+    let exact_band = ConformalBand {
+        half_width: 0.0,
+        alpha: 0.1,
+    };
+    assert!(matches!(
+        certify_or_escalate(&exact_band, true, 0.0),
+        Decision::UseSurrogate {
+            band_half_width: 0.0
+        }
     ));
 }
 
