@@ -3,8 +3,8 @@
 //! enclosures contain true propagation; composed validity ⊆ intersection).
 //! Plus the acceptance battery: the registration lint, the worked
 //! model-discrepancy-dominates example, the out-of-distribution refusal,
-//! and deterministic ledger rows. JSON-line verdicts; seeded cases carry
-//! their seed.
+//! and deterministic ledger rows. Aggregate verdicts use the canonical fs-obs
+//! schema; seeded cases carry their actual input seed.
 
 use fs_evidence::{
     Ambition, Color, ColorRank, DecisionStatus, DiscrepancyModel, EscalationAdvice, Evidence,
@@ -15,12 +15,30 @@ use fs_evidence::{
 use fs_propcheck::Stream;
 use std::collections::{BTreeMap, BTreeSet};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-evidence/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const SUITE: &str = "fs-evidence/conformance";
+const FIXED_INPUT_SEED: u64 = 0;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("evidence verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("evidence verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -116,6 +134,7 @@ fn evd_001_g0_composition_conservativeness_battery() {
             "composed enclosures contain true propagation over {checked} seeded samples \
              (seed {SEED:#x}); validity intersects, assumptions union, bands add"
         ),
+        SEED,
     );
 }
 
@@ -159,6 +178,7 @@ fn evd_002_model_card_registration_lint() {
         refused && accepted && rows_valid,
         "a solver without a card cannot register (teaching refusal); with the card it can; \
          model_cards rows validate through fs-obs",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -207,11 +227,24 @@ fn evd_003_worked_example_model_discrepancy_dominates() {
         .clone()
         .with_model(ModelEvidence::from_card(&better_card, &at));
     let flips = matches!(better.assess(0.05), DecisionStatus::DecisionGrade);
-    println!("{}", drag.to_ledger_row_json());
+    let mut emitter = fs_obs::Emitter::new(SUITE, "evd-003/drag");
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: "fs-evidence-row".to_string(),
+            json: drag.to_ledger_row_json(),
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("drag evidence row must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("drag evidence row must use the fs-obs wire schema");
+    println!("{line}");
     verdict(
         "evd-003",
         dominated && advice_ok && flips && detail.contains("model-form"),
         &format!("beautifully-certified-wrong caught: {detail}"),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -269,6 +302,7 @@ fn evd_004_discrepancy_model_flags_out_of_distribution_queries() {
              Estimated rather than impersonating an experimental anchor",
             band.mean_rel, band.max_rel
         ),
+        SEED,
     );
 }
 
@@ -321,6 +355,7 @@ fn evd_005_bracketing_reports_spread_and_rows_are_deterministic() {
         enclosing && spread_reported && not_decision_grade && row1 == row2 && valid,
         "bracketed contact-angle models: enclosure spans members, spread carried as the \
          model band, correctly not decision-grade at 5%, rows deterministic + schema-valid",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -342,6 +377,7 @@ fn evd_006_certified_discipline_composes() {
         chain_ok && poisoned,
         "Certified discipline survives rigorous composition and refuses estimate-tainted \
          chains (kind severity is monotone)",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -511,6 +547,7 @@ fn evd_012_certified_is_unforgeable_and_validated() {
         "Certified<T> is opaque: numerical, scalar-value, and model-validity forge routes are \
          refused with structured reasons; rigorous composition still certifies; \
          downgrade-mutate-recertify re-validates",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -666,6 +703,7 @@ fn evd_013_malformed_uncertainty_and_indeterminate_arithmetic_fail_closed() {
         "indeterminate interval arithmetic widens to the whole line; malformed statistical \
          and model uncertainty cannot certify or become decision-grade; an explicit infinite \
          model band remains honest but non-decision-grade",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -709,6 +747,7 @@ fn evd_007_disjoint_validated_regimes_demote_not_launder() {
         "validated⊕validated intersects when overlapping; disjoint regimes demote to \
          Estimated with infinite/no-claim dispersion instead of laundering a phantom point \
          regime or asserting a zero spread",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -753,6 +792,7 @@ fn evd_008_verified_compose_stays_a_true_enclosure() {
         "evd-008",
         true,
         "Verified compose is outward-rounded (true enclosure) and NaN-safe",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -833,6 +873,7 @@ fn evd_009_non_finite_regimes_fail_closed_and_payloads_escape() {
         "NaN and infinite state values, empty/non-finite/inverted regimes all demote \
          with infinite dispersion; hostile payload metadata is escaped deterministically \
          and non-finite floats are tagged strings",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -883,6 +924,7 @@ fn evd_010_verified_gate_refuses_nan_and_inverted_bounds() {
         "evd-010",
         true,
         "verified_from / color_of refuse NaN and inverted bounds (fail closed)",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -929,6 +971,7 @@ fn evd_011_color_canonical_identity_is_versioned_and_bit_exact() {
         true,
         "Color canonical encoding v2 is frozen, bit-exact for f64 payloads, and \
          deterministic across validity-domain insertion order",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -1186,6 +1229,7 @@ fn evd_014_color_provenance_composition_is_bounded_without_laundering() {
         "evd-014",
         true,
         "repeated and heterogeneous estimator composition stays bounded, deterministic, and Estimated",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -1279,6 +1323,7 @@ fn evd_015_malformed_bridge_inputs_fail_closed() {
         "evd-015",
         true,
         "malformed and out-of-domain bridge inputs demote to infinite-dispersion Estimated evidence",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -1333,6 +1378,7 @@ fn evd_015b_malformed_color_payloads_fail_closed() {
         "evd-015b",
         true,
         "malformed color payloads fail closed while the sound whole-line enclosure remains valid",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -1420,7 +1466,8 @@ fn evd_015c_malformed_card_diagnostics_remain_derived() {
     verdict(
         "evd-015c",
         true,
-        "malformed card diagnostics bind the complete canonical card set, remain derived, and \n+         cannot be re-rooted as evidence leaves",
+        "malformed card diagnostics bind the complete canonical card set, remain derived, and \n         cannot be re-rooted as evidence leaves",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -1549,5 +1596,6 @@ fn evd_016_g0_color_composition_rank_never_launders() {
         "evd-016",
         true,
         "512 generated shrinkable compositions cover all color-kind/operation combinations, both operand orders, and both validated-regime branches",
+        SEED,
     );
 }

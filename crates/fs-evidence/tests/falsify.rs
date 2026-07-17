@@ -15,11 +15,26 @@ use fs_evidence::{
     },
 };
 
+const SUITE: &str = "fs-evidence/falsify";
+const FIXED_INPUT_SEED: u64 = 0;
+
 fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-evidence/falsify\",\"case\":\"{case}\",\"verdict\":\"pass\",\
-         \"detail\":\"{detail}\"}}"
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed: FIXED_INPUT_SEED,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("falsifier verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("falsifier verdict must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 fn claim(class: &str, regime: &str, consequence: f64) -> ClaimContext {
