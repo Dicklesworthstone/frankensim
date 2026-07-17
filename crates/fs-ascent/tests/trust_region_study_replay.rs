@@ -2,15 +2,16 @@
 //!
 //! The production driver solves the existing six-dimensional Rosenbrock
 //! fixture with an exact matrix-free Hessian-vector callback. The receipt binds
-//! every objective and Hessian-vector callback input/output plus every public
-//! `TrustRegionReport` field, every trust-radius/Steihaug configuration value,
-//! and an independently reconstructed nonpositive-curvature witness. A
+//! every objective and Hessian-vector callback input/output under one global
+//! ordinal, reconstructs each outer iteration's Steihaug and final-model roles,
+//! and binds every public `TrustRegionReport` field, configuration value, and
+//! independently reconstructed nonpositive Steihaug-curvature witness. A
 //! separate algebraic oracle recomputes every Rosenbrock value, gradient, and
 //! Hessian-vector product. A same-input repeat must reproduce the receipt byte
 //! for byte. Deterministic red mutations cover the returned decision,
-//! objective/gradient evidence, trust configuration/accounting, and the
-//! negative-curvature claim; stale and correctly resealed forms fail through
-//! distinct typed refusal paths.
+//! objective/gradient evidence, trust configuration/accounting, callback
+//! ordinal/role/segment metadata, and negative-curvature claim; stale and
+//! correctly resealed forms fail through distinct typed refusal paths.
 //!
 //! This is one objective/Hessian pair. It does not claim all objectives,
 //! approximate-Hessian parity, cancellation, checkpointing, cross-ISA equality,
@@ -47,20 +48,56 @@ const MODEL_DECREASE_ZERO_THRESHOLD: f64 = 1e-300;
 const MAX_TRUST_RADIUS: f64 = 1e8;
 const MIN_TRUST_RADIUS: f64 = 1e-14;
 const NEGATIVE_CURVATURE_THRESHOLD: f64 = 0.0;
+const SEMANTIC_COMPARISON_EPSILON_MULTIPLIER: f64 = 4096.0;
+const FINAL_OBJECTIVE_LIMIT: f64 = 1e-10;
+const FINAL_COORDINATE_ERROR_LIMIT: f64 = 1e-4;
 const START: [f64; DIMENSION] = [-1.2; DIMENSION];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ObjectiveCall {
+    ordinal: usize,
     point_bits: Vec<u64>,
     objective_bits: u64,
     gradient_bits: Vec<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HessianVectorRole {
+    Steihaug,
+    ModelDecrease,
+}
+
+impl HessianVectorRole {
+    fn identity_tag(self) -> &'static str {
+        match self {
+            Self::Steihaug => "steihaug-search-direction",
+            Self::ModelDecrease => "final-model-decrease-step",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HessianVectorCall {
+    ordinal: usize,
+    outer_iteration: usize,
+    role: HessianVectorRole,
     point_bits: Vec<u64>,
     direction_bits: Vec<u64>,
     product_bits: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CapturedHessianVectorCall {
+    ordinal: usize,
+    point_bits: Vec<u64>,
+    direction_bits: Vec<u64>,
+    product_bits: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CapturedCall {
+    Objective(ObjectiveCall),
+    HessianVector(CapturedHessianVectorCall),
 }
 
 #[derive(Debug)]
@@ -89,6 +126,9 @@ struct TrustRegionConfigPayload {
     maximum_radius_bits: u64,
     minimum_radius_bits: u64,
     negative_curvature_threshold_bits: u64,
+    semantic_comparison_epsilon_multiplier_bits: u64,
+    final_objective_limit_bits: u64,
+    final_coordinate_error_limit_bits: u64,
 }
 
 impl TrustRegionConfigPayload {
@@ -111,13 +151,20 @@ impl TrustRegionConfigPayload {
             maximum_radius_bits: MAX_TRUST_RADIUS.to_bits(),
             minimum_radius_bits: MIN_TRUST_RADIUS.to_bits(),
             negative_curvature_threshold_bits: NEGATIVE_CURVATURE_THRESHOLD.to_bits(),
+            semantic_comparison_epsilon_multiplier_bits: SEMANTIC_COMPARISON_EPSILON_MULTIPLIER
+                .to_bits(),
+            final_objective_limit_bits: FINAL_OBJECTIVE_LIMIT.to_bits(),
+            final_coordinate_error_limit_bits: FINAL_COORDINATE_ERROR_LIMIT.to_bits(),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NegativeCurvatureWitness {
-    call_index: usize,
+    hessian_call_index: usize,
+    call_ordinal: usize,
+    outer_iteration: usize,
+    role: HessianVectorRole,
     point_bits: Vec<u64>,
     direction_bits: Vec<u64>,
     independently_recomputed_product_bits: Vec<u64>,
@@ -127,6 +174,11 @@ struct NegativeCurvatureWitness {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReceiptPayload {
+    suite: &'static str,
+    mutation_seed: u64,
+    event_seed_sentinel: u64,
+    fs_math_version: &'static str,
+    fs_obs_version: &'static str,
     objective_oracle_version: &'static str,
     hessian_oracle_version: &'static str,
     trust_config_version: &'static str,
@@ -145,9 +197,15 @@ struct ReceiptPayload {
 }
 
 impl ReceiptPayload {
+    #[allow(clippy::too_many_lines)] // One canonical field-order audit for the complete receipt.
     fn identity(&self) -> ReplayIdentity {
-        let mut builder = IdentityBuilder::new("fs-ascent-trust-region-study-receipt-v2")
+        let mut builder = IdentityBuilder::new("fs-ascent-trust-region-study-receipt-v3")
+            .str("suite", self.suite)
+            .u64("mutation-seed", self.mutation_seed)
+            .u64("event-seed-sentinel", self.event_seed_sentinel)
             .str("fs-ascent-version", fs_ascent::VERSION)
+            .str("fs-math-version", self.fs_math_version)
+            .str("fs-obs-version", self.fs_obs_version)
             .str("engine", "trust_region_newton/Steihaug-CG")
             .str("objective", "Rosenbrock-chain")
             .str("hessian-vector", "exact-analytic")
@@ -208,6 +266,18 @@ impl ReceiptPayload {
                 "negative-curvature-threshold-bits",
                 self.config.negative_curvature_threshold_bits,
             )
+            .u64(
+                "semantic-comparison-epsilon-multiplier-bits",
+                self.config.semantic_comparison_epsilon_multiplier_bits,
+            )
+            .u64(
+                "final-objective-limit-bits",
+                self.config.final_objective_limit_bits,
+            )
+            .u64(
+                "final-coordinate-error-limit-bits",
+                self.config.final_coordinate_error_limit_bits,
+            )
             .u64("start-values", self.start_bits.len() as u64);
         for &value_bits in &self.start_bits {
             builder = builder.u64("start-value-bits", value_bits);
@@ -215,7 +285,9 @@ impl ReceiptPayload {
 
         builder = builder.u64("objective-calls", self.objective_calls.len() as u64);
         for call in &self.objective_calls {
-            builder = builder.u64("objective-point-values", call.point_bits.len() as u64);
+            builder = builder
+                .u64("objective-call-ordinal", call.ordinal as u64)
+                .u64("objective-point-values", call.point_bits.len() as u64);
             for &value_bits in &call.point_bits {
                 builder = builder.u64("objective-point-bits", value_bits);
             }
@@ -232,7 +304,11 @@ impl ReceiptPayload {
             self.hessian_vector_calls.len() as u64,
         );
         for call in &self.hessian_vector_calls {
-            builder = builder.u64("hessian-point-values", call.point_bits.len() as u64);
+            builder = builder
+                .u64("hessian-call-ordinal", call.ordinal as u64)
+                .u64("hessian-outer-iteration", call.outer_iteration as u64)
+                .str("hessian-call-role", call.role.identity_tag())
+                .u64("hessian-point-values", call.point_bits.len() as u64);
             for &value_bits in &call.point_bits {
                 builder = builder.u64("hessian-point-bits", value_bits);
             }
@@ -265,7 +341,19 @@ impl ReceiptPayload {
             );
         let witness = &self.negative_curvature_witness;
         builder = builder
-            .u64("negative-curvature-call-index", witness.call_index as u64)
+            .u64(
+                "negative-curvature-hessian-call-index",
+                witness.hessian_call_index as u64,
+            )
+            .u64(
+                "negative-curvature-call-ordinal",
+                witness.call_ordinal as u64,
+            )
+            .u64(
+                "negative-curvature-outer-iteration",
+                witness.outer_iteration as u64,
+            )
+            .str("negative-curvature-call-role", witness.role.identity_tag())
             .u64(
                 "negative-curvature-point-values",
                 witness.point_bits.len() as u64,
@@ -333,6 +421,9 @@ enum SemanticRefusal {
     ReportGradientMismatch,
     FinalOptimalityFailure,
     AccountingMismatch,
+    TraceOrdinalMismatch,
+    TraceRoleMismatch,
+    TraceSegmentMismatch,
     NegativeCurvatureMismatch,
     NegativeCurvatureWitnessMismatch,
 }
@@ -469,7 +560,7 @@ fn approximately_equal(actual: f64, expected: f64) -> bool {
         return false;
     }
     let scale = actual.abs().max(expected.abs()).max(1.0);
-    (actual - expected).abs() <= 4096.0 * f64::EPSILON * scale
+    (actual - expected).abs() <= SEMANTIC_COMPARISON_EPSILON_MULTIPLIER * f64::EPSILON * scale
 }
 
 fn vectors_approximately_equal(actual: &[f64], expected: &[f64]) -> bool {
@@ -480,40 +571,303 @@ fn vectors_approximately_equal(actual: &[f64], expected: &[f64]) -> bool {
             .all(|(&actual, &expected)| approximately_equal(actual, expected))
 }
 
-fn derive_negative_curvature_witness(
-    calls: &[HessianVectorCall],
-) -> Result<NegativeCurvatureWitness, SemanticRefusal> {
-    for (call_index, call) in calls.iter().enumerate() {
-        let point = decode_finite(&call.point_bits)?;
-        let direction = decode_finite(&call.direction_bits)?;
-        let recorded_product = decode_finite(&call.product_bits)?;
-        if inf_norm(&direction) == 0.0 {
-            continue;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceEventLocator {
+    Objective(usize),
+    HessianVector(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IterationSegment {
+    steihaug_call_indices: Vec<usize>,
+    model_decrease_call_index: usize,
+}
+
+fn classify_captured_hessian_calls(
+    objective_calls: &[ObjectiveCall],
+    calls: Vec<CapturedHessianVectorCall>,
+    report_iterations: usize,
+) -> Result<Vec<HessianVectorCall>, SemanticRefusal> {
+    if objective_calls.len() != report_iterations.saturating_add(1) {
+        return Err(SemanticRefusal::AccountingMismatch);
+    }
+
+    let mut cursor = 0_usize;
+    let mut classified = Vec::with_capacity(calls.len());
+    for outer_iteration in 0..report_iterations {
+        let opening_ordinal = objective_calls[outer_iteration].ordinal;
+        let trial_ordinal = objective_calls[outer_iteration + 1].ordinal;
+        let segment_start = cursor;
+        while cursor < calls.len() && calls[cursor].ordinal < trial_ordinal {
+            if calls[cursor].ordinal <= opening_ordinal {
+                return Err(SemanticRefusal::TraceOrdinalMismatch);
+            }
+            cursor += 1;
         }
-        let product = oracle_rosenbrock_hessian_vector(&point, &direction)?;
-        if !vectors_approximately_equal(&recorded_product, &product) {
-            return Err(SemanticRefusal::HessianVectorMismatch);
+        if cursor == segment_start {
+            return Err(SemanticRefusal::TraceSegmentMismatch);
         }
-        let quadratic_form = dot(&direction, &product);
-        let recorded_quadratic_form = dot(&direction, &recorded_product);
-        if quadratic_form <= NEGATIVE_CURVATURE_THRESHOLD
-            && recorded_quadratic_form <= NEGATIVE_CURVATURE_THRESHOLD
-        {
-            return Ok(NegativeCurvatureWitness {
-                call_index,
+
+        let model_index = cursor - 1;
+        for (call_index, call) in calls[segment_start..cursor].iter().enumerate() {
+            classified.push(HessianVectorCall {
+                ordinal: call.ordinal,
+                outer_iteration,
+                role: if segment_start + call_index == model_index {
+                    HessianVectorRole::ModelDecrease
+                } else {
+                    HessianVectorRole::Steihaug
+                },
                 point_bits: call.point_bits.clone(),
                 direction_bits: call.direction_bits.clone(),
-                independently_recomputed_product_bits: bits(&product),
-                recorded_quadratic_form_bits: recorded_quadratic_form.to_bits(),
-                quadratic_form_bits: quadratic_form.to_bits(),
+                product_bits: call.product_bits.clone(),
             });
         }
     }
-    Err(SemanticRefusal::NegativeCurvatureWitnessMismatch)
+    if cursor != calls.len() {
+        return Err(SemanticRefusal::TraceOrdinalMismatch);
+    }
+    Ok(classified)
 }
 
+#[allow(clippy::too_many_lines)] // The parser keeps the whole callback protocol auditable in one state machine.
+fn reconstruct_iteration_segments(
+    start_bits: &[u64],
+    objective_calls: &[ObjectiveCall],
+    hessian_vector_calls: &[HessianVectorCall],
+    report_iterations: usize,
+) -> Result<Vec<IterationSegment>, SemanticRefusal> {
+    if objective_calls.len() != report_iterations.saturating_add(1) {
+        return Err(SemanticRefusal::AccountingMismatch);
+    }
+    if objective_calls
+        .first()
+        .is_none_or(|call| call.point_bits != start_bits)
+    {
+        return Err(SemanticRefusal::TraceSegmentMismatch);
+    }
+
+    let event_count = objective_calls
+        .len()
+        .checked_add(hessian_vector_calls.len())
+        .ok_or(SemanticRefusal::AccountingMismatch)?;
+    let mut events = vec![None; event_count];
+    for (index, call) in objective_calls.iter().enumerate() {
+        let Some(slot) = events.get_mut(call.ordinal) else {
+            return Err(SemanticRefusal::TraceOrdinalMismatch);
+        };
+        if slot.replace(TraceEventLocator::Objective(index)).is_some() {
+            return Err(SemanticRefusal::TraceOrdinalMismatch);
+        }
+    }
+    for (index, call) in hessian_vector_calls.iter().enumerate() {
+        let Some(slot) = events.get_mut(call.ordinal) else {
+            return Err(SemanticRefusal::TraceOrdinalMismatch);
+        };
+        if slot
+            .replace(TraceEventLocator::HessianVector(index))
+            .is_some()
+        {
+            return Err(SemanticRefusal::TraceOrdinalMismatch);
+        }
+    }
+    if events.iter().any(Option::is_none) {
+        return Err(SemanticRefusal::TraceOrdinalMismatch);
+    }
+
+    let mut cursor = 0_usize;
+    let mut previous_current_point: Option<Vec<u64>> = None;
+    let mut segments = Vec::with_capacity(report_iterations);
+    for outer_iteration in 0..report_iterations {
+        if events.get(cursor).copied().flatten()
+            != Some(TraceEventLocator::Objective(outer_iteration))
+        {
+            return Err(SemanticRefusal::TraceOrdinalMismatch);
+        }
+        cursor += 1;
+
+        let mut segment_calls = Vec::new();
+        while cursor < events.len() {
+            match events[cursor] {
+                Some(TraceEventLocator::HessianVector(call_index)) => {
+                    segment_calls.push(call_index);
+                    cursor += 1;
+                }
+                Some(TraceEventLocator::Objective(objective_index)) => {
+                    if objective_index != outer_iteration + 1 {
+                        return Err(SemanticRefusal::TraceOrdinalMismatch);
+                    }
+                    break;
+                }
+                None => return Err(SemanticRefusal::TraceOrdinalMismatch),
+            }
+        }
+        if cursor == events.len() {
+            return Err(SemanticRefusal::TraceOrdinalMismatch);
+        }
+        let Some((&model_decrease_call_index, steihaug_call_indices)) = segment_calls.split_last()
+        else {
+            return Err(SemanticRefusal::TraceSegmentMismatch);
+        };
+
+        for &call_index in steihaug_call_indices {
+            let call = &hessian_vector_calls[call_index];
+            if call.outer_iteration != outer_iteration {
+                return Err(SemanticRefusal::TraceSegmentMismatch);
+            }
+            if call.role != HessianVectorRole::Steihaug {
+                return Err(SemanticRefusal::TraceRoleMismatch);
+            }
+        }
+        let model_call = &hessian_vector_calls[model_decrease_call_index];
+        if model_call.outer_iteration != outer_iteration {
+            return Err(SemanticRefusal::TraceSegmentMismatch);
+        }
+        if model_call.role != HessianVectorRole::ModelDecrease {
+            return Err(SemanticRefusal::TraceRoleMismatch);
+        }
+        if segment_calls
+            .iter()
+            .any(|&call_index| hessian_vector_calls[call_index].point_bits != model_call.point_bits)
+        {
+            return Err(SemanticRefusal::TraceSegmentMismatch);
+        }
+
+        // The opening objective event is the previous iteration's trial. The
+        // next current point is therefore either that trial (accepted) or the
+        // previous current point (rejected); no third state is admissible.
+        if outer_iteration == 0 {
+            if model_call.point_bits != objective_calls[0].point_bits {
+                return Err(SemanticRefusal::TraceSegmentMismatch);
+            }
+        } else if previous_current_point.as_deref() != Some(model_call.point_bits.as_slice())
+            && objective_calls[outer_iteration].point_bits != model_call.point_bits
+        {
+            return Err(SemanticRefusal::TraceSegmentMismatch);
+        }
+
+        // Production calls Hv(x, p) exactly once after Steihaug, then evaluates
+        // fg(x + p). This exact addition is the independent role discriminator
+        // that prevents a search-direction Hv from masquerading as the final
+        // model-decrease call.
+        let current_point = decode_finite(&model_call.point_bits)?;
+        let step = decode_finite(&model_call.direction_bits)?;
+        let trial_point = decode_finite(&objective_calls[outer_iteration + 1].point_bits)?;
+        if current_point
+            .iter()
+            .zip(&step)
+            .zip(&trial_point)
+            .any(|((&current, &step), &trial)| (current + step).to_bits() != trial.to_bits())
+        {
+            return Err(SemanticRefusal::TraceSegmentMismatch);
+        }
+
+        previous_current_point = Some(model_call.point_bits.clone());
+        segments.push(IterationSegment {
+            steihaug_call_indices: steihaug_call_indices.to_vec(),
+            model_decrease_call_index,
+        });
+    }
+    if cursor.checked_add(1) != Some(events.len())
+        || events.get(cursor).copied().flatten()
+            != Some(TraceEventLocator::Objective(report_iterations))
+    {
+        return Err(SemanticRefusal::TraceOrdinalMismatch);
+    }
+    Ok(segments)
+}
+
+fn independently_count_negative_curvature_triggers(
+    calls: &[HessianVectorCall],
+    segments: &[IterationSegment],
+) -> Result<Vec<usize>, SemanticRefusal> {
+    let mut triggers = Vec::new();
+    for segment in segments {
+        if calls[segment.model_decrease_call_index].role != HessianVectorRole::ModelDecrease {
+            return Err(SemanticRefusal::TraceRoleMismatch);
+        }
+        for (position, &call_index) in segment.steihaug_call_indices.iter().enumerate() {
+            let call = &calls[call_index];
+            let point = decode_finite(&call.point_bits)?;
+            let direction = decode_finite(&call.direction_bits)?;
+            let recorded_product = decode_finite(&call.product_bits)?;
+            if inf_norm(&direction) == 0.0 {
+                return Err(SemanticRefusal::NegativeCurvatureMismatch);
+            }
+            let product = oracle_rosenbrock_hessian_vector(&point, &direction)?;
+            if !vectors_approximately_equal(&recorded_product, &product) {
+                return Err(SemanticRefusal::HessianVectorMismatch);
+            }
+            let recorded_quadratic_form = dot(&direction, &recorded_product);
+            let independent_quadratic_form = dot(&direction, &product);
+            if !recorded_quadratic_form.is_finite() || !independent_quadratic_form.is_finite() {
+                return Err(SemanticRefusal::NonFiniteEvidence);
+            }
+            let recorded_nonpositive = recorded_quadratic_form <= NEGATIVE_CURVATURE_THRESHOLD;
+            let independent_nonpositive =
+                independent_quadratic_form <= NEGATIVE_CURVATURE_THRESHOLD;
+            if recorded_nonpositive != independent_nonpositive {
+                return Err(SemanticRefusal::NegativeCurvatureMismatch);
+            }
+            if recorded_nonpositive {
+                if position + 1 != segment.steihaug_call_indices.len() {
+                    return Err(SemanticRefusal::NegativeCurvatureMismatch);
+                }
+                triggers.push(call_index);
+            }
+        }
+    }
+    Ok(triggers)
+}
+
+fn derive_negative_curvature_witness(
+    calls: &[HessianVectorCall],
+    trigger_indices: &[usize],
+) -> Result<NegativeCurvatureWitness, SemanticRefusal> {
+    let &hessian_call_index = trigger_indices
+        .first()
+        .ok_or(SemanticRefusal::NegativeCurvatureWitnessMismatch)?;
+    let call = &calls[hessian_call_index];
+    if call.role != HessianVectorRole::Steihaug {
+        return Err(SemanticRefusal::NegativeCurvatureWitnessMismatch);
+    }
+    let point = decode_finite(&call.point_bits)?;
+    let direction = decode_finite(&call.direction_bits)?;
+    let recorded_product = decode_finite(&call.product_bits)?;
+    let product = oracle_rosenbrock_hessian_vector(&point, &direction)?;
+    if !vectors_approximately_equal(&recorded_product, &product) {
+        return Err(SemanticRefusal::HessianVectorMismatch);
+    }
+    let quadratic_form = dot(&direction, &product);
+    let recorded_quadratic_form = dot(&direction, &recorded_product);
+    if !quadratic_form.is_finite()
+        || !recorded_quadratic_form.is_finite()
+        || quadratic_form > NEGATIVE_CURVATURE_THRESHOLD
+        || recorded_quadratic_form > NEGATIVE_CURVATURE_THRESHOLD
+    {
+        return Err(SemanticRefusal::NegativeCurvatureWitnessMismatch);
+    }
+    Ok(NegativeCurvatureWitness {
+        hessian_call_index,
+        call_ordinal: call.ordinal,
+        outer_iteration: call.outer_iteration,
+        role: call.role,
+        point_bits: call.point_bits.clone(),
+        direction_bits: call.direction_bits.clone(),
+        independently_recomputed_product_bits: bits(&product),
+        recorded_quadratic_form_bits: recorded_quadratic_form.to_bits(),
+        quadratic_form_bits: quadratic_form.to_bits(),
+    })
+}
+
+#[allow(clippy::too_many_lines)] // Admission intentionally walks every evidence layer in gate order.
 fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
-    if payload.objective_oracle_version != OBJECTIVE_ORACLE_VERSION
+    if payload.suite != SUITE
+        || payload.mutation_seed != MUTATION_SEED
+        || payload.event_seed_sentinel != EVENT_SEED_SENTINEL
+        || payload.fs_math_version != fs_math::VERSION
+        || payload.fs_obs_version != fs_obs::VERSION
+        || payload.objective_oracle_version != OBJECTIVE_ORACLE_VERSION
         || payload.hessian_oracle_version != HESSIAN_ORACLE_VERSION
         || payload.trust_config_version != TRUST_CONFIG_VERSION
     {
@@ -526,6 +880,14 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
         return Err(SemanticRefusal::FixtureMetadataMismatch);
     }
     if payload.objective_calls.is_empty() || payload.hessian_vector_calls.is_empty() {
+        return Err(SemanticRefusal::AccountingMismatch);
+    }
+    if payload.report_iterations == 0
+        || payload.report_iterations > MAX_ITERATIONS
+        || payload.report_iterations.checked_add(1) != Some(payload.report_evaluations)
+        || payload.report_evaluations != payload.objective_calls.len()
+        || payload.report_hessian_vector_evaluations != payload.hessian_vector_calls.len()
+    {
         return Err(SemanticRefusal::AccountingMismatch);
     }
 
@@ -545,7 +907,6 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
         }
     }
 
-    let mut independently_nonpositive_calls = 0usize;
     for call in &payload.hessian_vector_calls {
         let point = decode_finite(&call.point_bits)?;
         let direction = decode_finite(&call.direction_bits)?;
@@ -554,15 +915,22 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
         if !vectors_approximately_equal(&recorded_product, &product) {
             return Err(SemanticRefusal::HessianVectorMismatch);
         }
-        if inf_norm(&direction) > 0.0
-            && dot(&direction, &recorded_product) <= NEGATIVE_CURVATURE_THRESHOLD
-            && dot(&direction, &product) <= NEGATIVE_CURVATURE_THRESHOLD
-        {
-            independently_nonpositive_calls += 1;
-        }
     }
 
-    let expected_witness = derive_negative_curvature_witness(&payload.hessian_vector_calls)?;
+    let segments = reconstruct_iteration_segments(
+        &payload.start_bits,
+        &payload.objective_calls,
+        &payload.hessian_vector_calls,
+        payload.report_iterations,
+    )?;
+    let trigger_indices =
+        independently_count_negative_curvature_triggers(&payload.hessian_vector_calls, &segments)?;
+    if trigger_indices.is_empty() || payload.report_negative_curvature_hits != trigger_indices.len()
+    {
+        return Err(SemanticRefusal::NegativeCurvatureMismatch);
+    }
+    let expected_witness =
+        derive_negative_curvature_witness(&payload.hessian_vector_calls, &trigger_indices)?;
     if payload.negative_curvature_witness != expected_witness {
         return Err(SemanticRefusal::NegativeCurvatureWitnessMismatch);
     }
@@ -605,54 +973,46 @@ fn validate_semantics(payload: &ReceiptPayload) -> Result<(), SemanticRefusal> {
     if !approximately_equal(report_gradient_norm, gradient_norm) {
         return Err(SemanticRefusal::ReportGradientMismatch);
     }
-    if report_objective >= 1e-10
+    if report_objective >= FINAL_OBJECTIVE_LIMIT
         || report_gradient_norm >= GRADIENT_TOLERANCE
-        || report_x.iter().any(|value| (value - 1.0).abs() >= 1e-4)
+        || report_x
+            .iter()
+            .any(|value| (value - 1.0).abs() >= FINAL_COORDINATE_ERROR_LIMIT)
     {
         return Err(SemanticRefusal::FinalOptimalityFailure);
     }
 
-    if payload.report_iterations == 0
-        || payload.report_iterations > MAX_ITERATIONS
-        || payload.report_iterations.checked_add(1) != Some(payload.report_evaluations)
-        || payload.report_evaluations != payload.objective_calls.len()
-        || payload.report_hessian_vector_evaluations != payload.hessian_vector_calls.len()
-    {
-        return Err(SemanticRefusal::AccountingMismatch);
-    }
-    if payload.report_negative_curvature_hits == 0
-        || payload.report_negative_curvature_hits > payload.report_iterations
-        || payload.report_negative_curvature_hits > independently_nonpositive_calls
-        || independently_nonpositive_calls
-            > payload
-                .report_negative_curvature_hits
-                .saturating_add(payload.report_iterations)
-    {
-        return Err(SemanticRefusal::NegativeCurvatureMismatch);
-    }
     Ok(())
 }
 
 fn run_once(start: &[f64]) -> RunRecord {
-    let objective_calls = RefCell::new(Vec::new());
-    let hessian_vector_calls = RefCell::new(Vec::new());
+    // Both callbacks append to one stream. Its length is the single global
+    // call ordinal, so objective/Hv ordering cannot be reconstructed from two
+    // independently ordered vectors after the fact.
+    let captured_calls = RefCell::new(Vec::new());
     let report = {
         let mut objective = |x: &[f64]| {
             let (value, gradient) = fixture_rosenbrock(x);
-            objective_calls.borrow_mut().push(ObjectiveCall {
+            let mut calls = captured_calls.borrow_mut();
+            let ordinal = calls.len();
+            calls.push(CapturedCall::Objective(ObjectiveCall {
+                ordinal,
                 point_bits: bits(x),
                 objective_bits: value.to_bits(),
                 gradient_bits: bits(&gradient),
-            });
+            }));
             (value, gradient)
         };
         let mut hessian_vector = |x: &[f64], direction: &[f64]| {
             let product = fixture_rosenbrock_hessian_vector(x, direction);
-            hessian_vector_calls.borrow_mut().push(HessianVectorCall {
+            let mut calls = captured_calls.borrow_mut();
+            let ordinal = calls.len();
+            calls.push(CapturedCall::HessianVector(CapturedHessianVectorCall {
+                ordinal,
                 point_bits: bits(x),
                 direction_bits: bits(direction),
                 product_bits: bits(&product),
-            });
+            }));
             product
         };
         trust_region_newton(
@@ -663,22 +1023,53 @@ fn run_once(start: &[f64]) -> RunRecord {
             MAX_ITERATIONS,
         )
     };
+    let mut objective_calls = Vec::new();
+    let mut captured_hessian_vector_calls = Vec::new();
+    for call in captured_calls.into_inner() {
+        match call {
+            CapturedCall::Objective(call) => objective_calls.push(call),
+            CapturedCall::HessianVector(call) => captured_hessian_vector_calls.push(call),
+        }
+    }
+    let hessian_vector_calls = classify_captured_hessian_calls(
+        &objective_calls,
+        captured_hessian_vector_calls,
+        report.iters,
+    )
+    .expect("production trust-region callbacks must follow the declared iteration protocol");
     RunRecord {
         report,
-        objective_calls: objective_calls.into_inner(),
-        hessian_vector_calls: hessian_vector_calls.into_inner(),
+        objective_calls,
+        hessian_vector_calls,
     }
 }
 
 fn receipt(start: &[f64], run: &RunRecord) -> RetainedReceipt {
-    let negative_curvature_witness = derive_negative_curvature_witness(&run.hessian_vector_calls)
-        .expect("retained study must contain an independent negative-curvature witness");
+    let start_bits = bits(start);
+    let segments = reconstruct_iteration_segments(
+        &start_bits,
+        &run.objective_calls,
+        &run.hessian_vector_calls,
+        run.report.iters,
+    )
+    .expect("retained study callbacks must reconstruct into exact outer-iteration segments");
+    let trigger_indices =
+        independently_count_negative_curvature_triggers(&run.hessian_vector_calls, &segments)
+            .expect("retained study curvature roles must admit independent classification");
+    let negative_curvature_witness =
+        derive_negative_curvature_witness(&run.hessian_vector_calls, &trigger_indices)
+            .expect("retained study must contain an independent negative-curvature witness");
     RetainedReceipt::new(ReceiptPayload {
+        suite: SUITE,
+        mutation_seed: MUTATION_SEED,
+        event_seed_sentinel: EVENT_SEED_SENTINEL,
+        fs_math_version: fs_math::VERSION,
+        fs_obs_version: fs_obs::VERSION,
         objective_oracle_version: OBJECTIVE_ORACLE_VERSION,
         hessian_oracle_version: HESSIAN_ORACLE_VERSION,
         trust_config_version: TRUST_CONFIG_VERSION,
         config: TrustRegionConfigPayload::canonical(),
-        start_bits: bits(start),
+        start_bits,
         objective_calls: run.objective_calls.clone(),
         hessian_vector_calls: run.hessian_vector_calls.clone(),
         report_x_bits: bits(&run.report.x),
@@ -741,13 +1132,18 @@ fn emit_receipt(
         "{{\"randomness\":\"none\",\"event_seed_sentinel\":{EVENT_SEED_SENTINEL},\"mutation_seed\":{MUTATION_SEED},\
          \"reference_identity\":\"{}\",\"mutant_identity\":\"{}\",\
          \"mutated_coordinate\":{coordinate},\"mantissa_mask\":\"{mask:#018x}\",\
-         \"negative_curvature_call_index\":{},\"negative_curvature_recorded_quadratic_form_bits\":\"{:#018x}\",\
+         \"negative_curvature_hessian_call_index\":{},\"negative_curvature_call_ordinal\":{},\
+         \"negative_curvature_outer_iteration\":{},\"negative_curvature_role\":\"{}\",\
+         \"negative_curvature_recorded_quadratic_form_bits\":\"{:#018x}\",\
          \"negative_curvature_independent_quadratic_form_bits\":\"{:#018x}\",\
          \"reported_negative_curvature_hits\":{},\
          \"merge_refusal\":\"payload-semantics-mismatch\"}}",
         reference.declared_identity.hex(),
         mutant.declared_identity.hex(),
-        witness.call_index,
+        witness.hessian_call_index,
+        witness.call_ordinal,
+        witness.outer_iteration,
+        witness.role.identity_tag(),
         witness.recorded_quadratic_form_bits,
         witness.quadratic_form_bits,
         reference.payload.report_negative_curvature_hits,
@@ -773,8 +1169,10 @@ fn emit_receipt(
             case: "rosenbrock-exact-hessian-vector".to_string(),
             pass: true,
             detail: format!(
-                "the deterministic non-random Rosenbrock fixture replayed every objective/Hv call and report bit; independent objective, gradient, Hessian-vector, final-optimality, and negative-curvature oracles passed; witness call {} had recorded/independent dTHd bits {:#018x}/{:#018x} and production reported {} negative-curvature hits; mutation seed {MUTATION_SEED:#018x} flipped coordinate {coordinate} mask {mask:#018x}, produced stable identity {}, and typed stale/resealed gates refused every red family",
-                witness.call_index,
+                "the deterministic non-random Rosenbrock fixture replayed the global callback order, every outer-iteration Hv role, and every report bit; independent objective, gradient, Hessian-vector, final-optimality, and Steihaug-only negative-curvature oracles passed; witness ordinal {} in outer iteration {} had role {}, recorded/independent dTHd bits {:#018x}/{:#018x}, and production exactly matched {} independently counted negative-curvature triggers; mutation seed {MUTATION_SEED:#018x} flipped coordinate {coordinate} mask {mask:#018x}, produced stable identity {}, and typed stale/resealed gates refused every red family",
+                witness.call_ordinal,
+                witness.outer_iteration,
+                witness.role.identity_tag(),
                 witness.recorded_quadratic_form_bits,
                 witness.quadratic_form_bits,
                 reference.payload.report_negative_curvature_hits,
@@ -793,6 +1191,7 @@ fn emit_receipt(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One test exercises the reference plus every resealed red family.
 fn trust_region_study_replays_and_rejects_seeded_red_mutation() {
     let start = START.to_vec();
     let reference_run = run_once(&start);
@@ -865,6 +1264,37 @@ fn trust_region_study_replays_and_rejects_seeded_red_mutation() {
         &reference,
         &accounting_mutant,
         SemanticRefusal::AccountingMismatch,
+    );
+
+    let mut ordinal_payload = reference.payload.clone();
+    ordinal_payload.hessian_vector_calls[0].ordinal = ordinal_payload.objective_calls[0].ordinal;
+    let ordinal_mutant = RetainedReceipt::new(ordinal_payload);
+    assert_stale_and_resealed_refusal(
+        &reference,
+        &ordinal_mutant,
+        SemanticRefusal::TraceOrdinalMismatch,
+    );
+
+    let mut role_payload = reference.payload.clone();
+    let model_call = role_payload
+        .hessian_vector_calls
+        .iter_mut()
+        .find(|call| call.role == HessianVectorRole::ModelDecrease)
+        .expect("reference trace contains a final model-decrease call");
+    model_call.role = HessianVectorRole::Steihaug;
+    let role_mutant = RetainedReceipt::new(role_payload);
+    assert_stale_and_resealed_refusal(&reference, &role_mutant, SemanticRefusal::TraceRoleMismatch);
+
+    let mut segment_payload = reference.payload.clone();
+    let corrupted_iteration = segment_payload.hessian_vector_calls[0]
+        .outer_iteration
+        .saturating_add(1);
+    segment_payload.hessian_vector_calls[0].outer_iteration = corrupted_iteration;
+    let segment_mutant = RetainedReceipt::new(segment_payload);
+    assert_stale_and_resealed_refusal(
+        &reference,
+        &segment_mutant,
+        SemanticRefusal::TraceSegmentMismatch,
     );
 
     let mut negative_claim_payload = reference.payload.clone();
