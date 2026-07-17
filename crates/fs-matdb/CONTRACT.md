@@ -9,7 +9,7 @@
 > follow-up beads: query-time joint-uncertainty correlation refs,
 > tensor/distribution payloads with frame-transform receipts (arrive
 > together), wider explicit fusion policies, and the curated seed
-> dataset (bead 1sxe).
+> dataset beyond its first methane association tranche (bead 1sxe).
 
 The normalized-pack boundary now carries typed joint covariance/correlation
 blocks and unit/basis normalization receipts. Query-time propagation of those
@@ -303,6 +303,11 @@ verified exact binary round-trip; G3 phase/EOS/positive-value/provenance gates,
 complete dimension-linked receipt coverage, pack/species identity binding,
 whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
 
+`xtask/tests/matdb_pack_cli.rs`: G3 compilation of the committed methane seed
+manifest twice into byte-identical, identity-verified species packs, including
+the retained NASA source/license/standard-state association and a separately
+bounded NIST displayed-precision agreement check.
+
 ## No-claim boundaries
 
 - Storing a claim asserts NOTHING about its truth: fs-matdb records who
@@ -317,9 +322,11 @@ whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
 - Total magnetic moment is integrated over an actual body and is
   deliberately NOT a storable geometry-free material scalar; store
   magnetization/specific-moment curves instead.
-- No seed data ships in this crate (bead 1sxe owns the curated
-  dataset); no equilibrium computation happens here (fs-thermochem
-  consumes phase data; this crate only stores it).
+- No complete seed dataset ships in this crate. The repository's first
+  `data/matdb/seed-v1/methane` tranche is only a raw, offline-compiled species
+  association; bead 1sxe still owns the curated material/property dataset.
+  No equilibrium computation happens here (fs-thermochem consumes phase data;
+  this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,
   or other raw formats and does not decide whether terms permit
   redistribution; those are L6/offline compiler responsibilities. A nonblank
