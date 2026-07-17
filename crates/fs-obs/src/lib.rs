@@ -36,21 +36,21 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// Exact typed event-content identity semantics. Version 2 replaces the
 /// legacy display-JSON hash, which collapsed distinct NaN payload bits.
-pub const EVENT_CONTENT_IDENTITY_VERSION: u32 = 3;
+pub const EVENT_CONTENT_IDENTITY_VERSION: u32 = 4;
 
 /// Domain-separated artifact kind framed into the typed event identity.
-pub const EVENT_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-obs.event-content.v3";
+pub const EVENT_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-obs.event-content.v4";
 
 /// Owner-local declaration consumed by `xtask check-identities`.
 pub const EVENT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-obs:event-content",
     "version_const=EVENT_CONTENT_IDENTITY_VERSION",
-    "version=3",
-    "domain=org.frankensim.fs-obs.event-content.v3",
+    "version=4",
+    "domain=org.frankensim.fs-obs.event-content.v4",
     "domain_const=EVENT_CONTENT_IDENTITY_DOMAIN",
     "encoder=Event::content_identity",
-    "encoder_helpers=Event::content_identity_with_versions,Event::content_identity_with_schema,Severity::name,EventKind::kind_name",
+    "encoder_helpers=Event::content_identity_with_versions,Event::content_identity_with_schema,Severity::name,EventKind::kind_name,ReceiptScope::name,ExecutionDisposition::name,PredicateOutcome::name,EpistemicGrade::name,DomainApplicability::name,OperationalSupport::name,EvidenceCompleteness::name,EvidenceIntegrity::name,PromotionEffect::name",
     "schema_constants=EVENT_CONTENT_IDENTITY_VERSION,EVENT_CONTENT_IDENTITY_DOMAIN,SCHEMA_VERSION",
     "schema_functions=check_event_content_identity_version,Event::content_identity_receipt,Event::admit_content_identity,fnv1a64",
     "schema_dependencies=fs-obs:replay-identity-frame",
@@ -58,12 +58,12 @@ pub const EVENT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoding=typed-binary",
     "sources=Event,EventIdentityReceipt",
     "source_fields=Event.session:semantic,Event.scope:semantic,Event.seq:semantic,Event.severity:semantic,Event.kind:semantic,Event.wall_ns:nonsemantic:wall-clock-envelope-only,EventIdentityReceipt.declared_identity_version:semantic,EventIdentityReceipt.canonical_bytes:semantic,EventIdentityReceipt.root:derived:validated-fnv-root-of-retained-canonical-bytes",
-    "source_bindings=Event.session>session,Event.scope>scope,Event.seq>seq,Event.severity>severity,Event.kind>kind+solver-residual-solver+solver-residual-iter+solver-residual-residual+tile-complete-tile+tile-complete-kernel+cancellation-reason+budget-delta-resource+budget-delta-spent+budget-delta-remaining+gradient-check-op+gradient-check-max-rel-err+gradient-check-pass+conformance-case-suite+conformance-case-case+conformance-case-pass+conformance-case-detail+conformance-case-seed+benchmark-result-kernel+benchmark-result-metric+benchmark-result-value+benchmark-result-machine+storm-assertion-name+storm-assertion-pass+storm-assertion-seed+race-record-resource+race-record-schedule+race-record-pass+race-record-seed+degradation-event-resource+degradation-event-limit+degradation-event-observed+degradation-event-action+import-receipt-format+import-receipt-artifact+import-receipt-accepted+import-receipt-detail+certificate-verdict-certificate+certificate-verdict-pass+certificate-verdict-bound+certificate-verdict-detail+custom-name+custom-json-exact-opaque-utf8,EventIdentityReceipt.declared_identity_version>retained-producer-version,EventIdentityReceipt.canonical_bytes>retained-canonical-bytes",
+    "source_bindings=Event.session>session,Event.scope>scope,Event.seq>seq,Event.severity>severity,Event.kind>kind+solver-residual-solver+solver-residual-iter+solver-residual-residual+tile-complete-tile+tile-complete-kernel+cancellation-reason+budget-delta-resource+budget-delta-spent+budget-delta-remaining+gradient-check-op+gradient-check-max-rel-err+gradient-check-pass+conformance-case-suite+conformance-case-case+conformance-case-pass+conformance-case-detail+conformance-case-seed+benchmark-result-kernel+benchmark-result-metric+benchmark-result-value+benchmark-result-machine+storm-assertion-name+storm-assertion-pass+storm-assertion-seed+manifest-selection-manifest+manifest-selection-source-snapshot+stratum-expansion-stratum+stratum-expansion-profile+stratum-expansion-cases+dsr-run-run+dsr-run-outcome-scope+dsr-run-outcome-receipt+dsr-run-outcome-disposition+dsr-run-outcome-predicate+dsr-run-outcome-evidence-methods+dsr-run-outcome-grade+dsr-run-outcome-applicability+dsr-run-outcome-support+dsr-run-outcome-completeness+dsr-run-outcome-integrity+dsr-run-outcome-promotion+dsr-run-outcome-detail+race-record-resource+race-record-schedule+race-record-pass+race-record-seed+degradation-event-resource+degradation-event-limit+degradation-event-observed+degradation-event-action+import-receipt-format+import-receipt-artifact+import-receipt-accepted+import-receipt-detail+certificate-verdict-certificate+certificate-verdict-pass+certificate-verdict-bound+certificate-verdict-detail+custom-name+custom-json-exact-opaque-utf8,EventIdentityReceipt.declared_identity_version>retained-producer-version,EventIdentityReceipt.canonical_bytes>retained-canonical-bytes",
     "external_semantic_fields=artifact-domain,identity-version,wire-schema",
-    "semantic_fields=artifact-domain,identity-version,wire-schema,session,scope,seq,severity,kind,solver-residual-solver,solver-residual-iter,solver-residual-residual,tile-complete-tile,tile-complete-kernel,cancellation-reason,budget-delta-resource,budget-delta-spent,budget-delta-remaining,gradient-check-op,gradient-check-max-rel-err,gradient-check-pass,conformance-case-suite,conformance-case-case,conformance-case-pass,conformance-case-detail,conformance-case-seed,benchmark-result-kernel,benchmark-result-metric,benchmark-result-value,benchmark-result-machine,storm-assertion-name,storm-assertion-pass,storm-assertion-seed,race-record-resource,race-record-schedule,race-record-pass,race-record-seed,degradation-event-resource,degradation-event-limit,degradation-event-observed,degradation-event-action,import-receipt-format,import-receipt-artifact,import-receipt-accepted,import-receipt-detail,certificate-verdict-certificate,certificate-verdict-pass,certificate-verdict-bound,certificate-verdict-detail,custom-name,custom-json-exact-opaque-utf8,retained-producer-version,retained-canonical-bytes",
+    "semantic_fields=artifact-domain,identity-version,wire-schema,session,scope,seq,severity,kind,solver-residual-solver,solver-residual-iter,solver-residual-residual,tile-complete-tile,tile-complete-kernel,cancellation-reason,budget-delta-resource,budget-delta-spent,budget-delta-remaining,gradient-check-op,gradient-check-max-rel-err,gradient-check-pass,conformance-case-suite,conformance-case-case,conformance-case-pass,conformance-case-detail,conformance-case-seed,benchmark-result-kernel,benchmark-result-metric,benchmark-result-value,benchmark-result-machine,storm-assertion-name,storm-assertion-pass,storm-assertion-seed,manifest-selection-manifest,manifest-selection-source-snapshot,stratum-expansion-stratum,stratum-expansion-profile,stratum-expansion-cases,dsr-run-run,dsr-run-outcome-scope,dsr-run-outcome-receipt,dsr-run-outcome-disposition,dsr-run-outcome-predicate,dsr-run-outcome-evidence-methods,dsr-run-outcome-grade,dsr-run-outcome-applicability,dsr-run-outcome-support,dsr-run-outcome-completeness,dsr-run-outcome-integrity,dsr-run-outcome-promotion,dsr-run-outcome-detail,race-record-resource,race-record-schedule,race-record-pass,race-record-seed,degradation-event-resource,degradation-event-limit,degradation-event-observed,degradation-event-action,import-receipt-format,import-receipt-artifact,import-receipt-accepted,import-receipt-detail,certificate-verdict-certificate,certificate-verdict-pass,certificate-verdict-bound,certificate-verdict-detail,custom-name,custom-json-exact-opaque-utf8,retained-producer-version,retained-canonical-bytes",
     "excluded_fields=to-jsonl:display-transport-only",
     "consumers=Event::content_hash,EventIdentityReceipt,Event::admit_content_identity,ledger-event-sinks,replay-comparison",
-    "mutations=artifact-domain:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,identity-version:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,wire-schema:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,session:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,scope:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,seq:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,severity:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,kind:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,solver-residual-solver:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-iter:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-residual:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-tile:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,cancellation-reason:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-spent:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-remaining:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-op:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-max-rel-err:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-suite:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-case:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-metric:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-value:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-machine:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-schedule:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-limit:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-observed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-action:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-format:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-artifact:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-accepted:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-certificate:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-bound:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-json-exact-opaque-utf8:crates/fs-obs/src/lib.rs#custom_payload_identity_is_exact_opaque_utf8,retained-producer-version:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed,retained-canonical-bytes:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed",
+    "mutations=artifact-domain:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,identity-version:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,wire-schema:crates/fs-obs/src/lib.rs#event_content_identity_domain_version_and_wire_schema_bytes_are_independent,session:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,scope:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,seq:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,severity:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,kind:crates/fs-obs/src/lib.rs#event_content_identity_mutation_battery,solver-residual-solver:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-iter:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,solver-residual-residual:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-tile:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,tile-complete-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,cancellation-reason:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-spent:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,budget-delta-remaining:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-op:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-max-rel-err:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,gradient-check-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-suite:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-case:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,conformance-case-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-kernel:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-metric:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-value:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,benchmark-result-machine:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,storm-assertion-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,manifest-selection-manifest:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,manifest-selection-source-snapshot:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,stratum-expansion-stratum:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,stratum-expansion-profile:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,stratum-expansion-cases:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-run:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-scope:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-receipt:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-disposition:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-predicate:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-evidence-methods:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-grade:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-applicability:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-support:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-completeness:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-integrity:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-promotion:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,dsr-run-outcome-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-schedule:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,race-record-seed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-resource:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-limit:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-observed:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,degradation-event-action:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-format:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-artifact:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-accepted:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,import-receipt-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-certificate:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-pass:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-bound:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,certificate-verdict-detail:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-name:crates/fs-obs/src/lib.rs#every_event_kind_payload_field_moves_identity,custom-json-exact-opaque-utf8:crates/fs-obs/src/lib.rs#custom_payload_identity_is_exact_opaque_utf8,retained-producer-version:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed,retained-canonical-bytes:crates/fs-obs/src/lib.rs#retained_event_identity_receipts_admit_exactly_or_fail_closed",
     "nonsemantic_mutations=Event.wall_ns:crates/fs-obs/src/lib.rs#wall_clock_is_envelope_only,to-jsonl:crates/fs-obs/src/lib.rs#content_identity_preserves_bits_that_display_json_collapses",
     "field_guard=classify_event_identity_fields",
     "transport_guard=Event::admit_content_identity",
@@ -202,6 +202,280 @@ pub fn check_event_content_identity_version(
     }
 }
 
+/// Receipt scope for one verification outcome (i94v.7.3.1): a successful
+/// status query, a failed worker attempt, and a refuted scientific job can
+/// coexist, so every outcome names the exact scope its receipt covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptScope {
+    /// One scoped operation.
+    Operation,
+    /// One worker attempt.
+    Attempt,
+    /// One job across attempts.
+    Job,
+    /// One whole campaign.
+    Campaign,
+}
+
+impl ReceiptScope {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Operation => "operation",
+            Self::Attempt => "attempt",
+            Self::Job => "job",
+            Self::Campaign => "campaign",
+        }
+    }
+}
+
+/// How the scoped execution ended, independent of what it proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionDisposition {
+    /// Ran to completion.
+    Completed,
+    /// Ran and failed.
+    Failed,
+    /// Cancelled before completion.
+    Cancelled,
+    /// Exceeded its budget/deadline.
+    TimedOut,
+    /// Refused before execution.
+    Refused,
+    /// Ended in a state the harness cannot classify; closure incomplete.
+    Indeterminate,
+}
+
+impl ExecutionDisposition {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Refused => "refused",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// What the requested predicate concluded, independent of how it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredicateOutcome {
+    /// The predicate held.
+    Satisfied,
+    /// The predicate was refuted.
+    Refuted,
+    /// Ran but could not decide.
+    Indeterminate,
+    /// This outcome carries no predicate.
+    NotApplicable,
+}
+
+impl PredicateOutcome {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Satisfied => "satisfied",
+            Self::Refuted => "refuted",
+            Self::Indeterminate => "indeterminate",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Epistemic grade of the produced evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicGrade {
+    /// Machine-checked enclosure/certificate.
+    Verified,
+    /// Validated against admitted external data.
+    Validated,
+    /// Estimated by an uncertified method.
+    Estimated,
+    /// Reported without evidence machinery.
+    Reported,
+    /// No evidence claim in this outcome.
+    NotApplicable,
+}
+
+impl EpistemicGrade {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Validated => "validated",
+            Self::Estimated => "estimated",
+            Self::Reported => "reported",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Whether the run stayed inside its declared applicability domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainApplicability {
+    /// In-domain.
+    InDomain,
+    /// Out of the declared domain.
+    OutOfDomain,
+    /// Applicability was not evaluated.
+    Unevaluated,
+    /// No domain claim applies.
+    NotApplicable,
+}
+
+impl DomainApplicability {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::InDomain => "in_domain",
+            Self::OutOfDomain => "out_of_domain",
+            Self::Unevaluated => "unevaluated",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Operational support level under which the outcome was produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationalSupport {
+    /// Fully supported configuration.
+    Supported,
+    /// Degraded configuration; outcome stands with caveats.
+    Degraded,
+    /// Unsupported configuration.
+    Unsupported,
+    /// Support classification does not apply.
+    NotApplicable,
+}
+
+impl OperationalSupport {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Degraded => "degraded",
+            Self::Unsupported => "unsupported",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Whether the evidence set is complete (SEPARATE from integrity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceCompleteness {
+    /// Every required artifact/receipt is present.
+    Complete,
+    /// Required evidence is missing; closure incomplete.
+    Incomplete,
+    /// Completeness does not apply.
+    NotApplicable,
+}
+
+impl EvidenceCompleteness {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Incomplete => "incomplete",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Whether the evidence set is intact (SEPARATE from completeness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceIntegrity {
+    /// All present evidence authenticated.
+    Intact,
+    /// Tamper/corruption detected.
+    Compromised,
+    /// Integrity not yet checked.
+    Unchecked,
+    /// Integrity does not apply.
+    NotApplicable,
+}
+
+impl EvidenceIntegrity {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Intact => "intact",
+            Self::Compromised => "compromised",
+            Self::Unchecked => "unchecked",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Effect of this outcome on promotion state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionEffect {
+    /// Promoted evidence/authority.
+    Promoted,
+    /// Demoted evidence/authority.
+    Demoted,
+    /// No promotion movement.
+    Unchanged,
+    /// Promotion does not apply.
+    NotApplicable,
+}
+
+impl PromotionEffect {
+    /// Stable wire name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Promoted => "promoted",
+            Self::Demoted => "demoted",
+            Self::Unchanged => "unchanged",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// One scoped verification outcome (i94v.7.3.1): the shared core every
+/// outcome-bearing event kind embeds. Not-applicable states are explicit
+/// variants, never absent-by-convention fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopedReceiptOutcome {
+    /// Scope the receipt covers.
+    pub scope: ReceiptScope,
+    /// Receipt identity (hex) at that scope.
+    pub receipt: String,
+    /// How execution ended.
+    pub disposition: ExecutionDisposition,
+    /// What the requested predicate concluded.
+    pub predicate: PredicateOutcome,
+    /// Comma-joined registered evidence-method names ("" = none).
+    pub evidence_methods: String,
+    /// Epistemic grade of the produced evidence.
+    pub grade: EpistemicGrade,
+    /// Domain-applicability classification.
+    pub applicability: DomainApplicability,
+    /// Operational-support classification.
+    pub support: OperationalSupport,
+    /// Evidence completeness (separate from integrity).
+    pub completeness: EvidenceCompleteness,
+    /// Evidence integrity (separate from completeness).
+    pub integrity: EvidenceIntegrity,
+    /// Promotion effect.
+    pub promotion: PromotionEffect,
+    /// Diagnostic detail; REQUIRED non-empty for failed/refused/
+    /// indeterminate dispositions (lint-enforced).
+    pub detail: String,
+}
+
 /// Severity ladder. `Error` events MUST satisfy [`lint_failure_record`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -306,6 +580,31 @@ pub enum EventKind {
         /// Storm seed for replay.
         seed: u64,
     },
+    /// Manifest + source-snapshot selection for one verification run
+    /// (i94v.7.3.1 F1).
+    ManifestSelection {
+        /// Selected manifest identity (hex).
+        manifest: String,
+        /// Source-snapshot identity (hex) the manifest was resolved against.
+        source_snapshot: String,
+    },
+    /// Core/Max stratum and campaign-profile expansion (i94v.7.3.1 F1).
+    StratumExpansion {
+        /// Stratum name ("core", "max").
+        stratum: String,
+        /// Campaign profile the stratum expanded under.
+        profile: String,
+        /// Number of expanded cases.
+        cases: u64,
+    },
+    /// One DSR run outcome carrying the full scoped receipt core
+    /// (i94v.7.3.1 F1).
+    DsrRun {
+        /// DSR run identity.
+        run: String,
+        /// The scoped verification outcome.
+        outcome: ScopedReceiptOutcome,
+    },
     /// A concurrency-race observation from a G4 race/storm harness.
     RaceRecord {
         /// Contended resource or invariant ("arena-slot", "tune-row", ...).
@@ -378,6 +677,9 @@ impl EventKind {
             EventKind::ConformanceCase { .. } => "conformance_case",
             EventKind::BenchmarkResult { .. } => "benchmark_result",
             EventKind::StormAssertion { .. } => "storm_assertion",
+            EventKind::ManifestSelection { .. } => "manifest_selection",
+            EventKind::StratumExpansion { .. } => "stratum_expansion",
+            EventKind::DsrRun { .. } => "dsr_run",
             EventKind::RaceRecord { .. } => "race_record",
             EventKind::DegradationEvent { .. } => "degradation_event",
             EventKind::ImportReceipt { .. } => "import_receipt",
@@ -539,6 +841,52 @@ impl Event {
             EventKind::StormAssertion { name, pass, seed } => {
                 push_str_field(&mut s, "name", name);
                 let _ = write!(s, ",\"pass\":{pass},\"seed\":{seed}");
+            }
+            EventKind::ManifestSelection {
+                manifest,
+                source_snapshot,
+            } => {
+                push_str_field(&mut s, "manifest", manifest);
+                s.push(',');
+                push_str_field(&mut s, "source_snapshot", source_snapshot);
+            }
+            EventKind::StratumExpansion {
+                stratum,
+                profile,
+                cases,
+            } => {
+                push_str_field(&mut s, "stratum", stratum);
+                s.push(',');
+                push_str_field(&mut s, "profile", profile);
+                let _ = write!(s, ",\"cases\":{cases}");
+            }
+            EventKind::DsrRun { run, outcome } => {
+                push_str_field(&mut s, "run", run);
+                s.push_str(",\"outcome\":{");
+                push_str_field(&mut s, "scope", outcome.scope.name());
+                s.push(',');
+                push_str_field(&mut s, "receipt", &outcome.receipt);
+                s.push(',');
+                push_str_field(&mut s, "disposition", outcome.disposition.name());
+                s.push(',');
+                push_str_field(&mut s, "predicate", outcome.predicate.name());
+                s.push(',');
+                push_str_field(&mut s, "evidence_methods", &outcome.evidence_methods);
+                s.push(',');
+                push_str_field(&mut s, "grade", outcome.grade.name());
+                s.push(',');
+                push_str_field(&mut s, "applicability", outcome.applicability.name());
+                s.push(',');
+                push_str_field(&mut s, "support", outcome.support.name());
+                s.push(',');
+                push_str_field(&mut s, "completeness", outcome.completeness.name());
+                s.push(',');
+                push_str_field(&mut s, "integrity", outcome.integrity.name());
+                s.push(',');
+                push_str_field(&mut s, "promotion", outcome.promotion.name());
+                s.push(',');
+                push_str_field(&mut s, "detail", &outcome.detail);
+                s.push('}');
             }
             EventKind::RaceRecord {
                 resource,
@@ -702,6 +1050,34 @@ impl Event {
                 .str("name", name)
                 .flag("pass", *pass)
                 .u64("seed", *seed),
+            EventKind::ManifestSelection {
+                manifest,
+                source_snapshot,
+            } => builder
+                .str("manifest", manifest)
+                .str("source_snapshot", source_snapshot),
+            EventKind::StratumExpansion {
+                stratum,
+                profile,
+                cases,
+            } => builder
+                .str("stratum", stratum)
+                .str("profile", profile)
+                .u64("cases", *cases),
+            EventKind::DsrRun { run, outcome } => builder
+                .str("run", run)
+                .str("outcome_scope", outcome.scope.name())
+                .str("outcome_receipt", &outcome.receipt)
+                .str("outcome_disposition", outcome.disposition.name())
+                .str("outcome_predicate", outcome.predicate.name())
+                .str("outcome_evidence_methods", &outcome.evidence_methods)
+                .str("outcome_grade", outcome.grade.name())
+                .str("outcome_applicability", outcome.applicability.name())
+                .str("outcome_support", outcome.support.name())
+                .str("outcome_completeness", outcome.completeness.name())
+                .str("outcome_integrity", outcome.integrity.name())
+                .str("outcome_promotion", outcome.promotion.name())
+                .str("outcome_detail", &outcome.detail),
             EventKind::RaceRecord {
                 resource,
                 schedule,
@@ -964,6 +1340,9 @@ pub const KNOWN_KINDS: &[&str] = &[
     "conformance_case",
     "benchmark_result",
     "storm_assertion",
+    "manifest_selection",
+    "stratum_expansion",
+    "dsr_run",
     "race_record",
     "degradation_event",
     "import_receipt",
@@ -1082,6 +1461,21 @@ pub fn lint_failure_record(event: &Event) -> Result<(), SchemaError> {
             at: 0,
             message: "failing gradient check must name its operator".to_string(),
         }),
+        EventKind::DsrRun { outcome, .. }
+            if matches!(
+                outcome.disposition,
+                ExecutionDisposition::Failed
+                    | ExecutionDisposition::Refused
+                    | ExecutionDisposition::Indeterminate
+            ) && outcome.detail.is_empty() =>
+        {
+            Err(SchemaError {
+                at: 0,
+                message: "failed/refused/indeterminate scoped outcome must carry a \
+                          non-empty diagnostic detail (reproduce-from-log-alone doctrine)"
+                    .to_string(),
+            })
+        }
         EventKind::RaceRecord {
             pass: false, seed, ..
         } if *seed == 0 => Err(SchemaError {
@@ -1616,6 +2010,151 @@ mod tests {
             &mut observed,
         );
         assert_payload_mutations(
+            EventKind::ManifestSelection {
+                manifest: "ab12".into(),
+                source_snapshot: "cd34".into(),
+            },
+            vec![
+                (
+                    "manifest_selection.manifest",
+                    EventKind::ManifestSelection {
+                        manifest: "ef56".into(),
+                        source_snapshot: "cd34".into(),
+                    },
+                ),
+                (
+                    "manifest_selection.source_snapshot",
+                    EventKind::ManifestSelection {
+                        manifest: "ab12".into(),
+                        source_snapshot: "0789".into(),
+                    },
+                ),
+            ],
+            &mut observed,
+        );
+        assert_payload_mutations(
+            EventKind::StratumExpansion {
+                stratum: "core".into(),
+                profile: "nightly".into(),
+                cases: 40,
+            },
+            vec![
+                (
+                    "stratum_expansion.stratum",
+                    EventKind::StratumExpansion {
+                        stratum: "max".into(),
+                        profile: "nightly".into(),
+                        cases: 40,
+                    },
+                ),
+                (
+                    "stratum_expansion.profile",
+                    EventKind::StratumExpansion {
+                        stratum: "core".into(),
+                        profile: "release".into(),
+                        cases: 40,
+                    },
+                ),
+                (
+                    "stratum_expansion.cases",
+                    EventKind::StratumExpansion {
+                        stratum: "core".into(),
+                        profile: "nightly".into(),
+                        cases: 41,
+                    },
+                ),
+            ],
+            &mut observed,
+        );
+        {
+            let base_outcome = || ScopedReceiptOutcome {
+                scope: ReceiptScope::Job,
+                receipt: "ab12".into(),
+                disposition: ExecutionDisposition::Completed,
+                predicate: PredicateOutcome::Satisfied,
+                evidence_methods: "oracle,enclosure".into(),
+                grade: EpistemicGrade::Verified,
+                applicability: DomainApplicability::InDomain,
+                support: OperationalSupport::Supported,
+                completeness: EvidenceCompleteness::Complete,
+                integrity: EvidenceIntegrity::Intact,
+                promotion: PromotionEffect::Unchanged,
+                detail: "ok".into(),
+            };
+            let with = |mutate: &dyn Fn(&mut ScopedReceiptOutcome)| {
+                let mut o = base_outcome();
+                mutate(&mut o);
+                EventKind::DsrRun {
+                    run: "run-1".into(),
+                    outcome: o,
+                }
+            };
+            assert_payload_mutations(
+                EventKind::DsrRun {
+                    run: "run-1".into(),
+                    outcome: base_outcome(),
+                },
+                vec![
+                    (
+                        "dsr_run.run",
+                        EventKind::DsrRun {
+                            run: "run-2".into(),
+                            outcome: base_outcome(),
+                        },
+                    ),
+                    (
+                        "dsr_run.outcome.scope",
+                        with(&|o| o.scope = ReceiptScope::Attempt),
+                    ),
+                    (
+                        "dsr_run.outcome.receipt",
+                        with(&|o| o.receipt = "cd34".into()),
+                    ),
+                    (
+                        "dsr_run.outcome.disposition",
+                        with(&|o| o.disposition = ExecutionDisposition::Failed),
+                    ),
+                    (
+                        "dsr_run.outcome.predicate",
+                        with(&|o| o.predicate = PredicateOutcome::Refuted),
+                    ),
+                    (
+                        "dsr_run.outcome.evidence_methods",
+                        with(&|o| o.evidence_methods = "oracle".into()),
+                    ),
+                    (
+                        "dsr_run.outcome.grade",
+                        with(&|o| o.grade = EpistemicGrade::Estimated),
+                    ),
+                    (
+                        "dsr_run.outcome.applicability",
+                        with(&|o| o.applicability = DomainApplicability::OutOfDomain),
+                    ),
+                    (
+                        "dsr_run.outcome.support",
+                        with(&|o| o.support = OperationalSupport::Degraded),
+                    ),
+                    (
+                        "dsr_run.outcome.completeness",
+                        with(&|o| o.completeness = EvidenceCompleteness::Incomplete),
+                    ),
+                    (
+                        "dsr_run.outcome.integrity",
+                        with(&|o| o.integrity = EvidenceIntegrity::Unchecked),
+                    ),
+                    (
+                        "dsr_run.outcome.promotion",
+                        with(&|o| o.promotion = PromotionEffect::Promoted),
+                    ),
+                    (
+                        "dsr_run.outcome.detail",
+                        with(&|o| o.detail = "different".into()),
+                    ),
+                ],
+                &mut observed,
+            );
+        }
+        assert_payload_mutations(
             EventKind::RaceRecord {
                 resource: "arena-slot".into(),
                 schedule: "a-b-a".into(),
@@ -1852,6 +2391,24 @@ mod tests {
             "storm_assertion.name",
             "storm_assertion.pass",
             "storm_assertion.seed",
+            "manifest_selection.manifest",
+            "manifest_selection.source_snapshot",
+            "stratum_expansion.stratum",
+            "stratum_expansion.profile",
+            "stratum_expansion.cases",
+            "dsr_run.run",
+            "dsr_run.outcome.scope",
+            "dsr_run.outcome.receipt",
+            "dsr_run.outcome.disposition",
+            "dsr_run.outcome.predicate",
+            "dsr_run.outcome.evidence_methods",
+            "dsr_run.outcome.grade",
+            "dsr_run.outcome.applicability",
+            "dsr_run.outcome.support",
+            "dsr_run.outcome.completeness",
+            "dsr_run.outcome.integrity",
+            "dsr_run.outcome.promotion",
+            "dsr_run.outcome.detail",
             "race_record.resource",
             "race_record.schedule",
             "race_record.pass",
@@ -1874,7 +2431,7 @@ mod tests {
         assert_eq!(
             observed.as_slice(),
             expected.as_slice(),
-            "all 42 payload fields stay enumerated"
+            "all 60 payload fields stay enumerated"
         );
     }
 
@@ -1980,6 +2537,81 @@ mod tests {
         for line in &first {
             validate_line(line).expect("scope-tree events stay wire-valid");
         }
+    }
+
+    #[test]
+    fn verification_outcome_kinds_are_wire_valid_and_lint_enforced() {
+        let mut em = Emitter::new("study-x", "dsr-1");
+        let selection = em.emit(
+            Severity::Info,
+            EventKind::ManifestSelection {
+                manifest: "ab12".into(),
+                source_snapshot: "cd34".into(),
+            },
+            None,
+        );
+        let expansion = em.emit(
+            Severity::Info,
+            EventKind::StratumExpansion {
+                stratum: "core".into(),
+                profile: "nightly".into(),
+                cases: 40,
+            },
+            None,
+        );
+        let mut outcome = ScopedReceiptOutcome {
+            scope: ReceiptScope::Job,
+            receipt: "ab12".into(),
+            disposition: ExecutionDisposition::Completed,
+            predicate: PredicateOutcome::Satisfied,
+            evidence_methods: "oracle,enclosure".into(),
+            grade: EpistemicGrade::Verified,
+            applicability: DomainApplicability::InDomain,
+            support: OperationalSupport::Supported,
+            completeness: EvidenceCompleteness::Complete,
+            integrity: EvidenceIntegrity::Intact,
+            promotion: PromotionEffect::Unchanged,
+            detail: "ok".into(),
+        };
+        let run = em.emit(
+            Severity::Info,
+            EventKind::DsrRun {
+                run: "run-1".into(),
+                outcome: outcome.clone(),
+            },
+            Some(9),
+        );
+        for event in [&selection, &expansion, &run] {
+            validate_line(&event.to_jsonl()).expect("verification kinds stay wire-valid");
+            lint_failure_record(event).expect("conclusive outcomes pass the lint");
+        }
+
+        // A failed outcome without diagnostic detail refuses.
+        outcome.disposition = ExecutionDisposition::Failed;
+        outcome.detail = String::new();
+        let bad = em.emit(
+            Severity::Error,
+            EventKind::DsrRun {
+                run: "run-1".into(),
+                outcome: outcome.clone(),
+            },
+            None,
+        );
+        assert!(
+            lint_failure_record(&bad).is_err(),
+            "failed outcome without detail must refuse"
+        );
+        outcome.detail = "worker lost lease".into();
+        let repaired = em.emit(
+            Severity::Error,
+            EventKind::DsrRun {
+                run: "run-1".into(),
+                outcome,
+            },
+            None,
+        );
+        lint_failure_record(&repaired).expect("detailed failure passes");
+        validate_line(&repaired.to_jsonl()).expect("failure line stays wire-valid");
     }
 
     #[test]
