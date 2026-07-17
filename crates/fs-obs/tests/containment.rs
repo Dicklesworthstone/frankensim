@@ -208,6 +208,70 @@ fn context_edges_never_stand_in_for_parentage() {
 }
 
 #[test]
+fn worker_handoff_and_cancellation_races_stay_deterministic_and_honest() {
+    // Worker handoff: worker-1 builds the solve subtree, hands off, and
+    // worker-2 continues under the SAME propagated attempt root. Whatever
+    // interleaving the two record streams arrive in, the sealed tree is
+    // identical.
+    let root = AttemptId::new("attempt-9").unwrap();
+    let solve = op("solve", LocalParent::AttemptRoot, 0);
+    let k1 = scope("kernel-lbm", node(&solve), 0);
+    let w1_records = vec![solve.clone(), k1.clone(), tile("tile-1", node(&k1), 0)];
+    let k2 = scope("kernel-adjoint", node(&solve), 1);
+    let w2_records = vec![k2.clone(), tile("tile-2", node(&k2), 0)];
+
+    let interleavings: Vec<Vec<usize>> = vec![
+        vec![0, 0, 0, 1, 1], // worker-1 fully first
+        vec![1, 1, 0, 0, 0], // worker-2's stream arrives first (reordered)
+        vec![0, 1, 0, 1, 0], // alternating
+    ];
+    let mut sealed = Vec::new();
+    for order in &interleavings {
+        let mut tree = AttemptTree::new(root.clone());
+        let (mut i1, mut i2) = (0usize, 0usize);
+        for which in order {
+            let record = if *which == 0 {
+                let r = w1_records[i1].clone();
+                i1 += 1;
+                r
+            } else {
+                let r = w2_records[i2].clone();
+                i2 += 1;
+                r
+            };
+            tree.ingest(record).expect("handoff records admit");
+        }
+        sealed.push(tree.seal());
+    }
+    assert!(
+        sealed.windows(2).all(|w| w[0] == w[1]),
+        "worker handoff seals identically under every interleaving"
+    );
+    assert!(sealed[0].gaps().is_empty());
+
+    // Cancellation race: the scope is cancelled while its tiles are in
+    // flight, so some records never arrive. The seal never invents
+    // lineage — the missing parent is an explicit gap, and a tile whose
+    // parent DID arrive still admits even if delivered after the cancel.
+    let mut tree = AttemptTree::new(root);
+    tree.ingest(solve.clone()).unwrap();
+    tree.ingest(k1.clone()).unwrap();
+    // k2 was cancelled before its record flushed; its tile raced ahead.
+    tree.ingest(tile("tile-2", node(&k2), 0)).unwrap();
+    // tile-1's parent k1 arrived, so late delivery still admits.
+    tree.ingest(tile("tile-1", node(&k1), 0)).unwrap();
+    let sealed = tree.seal();
+    assert_eq!(sealed.nodes().len(), 3, "solve, kernel-lbm, tile-1");
+    assert_eq!(sealed.gaps().len(), 1, "tile-2's cancelled parent is a gap");
+    assert_eq!(sealed.gaps()[0].node, "tile-2");
+    assert_eq!(sealed.gaps()[0].missing_parent, "kernel-adjoint");
+    verdict(
+        "handoff-and-cancel-race",
+        "handoff interleavings seal bit-identically; cancellation races surface as explicit gaps",
+    );
+}
+
+#[test]
 fn embedding_refuses_the_wrong_attempt_root() {
     struct Recorder {
         embedded: usize,
