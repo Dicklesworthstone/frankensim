@@ -15,8 +15,8 @@ use fs_scenario::{
     RealizationBudget, Scenario, SpectrumModel, StochasticEnsemble, TimeSignal, ValidationBudget,
     ValidationError,
     ir::{
-        FiveToSixRule, IrParseBudget, LEGACY_SCENARIO_IR_VERSION, SCENARIO_IR_VERSION, parse_ir,
-        parse_ir_with_budget, write_ir,
+        FiveToSixRule, IrParseBudget, LEGACY_SCENARIO_IR_VERSION, SCENARIO_IR_VERSION,
+        SourceCanonicalizationRule, parse_ir, parse_ir_with_budget, write_ir,
     },
 };
 use std::time::Instant;
@@ -935,6 +935,7 @@ fn sc_001c_string_escapes_are_canonical_and_unambiguous() {
     let decoded = parse_ir(&canonical).expect("writer escapes must parse");
     assert_eq!(decoded.scenario(), &scenario);
     assert_eq!(write_ir(decoded.scenario()), canonical);
+    assert!(decoded.canonicalization().is_none());
 
     let unknown_escape = canonical.replacen("quoted", r"quo\qted", 1);
     assert_ne!(unknown_escape, canonical, "escape mutation must apply");
@@ -972,6 +973,14 @@ fn sc_001d_canonical_ir_normalizes_physically_irrelevant_signed_zero() {
     );
     let decoded_negative_zero =
         parse_ir(&negative_zero_wire).expect("finite v2 negative zero parses canonically");
+    let source_receipt = decoded_negative_zero
+        .canonicalization()
+        .expect("noncanonical v2 signed zero retains exact source identity");
+    assert_eq!(
+        source_receipt.rule(),
+        SourceCanonicalizationRule::CanonicalV2Reemission
+    );
+    assert!(source_receipt.verifies(negative_zero_wire.as_bytes(), canonical.as_bytes()));
     assert_eq!(
         decoded_negative_zero.scenario().environment.gravity[0]
             .value
@@ -1009,6 +1018,8 @@ fn sc_001d_canonical_ir_normalizes_physically_irrelevant_signed_zero() {
     let legacy_positive = parse_ir(LEGACY_MINIMAL_IR).expect("legacy positive zero parses");
     let legacy_negative =
         parse_ir(&legacy_negative_zero).expect("legacy negative zero parses canonically");
+    assert!(legacy_positive.canonicalization().is_none());
+    assert!(legacy_negative.canonicalization().is_none());
     assert_eq!(
         legacy_negative.scenario().environment.gravity[0]
             .value
@@ -1056,6 +1067,76 @@ fn sc_001d_canonical_ir_normalizes_physically_irrelevant_signed_zero() {
     verdict(
         "sc-001d",
         "v2 and legacy parser admission normalize signed zero while retaining source receipts and negative normal/subnormal bits",
+    );
+}
+
+#[test]
+fn sc_001f_noncanonical_v2_sources_retain_tamper_checked_identity() {
+    let scenario = Scenario::new("source-identity", 11, Environment::earth_lab());
+    let canonical = write_ir(&scenario);
+    let canonical_decoded = parse_ir(&canonical).expect("canonical v2 parses");
+    assert!(canonical_decoded.migration().is_none());
+    assert!(
+        canonical_decoded.canonicalization().is_none(),
+        "exact writer output needs no source-canonicalization receipt"
+    );
+
+    let aliases = [
+        format!(" \n{canonical}\t"),
+        canonical.replacen(":version 2", ":version 02", 1),
+        canonical.replacen("\"source-identity\" 11 ", "\"source-identity\" 011 ", 1),
+        canonical.replacen("(qty 0 ", "(qty 0.0 ", 1),
+        canonical.replacen("(qty 0 ", "(qty -0 ", 1),
+    ];
+    let mut source_hashes = Vec::new();
+    for alias in &aliases {
+        assert_ne!(alias, &canonical, "source alias mutation must apply");
+        let decoded = parse_ir(alias).expect("admitted v2 alias parses");
+        assert_eq!(decoded.source_version(), SCENARIO_IR_VERSION);
+        assert!(decoded.migration().is_none());
+        assert_eq!(decoded.scenario(), &scenario);
+        assert_eq!(write_ir(decoded.scenario()), canonical);
+
+        let receipt = decoded
+            .canonicalization()
+            .expect("every admitted noncanonical v2 source retains a receipt");
+        assert_eq!(receipt.source_version(), SCENARIO_IR_VERSION);
+        assert_eq!(receipt.canonical_version(), SCENARIO_IR_VERSION);
+        assert_eq!(
+            receipt.rule(),
+            SourceCanonicalizationRule::CanonicalV2Reemission
+        );
+        assert_eq!(receipt.source_hash(), hash_bytes(alias.as_bytes()));
+        assert_eq!(receipt.canonical_hash(), hash_bytes(canonical.as_bytes()));
+        assert_ne!(receipt.source_hash(), receipt.canonical_hash());
+        assert!(receipt.verifies(alias.as_bytes(), canonical.as_bytes()));
+        assert!(
+            !receipt.verifies(format!("{alias} ").as_bytes(), canonical.as_bytes()),
+            "source-byte tampering must invalidate the receipt"
+        );
+        assert!(
+            !receipt.verifies(alias.as_bytes(), format!("{canonical} ").as_bytes()),
+            "canonical-byte tampering must invalidate the receipt"
+        );
+        source_hashes.push(receipt.source_hash());
+    }
+    source_hashes.sort_unstable();
+    source_hashes.dedup();
+    assert_eq!(
+        source_hashes.len(),
+        aliases.len(),
+        "distinct accepted authority spellings retain distinct source identities"
+    );
+
+    let explicit_v1 = LEGACY_MINIMAL_IR.replacen("(scenario ", "(scenario :version 1 ", 1);
+    let legacy = parse_ir(&explicit_v1).expect("explicit v1 source parses");
+    assert_eq!(legacy.source_version(), LEGACY_SCENARIO_IR_VERSION);
+    assert!(legacy.migration().is_some());
+    assert!(legacy.canonicalization().is_none());
+
+    verdict(
+        "sc-001f",
+        "accepted v2 whitespace, version, integer, float, and signed-zero aliases retain exact tamper-checked source-to-canonical receipts",
     );
 }
 

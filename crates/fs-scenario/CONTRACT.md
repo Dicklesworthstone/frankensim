@@ -117,6 +117,14 @@ flagships.
   `DimensionCrosswalkReceipt`. The receipt BLAKE3-binds the exact supplied v1
   bytes to the exact canonical v2 re-emission and exposes a verifier; explicit
   and implicit v1 spellings therefore retain distinct source identities.
+  Accepted current-version bytes that differ from the canonical writer output
+  return a separate `SourceCanonicalizationReceipt`. It BLAKE3-binds the exact
+  supplied v2 bytes to the exact canonical v2 re-emission, names the versioned
+  re-emission rule, and refuses source or target tampering. Exact canonical v2
+  writer output carries no redundant receipt. Thus alternate whitespace,
+  integer/version spellings, finite float spellings, and signed zero may be
+  inspected without laundering distinct authority bytes into one silent
+  identity. Unsupported string escapes remain refusals rather than aliases.
   Floats use shortest-round-trip form and u64 seeds remain exact integers.
   Physically irrelevant signed zero is canonicalized to `0`, matching the
   scenario types' semantic `PartialEq` rather than creating two content
@@ -137,11 +145,17 @@ flagships.
 
 ## Invariants
 
-1. **Round-trip losslessness**: `parse_ir(write_ir(s)).scenario() == &s` for every
-   representable scenario; `write_ir` is byte-stable canonical v2. Historical
-   v1 bytes are accepted without mutation and their migration context is not
-   discarded; every legacy receipt records and verifies exact `old_hash →
-   new_hash` evidence.
+1. **Round-trip losslessness and source identity**:
+   `parse_ir(write_ir(s)).scenario() == &s` for every representable scenario;
+   `write_ir` is byte-stable canonical v2. Source evidence is mutually
+   exclusive: exact canonical v2 has no receipt, accepted noncanonical v2 has
+   one source-canonicalization receipt and no migration receipt, and legacy v1
+   has one dimension-crosswalk receipt and no source-canonicalization receipt.
+   `DecodedScenario` equality includes this provenance; callers that mean only
+   semantic equality compare the decoded `Scenario` values.
+   Historical v1 bytes are accepted without mutation and their migration
+   context is not discarded; every legacy receipt records and verifies exact
+   `old_hash → new_hash` evidence.
 2. **Dimensional soundness**: `validate()` rejects any BC/frame/ensemble/
    environment value whose SI exponents disagree with the contract table.
 3. **Net-flux compatibility**: if any condition declares `incompressible`,
@@ -334,6 +348,10 @@ None.
   byte-stable. A retained legacy fixture verifies implicit/explicit v1
   five-vector decoding, `mol = 0`, pinned distinct old hashes, a shared pinned
   canonical hash, and receipt verification/tamper refusal.
+- **sc-001f** accepted current-version whitespace, version, integer, finite
+  float, and signed-zero aliases re-emit to one canonical v2 artifact while
+  retaining distinct source hashes in versioned tamper-checked receipts;
+  exact canonical writer output remains receipt-free.
 - **sc-002** seeded violations caught with structured fixes: flux
   imbalance (repaired by adding an outlet), cyclic + dangling frames,
   wrong-dimension BC, undeclared inlet compatibility, unknown combo case,
@@ -466,7 +484,10 @@ None.
   semantic `check_round_trip` helper derives only byte/atom authority from the
   exact writer output and retains default structural ceilings. Semantic
   validation has its own explicit work plan and must not reuse syntax limits as
-  an admission receipt. Exact decoded-heap
+  an admission receipt. Detecting a current-version source alias performs one
+  canonical `write_ir` re-emission and therefore shares the writer's currently
+  unmetered output allocation; the source receipt is identity evidence, not a
+  heap-admission receipt. Exact decoded-heap
   accounting plus fallible semantic-finding allocation remain active work under
   `frankensim-sj31i.24`.
 - **Finding capacity is not exact diagnostic-heap admission**: bounded identity

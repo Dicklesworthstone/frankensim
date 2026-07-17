@@ -114,7 +114,101 @@ impl DimensionCrosswalkReceipt {
     }
 }
 
-/// A decoded scenario together with its wire-version migration context.
+/// The semantic rule witnessed by a current-version source receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCanonicalizationRule {
+    /// Decode admitted v2 source text and re-emit it through [`write_ir`].
+    CanonicalV2Reemission,
+}
+
+impl SourceCanonicalizationRule {
+    const fn for_source_version(version: u32) -> Option<Self> {
+        match version {
+            2 => Some(Self::CanonicalV2Reemission),
+            _ => None,
+        }
+    }
+
+    const fn source_version(self) -> u32 {
+        match self {
+            Self::CanonicalV2Reemission => 2,
+        }
+    }
+}
+
+/// Immutable evidence binding accepted noncanonical v2 bytes to canonical v2.
+///
+/// Canonical writer output does not need this receipt. It is present only when
+/// an accepted current-version source uses an alternate spelling or layout,
+/// so callers never lose the exact authority identity that was supplied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCanonicalizationReceipt {
+    /// Version declared by the supplied source.
+    source_version: u32,
+    /// Version emitted by the canonical writer.
+    canonical_version: u32,
+    /// BLAKE3 hash of the exact supplied source bytes.
+    source_hash: ContentHash,
+    /// BLAKE3 hash of the exact canonical re-emission.
+    canonical_hash: ContentHash,
+    /// Canonicalization rule applied.
+    rule: SourceCanonicalizationRule,
+}
+
+impl SourceCanonicalizationReceipt {
+    /// Version declared by the supplied source.
+    #[must_use]
+    pub const fn source_version(&self) -> u32 {
+        self.source_version
+    }
+
+    /// Version emitted by the canonical writer.
+    #[must_use]
+    pub const fn canonical_version(&self) -> u32 {
+        self.canonical_version
+    }
+
+    /// BLAKE3 hash of the exact supplied source bytes.
+    #[must_use]
+    pub const fn source_hash(&self) -> ContentHash {
+        self.source_hash
+    }
+
+    /// BLAKE3 hash of the exact canonical re-emission.
+    #[must_use]
+    pub const fn canonical_hash(&self) -> ContentHash {
+        self.canonical_hash
+    }
+
+    /// Semantic canonicalization rule used by this receipt.
+    #[must_use]
+    pub const fn rule(&self) -> SourceCanonicalizationRule {
+        self.rule
+    }
+
+    /// Verify the parser-issued receipt against exact preserved byte strings.
+    ///
+    /// This authenticates the immutable source/canonical hash pair created by
+    /// the parser. It does not independently parse arbitrary target bytes to
+    /// establish canonicality.
+    #[must_use]
+    pub fn verifies(&self, source_bytes: &[u8], canonical_bytes: &[u8]) -> bool {
+        self.source_version == self.rule.source_version()
+            && self.canonical_version == self.rule.source_version()
+            && source_bytes != canonical_bytes
+            && self.source_hash != self.canonical_hash
+            && hash_bytes(source_bytes) == self.source_hash
+            && hash_bytes(canonical_bytes) == self.canonical_hash
+    }
+}
+
+/// A decoded scenario together with mutually exclusive wire-source evidence.
+///
+/// Exact canonical v2 has neither receipt, accepted noncanonical v2 has only a
+/// [`SourceCanonicalizationReceipt`], and legacy v1 has only a
+/// [`DimensionCrosswalkReceipt`]. `PartialEq` includes that source evidence;
+/// compare [`DecodedScenario::scenario`] values when only semantic equality is
+/// intended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedScenario {
     /// Decoded scenario value.
@@ -123,6 +217,8 @@ pub struct DecodedScenario {
     source_version: u32,
     /// Present exactly when a legacy five-base form was crossed into six-base memory.
     dimension_crosswalk: Option<DimensionCrosswalkReceipt>,
+    /// Present exactly when admitted v2 source bytes were not canonical writer output.
+    source_canonicalization: Option<SourceCanonicalizationReceipt>,
 }
 
 impl DecodedScenario {
@@ -142,6 +238,12 @@ impl DecodedScenario {
     #[must_use]
     pub const fn migration(&self) -> Option<&DimensionCrosswalkReceipt> {
         self.dimension_crosswalk.as_ref()
+    }
+
+    /// Receipt binding accepted noncanonical v2 bytes to canonical v2 output.
+    #[must_use]
+    pub const fn canonicalization(&self) -> Option<&SourceCanonicalizationReceipt> {
+        self.source_canonicalization.as_ref()
     }
 }
 
@@ -1404,10 +1506,11 @@ fn scenario_wire_header(root_items: &[Sx]) -> Result<(u32, DimensionWire, &[Sx])
 
 /// Parse scenario IR under [`DEFAULT_IR_PARSE_BUDGET`].
 ///
-/// The decoded value retains its wire version and any dimension crosswalk
-/// receipt. Canonical v2 uses six exponents and may embed versioned typed
-/// payloads; explicit v1 and the historical unversioned form use five, append
-/// `mol = 0`, and refuse typed payload forms.
+/// The decoded value retains its wire version and any dimension crosswalk or
+/// current-version source-canonicalization receipt. Canonical v2 uses six
+/// exponents and may embed versioned typed payloads; explicit v1 and the
+/// historical unversioned form use five, append `mol = 0`, and refuse typed
+/// payload forms.
 ///
 /// # Errors
 /// [`ScenarioError::Parse`] for malformed, non-finite, or over-budget input,
@@ -1474,24 +1577,48 @@ pub fn parse_ir_with_budget(
         contacts,
         environment,
     };
-    let dimension_crosswalk = if wire == DimensionWire::LegacyFive {
-        let canonical = write_ir(&scenario);
-        Some(DimensionCrosswalkReceipt {
-            source_version,
-            target_version: SCENARIO_IR_VERSION,
-            old_hash: hash_bytes(text.as_bytes()),
-            new_hash: hash_bytes(canonical.as_bytes()),
-            source_width: 5,
-            target_width: 6,
-            rule: FiveToSixRule::AppendMoleZero,
-        })
+    let canonical = write_ir(&scenario);
+    let (dimension_crosswalk, source_canonicalization) = if wire == DimensionWire::LegacyFive {
+        (
+            Some(DimensionCrosswalkReceipt {
+                source_version,
+                target_version: SCENARIO_IR_VERSION,
+                old_hash: hash_bytes(text.as_bytes()),
+                new_hash: hash_bytes(canonical.as_bytes()),
+                source_width: 5,
+                target_width: 6,
+                rule: FiveToSixRule::AppendMoleZero,
+            }),
+            None,
+        )
+    } else if text.as_bytes() == canonical.as_bytes() {
+        (None, None)
     } else {
-        None
+        let rule = SourceCanonicalizationRule::for_source_version(source_version)
+            .ok_or_else(|| {
+                err(
+                    0,
+                    &format!(
+                        "scenario IR v{source_version} has no registered source-canonicalization rule"
+                    ),
+                )
+            })?;
+        (
+            None,
+            Some(SourceCanonicalizationReceipt {
+                source_version,
+                canonical_version: SCENARIO_IR_VERSION,
+                source_hash: hash_bytes(text.as_bytes()),
+                canonical_hash: hash_bytes(canonical.as_bytes()),
+                rule,
+            }),
+        )
     };
     Ok(DecodedScenario {
         scenario,
         source_version,
         dimension_crosswalk,
+        source_canonicalization,
     })
 }
 
