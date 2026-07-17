@@ -124,6 +124,23 @@ seeded corruption flips bit 0 of the core oracle and proves both the typed red
 report and `assert_green` refusal paths. These records make central failures
 replay-complete; one local record is not, by itself, a dual-ISA G5 proof.
 
+`tests/frankenscipy_special_oracle_casebook.rs` adds the plan's test-only
+FrankenScipy special-function seam for `det::{erf, erfc}`. It compares the
+production functions with `fsci_special::{erf_scalar, erfc_scalar}` under a
+versioned, canonical input frame. Signed zero and infinity outputs are exact;
+canonical NaN is checked by class without a payload claim. Fourteen fixed
+`erf` points outside the known weak-oracle band use a 12-ULP agreement margin;
+fourteen positive dyadic/integer `erfc` points through 26 have exact `x*x` and
+use 16 ULP. Each record checks same-run replay, retains separate observed
+output-bit digests, and emits exact computed/reference bits plus the full
+input frame on disagreement. The input-frame digests are
+`9e82a07fef5e77cd` (special values), `ea07b7ba4630b7ba` (NaN policy),
+`6357985eff784c7e` (`erf`), and `3735a50a7ae00f90` (`erfc`). Disclosed seed
+`0x5AEC_0000` flips bit zero of the exact `erf(+0)` reference, producing one
+replay-identical red record at `b85f44ff0d7d3109` and an `assert_green`
+refusal. `fsci-special` is a development dependency only; this tranche is
+central package-proof pending.
+
 ## No-claim boundaries
 - cbrt/log1p: not yet implemented (follow-up bead). (tan/atan/atan2/pow/
   erf/erfc/asin/acos/powi landed via wf9.14, t88x, and 4xnt — see above;
@@ -134,6 +151,16 @@ replay-complete; one local record is not, by itself, a dual-ISA G5 proof.
 - Fast mode (lower-accuracy feature-flagged variants): BLOCKED on consumers
   declaring tolerable budgets (fs-material/LUMEN) — deliberately not built
   speculatively, per the bead's own instruction.
+- The FrankenScipy Casebook is agreement evidence for its disclosed finite
+  fixture family, not a forward-error certificate. It does not establish
+  Python SciPy execution, arbitrary-input or full-special-function coverage,
+  performance parity, or fresh dual-ISA execution. The existing disjoint-path
+  test remains the stronger evidence inside erf's known external-oracle-weaker
+  cancellation band. `erfc` points at and above the oracle's
+  `sqrt(CEPHES_MAXLOG)` cutoff are excluded because that path returns zero
+  before fs-math's subnormal-preserving cutoff; the Casebook does not erase or
+  adjudicate that declared policy difference. Observed FrankenScipy output
+  digests are same-run diagnostics, not cross-ISA goldens.
 - The nightly ULP-ledger re-measurement lane: the budget-vs-measured tests
   ship here and run in every suite; wiring them into a dedicated nightly
   regression lane belongs to the CI/CD bead family (huq.4 closed; the perf-CI

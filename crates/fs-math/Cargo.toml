@@ -14,6 +14,9 @@ layer = "L0"
 
 [dev-dependencies]
 fs-casebook = { path = "../fs-casebook" }
+# Constellation reference oracle (test-only): independent Cephes-derived
+# erf/erfc implementations for the BEDROCK special-functions battery.
+fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.1.0" }
 
 [lints]
 workspace = true
