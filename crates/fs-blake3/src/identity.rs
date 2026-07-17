@@ -3534,6 +3534,60 @@ impl fmt::Display for PromotionRefusal {
 
 impl core::error::Error for PromotionRefusal {}
 
+/// Hash domain for [`PromotionRootCharter`] preimages.
+pub const PROMOTION_ROOT_CHARTER_DOMAIN: &str =
+    "org.frankensim.fs-blake3.promotion-root-charter.v1";
+
+/// The exact-configuration fingerprint of a [`PromotionTrustRoot`]
+/// (bead sj31i.52.9, root-provenance closure).
+///
+/// The charter is a domain-separated digest over EVERY axis that shapes
+/// the root's promotion decisions: both schema domains, the verifier and
+/// key-policy identity digests, their canonical-byte observations (root
+/// digest AND exact length), and the context string — all length-framed.
+/// Every [`PromotionWitness`] carries the charter of the root that minted
+/// it, so a consumption boundary that PINS its domain owner's charter
+/// rejects witnesses minted by any differently-configured root: a foreign
+/// crate can still call [`PromotionTrustRoot::configure`], but a root
+/// configured for a permit-everything verifier (or any other foreign
+/// binding) mints witnesses whose charter cannot match the pin.
+///
+/// Two roots with byte-identical configuration share a charter BY DESIGN:
+/// provenance here is configuration-relative, not instance-relative —
+/// pure data cannot carry instance identity across fork/replay in a
+/// deterministic workspace, and two roots that make identical decisions
+/// are the same policy. The no-claim boundary: fs-blake3 cannot vouch WHO
+/// holds a charter; it guarantees that a witness's charter equals the
+/// exact configuration of the root that minted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PromotionRootCharter(ContentHash);
+
+impl PromotionRootCharter {
+    /// Exact digest bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+
+    /// Lowercase hexadecimal rendering.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl fmt::Display for PromotionRootCharter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// Length-framed charter preimage field (u64 LE length, then bytes).
+fn push_charter_field(preimage: &mut Vec<u8>, bytes: &[u8]) {
+    preimage.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(bytes);
+}
+
 /// The domain owner's independently configured promotion trust root
 /// (bead sj31i.52.9).
 ///
@@ -3546,6 +3600,12 @@ impl core::error::Error for PromotionRefusal {}
 /// policy-relative: the ONLY path to a [`PromotionWitness`] runs
 /// through [`Self::admit_for_promotion`], which re-adjudicates the
 /// presented binding against this root's own retained observations.
+///
+/// Root-instance provenance: [`Self::charter`] fingerprints this exact
+/// configuration and every minted witness carries it
+/// ([`PromotionWitness::root_charter`]), so consumers that pin their
+/// domain owner's charter reject witnesses from cloned-then-reconfigured
+/// or self-configured roots (see [`PromotionRootCharter`]).
 ///
 /// No-claim boundary: the root's guarantees are relative to its
 /// configuration authority — fs-blake3 makes forgery of the witness
@@ -3617,6 +3677,36 @@ where
         })
     }
 
+    /// This root's exact-configuration fingerprint (bead sj31i.52.9).
+    ///
+    /// A pure function of the configuration: both schema domains, the
+    /// verifier and key-policy identity digests, their canonical-byte
+    /// observations (content root and exact length), and the context
+    /// string, length-framed under
+    /// [`PROMOTION_ROOT_CHARTER_DOMAIN`]. Domain owners publish/pin
+    /// this value; consumers compare it against
+    /// [`PromotionWitness::root_charter`].
+    #[must_use]
+    pub fn charter(&self) -> PromotionRootCharter {
+        let mut preimage = Vec::with_capacity(256);
+        push_charter_field(&mut preimage, V::DOMAIN.as_bytes());
+        push_charter_field(&mut preimage, P::DOMAIN.as_bytes());
+        push_charter_field(&mut preimage, self.verifier.id().as_bytes());
+        push_charter_field(&mut preimage, self.verifier.bytes().content_id().as_bytes());
+        push_charter_field(&mut preimage, &self.verifier.bytes().length().to_le_bytes());
+        push_charter_field(&mut preimage, self.key_policy.id().as_bytes());
+        push_charter_field(
+            &mut preimage,
+            self.key_policy.bytes().content_id().as_bytes(),
+        );
+        push_charter_field(&mut preimage, &self.key_policy.bytes().length().to_le_bytes());
+        push_charter_field(&mut preimage, self.context.as_bytes());
+        PromotionRootCharter(crate::hash_domain(
+            PROMOTION_ROOT_CHARTER_DOMAIN,
+            &preimage,
+        ))
+    }
+
     /// The opaque domain-owner decision: admit a policy-relative
     /// admission for PROMOTION by re-adjudicating its exact verifier
     /// and key-policy bindings against this root's independently
@@ -3672,6 +3762,7 @@ where
             verifier: self.verifier,
             key_policy: self.key_policy,
             context: self.context,
+            root_charter: self.charter(),
         })
     }
 }
@@ -3706,6 +3797,7 @@ where
 ///         verifier,
 ///         key_policy,
 ///         context: "forged",
+///         root_charter: unreachable!(),
 ///     }
 /// }
 /// ```
@@ -3731,6 +3823,7 @@ where
     verifier: ObservedIdentity<VerifierId<V>>,
     key_policy: ObservedIdentity<KeyPolicyId<P>>,
     context: &'static str,
+    root_charter: PromotionRootCharter,
 }
 
 impl<I, V, P> Clone for PromotionWitness<I, V, P>
@@ -3795,6 +3888,14 @@ where
     #[must_use]
     pub const fn key_policy(&self) -> ObservedIdentity<KeyPolicyId<P>> {
         self.key_policy
+    }
+
+    /// The exact-configuration charter of the root that minted this
+    /// witness (bead sj31i.52.9). Consumption boundaries pin their
+    /// domain owner's [`PromotionTrustRoot::charter`] against this.
+    #[must_use]
+    pub const fn root_charter(&self) -> PromotionRootCharter {
+        self.root_charter
     }
 
     /// The root's configured context string.

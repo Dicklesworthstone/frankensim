@@ -262,3 +262,155 @@ fn an_empty_context_never_configures_a_root() {
         PromotionRefusal::EmptyContext
     );
 }
+
+// ── Root-charter provenance (bead sj31i.52.9, acceptance closure) ──────────
+
+#[test]
+fn charter_is_a_pure_function_of_every_configuration_axis() {
+    let verifier = verifier_receipt(0x600D);
+    let policy = policy_receipt(0x600D);
+    let make = |v, p, ctx| {
+        Root::configure(v, p, ctx)
+            .expect("root configures")
+            .charter()
+    };
+    let baseline = make(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test",
+    );
+
+    // Byte-identical configuration => identical charter (provenance is
+    // configuration-relative: two roots making identical decisions ARE the
+    // same policy — including a Copy of the root).
+    let rebuilt = make(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test",
+    );
+    assert_eq!(baseline, rebuilt);
+    let root = Root::configure(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test",
+    )
+    .expect("root configures");
+    let copied = root;
+    assert_eq!(copied.charter(), root.charter());
+
+    // Every axis moves the charter.
+    let other_verifier = make(
+        ObservedIdentity::from_receipt(verifier_receipt(0xBAD)),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test",
+    );
+    let other_policy = make(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy_receipt(0xBAD)),
+        "promotion-test",
+    );
+    let other_context = make(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test-other",
+    );
+    // Same claimed id over DIFFERENT retained observation bytes: the
+    // observation axes are charter-bearing on their own.
+    let forged_observation = make(
+        ObservedIdentity::presented(
+            verifier.id(),
+            ByteObservation::new(ContentId::of_bytes(b"other-canonical-bytes"), 99),
+        ),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test",
+    );
+    let charters = [
+        baseline,
+        other_verifier,
+        other_policy,
+        other_context,
+        forged_observation,
+    ];
+    for (i, a) in charters.iter().enumerate() {
+        for (j, b) in charters.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "axes {i} and {j} must yield distinct charters");
+            }
+        }
+    }
+}
+
+#[test]
+fn witnesses_carry_the_minting_roots_exact_charter() {
+    let subject = subject_receipt(11);
+    let verifier = verifier_receipt(0x600D);
+    let policy = policy_receipt(0x600D);
+    let admitted = permit_all_admitted(subject, verifier, policy);
+    let root = Root::configure(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        "promotion-test",
+    )
+    .expect("root configures");
+    let witness: Witness = root
+        .admit_for_promotion(
+            &admitted,
+            ObservedIdentity::from_receipt(verifier).bytes(),
+            ObservedIdentity::from_receipt(policy).bytes(),
+        )
+        .expect("the exact configured binding promotes");
+    assert_eq!(witness.root_charter(), root.charter());
+}
+
+#[test]
+fn a_self_configured_root_mints_witnesses_with_a_visibly_foreign_charter() {
+    // The domain owner pins the charter of ITS root (in a golden, a
+    // CONTRACT constant, or a composition-root check).
+    let owner_verifier = verifier_receipt(0x600D);
+    let owner_policy = policy_receipt(0x600D);
+    let owner_root = Root::configure(
+        ObservedIdentity::from_receipt(owner_verifier),
+        ObservedIdentity::from_receipt(owner_policy),
+        "promotion-test",
+    )
+    .expect("owner root configures");
+    let pinned = owner_root.charter();
+
+    // The adversary can freely configure its OWN root around its rogue
+    // permit-everything verifier and mint a structurally genuine witness —
+    // configure() is public and that is by design.
+    let rogue_verifier = verifier_receipt(0xBAD);
+    let rogue_policy = policy_receipt(0xBAD);
+    let rogue_admitted = permit_all_admitted(subject_receipt(7), rogue_verifier, rogue_policy);
+    let rogue_root = Root::configure(
+        ObservedIdentity::from_receipt(rogue_verifier),
+        ObservedIdentity::from_receipt(rogue_policy),
+        "promotion-test",
+    )
+    .expect("rogue root configures");
+    let rogue_witness = rogue_root
+        .admit_for_promotion(
+            &rogue_admitted,
+            ObservedIdentity::from_receipt(rogue_verifier).bytes(),
+            ObservedIdentity::from_receipt(rogue_policy).bytes(),
+        )
+        .expect("a self-configured root promotes its own binding");
+
+    // ...but the witness carries the rogue configuration's charter, so the
+    // pinning consumption boundary refuses it. THIS is the root-provenance
+    // closure: self-configured and cloned-then-reconfigured roots are
+    // distinguishable exactly where witnesses are consumed.
+    assert_ne!(rogue_witness.root_charter(), pinned);
+
+    // An honestly-minted witness from the owner's configuration passes the
+    // same pin.
+    let honest_admitted = permit_all_admitted(subject_receipt(8), owner_verifier, owner_policy);
+    let honest_witness = owner_root
+        .admit_for_promotion(
+            &honest_admitted,
+            ObservedIdentity::from_receipt(owner_verifier).bytes(),
+            ObservedIdentity::from_receipt(owner_policy).bytes(),
+        )
+        .expect("owner binding promotes");
+    assert_eq!(honest_witness.root_charter(), pinned);
+}
