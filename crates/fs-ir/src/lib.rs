@@ -24,6 +24,7 @@ pub mod admission;
 pub mod anytime;
 pub mod ast;
 pub mod catalog;
+pub mod conformance;
 #[cfg(feature = "derived-crosswalk")]
 pub mod derived_crosswalk;
 pub mod json;

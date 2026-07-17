@@ -1400,3 +1400,31 @@ boundary without widening it.
 - Operational interruption is rung-granular. A callback can stop before the
   next operator and receive a clean deterministic prefix, but sub-operator
   cancellation lands with the fs-exec tile integration.
+
+## Conformance suites speak IR (bead frankensim-epic-gauntlet-6nb.8, slice 1)
+
+`conformance` routes conformance cases through the REAL entry path: each
+`IrCase` binds a stable case id, a FrankenScript program (fresh source:
+syntax parse then version-bind; persisted replays enter via the version
+envelope), a recorded `fs_casebook::ToleranceSpec`, and an expected
+artifact as a domain-separated content address
+(`org.frankensim.fs-ir.conformance-artifact.v1`). `run_ir_suite` admits
+every program through the supplied `AdmissionContext` — the same
+parse → lower → admit door a production study walks through, capability
+checks included; a refusal becomes a failing structured record carrying
+the deterministic diagnosis, and only an admitted case executes its
+kernel (which receives the `AdmissionReport`). Both canonical identities
+from the `LoweringReceipt` ride each record as evidence pointers — the
+cross-agent negotiation anchor: two agents agree on the exact canonical
+program bytes, never on prose.
+
+### No-claim boundaries (IR conformance)
+
+- fs-ir has no general study executor: kernels execute in the case (the
+  domain crate's own runner); this slice makes ADMISSION and IDENTITY
+  real, not execution.
+- Artifact comparison is content-address equality; numeric-tolerance
+  comparison happens inside kernels, with the tolerance model recorded.
+- Golden-ledger unification (ledger-timetravel replay of conformance
+  acceptance runs) and IR-level cross-crate contract checking are the
+  bead's remaining slices, tracked there — not claimed here.

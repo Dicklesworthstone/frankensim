@@ -754,6 +754,7 @@ dependencies = [
 name = "fs-ad"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-la",
  "fs-math",
  "ft-autograd",
@@ -801,6 +802,9 @@ dependencies = [
 [[package]]
 name = "fs-archive"
 version = "0.0.1"
+dependencies = [
+ "fs-casebook",
+]
 
 [[package]]
 name = "fs-asbuilt"
@@ -899,6 +903,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-casebook",
  "fs-exec",
  "fs-fft",
  "fs-ivl",
@@ -1115,11 +1120,13 @@ dependencies = [
 name = "fs-fft"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-exec",
  "fs-math",
  "fs-propcheck",
  "fs-roofline",
  "fs-simd",
+ "fs-substrate",
 ]
 
 [[package]]
@@ -1324,6 +1331,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-casebook",
  "fs-evidence",
  "fs-exec",
  "fs-geom",
@@ -1341,6 +1349,7 @@ dependencies = [
 name = "fs-ivl"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-math",
  "fs-propcheck",
 ]
@@ -1351,6 +1360,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-casebook",
  "fs-exec",
  "fs-math",
  "fs-propcheck",
@@ -1442,6 +1452,9 @@ dependencies = [
 [[package]]
 name = "fs-math"
 version = "0.0.1"
+dependencies = [
+ "fs-casebook",
+]
 
 [[package]]
 name = "fs-mesh"
@@ -1643,6 +1656,7 @@ dependencies = [
 name = "fs-rand"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-math",
  "fs-propcheck",
 ]
@@ -1862,6 +1876,7 @@ version = "0.0.1"
 name = "fs-simd"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-substrate",
 ]
 
@@ -1923,6 +1938,7 @@ dependencies = [
  "fnp-ufunc",
  "fnx-classes",
  "fnx-runtime",
+ "fs-casebook",
  "fs-propcheck",
  "fs-substrate",
 ]
