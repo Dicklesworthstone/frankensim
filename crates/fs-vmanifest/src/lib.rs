@@ -55,6 +55,7 @@ mod i15;
 mod pd;
 mod rl;
 pub mod v1;
+pub mod v1_selection;
 
 pub use cp::cp_draft;
 pub use em::em_draft;

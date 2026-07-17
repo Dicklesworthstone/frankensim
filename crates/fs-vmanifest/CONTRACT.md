@@ -3363,3 +3363,33 @@ migration semantics per field, in data.
 - Relation soundness is structural (orientation, variance, cycles,
   contradiction); checker/TCB strings are recorded identities, not
   re-verified proofs.
+
+## V.1.5 deterministic selection semantics (bead i94v.7.1.5)
+
+`v1_selection` keeps scientific scope and campaign intensity orthogonal:
+`Stratum` {core, max} selects the declared claim/capability surface (max
+is a superset of core); `ProfileId` selects exactly one atomic built-in
+{smoke, standard, adversarial, soak, security, chaos, cross-isa, release}
+or a versioned manifest-defined `CompositeProfile` whose ordered inputs
+(order IS precedence), stated conflict rule, and digest are frozen before
+execution. Repeated `--profile` flags and implicit string composition
+refuse; legacy SMOKE/MID/FULL names refuse here with a ranked migration
+to the V.4.6 adapters. `expand_selection` is pure and enumeration-order
+invariant over stable CaseIds: ordered prefix filters (last match wins),
+capability routing and named skip predicates produce VISIBLE receipted
+skips, shards partition the selection exactly by case-id hash, and an
+empty or unsupported selection refuses (`v1-empty-selection` — non-green
+by construction). The pre-execution `SelectionReceipt` digests stratum,
+profile, budgets, selections, named skips, and shard assignment;
+`semantic_diff` reports exact added/removed cases, row-level budget
+changes, and scope changes, so no case ever disappears silently.
+
+### No-claim boundaries (selection semantics)
+
+- Selection is metadata: expanding it runs no production computation and
+  adjudicates nothing.
+- Budgets and timeout/cancellation policy are carried and receipted;
+  enforcement is the campaign runner's scope.
+- The legacy SMOKE/MID/FULL adapters themselves are V.4.6 scope; this
+  layer only guarantees they cannot silently alias.
+- Scale is a workload/budget dimension, never a profile id, per the bead.

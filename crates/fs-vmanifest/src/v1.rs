@@ -65,6 +65,19 @@ impl V1Error {
         self
     }
 
+    /// Crate-internal constructor with a ranked fix list.
+    pub(crate) fn with_fixes(
+        rule: &'static str,
+        detail: impl Into<String>,
+        fixes: &[&str],
+    ) -> V1Error {
+        V1Error {
+            rule,
+            detail: detail.into(),
+            fixes: fixes.iter().map(|f| (*f).to_owned()).collect(),
+        }
+    }
+
     /// The stable rule slug.
     #[must_use]
     pub const fn rule(&self) -> &'static str {
