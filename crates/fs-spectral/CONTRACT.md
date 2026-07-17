@@ -1,5 +1,7 @@
 # CONTRACT: fs-spectral
 
+## Purpose and layer
+
 Layer L1 spectral semantics and health monitoring. This crate owns three related,
 but deliberately separate, capabilities:
 
@@ -31,6 +33,12 @@ Production dependencies are limited to:
   normalization boundaries.
 
 There is no FFI and no external numerical runtime.
+
+## Public types and semantics
+
+The API sections below (spectral health, admission, physical-domain
+adapter, Maslov--Krein--Evans bridge, eigensolver service, result truth)
+are the complete public-type surface; each states its own semantics.
 
 ## Existing spectral-health API
 
@@ -642,6 +650,16 @@ field envelope so the 256 promotion-bearing schema-v2 structure claims are
 representable. Authority verifier and policy descriptors retain their tighter
 64 KiB field envelope; the problem accommodation does not broaden those inputs.
 
+## Invariants
+
+- The semantic and epistemic capabilities (admission, bridge statements,
+  result truth) classify and verify; they never compute eigenpairs, prove
+  theorems, or manufacture scientific evidence (stated above; binding).
+- Admission and bridge statements are versioned; retained evidence must
+  name the exact proposition being used, and prerequisite checks are
+  explicit rather than assumed.
+- There is no FFI and no external numerical runtime.
+
 ## Units and normalization
 
 Floquet periods use `fs_qty::Time`; continuous branch anchors use
@@ -695,7 +713,7 @@ None. Workspace `unsafe_code = "deny"` applies.
 None. The RB.M1 moonshot is represented only as typed statement/conjecture data;
 no numerical or theorem-authority path is promoted into default execution.
 
-## Conformance evidence
+## Conformance tests
 
 - `tests/spectral.rs`: existing deterministic Jacobi, gap, hysteresis,
   confidence propagation, conditioning, and route tests.
