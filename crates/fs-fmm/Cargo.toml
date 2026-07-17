@@ -12,3 +12,6 @@ layer = "L2"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+fs-obs = { path = "../fs-obs" }

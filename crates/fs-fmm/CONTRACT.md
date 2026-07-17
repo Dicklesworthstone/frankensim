@@ -78,6 +78,16 @@ gating rule).
 translation invariance; fmm-003 scaling trend; invalid geometry, tuning,
 charge, and work-envelope refusal.
 
+Completed battery cases emit schema-validated `fs-obs` JSONL under suite
+`fs-fmm/battery`. Aggregate identities are `fmm-001` through `fmm-003`, with
+distinct `fmm-00N/measurement` companions that retain the order/error/tree,
+translation-error, and timing/exponent rows. Their literal input roots are
+`0x1001_2026_0708_0001`, `0x1001_2026_0708_0002`, and
+`0x1001_2026_0708_0003`; the last root is intentionally replayed independently
+for every size in the scaling ladder. Measurements and aggregate verdicts are
+emitted before the original terminal assertion, so a failed gate remains an
+ordinary Rust test failure as well as a canonical error event.
+
 ## No-claim boundaries
 
 - Adaptive trees (U/V/W/X interaction lists) — the uniform-depth
@@ -88,3 +98,6 @@ charge, and work-envelope refusal.
 - Periodic/boundary-image variants; oscillatory kernels.
 - Recoverable allocator exhaustion for internal tree/map/pass buffers. Work is
   bounded before those allocations, but allocator failure remains process-level.
+- The `fmm-003/measurement` timing rows are diagnostic observations, not
+  portable performance authority; performance claims still require the
+  machine-fingerprinted perf lanes and their acceptance bands.

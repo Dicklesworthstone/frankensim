@@ -1199,6 +1199,9 @@ dependencies = [
 [[package]]
 name = "fs-fmm"
 version = "0.0.1"
+dependencies = [
+ "fs-obs",
+]
 
 [[package]]
 name = "fs-frame"
