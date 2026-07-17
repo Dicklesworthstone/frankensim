@@ -72,8 +72,9 @@ the anytime-valid audit threshold used by authenticated authority.
   build identity, recorded-at) retained behind private fields so a
   caller-fitted model can never impersonate receipt-backed evidence.
   `provisional_unaudited` wraps caller fits as visibly provisional; every
-  prediction carries the scope fields and mint-time class, and
-  composition never upgrades the class.
+  opaque prediction carries the complete `CostModelScope`, including machine
+  key and producing op id, plus either the mint-time or explicitly assessed
+  class; composition never upgrades the class.
 - `cost_model_from_tune` — rebuilds a SEALED model from one EXACT
   `(kernel, shape_class, machine)` fs-ledger key. It accepts only the current
   fs-roofline receipt-v3 / row-v4 / `roofline-v8` production-v3 schema
@@ -332,9 +333,11 @@ preempt or enforce a time or memory limit on an arbitrary synchronous closure.
   Router therefore uses it only to enlarge an uncertified declaration.
 - The sealed carrier proves WHO minted a model and from WHAT validated
   row; it does not re-verify the ledger at prediction time (staleness
-  beyond `recorded_at_ns` is the consumer's freshness policy, not yet
-  folded into the class), and `provisional_unaudited` is a labeling
-  mechanism, not a sandbox — a consumer that ignores
+  is assessed only when a consumer supplies its current time, machine,
+  and preregistered `FreshnessPolicy`; `predict_assessed` folds that
+  verdict into the returned class, while raw `predict` preserves the
+  mint-time class), and `provisional_unaudited` is a labeling mechanism,
+  not a sandbox — a consumer that ignores
   `CostEvidenceClass` forfeits the distinction (fs-ir admission and
   fs-session estimate do not). External issuer signatures over sealed
   scopes remain future scope, coordinated with the admitted-scientific-

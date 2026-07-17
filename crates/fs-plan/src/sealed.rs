@@ -344,36 +344,43 @@ impl SealedCostModel {
         let prediction = self.model.predict(size)?;
         Ok(SealedCostPrediction {
             prediction,
-            kernel: self.scope.kernel.clone(),
-            shape_class: self.scope.shape_class.clone(),
-            run_receipt: self.scope.run_receipt.clone(),
-            build_identity: self.scope.build_identity.clone(),
-            recorded_at_ns: self.scope.recorded_at_ns,
+            scope: self.scope.clone(),
             evidence: self.class,
         })
     }
 }
 
-/// A prediction that remembers what it speaks for. The numeric bands
-/// are [`CostPrediction`]; the rest is the provenance the bead 2pmb
-/// audit found being dropped.
+/// A prediction that remembers exactly what it speaks for.
+///
+/// Private fields keep the authority carrier opaque: callers may read the
+/// numeric bands, complete validated scope, and evidence class, but cannot
+/// forge receipt-backed provenance around an arbitrary [`CostPrediction`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SealedCostPrediction {
-    /// The quantile bands (P10/P50/P90, n_obs, extrapolation flag).
-    pub prediction: CostPrediction,
-    /// The exact tune kernel (or `provisional:<label>`).
-    pub kernel: String,
-    /// The exact tune shape class.
-    pub shape_class: String,
-    /// The finalized-run receipt digest.
-    pub run_receipt: String,
-    /// The validated build identity.
-    pub build_identity: String,
-    /// Evidence-operation completion time (ledger nanoseconds; 0 for
-    /// provisional).
-    pub recorded_at_ns: i64,
-    /// The class stamped at mint time — never upgraded downstream.
-    pub evidence: CostEvidenceClass,
+    prediction: CostPrediction,
+    scope: CostModelScope,
+    evidence: CostEvidenceClass,
+}
+
+impl SealedCostPrediction {
+    /// The quantile bands (P10/P50/P90, observation count, and extrapolation
+    /// flag). Returning the `Copy` value cannot alter the sealed carrier.
+    #[must_use]
+    pub const fn prediction(&self) -> CostPrediction {
+        self.prediction
+    }
+
+    /// The complete validated (or visibly provisional) scope.
+    #[must_use]
+    pub const fn scope(&self) -> &CostModelScope {
+        &self.scope
+    }
+
+    /// The mint-time or freshness-assessed evidence class.
+    #[must_use]
+    pub const fn evidence_class(&self) -> CostEvidenceClass {
+        self.evidence
+    }
 }
 
 #[cfg(test)]
@@ -489,16 +496,23 @@ mod tests {
         let (fresh, verdict) = sealed
             .predict_assessed(512.0, 1_200, b"machine-a", policy)
             .expect("predicts");
-        assert_eq!(fresh.evidence, CostEvidenceClass::ExactRooflineReceipt);
+        assert_eq!(
+            fresh.evidence_class(),
+            CostEvidenceClass::ExactRooflineReceipt
+        );
         assert_eq!(verdict, StalenessVerdict::Fresh);
         let (stale, verdict) = sealed
             .predict_assessed(512.0, 9_000, b"machine-a", policy)
             .expect("predicts");
-        assert_eq!(stale.evidence, CostEvidenceClass::StaleRooflineReceipt);
+        assert_eq!(
+            stale.evidence_class(),
+            CostEvidenceClass::StaleRooflineReceipt
+        );
         assert!(matches!(verdict, StalenessVerdict::AgedOut { .. }));
         // The numeric bands are identical; only the evidence label
         // degrades — staleness never rewrites the science.
-        assert_eq!(fresh.prediction, stale.prediction);
+        assert_eq!(fresh.prediction(), stale.prediction());
+        assert_eq!(fresh.scope(), stale.scope());
         // The mint-time stamp itself is immutable.
         assert_eq!(
             sealed.evidence_class(),
@@ -536,15 +550,16 @@ mod tests {
         assert!(sealed.scope().machine().is_empty());
         let prediction = sealed.predict(512.0).expect("predicts");
         assert_eq!(
-            prediction.evidence,
+            prediction.evidence_class(),
             CostEvidenceClass::ProvisionalUnaudited,
             "the class travels into every prediction"
         );
-        assert_eq!(prediction.kernel, "provisional:unit-test");
-        assert_eq!(prediction.recorded_at_ns, 0);
+        assert_eq!(prediction.scope(), sealed.scope());
+        assert_eq!(prediction.scope().kernel(), "provisional:unit-test");
+        assert_eq!(prediction.scope().recorded_at_ns(), 0);
         // The math is untouched by the seal: bands match the raw model.
         let raw = fitted().predict(512.0).expect("raw predicts");
-        assert_eq!(prediction.prediction, raw);
+        assert_eq!(prediction.prediction(), raw);
     }
 
     #[test]
@@ -564,14 +579,24 @@ mod tests {
             CostEvidenceClass::ExactRooflineReceipt
         );
         let prediction = sealed.predict(512.0).expect("predicts");
-        assert_eq!(prediction.evidence, CostEvidenceClass::ExactRooflineReceipt);
-        assert_eq!(prediction.kernel, "simd-axpy-f64");
-        assert_eq!(prediction.shape_class, "roofline-v1:run=abc:op=41");
-        assert_eq!(prediction.run_receipt, "abc");
-        assert_eq!(prediction.build_identity, "build-xyz");
-        assert_eq!(prediction.recorded_at_ns, 1_784_000_000_000_000_000);
-        assert_eq!(sealed.scope().op(), 41);
-        assert_eq!(sealed.scope().machine(), &[7u8; 40][..]);
+        assert_eq!(
+            prediction.evidence_class(),
+            CostEvidenceClass::ExactRooflineReceipt
+        );
+        assert_eq!(prediction.scope(), sealed.scope());
+        assert_eq!(prediction.scope().kernel(), "simd-axpy-f64");
+        assert_eq!(
+            prediction.scope().shape_class(),
+            "roofline-v1:run=abc:op=41"
+        );
+        assert_eq!(prediction.scope().run_receipt(), "abc");
+        assert_eq!(prediction.scope().op(), 41);
+        assert_eq!(prediction.scope().machine(), &[7u8; 40][..]);
+        assert_eq!(prediction.scope().build_identity(), "build-xyz");
+        assert_eq!(
+            prediction.scope().recorded_at_ns(),
+            1_784_000_000_000_000_000
+        );
     }
 
     #[test]

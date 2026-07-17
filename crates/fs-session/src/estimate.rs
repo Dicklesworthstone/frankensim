@@ -213,7 +213,7 @@ pub fn estimate(
         });
         let prediction = model
             .predict(*size)
-            .map(|sealed| sealed.prediction)
+            .map(|sealed| sealed.prediction())
             .map_err(|error| crate::SessionError::Submission {
                 what: format!("cost model for operation {verb:?} refused size {size}: {error}"),
             })?;

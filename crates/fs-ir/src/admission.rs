@@ -945,7 +945,7 @@ fn cost_registered_calls<'a>(
             evidence_warned.push(verb);
             out.push(finding);
         }
-        match model.predict(size).map(|sealed| sealed.prediction) {
+        match model.predict(size).map(|sealed| sealed.prediction()) {
             Ok(prediction) if prediction.p90.is_finite() && prediction.p90 >= 0.0 => {
                 let next_total = total + prediction.p90;
                 if next_total.is_finite() {
@@ -1023,7 +1023,7 @@ fn check_budget(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Find
             .cost_models
             .get(*verb)
             .and_then(|model| model.predict(size / 2.0).ok())
-            .map(|sealed| sealed.prediction.p90)
+            .map(|sealed| sealed.prediction().p90)
             .filter(|prediction| prediction.is_finite() && *prediction >= 0.0);
         if let Some(halved) = halved {
             fixes.push(RankedFix {
