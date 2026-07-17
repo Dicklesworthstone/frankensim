@@ -184,3 +184,65 @@ fn identical_programs_negotiate_on_identical_canonical_identities() {
     );
     assert_eq!(a.records[0].inputs_digest, b.records[0].inputs_digest);
 }
+
+/// Slice 2 — golden-ledger unification: a conformance acceptance run IS
+/// a golden ledger, and CI replays it exactly the way it replays
+/// features: `travel::replay_verdict` over two runs is the one
+/// replay/compare mechanism.
+#[test]
+fn conformance_runs_are_golden_ledgers_replayed_via_timetravel() {
+    use fs_ir::conformance::run_ir_suite_ledgered;
+    use fs_ledger::{FiveExplicits, Ledger};
+
+    let cx = permissive_context();
+    let explicits = FiveExplicits {
+        seed: b"conformance-suite-seed-v1",
+        versions: "{\"constellation\":\"2026-07\"}",
+        budget: "{\"wall_s\":3600}",
+        capability: "{\"ops\":[\"flux.*\",\"ascent.*\",\"xform.*\"]}",
+    };
+    let run = |kernel_bytes: &'static [u8]| {
+        let ledger = Ledger::open(":memory:").expect("ledger opens");
+        let mut case = spout_case("ir-006-golden", b"golden-artifact-v1");
+        case.kernel = Box::new(move |_| kernel_bytes.to_vec());
+        let outcome = run_ir_suite_ledgered(
+            "ir-golden-suite",
+            vec![case],
+            &cx,
+            &ledger,
+            &explicits,
+            1_000,
+        )
+        .expect("ledgered run records");
+        (ledger, outcome)
+    };
+
+    // Two identical runs: the replay verdict is CLEAN — same study.
+    let (ledger_a, run_a) = run(b"golden-artifact-v1");
+    let (ledger_b, run_b) = run(b"golden-artifact-v1");
+    run_a.report.assert_green();
+    run_b.report.assert_green();
+    assert_eq!(run_a.op_ids.len(), 1);
+    let verdict = ledger_a
+        .replay_verdict(1, &ledger_b, 1)
+        .expect("replay verdict computes");
+    assert!(
+        verdict.is_replay_clean(),
+        "identical conformance runs must replay clean: {verdict:?}"
+    );
+
+    // A drifted kernel produces a DIFFERENT golden ledger: the same
+    // mechanism that catches feature drift catches conformance drift.
+    let (ledger_c, run_c) = run(b"drifted-artifact-v2");
+    assert!(
+        !run_c.report.all_passed(),
+        "drifted artifact fails the structured record too"
+    );
+    let verdict = ledger_a
+        .replay_verdict(1, &ledger_c, 1)
+        .expect("replay verdict computes");
+    assert!(
+        !verdict.is_replay_clean(),
+        "artifact drift must break the ledger replay: {verdict:?}"
+    );
+}

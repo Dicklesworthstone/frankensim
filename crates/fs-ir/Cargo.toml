@@ -16,6 +16,7 @@ fs-casebook = { path = "../fs-casebook" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-geom = { path = "../fs-geom" }
+fs-ledger = { path = "../fs-ledger" }
 fs-plan = { path = "../fs-plan" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }

@@ -1425,6 +1425,11 @@ program bytes, never on prose.
   real, not execution.
 - Artifact comparison is content-address equality; numeric-tolerance
   comparison happens inside kernels, with the tolerance model recorded.
-- Golden-ledger unification (ledger-timetravel replay of conformance
-  acceptance runs) and IR-level cross-crate contract checking are the
-  bead's remaining slices, tracked there — not claimed here.
+- Golden-ledger unification IS claimed (slice 2): `run_ir_suite_ledgered`
+  records one finished op per case (frozen IR identity, the suite's Five
+  Explicits, content-addressed linked artifacts, JSON diagnostics on
+  refusal/drift) with caller-supplied logical timestamps — never a clock
+  read; `fs_ledger::travel::replay_verdict` over two runs is the one
+  replay/compare mechanism for conformance and features alike.
+- IR-level cross-crate contract checking is the bead's remaining slice,
+  tracked there — not claimed here.
