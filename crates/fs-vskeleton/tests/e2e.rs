@@ -10,6 +10,12 @@ use std::sync::atomic::AtomicU32;
 
 static NEXT_DB: AtomicU32 = AtomicU32::new(0);
 
+const E2E_SUITE: &str = "fs-vskeleton/e2e";
+const INFRA_SUITE: &str = "fs-vskeleton";
+const STUDY_INPUT_SEED: u64 = 0x5EED_0001;
+const BAD_STUDY_INPUT_SEED: u64 = 1;
+const FIXED_INPUT_SEED: u64 = 0;
+
 fn temp_db() -> String {
     let n = NEXT_DB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir()
@@ -18,38 +24,62 @@ fn temp_db() -> String {
         .to_string()
 }
 
-const STUDY: &str = r#"(study "pv-plate-hole-v1"
-  (seed 0x5EED0001)
+fn study() -> String {
+    format!(
+        r#"(study "pv-plate-hole-v1"
+  (seed {STUDY_INPUT_SEED:#X})
   (grid 33)
   (budget (cg-iters 2000000))
   (hole-radius 0.25)
   (opt-steps 3)
   (step-size 0.15)
-  (volume-weight 0.05))"#;
+  (volume-weight 0.05))"#
+    )
+}
 
-fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-vskeleton/e2e\",\"case\":\"{case}\",\"verdict\":\"pass\",\"detail\":\"{detail}\"}}"
+fn verdict(suite: &str, case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(suite, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: suite.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("vertical-skeleton verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("vertical-skeleton verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
 }
 
 #[test]
 fn pv_001_deterministic_rerun_hash_equality() {
     let (db_a, db_b) = (temp_db(), temp_db());
-    let a = fs_vskeleton::run_study(STUDY, &db_a).expect("run a");
-    let b = fs_vskeleton::run_study(STUDY, &db_b).expect("run b");
-    assert_eq!(
-        a.artifact_hashes, b.artifact_hashes,
-        "artifact hashes must be identical"
-    );
-    assert_eq!(a.report, b.report, "reports must be byte-identical");
-    assert!(!a.artifact_hashes.is_empty());
+    let study = study();
+    let a = fs_vskeleton::run_study(&study, &db_a).expect("run a");
+    let b = fs_vskeleton::run_study(&study, &db_b).expect("run b");
+    let pass = a.artifact_hashes == b.artifact_hashes
+        && a.report == b.report
+        && !a.artifact_hashes.is_empty();
     verdict(
+        E2E_SUITE,
         "pv-001",
+        pass,
         &format!(
             "{} artifacts bit-identical across reruns",
             a.artifact_hashes.len()
         ),
+        STUDY_INPUT_SEED,
     );
     let _ = std::fs::remove_file(&db_a);
     let _ = std::fs::remove_file(&db_b);
@@ -58,11 +88,15 @@ fn pv_001_deterministic_rerun_hash_equality() {
 #[test]
 fn pv_002_replay_reproduces_ledger() {
     let db = temp_db();
-    let outcome = fs_vskeleton::run_study(STUDY, &db).expect("run");
+    let study = study();
+    let outcome = fs_vskeleton::run_study(&study, &db).expect("run");
     fs_vskeleton::replay(&db).expect("replay must reproduce");
     verdict(
+        E2E_SUITE,
         "pv-002",
+        true,
         &format!("replay matched {} artifacts", outcome.artifact_hashes.len()),
+        STUDY_INPUT_SEED,
     );
     let _ = std::fs::remove_file(&db);
 }
@@ -70,38 +104,42 @@ fn pv_002_replay_reproduces_ledger() {
 #[test]
 fn pv_003_corrupted_ledger_fails_loudly() {
     let db = temp_db();
-    fs_vskeleton::run_study(STUDY, &db).expect("run");
+    let study = study();
+    fs_vskeleton::run_study(&study, &db).expect("run");
     let led = fs_vskeleton::ledger::MiniLedger::open(&db).expect("open");
     led.corrupt_first_artifact_for_test().expect("corrupt");
     let err = fs_vskeleton::replay(&db).expect_err("tampered ledger must not replay");
-    assert!(
+    verdict(
+        E2E_SUITE,
+        "pv-003",
         err.contains("LedgerCorruption"),
-        "loud corruption verdict expected: {err}"
+        &format!("byte corruption detected and refused: {err}"),
+        STUDY_INPUT_SEED,
     );
-    verdict("pv-003", "byte corruption detected and refused");
     let _ = std::fs::remove_file(&db);
 }
 
 #[test]
 fn pv_004_objective_improves_and_gradient_checks_pass() {
     let db = temp_db();
-    let o = fs_vskeleton::run_study(STUDY, &db).expect("run");
-    assert_eq!(o.objective_trace.len(), 3);
-    assert!(
-        o.objective_trace.last().unwrap() < o.objective_trace.first().unwrap(),
-        "projected GD must reduce the objective: {:?}",
-        o.objective_trace
-    );
-    assert!(o.gradient_check_rel_err.iter().all(|&e| e < 1e-4));
-    assert!(o.report.contains("gradient checks: 3 / 3 passed"));
+    let study = study();
+    let o = fs_vskeleton::run_study(&study, &db).expect("run");
+    let objective_start = o.objective_trace.first().copied().unwrap_or(f64::NAN);
+    let objective_end = o.objective_trace.last().copied().unwrap_or(f64::NAN);
+    let worst_gradient_error = o.gradient_check_rel_err.iter().copied().fold(0.0, f64::max);
+    let pass = o.objective_trace.len() == 3
+        && objective_end < objective_start
+        && o.gradient_check_rel_err.iter().all(|&e| e < 1e-4)
+        && o.report.contains("gradient checks: 3 / 3 passed");
     verdict(
+        E2E_SUITE,
         "pv-004",
+        pass,
         &format!(
             "J: {:.6e} -> {:.6e}; worst grad rel err {:.2e}",
-            o.objective_trace[0],
-            o.objective_trace[2],
-            o.gradient_check_rel_err.iter().copied().fold(0.0, f64::max)
+            objective_start, objective_end, worst_gradient_error
         ),
+        STUDY_INPUT_SEED,
     );
     let _ = std::fs::remove_file(&db);
 }
@@ -110,24 +148,24 @@ fn pv_004_objective_improves_and_gradient_checks_pass() {
 fn pv_005_bad_studies_teach() {
     let db = temp_db();
     // Missing budget: the P4 message.
-    let e = fs_vskeleton::run_study(
-        r#"(study "x" (seed 1) (grid 33) (hole-radius 0.25)
-            (opt-steps 1) (step-size 0.1) (volume-weight 0.05))"#,
-        &db,
-    )
-    .expect_err("budgets are mandatory");
-    assert!(e.contains("budgets are mandatory"), "{e}");
+    let missing_budget = format!(
+        r#"(study "x" (seed {BAD_STUDY_INPUT_SEED}) (grid 33) (hole-radius 0.25)
+            (opt-steps 1) (step-size 0.1) (volume-weight 0.05))"#
+    );
+    let e = fs_vskeleton::run_study(&missing_budget, &db).expect_err("budgets are mandatory");
+    let missing_budget_teaches = e.contains("budgets are mandatory");
     // Tiny budget: enforcement, not advice.
-    let e = fs_vskeleton::run_study(
-        r#"(study "x" (seed 1) (grid 33) (budget (cg-iters 3)) (hole-radius 0.25)
-            (opt-steps 1) (step-size 0.1) (volume-weight 0.05))"#,
-        &db,
-    )
-    .expect_err("budget must be enforced");
-    assert!(e.contains("BudgetExhausted"), "{e}");
+    let tiny_budget = format!(
+        r#"(study "x" (seed {BAD_STUDY_INPUT_SEED}) (grid 33) (budget (cg-iters 3)) (hole-radius 0.25)
+            (opt-steps 1) (step-size 0.1) (volume-weight 0.05))"#
+    );
+    let e = fs_vskeleton::run_study(&tiny_budget, &db).expect_err("budget must be enforced");
     verdict(
+        E2E_SUITE,
         "pv-005",
+        missing_budget_teaches && e.contains("BudgetExhausted"),
         "missing and exhausted budgets both refused with guidance",
+        BAD_STUDY_INPUT_SEED,
     );
     let _ = std::fs::remove_file(&db);
 }
@@ -139,14 +177,16 @@ fn blake3_content_addresses_are_64_hex_and_domain_separated() {
     // matters: the same bytes under a different domain must not collide
     // with artifact addresses.
     let h = fs_vskeleton::ledger::content_hash(b"payload");
-    assert_eq!(h.len(), 64, "BLAKE3 hex width: {h}");
-    assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
-    assert_ne!(
-        h,
-        fs_blake3::hash_bytes(b"payload").to_hex(),
-        "artifact addresses must be domain-separated from plain hashing"
+    let pass = h.len() == 64
+        && h.chars().all(|c| c.is_ascii_hexdigit())
+        && h != fs_blake3::hash_bytes(b"payload").to_hex();
+    verdict(
+        INFRA_SUITE,
+        "hash-shape",
+        pass,
+        &format!("64-hex domain-separated BLAKE3 artifact address: {h}"),
+        FIXED_INPUT_SEED,
     );
-    println!("{{\"suite\":\"fs-vskeleton\",\"case\":\"hash-shape\",\"verdict\":\"pass\",\"hash\":\"{h}\"}}");
 }
 
 #[test]
@@ -173,18 +213,20 @@ fn pre_v2_ledger_is_version_refused_with_teaching_error() {
     let err = fs_vskeleton::ledger::MiniLedger::open(&db)
         .err()
         .expect("pre-v2 ledger must refuse");
-    assert!(
-        err.contains("LedgerFormatMismatch") && err.contains("fresh ledger"),
-        "teaching refusal expected, got: {err}"
-    );
     // Regression: the teaching string was line-wrapped INSIDE the literal, so it
     // rendered with long embedded space runs. It must read cleanly.
-    assert!(
-        !err.contains("  "),
-        "teaching message must not have garbled space runs: {err}"
+    let pass =
+        err.contains("LedgerFormatMismatch") && err.contains("fresh ledger") && !err.contains("  ");
+    verdict(
+        INFRA_SUITE,
+        "v1-refusal",
+        pass,
+        &format!(
+            "pre-v2 ledger refused with teaching diagnostic: {}",
+            err.split(':').next().unwrap_or("")
+        ),
+        FIXED_INPUT_SEED,
     );
-    println!("{{\"suite\":\"fs-vskeleton\",\"case\":\"v1-refusal\",\"verdict\":\"pass\",\"detail\":\"{}\"}}",
-        err.split(':').next().unwrap_or(""));
     let _ = std::fs::remove_file(&db); // test temp file cleanup, same as temp_db siblings
 }
 

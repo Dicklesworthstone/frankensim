@@ -45,10 +45,22 @@ None.
 None.
 
 ## Conformance tests
-tests/e2e.rs pv-001..pv-005 (determinism, replay, corruption, optimization +
-gradient gates, budget teaching errors) + 7 model/parser unit tests including
-the Poisson series-reference check (peak u ≈ 0.0736713 for -Δu=1).
+`tests/e2e.rs` cases pv-001..pv-005 cover determinism, replay, corruption,
+optimization + gradient gates, and budget teaching errors. `hash-shape` and
+`v1-refusal` cover domain-separated BLAKE3 artifact identity and legacy-ledger
+migration refusal. Each completed aggregate uses the canonical fs-obs
+`ConformanceCase` schema with Info/Error severity, passes the failure-record
+lint, validates as JSONL, and prints before its terminal assertion. Cases
+pv-001..pv-004 carry their literal study input seed `0x5EED0001`; pv-005 carries
+its literal malformed-study seed `1`; the fixed infrastructure cases carry
+seed zero. Setup and operation expectations that abort before an aggregate is
+reached remain ordinary Rust test diagnostics, so absence of a verdict is not
+a structured failure record. The future-format refusal test remains
+assertion-only. Seven model/parser unit tests additionally include the Poisson
+series-reference check (peak u ≈ 0.0736713 for -Δu=1).
 
 ## No-claim boundaries
-Performance (unoptimized by design); no RNG
-consumption (seed recorded for provenance only); 2D scalar physics only.
+Performance (unoptimized by design); no RNG consumption (study seeds are
+recorded as input provenance only); 2D scalar physics only. Process IDs and the
+atomic counter used to isolate temporary database names are execution-resource
+identities, not input seeds.
