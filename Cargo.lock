@@ -832,6 +832,7 @@ version = "0.0.1"
 dependencies = [
  "fs-ad",
  "fs-adjoint",
+ "fs-eproc",
  "fs-feec",
  "fs-la",
  "fs-math",
@@ -1664,6 +1665,8 @@ version = "0.0.1"
 dependencies = [
  "fs-eproc",
  "fs-exec",
+ "fs-obs",
+ "fs-rand",
 ]
 
 [[package]]
@@ -2077,7 +2080,9 @@ dependencies = [
  "fs-cutfem",
  "fs-ivl",
  "fs-material",
+ "fs-obs",
  "fs-sparse",
+ "fs-topo",
 ]
 
 [[package]]
