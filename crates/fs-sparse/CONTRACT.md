@@ -166,6 +166,27 @@ property, WSBF, preconditioner, release-performance, and cross-ISA lanes as
 separate evidence; this subset awards no fresh oracle, performance, nightly,
 or dual-ISA claim.
 
+`tests/frankenscipy_oracle_casebook.rs` supplies the missing test-only
+FrankenScipy sparse baseline. Identical canonical CSR storage is admitted by
+`fs-sparse::Csr` and `fsci_sparse::CsrMatrix`; a 4×5 dyadic KAT pins both
+outputs bit-for-bit, including an empty-row positive zero. Twelve disclosed
+LCG fixtures (root `0x5A25_5A25_D15C_0001`, 84 output rows) compare the fused
+FrankenSim path with FrankenScipy's separately rounded matvec under the
+declared absolute oracle-agreement bound `32·f64::EPSILON`. Canonical
+little-endian frames retain every row pointer, column, value, vector,
+implementation/API version, tolerance, and expected KAT bits. The input
+frame is sufficient to regenerate both outputs; the passing structured record
+retains separate FNV digests of all 84 computed output-bit rows, while any
+failing row logs both implementations' exact bits and the full frame. The
+input digests are `d7c1b8ae30777f71` (KAT), `735ea2d324e967bc` (seeded), and
+`3d1185b7e82a131f` (shape-refusal policy). Seed `0x5A25_0000` flips one
+reference bit, producing one replay-identical red record at digest
+`323f3591ddcb0d6e` and an `assert_green` refusal. The structural case records
+fs-sparse's documented actionable programmer-error panic and FrankenScipy's
+typed `IncompatibleShape` refusal, with the fs-sparse output unchanged.
+`fsci-sparse` remains a development dependency only; this tranche is central
+package-proof pending.
+
 ## FrankenNumpy interop (bead gtql item c, feature `fnp-interop`)
 
 Scout verdict recorded: fnp-ndarray holds only layout metadata; the
@@ -207,3 +228,9 @@ default; the L1 core pulls no constellation crate unless opted in.
 - Canonical `Csr`, `Bsr`, and `Sell` use `usize` indices. `CsrCompact` narrows
   column indices to `u32` and refuses dimensions outside that space; compact
   BSR/SELL indices are not claimed.
+- The FrankenScipy Casebook proves agreement for its fixed canonical KAT and
+  disclosed seeded finite fixture family. It does not establish Python SciPy
+  execution, arbitrary-matrix equivalence, performance parity, fresh
+  dual-ISA execution, or the umbrella's full G5 sweep. The `32·EPSILON`
+  margin is an absolute oracle-agreement bound for the fixture's five terms per row and
+  `|a_ij|, |x_j| ≤ 1/2`; it is not a dimension-free tolerance for callers.
