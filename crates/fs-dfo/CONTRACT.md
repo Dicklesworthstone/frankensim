@@ -9,8 +9,9 @@
 
 ## Purpose and layer
 Derivative-free optimization engines (plan §9.3). Layer: **L4 ASCENT**.
-Deps: fs-rand (keyed sampling), fs-la (eigendecomposition), fs-math, fs-robust
-(canonical empirical risk algebra).
+Deps: fs-rand (keyed sampling), fs-la (eigendecomposition), fs-math, fs-obs
+(canonical conformance evidence), and fs-robust (canonical empirical risk
+algebra).
 Engines are IR-agnostic (closure objectives) BY DESIGN — routing from
 the fs-opt problem IR is a wiring bead once that crate stabilizes
 (deliberate collision avoidance, bead 7tv.4 trail).
@@ -154,6 +155,47 @@ rejected at construction. Aggregate results use canonical fs-obs
 measurements use separate validated fs-obs `Custom` events that also retain
 those seeds. Assertions precede each passing aggregate verdict, so earlier
 failures remain ordinary Rust test diagnostics.
+
+The remaining MOO, NSGA-III, OT, and DRO-oracle batteries use the same canonical
+evidence boundary. Their 22 ordinary post-assert rows retain the existing suite
+and case identities and emit `ConformanceCase` events with Info/Error severity,
+failure-record linting, `to_jsonl`, schema validation, print-before-terminal-
+assert ordering, and exact input-seed provenance. The cases are:
+
+- `fs-dfo-moo`: `hypervolume`, `nds`, `helper-edges`, `zdt1`, `zdt2`,
+  `nsga2-replay`, `knee`, `cvar-ru`, `cvar-ties`, `mc-hv`, `mc-hv-edges`, and
+  `hv-archive`.
+- `fs-dfo-nsga3`: `das-dennis`, `dtlz2-m3`, `m5-vs-nsga2`, and `moead`.
+- `fs-dfo-ot`: `marginals-symmetry`, `eps-ladder`, and `translation`.
+- `fs-dfo-dro-oracle`: `endpoints`, `strong-duality`, and `robust-shift`.
+
+The four frozen-hash rows are measurements rather than pre-declared passing
+verdicts. `moo-golden`, `nsga3-golden`, `ot-golden`, and `dro-golden` therefore
+emit validated object-shaped `Custom` companions under distinct
+`<case>/measurement` scopes, with the original case identity retained as the
+Custom name. Each companion records actual and expected hashes plus the exact
+input roots and logical substream coordinates, then the original frozen-hash
+assertion runs unchanged. This preserves the diagnostic row on a golden
+mismatch without falsely emitting a passing aggregate.
+
+Seed provenance follows the literal fixtures. MOO uses optimizer input seed 21
+and Sobol comparator seed 777 for the ZDT summaries, seed 21 for replay, seed
+101 with stream `(kernel=0xC7A2,tile=0)` for Gaussian CVaR, seeds 5 and 6 with
+CVaR tile 1 for its golden, MC-HV roots 7, 8, 9, 10, and 42, and edge-call roots
+11 and 12. NSGA-III uses seed 17 for DTLZ2, optimizer seed 23 plus MC-HV seed 99
+for the many-objective comparison, seed 3 for its golden, and roots 29 and 31
+for the composite MOEA/D summary. OT uses root 111 and kernel `0x0007`, with
+tiles 1/2 for marginal symmetry, 3/4 for the epsilon ladder, 5 for translation,
+and 6/7 for its golden. DRO-oracle uses root 131 with
+`(kernel=0x0D20,tile=1)`, root 132 with kernel `0x0D21` and tiles 0..19, and
+root 133 with `(kernel=0x0D22,tile=0)`; robust-shift is fixed input.
+
+Fixed-input and multi-root aggregate summaries use seed zero, with every
+subordinate root named in the typed detail. `fs_rand::StreamKey` kernel and tile
+values are logical input-substream coordinates, never execution seeds. Direct
+assertions and expectations remain before ordinary aggregate emission; the ZDT
+loop can still emit its first completed case before a later case fails. Silent
+parity, guard, and `should_panic` tests remain silent.
 
 ## No-claim boundaries
 - No published-ERT-table parity claims yet (in-repo BBOB-class fixtures

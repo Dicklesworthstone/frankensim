@@ -7,10 +7,53 @@
 
 use fs_dfo::{NsgaParams, das_dennis, hypervolume, mc_hypervolume, nsga2, nsga3};
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-dfo-nsga3\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-dfo-nsga3";
+const FIXED_INPUT_SEED: u64 = 0;
+const DTLZ2_M3_INPUT_SEED: u64 = 17;
+const M5_OPT_INPUT_SEED: u64 = 23;
+const M5_MC_INPUT_SEED: u64 = 99;
+const GOLDEN_INPUT_SEED: u64 = 3;
+const MOEAD_ZDT_INPUT_SEED: u64 = 29;
+const MOEAD_DTLZ_INPUT_SEED: u64 = 31;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("NSGA-III verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("NSGA-III verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, format!("{case}/measurement"));
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: case.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("NSGA-III measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("NSGA-III measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 /// DTLZ2 with m objectives, n = m − 1 + k variables in [0,1].
@@ -51,7 +94,12 @@ fn das_dennis_counts_and_simplex() {
         );
         assert!(dir.iter().all(|&v| v >= 0.0));
     }
-    log("das-dennis", "pass", "91 @ (3,12), 70 @ (5,4), on-simplex");
+    verdict(
+        "das-dennis",
+        true,
+        "91 @ (3,12), 70 @ (5,4), on-simplex",
+        FIXED_INPUT_SEED,
+    );
 }
 
 fn guard_nsga_params() -> NsgaParams {
@@ -152,7 +200,7 @@ fn dtlz2_m3_convergence_and_coverage() {
         eta_c: 30.0,
         eta_m: 20.0,
         p_mut: 1.0 / 7.0,
-        seed: 17,
+        seed: DTLZ2_M3_INPUT_SEED,
     };
     let mut f = |x: &[f64]| dtlz2(x, m);
     let front = nsga3(&mut f, 7, (0.0, 1.0), &dirs, &params);
@@ -195,13 +243,15 @@ fn dtlz2_m3_convergence_and_coverage() {
         covered > 0.6,
         "reference-direction coverage too low: {covered:.2}"
     );
-    log(
+    verdict(
         "dtlz2-m3",
-        "pass",
+        true,
         &format!(
-            "worst norm dev {worst_norm:.4}, coverage {covered:.2}, front {}",
+            "worst norm dev {worst_norm:.4}, coverage {covered:.2}, front {}; input seed \
+             {DTLZ2_M3_INPUT_SEED}",
             front.len()
         ),
+        DTLZ2_M3_INPUT_SEED,
     );
 }
 
@@ -215,7 +265,7 @@ fn many_objective_m5_beats_nsga2_on_hv() {
         eta_c: 30.0,
         eta_m: 20.0,
         p_mut: 1.0 / 9.0,
-        seed: 23,
+        seed: M5_OPT_INPUT_SEED,
     };
     let mut f3 = |x: &[f64]| dtlz2(x, m);
     let front3 = nsga3(&mut f3, 9, (0.0, 1.0), &dirs, &params);
@@ -224,8 +274,8 @@ fn many_objective_m5_beats_nsga2_on_hv() {
     let reference = vec![1.5f64; m];
     let pts3: Vec<Vec<f64>> = front3.iter().map(|i| i.f.clone()).collect();
     let pts2: Vec<Vec<f64>> = front2.iter().map(|i| i.f.clone()).collect();
-    let (hv3, _) = mc_hypervolume(&pts3, &reference, 200_000, 99);
-    let (hv2, _) = mc_hypervolume(&pts2, &reference, 200_000, 99);
+    let (hv3, _) = mc_hypervolume(&pts3, &reference, 200_000, M5_MC_INPUT_SEED);
+    let (hv2, _) = mc_hypervolume(&pts2, &reference, 200_000, M5_MC_INPUT_SEED);
     assert!(
         hv3 > hv2,
         "NSGA-III should beat NSGA-II at m=5: {hv3:.4} vs {hv2:.4}"
@@ -243,10 +293,15 @@ fn many_objective_m5_beats_nsga2_on_hv() {
                 .all(|(u, v)| u.to_bits() == v.to_bits())
         );
     }
-    log(
+    verdict(
         "m5-vs-nsga2",
-        "pass",
-        &format!("HV nsga3 {hv3:.4} vs nsga2 {hv2:.4} at matched budget, replay bitwise"),
+        true,
+        &format!(
+            "HV nsga3 {hv3:.4} vs nsga2 {hv2:.4} at matched budget, replay bitwise; \
+             optimizer input seed {M5_OPT_INPUT_SEED}, MC-HV input seed \
+             {M5_MC_INPUT_SEED}; composite aggregate seed zero"
+        ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -273,7 +328,7 @@ fn nsga3_golden_hash() {
         eta_c: 30.0,
         eta_m: 20.0,
         p_mut: 0.2,
-        seed: 3,
+        seed: GOLDEN_INPUT_SEED,
     };
     let mut f = |x: &[f64]| dtlz2(x, 3);
     let front = nsga3(&mut f, 5, (0.0, 1.0), &dirs, &params);
@@ -282,7 +337,13 @@ fn nsga3_golden_hash() {
             feed(*v);
         }
     }
-    log("nsga3-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "nsga3-golden",
+        format!(
+            "{{\"actual\":\"{acc:#018x}\",\"expected\":\"{GOLDEN_HASH:#018x}\",\
+             \"input_seed\":{GOLDEN_INPUT_SEED}}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "nsga3 bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
@@ -307,7 +368,7 @@ fn moead_zdt1_and_dtlz2_competitive() {
         eta_c: 20.0,
         eta_m: 20.0,
         p_mut: 1.0 / 8.0,
-        seed: 29,
+        seed: MOEAD_ZDT_INPUT_SEED,
     };
     let mut f = |x: &[f64]| zdt1(x);
     let front = moead(&mut f, 8, (0.0, 1.0), &weights2, &params);
@@ -337,7 +398,7 @@ fn moead_zdt1_and_dtlz2_competitive() {
         eta_c: 30.0,
         eta_m: 20.0,
         p_mut: 1.0 / 7.0,
-        seed: 31,
+        seed: MOEAD_DTLZ_INPUT_SEED,
     };
     let mut fd = |x: &[f64]| dtlz2(x, m);
     let front_md = moead(&mut fd, 7, (0.0, 1.0), &dirs, &params3);
@@ -347,7 +408,7 @@ fn moead_zdt1_and_dtlz2_competitive() {
         eta_c: 30.0,
         eta_m: 20.0,
         p_mut: 1.0 / 7.0,
-        seed: 31,
+        seed: MOEAD_DTLZ_INPUT_SEED,
     };
     let mut fn3 = |x: &[f64]| dtlz2(x, m);
     let front_n3 = nsga3(&mut fn3, 7, (0.0, 1.0), &dirs, &nsga_params);
@@ -373,12 +434,15 @@ fn moead_zdt1_and_dtlz2_competitive() {
                 .all(|(u, v)| u.to_bits() == v.to_bits())
         );
     }
-    log(
+    verdict(
         "moead",
-        "pass",
+        true,
         &format!(
-            "ZDT1 gap {mean_gap:.4} spread {:.2}; DTLZ2 HV {hv_md:.4} vs NSGA-III {hv_n3:.4}",
+            "ZDT1 gap {mean_gap:.4} spread {:.2}; DTLZ2 HV {hv_md:.4} vs NSGA-III \
+             {hv_n3:.4}; input seeds {MOEAD_ZDT_INPUT_SEED} and \
+             {MOEAD_DTLZ_INPUT_SEED}; composite aggregate seed zero",
             hi - lo
         ),
+        FIXED_INPUT_SEED,
     );
 }

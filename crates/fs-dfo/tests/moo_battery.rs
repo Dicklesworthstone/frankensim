@@ -13,10 +13,62 @@ use fs_dfo::{
 };
 use fs_rand::StreamKey;
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-dfo-moo\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-dfo-moo";
+const FIXED_INPUT_SEED: u64 = 0;
+const ZDT_OPT_INPUT_SEED: u64 = 21;
+const ZDT_QMC_INPUT_SEED: u64 = 777;
+const CVAR_INPUT_SEED: u64 = 101;
+const CVAR_STREAM_KERNEL: u32 = 0xC7A2;
+const CVAR_STREAM_TILE: u32 = 0;
+const GOLDEN_NSGA_INPUT_SEED: u64 = 5;
+const GOLDEN_CVAR_INPUT_SEED: u64 = 6;
+const GOLDEN_CVAR_STREAM_TILE: u32 = 1;
+const MC_HV_M2_INPUT_SEED: u64 = 7;
+const MC_HV_M3_INPUT_SEED: u64 = 8;
+const MC_HV_M6_SINGLE_INPUT_SEED: u64 = 9;
+const MC_HV_M6_PAIR_INPUT_SEED: u64 = 10;
+const MC_HV_REPLAY_INPUT_SEED: u64 = 42;
+const MC_HV_EDGE_INPUT_SEED: u64 = 11;
+const MC_HV_EMPTY_INPUT_SEED: u64 = 12;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("MOO verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("MOO verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, format!("{case}/measurement"));
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: case.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("MOO measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("MOO measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 fn zdt1(x: &[f64]) -> Vec<f64> {
@@ -80,10 +132,11 @@ fn hypervolume_hand_computed() {
     assert!((hv7 - 0.8).abs() < 1e-12, "{hv7}");
     let hv8 = hypervolume(&[vec![0.2, 0.3], vec![0.4]], &[1.0, 1.0]);
     assert!((hv8 - 0.56).abs() < 1e-12, "{hv8}");
-    log(
+    verdict(
         "hypervolume",
-        "pass",
+        true,
         "2D/3D hand-computed incl. degenerate",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -103,7 +156,7 @@ fn non_dominated_sort_laws() {
     assert_eq!(fronts[2], 0);
     assert_eq!(fronts[3], 1);
     assert_eq!(fronts[4], 2);
-    log("nds", "pass", "front assignment exact");
+    verdict("nds", true, "front assignment exact", FIXED_INPUT_SEED);
 }
 
 #[test]
@@ -115,7 +168,12 @@ fn helper_edges_do_not_panic() {
         f: vec![1.0, 2.0],
     };
     assert_eq!(crowding_distance(&[&one]), vec![f64::INFINITY]);
-    log("helper-edges", "pass", "degenerate public helpers handled");
+    verdict(
+        "helper-edges",
+        true,
+        "degenerate public helpers handled",
+        FIXED_INPUT_SEED,
+    );
 }
 
 #[test]
@@ -130,7 +188,7 @@ fn nsga2_zdt_convergence_and_beats_random() {
         eta_c: 15.0,
         eta_m: 20.0,
         p_mut: 1.0 / 8.0,
-        seed: 21,
+        seed: ZDT_OPT_INPUT_SEED,
     };
     let reference = [1.1f64, 1.1];
     let cases: [(&str, Objective, TrueFront); 2] =
@@ -162,7 +220,7 @@ fn nsga2_zdt_convergence_and_beats_random() {
         let pts: Vec<Vec<f64>> = front.iter().map(|i| i.f.clone()).collect();
         let hv_nsga = hypervolume(&pts, &reference);
         let total_evals = params.pop * (params.generations + 1);
-        let sobol = fs_rand::qmc::Sobol::scrambled(8, 777);
+        let sobol = fs_rand::qmc::Sobol::scrambled(8, ZDT_QMC_INPUT_SEED);
         let mut pt = vec![0.0f64; 8];
         let mut rand_pts = Vec::new();
         assert!(u32::try_from(total_evals).is_ok());
@@ -175,13 +233,16 @@ fn nsga2_zdt_convergence_and_beats_random() {
             hv_nsga > hv_rand,
             "{name}: NSGA-II must beat random: {hv_nsga:.4} vs {hv_rand:.4}"
         );
-        log(
+        verdict(
             name,
-            "pass",
+            true,
             &format!(
-                "gap {mean_gap:.4}, spread {:.2}, HV {hv_nsga:.4} vs random {hv_rand:.4}",
+                "gap {mean_gap:.4}, spread {:.2}, HV {hv_nsga:.4} vs random {hv_rand:.4}; \
+                 optimizer input seed {ZDT_OPT_INPUT_SEED}, Sobol comparator input seed \
+                 {ZDT_QMC_INPUT_SEED}; composite aggregate seed zero",
                 hi - lo
             ),
+            FIXED_INPUT_SEED,
         );
     }
     // G5: bitwise replay.
@@ -197,7 +258,12 @@ fn nsga2_zdt_convergence_and_beats_random() {
                 .all(|(u, v)| u.to_bits() == v.to_bits())
         );
     }
-    log("nsga2-replay", "pass", "bitwise");
+    verdict(
+        "nsga2-replay",
+        true,
+        &format!("bitwise replay for optimizer input seed {ZDT_OPT_INPUT_SEED}"),
+        ZDT_OPT_INPUT_SEED,
+    );
 }
 
 #[test]
@@ -220,7 +286,12 @@ fn knee_on_asymmetric_front() {
         (p[0] - 0.2).abs() < 1e-12 && (p[1] - 0.2).abs() < 1e-12,
         "knee missed the elbow: {p:?}"
     );
-    log("knee", "pass", &format!("elbow found at {p:?}"));
+    verdict(
+        "knee",
+        true,
+        &format!("elbow found at {p:?}"),
+        FIXED_INPUT_SEED,
+    );
 }
 
 #[test]
@@ -229,9 +300,9 @@ fn cvar_matches_gaussian_closed_form() {
     // RU must converge to it.
     let (mu, sigma, beta) = (2.0f64, 1.5f64, 0.9f64);
     let mut s = StreamKey {
-        seed: 101,
-        kernel: 0xC7A2,
-        tile: 0,
+        seed: CVAR_INPUT_SEED,
+        kernel: CVAR_STREAM_KERNEL,
+        tile: CVAR_STREAM_TILE,
     }
     .stream();
     let n = 200_000usize;
@@ -254,10 +325,14 @@ fn cvar_matches_gaussian_closed_form() {
         (alpha - var_true).abs() < 0.03,
         "RU minimizer should be the VaR: {alpha:.4} vs {var_true:.4}"
     );
-    log(
+    verdict(
         "cvar-ru",
-        "pass",
-        &format!("cvar {cvar:.4}/{cvar_true:.4}, var {alpha:.4}/{var_true:.4}"),
+        true,
+        &format!(
+            "cvar {cvar:.4}/{cvar_true:.4}, var {alpha:.4}/{var_true:.4}; input seed \
+             {CVAR_INPUT_SEED}, stream kernel {CVAR_STREAM_KERNEL:#x}, tile {CVAR_STREAM_TILE}"
+        ),
+        CVAR_INPUT_SEED,
     );
 }
 
@@ -271,10 +346,11 @@ fn cvar_reports_lower_minimizer_at_tied_boundary() {
     assert!((cvar - 10.0).abs() < 1e-12, "{cvar}");
     assert_eq!(report.boundary_rank(), 2);
     assert_eq!(report.boundary_weight().to_bits(), 0.0_f64.to_bits());
-    log(
+    verdict(
         "cvar-ties",
-        "pass",
+        true,
         "duplicate order statistics choose the lower RU minimizer",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -329,7 +405,7 @@ fn moo_golden_hash() {
         eta_c: 15.0,
         eta_m: 20.0,
         p_mut: 0.2,
-        seed: 5,
+        seed: GOLDEN_NSGA_INPUT_SEED,
     };
     let mut f = |x: &[f64]| zdt1(x);
     let front = nsga2(&mut f, 5, (0.0, 1.0), &params);
@@ -340,16 +416,26 @@ fn moo_golden_hash() {
     let pts: Vec<Vec<f64>> = front.iter().map(|i| i.f.clone()).collect();
     feed(hypervolume(&pts, &[1.1, 1.1]));
     let mut s = StreamKey {
-        seed: 6,
-        kernel: 0xC7A2,
-        tile: 1,
+        seed: GOLDEN_CVAR_INPUT_SEED,
+        kernel: CVAR_STREAM_KERNEL,
+        tile: GOLDEN_CVAR_STREAM_TILE,
     }
     .stream();
     let losses: Vec<f64> = (0..500).map(|_| s.next_normal()).collect();
     let report = empirical_cvar(&losses, 0.85).expect("valid golden loss samples");
     feed(report.cvar());
     feed(report.var());
-    log("moo-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "moo-golden",
+        format!(
+            "{{\"actual\":\"{acc:#018x}\",\"expected\":\"{GOLDEN_HASH:#018x}\",\
+             \"aggregate_input_seed\":{FIXED_INPUT_SEED},\
+             \"nsga_input_seed\":{GOLDEN_NSGA_INPUT_SEED},\
+             \"cvar_input_seed\":{GOLDEN_CVAR_INPUT_SEED},\
+             \"cvar_stream_kernel\":{CVAR_STREAM_KERNEL},\
+             \"cvar_stream_tile\":{GOLDEN_CVAR_STREAM_TILE}}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "moo bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
@@ -363,14 +449,14 @@ fn mc_hypervolume_vs_exact_and_high_dim_closed_forms() {
     // Agreement with the EXACT recursion at m = 2 and m = 3.
     let front2 = vec![vec![0.2, 0.6], vec![0.6, 0.2]];
     let exact2 = hypervolume(&front2, &[1.0, 1.0]);
-    let (mc2, _) = mc_hypervolume(&front2, &[1.0, 1.0], 60_000, 7);
+    let (mc2, _) = mc_hypervolume(&front2, &[1.0, 1.0], 60_000, MC_HV_M2_INPUT_SEED);
     assert!(
         (mc2 - exact2).abs() < 0.01,
         "m=2 MC vs exact: {mc2:.4} vs {exact2:.4}"
     );
     let front3 = vec![vec![0.2, 0.8, 0.5], vec![0.8, 0.2, 0.5]];
     let exact3 = hypervolume(&front3, &[1.0, 1.0, 1.0]);
-    let (mc3, _) = mc_hypervolume(&front3, &[1.0, 1.0, 1.0], 60_000, 8);
+    let (mc3, _) = mc_hypervolume(&front3, &[1.0, 1.0, 1.0], 60_000, MC_HV_M3_INPUT_SEED);
     assert!(
         (mc3 - exact3).abs() < 0.01,
         "m=3 MC vs exact: {mc3:.4} vs {exact3:.4}"
@@ -381,7 +467,7 @@ fn mc_hypervolume_vs_exact_and_high_dim_closed_forms() {
     // vol(A) = 0.8·0.2·0.5⁴ = 0.01, vol(B) = 0.01,
     // overlap = 0.2·0.2·0.5⁴ = 0.0025 ⇒ HV = 0.0175.
     let one6 = vec![vec![0.5; 6]];
-    let (mc6a, _) = mc_hypervolume(&one6, &[1.0; 6], 120_000, 9);
+    let (mc6a, _) = mc_hypervolume(&one6, &[1.0; 6], 120_000, MC_HV_M6_SINGLE_INPUT_SEED);
     assert!(
         (mc6a - 0.015_625).abs() / 0.015_625 < 0.08,
         "m=6 single point: {mc6a:.6} vs 0.015625"
@@ -392,22 +478,29 @@ fn mc_hypervolume_vs_exact_and_high_dim_closed_forms() {
     let mut b6 = vec![0.5f64; 6];
     b6[0] = 0.8;
     b6[1] = 0.2;
-    let (mc6b, _) = mc_hypervolume(&[a6, b6], &[1.0; 6], 120_000, 10);
+    let (mc6b, _) = mc_hypervolume(&[a6, b6], &[1.0; 6], 120_000, MC_HV_M6_PAIR_INPUT_SEED);
     assert!(
         (mc6b - 0.0175).abs() / 0.0175 < 0.08,
         "m=6 two points: {mc6b:.6} vs 0.0175"
     );
     // Determinism.
-    let (r1, h1) = mc_hypervolume(&front2, &[1.0, 1.0], 10_000, 42);
-    let (r2, h2) = mc_hypervolume(&front2, &[1.0, 1.0], 10_000, 42);
+    let (r1, h1) = mc_hypervolume(&front2, &[1.0, 1.0], 10_000, MC_HV_REPLAY_INPUT_SEED);
+    let (r2, h2) = mc_hypervolume(&front2, &[1.0, 1.0], 10_000, MC_HV_REPLAY_INPUT_SEED);
     assert!(
         r1.to_bits() == r2.to_bits() && h1 == h2,
         "MC HV not deterministic"
     );
-    log(
+    verdict(
         "mc-hv",
-        "pass",
-        &format!("m2 {mc2:.4}/{exact2:.4}, m3 {mc3:.4}/{exact3:.4}, m6 {mc6a:.5}+{mc6b:.5}"),
+        true,
+        &format!(
+            "m2 {mc2:.4}/{exact2:.4}, m3 {mc3:.4}/{exact3:.4}, m6 \
+             {mc6a:.5}+{mc6b:.5}; input seeds {MC_HV_M2_INPUT_SEED}, \
+             {MC_HV_M3_INPUT_SEED}, {MC_HV_M6_SINGLE_INPUT_SEED}, \
+             {MC_HV_M6_PAIR_INPUT_SEED}, replay {MC_HV_REPLAY_INPUT_SEED}; \
+             composite aggregate seed zero"
+        ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -418,17 +511,25 @@ fn mc_hypervolume_public_edges_are_explicit() {
     // Match exact hypervolume's public helper policy: malformed-dimensional
     // points are ignored, not partially zipped into the reference box.
     let malformed = vec![vec![0.2], vec![0.3, 0.4]];
-    let (mc, hits) = mc_hypervolume(&malformed, &[1.0, 1.0], 2_048, 11);
+    let (mc, hits) = mc_hypervolume(&malformed, &[1.0, 1.0], 2_048, MC_HV_EDGE_INPUT_SEED);
     assert_eq!(hits, 2_048);
     assert!((mc - 0.42).abs() < 1e-12, "{mc}");
 
     // Empty objective dimension has zero dominated measure.
-    assert_eq!(mc_hypervolume(&[vec![]], &[], 0, 12), (0.0, 0));
+    assert_eq!(
+        mc_hypervolume(&[vec![]], &[], 0, MC_HV_EMPTY_INPUT_SEED),
+        (0.0, 0)
+    );
 
-    log(
+    verdict(
         "mc-hv-edges",
-        "pass",
-        "malformed points ignored; empty dimension zero",
+        true,
+        &format!(
+            "malformed points ignored for input seed {MC_HV_EDGE_INPUT_SEED}; empty \
+             dimension zero for call seed {MC_HV_EMPTY_INPUT_SEED}; composite aggregate \
+             seed zero"
+        ),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -480,10 +581,11 @@ fn hv_archive_eviction_is_least_contributor() {
     );
     // Monotone: archive HV never decreased across the successful
     // inserts (checked at the end state vs the 3-member start).
-    log(
+    verdict(
         "hv-archive",
-        "pass",
+        true,
         &format!("final HV {got:.4} == best subset"),
+        FIXED_INPUT_SEED,
     );
 }
 

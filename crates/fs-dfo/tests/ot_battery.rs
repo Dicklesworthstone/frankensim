@@ -7,16 +7,61 @@
 use fs_dfo::{cost_sq_1d, monotone_cost_1d, sinkhorn};
 use fs_rand::StreamKey;
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-dfo-ot\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-dfo-ot";
+const INPUT_SEED: u64 = 111;
+const STREAM_KERNEL: u32 = 0x0007;
+const MARGINAL_X_TILE: u32 = 1;
+const MARGINAL_Y_TILE: u32 = 2;
+const LADDER_X_TILE: u32 = 3;
+const LADDER_Y_TILE: u32 = 4;
+const TRANSLATION_TILE: u32 = 5;
+const GOLDEN_X_TILE: u32 = 6;
+const GOLDEN_Y_TILE: u32 = 7;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("OT verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("OT verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, format!("{case}/measurement"));
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: case.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("OT measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("OT measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 fn rand_pts(n: usize, tile: u32) -> Vec<f64> {
     let mut s = StreamKey {
-        seed: 111,
-        kernel: 0x0007,
+        seed: INPUT_SEED,
+        kernel: STREAM_KERNEL,
         tile,
     }
     .stream();
@@ -25,8 +70,8 @@ fn rand_pts(n: usize, tile: u32) -> Vec<f64> {
 
 #[test]
 fn marginals_and_symmetry() {
-    let x = rand_pts(12, 1);
-    let y = rand_pts(15, 2);
+    let x = rand_pts(12, MARGINAL_X_TILE);
+    let y = rand_pts(15, MARGINAL_Y_TILE);
     let a = vec![1.0 / 12.0; 12];
     let b = vec![1.0 / 15.0; 15];
     let c = cost_sq_1d(&x, &y);
@@ -51,21 +96,23 @@ fn marginals_and_symmetry() {
         rep.cost,
         rep_t.cost
     );
-    log(
+    verdict(
         "marginals-symmetry",
-        "pass",
+        true,
         &format!(
-            "residual {:.1e}, sym rel {rel:.1e}, iters {}",
+            "residual {:.1e}, sym rel {rel:.1e}, iters {}; input seed {INPUT_SEED}, \
+             stream kernel {STREAM_KERNEL:#x}, tiles {MARGINAL_X_TILE}/{MARGINAL_Y_TILE}",
             rep.marginal_residual, rep.iters
         ),
+        INPUT_SEED,
     );
 }
 
 #[test]
 fn epsilon_ladder_approaches_monotone_coupling() {
     let n = 16usize;
-    let x = rand_pts(n, 3);
-    let y: Vec<f64> = rand_pts(n, 4).iter().map(|v| v + 0.4).collect();
+    let x = rand_pts(n, LADDER_X_TILE);
+    let y: Vec<f64> = rand_pts(n, LADDER_Y_TILE).iter().map(|v| v + 0.4).collect();
     let a = vec![1.0 / n as f64; n];
     let c = cost_sq_1d(&x, &y);
     let truth = monotone_cost_1d(&x, &y);
@@ -85,7 +132,16 @@ fn epsilon_ladder_approaches_monotone_coupling() {
         prev_gap < 0.02,
         "smallest-eps cost still far from the closed form: {gaps:?}"
     );
-    log("eps-ladder", "pass", &gaps.join(", "));
+    verdict(
+        "eps-ladder",
+        true,
+        &format!(
+            "{}; input seed {INPUT_SEED}, stream kernel {STREAM_KERNEL:#x}, tiles \
+             {LADDER_X_TILE}/{LADDER_Y_TILE}",
+            gaps.join(", ")
+        ),
+        INPUT_SEED,
+    );
 }
 
 #[test]
@@ -93,7 +149,7 @@ fn translation_covariance() {
     // W₂²(μ, μ + t) = t² for equal translates (every coupling moves
     // mass exactly t in the monotone limit).
     let n = 20usize;
-    let x = rand_pts(n, 5);
+    let x = rand_pts(n, TRANSLATION_TILE);
     let t = 0.7f64;
     let y: Vec<f64> = x.iter().map(|v| v + t).collect();
     let a = vec![1.0 / n as f64; n];
@@ -101,10 +157,16 @@ fn translation_covariance() {
     let rep = sinkhorn(&a, &a, &c, 0.002, 20_000);
     let rel = (rep.cost - t * t).abs() / (t * t);
     assert!(rel < 0.02, "translate cost {} vs t^2 {}", rep.cost, t * t);
-    log(
+    verdict(
         "translation",
-        "pass",
-        &format!("cost {:.5} vs {:.5}, rel {rel:.4}", rep.cost, t * t),
+        true,
+        &format!(
+            "cost {:.5} vs {:.5}, rel {rel:.4}; input seed {INPUT_SEED}, stream kernel \
+             {STREAM_KERNEL:#x}, tile {TRANSLATION_TILE}",
+            rep.cost,
+            t * t
+        ),
+        INPUT_SEED,
     );
 }
 
@@ -119,8 +181,8 @@ fn ot_golden_hash() {
             acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    let x = rand_pts(10, 6);
-    let y = rand_pts(8, 7);
+    let x = rand_pts(10, GOLDEN_X_TILE);
+    let y = rand_pts(8, GOLDEN_Y_TILE);
     let a = vec![0.1f64; 10];
     let b = vec![0.125f64; 8];
     let c = cost_sq_1d(&x, &y);
@@ -130,7 +192,14 @@ fn ot_golden_hash() {
     for v in rep.plan.iter().step_by(7) {
         feed(*v);
     }
-    log("ot-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "ot-golden",
+        format!(
+            "{{\"actual\":\"{acc:#018x}\",\"expected\":\"{GOLDEN_HASH:#018x}\",\
+             \"input_seed\":{INPUT_SEED},\"stream_kernel\":{STREAM_KERNEL},\
+             \"x_stream_tile\":{GOLDEN_X_TILE},\"y_stream_tile\":{GOLDEN_Y_TILE}}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "ot bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \

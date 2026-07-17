@@ -7,10 +7,55 @@
 use fs_dfo::wasserstein_worst_case;
 use fs_rand::StreamKey;
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-dfo-dro-oracle\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-dfo-dro-oracle";
+const FIXED_INPUT_SEED: u64 = 0;
+const ENDPOINT_INPUT_SEED: u64 = 131;
+const ENDPOINT_STREAM_KERNEL: u32 = 0x0D20;
+const ENDPOINT_STREAM_TILE: u32 = 1;
+const DUALITY_INPUT_SEED: u64 = 132;
+const DUALITY_STREAM_KERNEL: u32 = 0x0D21;
+const GOLDEN_INPUT_SEED: u64 = 133;
+const GOLDEN_STREAM_KERNEL: u32 = 0x0D22;
+const GOLDEN_STREAM_TILE: u32 = 0;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("DRO-oracle verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("DRO-oracle verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, format!("{case}/measurement"));
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: case.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("DRO-oracle measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("DRO-oracle measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 /// Exact primal LP oracle by basic-solution enumeration: maximize
@@ -66,9 +111,9 @@ fn q_expectation(losses: &[f64], q: &[f64]) -> f64 {
 #[test]
 fn closed_form_endpoints_and_monotonicity() {
     let mut s = StreamKey {
-        seed: 131,
-        kernel: 0x0D20,
-        tile: 1,
+        seed: ENDPOINT_INPUT_SEED,
+        kernel: ENDPOINT_STREAM_KERNEL,
+        tile: ENDPOINT_STREAM_TILE,
     }
     .stream();
     let n = 4usize;
@@ -102,10 +147,15 @@ fn closed_form_endpoints_and_monotonicity() {
         assert!(r.worst_case >= prev - 1e-9, "must be monotone in rho");
         prev = r.worst_case;
     }
-    log(
+    verdict(
         "endpoints",
-        "pass",
-        &format!("mean {mean0:.4}, max {lmax:.4}, monotone"),
+        true,
+        &format!(
+            "mean {mean0:.4}, max {lmax:.4}, monotone; input seed \
+             {ENDPOINT_INPUT_SEED}, stream kernel {ENDPOINT_STREAM_KERNEL:#x}, tile \
+             {ENDPOINT_STREAM_TILE}"
+        ),
+        ENDPOINT_INPUT_SEED,
     );
 }
 
@@ -114,8 +164,8 @@ fn strong_duality_vs_lp_oracle() {
     let mut worst_gap = 0.0f64;
     for inst in 0..20u32 {
         let mut s = StreamKey {
-            seed: 132,
-            kernel: 0x0D21,
+            seed: DUALITY_INPUT_SEED,
+            kernel: DUALITY_STREAM_KERNEL,
             tile: inst,
         }
         .stream();
@@ -153,10 +203,14 @@ fn strong_duality_vs_lp_oracle() {
         worst_gap < 1e-8,
         "duality gap vs the LP oracle: {worst_gap:.3e}"
     );
-    log(
+    verdict(
         "strong-duality",
-        "pass",
-        &format!("worst gap {worst_gap:.1e} over 20 instances"),
+        true,
+        &format!(
+            "worst gap {worst_gap:.1e} over 20 instances; input seed \
+             {DUALITY_INPUT_SEED}, stream kernel {DUALITY_STREAM_KERNEL:#x}, tiles 0..19"
+        ),
+        DUALITY_INPUT_SEED,
     );
 }
 
@@ -210,10 +264,11 @@ fn robust_decision_shifts_conservatively() {
         x_dro > x_emp + 0.2,
         "DRO minimizer must shift toward the adversarial tail: {x_dro:.3} vs {x_emp:.3}"
     );
-    log(
+    verdict(
         "robust-shift",
-        "pass",
+        true,
         &format!("x* {x_emp:.3} -> {x_dro:.3}"),
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -229,9 +284,9 @@ fn dro_golden_hash() {
         }
     };
     let mut s = StreamKey {
-        seed: 133,
-        kernel: 0x0D22,
-        tile: 0,
+        seed: GOLDEN_INPUT_SEED,
+        kernel: GOLDEN_STREAM_KERNEL,
+        tile: GOLDEN_STREAM_TILE,
     }
     .stream();
     let (n, m) = (4usize, 4usize);
@@ -250,7 +305,15 @@ fn dro_golden_hash() {
             feed(*v);
         }
     }
-    log("dro-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "dro-golden",
+        format!(
+            "{{\"actual\":\"{acc:#018x}\",\"expected\":\"{GOLDEN_HASH:#018x}\",\
+             \"input_seed\":{GOLDEN_INPUT_SEED},\
+             \"stream_kernel\":{GOLDEN_STREAM_KERNEL},\
+             \"stream_tile\":{GOLDEN_STREAM_TILE}}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "dro bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
