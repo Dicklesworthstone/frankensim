@@ -1,8 +1,10 @@
 //! G0 battery for the operator catalog (bead gp3.6): generation
 //! determinism, registry/dispatch drift in both directions, executable
 //! examples (documentation rots loudly), deliberate-mismatch refusal,
-//! structured query fixtures, diffability, and the serve-latency
-//! budget (strict variant gated for quiet perf lanes).
+//! structured query fixtures, signature-compatibility search,
+//! error-model reference resolution, diffability, and the
+//! serve-latency budget (strict concurrent-load variant gated for
+//! quiet perf lanes).
 
 use fs_ir::catalog::{
     ARITH_SAME_DIMS, COMPARE_FORMS, Catalog, CatalogQuery, OperatorEntry, OperatorKind,
@@ -375,20 +377,60 @@ fn cat_007_query_latency_smoke() {
 #[test]
 #[ignore = "quiet-lane certification of the plan §11.5 ≤100ms serve budget; run with --ignored on an unloaded host"]
 fn cat_008_query_latency_certification() {
+    // The acceptance budget holds UNDER CONCURRENT SWEEP LOAD: eight
+    // threads hammer the same catalog and every individual sweep on
+    // every thread must serve within 100ms — the worst observed sweep
+    // is the certified number, not a per-thread average.
     let catalog = Catalog::builtin();
     let queries = latency_query_set();
-    let start = std::time::Instant::now();
-    for _ in 0..100 {
-        for query in &queries {
-            std::hint::black_box(catalog.query(query));
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                let mut worst = std::time::Duration::ZERO;
+                for _ in 0..100 {
+                    let start = std::time::Instant::now();
+                    for query in &queries {
+                        std::hint::black_box(catalog.query(query));
+                    }
+                    worst = worst.max(start.elapsed());
+                }
+                assert!(
+                    worst.as_millis() <= 100,
+                    "worst full-catalog sweep {worst:?} under 8-thread contention \
+                     exceeds the 100ms serve budget"
+                );
+            });
         }
+    });
+}
+
+#[test]
+fn cat_011_error_model_references_resolve() {
+    // Every entry's error-model reference must name a real crate whose
+    // CONTRACT.md carries an `## Error model` section — the mechanical
+    // no-dangling-reference check (references are data, so they rot
+    // loudly here instead of silently in prose).
+    let catalog = Catalog::builtin();
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("fs-ir lives under crates/");
+    for entry in catalog.entries() {
+        let contract = crates_dir.join(entry.error_model).join("CONTRACT.md");
+        let text = std::fs::read_to_string(&contract).unwrap_or_else(|error| {
+            panic!(
+                "{}: error_model {:?} has no readable CONTRACT.md at {}: {error}",
+                entry.name,
+                entry.error_model,
+                contract.display()
+            )
+        });
+        assert!(
+            text.contains("## Error model"),
+            "{}: {}/CONTRACT.md lacks an `## Error model` section",
+            entry.name,
+            entry.error_model
+        );
     }
-    let elapsed = start.elapsed();
-    let per_sweep = elapsed / 100;
-    assert!(
-        per_sweep.as_millis() <= 100,
-        "full-catalog query sweep {per_sweep:?} exceeds the 100ms serve budget"
-    );
 }
 
 fn latency_query_set() -> Vec<CatalogQuery> {

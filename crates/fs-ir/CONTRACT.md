@@ -600,8 +600,11 @@ admitted derived-geometry boundary.
   surfaces that exist today (two sugar verbs, two core operators, the
   QoI menu, arithmetic forms); per-operator wall-cost NUMBERS stay in
   sealed cost models, never in catalog prose; the ≤100ms serve budget
-  is certified by the gated `cat_008` lane on quiet hosts, not
-  asserted in default suites.
+  is certified by the gated `cat_008` lane on quiet hosts — worst
+  single sweep under 8-thread concurrent load, not a single-threaded
+  average — and not asserted in default suites; error-model references
+  resolve mechanically (`cat_011`: the named crate's CONTRACT.md must
+  carry an `## Error model` section).
 
 - `admission` (the gp3.5 bead): `admit(node, &AdmissionContext) ->
   AdmissionReport` first binds raw syntax to the current `VersionedProgram`,
