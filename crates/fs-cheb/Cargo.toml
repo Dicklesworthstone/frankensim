@@ -20,6 +20,7 @@ fs-math = { path = "../fs-math" }
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
+fs-casebook = { path = "../fs-casebook" }
 
 [lints]
 workspace = true

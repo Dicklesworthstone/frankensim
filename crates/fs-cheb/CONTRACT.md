@@ -99,10 +99,10 @@ budgeted, cancellable entry points).
 4. `diff_matrix` rows sum to exact zero (differentiation annihilates
    constants bitwise).
 5. Deterministic per ISA: all state is built on strict fs-math cos/sin
-   and fixed-order arithmetic. The last admitted radix-8/4/2 downstream
-   golden was identical in debug and release on M4 Pro. Current root/integral
-   semantics intentionally invalidate it; replacement and x86-64 equality are
-   pending an admitted two-profile, two-ISA replay. The upstream FFT stage-path
+   and fixed-order arithmetic. The current aggregate golden
+   `0x5d2f_e305_ce90_06fb` was admitted after the root/integral semantic
+   changes and reproduced bitwise in debug and release on both aarch64 M4 Pro
+   and x86-64 ts1 at evidence tree `0fba65d`. The upstream FFT stage-path
    golden remains independently verified in all four ISA/profile quadrants.
 6. Policy-filtered colleague candidates agree with the sign scanner on the
    admitted isolated fixtures, recover the retained even-multiplicity fixtures
@@ -151,14 +151,13 @@ counts.
 ## Determinism class
 Bit-deterministic per ISA by construction. The golden hashes coefficients
 + integral + derivative sample + roots + collocation eigenvalues. The
-last admitted radix-8/4/2 value was recorded in both build profiles on
-aarch64-apple, but the current reference-coordinate root-refinement and
-exceptional integral semantics intentionally invalidate that downstream
-value. The test remains armed and known-red pending a current admitted
-debug/release replay on both reference ISAs; no replacement value or G5 claim
-is accepted from a stale binary. The coupling remains registered in
-`golden-couplings.json` against `fs-fft:transform-bits=1` so later transform
-changes cannot strand it.
+current value `0x5d2f_e305_ce90_06fb` was admitted at commit `2c4c20ab`
+after the reference-coordinate root-refinement and exceptional-integral
+changes, with aarch64 and x86-64 debug/release reproduction at evidence tree
+`0fba65d`. The coupling remains registered in `golden-couplings.json` against
+`fs-fft:transform-bits=1` so later transform changes cannot strand it. New
+semantic changes still require a fresh admission; stale binaries cannot
+replace the registered value.
 
 ## Cancellation behavior
 Classic construction/search entry points are bounded by their degree caps and
@@ -195,6 +194,18 @@ three O(n³) matmuls).
 None.
 
 ## Conformance tests
+`tests/conformance.rs` is the cheap structured G0 PR subset. The shared
+`fs-casebook` runner records exact direct-coefficient Clenshaw/calculus known
+answers, exact checkpoint parity plus typed early refusal, and the n = 1
+Lobatto negative-sum differentiation KAT. Canonical frames bind arithmetic
+conventions, operation order, inputs, expected outputs, callback policy, and
+stable digests. Disclosed seed `0xF5CE_0001` corrupts one exact evaluation bit
+and must produce one structured red record plus `assert_green` refusal. This
+portable subset does not rerun or re-award the retained adaptive aggregate
+golden and adds no fresh adaptive-build, root, colleague, Fourier, Cheb2,
+Orr-Sommerfeld, performance, or dual-ISA execution proof; central package
+proof remains pending.
+
 tests/cheb_battery.rs (recovery, calculus, plateau robustness, roots,
 collocation accuracy, eigen demo, golden hash).
 
@@ -212,7 +223,10 @@ classic candidate parity + pre-eigen cancellation drain; admission
 tables for Cheb2/Fourier/Orr-Sommerfeld incl. typed shape refusals and
 huge requests; budgeted builder twins (Fourier bitwise mirror with
 typed non-finite/shape refusals, Cheb2 and OS admission-gated wrappers
-with boundary drains, solver failures mapped to `Numerical`).
+with boundary drains, solver failures mapped to `Numerical`). Case cb-010
+adds admission-bounded algebra/calculus twins for add, multiply,
+differentiate, and integral, including bitwise classic parity, typed domain
+and capacity refusals, and cancellation before publication.
 
 ## Variants (bead kw89)
 
@@ -269,7 +283,7 @@ structs.
   no FrankenScipy cross-checks yet.
 - `mul` may overshoot the minimal degree (resample-based); fine for
   correctness, recorded for the perf lane.
-- Budget coverage after slice 2: EVERY module now has an exact-u128
+- Budget coverage after cb-010: EVERY module now has an exact-u128
   admission preflight (`admit_adaptive_build`, `admit_dirichlet_eigs`,
   `admit_root_scan`, `admit_colleague_roots`, `admit_cheb2_build`,
   `admit_fourier_build`, `admit_growth_rates` — the last four typed-
@@ -284,9 +298,10 @@ structs.
   fixture-scale eigensolver convergence) retained and documented;
   `fourier_build_budgeted` is a faithful fallible MIRROR (bitwise
   spectrum parity, typed non-finite/shape refusals, 4096-sample polls).
-  Algebra (`add`/`mul`) and calculus budgeting remain the bead's
-  outstanding scope; the classic APIs keep their panicking contracts
-  unchanged for existing callers.
+  Algebra and calculus now expose admission-bounded `add_budgeted`,
+  `mul_budgeted`, `differentiate_budgeted`, and `integral_budgeted` twins;
+  the classic APIs keep their panicking contracts unchanged for existing
+  callers.
 - The abstract op counts in receipts are ADMITTED worst-case bounds,
   not measured cycle counts; no performance claim is attached.
 - `EigsRun` values are fixed-sweep estimates. `Complete` means all
