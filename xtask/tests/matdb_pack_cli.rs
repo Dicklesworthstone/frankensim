@@ -6336,7 +6336,12 @@ fn g3_cli_compiles_committed_nist_srm_1720_northern_continental_air() {
                 .source
                 .contains("Standard Reference Material 1720")
         );
-        assert!(claim.provenance.source.contains("[source:primary]"));
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("[source:nist-srm-1720-archived-certificate]")
+        );
 
         for (axis, expected) in [
             ("source_value_is_information_not_certified", 1.0),
@@ -6472,7 +6477,12 @@ fn g3_cli_compiles_committed_nist_srm_2728_auto_emission_reference_gas() {
                 .source
                 .contains("Standard Reference Material 2728")
         );
-        assert!(claim.provenance.source.contains("[source:primary]"));
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("[source:nist-srm-2728-archived-certificate]")
+        );
 
         for (axis, expected) in [
             ("source_composition_basis_is_amount_fraction", 1.0),
