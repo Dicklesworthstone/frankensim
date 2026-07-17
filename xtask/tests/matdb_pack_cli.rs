@@ -32,6 +32,8 @@ const PTFE_TEFLON_SEED_MANIFEST: &str =
 const PEEK_THERMIC_SEED_MANIFEST: &str = "data/matdb/seed-v1/peek-nasa-thermic-plate/manifest.tsv";
 const NASA_CR_115153_WATER_ETHYLENE_GLYCOL_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/nasa-cr-115153-water-ethylene-glycol/manifest.tsv";
+const N0602_001_NITRILE_JP8_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/n0602-001-nitrile-jp8-compatibility/manifest.tsv";
 const AISI_4140_RC33_SEED_MANIFEST: &str = "data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv";
 const AISI_1045_COLD_DRAWN_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv";
@@ -1394,6 +1396,272 @@ fn g3_cli_compiles_committed_nasa_cr_115153_water_ethylene_glycol_seed() {
     };
     let conductivity_relative_difference = (*conductivity_value - 0.402_f64).abs() / 0.402;
     assert!(conductivity_relative_difference <= 0.06);
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_n0602_001_nitrile_jp8_compatibility_seed() {
+    let manifest = workspace_path(N0602_001_NITRILE_JP8_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed N0602-001 nitrile seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("n0602-001-nitrile-first.fsmatpk");
+    let second_path = directory.join("n0602-001-nitrile-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first N0602-001 nitrile seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second N0602-001 nitrile seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "N0602-001 nitrile decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first N0602-001 nitrile pack");
+    let second_bytes = fs::read(second_path).expect("read second N0602-001 nitrile pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "N0602-001 nitrile pack bytes moved"
+    );
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode N0602-001 nitrile pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify N0602-001 nitrile pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "n0602-001-nitrile-o-ring-jp8-compatibility"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("public use permitted")
+    );
+    assert_eq!(decoded.claims().claim_count(), 10);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let tga_claims = decoded
+        .claims()
+        .claims_for("tga_semivolatile_mass_fraction");
+    assert_eq!(tga_claims.len(), 1);
+    let (_, tga) = tga_claims[0];
+    let PropertyValue::Scalar { value, dims } = &tga.value else {
+        panic!("N0602-001 TGA semi-volatiles were not scalar");
+    };
+    assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+    let tga_expected = 10.1_f64 * 0.01;
+    assert!((*value - tga_expected).abs() / tga_expected <= 2.0e-15);
+    assert_eq!(
+        tga.validity.bound("source_tga_temperature_program_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(tga.uncertainty, UncertaintyModel::Unstated);
+    assert_eq!(tga.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+    assert!(tga.provenance.source.contains("NTRS 20080003822"));
+    assert!(tga.provenance.source.contains("[source:primary]"));
+    let tga_observation = decoded
+        .claims()
+        .observation(tga.observations[0])
+        .expect("N0602-001 TGA observation remains linked");
+    assert_eq!(
+        tga_observation.specimen,
+        "n0602-001-nitrile-rubber-o-ring-source-formulation-and-lot-unspecified"
+    );
+    assert!(tga_observation.method.contains("Thermogravimetric"));
+    assert!(tga_observation.caveats.contains("propensity to shrink"));
+    assert!(tga_observation.caveats.contains("compound formulation"));
+
+    let absorbed_claims = decoded.claims().claims_for("absorbed_fuel_volume_fraction");
+    assert_eq!(absorbed_claims.len(), 2);
+    for (source_aromatic_percent, source_absorbed_percent) in [(0.0, 8.7), (25.0, 27.9)] {
+        let aromatic_fraction = source_aromatic_percent * 0.01;
+        let (_, claim) = absorbed_claims
+            .iter()
+            .copied()
+            .find(|(_, claim)| {
+                claim.validity.bound("fuel_aromatic_volume_fraction")
+                    == Some((aromatic_fraction, aromatic_fraction))
+            })
+            .unwrap_or_else(|| {
+                panic!("missing N0602-001 fuel absorption at {source_aromatic_percent}% aromatic")
+            });
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("N0602-001 fuel absorption was not scalar");
+        };
+        let expected_value = source_absorbed_percent * 0.01;
+        assert!((*value - expected_value).abs() / expected_value <= 2.0e-15);
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        assert_eq!(
+            claim.validity.bound("source_exposure_temperature_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_exposure_duration_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("N0602-001 fuel-absorption observation remains linked");
+        assert!(observation.method.contains("thermal-desorption GC-MS"));
+        assert!(
+            observation
+                .caveats
+                .contains("does not define service compatibility")
+        );
+    }
+
+    for (property, expected_value) in [
+        ("jp8_alkane_fuel_polymer_partition_coefficient", 0.120),
+        ("jp8_aromatic_fuel_polymer_partition_coefficient", 0.412),
+        ("jp8_aromatic_to_alkane_partition_ratio", 3.4),
+    ] {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing unique N0602-001 {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("N0602-001 {property} was not scalar");
+        };
+        assert_eq!(*value, expected_value);
+        assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+        assert_eq!(
+            claim.validity.bound("fuel_aromatic_volume_fraction"),
+            Some((0.0, 25.0_f64 * 0.01))
+        );
+        assert_eq!(
+            claim.validity.bound("source_exposure_temperature_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_exposure_duration_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+    }
+
+    let slope_claims = decoded
+        .claims()
+        .claims_for("jp8_volume_swell_per_aromatic_volume_fraction");
+    assert_eq!(slope_claims.len(), 2);
+    let mut slopes = slope_claims
+        .iter()
+        .map(|(_, claim)| match &claim.value {
+            PropertyValue::Scalar { value, dims } => {
+                assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+                *value
+            }
+            PropertyValue::Curve { .. } => panic!("N0602-001 slope was not scalar"),
+        })
+        .collect::<Vec<_>>();
+    slopes.sort_by(f64::total_cmp);
+    assert_eq!(slopes, vec![0.451, 0.463]);
+    assert_ne!(
+        slope_claims[0].1.observations[0], slope_claims[1].1.observations[0],
+        "conflicting printed slopes must retain distinct observations"
+    );
+    for (_, claim) in slope_claims {
+        assert_eq!(
+            claim.validity.bound("fuel_aromatic_volume_fraction"),
+            Some((0.0, 25.0_f64 * 0.01))
+        );
+        assert_eq!(
+            claim.validity.bound("source_exposure_temperature_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_exposure_duration_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, PUBLIC_USE_PERMITTED_LICENSE);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("N0602-001 slope observation remains linked");
+        assert!(observation.caveats.contains("conflict"));
+    }
+
+    let r_squared = decoded
+        .claims()
+        .claims_for("jp8_volume_swell_aromatic_fraction_r_squared");
+    assert_eq!(r_squared.len(), 1);
+    let PropertyValue::Scalar { value, dims } = &r_squared[0].1.value else {
+        panic!("N0602-001 R-squared was not scalar");
+    };
+    assert_eq!(*value, 0.948);
+    assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+    assert_eq!(
+        r_squared[0]
+            .1
+            .validity
+            .bound("source_exposure_temperature_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(
+        r_squared[0].1.provenance.license,
+        PUBLIC_USE_PERMITTED_LICENSE
+    );
+
+    let intercepts = decoded
+        .claims()
+        .claims_for("jp8_volume_swell_zero_aromatic_intercept");
+    assert_eq!(intercepts.len(), 1);
+    let PropertyValue::Scalar { value, dims } = &intercepts[0].1.value else {
+        panic!("N0602-001 regression intercept was not scalar");
+    };
+    let expected_intercept = -1.167_f64 * 0.01;
+    assert!((*value - expected_intercept).abs() / expected_intercept.abs() <= 2.0e-15);
+    assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+    assert_eq!(
+        intercepts[0]
+            .1
+            .validity
+            .bound("source_exposure_duration_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(
+        intercepts[0].1.provenance.license,
+        PUBLIC_USE_PERMITTED_LICENSE
+    );
+    let intercept_observation = decoded
+        .claims()
+        .observation(intercepts[0].1.observations[0])
+        .expect("N0602-001 intercept observation remains linked");
+    assert!(
+        intercept_observation
+            .caveats
+            .contains("not a certified shrinkage value")
+    );
+    assert!(
+        decoded
+            .claims()
+            .claims_for("jp8_prediction_interval_overlap")
+            .is_empty(),
+        "the source's approximate 57% overlap must remain observation-only"
+    );
 
     let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
     assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));

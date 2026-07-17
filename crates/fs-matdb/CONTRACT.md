@@ -311,7 +311,8 @@ NIST displayed-precision agreement checks. The material-pack battery likewise
 compiles each committed bulk tranche twice and verifies exact identity,
 condition flags, source/license linkage, no-claim exclusions, and bounded
 comparison evidence, including NASA-CR-115153's inhibited water/ethylene-glycol
-coolant specification.
+coolant specification and the conflict-preserving N0602-001 nitrile O-ring
+compatibility tranche.
 
 ## No-claim boundaries
 
@@ -355,7 +356,10 @@ coolant specification.
   graph-digitized room-state properties. The NASA-CR-115153 coolant tranche
   adds six formulation-bound endpoints, one source-condition-unspecified
   density, one source-condition-unspecified conductivity, and three exact-point
-  transcriptions of an approximate heat-capacity law.
+  transcriptions of an approximate heat-capacity law. The N0602-001 nitrile
+  tranche adds one TGA semi-volatile claim, two aromatic-content-keyed
+  absorbed-fuel claims, three partitioning statistics, two conflicting printed
+  swell slopes, one regression intercept, and one coefficient of determination.
   The gas associations do not define air or exhaust mixture compositions,
   humidity, or combustion completeness. The Aluminum claims do not define a
   continuous constitutive curve or a general-purpose design card; their NIST
@@ -420,8 +424,16 @@ coolant specification.
   report's unstated BTU convention remains explicit for conductivity and three
   exact-point SI evaluations of its approximate heat-capacity relation. Those
   points do not authorize a continuous law, interpolation, a freeze/boil
-  envelope, corrosion/compatibility behavior, or service-life authority. Bead
-  1sxe still owns the remaining curated material/property and interface-system
+  envelope, corrosion/compatibility behavior, or service-life authority. The
+  N0602-001 claims bind one source-coded nitrile O-ring and the reported JP-8/FT
+  matrix, not the nitrile family. Compound formulation, supplier, cure,
+  hardness, lot, dimensions, exposure temperature/duration, raw points, and
+  coefficient uncertainty remain absent. The summary-row and plot slopes
+  (`0.451` and `0.463`) coexist without fusion; the approximate prediction-
+  interval overlap remains observation-only, and the regression intercept is
+  not a certified shrinkage value. No generic seal, ozone/aging, permeability,
+  compression-set, compatibility, or service-life authority follows. Bead 1sxe
+  still owns the remaining curated material/property and interface-system
   dataset.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).

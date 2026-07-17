@@ -518,6 +518,45 @@ Water/ethylene-glycol references:
 - <https://ntrs.nasa.gov/citations/20190001449>
 - <https://ntrs.nasa.gov/api/citations/20190001449/downloads/20190001449.pdf>
 
+## N0602-001 nitrile O-ring JP-8 compatibility tranche
+
+`n0602-001-nitrile-jp8-compatibility/` retains the named N0602-001 nitrile
+rubber O-ring from Graham et al.'s NASA Seal/Secondary Air System Workshop
+study. It does not generalize the source's results to every nitrile or Buna-N
+compound. The source omits the compound formulation, supplier, cure, hardness,
+lot, and O-ring dimensions; those identity gaps remain explicit in every
+observation.
+
+The study used thermogravimetric analysis to estimate dry-material
+semi-volatiles, direct thermal-desorption GC-MS to measure absorbed fuel and
+fuel/polymer partitioning, and optical dilatometry to measure volume swell.
+Its matrix covered nine JP-8 fuels, one Fischer-Tropsch fuel, `25`, `37.5`,
+`50`, and `75%v/v` FT blends, and small `1..5 mg` specimens in `1..10 mL` of
+fuel. The pack retains `10.1 wt%` TGA semi-volatiles; `8.7` and `27.9%v/v`
+absorbed fuel at `0` and `25%v/v` aromatic content; alkane and aromatic
+partition coefficients `0.120` and `0.412`; their printed ratio `3.4`; and the
+volume-swell regression's `R^2 = 0.948`.
+
+The source is internally inconsistent about the volume-swell slope: its
+summary row prints `0.451`, while the adjacent plot prints
+`y = 0.463 x - 1.167`. Both slopes remain separate, provenance-linked claims;
+the intercept is explicitly a regression parameter, neither slope is averaged
+or preferred, and no raw-point refit is invented. The source's `~57%` overlap
+between 90% prediction intervals remains observation-only because it is
+printed as approximate. Exposure temperature, duration, allocation, raw
+points, coefficient uncertainty, and prediction limits are absent, so the
+runtime claims use `Unstated` uncertainty and fail-closed missing-condition
+axes.
+
+The NTRS record marks the conference paper public with public use permitted.
+No condition-matched independent source exposes the same N0602-001 formulation
+and fuel matrix, so this tranche records no synthetic agreement band.
+
+N0602-001 reference:
+
+- <https://ntrs.nasa.gov/citations/20080003822>
+- <https://ntrs.nasa.gov/api/citations/20080003822/downloads/20080003822.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -580,6 +619,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/nasa-cr-115153-water-ethylene-glycol/manifest.tsv \
   --out /path/to/nasa-cr-115153-inhibited-water-ethylene-glycol-coolant.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/n0602-001-nitrile-jp8-compatibility/manifest.tsv \
+  --out /path/to/n0602-001-nitrile-o-ring-jp8-compatibility.fsmatpk
 ```
 
 ## No-claim boundary
@@ -713,3 +756,12 @@ test pressure, and most property temperatures remain unknown. Its approximate
 heat-capacity equation is represented only by three exact-point transcriptions;
 no interpolation or extrapolation is authorized. The comparison report has a
 different, composition-basis-unspecified fluid and remains evidence only.
+
+The N0602-001 tranche is not a generic nitrile seal card, formulation,
+hardness specification, constitutive law, permeability model, compression-set
+law, ozone/aging qualification, fuel-system compatibility approval, or service
+life. Its TGA, absorbed-fuel, partitioning, and swell-regression claims bind the
+source's exact O-ring code and JP-8/FT test matrix. Missing exposure conditions
+must be acknowledged. The two printed swelling slopes remain conflicts, the
+approximate prediction-interval overlap is not promoted to an exact claim, and
+the regression intercept does not certify shrinkage in a particular fuel.
