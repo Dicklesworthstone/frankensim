@@ -147,6 +147,16 @@ oracle, c2r round-trip + full-IFFT oracle, DCT-II/III vs naive definitions +
 round-trip + same-build bit replay, N-D (2D/3D) vs independent naive N-D DFT +
 round-trip + separability + N-D Parseval + 2D convolution theorem +
 determinism, determinism + golden hash, and structured rejection of bad sizes.
+`tests/conformance.rs` additionally registers three fixed-order exact Casebook
+records: the n=2 complex KAT and exact round-trip; the current 16-batch n=128
+stage fingerprint `0x22ddb617266ea792`; and forward/inverse serial-vs-pooled
+bit equality over five shapes and worker counts `1, 2, 3, 7`, using an explicit
+fixed two-CCD/eight-core topology rather than a host probe. Every failure
+retains the complete canonical input frame, including that topology, plus
+exact mismatch bits or the structured run error. A disclosed `0xF5FF0001`
+seeded corruption flips bit 0 of the stage oracle and proves both the typed red
+report and `assert_green` refusal paths. These records make central failures
+replay-complete; one local record is not, by itself, a fresh dual-ISA G5 proof.
 The declared G3 adopter `forward-signal-scale-equivariance`
 (`tests/metamorphic.rs`, seed `0x2ACE_0002`, 384 cases) applies non-identity
 power-of-two rescalings to exactly eight generated complex samples and checks

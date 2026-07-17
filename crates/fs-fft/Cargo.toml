@@ -24,9 +24,11 @@ fs-math = { path = "../fs-math" }
 fs-simd = { path = "../fs-simd" }
 
 [dev-dependencies]
+fs-casebook = { path = "../fs-casebook" }
 fs-math = { path = "../fs-math" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-roofline = { path = "../fs-roofline" }
+fs-substrate = { path = "../fs-substrate" }
 
 [lints]
 workspace = true
