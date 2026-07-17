@@ -36,3 +36,10 @@ This document is the taxonomy; CONVENTIONS carries the code rules.
 - Gauntlet tier names in tests/docs are the "definition of done"
   (AGENTS.md): a determinism claim without its G5 lane is documented as
   targeted, not achieved.
+
+## Tooling
+
+The G5 audit harness is `fs-detaudit`: worker-matrix bit-identity audits
+with first-divergence localization, the cross-ISA divergence classifier
+(report of record: `docs/G5_CROSS_ISA_REPORT.md`), and measured ExecMode
+fast/deterministic deltas.
