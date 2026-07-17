@@ -483,7 +483,7 @@ fn mmt_002_semantic_gaps_refuse_before_identity_publication() {
     let terms = terms_for_behavior(&behavior);
     let stack = stack(&model, &terms);
 
-    let other_manufacturing = crate::manufacturing(&graph(2), 20);
+    let other_manufacturing = crate::manufacturing(&crate::graph(2), 20);
     assert!(matches!(
         other_manufacturing.bind_correlated_tolerance_axes(&behavior, &stack, coordinate_link(210)),
         Err(MachineToleranceAxisCrosswalkErrorV1::GraphMismatch { .. })
