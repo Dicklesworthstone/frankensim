@@ -119,11 +119,32 @@ regressions ch-006..ch-008 remain assertion-only and do not claim aggregate
 event coverage. Central proof must explicitly enable
 `fs-eproc/conformal-hardening`; a default-feature pass skips the target.
 
+`tests/adversarial_rotation.rs` is the fixed seeded e-process
+certifier-of-certifier tranche in `frankensim-epic-ascent-7tv.21.9`, advancing
+the e-process scope of `frankensim-epic-gauntlet-6nb.7`. Four
+strategies choose predictably among four dyadic bounded null laws whose
+conditional means are exactly one half, then stop at the Ville threshold,
+their declared history-dependent rule, or a 1024-observation horizon. Each
+strategy uses 1024 disjoint fs-rand logical streams and must record at most 80
+level-0.05 crossings (a greater-than-four-binomial-standard-deviation finite
+gate), exact law/stop/observation accounting, and a non-colliding tile range.
+One canonical configuration identity binds the laws, strategies, stopping
+rules and numeric selector thresholds, alpha, seed, Philox kernel/tile/index
+layout, draw method/count, stream-semantics version, and crate versions; a
+result identity and object-shaped `fs-obs` receipt retain all four empirical
+outcomes before five linted, wire-validated
+`ConformanceCase` verdicts are emitted.
+
 ## No-claim boundaries
 - Empirical-Bernstein/hedged closed-form CS for bounded means (mixture CS
   covers sub-Gaussian; EB variant is follow-up scope with its consumers).
 - Conformal e-prediction (fs-surrogate + conformal-hardening beads).
-- Nightly adversarial-rotation trials (certify-certifiers bead).
+- Both-ISA nightly rotation over a refreshed null/adversary corpus remains
+  certify-certifiers follow-up scope. The landed rotation battery is one fixed
+  finite seeded pseudorandom campaign: it can catch implementation drift but
+  is not an exhaustive proof over null laws, stopping times, dependence
+  structures, seeds, horizons, or ISAs. No cross-ISA execution evidence is
+  produced by this code-first slice.
 - Two-sided betting tests; asymptotic variants; sub-exponential extensions.
 - A caller-supplied finite span is a checked assumption, not a certificate that
   the underlying stochastic process has that support. Runtime breach refuses
