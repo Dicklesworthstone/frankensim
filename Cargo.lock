@@ -890,6 +890,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-casebook"
+version = "0.0.1"
+
+[[package]]
 name = "fs-cheb"
 version = "0.0.1"
 dependencies = [

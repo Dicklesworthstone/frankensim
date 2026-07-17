@@ -5208,4 +5208,76 @@ mod tests {
         ];
         assert_eq!(check_layers(&ms).len(), 1);
     }
+
+    /// A manifest whose crate dir is a real temp directory holding the
+    /// given CONTRACT.md text (or none), for exercising the contract lint
+    /// against complete/incomplete fixtures (bead huq.5 acceptance).
+    fn contract_fixture(name: &str, layer: &str, contract: Option<&str>) -> Manifest {
+        let dir = std::env::temp_dir().join(format!(
+            "fs-xtask-contract-fixture-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        match contract {
+            Some(text) => std::fs::write(dir.join("CONTRACT.md"), text).expect("fixture write"),
+            None => {
+                let _ = std::fs::remove_file(dir.join("CONTRACT.md"));
+            }
+        }
+        let mut m = manifest(name, layer, &[]);
+        m.dir = dir;
+        m
+    }
+
+    #[test]
+    fn contracts_lint_accepts_complete_and_names_every_gap() {
+        let complete: String = CONTRACT_SECTIONS
+            .iter()
+            .map(|s| format!("{s}\n\nbody\n\n"))
+            .collect();
+        let ok = contract_fixture("fs-ctest-ok", "L0", Some(&complete));
+        assert!(
+            check_contracts(&[ok]).is_empty(),
+            "a complete CONTRACT.md must lint clean"
+        );
+
+        let missing_file = contract_fixture("fs-ctest-none", "L0", None);
+        let v = check_contracts(&[missing_file]);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].detail.contains("missing CONTRACT.md"));
+
+        for dropped in CONTRACT_SECTIONS {
+            let partial: String = CONTRACT_SECTIONS
+                .iter()
+                .filter(|s| *s != dropped)
+                .map(|s| format!("{s}\n\nbody\n\n"))
+                .collect();
+            let m = contract_fixture("fs-ctest-partial", "L0", Some(&partial));
+            let v = check_contracts(&[m]);
+            assert_eq!(
+                v.len(),
+                1,
+                "dropping exactly {dropped:?} must produce exactly one violation"
+            );
+            assert!(
+                v[0].detail.contains(dropped),
+                "the violation must name the missing section {dropped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contracts_lint_exempts_tool_crates_only() {
+        let tool = contract_fixture("fs-ctest-tool", "TOOL", None);
+        assert!(
+            check_contracts(&[tool]).is_empty(),
+            "TOOL crates are exempt from the contract lint"
+        );
+        let util = contract_fixture("fs-ctest-util", "UTIL", None);
+        assert_eq!(
+            check_contracts(&[util]).len(),
+            1,
+            "UTIL crates are NOT exempt"
+        );
+    }
 }

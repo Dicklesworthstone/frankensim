@@ -1,0 +1,18 @@
+[package]
+name = "fs-casebook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Shared conformance-case harness: named cases with structured JSON-lines records (case id, inputs digest, tolerance, verdict, evidence) — the executable half of the CONTRACT.md discipline."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
