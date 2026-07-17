@@ -536,6 +536,9 @@ fn tls_006_cantilever_descent() {
     let (phi, report) = run();
     let (_, report_b) = run();
     let deterministic = report.snapshots == report_b.snapshots;
+    let load_pad_deterministic = report.load_pad_nodes == report_b.load_pad_nodes;
+    let load_pad_tracked = report.load_pad_nodes.len() == settings.iterations;
+    let load_pad_intervened = report.load_pad_nodes.iter().any(|&count| count > 0);
     // Volume convergence.
     let v_final = *report.volume.last().expect("volume history");
     // Trajectory stabilization: compliance variation over the last 3.
@@ -551,6 +554,8 @@ fn tls_006_cantilever_descent() {
     let drift_ok = report.audits.iter().all(|a| a.interface_drift_h < 0.5);
     // Quality: beats the TRIVIAL design (uniform band) atEQUAL volume.
     let grid = Quadtree::uniform(settings.level);
+    let final_support_valid =
+        try_cantilever_solution(&grid, &phi, fixture.load, fixture.band).is_ok();
     let half_trivial = 0.5 * v_final;
     let mut trivial = GridSdf::from_fn(n, &move |_, y: f64| (y - 0.5).abs() - half_trivial);
     let _ = redistance(&mut trivial, 6.0);
@@ -563,6 +568,10 @@ fn tls_006_cantilever_descent() {
         && interior_hole
         && drift_ok
         && deterministic
+        && load_pad_deterministic
+        && load_pad_tracked
+        && load_pad_intervened
+        && final_support_valid
         && beats_trivial;
     let mut rows = String::new();
     for r in report.rows.iter().step_by(4) {
@@ -580,6 +589,10 @@ fn tls_006_cantilever_descent() {
              determinism, beats-trivial\",\"v_final\":{v_final:.3},\
              \"j_final\":{j_final:.5e},\"j_trivial_same_volume\":{j_trivial:.5e},\
              \"deterministic\":{deterministic},\"interior_hole\":{interior_hole},\
+             \"load_pad_deterministic\":{load_pad_deterministic},\
+             \"load_pad_tracked\":{load_pad_tracked},\
+             \"load_pad_intervened\":{load_pad_intervened},\
+             \"final_support_valid\":{final_support_valid},\
              \"events\":[{}],\"trajectory\":[{}]",
             ev.trim_end_matches(','),
             rows.trim_end_matches(',')

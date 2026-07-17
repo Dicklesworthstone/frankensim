@@ -90,6 +90,9 @@ pub struct OptimizeReport {
     pub events: Vec<NucleationEvent>,
     /// FNV-64 hashes of the φ bits per iteration (evolution snapshots).
     pub snapshots: Vec<u64>,
+    /// Nodal assignments made to retain the non-design load pad each
+    /// iteration. This is intervention evidence, not a convergence metric.
+    pub load_pad_nodes: Vec<usize>,
     /// Ledger rows.
     pub rows: Vec<String>,
 }
@@ -152,6 +155,35 @@ fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, CutFemError> {
             fixture.band
         ))
     })
+}
+
+/// Retain a two-cell-deep non-design material pad around the checked load.
+///
+/// The pad extends one cell past each support endpoint and one cell beyond the
+/// design box, so the supported right-edge segment is strictly inside material
+/// rather than coincident with the pad boundary. Only the final three lattice
+/// columns can change. The caller still receives a fail-closed refusal when its
+/// initial geometry cuts the support; this policy repairs only geometry changes
+/// made by the optimizer after a successful canonical solve.
+fn retain_cantilever_load_pad(phi: &mut GridSdf, support: EdgeBand) -> usize {
+    let n = phi.n();
+    let h = phi.h();
+    let x_min = 1.0 - 2.0 * h;
+    let x_max = 1.0 + h;
+    let y_min = support.start() - h;
+    let y_max = support.end() + h;
+    let mut changed = 0usize;
+    for j in 0..=n {
+        for i in n.saturating_sub(2)..=n {
+            let [x, y] = phi.pos(i, j);
+            let pad = (x_min - x).max(x - x_max).max(y_min - y).max(y - y_max);
+            if pad <= 0.0 && pad < phi.node(i, j) {
+                *phi.node_mut(i, j) = pad;
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 fn validated_plane_strain_material(
@@ -344,8 +376,13 @@ pub fn optimize_compliance(
             settings.move_cells * h / vmax,
             0.45,
         );
+        // The load pad is non-design geometry. Retain it before redistancing
+        // so its restored interface participates in the ordinary audit, then
+        // reassert the strict interior clearance after the scalar sweep.
+        let mut load_pad_nodes = retain_cantilever_load_pad(phi, support);
         // 6. Redistance + audit.
         let audit = redistance(phi, settings.band_cells);
+        load_pad_nodes += retain_cantilever_load_pad(phi, support);
         // 7. Volume + multiplier update.
         let volume = material_volume(&grid, phi);
         #[allow(clippy::cast_precision_loss)]
@@ -383,7 +420,9 @@ pub fn optimize_compliance(
                 2,
             );
             if !events.is_empty() {
+                load_pad_nodes += retain_cantilever_load_pad(phi, support);
                 let _ = redistance(phi, settings.band_cells);
+                load_pad_nodes += retain_cantilever_load_pad(phi, support);
             }
             report.events.extend(events);
         }
@@ -393,7 +432,8 @@ pub fn optimize_compliance(
         let _ = write!(
             row,
             "{{\"iter\":{iter},\"compliance\":{compliance:.6e},\"volume\":{volume:.4},\
-             \"ell\":{ell:.4e},\"drift_h\":{:.2e},\"snapshot\":\"{snap:#018x}\"}}",
+             \"ell\":{ell:.4e},\"drift_h\":{:.2e},\"load_pad_nodes\":{load_pad_nodes},\
+             \"snapshot\":\"{snap:#018x}\"}}",
             audit.interface_drift_h
         );
         report.rows.push(row);
@@ -402,6 +442,7 @@ pub fn optimize_compliance(
         report.ell.push(ell);
         report.audits.push(audit);
         report.snapshots.push(snap);
+        report.load_pad_nodes.push(load_pad_nodes);
     }
     Ok(report)
 }
@@ -453,4 +494,38 @@ fn strain_at(
         [gu[0][0], gu[1][1], f64::midpoint(gu[0][1], gu[1][0])],
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_load_pad_is_strict_material_and_replays_without_global_fill() {
+        let support =
+            EdgeBand::new(DesignBoxEdge::Right, 0.375, 0.625).expect("valid right-edge support");
+        let initial = GridSdf::from_fn(8, &|_, y| y - 0.5);
+        let mut first = initial.clone();
+        let mut replay = initial.clone();
+
+        let changed = retain_cantilever_load_pad(&mut first, support);
+        let replay_changed = retain_cantilever_load_pad(&mut replay, support);
+        assert!(changed > 0, "fixture must exercise load-pad retention");
+        assert_eq!(changed, replay_changed);
+        assert_eq!(first.nodes(), replay.nodes());
+        assert!(first.value_at([1.0, support.start()]) < 0.0);
+        assert!(first.value_at([1.0, support.end()]) < 0.0);
+        assert!(
+            first
+                .enclose([1.0, support.start()], [1.0, support.end()])
+                .hi()
+                < 0.0,
+            "the complete loaded edge band must be strictly inside material"
+        );
+        assert_eq!(
+            first.node(0, 8).to_bits(),
+            initial.node(0, 8).to_bits(),
+            "load-pad retention must not fill unrelated lattice columns"
+        );
+    }
 }

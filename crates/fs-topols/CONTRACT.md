@@ -51,7 +51,12 @@ with zero meshing anywhere in the loop.
   speed — measured failure mode), scheduled nucleation; ledger rows
   with compliance, volume, ℓ, drift, and FNV snapshot hashes. The load is
   definitionally zero outside the checked `EdgeBand`; unrelated SDF cuts on
-  the same edge are skipped, while a cut through supported load refuses.
+  the same edge are skipped, while a caller-supplied cut through supported load
+  refuses before mutation. After every optimizer-owned advection,
+  redistancing, or nucleation update, a deterministic two-cell-deep
+  non-design material pad is retained around the loaded band with one cell of
+  endpoint clearance. Per-iteration ledger rows and `OptimizeReport` retain
+  the number of nodal assignments made by that policy.
   fs-topols constructs `IsotropicElastic` and calls fs-cutfem directly; the
   historical Nitsche and ghost coefficients are multiplied by
   `(lambda + 2*mu)/mu` so removing the fs-solid compatibility facade does not
@@ -94,13 +99,23 @@ with zero meshing anywhere in the loop.
    the supported band refuses. Non-finite/non-positive load magnitudes, band
    half-widths outside `[0, 0.5]`, and material settings outside the canonical
    finite coercive plane-strain regime refuse before the level set mutates.
+10. LOAD SUPPORT IS NON-DESIGN: once the initial canonical solve admits the
+    caller geometry, every optimizer-owned geometry update restores a
+    two-cell-deep right-edge material pad extending one cell past both support
+    endpoints. The complete supported segment remains strictly material on the
+    next solve. The policy scans only the last three lattice columns, records
+    every changed-node count, and replays exactly; it never weakens canonical
+    cut-edge refusal or fills unrelated columns.
 
 ## Error model
 
 fs-cutfem's `CutFemError` propagates unchanged from physics solves.
 `InvalidElasticityInput` names
 invalid cantilever load/band data, invalid optimizer material data, or the
-canonical typed-support refusal when the SDF cuts a loaded segment. The
+canonical typed-support refusal when the initial SDF cuts a loaded segment.
+Optimizer-owned erosion of an already-admitted load pad is repaired by the
+explicit bounded non-design policy and recorded, not passed to the solver or
+silently accepted. The
 inherited certified plane-strain bound is `(lambda + 2*mu)/mu <= 4`,
 equivalent for the isotropic card to `nu <= 1/3`; larger values refuse rather
 than entering the unsupported near-incompressible regime. Structured asserts
@@ -117,7 +132,8 @@ bitwise in the battery. Cross-ISA goldens not yet recorded.
 ## Cancellation behavior
 
 Bounded synchronous loops (fixed iteration counts, FIM sweep caps,
-CFL-bounded step counts). Chunked Cx polling belongs to the fs-exec
+CFL-bounded step counts). Load-pad retention adds at most three lattice-column
+visits per geometry publication. Chunked Cx polling belongs to the fs-exec
 driver (L4 consumes fs-cutfem's canonical L3 kernel directly).
 
 ## Unsafe boundary
@@ -137,10 +153,12 @@ idempotency; tls-003 normal extension; tls-004 volume conservation +
 drift policy; tls-005 numerical sensitivity gates (DT vs punched
 hole, shape velocity vs FD); tls-006 the cantilever descent (volume,
 stabilization, nucleation with interior-hole flood-fill proof,
-determinism, beats-trivial-at-equal-volume). Unit tests: enclosure
+determinism, recorded/replayed load-pad intervention, final typed-support
+validity, beats-trivial-at-equal-volume). Unit tests: enclosure
 containment including degenerate lattice-aligned boxes, planar extension,
-typed aligned-band success/replay, supported-cut refusal, and invalid
-fixture/material no-mutation refusals.
+typed aligned-band success/replay, supported-cut refusal, deterministic strict
+load-pad retention without unrelated-column fill, and invalid fixture/material
+no-mutation refusals.
 
 ## No-claim boundaries
 
@@ -154,9 +172,11 @@ fixture/material no-mutation refusals.
   design).
 - 3D, multiple load cases, stress constraints, compliant mechanisms.
 - Certified clipping of an SDF-cut loaded edge segment is not claimed; typed
-  support refuses that case. The two-point rule is exact for the shipped
-  constant traction times Q1 edge shapes, but no quadrature-error claim is
-  made for arbitrary traction callbacks.
+  support refuses that case. The optimizer's non-design pad prevents its own
+  evolution from creating that unsupported case; it is not a cut-edge
+  quadrature implementation. The two-point rule is exact for the shipped
+  constant traction times Q1 edge shapes, but no quadrature-error claim is made
+  for arbitrary traction callbacks.
 - fs-adjoint Hadamard boundary-form velocities (the volumetric
   energy-density form ships; the Hadamard trace form composes when
   the FEEC trace machinery lands).
