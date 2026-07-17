@@ -364,7 +364,11 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    fn kind_name(&self) -> &'static str {
+    /// Stable wire/ledger kind name. This is the documented export surface
+    /// for ledger `events`-table sinks (huq.16): sinks store
+    /// (`Event::to_jsonl` bytes, `kind_name`) without re-encoding.
+    #[must_use]
+    pub fn kind_name(&self) -> &'static str {
         match self {
             EventKind::SolverResidual { .. } => "solver_residual",
             EventKind::TileComplete { .. } => "tile_complete",
@@ -830,6 +834,9 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 pub struct Emitter {
     session: String,
     scope: String,
+    /// Byte length of the immutable base scope; `exit_scope` never
+    /// truncates past it.
+    base_scope_len: usize,
     seq: u64,
 }
 
@@ -837,11 +844,76 @@ impl Emitter {
     /// Create an emitter for one (session, scope) pair.
     #[must_use]
     pub fn new(session: impl Into<String>, scope: impl Into<String>) -> Self {
+        let scope = scope.into();
+        let base_scope_len = scope.len();
         Emitter {
             session: session.into(),
-            scope: scope.into(),
+            scope,
+            base_scope_len,
             seq: 0,
         }
+    }
+
+    /// Enter a child scope segment: the asupersync scope tree IS the trace
+    /// tree (huq.16), so the emitter mirrors it with explicit enter/exit
+    /// rather than thread-local magic. Entering emits nothing by itself;
+    /// `seq` stays one monotone stream per emitter so interleaved child
+    /// scopes replay in exact emission order.
+    ///
+    /// # Errors
+    /// Refuses empty segments and segments containing `/` (the path
+    /// separator) or control characters — a forged segment must not be able
+    /// to impersonate a different tree position.
+    pub fn enter_scope(&mut self, segment: &str) -> Result<(), SchemaError> {
+        if segment.is_empty() {
+            return Err(SchemaError {
+                at: 0,
+                message: "scope segment must be non-empty".to_string(),
+            });
+        }
+        if segment.contains('/') || segment.chars().any(char::is_control) {
+            return Err(SchemaError {
+                at: 0,
+                message: format!(
+                    "scope segment {segment:?} must not contain '/' or control characters \
+                     (path forgery guard)"
+                ),
+            });
+        }
+        self.scope.push('/');
+        self.scope.push_str(segment);
+        Ok(())
+    }
+
+    /// Exit the innermost child scope.
+    ///
+    /// # Errors
+    /// Refuses at the base scope: exits must pair with entries, and a
+    /// mismatched exit is a harness bug worth surfacing, not masking.
+    pub fn exit_scope(&mut self) -> Result<(), SchemaError> {
+        let Some(cut) = self.scope[self.base_scope_len..].rfind('/') else {
+            return Err(SchemaError {
+                at: 0,
+                message: "exit_scope at the base scope: unbalanced enter/exit".to_string(),
+            });
+        };
+        self.scope.truncate(self.base_scope_len + cut);
+        Ok(())
+    }
+
+    /// The live slash-separated scope path events are currently stamped with.
+    #[must_use]
+    pub fn current_scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// Depth of entered child segments below the base scope.
+    #[must_use]
+    pub fn scope_depth(&self) -> usize {
+        self.scope[self.base_scope_len..]
+            .chars()
+            .filter(|&c| c == '/')
+            .count()
     }
 
     /// Build the next event (seq auto-increments). `wall_ns` is supplied by
@@ -1804,6 +1876,110 @@ mod tests {
             expected.as_slice(),
             "all 42 payload fields stay enumerated"
         );
+    }
+
+    #[test]
+    fn scope_tree_mirrors_enter_exit_and_refuses_forgery_and_imbalance() {
+        let mut em = Emitter::new("study-x", "op-1");
+        assert_eq!(em.current_scope(), "op-1");
+        assert_eq!(em.scope_depth(), 0);
+
+        em.enter_scope("kernel-cg").expect("child scope");
+        em.enter_scope("tile-7").expect("grandchild scope");
+        assert_eq!(em.current_scope(), "op-1/kernel-cg/tile-7");
+        assert_eq!(em.scope_depth(), 2);
+        let deep = em.emit(
+            Severity::Info,
+            EventKind::TileComplete {
+                tile: 7,
+                kernel: "cg".into(),
+            },
+            None,
+        );
+        assert_eq!(deep.scope, "op-1/kernel-cg/tile-7");
+
+        em.exit_scope().expect("exit grandchild");
+        assert_eq!(em.current_scope(), "op-1/kernel-cg");
+        let mid = em.emit(
+            Severity::Info,
+            EventKind::Cancellation {
+                reason: "budget".into(),
+            },
+            None,
+        );
+        assert_eq!(mid.scope, "op-1/kernel-cg");
+        assert_eq!(
+            mid.seq,
+            deep.seq + 1,
+            "seq is one monotone stream across scope moves"
+        );
+
+        em.exit_scope().expect("exit child");
+        assert_eq!(em.current_scope(), "op-1");
+        assert!(
+            em.exit_scope().is_err(),
+            "exit at the base scope must refuse (unbalanced enter/exit)"
+        );
+
+        assert!(em.enter_scope("").is_err(), "empty segment must refuse");
+        assert!(
+            em.enter_scope("a/b").is_err(),
+            "path separator inside a segment is scope forgery"
+        );
+        assert!(
+            em.enter_scope("a\u{7}b").is_err(),
+            "control characters inside a segment must refuse"
+        );
+        assert_eq!(
+            em.current_scope(),
+            "op-1",
+            "refused entries must not move the scope"
+        );
+    }
+
+    #[test]
+    fn scope_tree_replay_is_deterministic_and_wire_valid() {
+        let run = || {
+            let mut em = Emitter::new("study-x", "op-1");
+            let mut lines = Vec::new();
+            em.enter_scope("solve").expect("scope");
+            lines.push(
+                em.emit(
+                    Severity::Info,
+                    EventKind::SolverResidual {
+                        solver: "cg".into(),
+                        iter: 0,
+                        residual: 0.5,
+                    },
+                    None,
+                )
+                .to_jsonl(),
+            );
+            em.enter_scope("tile-3").expect("scope");
+            lines.push(
+                em.emit(
+                    Severity::Trace,
+                    EventKind::TileComplete {
+                        tile: 3,
+                        kernel: "cg".into(),
+                    },
+                    None,
+                )
+                .to_jsonl(),
+            );
+            em.exit_scope().expect("exit");
+            em.exit_scope().expect("exit");
+            lines
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(
+            first, second,
+            "identical scope walks replay bit-identically"
+        );
+        for line in &first {
+            validate_line(line).expect("scope-tree events stay wire-valid");
+        }
     }
 
     #[test]

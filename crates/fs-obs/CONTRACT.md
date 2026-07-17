@@ -100,9 +100,19 @@ including direct domain-prefix binding.
 ## No-claim boundaries
 - FNV-1a is NOT cryptographic; ledger-grade content addressing (BLAKE3-class)
   arrives with fs-ledger.
-- Tracing-on-scope-trees integration (needs fs-exec), ledger `events` sink
-  (needs fs-ledger), and overhead budgeting (needs roofline harness) are this
-  crate's REMAINING bead scope — not yet claimed.
+- Scope-tree mirroring is IN-CRATE (huq.16): `Emitter::enter_scope` /
+  `exit_scope` mirror the asupersync scope tree explicitly (the scope tree IS
+  the trace tree), refusing path-forging segments (`/`, control characters)
+  and unbalanced exits, with one monotone `seq` stream so interleaved child
+  scopes replay in exact emission order. Runtime layers walk their live scope
+  trees through these calls; this crate stays deterministic and I/O-free.
+- The ledger `events` sink surface is the documented pair
+  (`EventKind::kind_name`, `Event::to_jsonl`) — sinks store both without
+  re-encoding. The sink implementation itself lives with fs-ledger's owners;
+  committed `*.events.jsonl` fixtures are schema-enforced in CI by
+  `xtask check-obs-events`, whose validator authority is
+  `fs_obs::validate_line` (never a second dialect). Overhead budgeting
+  (roofline harness) remains unclaimed bead scope.
 - The validator is structural, not a full JSON parser (the writer is ours;
   external JSON is out of scope). The JSON line is presentation/transport, not
   the exact-bit content-identity preimage. Public `Custom` construction still

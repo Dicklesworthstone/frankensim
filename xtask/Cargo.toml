@@ -12,6 +12,7 @@ layer = "TOOL"
 fs-blake3 = { path = "../crates/fs-blake3" }
 fs-evidence = { path = "../crates/fs-evidence" }
 fs-matdb = { path = "../crates/fs-matdb" }
+fs-obs = { path = "../crates/fs-obs" }
 fs-qty = { path = "../crates/fs-qty" }
 
 [lints]

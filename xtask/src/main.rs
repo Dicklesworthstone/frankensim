@@ -10,6 +10,7 @@
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-libm`     — cross-ISA-claiming crates route transcendentals via fs_math::det (bead lyms).
 //! - `check-color-admission` — no new positive Color literals outside admission authorities (bead 6pf9).
+//! - `check-obs-events` — committed *.events.jsonl fixtures are schema-valid fs-obs lines (bead huq.16).
 //! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
@@ -1190,6 +1191,65 @@ fn check_color_admission(root: &Path) -> Vec<Violation> {
                             });
                         }
                     }
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// check-obs-events (bead huq.16): every committed `*.events.jsonl` file must
+/// contain only schema-valid fs-obs event lines. The schema authority is
+/// `fs_obs::validate_line` itself — this check deliberately depends on the
+/// crate instead of re-implementing the wire format, so xtask can never
+/// drift into a second dialect. No fixtures exist yet: the check arms the
+/// test-log convention and enforces from the first committed fixture
+/// (citable-scanner precedent).
+fn check_obs_events(root: &Path) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let mut stack = vec![root.join("crates"), root.join("data")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if p.file_name().is_none_or(|name| name != "target") {
+                    stack.push(p);
+                }
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".events.jsonl") {
+                continue;
+            }
+            let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                violations.push(Violation {
+                    check: "obs-events",
+                    crate_name: rel.clone(),
+                    detail: format!("{rel}: unreadable event fixture"),
+                });
+                continue;
+            };
+            for (idx, line) in text.lines().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Err(error) = fs_obs::validate_line(line) {
+                    violations.push(Violation {
+                        check: "obs-events",
+                        crate_name: rel.clone(),
+                        detail: format!(
+                            "{rel}:{}: invalid fs-obs event line at byte {}: {}",
+                            idx + 1,
+                            error.at,
+                            error.message
+                        ),
+                    });
                 }
             }
         }
@@ -3565,6 +3625,7 @@ fn main() -> ExitCode {
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-libm" => (check_libm(&root), vec!["libm-determinism"]),
         "check-color-admission" => (check_color_admission(&root), vec!["color-admission"]),
+        "check-obs-events" => (check_obs_events(&root), vec!["obs-events"]),
         "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
         "check-identities" => (
@@ -3587,6 +3648,7 @@ fn main() -> ExitCode {
             v.extend(check_powi(&root));
             v.extend(check_libm(&root));
             v.extend(check_color_admission(&root));
+            v.extend(check_obs_events(&root));
             v.extend(check_terminology(&root));
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
@@ -3606,6 +3668,7 @@ fn main() -> ExitCode {
                     "powi-determinism",
                     "libm-determinism",
                     "color-admission",
+                    "obs-events",
                     TERMINOLOGY_CHECK,
                     "golden-couplings",
                     "semantic-identities",
