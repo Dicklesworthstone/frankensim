@@ -6,8 +6,9 @@ artifact becomes a trusted value without a certification receipt.
 
 Ambition tags: STL/OBJ/PLY + quarantine + catalogs + 3MF/GLB/VTK [S];
 bounded STEP Part-21 syntax, strict native triangular faceted-resource
-decoding, and estimated-SDF handoff [S]; broader CAD/EXPRESS interpretation,
-surface tessellation, and B-rep export explicitly STAGED (no-claim below).
+decoding/re-emission, and estimated-SDF handoff [S]; broader CAD/EXPRESS
+interpretation, surface tessellation, and SDF-to-NURBS/B-rep re-fit export
+explicitly STAGED (no-claim below).
 
 ## Purpose and layer
 
@@ -94,6 +95,17 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   spatial deviation. This is bounded resource-entity decoding, not AP203/AP214
   conformance; callers supply the length unit because the admitted closure
   deliberately excludes representation context.
+- **Strict native STEP faceted re-emission** (`step_faceted_export` module):
+  accepts only an immutable decoded resource made entirely of bare `FACE`
+  entities, assigns canonical dense IDs, emits the pinned triangular
+  `FACETED_BREP` resource closure under its retained AP203/AP214 declaration,
+  and binds caller-explicit `FILE_NAME` metadata. Coordinates use deterministic
+  binary64 round-trip decimal spelling. Before publication the emitted bytes
+  must pass the bounded syntax parser and native semantic decoder, with every
+  coordinate bit and triangle index equal to the sealed source. The receipt
+  retains caller metadata, both limit sets, the complete source decoder
+  receipt, output syntax receipt, and output decoder receipt. This is a
+  resource-level replay rung, not a NURBS re-fit or supplier-ready AP artifact.
 
 ## Invariants
 
@@ -183,6 +195,14 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
     decoder vector. Platform allocator rounding and container headers are not
     misrepresented as measured bytes; `try_reserve_exact` failure still returns
     a structured resource refusal.
+18. **Faceted re-emission is sealed and self-replaying**: version 1 accepts only
+    an existing native decoder result whose faces are all bare `FACE`; it
+    refuses plane-backed inputs rather than discarding surface semantics.
+    Dense point/loop/bound/face/shell/root IDs are checked for overflow, input
+    coordinates and indices are re-admitted, and output cannot publish until
+    bounded write-parse-decode replay returns bit-identical positions and exact
+    triangle order. Source and output semantic fingerprints remain distinct
+    because instance-ID normalization is an explicit transformation.
 
 ## Error model
 
@@ -200,6 +220,9 @@ with the source fingerprint plus exact instance relationship or decoder stage.
 `StepFacetedImportRefusal` preserves whether refusal happened during native
 materialization or the downstream topology/SDF handoff; a downstream refusal
 retains the successful decoder receipt and selected-root provenance.
+`StepFacetedExportRefusal` separately names source admission, checked
+construction/allocation bounds, cancellation, nested syntax write/parse,
+nested semantic replay, and first exact-geometry replay mismatch.
 
 ## Determinism class
 
@@ -207,6 +230,10 @@ retains the successful decoder receipt and selected-root provenance.
 state. Native faceted decoding sorts schema-defined `SET` members and materializes
 points/faces by numeric instance ID. The STEP tessellation handoff rejects
 `ExecMode::Fast`; its receipt and provenance explicitly bind deterministic mode.
+Strict faceted re-emission uses dense IDs and source decoder order, fixed header
+fields plus exact caller metadata, and deterministic round-trip decimal
+spelling. Identical sealed source, metadata, and limits produce identical bytes
+and nested receipts on one target.
 
 ## Cancellation behavior
 
@@ -225,6 +252,11 @@ passes before forwarding the same `Cx` to mesh-to-SDF sampling. Cancellation is
 reported as `StepImportRefusal::SdfBuild`. The existing `repair`, topology-sort,
 and `MeshChart` construction calls have no internal poll, so this subset makes
 no sub-call latency claim for those separately bounded stages.
+Strict faceted re-emission polls at entry/publication, every 4096 points and
+faces during owned graph construction, and around the bounded syntax writer,
+parser, and semantic decoder. The syntax subcalls have no internal `Cx`, so the
+re-emitter makes no sub-call latency claim inside those separately capped
+operations.
 
 ## Unsafe boundary
 
@@ -282,6 +314,13 @@ vertex-cap, and auxiliary-memory refusals plus the independent triangle cap;
 pre-requested cancellation; and proof that the native bridge reaches the
 existing topology quarantine rather than laundering an open shell.
 
+`tests/step_faceted_export.rs` (G0/G3/G4/G5): exact finite-coordinate and
+triangle replay through dense-ID export/write/parse/decode; negative-zero and
+nontrivial binary64 decimal preservation; nested receipt and AP203/AP214
+profile binding; byte-identical repeated export; canonical apostrophe escaping;
+syntax-instance and semantic-vertex bound refusals; invalid metadata refusal;
+plane-semantic-loss refusal; and pre-requested cancellation.
+
 ## PLY element order (bead wqd.25.1)
 
 Element order is the header's to define: faces may legally precede
@@ -311,7 +350,9 @@ import identically in both ASCII and binary (conformance-tested).
   tessellation. The native decoder claims correspondence only for its selected
   admitted closure and records decimal-to-f64 conversion plus accepted
   plane-consistency residual as an estimate.
-  It does not fit NURBS, write a topological B-rep/solid, or establish
+  The strict re-emitter writes only its already-decoded bare triangular
+  resource closure; it does not fit NURBS, establish an AP-conformant
+  topological solid/product, compose a source SDF deviation bound, or establish
   manufacturing predicates.
 - **Part-21 encoded characters and binary literals are refused** in this
   first subset. Source bytes must be ASCII; encoded-character directives
