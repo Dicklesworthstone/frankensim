@@ -59,8 +59,25 @@ a structured failure record. The future-format refusal test remains
 assertion-only. Seven model/parser unit tests additionally include the Poisson
 series-reference check (peak u ≈ 0.0736713 for -Δu=1).
 
+`tests/metamorphic.rs` adds three G3 aggregate cases under
+`fs-vskeleton/metamorphic`: `frame-invariance` uses primary input seed
+`0x6EB401` and companion derivative seed `0x6EB402`; `unit-rescaling` uses
+primary seed `0x6EB403` and companion derivative seed `0x6EB404`; and
+`seeded-violations` uses primary frame-violator seed `0x6EB405` and companion
+unit-violator seed `0x6EB406`. The canonical `ConformanceCase.seed` field holds
+the primary input-generating stream seed and the detail names its companion;
+none of these values is an execution or scheduler seed. Every aggregate has a
+distinct scope and, when reached, emits exactly one sequence-zero event that
+passes the failure-record lint and validates as fs-obs JSONL. Relation failures
+and a failed frame-violator catcher abort before their aggregate is reached, so
+the missing verdict is ordinary Rust early-abort evidence rather than a
+structured failure record. The unit-violator aggregate is emitted with
+Info/Error severity before its unchanged terminal assertion.
+
 ## No-claim boundaries
-Performance (unoptimized by design); no RNG consumption (study seeds are
-recorded as input provenance only); 2D scalar physics only. Process IDs and the
-atomic counter used to isolate temporary database names are execution-resource
-identities, not input seeds.
+Performance (unoptimized by design); the production study path consumes no RNG
+(study seeds are recorded as input provenance only); 2D scalar physics only.
+The G3 metamorphic battery consumes deterministic pseudorandom inputs from its
+named seeds but makes no cross-ISA generator or scheduler claim. Process IDs
+and the atomic counter used to isolate temporary database names are
+execution-resource identities, not input seeds.

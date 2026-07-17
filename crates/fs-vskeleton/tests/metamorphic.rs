@@ -14,6 +14,13 @@ use fs_propcheck::metamorphic::{
 use fs_vskeleton::model::EdgeLaw;
 
 const HOLE_CENTER: (f64, f64) = (0.5, 0.5);
+const SUITE: &str = "fs-vskeleton/metamorphic";
+const FRAME_RHO_INPUT_SEED: u64 = 0x6E_B4_01;
+const FRAME_DRHO_INPUT_SEED: u64 = 0x6E_B4_02;
+const UNIT_RHO_INPUT_SEED: u64 = 0x6E_B4_03;
+const UNIT_DRHO_INPUT_SEED: u64 = 0x6E_B4_04;
+const FRAME_VIOLATOR_INPUT_SEED: u64 = 0x6E_B4_05;
+const UNIT_VIOLATOR_INPUT_SEED: u64 = 0x6E_B4_06;
 
 fn law(radius: f64, width: f64) -> EdgeLaw {
     EdgeLaw {
@@ -23,11 +30,29 @@ fn law(radius: f64, width: f64) -> EdgeLaw {
     }
 }
 
-fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-vskeleton/metamorphic\",\"case\":\"{case}\",\
-         \"verdict\":\"pass\",\"detail\":\"{detail}\"}}"
+fn verdict(case: &str, pass: bool, detail: &str, primary_input_seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed: primary_input_seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event)
+        .expect("vertical-skeleton metamorphic verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("vertical-skeleton metamorphic verdict must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 /// Frame invariance: the ersatz density is a function of DISTANCE from the
@@ -69,7 +94,7 @@ fn g3_edge_law_density_is_frame_invariant_under_rotation_about_the_hole() {
     };
     check_relation(
         "pv-skeleton-rho",
-        0x6E_B4_01,
+        FRAME_RHO_INPUT_SEED,
         512,
         generate,
         &rho,
@@ -77,7 +102,7 @@ fn g3_edge_law_density_is_frame_invariant_under_rotation_about_the_hole() {
     );
     check_relation(
         "pv-skeleton-drho-dr",
-        0x6E_B4_02,
+        FRAME_DRHO_INPUT_SEED,
         512,
         generate,
         &drho,
@@ -85,7 +110,13 @@ fn g3_edge_law_density_is_frame_invariant_under_rotation_about_the_hole() {
     );
     verdict(
         "frame-invariance",
-        "rho and d(rho)/dr invariant under 1024 random rotations about the hole center",
+        true,
+        &format!(
+            "rho and d(rho)/dr invariant under 1024 random rotations about the hole center; \
+             rho_input_seed={FRAME_RHO_INPUT_SEED:#X} \
+             drho_input_seed={FRAME_DRHO_INPUT_SEED:#X}; execution_seed=none"
+        ),
+        FRAME_RHO_INPUT_SEED,
     );
 }
 
@@ -150,7 +181,7 @@ fn g3_edge_law_units_rescale_coherently() {
     };
     check_relation(
         "pv-skeleton-rho",
-        0x6E_B4_03,
+        UNIT_RHO_INPUT_SEED,
         512,
         generate,
         &rho,
@@ -158,7 +189,7 @@ fn g3_edge_law_units_rescale_coherently() {
     );
     check_relation(
         "pv-skeleton-drho-dr",
-        0x6E_B4_04,
+        UNIT_DRHO_INPUT_SEED,
         512,
         generate,
         &drho,
@@ -166,7 +197,13 @@ fn g3_edge_law_units_rescale_coherently() {
     );
     verdict(
         "unit-rescaling",
-        "rho dimensionless-invariant and d(rho)/dr scales as 1/length across 1024 rescalings",
+        true,
+        &format!(
+            "rho dimensionless-invariant and d(rho)/dr scales as 1/length across 1024 \
+             rescalings; rho_input_seed={UNIT_RHO_INPUT_SEED:#X} \
+             drho_input_seed={UNIT_DRHO_INPUT_SEED:#X}; execution_seed=none"
+        ),
+        UNIT_RHO_INPUT_SEED,
     );
 }
 
@@ -199,7 +236,7 @@ fn g3_seeded_frame_and_unit_violations_are_caught() {
     let frame_caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         check_relation(
             "pv-skeleton-anisotropic-rho",
-            0x6E_B4_05,
+            FRAME_VIOLATOR_INPUT_SEED,
             512,
             |stream: &mut Stream| {
                 let radius = stream.f64_in(0.05, 0.45);
@@ -243,7 +280,7 @@ fn g3_seeded_frame_and_unit_violations_are_caught() {
     let unit_caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         check_relation(
             "pv-skeleton-fixed-width-rho",
-            0x6E_B4_06,
+            UNIT_VIOLATOR_INPUT_SEED,
             512,
             |stream: &mut Stream| {
                 let radius = stream.f64_in(0.05, 0.45);
@@ -256,12 +293,18 @@ fn g3_seeded_frame_and_unit_violations_are_caught() {
             &unit_relation,
         );
     }));
+    verdict(
+        "seeded-violations",
+        unit_caught.is_err(),
+        &format!(
+            "anisotropic-distance frame bug and hardcoded-width unit bug both refused; \
+             frame_input_seed={FRAME_VIOLATOR_INPUT_SEED:#X} \
+             unit_input_seed={UNIT_VIOLATOR_INPUT_SEED:#X}; execution_seed=none"
+        ),
+        FRAME_VIOLATOR_INPUT_SEED,
+    );
     assert!(
         unit_caught.is_err(),
         "the hardcoded-width unit bug must be caught by the rescaling relation"
-    );
-    verdict(
-        "seeded-violations",
-        "anisotropic-distance frame bug and hardcoded-width unit bug both refused",
     );
 }
