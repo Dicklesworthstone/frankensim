@@ -93,6 +93,15 @@ Fully deterministic: LCG-seeded multi-starts and Monte-Carlo streams,
 canonical constraint ordering, bitwise float serialization. Identical
 inputs give identical diagnoses, estimates, and bytes.
 
+The conformance aggregate records distinguish input generation from
+execution provenance. Randomized fscon-003, fscon-004, and fscon-005
+carry their literal base input seeds `0x1001_2026_0707_0003`,
+`0x1001_2026_0707_0004`, and `0x1001_2026_0707_0005`; fscon-003 derives
+sample stream `s` as `base ^ s.wrapping_mul(0x9E37_79B9_7F4A_7C15)`.
+Fixed-input cases use aggregate seed zero. Scoped-runtime cases
+separately use the fixed Cx execution seed `0xC0C0`; that execution
+identity is not misreported as randomized input provenance.
+
 ## Cancellation behavior
 
 `elastic_solve` (and therefore `diagnose_infeasibility`) polls
@@ -109,11 +118,14 @@ None.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases fscon-001..fscon-006 — JSON-line
-verdicts, seeded LCG randomness, fs-obs events for ledger rows and
-the full diagnosis payload, plus G4 shared-DAG/work and exact/max+1
-depth-boundary fixtures for interval evaluation. Any reimplementation
-must pass the suite unchanged.
+`tests/conformance.rs`, cases fscon-001..fscon-006 — completed aggregate
+cases emit `fs_obs::EventKind::ConformanceCase` with Info/Error severity,
+failure-record linting, JSONL wire validation, and printing before the
+aggregate assertion. Seeded LCG randomness follows the mapping above.
+The object-shaped Custom companions for ledger rows and the full
+diagnosis payload remain wire-validated and printed, alongside G4
+shared-DAG/work and exact/max+1 depth-boundary fixtures for interval
+evaluation. Any reimplementation must pass the suite unchanged.
 
 ## No-claim boundaries
 
@@ -134,3 +146,6 @@ must pass the suite unchanged.
   and fs-fab integration.
 - Host problems are single-Rn-variable v1; multi-variable and
   manifold-variable domains generalize with the restoration solver.
+- Assertions and expectations reached before an aggregate verdict are
+  ordinary Rust test diagnostics; an early abort cannot claim that a
+  canonical aggregate conformance record was emitted.

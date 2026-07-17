@@ -3,8 +3,11 @@
 //! statuses/roles/penalties, chance validity machinery (the BOUND
 //! decides, not the raw rate), certification refusals + real interval
 //! proofs, minimal unsat cores vs enumeration, and the worked repair
-//! example with calibrated feasibility estimates. JSON-line verdicts;
-//! seeded cases carry seeds.
+//! example with calibrated feasibility estimates. Completed aggregate
+//! cases emit canonical fs-obs verdicts. Randomized input campaigns carry
+//! their literal base seeds; fixed-input cases use zero, and the fixed Cx
+//! stream remains separate execution provenance. Assertions and expectations
+//! reached before a verdict remain ordinary Rust test diagnostics.
 
 use asupersync::types::Budget;
 use fs_constraint::{
@@ -16,12 +19,34 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_opt::{AdmissionCaps, Manifold, NodeId, Problem, ProblemBuilder};
 use fs_qty::Dims;
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-constraint/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+const FIXED_INPUT_SEED: u64 = 0;
+const EXECUTION_SEED: u64 = 0xC0C0;
+const FSCON_003_INPUT_SEED: u64 = 0x1001_2026_0707_0003;
+const FSCON_003_STREAM_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+const FSCON_004_INPUT_SEED: u64 = 0x1001_2026_0707_0004;
+const FSCON_005_INPUT_SEED: u64 = 0x1001_2026_0707_0005;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-constraint/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-constraint/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("constraint verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("constraint verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -53,7 +78,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 0xC0C0,
+                seed: EXECUTION_SEED,
                 kernel_id: 1,
                 tile: 0,
                 iteration: 0,
@@ -200,6 +225,7 @@ fn fscon_001_taxonomy_and_roundtrip() {
         "all seven kinds map to their optimizer treatments, the spec set \
          round-trips through canonical serialization IDENTICALLY, garbage refuses \
          with its line number, and ledger rows validate through fs-obs",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -238,6 +264,7 @@ fn fscon_002_evidence() {
         "statuses and active-set roles classify correctly, violation magnitudes \
          carry EXACT certificates, and both penalty laws price violations as \
          declared",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -262,7 +289,7 @@ fn fscon_003_chance_bound_decides() {
     // Noise: u ~ U(0,1) on x0 (deterministic per-sample stream).
     // At x0 = 0.2: P(x0 + u ≤ 1) = P(u ≤ 0.8) = 0.8 exactly.
     let noise = |s: u64| -> Vec<f64> {
-        let mut r = Lcg(0x1001_2026_0707_0003 ^ (s.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
+        let mut r = Lcg(FSCON_003_INPUT_SEED ^ (s.wrapping_mul(FSCON_003_STREAM_STRIDE)));
         vec![r.unit(), 0.0]
     };
     let x = [0.2, 0.0];
@@ -289,9 +316,12 @@ fn fscon_003_chance_bound_decides() {
             "the BOUND decides: level 0.70 satisfied, level 0.78 refused as \
              BoundNotCleared even though the raw rate clears it ({squeezed:?} \
              status), level 0.95 violated; the Hoeffding half-width travels as a \
-             StatisticalCertificate; seed 0x1001_2026_0707_0003",
+             StatisticalCertificate; input seed 0x1001_2026_0707_0003, with \
+             sample stream s derived as seed ^ \
+             s.wrapping_mul(0x9E37_79B9_7F4A_7C15)",
             squeezed = squeezed.status
         ),
+        FSCON_003_INPUT_SEED,
     );
 }
 
@@ -341,7 +371,7 @@ fn fscon_004_certification_and_robust() {
     let g = b.min_of(a, one).expect("g");
     b.objective(g, fs_opt::Sense::Minimize, 1.0).expect("o");
     let nl = b.finish();
-    let mut rng = Lcg(0x1001_2026_0707_0004);
+    let mut rng = Lcg(FSCON_004_INPUT_SEED);
     let mut contained = true;
     for _ in 0..300 {
         let c = [rng.range(-1.5, 1.5), rng.range(-1.5, 1.5)];
@@ -382,6 +412,7 @@ fn fscon_004_certification_and_robust() {
          domains and refuses honestly otherwise, containment holds over 300 \
          random nonlinear boxes x 10 samples, and robust kinds carry enclosure \
          certificates; seed 0x1001_2026_0707_0004",
+        FSCON_004_INPUT_SEED,
     );
 }
 
@@ -458,7 +489,7 @@ fn fscon_005_unsat_cores() {
             .expect("feasible diag");
         let feasible_ok = fd.feasible && fd.core.is_empty() && fd.witness.is_some();
         // Seeded random family: elastic verdict matches enumeration.
-        let mut rng = Lcg(0x1001_2026_0707_0005);
+        let mut rng = Lcg(FSCON_005_INPUT_SEED);
         let mut agree = 0;
         for _ in 0..12 {
             let rows: Vec<(f64, f64, f64)> = (0..4)
@@ -488,8 +519,10 @@ fn fscon_005_unsat_cores() {
                  infeasible and EVERY single deletion restores feasibility; feasible \
                  systems return witnesses; elastic feasibility verdicts match \
                  enumeration on 12/12 seeded random fixtures ({agree}/12); \
-                 seed 0x1001_2026_0707_0005"
+                 input seed 0x1001_2026_0707_0005; fixed Cx execution seed \
+                 0xC0C0"
             ),
+            FSCON_005_INPUT_SEED,
         );
     });
 }
@@ -553,9 +586,10 @@ fn feasible_elastic_support_is_expanded_before_deletion_filtering() {
                 && deletions_feasible
                 && deterministic,
             &format!(
-                "the feasible elastic support {{floor-x, floor-y}} expands to the deterministic minimal jointly-infeasible core {:?}; every deletion is feasible",
+                "the feasible elastic support {{floor-x, floor-y}} expands to the deterministic minimal jointly-infeasible core {:?}; every deletion is feasible; fixed Cx execution seed 0xC0C0",
                 first.core
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -660,8 +694,9 @@ fn fscon_006_repairs_calibrated() {
                  RANKED repairs (drop-soft offered for the soft member); feasibility \
                  estimates are calibrated against exact enumeration (worst gap \
                  {worst_gap:.3} < 0.05); the full diagnosis payload ships through \
-                 fs-obs: {payload}"
+                 fs-obs under fixed Cx execution seed 0xC0C0: {payload}"
             ),
+            FIXED_INPUT_SEED,
         );
     });
 }
@@ -722,6 +757,7 @@ fn a_non_finite_constraint_value_is_never_certified_feasible() {
         ) && finite_ev.violation.is_finite(),
         "a NaN (out-of-domain) constraint refuses with a typed EvalNonFinite, never a feasible \
          exact-0 certificate",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -762,6 +798,7 @@ fn a_chance_constraint_with_a_bad_delta_or_zero_samples_is_refused() {
         "fscon-chance-params",
         true,
         "invalid chance delta / zero samples are refused, not turned into a NaN certificate",
+        FIXED_INPUT_SEED,
     );
 }
 
