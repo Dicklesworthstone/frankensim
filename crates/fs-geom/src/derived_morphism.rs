@@ -5709,7 +5709,24 @@ fn morphism_receipt(
     factors: &[DerivedMorphismIdV1],
     cx: &Cx<'_>,
 ) -> Result<IdentityReceipt<DerivedMorphismIdV1>, DerivedMorphismErrorV1> {
-    if cx.checkpoint().is_err() {
+    morphism_receipt_with_cancellation(source, target, class, evidence, no_claims, factors, || {
+        cx.checkpoint().is_err()
+    })
+}
+
+fn morphism_receipt_with_cancellation<C>(
+    source: DerivedGeometryIdV1,
+    target: DerivedGeometryIdV1,
+    class: ReceiptClassV1,
+    evidence: DerivedEvidenceTransportV1,
+    no_claims: &[DerivedNoClaimIdV1],
+    factors: &[DerivedMorphismIdV1],
+    mut cancellation: C,
+) -> Result<IdentityReceipt<DerivedMorphismIdV1>, DerivedMorphismErrorV1>
+where
+    C: FnMut() -> bool,
+{
+    if cancellation() {
         return Err(DerivedMorphismErrorV1::Cancelled {
             stage: "identity-entry",
         });
@@ -5720,9 +5737,10 @@ fn morphism_receipt(
         CanonicalError::Cancelled { .. } => DerivedMorphismErrorV1::Cancelled { stage: "identity" },
         other => DerivedMorphismErrorV1::Identity(other),
     };
-    CanonicalEncoder::<DerivedMorphismIdV1, _>::new(DERIVED_MORPHISM_IDENTITY_LIMITS_V1, || {
-        cx.checkpoint().is_err()
-    })
+    CanonicalEncoder::<DerivedMorphismIdV1, _>::new(
+        DERIVED_MORPHISM_IDENTITY_LIMITS_V1,
+        cancellation,
+    )
     .map_err(map_identity_error)?
     .bytes(Field::new(0, "source"), source.as_bytes())
     .and_then(|encoder| encoder.bytes(Field::new(1, "target"), target.as_bytes()))
@@ -5754,7 +5772,23 @@ fn evidence_polarity_transport_candidate_receipt(
     IdentityReceipt<DerivedEvidencePolarityTransportCandidateIdV1>,
     DerivedEvidencePolarityTransportCandidateErrorV1,
 > {
-    if cx.checkpoint().is_err() {
+    evidence_polarity_transport_candidate_receipt_with_cancellation(ir, morphism, || {
+        cx.checkpoint().is_err()
+    })
+}
+
+fn evidence_polarity_transport_candidate_receipt_with_cancellation<C>(
+    ir: &DerivedEvidencePolarityTransportCandidateIrV1,
+    morphism: &AdmittedDerivedMorphismV1,
+    mut cancellation: C,
+) -> Result<
+    IdentityReceipt<DerivedEvidencePolarityTransportCandidateIdV1>,
+    DerivedEvidencePolarityTransportCandidateErrorV1,
+>
+where
+    C: FnMut() -> bool,
+{
+    if cancellation() {
         return Err(
             DerivedEvidencePolarityTransportCandidateErrorV1::Cancelled {
                 stage: "evidence-polarity-identity-entry",
@@ -5778,7 +5812,7 @@ fn evidence_polarity_transport_candidate_receipt(
     };
     CanonicalEncoder::<DerivedEvidencePolarityTransportCandidateIdV1, _>::new(
         DERIVED_EVIDENCE_POLARITY_TRANSPORT_CANDIDATE_IDENTITY_LIMITS_V1,
-        || cx.checkpoint().is_err(),
+        cancellation,
     )
     .map_err(map_identity_error)?
     .bytes(
@@ -6527,6 +6561,28 @@ fn admit_between_endpoints(
     target: GeometryEndpointV1<'_>,
     cx: &Cx<'_>,
 ) -> Result<AdmittedDerivedMorphismV1, DerivedMorphismErrorV1> {
+    admit_between_endpoints_with_cancellation(
+        ir,
+        source,
+        target,
+        cx,
+        || cx.checkpoint().is_err(),
+        || cx.checkpoint().is_err(),
+    )
+}
+
+fn admit_between_endpoints_with_cancellation<I, P>(
+    ir: DerivedMorphismIrV1,
+    source: GeometryEndpointV1<'_>,
+    target: GeometryEndpointV1<'_>,
+    cx: &Cx<'_>,
+    identity_cancellation: I,
+    mut publication_cancellation: P,
+) -> Result<AdmittedDerivedMorphismV1, DerivedMorphismErrorV1>
+where
+    I: FnMut() -> bool,
+    P: FnMut() -> bool,
+{
     if cx.checkpoint().is_err() {
         return Err(DerivedMorphismErrorV1::Cancelled {
             stage: "admission-entry",
@@ -6553,14 +6609,14 @@ fn admit_between_endpoints(
     let no_equivalence_claims = retain_no_claim(validated.no_claim)?;
     let primitive_path = retain_typed_primitive(validated.primitive)?;
     let declared_chart_maps = retain_chart_primitive(validated.chart_primitive)?;
-    let receipt = morphism_receipt(
+    let receipt = morphism_receipt_with_cancellation(
         source.id,
         target.id,
         validated.receipt,
         ir.evidence,
         &no_equivalence_claims,
         &[],
-        cx,
+        identity_cancellation,
     )?;
     let mut primitive_factors = Vec::new();
     if validated.admitted != AdmittedDerivedMorphismClassV1::Identity {
@@ -6571,7 +6627,7 @@ fn admit_between_endpoints(
         })?;
         primitive_factors.push(receipt.id());
     }
-    if cx.checkpoint().is_err() {
+    if publication_cancellation() {
         return Err(DerivedMorphismErrorV1::Cancelled {
             stage: "publication",
         });
@@ -6668,6 +6724,29 @@ pub fn admit_derived_evidence_polarity_transport_candidate_v1(
     AdmittedDerivedEvidencePolarityTransportCandidateV1,
     DerivedEvidencePolarityTransportCandidateErrorV1,
 > {
+    admit_derived_evidence_polarity_transport_candidate_with_cancellation_v1(
+        ir,
+        morphism,
+        cx,
+        || cx.checkpoint().is_err(),
+        || cx.checkpoint().is_err(),
+    )
+}
+
+fn admit_derived_evidence_polarity_transport_candidate_with_cancellation_v1<I, P>(
+    ir: &DerivedEvidencePolarityTransportCandidateIrV1,
+    morphism: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+    identity_cancellation: I,
+    mut publication_cancellation: P,
+) -> Result<
+    AdmittedDerivedEvidencePolarityTransportCandidateV1,
+    DerivedEvidencePolarityTransportCandidateErrorV1,
+>
+where
+    I: FnMut() -> bool,
+    P: FnMut() -> bool,
+{
     if cx.checkpoint().is_err() {
         return Err(
             DerivedEvidencePolarityTransportCandidateErrorV1::Cancelled {
@@ -6710,8 +6789,12 @@ pub fn admit_derived_evidence_polarity_transport_candidate_v1(
             },
         );
     }
-    let receipt = evidence_polarity_transport_candidate_receipt(ir, morphism, cx)?;
-    if cx.checkpoint().is_err() {
+    let receipt = evidence_polarity_transport_candidate_receipt_with_cancellation(
+        ir,
+        morphism,
+        identity_cancellation,
+    )?;
+    if publication_cancellation() {
         return Err(
             DerivedEvidencePolarityTransportCandidateErrorV1::Cancelled {
                 stage: "evidence-polarity-publication",
@@ -12152,6 +12235,8 @@ pub fn admit_derived_scoped_presentation_equivalence_candidate_assembly_v1(
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
     use super::*;
     use asupersync::types::Budget;
     use fs_exec::{CancelGate, ExecMode, StreamKey};
@@ -12190,6 +12275,17 @@ mod tests {
             );
             f(&cx)
         })
+    }
+
+    fn scripted_cancellation<'a>(
+        observed: &'a Cell<usize>,
+        cancel_at: Option<usize>,
+    ) -> impl FnMut() -> bool + 'a {
+        move || {
+            let checkpoint = observed.get() + 1;
+            observed.set(checkpoint);
+            cancel_at == Some(checkpoint)
+        }
     }
 
     fn geometry_id(seed: u8) -> DerivedGeometryIdV1 {
@@ -22017,6 +22113,104 @@ mod tests {
     }
 
     #[test]
+    fn evidence_polarity_cancellation_injection_covers_identity_and_publication() {
+        with_cx(false, |cx| {
+            let source = endpoint(165);
+            let target = endpoint(166);
+            let morphism = admit_strict(
+                source,
+                target,
+                167,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let ir = evidence_polarity_candidate_ir(
+                &morphism,
+                DerivedEvidencePolarityV1::Refutation,
+                DerivedEvidencePolarityV1::Refutation,
+                168,
+            );
+
+            let baseline_polls = Cell::new(0);
+            let baseline =
+                admit_derived_evidence_polarity_transport_candidate_with_cancellation_v1(
+                    &ir,
+                    &morphism,
+                    cx,
+                    scripted_cancellation(&baseline_polls, None),
+                    || false,
+                )
+                .expect("non-cancelling evidence probe preserves admission");
+            let public = admit_derived_evidence_polarity_transport_candidate_v1(&ir, &morphism, cx)
+                .expect("public evidence admission remains equivalent");
+            assert_eq!(
+                baseline, public,
+                "the private probe seam changes no identity bytes"
+            );
+
+            let identity_polls = baseline_polls.get();
+            assert!(
+                identity_polls > 2,
+                "encoder must expose genuine mid-flight polls"
+            );
+            for cancel_at in 1..=identity_polls {
+                let expected_stage = if cancel_at == 1 {
+                    "evidence-polarity-identity-entry"
+                } else {
+                    "evidence-polarity-identity"
+                };
+                for replay in 0..2 {
+                    let observed = Cell::new(0);
+                    let result =
+                        admit_derived_evidence_polarity_transport_candidate_with_cancellation_v1(
+                            &ir,
+                            &morphism,
+                            cx,
+                            scripted_cancellation(&observed, Some(cancel_at)),
+                            || false,
+                        );
+                    assert!(
+                        matches!(
+                            result,
+                            Err(
+                                DerivedEvidencePolarityTransportCandidateErrorV1::Cancelled {
+                                    stage
+                                }
+                            ) if stage == expected_stage
+                        ),
+                        "checkpoint {cancel_at} replay {replay} must fail closed at {expected_stage}"
+                    );
+                    assert_eq!(observed.get(), cancel_at);
+                }
+            }
+
+            let publication_identity_polls = Cell::new(0);
+            let publication_polls = Cell::new(0);
+            let result = admit_derived_evidence_polarity_transport_candidate_with_cancellation_v1(
+                &ir,
+                &morphism,
+                cx,
+                scripted_cancellation(&publication_identity_polls, None),
+                || {
+                    publication_polls.set(publication_polls.get() + 1);
+                    true
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(
+                    DerivedEvidencePolarityTransportCandidateErrorV1::Cancelled {
+                        stage: "evidence-polarity-publication"
+                    }
+                )
+            ));
+            assert_eq!(publication_identity_polls.get(), identity_polls);
+            assert_eq!(publication_polls.get(), 1);
+        });
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // All three explicit proof polarities and every accessor.
     fn span_evidence_transport_candidates_bind_restriction_corestriction_route() {
         assert_ne!(
@@ -25909,6 +26103,93 @@ mod tests {
                 ),
                 Err(DerivedMorphismErrorV1::Cancelled { .. })
             ));
+        });
+    }
+
+    #[test]
+    fn morphism_cancellation_injection_covers_every_identity_poll_and_publication() {
+        with_cx(false, |cx| {
+            let source = endpoint(63);
+            let target = endpoint(64);
+            let ir = strict_ir(
+                source,
+                target,
+                65,
+                ColorRank::Verified,
+                ColorRank::Validated,
+            );
+
+            let baseline_polls = Cell::new(0);
+            let baseline = admit_between_endpoints_with_cancellation(
+                ir,
+                source,
+                target,
+                cx,
+                scripted_cancellation(&baseline_polls, None),
+                || false,
+            )
+            .expect("non-cancelling probe preserves admission");
+            let public = admit_between_endpoints(ir, source, target, cx)
+                .expect("public admission remains equivalent");
+            assert_eq!(
+                baseline, public,
+                "the private probe seam changes no identity bytes"
+            );
+
+            let identity_polls = baseline_polls.get();
+            assert!(
+                identity_polls > 2,
+                "encoder must expose genuine mid-flight polls"
+            );
+            for cancel_at in 1..=identity_polls {
+                let expected_stage = if cancel_at == 1 {
+                    "identity-entry"
+                } else {
+                    "identity"
+                };
+                for replay in 0..2 {
+                    let observed = Cell::new(0);
+                    let result = admit_between_endpoints_with_cancellation(
+                        ir,
+                        source,
+                        target,
+                        cx,
+                        scripted_cancellation(&observed, Some(cancel_at)),
+                        || false,
+                    );
+                    assert!(
+                        matches!(
+                            result,
+                            Err(DerivedMorphismErrorV1::Cancelled { stage })
+                                if stage == expected_stage
+                        ),
+                        "checkpoint {cancel_at} replay {replay} must fail closed at {expected_stage}"
+                    );
+                    assert_eq!(observed.get(), cancel_at);
+                }
+            }
+
+            let publication_identity_polls = Cell::new(0);
+            let publication_polls = Cell::new(0);
+            let result = admit_between_endpoints_with_cancellation(
+                ir,
+                source,
+                target,
+                cx,
+                scripted_cancellation(&publication_identity_polls, None),
+                || {
+                    publication_polls.set(publication_polls.get() + 1);
+                    true
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(DerivedMorphismErrorV1::Cancelled {
+                    stage: "publication"
+                })
+            ));
+            assert_eq!(publication_identity_polls.get(), identity_polls);
+            assert_eq!(publication_polls.get(), 1);
         });
     }
 

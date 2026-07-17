@@ -1167,16 +1167,20 @@ model-version/convention mismatch, the lineage cap/cap+1 boundary, deterministic
 replay, and already-requested entry cancellation. Public-wrapper coverage now
 uses fully admitted RD.1a fixtures for strict admission, identity, composition
 neutrality, replay, ordered raw endpoint refusal, and immutable model-version
-refusal. Deterministic mid-flight cancellation injection remains an explicit
-batch-verification follow-up.
+refusal. A private deterministic probe seam now replays cancellation twice at
+every base-morphism identity-entry/streaming-encoder poll and exactly at the
+pre-publication linearization point. A non-cancelling probe must reproduce the
+public admission byte-for-byte, and every injected cancellation returns no
+admitted morphism; the seam is not public API and changes no receipt schema.
 The evidence-polarity candidate suite covers its separate domain and exact
 12-parent/18-recursive-field contract, both variance lanes, all three equal
 polarity pairs with identity separation, recursive child-domain refusal, raw/
 sealed child drift, zero nominal identities, identity-evidence refusal, all six
 unequal-polarity pairs, replay/accessors, retained-field identity movement, and
-already-requested entry/identity-entry cancellation. Injected cancellation
-inside its canonical encoder and immediately before publication remains part of
-the same deterministic mid-flight follow-up.
+already-requested entry/identity-entry cancellation. The same private probe
+pattern replays every evidence-polarity identity checkpoint twice and injects
+exactly before publication; the non-cancelling path must equal public admission
+and every injected path returns no candidate.
 The standalone stratum suite covers domain-separated class encoding, exact
 geometry/stratification/stratum ownership, identity neutrality, associative
 flattening, exact middle-triple refusal, nominal-field identity movement,
