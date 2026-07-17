@@ -314,7 +314,10 @@ comparison evidence, including NASA-CR-115153's inhibited water/ethylene-glycol
 coolant specification and the conflict-preserving N0602-001 nitrile O-ring
 compatibility tranche. The NGYC N42 battery additionally pins supplier, sintered
 grade, and coating identity while proving that incompatible SI/CGS energy-product
-prints survive as distinct claims.
+prints survive as distinct claims. The NACA TN 2680 battery compiles the
+supplier-minimum-purity 2,2,4-trimethylpentane tranche and verifies all fifteen
+apparatus-bound Table I maximum-flame-speed rows without promoting the report's
+empirical fit to a bulk-material law.
 
 ## No-claim boundaries
 
@@ -363,7 +366,10 @@ prints survive as distinct claims.
   swell slopes, one regression intercept, and one coefficient of determination.
   The first supplier-pinned N42 tranche adds one remanence, one coercivity, and
   two conflict-preserving maximum-energy-product claims for NGYC sintered,
-  nickel-coated cubes.
+  nickel-coated cubes. The NACA TN 2680 iso-octane tranche adds one
+  supplier-minimum-purity claim and fifteen atmospheric Bunsen-flame maximum-
+  speed observations with explicit temperature, oxidizer, flow, burner, and
+  missing-condition metadata.
   The gas associations do not define air or exhaust mixture compositions,
   humidity, or combustion completeness. The Aluminum claims do not define a
   continuous constitutive curve or a general-purpose design card; their NIST
@@ -444,8 +450,17 @@ prints survive as distinct claims.
   demagnetization curves, and temperature coefficients. Its printed
   `318.3 kJ/m^3` and `42 MGOe` maximum-energy-product representations normalize
   to different SI values and therefore remain separate claims; neither is a
-  resolved design allowable. Bead 1sxe still owns the temperature-dependent N42
-  card and the remaining curated material/property and interface-system dataset.
+  resolved design allowable. The NACA TN 2680 claims bind a supplier-claimed
+  `99.6 mol%` minimum-purity 2,2,4-trimethylpentane fuel and fifteen Table I
+  maximum-flame-speed rows to the reported atmospheric Bunsen-flame apparatus.
+  Supplier, lot, exact assay, impurity composition, row-level pressure, exact
+  maximizing equivalence ratio, raw images, dispersion, and confidence metadata
+  remain absent. The observations are not a pure-fluid property card, gasoline
+  surrogate specification, reaction mechanism, transferable burner law, or
+  authority for density, viscosity, surface tension, heat capacity, latent heat,
+  vapor pressure, octane rating, or the report's empirical fit. Bead 1sxe still
+  owns the versioned multicomponent gasoline surrogate, temperature-dependent
+  N42 card, and the remaining curated material/property and interface-system dataset.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	naca-tn-2680-2-2-4-trimethylpentane-flame-speed
+redistribution	permitted	NASA NTRS record 19930083861 marks NACA Technical Note 2680 public and states Work of the US Gov. Public Use Permitted; authors, title, report number, laboratory, and publication date retained
+citation	Dugger, G. L. and Graab, D. D. (1952), Flame Speeds of 2,2,4-Trimethylpentane-Oxygen-Nitrogen Mixtures, NACA Technical Note 2680, Lewis Flight Propulsion Laboratory, NTRS 19930083861
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

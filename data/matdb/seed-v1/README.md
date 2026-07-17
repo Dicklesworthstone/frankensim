@@ -595,6 +595,44 @@ NGYC N42 reference:
 - <https://www.nature.com/articles/s41598-023-47689-2>
 - <https://creativecommons.org/licenses/by/4.0/>
 
+## NACA TN 2680 iso-octane flame-speed tranche
+
+`naca-tn-2680-isooctane-flame-speed/` retains the
+2,2,4-trimethylpentane fuel and Bunsen-flame observations reported by Dugger
+and Graab. The source identifies the chemical name and a supplier-claimed
+minimum purity of `99.6 mol%`, but not the supplier, lot, analytical method,
+measured assay, or impurity composition. The pack therefore stores the purity
+statement as a lower-bound claim with `Unstated` uncertainty; it does not turn
+`99.6 mol%` into an exact pure-fluid composition.
+
+The flame-speed observation transcribes all `15` experimental rows from Table
+I. Each scalar retains the initial mixture temperature, oxygen mole fraction
+in the oxygen-nitrogen stream, stream-flow Reynolds number, burner inside
+diameter, and the experiment-wide average atmospheric pressure. Two repeated
+nominal conditions at `422 K`, `0.210` oxygen fraction, `Re = 1000`, and
+`1.256 cm` diameter remain distinct (`56.1` and `59.0 cm/s`); the two repeated
+`422 K`, `0.294`, `Re = 900`, `0.617 cm` rows likewise remain distinct
+(`108.0` and `102.1 cm/s`). No averaging or synthetic dispersion is invented.
+
+The report locates each maximum only between equivalence ratios `1.0` and
+`1.1`, so every flame-speed claim exposes an exact-ratio-missing flag and the
+two source bounds. Its average `744 mm` mercury pressure is retained as a
+source-precision `99.2 kPa` condition and explicitly marked as not known per
+row. The `0.210` oxygen-fraction runs used service air with approximately
+`0.4 vol%` water; that approximate value remains observation-only. The other
+oxygen-nitrogen mixtures retain the supplier's `+/-0.1 vol%` analysis width.
+
+The report also presents least-squares lines and an empirical maximum-speed
+equation. Those are deliberately absent: the tranche records apparatus-bound
+mixture observations, not a continuous constitutive law or a geometry-free
+bulk-fluid flame-speed constant. NASA marks NTRS record `19930083861` public
+and states that public use of the US Government work is permitted.
+
+NACA TN 2680 references:
+
+- <https://ntrs.nasa.gov/citations/19930083861>
+- <https://ntrs.nasa.gov/api/citations/19930083861/downloads/19930083861.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -665,6 +703,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv \
   --out /path/to/ngyc-n42-sintered-ndfeb-nickel-coated-cubes.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv \
+  --out /path/to/naca-tn-2680-2-2-4-trimethylpentane-flame-speed.fsmatpk
 ```
 
 ## No-claim boundary
@@ -817,3 +859,15 @@ temperature, production lot, chemistry, exact process, intrinsic coercivity,
 recoil permeability, temperature coefficients, and second-quadrant curves.
 The `318.3 kJ/m^3` and `42 MGOe` energy-product representations remain separate;
 neither authorizes selecting a resolved value for motor design.
+
+The NACA TN 2680 tranche is not an exact pure-iso-octane fluid card, gasoline
+surrogate specification, reaction mechanism, ignition model, or continuous
+flame-speed law. It binds one supplier-minimum-purity statement and fifteen
+atmospheric Bunsen-flame observations to their reported mixture and apparatus
+conditions. Supplier, lot, exact assay, impurity composition, row-level
+pressure, exact maximizing equivalence ratio, raw images, dispersion, and
+confidence metadata remain absent. It supplies no density, viscosity, surface
+tension, heat capacity, latent heat, vapor pressure, octane rating, transport
+curve, or permission to transfer the measured maxima to another burner,
+pressure, oxidizer, humidity state, or practical gasoline. The empirical fit
+printed by the report remains excluded as model-only evidence.

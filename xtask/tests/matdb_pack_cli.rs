@@ -36,6 +36,8 @@ const N0602_001_NITRILE_JP8_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/n0602-001-nitrile-jp8-compatibility/manifest.tsv";
 const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
+const NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv";
 const AISI_4140_RC33_SEED_MANIFEST: &str = "data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv";
 const AISI_1045_COLD_DRAWN_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv";
@@ -1829,6 +1831,256 @@ fn g3_cli_compiles_committed_ngyc_n42_sintered_magnet_seed() {
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "source-absent NGYC N42 property must remain refused: {refused_property}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_naca_tn_2680_isooctane_flame_speed_seed() {
+    let manifest = workspace_path(NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed NACA TN 2680 iso-octane flame-speed seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("naca-tn-2680-isooctane-first.fsmatpk");
+    let second_path = directory.join("naca-tn-2680-isooctane-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first NACA TN 2680 iso-octane seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second NACA TN 2680 iso-octane seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "NACA TN 2680 iso-octane decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first NACA TN 2680 iso-octane pack");
+    let second_bytes = fs::read(second_path).expect("read second NACA TN 2680 iso-octane pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "NACA TN 2680 iso-octane pack bytes moved"
+    );
+    let decoded =
+        NormalizedPack::from_bytes(&first_bytes).expect("decode NACA TN 2680 iso-octane pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify NACA TN 2680 iso-octane pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "naca-tn-2680-2-2-4-trimethylpentane-flame-speed"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("Work of the US Gov. Public Use Permitted")
+    );
+    assert_eq!(decoded.claims().claim_count(), 16);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let purity = decoded
+        .claims()
+        .claims_for("minimum_reported_fuel_mole_fraction_purity");
+    assert_eq!(purity.len(), 1);
+    let (_, purity_claim) = purity[0];
+    let PropertyValue::Scalar { value, dims } = &purity_claim.value else {
+        panic!("NACA TN 2680 fuel minimum purity was not scalar");
+    };
+    let expected_purity = 99.6_f64 * 0.01;
+    assert!((*value - expected_purity).abs() / expected_purity <= 2.0e-15);
+    assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
+    assert_eq!(
+        purity_claim
+            .validity
+            .bound("source_fuel_supplier_identity_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(
+        purity_claim.validity.bound("source_fuel_lot_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(
+        purity_claim.validity.bound("source_exact_assay_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(purity_claim.uncertainty, UncertaintyModel::Unstated);
+    assert_eq!(purity_claim.provenance.license, NASA_SEED_LICENSE);
+    assert!(
+        purity_claim
+            .provenance
+            .source
+            .contains("NACA Technical Note 2680")
+    );
+    let purity_observation = decoded
+        .claims()
+        .observation(purity_claim.observations[0])
+        .expect("NACA TN 2680 purity observation remains linked");
+    assert!(
+        purity_observation
+            .method
+            .contains("minimum-purity statement")
+    );
+    assert!(purity_observation.caveats.contains("lower-bound statement"));
+
+    let flame_claims = decoded.claims().claims_for("maximum_laminar_flame_speed");
+    assert_eq!(flame_claims.len(), 15);
+    let expected_rows = [
+        (311.0, 0.210, 1000.0, 1.256, 34.6),
+        (311.0, 0.250, 1000.0, 0.838, 52.1),
+        (311.0, 0.294, 1600.0, 0.838, 72.2),
+        (311.0, 0.294, 900.0, 0.617, 67.2),
+        (311.0, 0.347, 1200.0, 0.617, 89.1),
+        (311.0, 0.496, 1800.0, 0.297, 152.2),
+        (367.0, 0.210, 1000.0, 1.256, 44.8),
+        (422.0, 0.210, 1000.0, 1.256, 56.1),
+        (422.0, 0.210, 1000.0, 1.256, 59.0),
+        (422.0, 0.210, 700.0, 0.838, 57.4),
+        (422.0, 0.250, 1400.0, 0.838, 83.1),
+        (422.0, 0.294, 900.0, 0.617, 108.0),
+        (422.0, 0.294, 900.0, 0.617, 102.1),
+        (422.0, 0.347, 1400.0, 0.617, 138.0),
+        (422.0, 0.496, 1800.0, 0.297, 229.9),
+    ];
+
+    for (temperature, oxygen_fraction, reynolds_number, diameter_cm, speed_cm_per_s) in
+        expected_rows
+    {
+        let diameter_m = diameter_cm * 0.01;
+        let speed_m_per_s = speed_cm_per_s * 0.01;
+        let matching = flame_claims
+            .iter()
+            .filter(|(_, claim)| {
+                claim.validity.bound("initial_mixture_temperature")
+                    == Some((temperature, temperature))
+                    && claim
+                        .validity
+                        .bound("oxygen_mole_fraction_in_oxygen_nitrogen")
+                        == Some((oxygen_fraction, oxygen_fraction))
+                    && claim.validity.bound("stream_flow_reynolds_number")
+                        == Some((reynolds_number, reynolds_number))
+                    && claim.validity.bound("burner_inside_diameter")
+                        == Some((diameter_m, diameter_m))
+                    && matches!(
+                        &claim.value,
+                        PropertyValue::Scalar { value, .. } if *value == speed_m_per_s
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected one NACA Table I row at T={temperature}, O2={oxygen_fraction}, Re={reynolds_number}, diameter={diameter_cm} cm, speed={speed_cm_per_s} cm/s"
+        );
+        let (_, claim) = matching[0];
+        let PropertyValue::Scalar { dims, .. } = &claim.value else {
+            unreachable!("matching predicate admitted only scalar flame speeds");
+        };
+        assert_eq!(*dims, Dims([1, 0, -1, 0, 0, 0]));
+        assert_eq!(
+            claim.validity.bound("average_atmospheric_pressure"),
+            Some((99.2_f64 * 1.0e3, 99.2_f64 * 1.0e3))
+        );
+        assert_eq!(
+            claim.validity.bound("source_pressure_per_row_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_equivalence_ratio_at_maximum_exact_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_maximum_equivalence_ratio_lower_bound"),
+            Some((1.0, 1.0))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_maximum_equivalence_ratio_upper_bound"),
+            Some((1.1, 1.1))
+        );
+        assert_eq!(
+            claim.validity.bound("source_fuel_supplier_identity_known"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            claim.validity.bound("source_fuel_lot_known"),
+            Some((0.0, 0.0))
+        );
+        if oxygen_fraction == 0.210 {
+            assert_eq!(
+                claim
+                    .validity
+                    .bound("source_oxidizer_analysis_half_width_known"),
+                Some((0.0, 0.0))
+            );
+            assert_eq!(
+                claim
+                    .validity
+                    .bound("source_oxidizer_analysis_absolute_half_width"),
+                None
+            );
+        } else {
+            assert_eq!(
+                claim
+                    .validity
+                    .bound("source_oxidizer_analysis_absolute_half_width"),
+                Some((0.1_f64 * 0.01, 0.1_f64 * 0.01))
+            );
+        }
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        assert!(claim.provenance.source.contains("NTRS 19930083861"));
+        assert!(claim.provenance.source.contains("[source:primary]"));
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("NACA TN 2680 flame-speed observation remains linked");
+        assert!(observation.method.contains("total-area method"));
+        assert!(
+            observation
+                .caveats
+                .contains("not geometry-free bulk-material constants")
+        );
+        assert!(observation.caveats.contains("Repeated rows"));
+    }
+
+    for refused_property in [
+        "density",
+        "dynamic_viscosity",
+        "surface_tension",
+        "specific_heat_capacity",
+        "heat_of_vaporization",
+        "vapor_pressure",
+        "research_octane_number",
+        "empirical_maximum_flame_speed_fit",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "source-absent or model-only NACA TN 2680 property must remain refused: {refused_property}"
         );
     }
 
