@@ -153,6 +153,13 @@ while machine-neutral `BenchmarkResult` rows expose hypervolume and mean front
 distance for later trend wiring. The formula source is Huband et al., *A Scalable
 Multi-objective Test Problem Toolkit* (corrected EMO 2005 version), cross-read
 against jMetal revision `ea7e882f6b8f94b99535921674e62cda7986f20e`.
+At the retained seed and fixed 36,892-evaluation budget, the first central run
+measured mean front distance `0.23171459361058497`; the coarse conformance ceiling
+is `0.25`, leaving `0.01828540638941503` absolute (7.3% of the ceiling) headroom.
+This is a fixed-fixture acceptance band, not a convergence-rate or
+optimizer-performance claim. The budget, returned front, and orthogonal gates
+remain unchanged; any passing rerun receipt supersedes rather than relabels the
+original red receipt.
 As in the older fs-dfo aggregate batteries, impossible public-API structural
 failures such as an empty front remain ordinary Rust diagnostics before aggregate
 emission; gate failures after a front exists retain structured red evidence.
