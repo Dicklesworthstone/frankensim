@@ -35,6 +35,7 @@ use core::fmt;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+pub mod action;
 pub mod admitted;
 pub mod balance;
 mod cards;

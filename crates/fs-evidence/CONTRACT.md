@@ -526,3 +526,43 @@ identity is the domain-separated BLAKE3 hash of the canonical bytes.
   chart accounts with the matching declared role.
 - `ColorRank` is carried and composed weakest-wins, but no payload-level
   color algebra (regimes, datasets, estimators) is evaluated here.
+
+## Evidence-action vocabulary (bead frankensim-leapfrog-2026-program-i94v.1.4.1, I08.1)
+
+`action` defines the decision-facing vocabulary for buying uncertainty
+reduction: `ActionProposal` pins a closed ten-kind taxonomy (solver
+tolerance, mesh/time refinement, representation escalation, UQ samples,
+material/coupon test, sensor campaign, falsification, standards obligation,
+explicit refusal — coupon tests and sensor campaigns are the physical
+kinds), one targeted claim slice (claim id × six-component uncertainty
+decomposition), a planning-only expected-response factor in (0, 1] or
+explicit Unknown, per-axis cost states (money/compute/memory/lead-time,
+each a `NonNegRange` envelope in one unit or `Unknown` with a NAMED
+authority gap — never a silent zero), capability demands, dependencies on
+content ids, exclusivity and correlation group identities, optional expiry
+on a named clock, an evidence-color CEILING, and the proposer.
+`Portfolio::admit` refuses duplicate content identity (idempotent
+proposals), missing/self dependencies and cycles (content addressing makes
+true cycles inexpressible), exclusivity violations, cross-clock expiry, and
+expired proposals; per-axis totals are `Known` only when every contribution
+shares one unit, else `Incomparable` listing every gap and unit — cross-
+currency sums refuse because price normalization is a policy input. The
+planning/execution split is structural: proposals cannot carry outcome
+colors; only `ExecutionReceipt::admit` (bound to the exact proposal id,
+outcome never above the ceiling) can, so planned physical tests cannot
+raise evidence until executed. Canonical transport is bounded,
+version-gated, canonical (re-encode bit-for-bit or refuse), with
+domain-separated BLAKE3 identity.
+
+### No-claim boundaries (evidence-action vocabulary)
+
+- Cost and response "distributions" are interval envelopes; no parametric,
+  moment, or coverage claim.
+- Correlation is a group identity only; no joint-distribution claim.
+- Portfolio admission proves feasibility structure, not optimality; no
+  decision, ranking, or value-of-information computation lives here.
+- No currency, time, or unit conversion — ever; mismatches refuse and
+  normalization decisions belong to policy layers.
+- An `ExecutionReceipt` binds outcome color to a proposal identity but does
+  not itself verify the execution happened; execution attestation is
+  ledger/checker scope.
