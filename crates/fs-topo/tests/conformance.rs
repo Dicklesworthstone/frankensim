@@ -480,7 +480,10 @@ fn topo_005_stability() {
 /// to the ledger.
 #[test]
 fn topo_006_determinism_and_scale() {
-    let field = two_well_field(0.02, 0x1001_2026_0707_0037);
+    const DETERMINISM_SEED: u64 = 0x1001_2026_0707_0037;
+    const SCALE_SEED: u64 = 0x1001_2026_0707_0038;
+
+    let field = two_well_field(0.02, DETERMINISM_SEED);
     let a = persistence0(&field);
     let b = persistence0(&field);
     let bitwise = a.len() == b.len()
@@ -489,7 +492,7 @@ fn topo_006_determinism_and_scale() {
         });
     // Scale run: 96³ ≈ 885k voxels.
     let n = 96u32;
-    let mut rng = Lcg(0x1001_2026_0707_0038);
+    let mut rng = Lcg(SCALE_SEED);
     let mut values = Vec::with_capacity((n * n * n) as usize);
     for z in 0..n {
         for y in 0..n {
@@ -517,7 +520,7 @@ fn topo_006_determinism_and_scale() {
             fs_obs::EventKind::Custom {
                 name: "topo-scale-ledger".to_string(),
                 json: format!(
-                    "{{\"voxels\":{},\"betti\":[{},{},{}],\"betti_ms\":{t_betti},\
+                    "{{\"seed\":{SCALE_SEED},\"voxels\":{},\"betti\":[{},{},{}],\"betti_ms\":{t_betti},\
                      \"bars\":{},\"persistence_ms\":{t_pers}}}",
                     n * n * n,
                     bt.0,
@@ -532,15 +535,24 @@ fn topo_006_determinism_and_scale() {
     fs_obs::validate_line(&line).expect("scale ledger validates");
     println!("{line}");
     verdict(
-        "topo-006",
-        bitwise && bt.0 >= 1,
+        "topo-006/determinism",
+        bitwise,
         &format!(
-            "persistence is BITWISE reproducible; the 885k-voxel scale run ledgers \
-             betti {bt:?} in {t_betti} ms and {} bars in {t_pers} ms (sequential v1; \
-             chunked-parallel is the contract no-claim); seed 0x1001_2026_0707_0038",
+            "persistence is BITWISE reproducible for seed {DETERMINISM_SEED:#018x} \
+             (sequential v1; chunked-parallel is the contract no-claim)"
+        ),
+        DETERMINISM_SEED,
+    );
+    verdict(
+        "topo-006/scale",
+        bt.0 >= 1,
+        &format!(
+            "the 885k-voxel scale run produced betti {bt:?} and {} bars for seed \
+             {SCALE_SEED:#018x}; wall-clock measurements are retained only in the \
+             companion scale event",
             bars.len()
         ),
-        0x1001_2026_0707_0038,
+        SCALE_SEED,
     );
 }
 
