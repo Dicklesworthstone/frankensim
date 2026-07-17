@@ -595,6 +595,45 @@ NGYC N42 reference:
 - <https://www.nature.com/articles/s41598-023-47689-2>
 - <https://creativecommons.org/licenses/by/4.0/>
 
+## Jinshan N42 pristine temperature-endpoint tranche
+
+`jinshan-n42-pristine-temperature/` retains the pristine commercial N42
+sintered NdFeB state tested by Chang et al. The source pins the supplier to
+Jinshan Magnetic Materials Co., identifies wire-cut `10 mm x 10 mm x 6 mm`
+pieces, and names the NIM 6500C permanent-magnet measuring instrument. The
+paper calls those unequal-sided pieces cubes; the pack preserves both the
+printed wording and the dimensions rather than silently regularizing them.
+
+Table 1 supplies intrinsic coercivity `Hcj`, remanence `Br`, and maximum energy
+product at `25 degC` and `120 degC`. The six CGS values are normalized with
+`1 G = 1e-4 T` and `1 Oe = 1000/(4*pi) A/m`; their exact temperature states
+remain claim validity rather than being interpolated. Table 2 additionally
+prints interval-average remanence and coercivity coefficients of
+`-0.129 %/degC` and `-0.602 %/degC`, normalized to `-0.00129 K^-1` and
+`-0.00602 K^-1`. The rounded Table 1 endpoints do not reproduce both printed
+coefficients exactly, so the coefficients remain separate source claims and
+are not recomputed from the rounded endpoint values.
+
+The pristine `N42` specimen is distinct from the authors' `N42-HT` state: it
+did not receive their `800 degC` for `5 h` plus `550 degC` for `2 h` treatment.
+The source omits the supplier lot, composition, original sinter schedule,
+coating, magnetization protocol, temperature-control details, field sweep,
+repeats, dispersion, and uncertainty. Figure 10 depicts `25`, `80`, and
+`120 degC` demagnetization curves, but the pack does not digitize graph pixels.
+It admits no `80 degC` scalar, recoil permeability, irreversible-loss boundary,
+continuous constitutive law, or extrapolation beyond `25-120 degC`. This card
+therefore adds supplier-, state-, method-, and temperature-pinned endpoints;
+it does not pretend to complete the bead's still-missing recoil-limit evidence.
+
+The article is published under CC-BY-4.0; the manifest retains its authors,
+title, DOI, publisher notice, and license identifier.
+
+Jinshan N42 reference:
+
+- <https://doi.org/10.1016/j.jmrt.2024.12.235>
+- <https://www.sciencedirect.com/science/article/pii/S2238785424030382>
+- <https://creativecommons.org/licenses/by/4.0/>
+
 ## NACA TN 2680 iso-octane flame-speed tranche
 
 `naca-tn-2680-isooctane-flame-speed/` retains the

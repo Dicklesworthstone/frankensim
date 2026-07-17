@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	jinshan-n42-pristine-sintered-temperature-endpoints
+redistribution	permitted	Creative Commons Attribution 4.0 permits sharing and adaptation with attribution; retain the authors, article title, DOI, publisher notice, and license identifier
+citation	Chang, R., Bai, G., Li, Y., Yan, Z., Qin, X., Guo, J., Wang, F., and Xu, X. (2025), Synergistic regulation and optimization of microstructure, coercivity, and thermal stability in sintered NdFeB magnets through grain boundary diffusion of Dy and Al elements, Journal of Materials Research and Technology 34, 2183-2192, doi:10.1016/j.jmrt.2024.12.235
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

@@ -36,6 +36,8 @@ const N0602_001_NITRILE_JP8_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/n0602-001-nitrile-jp8-compatibility/manifest.tsv";
 const NGYC_N42_SINTERED_NICKEL_COATED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ngyc-n42-sintered-nickel-coated/manifest.tsv";
+const JINSHAN_N42_PRISTINE_TEMPERATURE_SEED_MANIFEST: &str =
+    "data/matdb/seed-v1/jinshan-n42-pristine-temperature/manifest.tsv";
 const NACA_TN_2680_ISOOCTANE_FLAME_SPEED_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/naca-tn-2680-isooctane-flame-speed/manifest.tsv";
 const FACE_G_CDTRF_G_2023_V1_SEED_MANIFEST: &str =
@@ -1846,6 +1848,237 @@ fn g3_cli_compiles_committed_ngyc_n42_sintered_magnet_seed() {
         assert!(
             decoded.claims().claims_for(refused_property).is_empty(),
             "source-absent NGYC N42 property must remain refused: {refused_property}"
+        );
+    }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_jinshan_n42_pristine_temperature_endpoints() {
+    let manifest = workspace_path(JINSHAN_N42_PRISTINE_TEMPERATURE_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed Jinshan N42 temperature seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("jinshan-n42-temperature-first.fsmatpk");
+    let second_path = directory.join("jinshan-n42-temperature-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first Jinshan N42 temperature seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second Jinshan N42 temperature seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "Jinshan N42 temperature decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first Jinshan N42 temperature pack");
+    let second_bytes = fs::read(second_path).expect("read second Jinshan N42 temperature pack");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "Jinshan N42 temperature pack bytes moved"
+    );
+    let decoded =
+        NormalizedPack::from_bytes(&first_bytes).expect("decode Jinshan N42 temperature pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify Jinshan N42 temperature pack identity");
+
+    assert_eq!(
+        decoded.pack_id(),
+        "jinshan-n42-pristine-sintered-temperature-endpoints"
+    );
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(decoded.redistribution_terms().contains("Creative Commons"));
+    assert_eq!(decoded.claims().claim_count(), 8);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let endpoint_expectations = [
+        (
+            "remanent_flux_density",
+            25.0_f64,
+            12.75_f64 * 1.0e3 * 1.0e-4,
+            Dims([0, 1, -2, 0, -1, 0]),
+        ),
+        (
+            "remanent_flux_density",
+            120.0_f64,
+            11.18_f64 * 1.0e3 * 1.0e-4,
+            Dims([0, 1, -2, 0, -1, 0]),
+        ),
+        (
+            "intrinsic_coercive_field_strength",
+            25.0_f64,
+            12.07_f64 * 1.0e3 * (1.0e3 / (4.0 * std::f64::consts::PI)),
+            Dims([-1, 0, 0, 0, 1, 0]),
+        ),
+        (
+            "intrinsic_coercive_field_strength",
+            120.0_f64,
+            5.17_f64 * 1.0e3 * (1.0e3 / (4.0 * std::f64::consts::PI)),
+            Dims([-1, 0, 0, 0, 1, 0]),
+        ),
+        (
+            "maximum_magnetic_energy_product",
+            25.0_f64,
+            40.14_f64 * (100_000.0 / (4.0 * std::f64::consts::PI)),
+            Dims([-1, 1, -2, 0, 0, 0]),
+        ),
+        (
+            "maximum_magnetic_energy_product",
+            120.0_f64,
+            29.29_f64 * (100_000.0 / (4.0 * std::f64::consts::PI)),
+            Dims([-1, 1, -2, 0, 0, 0]),
+        ),
+    ];
+    let endpoint_observation = endpoint_expectations
+        .iter()
+        .map(
+            |(property, source_temperature_c, expected_value, expected_dims)| {
+                let temperature_k = source_temperature_c + 273.15;
+                let claims = decoded.claims().claims_for(property);
+                let (_, claim) = claims
+                    .into_iter()
+                    .find(|(_, claim)| {
+                        claim.validity.bound("temperature") == Some((temperature_k, temperature_k))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("missing Jinshan N42 {property} at {source_temperature_c} degC")
+                    });
+                let PropertyValue::Scalar { value, dims } = &claim.value else {
+                    panic!("Jinshan N42 {property} endpoint was not scalar");
+                };
+                assert_eq!(dims, expected_dims);
+                let scale = expected_value.abs().max(1.0e-12);
+                assert!((*value - expected_value).abs() / scale <= 2.0e-15);
+                assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+                assert_eq!(claim.provenance.license, CC_BY_4_0_LICENSE);
+                assert!(
+                    claim
+                        .provenance
+                        .source
+                        .contains("10.1016/j.jmrt.2024.12.235")
+                );
+                assert!(claim.provenance.source.contains("[source:primary]"));
+                assert_eq!(
+                    claim.validity.bound("source_instrument_nim_6500c"),
+                    Some((1.0, 1.0))
+                );
+                assert_eq!(
+                    claim
+                        .validity
+                        .bound("source_authors_heat_treatment_applied"),
+                    Some((0.0, 0.0))
+                );
+                for missing_axis in [
+                    "source_supplier_production_lot_known",
+                    "source_composition_known",
+                    "source_temperature_control_method_known",
+                ] {
+                    assert_eq!(claim.validity.bound(missing_axis), Some((0.0, 0.0)));
+                }
+                claim.observations[0]
+            },
+        )
+        .collect::<Vec<_>>();
+    assert!(
+        endpoint_observation
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]),
+        "all Table 1 endpoints must retain one shared observation"
+    );
+    let endpoint_observation = decoded
+        .claims()
+        .observation(endpoint_observation[0])
+        .expect("Jinshan N42 endpoint observation remains linked");
+    assert_eq!(
+        endpoint_observation.specimen,
+        "jinshan-magnetic-materials-commercial-n42-sintered-ndfeb-pristine-wire-cut-10x10x6-mm-lot-unspecified"
+    );
+    assert!(endpoint_observation.method.contains("NIM 6500C"));
+    assert!(
+        endpoint_observation
+            .caveats
+            .contains("calls the 10 mm x 10 mm x 6 mm pieces cubes")
+    );
+    assert!(
+        endpoint_observation
+            .caveats
+            .contains("no curve points are digitized")
+    );
+
+    for (property, expected_value) in [
+        ("remanence_temperature_coefficient", -0.00129_f64),
+        ("coercivity_temperature_coefficient", -0.00602_f64),
+    ] {
+        let claims = decoded.claims().claims_for(property);
+        assert_eq!(claims.len(), 1, "missing Jinshan N42 {property}");
+        let (_, claim) = claims[0];
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("Jinshan N42 {property} was not scalar");
+        };
+        assert_eq!(*dims, Dims([0, 0, 0, -1, 0, 0]));
+        assert_eq!(*value, expected_value);
+        assert_eq!(
+            claim.validity.bound("temperature"),
+            Some((25.0 + 273.15, 120.0 + 273.15))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_coefficient_uses_25c_and_120c_endpoints"),
+            Some((1.0, 1.0))
+        );
+        assert_eq!(
+            claim
+                .validity
+                .bound("source_rounded_endpoints_reproduce_printed_coefficient_exactly"),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("Jinshan N42 coefficient observation remains linked");
+        assert!(
+            observation
+                .caveats
+                .contains("do not reproduce both printed coefficients exactly")
+        );
+        assert!(
+            observation
+                .caveats
+                .contains("not continuous constitutive laws")
+        );
+    }
+
+    for refused_property in [
+        "coercive_field_strength",
+        "recoil_relative_permeability",
+        "demagnetization_curve",
+        "irreversible_demagnetization_loss_boundary",
+    ] {
+        assert!(
+            decoded.claims().claims_for(refused_property).is_empty(),
+            "source-absent Jinshan N42 property must remain refused: {refused_property}"
         );
     }
 

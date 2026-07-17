@@ -379,7 +379,11 @@ Wankel-housing authority.
   swell slopes, one regression intercept, and one coefficient of determination.
   The first supplier-pinned N42 tranche adds one remanence, one coercivity, and
   two conflict-preserving maximum-energy-product claims for NGYC sintered,
-  nickel-coated cubes. The NACA TN 2680 iso-octane tranche adds one
+  nickel-coated cubes. A separate Jinshan N42 tranche adds exact `25 degC` and
+  `120 degC` remanence, intrinsic-coercivity, and maximum-energy-product
+  endpoints plus the source's two interval-average temperature coefficients
+  for its pristine, wire-cut commercial sintered state. The NACA TN 2680
+  iso-octane tranche adds one
   supplier-minimum-purity claim and fifteen atmospheric Bunsen-flame maximum-
   speed observations with explicit temperature, oxidizer, flow, burner, and
   missing-condition metadata. The FACE G CDTRF-G 2023 v1 tranche adds five
@@ -466,8 +470,19 @@ Wankel-housing authority.
   demagnetization curves, and temperature coefficients. Its printed
   `318.3 kJ/m^3` and `42 MGOe` maximum-energy-product representations normalize
   to different SI values and therefore remain separate claims; neither is a
-  resolved design allowable. The NACA TN 2680 claims bind a supplier-claimed
-  `99.6 mol%` minimum-purity 2,2,4-trimethylpentane fuel and fifteen Table I
+  resolved design allowable. The Jinshan N42 claims remain a separate material
+  state and may not be fused with NGYC: they bind a different supplier, the
+  source-described `10 mm x 10 mm x 6 mm` pristine wire-cut specimen, and a
+  NIM 6500C measurement campaign. The source's rounded endpoints and printed
+  coefficients are retained independently because they do not reproduce one
+  another exactly. The plotted `80 degC` curve is not digitized, and missing
+  production lot, chemistry, original sinter schedule, coating, magnetization
+  protocol, temperature-control details, field sweep, repeats, uncertainty,
+  recoil permeability, and irreversible-loss boundary remain fail-closed.
+  Neither the two endpoint states nor the interval-average coefficients are a
+  continuous law or extrapolation authority. The NACA TN 2680 claims bind a
+  supplier-claimed `99.6 mol%` minimum-purity 2,2,4-trimethylpentane fuel and
+  fifteen Table I
   maximum-flame-speed rows to the reported atmospheric Bunsen-flame apparatus.
   Supplier, lot, exact assay, impurity composition, row-level pressure, exact
   maximizing equivalence ratio, raw images, dispersion, and confidence metadata
@@ -483,7 +498,7 @@ Wankel-housing authority.
   uncertainty remain absent; no density, viscosity, vapor pressure,
   distillation, heat capacity, latent heat, flame speed, ignition delay, storage,
   compatibility, or emissions authority follows. Bead 1sxe still owns the
-  temperature-dependent N42 card and the remaining curated material/property
+  N42 recoil-limit evidence and the remaining curated material/property
   and interface-system dataset. The WO 2018/125520 Formulation 8 claims bind
   one patent-table comparator with four named source-era commercial products,
   exact as-added mass fractions, and eight printed 5W-30 property results. They
