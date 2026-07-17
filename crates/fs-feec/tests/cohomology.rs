@@ -14,11 +14,51 @@ use fs_feec::{
 };
 use fs_rep_mesh::TetComplex;
 
+const SUITE: &str = "fs-feec/cohomology";
+const FIXED_INPUT_SEED: u64 = 0;
+
 fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-feec/cohomology\",\"case\":\"{case}\",\"verdict\":\"pass\",\
-         \"detail\":\"{detail}\"}}"
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed: FIXED_INPUT_SEED,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("cohomology verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("cohomology verdict must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn measurement(case: &str, name: &str, json: String) {
+    let identity = format!("{case}/measurement");
+    let mut emitter = fs_obs::Emitter::new(SUITE, &identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("cohomology measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("cohomology measurement must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
 }
 
 /// Ring slab: nx × nx × 1 cells with a centered hole_w × hole_w hole.
@@ -227,9 +267,17 @@ fn ch_003_circulation_to_lift_g1() {
     let (rho, v_inf) = (1.225, 1.0);
     let lift = rho * v_inf * rec_fine;
     let lift_ref = rho * v_inf * gamma;
-    println!(
-        "{{\"metric\":\"circulation-lift\",\"gamma_ref\":{gamma},\"gamma_coarse\":{rec_coarse:.4},\
-         \"gamma_fine\":{rec_fine:.4},\"lift\":{lift:.4},\"lift_ref\":{lift_ref:.4}}}"
+    measurement(
+        "ch-003",
+        "circulation-lift",
+        format!(
+            "{{\"gamma_ref\":{},\"gamma_coarse\":{},\"gamma_fine\":{},\"lift\":{},\"lift_ref\":{}}}",
+            finite_json(gamma),
+            finite_json(rec_coarse),
+            finite_json(rec_fine),
+            finite_json(lift),
+            finite_json(lift_ref)
+        ),
     );
     assert!((lift - lift_ref).abs() / lift_ref < 0.04);
     verdict(

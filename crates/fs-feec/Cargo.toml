@@ -29,6 +29,7 @@ fs-soa = { path = "../fs-soa" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-obs = { path = "../fs-obs" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-rand = { path = "../fs-rand" }
 fs-roofline = { path = "../fs-roofline" }

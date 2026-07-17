@@ -1101,6 +1101,7 @@ dependencies = [
  "fs-couple",
  "fs-la",
  "fs-math",
+ "fs-obs",
  "fs-propcheck",
  "fs-qty",
  "fs-rand",

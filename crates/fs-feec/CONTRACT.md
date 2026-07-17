@@ -507,6 +507,15 @@ other crate code inherits the workspace `unsafe_code = "deny"` policy.
 
 ## Conformance tests
 
+`tests/cohomology.rs` emits schema-validated `fs-obs` JSONL under suite
+`fs-feec/cohomology`. The four fixed-input aggregate identities are `ch-001`
+through `ch-004`, each with input seed zero. `ch-003/measurement` is a distinct
+Custom companion retaining the coarse/refined circulation and lift values; it
+is emitted at the original diagnostic boundary before the final lift gate, and
+the `ch-003` aggregate is emitted only after that gate succeeds. The canonical
+measurement is replay evidence for the existing G1 tolerances, not an upgrade
+of their authority or discretization claim.
+
 `tests/feec_battery.rs` (10 cases, JSON logging): dd = 0 on the
 fixture zoo (single/two-tet, kuhn 1–3) over random integer cochains
 AND via CSR spgemm; Kuhn fixture positively oriented, conforming,
