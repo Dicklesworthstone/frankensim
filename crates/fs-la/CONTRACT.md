@@ -343,7 +343,16 @@ mid-dispatch cancellation injection proves bounded polling, real TilePool
 traversal receipts, worker drain, arena quiescence, and unchanged C; G5 proves
 the success path is bitwise the serial contract across 1, 2, host-parallelism,
 and advisory-pinned pool configurations.
-tests/conformance.rs placeholder remains for the shared-harness migration.
+The shared `fs-casebook` runner records three bounded G0 cases: the retained
+`0x1d7a_a3c6_b631_7ef0` GEMM bit golden, exact β=0 overwrite and α=0 poisoned
+operand no-read semantics, and deterministic LU tie-breaking plus typed
+`Singular { index: 1 }` / `NotSpd { index: 1 }` refusals. Canonical frames bind
+bit-semantics versions, generator arithmetic, fixtures, policies, and expected
+results. Disclosed seed `0xF51A_0001` corrupts the GEMM golden and must produce
+one structured red record plus `assert_green` refusal. This Casebook tranche is
+portable G0 evidence; it preserves the larger batteries and makes no new
+performance or dual-ISA execution claim. The structured tranche remains
+central-package-proof pending.
 `tests/gemm_suite.rs` additionally runs bead 4nh8's 600-case shrink-armed
 adjoint-consistency property (seed `0x1A_4A48_0001`) over generated 1×1 through
 4×4 dense matrices and vectors. It exercises `gemm_f64` for `Av` and the live
