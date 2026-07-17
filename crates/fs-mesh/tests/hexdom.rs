@@ -2,7 +2,7 @@
 //! `frontier-hexmesh`). Acceptance: MBO smoothing decreases the SH9
 //! Dirichlet energy monotonically with boundary alignment held (G0);
 //! singularity structures valid (a smooth field is singularity-free, a
-//! seeded twist is detected, deterministically); hex extraction meets
+//! fixed twist is detected, deterministically); hex extraction meets
 //! quality targets on the box and the polycube fallback engages with
 //! documented decisions; failure routes to IGA/CutFEM with the honest
 //! diagnostic; the accuracy-per-DOF harness reports honestly.
@@ -14,11 +14,65 @@ use fs_mesh::hexdom::{
     mbo_step, singular_edges,
 };
 
-fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-mesh/hexdom\",\"case\":\"{case}\",\"verdict\":\"pass\",\
-         \"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-mesh/hexdom";
+const FIXED_INPUT_SEED: u64 = 0;
+const HD_001_INPUT_SEED: u64 = 0x5eed;
+
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("hexdom verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("hexdom verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
+
+fn measurement(case: &str, name: &str, json: String) {
+    let identity = format!("{case}/measurement");
+    let mut emitter = fs_obs::Emitter::new(SUITE, &identity);
+    let line = emitter
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: name.to_string(),
+                json,
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("hexdom measurement must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
+}
+
+fn route_name(route: Route) -> &'static str {
+    match route {
+        Route::FrameField => "frame-field",
+        Route::Polycube => "polycube",
+        Route::RoutedToAlternatives => "routed-to-alternatives",
+    }
 }
 
 fn axis_quat(axis: usize, angle: f64) -> Quat {
@@ -65,15 +119,25 @@ fn hd_001_cube_group_and_mbo_monotone() {
     let mut field = noisy_field(5);
     let mut energies = vec![dirichlet_energy(&field)];
     for step in 0..3 {
-        mbo_step(&mut field, 0x5eed + step);
+        mbo_step(&mut field, HD_001_INPUT_SEED + step);
         energies.push(dirichlet_energy(&field));
     }
-    println!(
-        "{{\"metric\":\"mbo\",\"energies\":{:?}}}",
-        energies
-            .iter()
-            .map(|e| (e * 1e4).round() / 1e4)
-            .collect::<Vec<_>>()
+    let energy_json = energies
+        .iter()
+        .copied()
+        .map(finite_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    measurement(
+        "hd-001",
+        "mesh-hexdom-mbo",
+        format!(
+            "{{\"metric\":\"mbo\",\"energies\":[{energy_json}],\
+             \"input_seed\":{HD_001_INPUT_SEED},\"step_seeds\":[{},{},{}]}}",
+            HD_001_INPUT_SEED,
+            HD_001_INPUT_SEED + 1,
+            HD_001_INPUT_SEED + 2,
+        ),
     );
     for w in energies.windows(2) {
         assert!(
@@ -95,8 +159,10 @@ fn hd_001_cube_group_and_mbo_monotone() {
     }
     verdict(
         "hd-001",
+        true,
         "24-element matching group; MBO halves the SH9 Dirichlet energy monotonically \
          in 3 steps with boundary alignment pinned (G0)",
+        HD_001_INPUT_SEED,
     );
 }
 
@@ -133,10 +199,18 @@ fn hd_002_singularity_detection_and_determinism() {
         frames,
     };
     let singular = singular_edges(&twisted);
-    println!(
-        "{{\"metric\":\"singularities\",\"count\":{},\"sample\":{:?}}}",
-        singular.len(),
-        singular.first()
+    let sample_json = singular
+        .first()
+        .map(|&(i, j, k, axis)| format!("[{i},{j},{k},{axis}]"))
+        .unwrap_or_else(|| "null".to_string());
+    measurement(
+        "hd-002",
+        "mesh-hexdom-singularities",
+        format!(
+            "{{\"metric\":\"singularities\",\"count\":{},\"sample\":{sample_json},\
+             \"input_seed\":{FIXED_INPUT_SEED}}}",
+            singular.len(),
+        ),
     );
     assert!(
         !singular.is_empty(),
@@ -146,8 +220,10 @@ fn hd_002_singularity_detection_and_determinism() {
     assert_eq!(singular, singular_edges(&twisted), "bitwise deterministic");
     verdict(
         "hd-002",
-        "aligned fields are singularity-free; the seeded twist column is detected; the \
+        true,
+        "aligned fields are singularity-free; the fixed twist column is detected; the \
          singular set replays bitwise",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -158,10 +234,19 @@ fn hd_003_box_extraction_full_hex_quality() {
         frames: vec![Quat::identity(); 512],
     };
     let mesh = extract_hex_dominant(&field, &|_, _, _| true, 0.8);
-    println!(
-        "{{\"metric\":\"box-hex\",\"hexes\":{},\"transitions\":{},\"fraction\":{:.3},\
-         \"min_sj\":{:.3},\"route\":\"{:?}\"}}",
-        mesh.hexes, mesh.transitions, mesh.hex_fraction, mesh.min_scaled_jacobian, mesh.route
+    let hex_fraction_json = finite_json(mesh.hex_fraction);
+    let min_scaled_jacobian_json = finite_json(mesh.min_scaled_jacobian);
+    measurement(
+        "hd-003",
+        "mesh-hexdom-box-hex",
+        format!(
+            "{{\"metric\":\"box-hex\",\"hexes\":{},\"transitions\":{},\
+             \"fraction\":{hex_fraction_json},\"min_scaled_jacobian\":{min_scaled_jacobian_json},\
+             \"route\":\"{}\",\"input_seed\":{FIXED_INPUT_SEED}}}",
+            mesh.hexes,
+            mesh.transitions,
+            route_name(mesh.route),
+        ),
     );
     assert_eq!(
         mesh.route,
@@ -178,8 +263,10 @@ fn hd_003_box_extraction_full_hex_quality() {
     );
     verdict(
         "hd-003",
+        true,
         "the box extracts 100% hexes at scaled Jacobian exactly 1.0 through the \
          frame-field route",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -200,10 +287,20 @@ fn hd_004_polycube_fallback_and_honest_refusal() {
     };
     let stepped = |x: f64, y: f64, _z: f64| x + y < 1.4;
     let mesh = extract_hex_dominant(&field, &stepped, 0.5);
-    println!(
-        "{{\"metric\":\"fallback\",\"route\":\"{:?}\",\"fraction\":{:.3},\
-         \"diagnostic\":\"{}\"}}",
-        mesh.route, mesh.hex_fraction, mesh.diagnostic
+    let hex_fraction_json = finite_json(mesh.hex_fraction);
+    let diagnostic_mentions_singular = mesh.diagnostic.contains("singular");
+    let diagnostic_mentions_energy = mesh.diagnostic.contains("energy");
+    measurement(
+        "hd-004",
+        "mesh-hexdom-fallback",
+        format!(
+            "{{\"metric\":\"fallback\",\"route\":\"{}\",\
+             \"fraction\":{hex_fraction_json},\
+             \"diagnostic_mentions_singular\":{diagnostic_mentions_singular},\
+             \"diagnostic_mentions_energy\":{diagnostic_mentions_energy},\
+             \"input_seed\":{FIXED_INPUT_SEED}}}",
+            route_name(mesh.route),
+        ),
     );
     assert_eq!(mesh.route, Route::Polycube, "the fallback engaged");
     assert!(
@@ -222,11 +319,13 @@ fn hd_004_polycube_fallback_and_honest_refusal() {
         "the diagnostic routes to the honest alternatives: {}",
         refused.diagnostic
     );
-    verdict(
-        "hd-004",
-        "the twist-seeded field engages the polycube fallback with its decision \
-         documented; the hostile thin shell refuses and routes to IGA/CutFEM by name",
+    let detail = format!(
+        "the constructed-twist field engages the polycube fallback with its decision \
+         documented; the hostile thin shell refuses and routes to IGA/CutFEM by name; \
+         fallback diagnostic: {}; refusal diagnostic: {}",
+        mesh.diagnostic, refused.diagnostic,
     );
+    verdict("hd-004", true, &detail, FIXED_INPUT_SEED);
 }
 
 #[test]
@@ -237,14 +336,23 @@ fn hd_005_accuracy_per_dof_reported_honestly() {
     // smooth fixture, but the assert demands only the honest record).
     let (hex_err, tet_err) = accuracy_per_dof(12);
     let winner = if hex_err < tet_err { "hex" } else { "tet" };
-    println!(
-        "{{\"metric\":\"accuracy-per-dof\",\"hex_l2\":{hex_err:.3e},\"tet_l2\":{tet_err:.3e},\
-         \"winner\":\"{winner}\"}}"
+    let hex_err_json = finite_json(hex_err);
+    let tet_err_json = finite_json(tet_err);
+    measurement(
+        "hd-005",
+        "mesh-hexdom-accuracy-per-dof",
+        format!(
+            "{{\"metric\":\"accuracy-per-dof\",\"hex_l2\":{hex_err_json},\
+             \"tet_l2\":{tet_err_json},\"winner\":\"{winner}\",\
+             \"input_seed\":{FIXED_INPUT_SEED}}}"
+        ),
     );
     assert!(hex_err.is_finite() && tet_err.is_finite() && hex_err > 0.0 && tet_err > 0.0);
     verdict(
         "hd-005",
+        true,
         "accuracy-per-DOF measured and reported for both element classes — the honest \
          comparison the doctrine demands, whichever way it falls",
+        FIXED_INPUT_SEED,
     );
 }

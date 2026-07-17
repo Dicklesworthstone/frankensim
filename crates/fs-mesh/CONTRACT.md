@@ -241,6 +241,17 @@ state/lineage/accounting retention, effect and trigger coverage, a byte-pinned
 schema-v1 JSON fixture, exact replay tests for the adaptivity receipt seam, and
 piecewise-constant remap refinement/signed-cancellation, hostile overlap,
 coverage-vs-balance, arithmetic-overflow, cap, and cancellation fixtures.
+`tests/hexdom.rs`, cases hd-001..hd-005 behind `frontier-hexmesh`, emits
+schema-validated fs-obs `ConformanceCase` verdicts and object-shaped,
+wire-validated `Custom` measurements. hd-001 retains the actual MBO input-seed
+family rooted at `0x5eed`; hd-002..hd-005 are fixed fixtures recorded with input
+seed zero, and no execution/Cx seed is invented. Custom measurements are
+diagnostic and do not substitute for or aggregate verdict authority. Existing
+case-internal assertions may still abort before the verdict boundary; whenever
+the verdict emitter is reached, it records an Info/Error event with a lintable
+failure record, validates and prints the wire row, and only then performs its
+terminal assertion. The target's central proof must explicitly enable
+`frontier-hexmesh`; a default-feature workspace pass does not exercise it.
 
 ### Addendum (bead uee3, partial): policy floor, hull-split evidence, exudation
 
