@@ -135,9 +135,21 @@ fn credentials_are_redacted_even_for_privileged_local_replay() {
         &local,
     )
     .expect("privileged local projection");
+    assert_eq!(
+        manifest
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["credential", "personal", "secret"],
+        "share entries remain in deterministic path order",
+    );
     assert!(matches!(
         &manifest.entries[0].disclosure,
-        Disclosure::Plain(_)
+        Disclosure::Redacted {
+            reason: ShareBlock::Credential,
+            ..
+        }
     ));
     assert!(matches!(
         &manifest.entries[1].disclosure,
@@ -145,10 +157,7 @@ fn credentials_are_redacted_even_for_privileged_local_replay() {
     ));
     assert!(matches!(
         &manifest.entries[2].disclosure,
-        Disclosure::Redacted {
-            reason: ShareBlock::Credential,
-            ..
-        }
+        Disclosure::Plain(_)
     ));
     assert_eq!(manifest.completeness, EvidenceCompleteness::Incomplete);
 }
