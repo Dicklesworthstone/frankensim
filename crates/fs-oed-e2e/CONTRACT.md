@@ -20,15 +20,20 @@ Dependencies point downward.
   `ObjectiveSpec` retains all six exponents plus the exact optional quantity
   kind and scalar form, and exposes the shared `fs-qty::QuantitySpec` it wraps.
   Dimension-only is an exact claim, never a wildcard.
-- `Candidate::new(...) -> Result<Candidate, CandidateError>` checks and seals
-  the name; truth/prior mean under one exact objective schema `Q`;
-  non-negative prior variance and positive sensor-noise variance in `Q²`; and
-  a positive, explicitly dimensionless relative acquisition-cost weight.
-  Accessors reconstruct typed quantities instead of exposing bare inference
-  scalars.
+- `AcquisitionCost` seals one finite positive ranking scalar together with an
+  `AcquisitionCostSpec`: either `RelativeWeight` or an exact dimensional/
+  semantic `QuantitySpec`. A relative weight is role-distinct from a declared
+  dimensionless physical quantity. `Candidate::new(...)` preserves the legacy
+  positive relative-weight API. `Candidate::with_acquisition_cost(...)` admits
+  the typed cost plus a separate positive, explicitly dimensionless
+  `allocation_cost_weight`; physical time/energy costs therefore cannot enter
+  `fs-toleralloc` as its dimensionless coefficient. Both constructors also
+  seal the name, truth/prior mean under one exact objective schema `Q`,
+  non-negative prior variance, and positive sensor-noise variance in `Q²`.
 - `run_campaign(&[Candidate], ObjectiveValue, max_sensors, &Cx) ->
   Result<OedReport, OedError>` validates the typed threshold, exact schema
-  agreement across every candidate, unique candidate
+  agreement across every candidate, exact acquisition-cost role/schema
+  agreement, a checked value-per-cost score schema, unique candidate
   identities, and explicit synchronous work caps, then CANONICALIZES the
   candidate menu (name-ascending) EXACTLY ONCE at admission (bead
   sj31i.62) before greedily placing VoI-chosen sensors under
@@ -52,7 +57,12 @@ Dependencies point downward.
   or poll boundary.
 - `demo_candidates() -> Result<Vec<Candidate>, CandidateError>` builds four
   checked alternatives for the full-menu decision evaluator.
-- `OedReport` retains the exact objective schema. Total/posterior variances
+- `OedReport` retains the exact objective schema, shared acquisition-cost
+  role/schema, and derived score schema. The score means estimated
+  opportunity-loss reduction per declared acquisition cost; a relative weight
+  preserves the decision schema, while a physical cost produces the checked
+  dimension-only quotient `decision_dims / cost_dims`. This is not a certified
+  utility kind. Total/posterior variances
   return `QtyAny` in `Q²`; posterior means return `ObjectiveValue` in `Q`;
   EVPI and its trace return `ObjectiveValue` under the decision-difference
   schema. For an absolute-temperature objective this decision schema is
@@ -61,26 +71,28 @@ Dependencies point downward.
   schema because `fs-qty` has no general loss/difference kind; retaining the
   measurement kind or its Peak/RMS form on EVPI would be a false claim. The
   original exact objective schema remains separately retained and identity-bound.
-  Fractional variance reduction, relative acquisition weights, and the current
-  first-order allocation tolerance are dimensionless.
+  Fractional variance reduction, relative acquisition weights, the separate
+  allocation coefficient, and the current first-order allocation tolerance are
+  dimensionless.
 - `OedReport` also includes one
   instrument-bound `assimilation_color` per placement, and input-bound final
   variance/EVPI colors so consumers do not need to transcribe the loop.
-- Both retained report estimators use identity version 8. Their canonical
+- Both retained report estimators use identity version 9. Their canonical
   preimages bind every candidate declaration, threshold and placement cap,
-  the exact 12-byte six-base/semantic objective schema,
+  the exact 12-byte six-base/semantic objective schema, the role-tagged
+  13-byte acquisition-cost schema, every coherent-SI acquisition-cost scalar,
+  every separate allocation coefficient, and the derived 12-byte score schema,
   execution mode, stream/budget context, admitted and realized work shapes,
   poll/planning policy versions and strides, quadrature rule constants, every
   realized output sequence, and both color dispersions.
-  Prefixes are `sensorforge-posterior-variance:v8:` and
-  `sensorforge-evpi:v8:` under domain `org.frankensim.fs-oed-e2e.report.v6`;
-  the manifest also locks planning policy v4, byte policy v3, poll policy v2,
+  Prefixes are `sensorforge-posterior-variance:v9:` and
+  `sensorforge-evpi:v9:` under domain `org.frankensim.fs-oed-e2e.report.v6`;
+  the manifest also locks planning policy v4, byte policy v4, poll policy v2,
   `fs-voi` EVPI semantics, record stride 256, and action stride 1. The same
   fixed schema token is included in each point-sensor instrument identity, so
   nested `fs-assimilate` colors receive distinct preimages for semantic aliases.
-  The token layout and tags are owned by `fs-qty`; this extraction preserves
-  the previously landed 12 bytes exactly, so identity v8 and byte policy v3 do
-  not change.
+  The quantity-token layout and tags are owned by `fs-qty`; OED owns only the
+  outer relative-versus-quantity role tag.
 
 ## Invariants
 
@@ -104,7 +116,10 @@ Dependencies point downward.
   posterior sequences, and canonical assimilation colors.
 - Campaign admission is unit-closed before sorting, allocation, or scientific
   work: all candidates share exact `Q`; variance/noise fields are `Q²`; and the
-  threshold carries the derived decision schema. Pressure and stress refuse
+  threshold carries the derived decision schema. Acquisition-cost schemas also
+  agree exactly: relative versus dimensionless-quantity, energy versus torque,
+  and semantic versus dimension-only aliases refuse. Score-dimension overflow
+  refuses before byte planning. Pressure and stress refuse
   despite identical dimensions, as do semantic and dimension-only aliases.
   Equivalent metre/millimetre declarations share one schema identity.
   Complete report identities are equal only when coherent-SI conversion also
@@ -140,7 +155,9 @@ by the retained expectation-rule cost before campaign allocation or iteration.
 Derived posterior variances, posterior means, expected EVPI, and value-per-cost
 must remain finite. `CandidateError::DimensionMismatch` names actual and
 required dimensions; `ObjectiveSchemaMismatch` and `ThresholdSchemaMismatch`
-retain both exact schemas. Exponent overflow while deriving `Q²` refuses typed.
+retain both exact schemas. `AcquisitionCostSchemaMismatch` retains the candidate
+name plus actual/expected cost schemas, and `ScoreDimensionOverflow` retains the
+benefit/cost dimensions. Exponent overflow while deriving `Q²` refuses typed.
 
 `BudgetRefused` (bead sj31i.6) retains the ambient accountant's typed refusal
 verbatim: `run_campaign` admits `cx.budget()` plus the admitted work plan
@@ -189,7 +206,10 @@ menu permutations; predicted/realized Kalman variance agreement and extreme
 finite noise limits; initial STOP at a
 zero placement cap; full-report determinism; adversarial candidate/campaign
 input rejection; zero-variance behavior; cancellation/poll bounds;
-`Q²` variance/noise and dimensionless-cost refusal; pressure/stress and
+`Q²` variance/noise and legacy dimensionless-cost refusal; role-safe typed
+acquisition-cost construction and schema mismatch; energy/torque and
+semantic/dimension-only cost traps; physical-unit normalization; checked score
+dimensions and overflow; allocation-weight isolation; pressure/stress and
 absolute/delta-temperature traps; metre/millimetre rescaling; typed output
 dimensions; report and nested assimilation identity movement by schema;
 unmeasured-input evidence binding; instrument-bound assimilation lineage;
@@ -209,12 +229,13 @@ codec; and sealed-output identity movement.
   certificate or independent validation. The worked campaign currently injects
   declared truth as its deterministic reading; a production measurement
   provider and stochastic outcome stream are separate required work.
-- `sensor_cost` is presently a positive dimensionless relative resource
-  weight, not money, energy, time, or a certified utility. `fs-qty` deliberately
-  has no monetary base dimension. The first-order allocation tolerance and its
-  fixed internal budget remain dimensionless proxies; introducing a real
-  acquisition-cost/utility algebra requires its own schema and conversion
-  contract rather than relabeling these scalars.
+- `AcquisitionCost` can represent `fs-qty` physical dimensions and semantic
+  kinds, but `fs-qty` deliberately has no monetary base dimension. The derived
+  value-per-cost schema is estimated opportunity-loss reduction divided by the
+  declared cost, not a generic or certified utility. No exchange rate,
+  multi-resource aggregation, or cross-schema conversion is claimed. The
+  first-order allocation tolerance, its fixed internal budget, and its explicit
+  `allocation_cost_weight` remain dimensionless proxies.
 - `QuantitySpec` binds only the dimension/kind/form portion of an objective.
   It does not encode coordinate frames, candidate ordering, covariance role,
   observation support, instrument calibration, or the actual scientific
@@ -233,6 +254,9 @@ codec; and sealed-output identity movement.
   byte-accounting policy version; v6 artifacts remain valid only under their
   own version prefix. Identity v8 additionally binds the exact objective
   schema; v7 and earlier artifacts make no unit/semantic identity claim.
+  Identity v9 additionally binds acquisition-cost roles/schemas, both cost
+  scalars, and the derived score schema; v8 and earlier artifacts make no such
+  acquisition-cost identity claim.
 - Full-menu decision algebra (bead sj31i.5, planning policy v4, byte policy
   v3): the STOP gate, initial/final EVPI, and the trace are the FULL
   multi-alternative `fs_voi::expected_opportunity_loss_by`; action valuation
@@ -245,7 +269,7 @@ codec; and sealed-output identity movement.
   placements on the non-contender alternatives whose residual optimality
   probability blocks the certificate, instead of declaring robustness while
   ignoring them.
-- Byte accounting (identity v8, byte policy v3): every bounded seam —
+- Byte accounting (identity v9, byte policy v4): every bounded seam —
   admission scan and one-time canonical sort, belief/estimate/menu builds and
   their window verifications, EVPI scans, action construction, each
   quadrature-view action evaluation (view construction reads plus per-node menu
@@ -262,5 +286,8 @@ codec; and sealed-output identity movement.
   canonical candidate menu) reserve their admitted capacity fallibly
   (`OutputAllocationRefused`) before scientific work; transient scratch keeps
   ordinary infallible allocation and is covered by the charge ledger instead.
-  Policy v3 additionally charges schema comparison/retention, the expanded
-  point-sensor identity, and both schema-bearing report preimages.
+  Policy v3 additionally charges objective-schema comparison/retention, the
+  expanded point-sensor identity, and both schema-bearing report preimages.
+  Policy v4 additionally charges acquisition-cost comparison, score-schema
+  derivation/retention, the separate allocation coefficient, and both expanded
+  report preimages.

@@ -6,12 +6,13 @@ use fs_assimilate::AssimError;
 use fs_evidence::{Color, color_leaf_identity_reason};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_oed_e2e::{
-    Candidate, CandidateError, MAX_CAMPAIGN_CANDIDATES, MAX_CAMPAIGN_EVALUATIONS,
-    MAX_CAMPAIGN_SENSORS, ObjectiveValue, OedError, OedReport, demo_candidates, run_campaign,
+    AcquisitionCost, AcquisitionCostSpec, Candidate, CandidateError, MAX_CAMPAIGN_CANDIDATES,
+    MAX_CAMPAIGN_EVALUATIONS, MAX_CAMPAIGN_SENSORS, ObjectiveValue, OedError, OedReport,
+    demo_candidates, run_campaign,
 };
 use fs_qty::parse::parse_qty;
 use fs_qty::semantic::{CompositionBasis, QuantityKind, SemanticQty, SemanticType, ValueForm};
-use fs_qty::{Dims, QtyAny};
+use fs_qty::{Dims, QtyAny, QuantitySpec};
 
 const TEST_STREAM: StreamKey = StreamKey {
     seed: 0x6f65_642d_6532_6501,
@@ -82,6 +83,36 @@ fn semantic_objective(value: f64, kind: QuantityKind) -> ObjectiveValue {
         SemanticQty::new(QtyAny::new(value, kind.expected_dims()), semantic_type)
             .expect("test semantic objective must be admissible"),
     )
+}
+
+fn semantic_acquisition_cost(value: f64, kind: QuantityKind) -> AcquisitionCost {
+    let semantic_type = SemanticType::new(kind, ValueForm::Static);
+    AcquisitionCost::semantic(
+        SemanticQty::new(QtyAny::new(value, kind.expected_dims()), semantic_type)
+            .expect("test semantic cost must be admissible"),
+    )
+    .expect("test semantic cost must be positive")
+}
+
+fn candidate_with_acquisition_cost(
+    name: &str,
+    truth: ObjectiveValue,
+    prior_mean: ObjectiveValue,
+    prior_variance: QtyAny,
+    sensor_noise_variance: QtyAny,
+    acquisition_cost: AcquisitionCost,
+    allocation_cost_weight: f64,
+) -> Candidate {
+    Candidate::with_acquisition_cost(
+        name,
+        truth,
+        prior_mean,
+        prior_variance,
+        sensor_noise_variance,
+        acquisition_cost,
+        QtyAny::dimensionless(allocation_cost_weight),
+    )
+    .expect("typed acquisition-cost candidate must be admissible")
 }
 
 fn typed_candidate(
@@ -548,6 +579,325 @@ fn candidate_refuses_wrong_variance_noise_and_cost_dimensions() {
             expected,
         }) if actual == length && expected == Dims::NONE
     ));
+}
+
+#[test]
+fn acquisition_cost_roles_are_sealed_and_invalid_values_refuse() {
+    let relative = AcquisitionCost::relative(1.0).expect("positive relative weight");
+    let dimensionless_quantity =
+        AcquisitionCost::dimensional(QtyAny::dimensionless(1.0)).expect("positive quantity");
+    assert_eq!(relative.spec(), AcquisitionCostSpec::RelativeWeight);
+    assert_eq!(
+        dimensionless_quantity.spec(),
+        AcquisitionCostSpec::Quantity(QuantitySpec::dimensional(Dims::NONE))
+    );
+    assert_ne!(relative.spec(), dimensionless_quantity.spec());
+
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            AcquisitionCost::relative(invalid),
+            Err(CandidateError::InvalidNumber {
+                field: "acquisition_cost",
+                ..
+            })
+        ));
+        assert!(matches!(
+            AcquisitionCost::dimensional(QtyAny::dimensionless(invalid)),
+            Err(CandidateError::InvalidNumber {
+                field: "acquisition_cost",
+                ..
+            })
+        ));
+    }
+
+    let time_cost = AcquisitionCost::dimensional(parse_qty("1s").expect("time cost"))
+        .expect("positive time cost");
+    assert!(matches!(
+        Candidate::with_acquisition_cost(
+            "A",
+            objective(0.0),
+            objective(0.0),
+            QtyAny::dimensionless(1.0),
+            QtyAny::dimensionless(1.0),
+            time_cost,
+            parse_qty("1s").expect("wrong allocation units"),
+        ),
+        Err(CandidateError::DimensionMismatch {
+            field: "allocation_cost_weight",
+            actual,
+            expected,
+        }) if actual == parse_qty("1s").expect("time dimensions").dims
+            && expected == Dims::NONE
+    ));
+}
+
+#[test]
+fn campaign_refuses_acquisition_cost_role_and_semantic_aliases() {
+    let relative = candidate("A", 0.0, 0.0, 1.0, 1.0, 1.0);
+    let dimensionless_quantity = candidate_with_acquisition_cost(
+        "B",
+        objective(0.1),
+        objective(0.1),
+        QtyAny::dimensionless(1.0),
+        QtyAny::dimensionless(1.0),
+        AcquisitionCost::dimensional(QtyAny::dimensionless(1.0))
+            .expect("dimensionless physical quantity"),
+        1.0,
+    );
+    assert!(matches!(
+        campaign(&[relative, dimensionless_quantity], 0.0, 0),
+        Err(OedError::AcquisitionCostSchemaMismatch {
+            candidate,
+            actual: AcquisitionCostSpec::Quantity(QuantitySpec::Dimensional(Dims::NONE)),
+            expected: AcquisitionCostSpec::RelativeWeight,
+        }) if candidate == "B"
+    ));
+
+    let semantic_candidate = |name, kind| {
+        candidate_with_acquisition_cost(
+            name,
+            objective(0.0),
+            objective(0.0),
+            QtyAny::dimensionless(1.0),
+            QtyAny::dimensionless(1.0),
+            semantic_acquisition_cost(1.0, kind),
+            1.0,
+        )
+    };
+    let energy = semantic_candidate("energy", QuantityKind::Energy);
+    let torque = semantic_candidate("torque", QuantityKind::Torque);
+    assert_eq!(
+        energy.acquisition_cost().quantity().dims,
+        torque.acquisition_cost().quantity().dims
+    );
+    assert!(matches!(
+        campaign(&[energy.clone(), torque], 0.0, 0),
+        Err(OedError::AcquisitionCostSchemaMismatch { candidate, .. })
+            if candidate == "torque"
+    ));
+
+    let time = candidate_with_acquisition_cost(
+        "time",
+        objective(0.0),
+        objective(0.0),
+        QtyAny::dimensionless(1.0),
+        QtyAny::dimensionless(1.0),
+        AcquisitionCost::dimensional(parse_qty("1s").expect("time cost"))
+            .expect("positive time cost"),
+        1.0,
+    );
+    assert!(matches!(
+        campaign(&[energy.clone(), time], 0.0, 0),
+        Err(OedError::AcquisitionCostSchemaMismatch {
+            candidate,
+            actual,
+            expected,
+        }) if candidate == "time"
+            && actual.dims() == parse_qty("1s").expect("time dimensions").dims
+            && expected == energy.acquisition_cost_spec()
+    ));
+
+    let dimension_only_energy = candidate_with_acquisition_cost(
+        "dimension-only-energy",
+        objective(0.0),
+        objective(0.0),
+        QtyAny::dimensionless(1.0),
+        QtyAny::dimensionless(1.0),
+        AcquisitionCost::dimensional(energy.acquisition_cost().quantity())
+            .expect("positive dimension-only energy"),
+        1.0,
+    );
+    assert!(matches!(
+        campaign(&[energy, dimension_only_energy], 0.0, 0),
+        Err(OedError::AcquisitionCostSchemaMismatch { candidate, .. })
+            if candidate == "dimension-only-energy"
+    ));
+}
+
+#[test]
+fn acquisition_cost_units_normalize_and_role_changes_move_v9_identity() {
+    let menu_with = |cost: AcquisitionCost| {
+        vec![
+            candidate_with_acquisition_cost(
+                "A",
+                objective(0.60),
+                objective(0.60),
+                QtyAny::dimensionless(0.10),
+                QtyAny::dimensionless(0.01),
+                cost,
+                1.0,
+            ),
+            candidate_with_acquisition_cost(
+                "B",
+                objective(0.65),
+                objective(0.65),
+                QtyAny::dimensionless(0.12),
+                QtyAny::dimensionless(0.01),
+                cost,
+                1.0,
+            ),
+        ]
+    };
+    let second =
+        AcquisitionCost::dimensional(parse_qty("1s").expect("seconds")).expect("positive second");
+    let thousand_ms = AcquisitionCost::dimensional(parse_qty("1000ms").expect("milliseconds"))
+        .expect("positive milliseconds");
+    assert_eq!(second, thousand_ms);
+    let seconds_report = campaign(&menu_with(second), 0.0, 0).expect("seconds campaign");
+    let milliseconds_report =
+        campaign(&menu_with(thousand_ms), 0.0, 0).expect("milliseconds campaign");
+    assert_eq!(seconds_report, milliseconds_report);
+
+    let relative_report = campaign(
+        &[
+            candidate("A", 0.60, 0.60, 0.10, 0.01, 1.0),
+            candidate("B", 0.65, 0.65, 0.12, 0.01, 1.0),
+        ],
+        0.0,
+        0,
+    )
+    .expect("relative-weight campaign");
+    let dimensionless_report = campaign(
+        &menu_with(
+            AcquisitionCost::dimensional(QtyAny::dimensionless(1.0))
+                .expect("dimensionless declared quantity"),
+        ),
+        0.0,
+        0,
+    )
+    .expect("dimensionless-quantity campaign");
+    assert_same_non_identity_report(&relative_report, &dimensionless_report);
+    assert_ne!(
+        relative_report.acquisition_cost_spec(),
+        dimensionless_report.acquisition_cost_spec()
+    );
+    assert_ne!(
+        estimator(relative_report.variance_color()),
+        estimator(dimensionless_report.variance_color())
+    );
+}
+
+#[test]
+fn physical_cost_derives_score_schema_and_never_becomes_allocator_weight() {
+    let absolute = semantic_objective(300.0, QuantityKind::AbsoluteTemperature);
+    let variance_dims = absolute
+        .quantity()
+        .powi(2)
+        .expect("temperature variance dimensions")
+        .dims;
+    let energy_cost = semantic_acquisition_cost(2.0, QuantityKind::Energy);
+    let temperature = candidate_with_acquisition_cost(
+        "T",
+        absolute,
+        absolute,
+        QtyAny::new(1.0, variance_dims),
+        QtyAny::new(1.0, variance_dims),
+        energy_cost,
+        1.0,
+    );
+    let temperature_report = with_cx(
+        &CancelGate::new(),
+        Budget::INFINITE,
+        ExecMode::Deterministic,
+        |cx| {
+            run_campaign(
+                std::slice::from_ref(&temperature),
+                temperature
+                    .objective_spec()
+                    .decision_value(0.0)
+                    .expect("delta-temperature threshold"),
+                0,
+                cx,
+            )
+        },
+    )
+    .expect("typed physical-cost campaign");
+    assert_eq!(
+        temperature_report.acquisition_cost_spec(),
+        AcquisitionCostSpec::Quantity(QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Energy,
+            ValueForm::Static,
+        )))
+    );
+    assert_eq!(
+        temperature_report.score_spec().dims(),
+        temperature
+            .objective_spec()
+            .decision_spec()
+            .dims()
+            .checked_minus(energy_cost.quantity().dims)
+            .expect("temperature per energy dimensions")
+    );
+    assert!(temperature_report.score_spec().semantic_type().is_none());
+
+    let make_menu = |first_cost: &str, first_weight: f64| {
+        vec![
+            candidate_with_acquisition_cost(
+                "A",
+                objective(0.0),
+                objective(0.0),
+                QtyAny::dimensionless(1.0),
+                QtyAny::dimensionless(1.0),
+                AcquisitionCost::dimensional(parse_qty(first_cost).expect("time cost"))
+                    .expect("positive time cost"),
+                first_weight,
+            ),
+            candidate_with_acquisition_cost(
+                "B",
+                objective(0.0),
+                objective(0.0),
+                QtyAny::dimensionless(4.0),
+                QtyAny::dimensionless(1.0),
+                AcquisitionCost::dimensional(parse_qty("1s").expect("time cost"))
+                    .expect("positive time cost"),
+                1.0,
+            ),
+        ]
+    };
+    let one_second = campaign(&make_menu("1s", 1.0), 0.0, 0).expect("one-second cost");
+    let hundred_seconds = campaign(&make_menu("100s", 1.0), 0.0, 0).expect("hundred-second cost");
+    assert_same_non_identity_report(&one_second, &hundred_seconds);
+
+    let heavier_allocation =
+        campaign(&make_menu("1s", 8.0), 0.0, 0).expect("heavier allocator coefficient");
+    assert_ne!(one_second.allocation(), heavier_allocation.allocation());
+}
+
+#[test]
+fn score_dimension_overflow_refuses_before_campaign_science() {
+    let objective_dims = Dims([-64, 0, 0, 0, 0, 0]);
+    let variance_dims = Dims([-128, 0, 0, 0, 0, 0]);
+    let cost_dims = Dims([127, 0, 0, 0, 0, 0]);
+    let candidate = candidate_with_acquisition_cost(
+        "overflow",
+        ObjectiveValue::dimensional(QtyAny::new(1.0, objective_dims)).expect("finite objective"),
+        ObjectiveValue::dimensional(QtyAny::new(1.0, objective_dims)).expect("finite objective"),
+        QtyAny::new(1.0, variance_dims),
+        QtyAny::new(1.0, variance_dims),
+        AcquisitionCost::dimensional(QtyAny::new(1.0, cost_dims)).expect("positive cost"),
+        1.0,
+    );
+    let refusal = with_cx(
+        &CancelGate::new(),
+        Budget::INFINITE,
+        ExecMode::Deterministic,
+        |cx| {
+            run_campaign(
+                std::slice::from_ref(&candidate),
+                ObjectiveValue::dimensional(QtyAny::new(0.0, objective_dims))
+                    .expect("finite threshold"),
+                0,
+                cx,
+            )
+        },
+    );
+    assert_eq!(
+        refusal,
+        Err(OedError::ScoreDimensionOverflow {
+            benefit: objective_dims,
+            cost: cost_dims,
+        })
+    );
 }
 
 #[test]
@@ -1024,8 +1374,8 @@ fn evidence_identities_bind_unmeasured_inputs_and_realized_updates() {
     );
     assert!(color_leaf_identity_reason(estimator(report.variance_color())).is_none());
     assert!(color_leaf_identity_reason(estimator(report.evpi_color())).is_none());
-    assert!(estimator(report.variance_color()).starts_with("sensorforge-posterior-variance:v8:"));
-    assert!(estimator(report.evpi_color()).starts_with("sensorforge-evpi:v8:"));
+    assert!(estimator(report.variance_color()).starts_with("sensorforge-posterior-variance:v9:"));
+    assert!(estimator(report.evpi_color()).starts_with("sensorforge-evpi:v9:"));
 }
 
 #[test]
@@ -1373,9 +1723,9 @@ fn byte_ledger_is_admitted_charged_and_retained_exactly() {
     let report = campaign(&candidates, 0.01, 12).expect("demo campaign succeeds");
     assert!(report.retained_byte_units() <= report.consumed_byte_units());
     assert!(report.consumed_byte_units() <= report.admitted_byte_units());
-    assert_eq!(report.admitted_byte_units(), 9_001_743);
-    assert_eq!(report.consumed_byte_units(), 7_504_519);
-    assert_eq!(report.retained_byte_units(), 757);
+    assert_eq!(report.admitted_byte_units(), 9_002_023);
+    assert_eq!(report.consumed_byte_units(), 7_504_799);
+    assert_eq!(report.retained_byte_units(), 782);
     let replay = campaign(&candidates, 0.01, 12).expect("replay succeeds");
     assert_eq!(replay.admitted_byte_units(), report.admitted_byte_units());
     assert_eq!(replay.consumed_byte_units(), report.consumed_byte_units());

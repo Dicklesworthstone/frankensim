@@ -53,6 +53,9 @@ pub const MAX_CAMPAIGN_SENSORS: usize = 4_096;
 pub const MAX_CAMPAIGN_EVALUATIONS: usize = 10_500_000;
 
 /// Semantic version of the sealed SensorForge report estimator identities.
+// v9 (bead sj31i.7): the identity preimage additionally binds the acquisition-
+// cost role/schema, its coherent-SI scalar, the separate dimensionless
+// allocation weight, and the derived value-per-cost score schema.
 // v8 (bead sj31i.7): the identity preimage additionally binds the exact
 // objective dimension/semantic schema. Numerically identical campaigns under
 // incompatible quantity kinds therefore cannot share evidence identities.
@@ -64,7 +67,7 @@ pub const MAX_CAMPAIGN_EVALUATIONS: usize = 10_500_000;
 // admission, so the identity preimage binds the CANONICAL declaration
 // sequence — permuted caller menus now collapse to one identity where
 // v5 deliberately kept declaration order identity-semantic.
-pub const OED_REPORT_IDENTITY_VERSION: u64 = 8;
+pub const OED_REPORT_IDENTITY_VERSION: u64 = 9;
 
 const REPORT_ID_DOMAIN: &str = "org.frankensim.fs-oed-e2e.report.v6";
 // v4 (bead sj31i.5): robustness-bearing EVPI evaluations and action
@@ -87,7 +90,9 @@ const CAMPAIGN_ACTION_POLL_STRIDE: usize = 1;
 // baseline scan is charged at the action-value seam.
 // v3 binds and charges the 12-byte objective schema at admission and in each
 // report preimage, and carries that schema token into instrument identities.
-const CAMPAIGN_BYTE_POLICY_VERSION: u64 = 3;
+// v4 additionally charges the role-safe acquisition-cost schema, derived score
+// schema, and separate allocation weight in the report identity.
+const CAMPAIGN_BYTE_POLICY_VERSION: u64 = 4;
 // One retained candidate/estimate/posterior record's fixed scalar
 // payload (means, variances, uncertainty components), name excluded.
 const RECORD_SCALAR_BYTE_UNITS: u128 = 32;
@@ -100,6 +105,11 @@ const FULL_EOL_SCAN_SWEEPS: u128 = fs_voi::EOL_QUADRATURE_PANELS as u128 + 3;
 // `measure-` / `sensor-` identity prefixes added to candidate names.
 const ACTION_PREFIX_BYTE_UNITS: u128 = 8;
 const OBJECTIVE_SCHEMA_BYTES: u128 = QUANTITY_SPEC_ENCODED_LEN as u128;
+/// Exact byte length of the role-tagged acquisition-cost schema encoding.
+pub const ACQUISITION_COST_SPEC_ENCODED_LEN: usize = 1 + QUANTITY_SPEC_ENCODED_LEN;
+const ACQUISITION_COST_SCHEMA_BYTES: u128 = ACQUISITION_COST_SPEC_ENCODED_LEN as u128;
+const REPORT_SCHEMA_BYTES: u128 =
+    OBJECTIVE_SCHEMA_BYTES + ACQUISITION_COST_SCHEMA_BYTES + OBJECTIVE_SCHEMA_BYTES;
 const OBJECTIVE_SCHEMA_HEX_BYTES: u128 = OBJECTIVE_SCHEMA_BYTES * 2;
 const SENSOR_IDENTITY_FIXED_BYTES: u128 = 7 + 2 + OBJECTIVE_SCHEMA_HEX_BYTES;
 
@@ -240,6 +250,149 @@ impl ObjectiveSpec {
             encoded.push(HEX[usize::from(byte & 0x0f)] as char);
         }
         encoded
+    }
+}
+
+/// Declared role and exact schema of one sensor acquisition cost.
+///
+/// `RelativeWeight` is deliberately distinct from a dimensionless physical
+/// quantity. The distinction prevents a generic ranking weight from being
+/// silently reinterpreted as a measured cost, or vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AcquisitionCostSpec {
+    /// Positive unitless ranking weight used by the legacy API.
+    RelativeWeight,
+    /// Positive coherent-SI quantity with an exact dimension/semantic schema.
+    Quantity(QuantitySpec),
+}
+
+impl AcquisitionCostSpec {
+    /// Required dimensions of the admitted scalar.
+    #[must_use]
+    pub const fn dims(self) -> Dims {
+        match self {
+            Self::RelativeWeight => Dims::NONE,
+            Self::Quantity(spec) => spec.dims(),
+        }
+    }
+
+    /// Exact physical quantity schema, or `None` for a relative ranking weight.
+    #[must_use]
+    pub const fn quantity_spec(self) -> Option<QuantitySpec> {
+        match self {
+            Self::RelativeWeight => None,
+            Self::Quantity(spec) => Some(spec),
+        }
+    }
+
+    /// Derive the dimensions of estimated decision loss removed per declared
+    /// acquisition cost. A relative weight preserves the decision schema;
+    /// division by a physical quantity intentionally yields a dimension-only
+    /// schema because `fs-qty` defines no generic utility kind.
+    fn score_spec(self, decision_spec: ObjectiveSpec) -> Option<ObjectiveSpec> {
+        match self {
+            Self::RelativeWeight => Some(decision_spec),
+            Self::Quantity(cost) => decision_spec
+                .dims()
+                .checked_minus(cost.dims())
+                .map(ObjectiveSpec::dimensional),
+        }
+    }
+
+    fn canonical_bytes(self) -> [u8; ACQUISITION_COST_SPEC_ENCODED_LEN] {
+        let mut bytes = [0; ACQUISITION_COST_SPEC_ENCODED_LEN];
+        match self {
+            Self::RelativeWeight => {}
+            Self::Quantity(spec) => {
+                bytes[0] = 1;
+                bytes[1..].copy_from_slice(&spec.canonical_bytes());
+            }
+        }
+        bytes
+    }
+}
+
+/// Finite positive coherent-SI acquisition cost with a sealed role/schema.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcquisitionCost {
+    quantity: QtyAny,
+    spec: AcquisitionCostSpec,
+}
+
+impl AcquisitionCost {
+    /// Construct a positive unitless ranking weight.
+    ///
+    /// # Errors
+    /// Returns [`CandidateError::InvalidNumber`] unless `value` is finite and
+    /// strictly positive.
+    pub fn relative(value: f64) -> Result<Self, CandidateError> {
+        Self::checked(
+            QtyAny::dimensionless(value),
+            AcquisitionCostSpec::RelativeWeight,
+            "acquisition_cost",
+        )
+    }
+
+    /// Construct a positive physical quantity under an explicit no-kind schema.
+    ///
+    /// # Errors
+    /// Returns [`CandidateError::InvalidNumber`] unless the scalar is finite
+    /// and strictly positive.
+    pub fn dimensional(quantity: QtyAny) -> Result<Self, CandidateError> {
+        Self::checked(
+            quantity,
+            AcquisitionCostSpec::Quantity(QuantitySpec::dimensional(quantity.dims)),
+            "acquisition_cost",
+        )
+    }
+
+    /// Construct a positive already-validated semantic physical quantity.
+    ///
+    /// # Errors
+    /// Returns [`CandidateError::InvalidNumber`] unless the semantic scalar is
+    /// strictly positive.
+    pub fn semantic(quantity: SemanticQty) -> Result<Self, CandidateError> {
+        Self::checked(
+            quantity.quantity(),
+            AcquisitionCostSpec::Quantity(QuantitySpec::semantic(quantity.semantic_type())),
+            "acquisition_cost",
+        )
+    }
+
+    fn checked(
+        quantity: QtyAny,
+        spec: AcquisitionCostSpec,
+        field: &'static str,
+    ) -> Result<Self, CandidateError> {
+        if !quantity.value.is_finite() || quantity.value <= 0.0 {
+            return Err(CandidateError::InvalidNumber {
+                field,
+                requirement: "finite and positive",
+            });
+        }
+        debug_assert_eq!(quantity.dims, spec.dims());
+        Ok(Self {
+            quantity: QtyAny::new(canonicalize_zero(quantity.value), quantity.dims),
+            spec,
+        })
+    }
+
+    /// Coherent-SI scalar and dimensions.
+    #[must_use]
+    pub const fn quantity(self) -> QtyAny {
+        self.quantity
+    }
+
+    /// Raw coherent-SI scalar used by the ranking kernel.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.quantity.value
+    }
+
+    /// Exact role and dimension/semantic schema.
+    #[must_use]
+    pub const fn spec(self) -> AcquisitionCostSpec {
+        self.spec
     }
 }
 
@@ -404,6 +557,14 @@ impl fmt::Display for CandidateError {
 
 impl std::error::Error for CandidateError {}
 
+enum CandidateCostInput {
+    Legacy(QtyAny),
+    Typed {
+        acquisition_cost: AcquisitionCost,
+        allocation_cost_weight: QtyAny,
+    },
+}
+
 /// A candidate design under measurement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -413,11 +574,12 @@ pub struct Candidate {
     prior_mean: f64,
     prior_var: f64,
     sensor_noise_variance: f64,
-    sensor_cost: f64,
+    acquisition_cost: AcquisitionCost,
+    allocation_cost_weight: f64,
 }
 
 impl Candidate {
-    /// Construct a checked candidate.
+    /// Construct a checked candidate with a legacy relative acquisition weight.
     ///
     /// # Errors
     /// Returns [`CandidateError`] for an unusable name, incompatible objective
@@ -430,6 +592,59 @@ impl Candidate {
         prior_variance: QtyAny,
         sensor_noise_variance: QtyAny,
         sensor_cost: QtyAny,
+    ) -> Result<Self, CandidateError> {
+        Self::checked(
+            name,
+            truth,
+            prior_mean,
+            prior_variance,
+            sensor_noise_variance,
+            CandidateCostInput::Legacy(sensor_cost),
+        )
+    }
+
+    /// Construct a candidate with an exact acquisition-cost schema and a
+    /// separate positive dimensionless tolerance-allocation coefficient.
+    ///
+    /// Physical time, energy, or other acquisition quantities affect VoI
+    /// ranking only. They can never enter `fs-toleralloc` without the caller
+    /// separately declaring the dimensionless `allocation_cost_weight`.
+    ///
+    /// # Errors
+    /// Returns [`CandidateError`] for the same candidate/objective/variance
+    /// violations as [`Candidate::new`], or when `allocation_cost_weight` is
+    /// not finite, positive, and dimensionless.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_acquisition_cost(
+        name: impl Into<String>,
+        truth: ObjectiveValue,
+        prior_mean: ObjectiveValue,
+        prior_variance: QtyAny,
+        sensor_noise_variance: QtyAny,
+        acquisition_cost: AcquisitionCost,
+        allocation_cost_weight: QtyAny,
+    ) -> Result<Self, CandidateError> {
+        Self::checked(
+            name,
+            truth,
+            prior_mean,
+            prior_variance,
+            sensor_noise_variance,
+            CandidateCostInput::Typed {
+                acquisition_cost,
+                allocation_cost_weight,
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn checked(
+        name: impl Into<String>,
+        truth: ObjectiveValue,
+        prior_mean: ObjectiveValue,
+        prior_variance: QtyAny,
+        sensor_noise_variance: QtyAny,
+        cost: CandidateCostInput,
     ) -> Result<Self, CandidateError> {
         let name = name.into();
         let name_reason = if name.len() > MAX_CANDIDATE_NAME_BYTES {
@@ -473,19 +688,50 @@ impl Candidate {
                 requirement: "finite and positive",
             });
         }
-        if sensor_cost.dims != Dims::NONE {
-            return Err(CandidateError::DimensionMismatch {
-                field: "sensor_cost",
-                actual: sensor_cost.dims,
-                expected: Dims::NONE,
-            });
-        }
-        if !sensor_cost.value.is_finite() || sensor_cost.value <= 0.0 {
-            return Err(CandidateError::InvalidNumber {
-                field: "sensor_cost",
-                requirement: "finite, positive, and dimensionless",
-            });
-        }
+        let (acquisition_cost, allocation_cost_weight) = match cost {
+            CandidateCostInput::Legacy(sensor_cost) => {
+                if sensor_cost.dims != Dims::NONE {
+                    return Err(CandidateError::DimensionMismatch {
+                        field: "sensor_cost",
+                        actual: sensor_cost.dims,
+                        expected: Dims::NONE,
+                    });
+                }
+                if !sensor_cost.value.is_finite() || sensor_cost.value <= 0.0 {
+                    return Err(CandidateError::InvalidNumber {
+                        field: "sensor_cost",
+                        requirement: "finite, positive, and dimensionless",
+                    });
+                }
+                (
+                    AcquisitionCost {
+                        quantity: QtyAny::dimensionless(canonicalize_zero(sensor_cost.value)),
+                        spec: AcquisitionCostSpec::RelativeWeight,
+                    },
+                    sensor_cost.value,
+                )
+            }
+            CandidateCostInput::Typed {
+                acquisition_cost,
+                allocation_cost_weight,
+            } => {
+                if allocation_cost_weight.dims != Dims::NONE {
+                    return Err(CandidateError::DimensionMismatch {
+                        field: "allocation_cost_weight",
+                        actual: allocation_cost_weight.dims,
+                        expected: Dims::NONE,
+                    });
+                }
+                if !allocation_cost_weight.value.is_finite() || allocation_cost_weight.value <= 0.0
+                {
+                    return Err(CandidateError::InvalidNumber {
+                        field: "allocation_cost_weight",
+                        requirement: "finite, positive, and dimensionless",
+                    });
+                }
+                (acquisition_cost, allocation_cost_weight.value)
+            }
+        };
         Ok(Self {
             name,
             objective_spec,
@@ -493,7 +739,8 @@ impl Candidate {
             prior_mean: prior_mean.quantity.value,
             prior_var: canonicalize_zero(prior_variance.value),
             sensor_noise_variance: canonicalize_zero(sensor_noise_variance.value),
-            sensor_cost: canonicalize_zero(sensor_cost.value),
+            acquisition_cost,
+            allocation_cost_weight: canonicalize_zero(allocation_cost_weight),
         })
     }
 
@@ -537,10 +784,29 @@ impl Candidate {
         )
     }
 
-    /// Cost of one measurement.
+    /// Acquisition cost of one measurement. Legacy relative-weight candidates
+    /// return a dimensionless quantity; typed candidates retain physical units.
     #[must_use]
     pub const fn sensor_cost(&self) -> QtyAny {
-        QtyAny::dimensionless(self.sensor_cost)
+        self.acquisition_cost.quantity()
+    }
+
+    /// Sealed acquisition cost and its exact role/schema.
+    #[must_use]
+    pub const fn acquisition_cost(&self) -> AcquisitionCost {
+        self.acquisition_cost
+    }
+
+    /// Exact acquisition-cost role/schema.
+    #[must_use]
+    pub const fn acquisition_cost_spec(&self) -> AcquisitionCostSpec {
+        self.acquisition_cost.spec()
+    }
+
+    /// Positive dimensionless coefficient passed to the tolerance allocator.
+    #[must_use]
+    pub const fn allocation_cost_weight(&self) -> QtyAny {
+        QtyAny::dimensionless(self.allocation_cost_weight)
     }
 
     /// Exact objective schema carried by means, variances, EVPI, and evidence.
@@ -655,6 +921,24 @@ pub enum OedError {
         actual: ObjectiveSpec,
         /// Schema established by the canonical campaign declaration.
         expected: ObjectiveSpec,
+    },
+    /// Candidate acquisition-cost roles/schemas must agree before any
+    /// scientific work or byte-plan admission.
+    AcquisitionCostSchemaMismatch {
+        /// Candidate carrying the incompatible cost schema.
+        candidate: String,
+        /// Schema supplied by that candidate.
+        actual: AcquisitionCostSpec,
+        /// Schema established by the canonical campaign declaration.
+        expected: AcquisitionCostSpec,
+    },
+    /// Deriving decision-benefit per physical acquisition cost overflowed the
+    /// supported dimension-exponent domain.
+    ScoreDimensionOverflow {
+        /// Dimensions of the decision-difference benefit.
+        benefit: Dims,
+        /// Dimensions of the declared acquisition cost.
+        cost: Dims,
     },
     /// The stop threshold must carry the objective's decision-difference
     /// schema (absolute temperature objectives require delta-temperature
@@ -798,6 +1082,18 @@ impl fmt::Display for OedError {
                 f,
                 "candidate `{candidate}` objective schema {actual:?} does not match campaign schema {expected:?}"
             ),
+            Self::AcquisitionCostSchemaMismatch {
+                candidate,
+                actual,
+                expected,
+            } => write!(
+                f,
+                "candidate `{candidate}` acquisition-cost schema {actual:?} does not match campaign schema {expected:?}"
+            ),
+            Self::ScoreDimensionOverflow { benefit, cost } => write!(
+                f,
+                "decision-benefit dimensions {benefit:?} divided by acquisition-cost dimensions {cost:?} overflow the supported exponent domain"
+            ),
             Self::ThresholdSchemaMismatch { actual, expected } => write!(
                 f,
                 "EVPI threshold schema {actual:?} does not match decision schema {expected:?}"
@@ -892,6 +1188,10 @@ impl PosteriorSummary {
 pub struct OedReport {
     /// Exact schema of candidate truth/prior/posterior means.
     objective_spec: ObjectiveSpec,
+    /// Exact role/schema shared by every acquisition cost.
+    acquisition_cost_spec: AcquisitionCostSpec,
+    /// Schema of estimated decision loss removed per acquisition cost.
+    score_spec: ObjectiveSpec,
     /// Candidate names in the order sensors were placed.
     placements: Vec<String>,
     /// Number of sensors placed.
@@ -939,6 +1239,20 @@ impl OedReport {
     #[must_use]
     pub const fn objective_spec(&self) -> ObjectiveSpec {
         self.objective_spec
+    }
+
+    /// Exact role/schema shared by every candidate acquisition cost.
+    #[must_use]
+    pub const fn acquisition_cost_spec(&self) -> AcquisitionCostSpec {
+        self.acquisition_cost_spec
+    }
+
+    /// Schema of estimated opportunity-loss reduction per declared
+    /// acquisition cost. This is an estimated ranking score, not certified
+    /// utility.
+    #[must_use]
+    pub const fn score_spec(&self) -> ObjectiveSpec {
+        self.score_spec
     }
 
     /// Schema of EVPI and its stop threshold. Absolute-temperature objectives
@@ -1386,14 +1700,16 @@ impl CampaignBytePlan {
         sum_name: u128,
         max_name: u128,
     ) -> Option<u128> {
-        let candidate_rows = n.checked_mul(48)?.checked_add(sum_name)?;
+        // Length-prefixed name plus truth, prior mean/variance, sensor noise,
+        // acquisition cost, and the distinct allocation coefficient.
+        let candidate_rows = n.checked_mul(56)?.checked_add(sum_name)?;
         let placement_rows = placements.checked_mul(max_name.checked_add(8)?)?;
         let allocation_rows = n.checked_mul(16)?.checked_add(sum_name)?;
         let trace_rows = placements.checked_add(2)?.checked_mul(8)?;
         let posterior_rows = n.checked_mul(24)?.checked_add(sum_name)?;
         let color_rows = placements.checked_mul(256)?;
         1024u128
-            .checked_add(OBJECTIVE_SCHEMA_BYTES)?
+            .checked_add(REPORT_SCHEMA_BYTES)?
             .checked_add(candidate_rows)?
             .checked_add(placement_rows)?
             .checked_add(allocation_rows)?
@@ -1421,16 +1737,26 @@ impl CampaignBytePlan {
 
         // Admission: the duplicate-identity scan reads every name once;
         // the one-time canonical sort compares two names per comparison;
-        // and every exact schema comparison reads both 12-byte operands.
+        // and every exact schema comparison reads both operands. Deriving the
+        // score schema reads the decision schema and acquisition schema once
+        // and materializes one fixed-width output schema.
         let admission_byte_units = (|| {
-            let schema_comparisons = n
+            let objective_schema_comparisons = n
                 .checked_add(1)?
                 .checked_mul(2)?
                 .checked_mul(OBJECTIVE_SCHEMA_BYTES)?;
+            let acquisition_schema_comparisons = n
+                .checked_mul(2)?
+                .checked_mul(ACQUISITION_COST_SCHEMA_BYTES)?;
+            let score_schema_derivation = OBJECTIVE_SCHEMA_BYTES
+                .checked_add(ACQUISITION_COST_SCHEMA_BYTES)?
+                .checked_add(OBJECTIVE_SCHEMA_BYTES)?;
             Self::sort_comparison_bound(n)?
                 .checked_mul(max_name.checked_mul(2)?)?
                 .checked_add(sum_name)?
-                .checked_add(schema_comparisons)
+                .checked_add(objective_schema_comparisons)?
+                .checked_add(acquisition_schema_comparisons)?
+                .checked_add(score_schema_derivation)
         })()
         .ok_or_else(|| overflow.clone())?;
 
@@ -1515,7 +1841,7 @@ impl CampaignBytePlan {
             scans
                 .checked_add(allocation)?
                 .checked_add(posteriors)?
-                .checked_add(OBJECTIVE_SCHEMA_BYTES)?
+                .checked_add(REPORT_SCHEMA_BYTES)?
                 .checked_add(identities)
         })()
         .ok_or_else(|| overflow.clone())?;
@@ -1935,7 +2261,7 @@ fn sensor_actions(candidates: &[Candidate], beliefs: &[Belief]) -> Result<Vec<Ac
                 kind: ActionKind::Sample,
                 target_design: candidate.name.clone(),
                 reduction,
-                cost: candidate.sensor_cost,
+                cost: candidate.acquisition_cost.value(),
             })
         })
         .collect()
@@ -2029,7 +2355,7 @@ fn precision_allocation(candidates: &[Candidate]) -> Result<(Vec<(String, f64)>,
             name: candidate.name.clone(),
             sensitivity: candidate.prior_var.sqrt(),
             sensitivity_color: ColorRank::Estimated,
-            cost_coeff: candidate.sensor_cost,
+            cost_coeff: candidate.allocation_cost_weight,
             baseline_tolerance: 0.1,
         })
         .collect();
@@ -2100,6 +2426,8 @@ struct ReportIdentityOutputs<'a> {
 struct ReportIdentitySource<'a> {
     candidates: &'a [Candidate],
     objective_spec: ObjectiveSpec,
+    acquisition_cost_spec: AcquisitionCostSpec,
+    score_spec: ObjectiveSpec,
     threshold: f64,
     max_sensors: usize,
     outputs: ReportIdentityOutputs<'a>,
@@ -2134,6 +2462,8 @@ fn report_identity_with_rule(
 ) -> Result<String, OedError> {
     let candidates = source.candidates;
     let objective_spec = source.objective_spec;
+    let acquisition_cost_spec = source.acquisition_cost_spec;
+    let score_spec = source.score_spec;
     let threshold = source.threshold;
     let max_sensors = source.max_sensors;
     let outputs = source.outputs;
@@ -2142,6 +2472,8 @@ fn report_identity_with_rule(
     let mut canonical = Vec::new();
     canonical.extend_from_slice(&OED_REPORT_IDENTITY_VERSION.to_le_bytes());
     canonical.extend_from_slice(&objective_spec.canonical_bytes());
+    canonical.extend_from_slice(&acquisition_cost_spec.canonical_bytes());
+    canonical.extend_from_slice(&score_spec.canonical_bytes());
     push_str(&mut canonical, cx.mode().name());
     let stream = cx.stream_key();
     for value in [stream.seed, stream.kernel_id, stream.tile, stream.iteration] {
@@ -2207,7 +2539,8 @@ fn report_identity_with_rule(
             candidate.prior_mean,
             candidate.prior_var,
             candidate.sensor_noise_variance,
-            candidate.sensor_cost,
+            candidate.acquisition_cost.value(),
+            candidate.allocation_cost_weight,
         ] {
             canonical.extend_from_slice(&value.to_bits().to_le_bytes());
         }
@@ -2297,11 +2630,27 @@ fn report_identity_with_rule(
     Ok(identity)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CampaignSchemas {
+    objective: ObjectiveSpec,
+    acquisition_cost: AcquisitionCostSpec,
+    score: ObjectiveSpec,
+}
+
 fn validate_campaign(
     candidates: &[Candidate],
     threshold: ObjectiveValue,
     max_sensors: usize,
-) -> Result<(f64, CampaignWorkPlan, CampaignBytePlan, Vec<Candidate>), OedError> {
+) -> Result<
+    (
+        f64,
+        CampaignSchemas,
+        CampaignWorkPlan,
+        CampaignBytePlan,
+        Vec<Candidate>,
+    ),
+    OedError,
+> {
     if candidates.is_empty() {
         return Err(OedError::NoCandidates);
     }
@@ -2323,6 +2672,7 @@ fn validate_campaign(
     }
     let objective_spec = candidates[0].objective_spec;
     let decision_spec = objective_spec.decision_spec();
+    let acquisition_cost_spec = candidates[0].acquisition_cost.spec();
     if threshold.spec != decision_spec {
         return Err(OedError::ThresholdSchemaMismatch {
             actual: threshold.spec,
@@ -2340,6 +2690,13 @@ fn validate_campaign(
                 expected: objective_spec,
             });
         }
+        if candidate.acquisition_cost.spec() != acquisition_cost_spec {
+            return Err(OedError::AcquisitionCostSchemaMismatch {
+                candidate: candidate.name.clone(),
+                actual: candidate.acquisition_cost.spec(),
+                expected: acquisition_cost_spec,
+            });
+        }
         if !names.insert(candidate.name.as_str()) {
             return Err(OedError::DuplicateCandidate {
                 name: candidate.name.clone(),
@@ -2348,6 +2705,12 @@ fn validate_campaign(
         sum_name = sum_name.saturating_add(candidate.name.len());
         max_name = max_name.max(candidate.name.len());
     }
+    let score_spec = acquisition_cost_spec.score_spec(decision_spec).ok_or(
+        OedError::ScoreDimensionOverflow {
+            benefit: decision_spec.dims(),
+            cost: acquisition_cost_spec.dims(),
+        },
+    )?;
     // The byte envelope is preflighted from the ACTUAL validated names
     // (bead sj31i.62): admission evaluates the same charge formulas
     // every later seam uses, at the worst-case shape.
@@ -2367,7 +2730,17 @@ fn validate_campaign(
     })?;
     canonical.extend_from_slice(candidates);
     canonical.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok((threshold.quantity.value, plan, byte_plan, canonical))
+    Ok((
+        threshold.quantity.value,
+        CampaignSchemas {
+            objective: objective_spec,
+            acquisition_cost: acquisition_cost_spec,
+            score: score_spec,
+        },
+        plan,
+        byte_plan,
+        canonical,
+    ))
 }
 
 struct CampaignState {
@@ -2587,6 +2960,7 @@ fn execute_placements(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn finish_report(
     candidates: &[Candidate],
+    schemas: CampaignSchemas,
     threshold: f64,
     max_sensors: usize,
     prior_total_variance: f64,
@@ -2687,7 +3061,9 @@ fn finish_report(
     let (variance_identity, evpi_identity) = {
         let source = ReportIdentitySource {
             candidates,
-            objective_spec: candidates[0].objective_spec,
+            objective_spec: schemas.objective,
+            acquisition_cost_spec: schemas.acquisition_cost,
+            score_spec: schemas.score,
             threshold,
             max_sensors,
             outputs: ReportIdentityOutputs {
@@ -2717,12 +3093,14 @@ fn finish_report(
     };
 
     progress.checkpoint(cx, plan, "report publication")?;
-    progress.retain_bytes("objective schema", OBJECTIVE_SCHEMA_BYTES)?;
+    progress.retain_bytes("campaign quantity schemas", REPORT_SCHEMA_BYTES)?;
     progress.advance(1);
     progress.finish(plan, realized)?;
 
     Ok(OedReport {
-        objective_spec: candidates[0].objective_spec,
+        objective_spec: schemas.objective,
+        acquisition_cost_spec: schemas.acquisition_cost,
+        score_spec: schemas.score,
         admitted_byte_units: progress.byte_plan.admitted_byte_units,
         consumed_byte_units: progress.charged_byte_units,
         retained_byte_units: progress.retained_byte_units,
@@ -2769,7 +3147,7 @@ pub fn run_campaign(
     max_sensors: usize,
     cx: &Cx<'_>,
 ) -> Result<OedReport, OedError> {
-    let (threshold, plan, byte_plan, candidates) =
+    let (threshold, schemas, plan, byte_plan, candidates) =
         validate_campaign(candidates, threshold, max_sensors)?;
     let candidates = candidates.as_slice();
     let shape = ByteShape::of(candidates);
@@ -2813,6 +3191,7 @@ pub fn run_campaign(
     )?;
     finish_report(
         candidates,
+        schemas,
         threshold,
         max_sensors,
         prior_total_variance,
@@ -2937,6 +3316,12 @@ mod tests {
             ReportIdentitySource {
                 candidates: &self.candidates,
                 objective_spec: self.candidates[0].objective_spec,
+                acquisition_cost_spec: self.candidates[0].acquisition_cost.spec(),
+                score_spec: self.candidates[0]
+                    .acquisition_cost
+                    .spec()
+                    .score_spec(self.candidates[0].objective_spec.decision_spec())
+                    .expect("fixture score dimensions"),
                 threshold: self.threshold,
                 max_sensors: self.max_sensors,
                 outputs: ReportIdentityOutputs {
@@ -3047,14 +3432,14 @@ mod tests {
 
     #[test]
     fn report_identity_versions_and_final_work_shape_are_locked() {
-        // v8 (bead sj31i.7): deliberate bump — the preimage now binds
-        // the exact objective dimension and semantic schema.
-        assert_eq!(OED_REPORT_IDENTITY_VERSION, 8);
+        // v9 (bead sj31i.7): deliberate bump — the preimage now binds
+        // role-safe acquisition costs and their derived score schema.
+        assert_eq!(OED_REPORT_IDENTITY_VERSION, 9);
         assert_eq!(REPORT_ID_DOMAIN, "org.frankensim.fs-oed-e2e.report.v6");
         // v4 (bead sj31i.5): full-EOL robustness evaluations.
         assert_eq!(CAMPAIGN_PLANNING_POLICY_VERSION, 4);
         assert_eq!(CAMPAIGN_POLL_POLICY_VERSION, 2);
-        assert_eq!(super::CAMPAIGN_BYTE_POLICY_VERSION, 3);
+        assert_eq!(super::CAMPAIGN_BYTE_POLICY_VERSION, 4);
         // v2 (bead sj31i.5): full multi-alternative opportunity loss.
         assert_eq!(fs_voi::EVPI_SEMANTICS_VERSION, 2);
 
@@ -3084,9 +3469,9 @@ mod tests {
         assert!(
             identities
                 .0
-                .starts_with("sensorforge-posterior-variance:v8:")
+                .starts_with("sensorforge-posterior-variance:v9:")
         );
-        assert!(identities.1.starts_with("sensorforge-evpi:v8:"));
+        assert!(identities.1.starts_with("sensorforge-evpi:v9:"));
     }
 
     #[test]
@@ -3228,6 +3613,29 @@ mod tests {
         let stress_id = report_identities(&stress_fixture, &NORMAL_EXPECTATION_RULE);
         assert_ne!(baseline, pressure_id);
         assert_ne!(pressure_id, stress_id);
+    }
+
+    #[test]
+    fn acquisition_schema_value_and_allocator_weight_are_identity_semantic() {
+        let baseline_fixture = IdentityFixture::new();
+        let baseline = report_identities(&baseline_fixture, &NORMAL_EXPECTATION_RULE);
+
+        let mut changed_schema = baseline_fixture.clone();
+        changed_schema.candidates[0].acquisition_cost.spec = super::AcquisitionCostSpec::Quantity(
+            fs_qty::QuantitySpec::dimensional(fs_qty::Dims::NONE),
+        );
+        let schema_identity = report_identities(&changed_schema, &NORMAL_EXPECTATION_RULE);
+        assert_ne!(baseline, schema_identity);
+
+        let mut changed_cost = baseline_fixture.clone();
+        changed_cost.candidates[0].acquisition_cost.quantity.value = 2.0;
+        let cost_identity = report_identities(&changed_cost, &NORMAL_EXPECTATION_RULE);
+        assert_ne!(baseline, cost_identity);
+
+        let mut changed_allocator = baseline_fixture;
+        changed_allocator.candidates[0].allocation_cost_weight = 2.0;
+        let allocator_identity = report_identities(&changed_allocator, &NORMAL_EXPECTATION_RULE);
+        assert_ne!(baseline, allocator_identity);
     }
 
     #[test]
