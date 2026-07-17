@@ -224,6 +224,21 @@ stale and self-consistently resealed variants are both refused. This is one
 small dense fixture, not all constrained problems, large-scale sparse behavior,
 cancellation, checkpointing, cross-ISA equality, persistence, or performance.
 
+`tests/pareto_study_replay.rs` (bead 7tv.21.27) is the retained study-scale
+replay and seeded-failure self-test for the two-objective Pareto tracing family.
+It runs production weighted-sum continuation across the convex quadratic front
+and production epsilon-constraint continuation across the concave
+Fonseca-Fleming front. The versioned receipt binds the fixed input seed, both
+schedules, starts and tolerance, every objective callback point/value/gradient,
+and every public decision, objective, scalar-gradient, optional KKT, and KKT
+component field. Independent execution must replay byte-identically while
+retaining the existing closed-form, coverage, and certificate gates. A
+deterministic mutation seed flips one finite epsilon-path decision mantissa bit;
+stale and self-consistently resealed forms are both refused. This proves the
+two-objective tracing paths only, not tri-objective behavior, the full WFG
+transformation stack, cancellation, checkpointing, cross-ISA equality,
+persistence, or performance.
+
 `tests/wfg_moo_battery.rs` covers WFG-scale front geometry without claiming
 the full deceptive or multimodal transformation stack. Concave, convex, and
 WFG1-class mixed fixtures retain their measured sweep behavior as linted,
