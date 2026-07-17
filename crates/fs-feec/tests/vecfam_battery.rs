@@ -14,10 +14,44 @@ use fs_feec::highorder::vecfam::{
 use fs_feec::{deram1, deram2, element_geometry, kuhn_cube, two_tets};
 use fs_rep_mesh::TetComplex;
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-feec-vecfam\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-feec/vecfam";
+const FIXED_INPUT_SEED: u64 = 0;
+
+fn verdict(case: &str, detail: &str) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed: FIXED_INPUT_SEED,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("vector-family verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("vector-family verdict must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn measurement(case: &str, name: &str, json: String) {
+    let identity = format!("{case}/measurement");
+    let mut emitter = fs_obs::Emitter::new(SUITE, &identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("vector-family measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("vector-family measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 const PI: f64 = std::f64::consts::PI;
@@ -71,11 +105,7 @@ fn vec_001_dimensions() {
         }
     }
     assert_eq!(dg_cell_dofs(3), 10, "P_2 dim");
-    log(
-        "vec-001",
-        "pass",
-        "dims + Euler alternating sum = 1, r=1..4",
-    );
+    verdict("vec-001", "dims + Euler alternating sum = 1, r=1..4");
 }
 
 /// vec-002: unisolvence — every element basis reproduces its defining
@@ -121,9 +151,8 @@ fn vec_002_unisolvence() {
             assert!(f.is_ok(), "mass SPD r={r}");
         }
     }
-    log(
+    verdict(
         "vec-002",
-        "pass",
         &format!("Kronecker worst {worst:.2e}; mass SPD r=2,3"),
     );
 }
@@ -202,9 +231,8 @@ fn vec_003_conformity() {
         worst_t < 1e-9 && worst_n < 1e-9,
         "tangential jump {worst_t:.2e}, normal jump {worst_n:.2e}"
     );
-    log(
+    verdict(
         "vec-003",
-        "pass",
         &format!("tangential jump {worst_t:.2e}, normal jump {worst_n:.2e}, r=2..4"),
     );
 }
@@ -268,9 +296,8 @@ fn vec_004_dd_zero() {
             worst_cg < gate && worst_dc < gate,
             "r={r}: curl.grad {worst_cg:.2e}, div.curl {worst_dc:.2e}, gate {gate:.2e}"
         );
-        log(
-            "vec-004",
-            "pass",
+        verdict(
+            &format!("vec-004/r{r}"),
             &format!("r={r}: curl.grad {worst_cg:.2e}, div.curl {worst_dc:.2e}"),
         );
     }
@@ -296,13 +323,17 @@ fn vec_005_interpolation_ladder() {
             } else {
                 "RT"
             };
+            let family_id = if matches!(family, Family::Nedelec) {
+                "nedelec"
+            } else {
+                "rt"
+            };
             assert!(
                 slope > r as f64 - 0.45 && errs[1] < errs[0],
                 "{fam} r={r}: errs {errs:?} slope {slope:.2}"
             );
-            log(
-                "vec-005",
-                "pass",
+            verdict(
+                &format!("vec-005/{family_id}-r{r}"),
                 &format!(
                     "{fam} r={r}: errs {:.3e}/{:.3e} slope {slope:.2}",
                     errs[0], errs[1]
@@ -394,9 +425,8 @@ fn vec_006_relabeling() {
         worst_sign < 1e-10 && worst_field < 1e-9,
         "signed-permutation dev {worst_sign:.2e}, field dev {worst_field:.2e}"
     );
-    log(
+    verdict(
         "vec-006",
-        "pass",
         &format!(
             "edge signed-permutation dev {worst_sign:.2e}; physics-level field dev {worst_field:.2e}"
         ),
@@ -462,10 +492,16 @@ fn vec_007_whitney_and_golden() {
             feed(*v);
         }
     }
-    log("vec-007-golden", "info", &format!("{acc:#018x}"));
-    log(
+    measurement(
+        "vec-007-golden",
+        "vec-007-golden",
+        format!(
+            "{{\"input_seed\":{FIXED_INPUT_SEED},\"actual_hash\":\"{acc:#018x}\",\
+             \"expected_hash\":\"{GOLDEN_HASH:#018x}\"}}"
+        ),
+    );
+    verdict(
         "vec-007",
-        "pass",
         &format!("whitney edge {worst:.2e} face {worst_rt:.2e}; golden {acc:#018x}"),
     );
     assert_eq!(

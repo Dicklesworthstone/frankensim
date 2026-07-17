@@ -3,7 +3,7 @@
 //! from both elements bitwise-comparable at face barycentric points),
 //! G1 MMS at r = 1..4 on Kuhn ladders, and the ORIENTATION battery
 //! (G3): operator equivariance under vertex relabeling at the
-//! signed-permutation level (r = 2, where the dof map is exactly a
+//! signed-permutation level (r = 3, where the dof map is exactly a
 //! signed permutation) and physics invariance at r = 4 (vertex point
 //! values, energy, and L2 error are label-independent).
 
@@ -13,16 +13,59 @@ use fs_rand::StreamKey;
 use fs_rep_mesh::TetComplex;
 use fs_sparse::precond::{IdentityPrecond, pcg};
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-feec-ho\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-feec/simplex";
+const FIXED_INPUT_SEED: u64 = 0;
+const VECTOR_INPUT_SEED: u64 = 11;
+const PERMUTATION_INPUT_SEED: u64 = 12;
+const STREAM_KERNEL: u32 = 0x51E3;
+
+fn verdict(case: &str, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("simplex verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("simplex verdict must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn measurement(identity: &str, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("simplex measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("simplex measurement must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
 }
 
 fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
     let mut s = StreamKey {
-        seed: 11,
-        kernel: 0x51E3,
+        seed: VECTOR_INPUT_SEED,
+        kernel: STREAM_KERNEL,
         tile,
     }
     .stream();
@@ -57,7 +100,11 @@ fn quadrature_and_dof_counts() {
             "r={r}: local dof count {local} vs dim P_r = {dim}"
         );
     }
-    log("counts", "pass", "Duffy volumes + P_r dimensions r=1..6");
+    verdict(
+        "counts",
+        "Duffy volumes + P_r dimensions r=1..6",
+        FIXED_INPUT_SEED,
+    );
 }
 
 #[test]
@@ -75,7 +122,7 @@ fn unisolvence_mass_spd() {
             "r={r}: mass not SPD — basis dependent or quadrature underintegrated"
         );
     }
-    log("unisolvence", "pass", "mass SPD r=1..5 (two-tet)");
+    verdict("unisolvence", "mass SPD r=1..5 (two-tet)", FIXED_INPUT_SEED);
 }
 
 #[test]
@@ -112,10 +159,22 @@ fn conformity_across_shared_face() {
         worst < 1e-13,
         "conformity broken across shared face: {worst:.3e}"
     );
-    log(
+    measurement(
+        "conformity/measurement",
         "conformity",
-        "pass",
-        &format!("r=4 trace agreement {worst:.1e}"),
+        format!(
+            "{{\"r\":4,\"trace_agreement\":{},\"input_seed\":{VECTOR_INPUT_SEED},\
+             \"stream_kernel\":\"0x51E3\",\"stream_tile\":1,\"execution_seed\":null}}",
+            finite_json(worst)
+        ),
+    );
+    verdict(
+        "conformity",
+        &format!(
+            "r=4 trace agreement {worst:.1e}; input_seed={VECTOR_INPUT_SEED} \
+             stream_kernel=0x51E3 stream_tile=1"
+        ),
+        VECTOR_INPUT_SEED,
     );
 }
 
@@ -162,6 +221,7 @@ fn mms_orders_r1_through_r4() {
     let u_exact = move |p: [f64; 3]| (pi * p[0]).sin() * (pi * p[1]).sin() * (pi * p[2]).sin();
     let f_exact = move |p: [f64; 3]| 3.0 * pi * pi * u_exact(p);
     for r in 1..=4usize {
+        let case = format!("mms-simplex-order/r-{r}");
         // r = 1 needs a finer ladder to reach asymptotics on tets.
         let ladder: [usize; 2] = if r == 1 { [4, 8] } else { [2, 4] };
         let mut errs = Vec::new();
@@ -171,17 +231,26 @@ fn mms_orders_r1_through_r4() {
             let sp = SimplexSpace::new(&complex, r);
             let err = sp.l2_error(&positions, &u, &u_exact);
             errs.push(err);
-            log("mms-simplex", "info", &format!("r={r} m={m} L2={err:.4e}"));
+            measurement(
+                &format!("{case}/measurement/m-{m}"),
+                "mms-simplex",
+                format!(
+                    "{{\"detail\":\"r={r} m={m} L2={err:.4e}\",\"r\":{r},\"m\":{m},\
+                     \"l2_error\":{},\"input_seed\":{FIXED_INPUT_SEED},\
+                     \"execution_seed\":null}}",
+                    finite_json(err)
+                ),
+            );
         }
         let order = (errs[0] / errs[1]).ln() / 2.0f64.ln();
         assert!(
             order > r as f64 + 0.6,
             "r={r}: simplicial order {order:.2} (errors {errs:?})"
         );
-        log(
-            "mms-simplex-order",
-            "pass",
-            &format!("r={r} order={order:.2}"),
+        verdict(
+            &case,
+            &format!("r={r} order={order:.2}; input_seed={FIXED_INPUT_SEED}"),
+            FIXED_INPUT_SEED,
         );
     }
 }
@@ -214,8 +283,8 @@ fn permute(
 /// Deterministic pseudo-random permutation of 0..n.
 fn random_perm(n: usize, seed_tile: u32) -> Vec<u32> {
     let mut s = StreamKey {
-        seed: 12,
-        kernel: 0x51E3,
+        seed: PERMUTATION_INPUT_SEED,
+        kernel: STREAM_KERNEL,
         tile: seed_tile,
     }
     .stream();
@@ -308,10 +377,28 @@ fn orientation_signed_permutation_equivariance_r3() {
         worst < 1e-12 * scale,
         "orientation equivariance broken: {worst:.3e} (scale {scale:.3e})"
     );
-    log(
+    measurement(
+        "orientation-r2/measurement",
         "orientation-r2",
-        "pass",
-        &format!("signed-permutation equivariance {worst:.1e}"),
+        format!(
+            "{{\"r\":3,\"signed_permutation_deviation\":{},\"scale\":{},\
+             \"vector_input_seed\":{VECTOR_INPUT_SEED},\"vector_stream_kernel\":\"0x51E3\",\
+             \"vector_stream_tile\":20,\"permutation_input_seed\":{PERMUTATION_INPUT_SEED},\
+             \"permutation_stream_kernel\":\"0x51E3\",\"permutation_stream_tile\":7,\
+             \"execution_seed\":null}}",
+            finite_json(worst),
+            finite_json(scale)
+        ),
+    );
+    verdict(
+        "orientation-r2",
+        &format!(
+            "signed-permutation equivariance {worst:.1e}; vector_input_seed={VECTOR_INPUT_SEED} \
+             vector_stream_kernel=0x51E3 vector_stream_tile=20 \
+             permutation_input_seed={PERMUTATION_INPUT_SEED} \
+             permutation_stream_kernel=0x51E3 permutation_stream_tile=7"
+        ),
+        VECTOR_INPUT_SEED,
     );
 }
 
@@ -349,10 +436,29 @@ fn orientation_physics_invariance_r4() {
         rel < 1e-6,
         "L2 error differs under relabeling: {err1:.6e} vs {err2:.6e}"
     );
-    log(
+    measurement(
+        "orientation-r4/measurement",
         "orientation-r4",
-        "pass",
-        &format!("vertex dev {worst_v:.1e}, L2 rel dev {rel:.1e}"),
+        format!(
+            "{{\"r\":4,\"vertex_deviation\":{},\"l2_error_original\":{},\
+             \"l2_error_relabelled\":{},\"l2_relative_deviation\":{},\
+             \"permutation_input_seed\":{PERMUTATION_INPUT_SEED},\
+             \"permutation_stream_kernel\":\"0x51E3\",\"permutation_stream_tile\":9,\
+             \"execution_seed\":null}}",
+            finite_json(worst_v),
+            finite_json(err1),
+            finite_json(err2),
+            finite_json(rel)
+        ),
+    );
+    verdict(
+        "orientation-r4",
+        &format!(
+            "vertex dev {worst_v:.1e}, L2 rel dev {rel:.1e}; \
+             permutation_input_seed={PERMUTATION_INPUT_SEED} \
+             permutation_stream_kernel=0x51E3 permutation_stream_tile=9"
+        ),
+        PERMUTATION_INPUT_SEED,
     );
 }
 
@@ -391,7 +497,16 @@ fn simplex_golden_hash() {
         }
         feed(*w);
     }
-    log("simplex-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "simplex-golden/measurement",
+        "simplex-golden",
+        format!(
+            "{{\"detail\":\"{acc:#018x}\",\"actual_hash\":\"{acc:#018x}\",\
+             \"expected_hash\":\"{GOLDEN_HASH:#018x}\",\"input_seed\":{VECTOR_INPUT_SEED},\
+             \"stream_kernel\":\"0x51E3\",\"stream_tile\":40,\
+             \"execution_seed\":null}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "simplex bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \

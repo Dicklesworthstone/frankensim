@@ -592,18 +592,52 @@ vec-005 interpolation ladders; vec-006 two-tier G3 relabeling;
 vec-007 Whitney cross-checks + frozen golden (cross-ISA row LEDGERED
 PENDING, same policy as the simplex golden).
 
-`tests/simplex_battery.rs` (slice 3): Duffy weight/volume exactness
-and P_r dimension counts (local dofs = C(r+3,3), r = 1..6);
-unisolvence via mass SPD (r = 1..5); conformity across the shared
-two-tet face (traces from both elements agree ≤ 1e−13 at sampled
-face barycentrics); G1 MMS r = 1..4 with slope gates ≥ r + 0.6
-(ladders [4,8] for r = 1, [2,4] above); ORIENTATION battery (G3):
-signed-permutation operator equivariance at r = 3 (edge P₁ kernels
-flip sign under sort-order reversal, K′(Su) = S(Ku) ≤ 1e−12) and
-physics invariance at r = 4 under random relabeling (vertex point
-values ≤ 1e−9, L2 error relative deviation ≤ 1e−6 — face bases mix
-under relabeling, so operator-level identity is the WRONG gate
-there); its own golden hash.
+The vector-family battery emits schema-validated `fs-obs` JSONL under suite
+`fs-feec/vecfam`. Fixed-input conformance identities are `vec-001`, `vec-002`,
+`vec-003`, `vec-004/r{2,3}`, `vec-005/{nedelec,rt}-r{2,3}`, `vec-006`, and
+`vec-007`, all with seed zero. The legacy golden diagnostic remains an
+info-only `Custom` event named `vec-007-golden` at
+`vec-007-golden/measurement`, recording actual and expected hashes before the
+unchanged terminal equality gate. All rows retain their original emission
+boundaries; this migration adds replay evidence without upgrading the existing
+G1/G3, golden, or cross-ISA claims.
+
+`tests/simplex_battery.rs` (slice 3) emits schema-validated `fs-obs` JSONL
+under suite `fs-feec/simplex`. Post-gate aggregate identities are `counts`,
+`unisolvence`, `conformity`, `mms-simplex-order/r-1` through
+`mms-simplex-order/r-4`, `orientation-r2`, and `orientation-r4`. The retained
+legacy `orientation-r2` identity covers the existing r = 3 signed-permutation
+fixture; its payload records `r = 3` explicitly. Counts,
+unisolvence, and the MMS ladders are fixed-input cases with seed zero.
+Conformity records input root 11, kernel `0x51E3`, and tile 1. The r = 3
+orientation measurement records both the vector stream (root 11, tile 20) and
+the permutation stream (root 12, tile 7); its aggregate seed is the vector
+root. The r = 4 orientation case records permutation root 12 and tile 9. These
+are logical input streams, not execution randomness; this suite has no Cx or
+execution seed.
+
+The eight original per-ladder MMS diagnostics remain info-only `Custom` events
+at `mms-simplex-order/r-{r}/measurement/m-{m}` after each solve and before its
+slope gate: `m = 4, 8` for `r = 1` and `m = 2, 4` for `r = 2..4`.
+`conformity/measurement`, `orientation-r2/measurement`, and
+`orientation-r4/measurement` retain the numerical diagnostics beside their
+post-assert aggregates. `simplex-golden/measurement` retains actual and
+expected hashes plus input root 11, kernel `0x51E3`, and tile 40 at the original
+info-only boundary before the unchanged equality assertion; no passing golden
+aggregate is synthesized. All measurements use object-shaped JSON, encode
+non-finite floating values as `null`, and are failure-linted, serialized,
+wire-validated, then printed. Aggregate detail retains each legacy text prefix
+and appends the applicable replay coordinates.
+
+The unchanged gates cover Duffy weight/volume exactness and P_r dimension
+counts (local dofs = C(r+3,3), r = 1..6); unisolvence via mass SPD (r = 1..5);
+shared-face conformity to 1e−13; G1 MMS slopes greater than r + 0.6;
+signed-permutation operator equivariance at r = 3 to 1e−12 relative; and G3
+physics invariance at r = 4 with vertex deviation below 1e−9 and L2 relative
+deviation below 1e−6. The canonical events are replay evidence for those
+existing fixtures, tolerances, and frozen bits; they do not upgrade G1/G3,
+cross-ISA, golden, completeness, or performance authority.
+
 `tests/derham_battery.rs` (slice 2): curl∘grad and div∘curl ≤ 1e−13
 relative on four (m, r) fixtures; exact-sequence dimensions
 (χ = 1 for m = 1..3 × r = 1..6); commuting diagram 1D
