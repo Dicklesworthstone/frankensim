@@ -23,7 +23,7 @@
 //! can resolve.
 
 use super::*;
-use fs_evidence::vv::MAX_VV_MATRIX_DIMENSION;
+use fs_evidence::vv::{ExperimentOrigin, MAX_VV_MATRIX_DIMENSION, ObservationLocatorIdentity};
 
 /// Umbrella API generation for the authority-separated I10.1 module. Identity
 /// preimages use the four stage-specific versions below, so changing one stage
@@ -12663,7 +12663,8 @@ fn relevant_gauge_obstructions(
                         && composition.members.iter().all(|member| {
                             matches!(&problem.gauges[member].status, GaugeStatus::Assumed { .. })
                         });
-                candidate.members.is_proper_subset(&composition.members)
+                candidate.members.is_subset(&composition.members)
+                    && candidate.members.len() < composition.members.len()
                     && (effectively_assumed || claim_gauge_action(claim) == Some(&composed_action))
                     && matching_gauge_cell(&composition.validity, claim, problem).is_some_and(
                         |cell| {
