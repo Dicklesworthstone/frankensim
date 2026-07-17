@@ -4,6 +4,25 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Compiler profiles
+
+Bulk scalar/curve sources use `material-tsv-v1`. Ordered interface-system
+sources use `interface-tsv-v1`: they retain that same provenance, uncertainty,
+validity, frame, and joint-statistics grammar, and additionally require exactly
+one record for each ordered surface and one complete system context:
+
+```text
+surface_a<TAB>chemistry<TAB>phase<TAB>process<TAB>revision<TAB>texture_frame
+surface_b<TAB>chemistry<TAB>phase<TAB>process<TAB>revision<TAB>texture_frame
+context<TAB>medium<TAB>third_body-or--<TAB>environment<TAB>named_history
+```
+
+The compiler emits `FSINTPK` v1, preserving surface order and named history as
+identity-bearing state. This profile does not carry constitutive model cards,
+infer symmetry, or turn a fixture claim into authority for either bulk material.
+The committed directories below remain bulk/species sources until separately
+identified, redistributable interface evidence is added.
+
 ## Current species-association tranches
 
 | Directory | Species | NASA molecular weight | Program role |

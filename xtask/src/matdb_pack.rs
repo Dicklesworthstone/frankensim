@@ -1,8 +1,10 @@
-//! Strict offline compiler for canonical fs-matdb material and model packs.
+//! Strict offline compiler for canonical fs-matdb material, interface, and model packs.
 //!
 //! This tool boundary owns source-format and redistribution decisions. The
 //! runtime fs-matdb crate only admits the normalized artifact. The material
-//! profile emits [`NormalizedPack`]. NASA-9 and kinetics emit a separate
+//! profile emits [`NormalizedPack`], while interface-tsv-v1 adds an ordered
+//! pair of named surfaces and one complete system context before emitting
+//! [`NormalizedInterfacePack`]. NASA-9 and kinetics emit a separate
 //! [`NormalizedModelPack`], while species-v1 emits [`NormalizedSpeciesPack`]
 //! with the explicit source-declared thermochemical association that generic
 //! model cards cannot carry. None of these artifacts authenticates chemistry,
@@ -12,8 +14,10 @@
 //! citation, and license record, followed by source records containing logical
 //! id, safe relative path, and profile. A material-tsv-v1 source starts with
 //! SOURCE_HEADER and then uses observation, scalar, curve, uncertainty,
-//! validity, frame, and joint records. Every numeric token has a separate
-//! explicit unit field; confidence and correlation use the exact basis 1.
+//! validity, frame, and joint records. Interface-tsv-v1 uses that same claim
+//! grammar plus exactly one `surface_a`, `surface_b`, and `context` record.
+//! Every numeric token has a separate explicit unit field; confidence and
+//! correlation use the exact basis 1.
 //! A kinetics-v1 source declares exactly one explicitly first-order reaction
 //! plus `pre_exponential` and `activation_temperature`, representing only the
 //! immutable coefficient schema `k(T) = A exp(-T_a / T)` with `A` in `s^-1`
@@ -36,11 +40,12 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimId, ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy,
     JointStatistics, LawId, LawParameter, MATDB_PACK_TARGET_BASIS, MODEL_PACK_TARGET_BASIS,
-    ModelNormalizationReceipt, ModelNormalizationTarget, NormalizationReceipt, NormalizationTarget,
-    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, ObservationDataset, ObservationId,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, SPECIES_MOLAR_MASS_DIMS,
-    SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS, SpeciesAssociation,
-    SpeciesNormalizationReceipt, SpeciesNormalizationTarget, StatisticMember, UncertaintyModel,
+    MaterialStateId, ModelNormalizationReceipt, ModelNormalizationTarget, NormalizationReceipt,
+    NormalizationTarget, NormalizedInterfacePack, NormalizedModelPack, NormalizedPack,
+    NormalizedSpeciesPack, ObservationDataset, ObservationId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, SPECIES_MOLAR_MASS_DIMS, SPECIES_PACK_TARGET_BASIS,
+    SPECIES_REFERENCE_PRESSURE_DIMS, SpeciesAssociation, SpeciesNormalizationReceipt,
+    SpeciesNormalizationTarget, StatisticMember, SurfaceSpec, SystemContext, UncertaintyModel,
     ValidityBoundSide,
 };
 use fs_qty::Dims;
@@ -48,6 +53,7 @@ use fs_qty::chemistry::{ReactionId, SpeciesId};
 use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
 
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
+const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -56,13 +62,14 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 3;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 4;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const KINETICS_SOURCE_HEADER: &str = "frankensim.kinetics-source.v1";
 const SPECIES_SOURCE_HEADER: &str = "frankensim.species-source.v1";
 const MATERIAL_PROFILE: &str = "material-tsv-v1";
+const INTERFACE_PROFILE: &str = "interface-tsv-v1";
 const NASA9_PROFILE: &str = "nasa9-v1";
 const KINETICS_PROFILE: &str = "kinetics-v1";
 const SPECIES_PROFILE: &str = "species-v1";
@@ -245,6 +252,7 @@ struct CompileOutput {
 #[derive(Debug)]
 enum CompiledPack {
     Material(NormalizedPack),
+    Interface(NormalizedInterfacePack),
     Model(NormalizedModelPack),
     Species(NormalizedSpeciesPack),
 }
@@ -253,6 +261,7 @@ impl CompiledPack {
     fn compiler_id(&self) -> &str {
         match self {
             Self::Material(pack) => pack.compiler(),
+            Self::Interface(pack) => pack.compiler(),
             Self::Model(pack) => pack.compiler(),
             Self::Species(pack) => pack.compiler(),
         }
@@ -261,6 +270,7 @@ impl CompiledPack {
     fn source_artifact(&self) -> ContentHash {
         match self {
             Self::Material(pack) => pack.source_artifact(),
+            Self::Interface(pack) => pack.source_artifact(),
             Self::Model(pack) => pack.source_artifact(),
             Self::Species(pack) => pack.source_artifact(),
         }
@@ -269,14 +279,27 @@ impl CompiledPack {
     fn content_hash(&self) -> ContentHash {
         match self {
             Self::Material(pack) => pack.content_hash(),
+            Self::Interface(pack) => pack.content_hash(),
             Self::Model(pack) => pack.content_hash(),
             Self::Species(pack) => pack.content_hash(),
+        }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Material(pack) => pack.to_bytes(),
+            Self::Interface(pack) => pack.to_bytes(),
+            Self::Model(pack) => pack.to_bytes(),
+            Self::Species(pack) => pack.to_bytes(),
         }
     }
 
     fn verify_bytes(&self, expected: ContentHash, bytes: &[u8]) -> Result<(), String> {
         match self {
             Self::Material(_) => NormalizedPack::from_bytes_verified(expected, bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Self::Interface(_) => NormalizedInterfacePack::from_bytes_verified(expected, bytes)
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
             Self::Model(_) => NormalizedModelPack::from_bytes_verified(expected, bytes)
@@ -316,6 +339,7 @@ impl CompiledPack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceProfile {
     Material,
+    Interface,
     Nasa9,
     Kinetics,
     Species,
@@ -325,6 +349,7 @@ impl SourceProfile {
     const fn compiler_id(self) -> &'static str {
         match self {
             Self::Material => COMPILER_ID,
+            Self::Interface => INTERFACE_COMPILER_ID,
             Self::Nasa9 => NASA9_COMPILER_ID,
             Self::Kinetics => KINETICS_COMPILER_ID,
             Self::Species => SPECIES_COMPILER_ID,
@@ -442,6 +467,25 @@ struct RawJoint {
     source_hash: ContentHash,
 }
 
+#[derive(Debug)]
+struct RawSurfaceSpec {
+    chemistry: String,
+    phase: String,
+    process: String,
+    revision: u32,
+    texture_frame: String,
+    record_hash: ContentHash,
+}
+
+#[derive(Debug)]
+struct RawSystemContext {
+    medium: String,
+    third_body: Option<String>,
+    environment: String,
+    history: String,
+    record_hash: ContentHash,
+}
+
 #[derive(Debug, Default)]
 struct RawDatabase {
     observations: BTreeMap<String, RawObservation>,
@@ -450,6 +494,9 @@ struct RawDatabase {
     validities: BTreeMap<String, BTreeMap<String, RawValidity>>,
     frames: BTreeMap<String, RawFrame>,
     joints: BTreeMap<(String, String), RawJoint>,
+    surface_a: Option<RawSurfaceSpec>,
+    surface_b: Option<RawSurfaceSpec>,
+    context: Option<RawSystemContext>,
     decisions: Vec<Decision>,
     records: usize,
     curve_knots: usize,
@@ -918,6 +965,7 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
     }
     match first.profile.as_str() {
         MATERIAL_PROFILE => Ok(SourceProfile::Material),
+        INTERFACE_PROFILE => Ok(SourceProfile::Interface),
         NASA9_PROFILE => Ok(SourceProfile::Nasa9),
         KINETICS_PROFILE => Ok(SourceProfile::Kinetics),
         SPECIES_PROFILE => Ok(SourceProfile::Species),
@@ -925,7 +973,7 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
             "unsupported_source_profile",
             format!("source:{}", first.id),
             format!(
-                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?}, {NASA9_PROFILE:?}, {KINETICS_PROFILE:?}, and {SPECIES_PROFILE:?}",
+                "profile {:?} has no runtime-loadable compiler path; supported profiles are {MATERIAL_PROFILE:?}, {INTERFACE_PROFILE:?}, {NASA9_PROFILE:?}, {KINETICS_PROFILE:?}, and {SPECIES_PROFILE:?}",
                 first.profile
             ),
         )),
@@ -1207,8 +1255,48 @@ fn push_part(output: &mut Vec<u8>, part: &[u8]) {
     output.extend_from_slice(part);
 }
 
+fn parse_canonical_u32(raw: &str, field: &str, subject: &str) -> Result<u32, CompileError> {
+    let value = raw.parse::<u32>().map_err(|_| {
+        CompileError::new(
+            "invalid_unsigned_integer",
+            subject,
+            format!("{field} must be a canonical base-10 u32"),
+        )
+    })?;
+    if value.to_string() != raw {
+        return Err(CompileError::new(
+            "noncanonical_unsigned_integer",
+            subject,
+            format!("{field} must not contain signs, whitespace, or leading zeroes"),
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_interface_surface(
+    fields: &[&str],
+    source_id: &str,
+    line_number: usize,
+    subject: &str,
+    record_hash: ContentHash,
+) -> Result<RawSurfaceSpec, CompileError> {
+    require_field_count(fields, 6, source_id, line_number)?;
+    Ok(RawSurfaceSpec {
+        chemistry: require_text(fields[1], "surface chemistry", subject)?,
+        phase: require_text(fields[2], "surface phase", subject)?,
+        process: require_text(fields[3], "surface process", subject)?,
+        revision: parse_canonical_u32(fields[4], "material revision", subject)?,
+        texture_frame: require_identifier(fields[5], "texture-frame id", subject)?,
+        record_hash,
+    })
+}
+
 #[allow(clippy::too_many_lines)] // Exact record grammar and per-record refusals stay co-located.
-fn parse_source(source: &LoadedSource, raw: &mut RawDatabase) -> Result<(), CompileError> {
+fn parse_source(
+    source: &LoadedSource,
+    raw: &mut RawDatabase,
+    profile: SourceProfile,
+) -> Result<(), CompileError> {
     if source.text.as_bytes().contains(&0) {
         return Err(CompileError::new(
             "invalid_source_encoding",
@@ -1254,6 +1342,78 @@ fn parse_source(source: &LoadedSource, raw: &mut RawDatabase) -> Result<(), Comp
         let fields: Vec<&str> = line.split('\t').collect();
         let record_hash = hash_domain(SOURCE_RECORD_DOMAIN, line.as_bytes());
         match fields.first().copied() {
+            Some("surface_a") => {
+                if profile != SourceProfile::Interface {
+                    return Err(CompileError::new(
+                        "unsupported_source_record",
+                        subject,
+                        "surface identity records require interface-tsv-v1",
+                    ));
+                }
+                let surface = parse_interface_surface(
+                    &fields,
+                    &source.spec.id,
+                    line_number,
+                    &subject,
+                    record_hash,
+                )?;
+                set_once(
+                    &mut raw.surface_a,
+                    surface,
+                    "duplicate_interface_surface",
+                    "interface:surface_a",
+                )?;
+            }
+            Some("surface_b") => {
+                if profile != SourceProfile::Interface {
+                    return Err(CompileError::new(
+                        "unsupported_source_record",
+                        subject,
+                        "surface identity records require interface-tsv-v1",
+                    ));
+                }
+                let surface = parse_interface_surface(
+                    &fields,
+                    &source.spec.id,
+                    line_number,
+                    &subject,
+                    record_hash,
+                )?;
+                set_once(
+                    &mut raw.surface_b,
+                    surface,
+                    "duplicate_interface_surface",
+                    "interface:surface_b",
+                )?;
+            }
+            Some("context") => {
+                if profile != SourceProfile::Interface {
+                    return Err(CompileError::new(
+                        "unsupported_source_record",
+                        subject,
+                        "system context records require interface-tsv-v1",
+                    ));
+                }
+                require_field_count(&fields, 5, &source.spec.id, line_number)?;
+                let third_body = if fields[2] == "-" {
+                    None
+                } else {
+                    Some(require_text(fields[2], "third body", &subject)?)
+                };
+                let context = RawSystemContext {
+                    medium: require_text(fields[1], "medium", &subject)?,
+                    third_body,
+                    environment: require_text(fields[3], "environment", &subject)?,
+                    history: require_text(fields[4], "history", &subject)?,
+                    record_hash,
+                };
+                set_once(
+                    &mut raw.context,
+                    context,
+                    "duplicate_interface_context",
+                    "interface:context",
+                )?;
+            }
             Some("observation") => {
                 require_field_count(&fields, 5, &source.spec.id, line_number)?;
                 let id = require_identifier(fields[1], "observation id", &subject)?;
@@ -1500,7 +1660,15 @@ fn parse_source(source: &LoadedSource, raw: &mut RawDatabase) -> Result<(), Comp
     raw.decisions.push(Decision::admit(
         format!("source:{}", source.spec.id),
         "source_schema_admitted",
-        "bounded material-tsv-v1 source parsed without inference",
+        match profile {
+            SourceProfile::Material => "bounded material-tsv-v1 source parsed without inference",
+            SourceProfile::Interface => {
+                "bounded interface-tsv-v1 source parsed without inferred system identity"
+            }
+            SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+                unreachable!("specialized profiles use dedicated parsers")
+            }
+        },
         Some(source.hash),
     ));
     Ok(())
@@ -3311,6 +3479,56 @@ fn compile_kinetics_manifest(
     })
 }
 
+fn compile_interface_identity(
+    raw: &RawDatabase,
+) -> Result<(SurfaceSpec, SurfaceSpec, SystemContext, [ContentHash; 3]), CompileError> {
+    let surface_a = raw.surface_a.as_ref().ok_or_else(|| {
+        CompileError::new(
+            "missing_interface_surface",
+            "interface:surface_a",
+            "interface-tsv-v1 requires exactly one surface_a record",
+        )
+    })?;
+    let surface_b = raw.surface_b.as_ref().ok_or_else(|| {
+        CompileError::new(
+            "missing_interface_surface",
+            "interface:surface_b",
+            "interface-tsv-v1 requires exactly one surface_b record",
+        )
+    })?;
+    let context = raw.context.as_ref().ok_or_else(|| {
+        CompileError::new(
+            "missing_interface_context",
+            "interface:context",
+            "interface-tsv-v1 requires exactly one context record",
+        )
+    })?;
+    let to_surface = |surface: &RawSurfaceSpec| SurfaceSpec {
+        material: MaterialStateId {
+            chemistry: surface.chemistry.clone(),
+            phase: surface.phase.clone(),
+            process: surface.process.clone(),
+            revision: surface.revision,
+        },
+        texture_frame: surface.texture_frame.clone(),
+    };
+    Ok((
+        to_surface(surface_a),
+        to_surface(surface_b),
+        SystemContext {
+            medium: context.medium.clone(),
+            third_body: context.third_body.clone(),
+            environment: context.environment.clone(),
+            history: context.history.clone(),
+        },
+        [
+            surface_a.record_hash,
+            surface_b.record_hash,
+            context.record_hash,
+        ],
+    ))
+}
+
 #[allow(clippy::too_many_lines)] // The ordered admission pipeline is easier to audit in one pass.
 fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError> {
     let manifest_bytes = read_bounded_regular(manifest_path, MAX_MANIFEST_BYTES, "manifest")?;
@@ -3347,11 +3565,11 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             return compile_species_manifest(manifest, &sources, source_artifact)
                 .map_err(|error| error.with_compiler_id(compiler_id));
         }
-        SourceProfile::Material => {}
+        SourceProfile::Material | SourceProfile::Interface => {}
     }
     let mut raw = RawDatabase::default();
     for source in &sources {
-        if let Err(error) = parse_source(source, &mut raw) {
+        if let Err(error) = parse_source(source, &mut raw, profile) {
             return Err(error
                 .with_input_hash(source_artifact)
                 .with_prior_decisions(std::mem::take(&mut raw.decisions)));
@@ -3613,9 +3831,9 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             ));
         }
 
-        let pack = NormalizedPack::new(
+        let material_pack = NormalizedPack::new(
             manifest.pack_id,
-            COMPILER_ID,
+            compiler_id,
             source_artifact,
             manifest.redistribution_terms,
             claims,
@@ -3629,16 +3847,60 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 format!("runtime pack admission refused the compiled artifact: {error}"),
             )
         })?;
+        let pack = match profile {
+            SourceProfile::Material => CompiledPack::Material(material_pack),
+            SourceProfile::Interface => {
+                let (surface_a, surface_b, context, identity_hashes) =
+                    compile_interface_identity(&raw)?;
+                decisions.push(Decision::admit(
+                    "interface:surface_a",
+                    "ordered_surface_identity_admitted",
+                    "first material state and texture frame retained as the ordered A surface",
+                    Some(identity_hashes[0]),
+                ));
+                decisions.push(Decision::admit(
+                    "interface:surface_b",
+                    "ordered_surface_identity_admitted",
+                    "second material state and texture frame retained as the ordered B surface",
+                    Some(identity_hashes[1]),
+                ));
+                decisions.push(Decision::admit(
+                    "interface:context",
+                    "interface_context_admitted",
+                    "medium, optional third body, environment, and named history retained without inference",
+                    Some(identity_hashes[2]),
+                ));
+                let interface_pack = NormalizedInterfacePack::new(
+                    surface_a,
+                    surface_b,
+                    context,
+                    material_pack,
+                )
+                .map_err(|error| {
+                    CompileError::new(
+                        "normalized_interface_pack_refused",
+                        "pack",
+                        format!(
+                            "runtime interface-pack admission refused the compiled artifact: {error}"
+                        ),
+                    )
+                })?;
+                CompiledPack::Interface(interface_pack)
+            }
+            SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+                unreachable!("specialized profiles return before material claim compilation")
+            }
+        };
         let bytes = pack.to_bytes();
         let pack_hash = pack.content_hash();
-        let decoded = NormalizedPack::from_bytes_verified(pack_hash, &bytes).map_err(|error| {
+        pack.verify_bytes(pack_hash, &bytes).map_err(|error| {
             CompileError::new(
                 "self_verification_failed",
                 "pack",
                 format!("fresh artifact failed verified runtime decode: {error}"),
             )
         })?;
-        if decoded.to_bytes() != bytes {
+        if pack.to_bytes() != bytes {
             return Err(CompileError::new(
                 "self_verification_failed",
                 "pack",
@@ -3647,8 +3909,24 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         }
         decisions.push(Decision::admit(
             "pack",
-            "runtime_pack_self_verified",
-            "canonical bytes decoded under their externally pinned content hash",
+            match profile {
+                SourceProfile::Material => "runtime_pack_self_verified",
+                SourceProfile::Interface => "runtime_interface_pack_self_verified",
+                SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+                    unreachable!("specialized profiles return before material claim compilation")
+                }
+            },
+            match profile {
+                SourceProfile::Material => {
+                    "canonical bytes decoded under their externally pinned content hash"
+                }
+                SourceProfile::Interface => {
+                    "canonical FSINTPK bytes decoded under their externally pinned content hash"
+                }
+                SourceProfile::Nasa9 | SourceProfile::Kinetics | SourceProfile::Species => {
+                    unreachable!("specialized profiles return before material claim compilation")
+                }
+            },
             Some(source_artifact),
         ));
         for decision in &mut decisions {
@@ -3656,7 +3934,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         }
         sort_decisions(&mut decisions);
         Ok(CompileOutput {
-            pack: CompiledPack::Material(pack),
+            pack,
             bytes,
             decisions: std::mem::take(&mut decisions),
         })
@@ -5643,6 +5921,7 @@ mod tests {
     fn source_profiles_select_their_exact_compiler_identity() {
         for (profile, expected) in [
             (SourceProfile::Material, COMPILER_ID),
+            (SourceProfile::Interface, INTERFACE_COMPILER_ID),
             (SourceProfile::Nasa9, NASA9_COMPILER_ID),
             (SourceProfile::Kinetics, KINETICS_COMPILER_ID),
             (SourceProfile::Species, SPECIES_COMPILER_ID),

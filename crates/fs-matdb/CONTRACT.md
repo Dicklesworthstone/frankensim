@@ -72,8 +72,11 @@ persistence.
   states, both texture frames, medium, optional third body, environment, and
   named history. Decode re-admits the nested claim pack and verifies both its
   hash and the reconstructed interface-card hash before accepting canonical
-  bytes. V1 carries no constitutive model cards; model-law transport requires a
-  separately versioned binding and cannot be smuggled through this wrapper.
+  bytes. Offline `interface-tsv-v1` compilation reuses the ordinary material
+  claim grammar but additionally requires exactly one `surface_a`, `surface_b`,
+  and `context` record. V1 carries no constitutive model cards; model-law
+  transport requires a separately versioned binding and cannot be smuggled
+  through this wrapper.
 - `NormalizedModelPack` — a separate bounded `FSMODPK` v1 transport for
   immutable `ConstitutiveModelCard`s. Model cards are not laundered into
   scalar property claims: the pack retains each law/version, dimensioned
@@ -310,6 +313,12 @@ refusals.
 verified exact binary round-trip; G3 phase/EOS/positive-value/provenance gates,
 complete dimension-linked receipt coverage, pack/species identity binding,
 whole-pack tampering, untrusted-length preflight, and trailing-byte refusals.
+
+`xtask/tests/interface_pack_cli.rs`: G3 two-pass compilation of a synthetic,
+explicitly non-authoritative ordered steel/bronze fixture into byte-identical,
+identity-verified interface packs; compiler-identity retention; surface,
+context, and claim reconstruction; and fail-closed missing-context and
+noncanonical-revision cases. Real seed cards remain separately source-bound.
 
 `xtask/tests/matdb_pack_cli.rs`: G3 compilation of the committed methane,
 nitrogen, oxygen, argon, carbon-dioxide, water-vapor, and carbon-monoxide seed
