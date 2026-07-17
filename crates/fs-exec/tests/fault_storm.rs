@@ -14,8 +14,12 @@ use fs_exec::{
 };
 use fs_substrate::affinity::CcdTopology;
 
+const SUITE: &str = "fs-exec/fault-storm";
 const TILES: u64 = 41;
 const TOUCHES_PER_TILE: u32 = 3;
+const SEEDED_POOL_EXECUTION_ROOT: u64 = 0xF404_F00D;
+const EARLY_POOL_EXECUTION_ROOT: u64 = 0xF404_DA1A;
+const EARLY_SEED: u64 = 0xF404_001a;
 const SEEDS: [u64; 16] = [
     0xF404_0000,
     0xF404_0001,
@@ -34,6 +38,29 @@ const SEEDS: [u64; 16] = [
     0xF404_000e,
     0xF404_000f,
 ];
+
+fn verdict(emitter: &mut fs_obs::Emitter, case: &str, pass: bool, detail: &str, seed: u64) {
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("fault-storm verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("fault-storm verdict must use the fs-obs wire schema");
+    println!("{line}");
+    assert!(pass, "case {case}: {detail}");
+}
 
 struct TouchKernel {
     fault: Option<TileFaultPlan>,
@@ -71,7 +98,12 @@ impl TileKernel for TouchKernel {
 
 #[test]
 fn g4_seeded_faults_are_structured_drained_and_replayable() {
-    let pool = TilePool::new(PoolConfig::new(4, CcdTopology::APPLE_M_CLASS, 0xF404_F00D));
+    let pool = TilePool::new(PoolConfig::new(
+        4,
+        CcdTopology::APPLE_M_CLASS,
+        SEEDED_POOL_EXECUTION_ROOT,
+    ));
+    let mut emitter = fs_obs::Emitter::new(SUITE, "seeded-fault");
 
     for seed in SEEDS {
         let plan = TileFaultPlan::seeded(seed, TILES, TOUCHES_PER_TILE).expect("valid plan");
@@ -114,23 +146,34 @@ fn g4_seeded_faults_are_structured_drained_and_replayable() {
         assert_eq!(healthy, TILES * (TILES - 1) / 2);
         assert!(pool.arena_pool().stats().quiescent());
 
-        println!(
-            "{{\"suite\":\"fs-exec/fault-storm\",\"plan_version\":{},\"seed\":\"{:#018x}\",\"tiles\":{},\"touches_per_tile\":{},\"tile\":{},\"touch\":{},\"completed_before_drain\":{},\"verdict\":\"pass\"}}",
-            plan.version(),
+        verdict(
+            &mut emitter,
+            "seeded-fault",
+            true,
+            &format!(
+                "plan_version={}, plan_seed={:#018x}, tiles={}, touches_per_tile={}, tile={}, \
+                 touch={}, completed_before_drain={}, pool_execution_root={:#018x}",
+                plan.version(),
+                plan.seed(),
+                plan.tiles(),
+                plan.touches_per_tile(),
+                plan.tile(),
+                plan.touch(),
+                completed,
+                SEEDED_POOL_EXECUTION_ROOT,
+            ),
             plan.seed(),
-            plan.tiles(),
-            plan.touches_per_tile(),
-            plan.tile(),
-            plan.touch(),
-            completed,
         );
     }
 }
 
 #[test]
 fn g4_early_fault_stops_single_worker_before_its_next_claim() {
-    const EARLY_SEED: u64 = 0xF404_001a;
-    let pool = TilePool::new(PoolConfig::new(1, CcdTopology::APPLE_M_CLASS, 0xF404_DA1A));
+    let pool = TilePool::new(PoolConfig::new(
+        1,
+        CcdTopology::APPLE_M_CLASS,
+        EARLY_POOL_EXECUTION_ROOT,
+    ));
     let plan = TileFaultPlan::seeded(EARLY_SEED, TILES, TOUCHES_PER_TILE).expect("valid plan");
     assert_eq!(
         (plan.tile(), plan.touch()),
@@ -159,11 +202,20 @@ fn g4_early_fault_stops_single_worker_before_its_next_claim() {
         "a one-worker pool must stop before claiming tile 1 after tile 0 refuses"
     );
     assert!(pool.arena_pool().stats().quiescent());
-    println!(
-        "{{\"suite\":\"fs-exec/fault-storm\",\"case\":\"early-drain\",\"plan_version\":{},\"seed\":\"{:#018x}\",\"tiles\":{},\"touches_per_tile\":{},\"tile\":0,\"touch\":1,\"completed_before_drain\":0,\"verdict\":\"pass\"}}",
-        plan.version(),
+    let mut emitter = fs_obs::Emitter::new(SUITE, "early-drain");
+    verdict(
+        &mut emitter,
+        "early-drain",
+        true,
+        &format!(
+            "plan_version={}, plan_seed={:#018x}, tiles={}, touches_per_tile={}, tile=0, \
+             touch=1, completed_before_drain=0, pool_execution_root={:#018x}",
+            plan.version(),
+            plan.seed(),
+            plan.tiles(),
+            plan.touches_per_tile(),
+            EARLY_POOL_EXECUTION_ROOT,
+        ),
         plan.seed(),
-        plan.tiles(),
-        plan.touches_per_tile(),
     );
 }

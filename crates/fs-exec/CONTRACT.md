@@ -552,12 +552,27 @@ complete placement-v2 mutation matrix, independent count-prefix movement,
 seed nonmovement, and fail-closed retained-version admission.
 tests/fault_storm.rs runs 16 declared seeds through the version-1 tile-fault
 plan. Every case checks exact tile/seed/touch provenance, sibling drain via the
-typed refusal path, arena quiescence, and successful reuse of the same pool;
-each seed emits one JSON-line receipt only after all assertions pass. A golden
-single-worker early fault additionally proves that no later tile is claimed
-after the refusal, while an in-module golden vector locks the v1 seed mapping.
-This bounded battery is G4 evidence, not an exhaustive scheduler-state
-exploration.
+typed refusal path, arena quiescence, and successful reuse of the same pool.
+Only after those assertions pass, each row emits a canonical fs-obs
+`ConformanceCase` under session/suite `fs-exec/fault-storm` and the shared
+`seeded-fault` scope. The retained input order `0xF404_0000..=0xF404_000f`
+therefore maps exactly to emitter sequences `0..=15`; an earlier assertion
+failure leaves only the valid emitted prefix. Each event's `seed` is its exact
+`TileFaultPlan` input seed, while its detail retains plan version, plan seed,
+tile count, touches per tile, selected tile/touch, completed-before-drain count,
+and the separately named TilePool execution root `0xF404_F00D`.
+
+A golden single-worker early fault additionally proves that no later tile is
+claimed after the refusal, while an in-module golden vector locks the v1 seed
+mapping. Its post-assert aggregate has scope/case `early-drain`, sequence zero,
+event seed `0xF404_001a`, and separately records TilePool execution root
+`0xF404_DA1A` plus the same plan/drain fields. Reached aggregates use
+Info/Error severity, pass the failure-record lint, serialize through
+`to_jsonl`, validate against the fs-obs wire schema, print, and only then make
+their terminal verdict assertion. The two PoolConfig roots identify executor
+stream provenance; they are not fault-plan input seeds. Neither seed class
+claims replay of thread scheduling, completion count, or timing. This bounded
+battery is G4 evidence, not an exhaustive scheduler-state exploration.
 
 ## No-claim boundaries
 - NO 200 µs cancel-latency CLAIM yet: the reference-hardware p99 gate
