@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	motorette-slot-liner-selection	nasa-20240007451-dupont-nomex-410-aramid-paper-0p08mm-lot-unspecified	Tallerico et al. Section IV-A direct component-selection statement for the in-house NASA motorettes	The source identifies DuPont Nomex 410 aramid paper and states that 0.08 mm thick paper was used between the M15 core and winding. Reference 18 identifies the 2016 technical data sheet, but the campaign does not report product lot, measured thickness, thickness tolerance, paper orientation, moisture conditioning, dielectric test, thermal-property test, uncertainty, or confidence metadata. This is the selected liner thickness in that stack, not a generic Nomex 410 design allowable
+scalar	selected-slot-liner-thickness	motorette-slot-liner-selection	selected_slot_liner_thickness	0.08	mm	constant
+uncertainty	selected-slot-liner-thickness	unstated	-	-	-	-
+validity	selected-slot-liner-thickness	source_product_is_dupont_nomex_410	1	1	1
+validity	selected-slot-liner-thickness	source_material_is_aramid_paper	1	1	1
+validity	selected-slot-liner-thickness	source_product_lot_known	0	0	1
+validity	selected-slot-liner-thickness	source_thickness_measurement_method_known	0	0	1
+validity	selected-slot-liner-thickness	source_moisture_condition_known	0	0	1

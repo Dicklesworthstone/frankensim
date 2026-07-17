@@ -701,6 +701,41 @@ WO 2018/125520 Formulation 8 references:
 - <https://patents.google.com/patent/US20180179462A1/en>
 - <https://www.uspto.gov/terms-use-uspto-websites#patent-information>
 
+## NASA UAM motor-winding insulation constituent tranche
+
+Three packs retain the constituent identity and actual process state from
+Tallerico et al.'s NASA electric-aircraft winding-lifetime campaign. The source
+is one coupled application record, but each bulk fact stays on the constituent
+to which it belongs:
+
+- `nasa-uam-mw16c-polyimide-magnet-wire/` identifies the campaign's `16 AWG`
+  heavy-build `MW-16C` polyimide-insulated magnet wire under NEMA MW 1000-2003.
+  Its `240 degC` and `20000 h` thermal-endurance statements are cross-bound as
+  one ASTM D2307-2013 classification basis. Neither number is admitted as a
+  free-standing lifetime law.
+- `nasa-uam-nomex-410-slot-liner/` identifies DuPont Nomex 410 aramid paper and
+  records the `0.08 mm` thickness selected between the M15 core and winding in
+  the in-house motorettes. It is a stack selection, not a product-wide measured
+  thickness distribution.
+- `nasa-uam-cooltherm-ep2000-180c-cure/` identifies Parker LORD CoolTherm
+  EP-2000 and distinguishes the highest completed `180 degC` post-cure step
+  from the manufacturer-recommended `210 degC` final step that NASA explicitly
+  omitted because of the nylon end-board temperature limit.
+
+NTRS record `20240007451` marks the paper public, non-export-controlled, and
+government public use permitted. The source does not publish wire vendor or
+lot, constituent uncertainty, the wire-classification raw data, Nomex moisture
+conditioning or thickness metrology, epoxy lot, complete cure times/ramps, or
+degree of cure. Those gaps are retained as validity axes. Campaign PDIV values,
+motorette hot-spot estimates, and modeled insulation stresses are deliberately
+not bulk claims: they depend on the assembled geometry, winding, cooling,
+electrical procedure, and thermal-cycle history.
+
+NASA UAM winding-insulation reference:
+
+- <https://ntrs.nasa.gov/citations/20240007451>
+- <https://ntrs.nasa.gov/api/citations/20240007451/downloads/Winding%20Lifetime%20Testing%20V4.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -783,6 +818,18 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/wo2018-125520-formulation-8-5w30/manifest.tsv \
   --out /path/to/wo2018-125520-formulation-8-5w30.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-uam-mw16c-polyimide-magnet-wire/manifest.tsv \
+  --out /path/to/nasa-uam-mw16c-polyimide-magnet-wire.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-uam-nomex-410-slot-liner/manifest.tsv \
+  --out /path/to/nasa-uam-nomex-410-slot-liner.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-uam-cooltherm-ep2000-180c-cure/manifest.tsv \
+  --out /path/to/nasa-uam-cooltherm-ep2000-180c-cure.fsmatpk
 ```
 
 ## No-claim boundary
@@ -958,3 +1005,15 @@ batch identity remain absent. It supplies no density, viscosity, vapor pressure,
 distillation curve, heat capacity, latent heat, flame speed, ignition delay,
 emissions behavior, storage stability, material compatibility, or authority
 outside the source's reported modeling context.
+
+The NASA UAM insulation tranches do not constitute a qualified winding system,
+generic constituent allowables, or a lifetime model. The MW-16C temperature
+and duration are one thermal-class basis and may not be separated or
+extrapolated. The Nomex claim is only the source-selected liner thickness. The
+EP-2000 claims preserve an intentionally incomplete cure state; the omitted
+`210 degC` step is not evidence of a completed cure. No pack claims dielectric
+strength, thermal conductivity, moisture response, fatigue, adhesion, partial
+discharge inception voltage, Arrhenius activation energy, degree of cure, or
+service life. The paper's PDIV measurements and FEA stress/temperature results
+belong to the assembled motorette and its geometry, cooling, excitation, and
+aging history, so they are excluded from these bulk constituent cards.

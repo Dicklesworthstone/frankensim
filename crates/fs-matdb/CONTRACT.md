@@ -320,6 +320,11 @@ apparatus-bound Table I maximum-flame-speed rows without promoting the report's
 empirical fit to a bulk-material law. The FACE G CDTRF-G 2023 v1 battery checks
 five exact volume fractions, their unit sum, and two conflict-preserving
 calculated-RON prints for the same named formulation.
+The NASA UAM winding-insulation battery compiles the source-linked MW-16C
+polyimide-wire thermal-class pair, the selected 0.08 mm Nomex 410 slot liner,
+and the CoolTherm EP-2000 actual/omitted cure steps as three separate packs. It
+also proves that assembly-level PDIV, modeled stress, dielectric, conductivity,
+and lifetime-law claims are not laundered into the bulk constituents.
 
 ## No-claim boundaries
 
@@ -483,6 +488,19 @@ calculated-RON prints for the same named formulation.
   final blending protocol, method editions, repeats, dispersion, and confidence
   metadata remain absent. Permission to redistribute patent text is explicitly
   not a patent-practice or trademark license.
+  The NASA UAM winding-insulation claims bind three constituents from one
+  NASA electric-aircraft motorette campaign. The MW-16C `240 degC` and
+  `20000 h` values are cross-bound as one NEMA/ASTM thermal-class basis, not an
+  Arrhenius or service-life law. The Nomex 410 claim is only the `0.08 mm`
+  selected slot-liner thickness. The CoolTherm EP-2000 process state completed
+  the `180 degC` post-cure but explicitly omitted the manufacturer-recommended
+  `210 degC` final step; it is not a fully cured generic epoxy card. Wire
+  vendor/lot, raw classification evidence, Nomex conditioning/metrology, epoxy
+  lot, full cure schedule, degree of cure, uncertainty, and confidence remain
+  absent. Campaign PDIV, hot-spot, and stress results depend on the assembled
+  geometry and history and therefore remain excluded from the bulk packs, as
+  do dielectric strength, thermal conductivity, fatigue, adhesion, moisture,
+  activation-energy, and service-life claims.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,

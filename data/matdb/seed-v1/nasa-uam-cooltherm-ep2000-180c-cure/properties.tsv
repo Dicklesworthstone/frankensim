@@ -1,0 +1,16 @@
+frankensim.matdb-source.v1
+observation	motorette-ep2000-partial-cure-state	nasa-20240007451-parker-lord-cooltherm-ep2000-cured-through-180degc-final-210degc-step-omitted	Tallerico et al. Section IV-A direct motorette process statement; Parker LORD CoolTherm EP-2000 identified by reference 19	The in-house motorettes used the same epoxy as the twisted pairs and were cured through the 180 degC post-cure step. The manufacturer-recommended final 210 degC step was intentionally not completed because of the nylon end-board temperature limit. The paper does not report epoxy lot, mix ratio, complete preceding cure schedule, hold durations, ramp rates, vacuum or pressure values for the motorettes, degree of cure, void fraction, thickness distribution, dielectric or thermal bulk-property measurements, uncertainty, or confidence metadata. The two temperatures describe one deliberately incomplete source process state
+scalar	highest-completed-post-cure-temperature	motorette-ep2000-partial-cure-state	highest_completed_post_cure_temperature	180	degC	constant
+uncertainty	highest-completed-post-cure-temperature	unstated	-	-	-	-
+validity	highest-completed-post-cure-temperature	source_product_is_parker_lord_cooltherm_ep2000	1	1	1
+validity	highest-completed-post-cure-temperature	source_step_completed	1	1	1
+validity	highest-completed-post-cure-temperature	source_epoxy_lot_known	0	0	1
+validity	highest-completed-post-cure-temperature	source_cure_hold_duration_known	0	0	1
+validity	highest-completed-post-cure-temperature	source_degree_of_cure_known	0	0	1
+scalar	manufacturer-recommended-final-cure-temperature	motorette-ep2000-partial-cure-state	manufacturer_recommended_final_cure_temperature	210	degC	constant
+uncertainty	manufacturer-recommended-final-cure-temperature	unstated	-	-	-	-
+validity	manufacturer-recommended-final-cure-temperature	source_product_is_parker_lord_cooltherm_ep2000	1	1	1
+validity	manufacturer-recommended-final-cure-temperature	source_step_completed	0	0	1
+validity	manufacturer-recommended-final-cure-temperature	source_epoxy_lot_known	0	0	1
+validity	manufacturer-recommended-final-cure-temperature	source_cure_hold_duration_known	0	0	1
+validity	manufacturer-recommended-final-cure-temperature	source_degree_of_cure_known	0	0	1
