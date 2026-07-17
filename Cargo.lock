@@ -1361,7 +1361,9 @@ version = "0.0.1"
 dependencies = [
  "fs-evidence",
  "fs-fft",
+ "fs-matdb",
  "fs-math",
+ "fs-qty",
 ]
 
 [[package]]

@@ -12,7 +12,9 @@ layer = "L3"
 
 [dependencies]
 fs-evidence = { path = "../fs-evidence" }
+fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
 fs-fft = { path = "../fs-fft" }

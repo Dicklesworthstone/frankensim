@@ -8,8 +8,9 @@ thermal double-population fixtures, and a free-surface mass-ledger prototype.
 ## Purpose and layer
 
 Layer L3 (FLUX). Depends on `fs-evidence` (the `Color` for the Evidence-typed
-scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
-(fixed tile/cell/link order).
+scaling plan), deterministic `fs-math` primitives, `fs-matdb` for immutable
+interface-system queries and usage receipts, and `fs-qty` for runtime
+dimension checks. Pure, deterministic (fixed tile/cell/link order).
 
 ## Public types and semantics
 
@@ -69,6 +70,15 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   — dense-grid VOF-style mass tracking with interface/gas/fluid conversion
   bookkeeping, conservative carry redistribution, contact-model bracketing,
   and qualitative dam-break / jet-fragment fixtures.
+- `freesurface::query_dynamic_wetting2`, `DynamicWettingAnswer2`,
+  `ContactLineRegime2`, and `DynamicWettingError2` — a read-only adapter from
+  an ordered, history-bearing `InterfaceSystemCard` to a receipt-bearing
+  receding/advancing contact-angle bracket. Both speed inputs are `QtyAny`
+  values carrying coherent-SI velocity dimensions. It queries both endpoints
+  at the absolute contact-line speed, selects by signed speed outside a
+  symmetric pinning deadband, and returns no selected angle while pinned. The
+  answer retains both `MaterialAnswer` receipts and the interface-system
+  content identity.
 - `d3q19::{Duct, equilibrium3, duct_analytic}` — the frozen D3Q19 BGK + Guo
   body-force core on aligned 4x4x4 SoA tiles, with stationary halfway
   bounce-back x/y walls and periodic z for the rectangular-duct fixture. Its
@@ -218,6 +228,15 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
 - Free-surface steps conserve the tracked ledger mass (fluid `Σf` plus
   interface mass plus carry) to the test tolerance, and gas/interface/fluid
   conversions are counted rather than hidden.
+- Dynamic wetting admission requires both endpoint claims to answer under the
+  same explicit `SelectionPolicy`. Each endpoint must be dimensionless,
+  finite, and strictly inside `(0, pi)` radians, with receding no greater than
+  advancing. Both caller inputs and any selected curve whose abscissa is
+  `contact_line_speed` must carry SI velocity dimensions. The cloned query
+  point binds that axis to the absolute coherent-SI speed; the sign only
+  chooses the endpoint. Exact replay reproduces both usage receipts, and the
+  retained system hash moves when ordered surfaces, history, claims, or models
+  move.
 - D3Q19 wall and open masks are disjoint and compiled in tile/lane/direction
   order. Where an open face meets a wall, directions crossing both faces are
   stationary wall-owned while pure open-face directions are reconstructed;
@@ -286,6 +305,14 @@ D2Q9 regularized x flow requires at least three columns, non-periodic x,
 periodic y, fluid face/first-interior columns, zero gravity/external forcing,
 a positive finite outlet density, and a finite inlet speed squared below 0.03.
 Every condition is checked before collision.
+Dynamic wetting queries return typed errors when either `QtyAny` input is not a
+velocity; for a non-finite signed speed or negative/non-finite pinning speed;
+when a selected `contact_line_speed` curve declares non-velocity abscissa
+dimensions; for either material-query refusal, non-dimensionless or
+out-of-range angles, or a reversed hysteresis bracket. They query both
+endpoints before selecting one, so an incomplete card refuses even when the
+current direction would consume the endpoint that is present. The adapter
+mutates neither the card nor free-surface state.
 D3Q19 boundary construction additionally rejects non-4-multiple dimensions,
 tile-count overflow, invalid collision parameters, moment-space collision with
 nonzero force, unpaired periodic faces, non-tangential/non-finite or
@@ -362,7 +389,9 @@ Newtonian-limit channel profiles, Carreau plateaus, Rayleigh-Bénard onset
 bracketing and Nusselt heat transport, gas-neighbor streaming behavior, thermal
 wall-temperature queries, invalid-parameter rejection, free-surface mass-ledger
 conservation, qualitative dam-break front advance, rotation equivariance,
-contact-model bracketing, and qualitative jet fragmentation.
+contact-model bracketing, qualitative jet fragmentation, and dynamic wetting
+selection, receipt replay, interface-system identity binding, and typed
+refusal paths.
 
 `tests/extensions.rs` (tfz.19): lbm-101 power-law/Carreau profiles vs
 analytic (0.12% with τ floor+cap ledger); lbm-102 Rayleigh–Bénard onset
@@ -372,7 +401,10 @@ counted); lbm-105 dam-break front envelope (coarse honesty band);
 lbm-106 G3 rotation equivariance (3e-14); lbm-107 contact-model
 bracket band + Plateau–Rayleigh jet fragmentation with strict ledger;
 lbm-108 level-jump refinement (Poiseuille through the interface +
-shear-wave decay-rate transmission, first-order labels).
+shear-wave decay-rate transmission, first-order labels); lbm-110 through
+lbm-112 dynamic wetting interpolation/pinning, G5 receipt replay and ordered
+system identity, and typed incomplete/ambiguous/out-of-domain/unit/bracket
+refusals.
 
 `tests/d3q19_battery.rs` covers the frozen D3Q19 core: exact integer lattice
 moments/opposites, equilibrium moments, mass conservation, analytic
@@ -538,6 +570,14 @@ redistributed.
   metamorphic gates. It does not yet claim quantitative dam-break agreement,
   contact-angle calibration, production wetting physics, or validated
   surface-tension breakup rates.
+- The dynamic wetting adapter proves system- and endpoint-provenance-bound
+  hysteresis admission and directional selection only. Its caller-supplied
+  pinning deadband is recorded but has no independent calibration evidence or
+  MatDB usage receipt. The adapter does not impose a returned angle in
+  `phi_at`, evolve roughness or contamination, implement Cox-Voinov,
+  Hoffman-Tanner, or another contact-line law, or claim capillary-rise or
+  contact-line validation. The existing binary neutral/wetting solver path is
+  behaviorally unchanged.
 - The scaling assistant covers the `τ`/`ν`/`Mach` core; consuming fs-regime's
   dimensionless groups and emitting a full `dx`/`dt` unit conversion with
   Evidence provenance is the fuller deliverable.

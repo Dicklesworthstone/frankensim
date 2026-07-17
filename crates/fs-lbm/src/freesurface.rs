@@ -13,6 +13,19 @@
 
 use crate::core2::{Cell, Grid};
 use crate::{CS2, E, OPP, Q, equilibrium};
+use fs_matdb::{
+    InterfaceSystemCard, MatDbError, MaterialAnswer, PropertyValue, QueryPoint, SelectionPolicy,
+};
+use fs_qty::{Dims, QtyAny};
+
+/// MatDB property name consumed for the lower wetting-hysteresis endpoint.
+pub const RECEDING_CONTACT_ANGLE_PROPERTY: &str = "receding-contact-angle";
+/// MatDB property name consumed for the upper wetting-hysteresis endpoint.
+pub const ADVANCING_CONTACT_ANGLE_PROPERTY: &str = "advancing-contact-angle";
+/// MatDB query/curve axis carrying absolute contact-line speed.
+pub const DYNAMIC_WETTING_SPEED_AXIS: &str = "contact_line_speed";
+/// Required SI dimensions of the dynamic-wetting speed axis (`m s^-1`).
+pub const DYNAMIC_WETTING_SPEED_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
 /// Wall wetting model for the curvature fill-field ghost — the
 /// contact-line bracket per the plan's honesty clause.
@@ -23,6 +36,274 @@ pub enum ContactModel {
     /// Wetting: wall ghost is full (φ = 1) — the fluid is drawn along
     /// the wall.
     Wetting,
+}
+
+/// Directional state selected from a dynamic wetting hysteresis bracket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactLineRegime2 {
+    /// The signed contact-line speed is below the negative pinning deadband.
+    Receding,
+    /// The signed contact-line speed lies inside the closed pinning deadband.
+    Pinned,
+    /// The signed contact-line speed is above the positive pinning deadband.
+    Advancing,
+}
+
+/// System- and endpoint-provenance-bound wetting selection for one interface.
+///
+/// Both material answers are retained even when only one endpoint is selected.
+/// A pinned answer deliberately has no selected angle: its admissible output is
+/// the full receding-to-advancing bracket, not an invented static value.
+#[derive(Debug, Clone, PartialEq)]
+#[must_use]
+pub struct DynamicWettingAnswer2 {
+    /// Canonical identity of the ordered, history-bearing interface card.
+    pub interface_system_hash: [u8; 32],
+    /// Directional regime selected by the signed speed and deadband.
+    pub regime: ContactLineRegime2,
+    /// Caller-supplied signed contact-line speed in SI metres per second.
+    pub signed_contact_line_speed: f64,
+    /// Symmetric pinning deadband in SI metres per second.
+    pub pinning_speed: f64,
+    /// Receipt-bearing receding-angle answer at the absolute speed.
+    pub receding: MaterialAnswer,
+    /// Receipt-bearing advancing-angle answer at the absolute speed.
+    pub advancing: MaterialAnswer,
+    /// Selected endpoint angle in radians, or `None` while pinned.
+    pub selected_angle_radians: Option<f64>,
+}
+
+/// Fail-closed diagnostics for dynamic wetting-card admission and selection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DynamicWettingError2 {
+    /// The underlying material query refused.
+    MatDb(MatDbError),
+    /// A caller-supplied speed does not carry SI velocity dimensions.
+    SpeedDimsMismatch {
+        /// Name of the rejected input.
+        input: &'static str,
+        /// Dimensions carried by the input.
+        dims: Dims,
+    },
+    /// The signed contact-line speed is not finite.
+    NonFiniteSpeed {
+        /// Exact rejected floating-point representation.
+        bits: u64,
+    },
+    /// The pinning speed is negative or non-finite.
+    InvalidPinningSpeed {
+        /// Exact rejected floating-point representation.
+        bits: u64,
+    },
+    /// A contact-angle claim is not dimensionless (radians).
+    NonDimensionlessAngle {
+        /// Name of the rejected property.
+        property: &'static str,
+        /// Dimensions carried by the material answer.
+        dims: Dims,
+    },
+    /// A speed-dependent angle curve labels its abscissa with non-velocity dimensions.
+    ContactLineSpeedDimsMismatch {
+        /// Name of the rejected angle property.
+        property: &'static str,
+        /// Dimensions declared by the selected curve's speed abscissa.
+        dims: Dims,
+    },
+    /// A contact-angle answer is not finite and strictly inside `(0, pi)`.
+    AngleOutOfRange {
+        /// Name of the rejected property.
+        property: &'static str,
+        /// Rejected SI value in radians.
+        value: f64,
+    },
+    /// The card's lower endpoint exceeds its upper endpoint.
+    ReversedHysteresis {
+        /// Receding angle in radians.
+        receding: f64,
+        /// Advancing angle in radians.
+        advancing: f64,
+    },
+}
+
+impl core::fmt::Display for DynamicWettingError2 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MatDb(error) => write!(f, "dynamic wetting material query refused: {error}"),
+            Self::SpeedDimsMismatch { input, dims } => write!(
+                f,
+                "dynamic wetting input '{input}' carries {dims:?}, expected SI velocity dimensions {DYNAMIC_WETTING_SPEED_DIMS:?}"
+            ),
+            Self::NonFiniteSpeed { bits } => write!(
+                f,
+                "signed contact-line speed is non-finite (bits {bits:#018x})"
+            ),
+            Self::InvalidPinningSpeed { bits } => write!(
+                f,
+                "pinning speed must be finite and nonnegative (bits {bits:#018x})"
+            ),
+            Self::NonDimensionlessAngle { property, dims } => write!(
+                f,
+                "dynamic wetting property '{property}' must be dimensionless radians, got {dims:?}"
+            ),
+            Self::ContactLineSpeedDimsMismatch { property, dims } => write!(
+                f,
+                "dynamic wetting property '{property}' declares '{DYNAMIC_WETTING_SPEED_AXIS}' with {dims:?}, expected SI velocity dimensions {DYNAMIC_WETTING_SPEED_DIMS:?}"
+            ),
+            Self::AngleOutOfRange { property, value } => write!(
+                f,
+                "dynamic wetting property '{property}' must be finite and strictly inside (0, pi) radians, got {value}"
+            ),
+            Self::ReversedHysteresis {
+                receding,
+                advancing,
+            } => write!(
+                f,
+                "dynamic wetting hysteresis is reversed: receding angle {receding} exceeds advancing angle {advancing} radians"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for DynamicWettingError2 {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::MatDb(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<MatDbError> for DynamicWettingError2 {
+    fn from(error: MatDbError) -> Self {
+        Self::MatDb(error)
+    }
+}
+
+/// Query and select a system- and endpoint-provenance-bound contact-angle bracket.
+///
+/// Both speed inputs are runtime-dimensioned [`QtyAny`] values in coherent SI
+/// and must carry velocity dimensions. The query point is cloned and its
+/// `contact_line_speed` axis is replaced by the absolute supplied speed. Both
+/// receding and advancing claims must answer under the same explicit selection
+/// policy. Positive speed selects the advancing endpoint, negative speed
+/// selects the receding endpoint, and the closed deadband
+/// `[-pinning_speed, pinning_speed]` remains unselected.
+///
+/// This adapter performs admission and selection only. It does not impose the
+/// returned angle in `FreeSurface::phi_at` or claim a contact-line law. The
+/// caller-supplied pinning deadband is retained but carries no independent
+/// calibration evidence or MatDB usage receipt.
+///
+/// # Errors
+/// [`DynamicWettingError2`] for invalid speeds, material-query refusal,
+/// dimensional or angular invalidity, or a reversed hysteresis bracket.
+pub fn query_dynamic_wetting2(
+    card: &InterfaceSystemCard,
+    point: &QueryPoint,
+    signed_contact_line_speed: QtyAny,
+    pinning_speed: QtyAny,
+    policy: SelectionPolicy,
+) -> Result<DynamicWettingAnswer2, DynamicWettingError2> {
+    if signed_contact_line_speed.dims != DYNAMIC_WETTING_SPEED_DIMS {
+        return Err(DynamicWettingError2::SpeedDimsMismatch {
+            input: "signed_contact_line_speed",
+            dims: signed_contact_line_speed.dims,
+        });
+    }
+    if pinning_speed.dims != DYNAMIC_WETTING_SPEED_DIMS {
+        return Err(DynamicWettingError2::SpeedDimsMismatch {
+            input: "pinning_speed",
+            dims: pinning_speed.dims,
+        });
+    }
+    let signed_contact_line_speed = signed_contact_line_speed.value;
+    let pinning_speed = pinning_speed.value;
+    if !signed_contact_line_speed.is_finite() {
+        return Err(DynamicWettingError2::NonFiniteSpeed {
+            bits: signed_contact_line_speed.to_bits(),
+        });
+    }
+    if !pinning_speed.is_finite() || pinning_speed < 0.0 {
+        return Err(DynamicWettingError2::InvalidPinningSpeed {
+            bits: pinning_speed.to_bits(),
+        });
+    }
+
+    let query_point = point
+        .clone()
+        .with(DYNAMIC_WETTING_SPEED_AXIS, signed_contact_line_speed.abs())?;
+    let receding = card
+        .claims()
+        .query(RECEDING_CONTACT_ANGLE_PROPERTY, &query_point, policy)?;
+    let advancing = card
+        .claims()
+        .query(ADVANCING_CONTACT_ANGLE_PROPERTY, &query_point, policy)?;
+
+    let receding_angle = checked_contact_angle(card, RECEDING_CONTACT_ANGLE_PROPERTY, &receding)?;
+    let advancing_angle =
+        checked_contact_angle(card, ADVANCING_CONTACT_ANGLE_PROPERTY, &advancing)?;
+    if receding_angle > advancing_angle {
+        return Err(DynamicWettingError2::ReversedHysteresis {
+            receding: receding_angle,
+            advancing: advancing_angle,
+        });
+    }
+
+    let (regime, selected_angle_radians) = if signed_contact_line_speed > pinning_speed {
+        (ContactLineRegime2::Advancing, Some(advancing_angle))
+    } else if signed_contact_line_speed < -pinning_speed {
+        (ContactLineRegime2::Receding, Some(receding_angle))
+    } else {
+        (ContactLineRegime2::Pinned, None)
+    };
+
+    Ok(DynamicWettingAnswer2 {
+        interface_system_hash: card.content_hash().0,
+        regime,
+        signed_contact_line_speed,
+        pinning_speed,
+        receding,
+        advancing,
+        selected_angle_radians,
+    })
+}
+
+fn checked_contact_angle(
+    card: &InterfaceSystemCard,
+    property: &'static str,
+    answer: &MaterialAnswer,
+) -> Result<f64, DynamicWettingError2> {
+    let selected_claim =
+        card.claims()
+            .claim(answer.receipt.selected)
+            .ok_or(DynamicWettingError2::MatDb(MatDbError::ReceiptMismatch {
+                field: "selected",
+            }))?;
+    if let PropertyValue::Curve {
+        abscissa,
+        abscissa_dims,
+        ..
+    } = &selected_claim.value
+        && abscissa == DYNAMIC_WETTING_SPEED_AXIS
+        && *abscissa_dims != DYNAMIC_WETTING_SPEED_DIMS
+    {
+        return Err(DynamicWettingError2::ContactLineSpeedDimsMismatch {
+            property,
+            dims: *abscissa_dims,
+        });
+    }
+    let sample = &answer.evidence.value;
+    if sample.dims != Dims::NONE {
+        return Err(DynamicWettingError2::NonDimensionlessAngle {
+            property,
+            dims: sample.dims,
+        });
+    }
+    let value = sample.value;
+    if !value.is_finite() || value <= 0.0 || value >= core::f64::consts::PI {
+        return Err(DynamicWettingError2::AngleOutOfRange { property, value });
+    }
+    Ok(value)
 }
 
 /// Free-surface simulation state.
