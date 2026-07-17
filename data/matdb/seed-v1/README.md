@@ -870,6 +870,33 @@ Interface references:
 - <https://ntrs.nasa.gov/citations/19990031946>
 - <https://ntrs.nasa.gov/api/citations/19990031946/downloads/19990031946.pdf>
 
+## NASA SAE 4340/high-lead-bronze hexane journal tranche
+
+`nasa-tn-d-2223-4340-high-lead-bronze-journal/` binds NASA-TN-D-2223's
+ordered Rockwell C35 SAE 4340 journal and high-lead bearing bronze
+(`70 wt% Cu`, `26 wt% Pb`, `4 wt% Sn`) to the report's pressure-fed hexane
+screening rig. The journal was finished to `5..10 microinch rms`; the nominal
+`1.5 in`-ID by `1.5 in`-long bearing had `0.0015 in` room-temperature
+diametral clearance and the source's Figure 2(a) supply groove. The pump inlet
+was `10 psig` through a `0.125 in` hole. Hexane viscosity is retained as
+`0.043e-6 reyn` at the source's `75 degF` reference point.
+
+The sole runtime claim is Table I's maximum demonstrated unit bearing load of
+`220 psi` (`1516846.6044970395 Pa`) for the run at `15000 rpm` and `107 ft/s`.
+The source says the maximum speed/load was held for `30 min`, the total test
+time was `90 min`, the test objective was attained, and the bearing surface was
+excellent with light polishing in the load zone. This is a source- and
+apparatus-bounded demonstrated result, not a design allowable. Exact run
+temperature, surrounding atmosphere, hexane grade/purity, bearing roughness,
+material heats, repeats, dispersion, endpoint torque, quantitative wear, and
+confidence remain unstated. The pack therefore supplies no friction
+coefficient, wear rate, lifetime, or transferable journal-bearing law.
+
+Journal-interface references:
+
+- <https://ntrs.nasa.gov/citations/19650001032>
+- <https://ntrs.nasa.gov/api/citations/19650001032/downloads/19650001032.pdf>
+
 To compile the sources into canonical runtime packs:
 
 ```bash
@@ -976,6 +1003,10 @@ cargo run -p xtask -- matdb-pack \
 cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/nasa-52100-gxl320a-vacuum-interface/manifest.tsv \
   --out /path/to/nasa-52100-gxl320a-vacuum-interface.fsintpk
+
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nasa-tn-d-2223-4340-high-lead-bronze-journal/manifest.tsv \
+  --out /path/to/nasa-tn-d-2223-4340-high-lead-bronze-journal.fsintpk
 ```
 
 ## No-claim boundary
@@ -1006,6 +1037,13 @@ apply only to the retained four-ball vacuum system; its printed extrema are an
 observed range, not uncertainty bounds. Neither pack supplies static friction,
 wear, a constitutive friction law, lifetime, air/vacuum transfer, surface-state
 evolution, or authority for another heat, finish, cleaner, or lubricant.
+
+The SAE 4340/high-lead-bronze tranche records one successful NASA
+pressure-fed-hexane screening endpoint. `maximum-demonstrated` does not mean
+safe working load, fatigue capacity, hydrodynamic closure, or a material-pair
+constant. No coefficient of friction, torque at that endpoint, wear rate,
+thermal state, lifetime, or transfer across clearance, finish, groove, fluid,
+load history, or material heat is claimed.
 
 The OFHC Copper tranche likewise does not select between UNS C10100 and C10200,
 define electrical resistivity, density, mechanical strength, temper, grain

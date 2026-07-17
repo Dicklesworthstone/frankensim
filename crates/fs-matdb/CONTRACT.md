@@ -321,12 +321,14 @@ context, and claim reconstruction; and fail-closed missing-context and
 noncanonical-revision cases.
 
 `xtask/tests/interface_pack_seed_cli.rs`: G3 two-pass compilation of the first
-two source-bound interface seeds into byte-identical, externally pinned packs.
+three source-bound interface seeds into byte-identical, externally pinned packs.
 The battery checks the NASA 52100 dry-air rider/disk identity and `0.45` value,
 the NASA GXL-320A vacuum four-ball identity and distinct `0.11` mean plus
-`0.09..0.23` observed extrema, exact retained condition axes, `Unstated`
-uncertainty, surface-role order, complete context, and explicit friction-law,
-wear, and lifetime no-claim exclusions.
+`0.09..0.23` observed extrema, and NASA-TN-D-2223's SAE 4340/high-lead-bronze
+hexane journal identity plus apparatus-bound `220 psi` maximum-demonstrated
+unit bearing load. The tests retain exact condition axes, `Unstated`
+uncertainty, surface-role order, complete context, and explicit design-
+allowable, friction-law, wear, and lifetime no-claim exclusions.
 
 `xtask/tests/matdb_pack_cli.rs`: G3 compilation of the committed methane,
 nitrogen, oxygen, argon, carbon-dioxide, water-vapor, and carbon-monoxide seed
@@ -568,6 +570,14 @@ Wankel-housing authority.
   material heats, repeat-level values, lubricant formulation, uncertainty,
   wear, constitutive laws, lifetime, and transfer across apparatus,
   environment, finish, or lubricant remain fail-closed no-claims.
+  The NASA-TN-D-2223 journal card separately binds Rockwell C35 SAE 4340 to the
+  source-composition high-lead bronze, pressure-fed hexane, exact clearance,
+  finish, groove, speed, duration, and rig conditions. Its `220 psi` value is
+  only the maximum demonstrated unit bearing load in the retained Table I run;
+  it is not a safe working load, fatigue capacity, friction coefficient, wear
+  rate, lifetime, or transferable journal-bearing law. Missing heat/lot,
+  bearing roughness, exact run temperature, fluid purity, repeats, dispersion,
+  endpoint torque, and quantitative wear remain no-claims.
   No equilibrium computation happens here (fs-thermochem consumes phase data;
   this crate only stores it).
 - The L1 pack codec does not parse handbooks, CSV, NASA tables, license text,

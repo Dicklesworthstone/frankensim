@@ -13,6 +13,8 @@ const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1
 const DRY_52100_MANIFEST: &str = "data/matdb/seed-v1/nasa-52100-dry-air-interface/manifest.tsv";
 const GREASED_52100_MANIFEST: &str =
     "data/matdb/seed-v1/nasa-52100-gxl320a-vacuum-interface/manifest.tsv";
+const JOURNAL_4340_BRONZE_MANIFEST: &str =
+    "data/matdb/seed-v1/nasa-tn-d-2223-4340-high-lead-bronze-journal/manifest.tsv";
 const NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 fn workspace_path(relative: &str) -> PathBuf {
@@ -227,6 +229,83 @@ fn g3_cli_compiles_committed_nasa_52100_gxl320a_vacuum_interface() {
         assert!(
             pack.card().claims_for(refused_property).is_empty(),
             "greased source crossed the {refused_property} no-claim boundary"
+        );
+    }
+    assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
+}
+
+#[test]
+fn g3_cli_compiles_committed_nasa_4340_high_lead_bronze_journal_interface() {
+    let (pack, decisions) = compile_twice(JOURNAL_4340_BRONZE_MANIFEST);
+
+    assert_eq!(
+        pack.pack_id(),
+        "nasa-tn-d-2223-sae-4340-high-lead-bronze-hexane-journal-interface"
+    );
+    assert_eq!(pack.card().surface_a().material.chemistry, "SAE 4340 steel");
+    assert_eq!(
+        pack.card().surface_b().material.chemistry,
+        "high-lead bearing bronze 70wt%Cu-26wt%Pb-4wt%Sn"
+    );
+    assert_eq!(pack.card().medium(), "hexane");
+    assert_eq!(pack.card().third_body(), None);
+    assert_eq!(
+        pack.card().environment(),
+        "source-surrounding-environment-unstated"
+    );
+    assert_eq!(
+        pack.card().history(),
+        "table-I-220-psi-screening-run-test-objective-attained"
+    );
+    assert_eq!(pack.claims_pack().claims().claim_count(), 1);
+    assert_eq!(
+        scalar(&pack, "maximum-demonstrated-unit-bearing-load"),
+        1_516_846.604_497_039_5
+    );
+
+    let claim = pack
+        .card()
+        .claims_for("maximum-demonstrated-unit-bearing-load")[0]
+        .1;
+    for (axis, bounds) in [
+        ("journal_rotation_frequency", (250.0, 250.0)),
+        ("journal_surface_speed", (32.613_6, 32.613_6)),
+        ("time_at_maximum_speed_and_load", (1_800.0, 1_800.0)),
+        ("total_test_time", (5_400.0, 5_400.0)),
+        ("bearing_inside_diameter", (0.038_1, 0.038_1)),
+        ("bearing_length", (0.038_1, 0.038_1)),
+        (
+            "room_temperature_diametral_clearance",
+            (0.000_038_1, 0.000_038_1),
+        ),
+        ("journal_surface_finish_rms", (0.000_000_127, 0.000_000_254)),
+        (
+            "hexane_inlet_gauge_pressure",
+            (68_947.572_931_683_61, 68_947.572_931_683_61),
+        ),
+        ("hexane_inlet_hole_diameter", (0.003_175, 0.003_175)),
+        (
+            "hexane_dynamic_viscosity_at_source_reference_temperature",
+            (0.000_296_474_563_606_239, 0.000_296_474_563_606_239),
+        ),
+        (
+            "hexane_viscosity_reference_temperature",
+            (297.038_888_888_888_9, 297.038_888_888_888_9),
+        ),
+        ("source_groove_type_figure_2a", (1.0, 1.0)),
+    ] {
+        assert_eq!(claim.validity.bound(axis), Some(bounds));
+    }
+    assert_eq!(claim.validity.bounds().len(), 13);
+    for refused_property in [
+        "kinetic-friction-coefficient",
+        "wear-rate",
+        "design-allowable-bearing-load",
+        "transferable-journal-bearing-law",
+    ] {
+        assert!(
+            pack.card().claims_for(refused_property).is_empty(),
+            "journal source crossed the {refused_property} no-claim boundary"
         );
     }
     assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));

@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+surface_a	SAE 4340 steel	phase and heat lot unstated by source	Rockwell C35 journal finished to 5 to 10 microinch rms	1	journal-5-to-10-microinch-rms
+surface_b	high-lead bearing bronze 70wt%Cu-26wt%Pb-4wt%Sn	phase heat lot and manufacturing route unstated by source	1.5-inch nominal ID by 1.5-inch nominal length bearing with 0.0015-inch room-temperature diametral clearance	1	bearing-surface-finish-unstated
+context	hexane	-	source-surrounding-environment-unstated	table-I-220-psi-screening-run-test-objective-attained
+observation	high-lead-bronze-220-psi-run	SAE 4340 Rockwell C35 journal on source-composition high-lead bearing bronze in pressure-fed hexane	NASA-TN-D-2223 Table I metal-screening run and stated successful-run procedure	Table I reports 220 psi maximum unit bearing load at 15000 rpm and 107 ft/s for 30 min at maximum speed and load with 90 min total test time; test objective attained; bearing surface excellent with light polishing in load zone; SI rows use 1 psi = 6894.7572931683608 Pa and exact international inch foot pound conventions; the source gives 0.043e-6 reyn hexane viscosity at 75 degF but omits hexane grade purity exact run temperature surrounding atmosphere bearing-surface roughness material heats repeats dispersion confidence torque at this endpoint quantitative wear and transfer beyond this rig
+scalar	maximum-load	high-lead-bronze-220-psi-run	maximum-demonstrated-unit-bearing-load	1516846.6044970395	Pa	constant
+uncertainty	maximum-load	unstated	-	-	-	-
+validity	maximum-load	journal_rotation_frequency	250	250	s^-1
+validity	maximum-load	journal_surface_speed	32.6136	32.6136	m/s
+validity	maximum-load	time_at_maximum_speed_and_load	1800	1800	s
+validity	maximum-load	total_test_time	5400	5400	s
+validity	maximum-load	bearing_inside_diameter	0.0381	0.0381	m
+validity	maximum-load	bearing_length	0.0381	0.0381	m
+validity	maximum-load	room_temperature_diametral_clearance	0.0000381	0.0000381	m
+validity	maximum-load	journal_surface_finish_rms	0.000000127	0.000000254	m
+validity	maximum-load	hexane_inlet_gauge_pressure	68947.57293168361	68947.57293168361	Pa
+validity	maximum-load	hexane_inlet_hole_diameter	0.003175	0.003175	m
+validity	maximum-load	hexane_dynamic_viscosity_at_source_reference_temperature	0.000296474563606239	0.000296474563606239	Pa*s
+validity	maximum-load	hexane_viscosity_reference_temperature	297.0388888888889	297.0388888888889	K
+validity	maximum-load	source_groove_type_figure_2a	1	1	1
