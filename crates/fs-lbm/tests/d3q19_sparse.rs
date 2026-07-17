@@ -423,6 +423,12 @@ fn sparse_candidate_hash() -> u64 {
     fnv1a_bits(&bits)
 }
 
+/// FROZEN 2026-07-17 (bead sjro): all four policy quadrants reproduced
+/// this value bit-identically on the committed tree e33b74de — aarch64
+/// M4 Pro debug+release and x86-64 ts1 debug+release. Bump only per
+/// docs/GOLDEN_POLICY.md with the same four-quadrant evidence.
+const SPARSE_GOLDEN_HASH: u64 = 0x4c00_8876_e576_a332;
+
 #[test]
 fn d3q19_sparse_candidate_hash_is_replay_stable() {
     let first = sparse_candidate_hash();
@@ -431,9 +437,10 @@ fn d3q19_sparse_candidate_hash_is_replay_stable() {
         first, second,
         "sparse candidate hash is not replay-stable on one host"
     );
-    // UNFROZEN: four-quadrant ceremony pending (M4 + ts1, debug + release).
-    // Once all four quadrants agree, freeze this value as
-    // SPARSE_GOLDEN_HASH and register the row in golden-couplings.json
-    // per docs/GOLDEN_POLICY.md.
     println!("d3q19-sparse candidate hash: {first:#018x}");
+    assert_eq!(
+        first, SPARSE_GOLDEN_HASH,
+        "sparse golden moved — bump only per docs/GOLDEN_POLICY.md \
+         with four-quadrant evidence"
+    );
 }
