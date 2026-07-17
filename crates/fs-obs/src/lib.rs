@@ -25,6 +25,7 @@
 
 pub mod containment;
 pub mod ident;
+pub mod privacy;
 pub mod process;
 
 use core::fmt;

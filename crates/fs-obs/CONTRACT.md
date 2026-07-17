@@ -38,6 +38,10 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   diagnostic, and telemetry loss classes; bounded frame/gap queues;
   cancellation-aware backpressure; committed-artifact spill pointers; exact
   drop/range/policy accounting; and final-receipt reconciliation.
+- `privacy::{LabeledField, FieldPolicy, ShareRequest, ShareManifest}` —
+  field-level sensitivity, license, export, and retention policy; bounded
+  deterministic reveal/redact/omit decisions; explicit correlation-token
+  safety; privilege downgrade; and replay-completeness effects.
 
 ## Invariants
 - One event = one line; strings escaped so no literal newlines appear.
@@ -69,6 +73,14 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   pointer constructor. Inline omission without that token remains explicit
   loss; process exit (including code zero) without a final typed receipt
   remains an observation gap.
+- Share policy never infers sensitivity from payload text. Opaque bytes are
+  revealed only when sensitivity, audience, privilege, license, export,
+  retention, and request bounds all admit them. Credentials are never
+  revealed, including locally; unsafe unsalted/salted correlation of PII or
+  secrets refuses the whole manifest before disclosure.
+- Share entries are sorted by path and duplicate paths refuse. Intentional
+  redaction preserves integrity but makes required replay evidence incomplete
+  and promotion demoted; missing license/export authority is unsupported.
 - Non-finite floats serialize as tagged strings ("non-finite:NaN"), never
   invalid JSON.
 - Replay identity v1 begins with the exact bytes of
@@ -88,7 +100,9 @@ distinguishes canonical-byte-cap refusal, unrepresentable framing, length
 overflow, and allocation failure. No panics cross the bounded identity or
 event-validation boundaries; they reject rather than repair. Process-capture
 constructors reject zero bounds, malformed identities/hashes, and zero
-ordinals; non-monotone frames are returned untouched.
+ordinals; non-monotone frames are returned untouched. Privacy constructors
+reject malformed paths/realms/tokens, zero bounds, duplicate paths, byte/count
+budget overflow, and dictionary-testable correlation for protected labels.
 
 ## Determinism class
 Deterministic: pure functions; no clocks (callers supply `wall_ns`), no I/O,
@@ -120,6 +134,12 @@ The process-capture battery covers critical queue pressure and cancellation,
 sink failure, deterministic telemetry sampling, diagnostic drop coalescing,
 bounded gap-ledger pressure, durable oversized spill, lossy truncation,
 non-UTF-8 payload preservation, per-stream ordering, and final-receipt closure.
+
+The privacy battery covers public and privileged-local projection, credentials
+in every privilege state, PII/secret dictionary attacks, keyed opaque
+correlation, license/export refusal, expiry/legal hold, deterministic field
+ordering, hostile binary values, duplicate paths, budget exhaustion, and
+privilege downgrade.
 
 ## No-claim boundaries
 - FNV-1a is NOT cryptographic; ledger-grade content addressing (BLAKE3-class)
@@ -153,3 +173,8 @@ non-UTF-8 payload preservation, per-stream ordering, and final-receipt closure.
   independently authenticate committed artifacts. `DurableArtifactPointer`
   records constructor-level admission; it cannot prove an external store
   truthful by itself.
+- `privacy` is a labeled-data policy core, not a secret detector, cryptographic
+  implementation, access-control service, jurisdiction engine, or artifact
+  scanner. External salted/keyed tokens remain caller assertions until an
+  admitted cryptographic owner verifies them. Legal hold controls retention;
+  it never grants disclosure.
