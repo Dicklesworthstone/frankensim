@@ -183,9 +183,14 @@ const LANES: usize = 48;
 const LANES: usize = 64;
 /// Chain steps per timed pass.
 const STEPS: usize = 4096;
-/// Timed passes per measurement; best-of keeps thermal/scheduler noise from
-/// deflating the axis (an axis too low would inflate everyone's attainment).
+/// Samples per probe. The single-thread axis selects their best rate; the
+/// all-core axis executes all of them inside one cumulative common window.
 const PASSES: usize = 5;
+const MIN_FMA_SAMPLE_SECONDS: f64 = 5e-3;
+const MAX_FMA_REPETITIONS: usize = 1 << 20;
+const MAX_FMA_WORKERS: usize = 4096;
+const FMA_MULTIPLIER: f64 = 0.999_999_9;
+const FMA_ADDEND: f64 = 1.0e-9;
 
 use fma_kernel::fma_pass;
 
@@ -193,6 +198,26 @@ use fma_kernel::fma_pass;
 /// `target_feature`; everything else in this file is safe).
 #[path = "fma_kernel.rs"]
 mod fma_kernel;
+
+fn run_fma_repetitions(acc: &mut [f64; LANES], repetitions: usize) {
+    for _ in 0..repetitions {
+        fma_pass(acc, FMA_MULTIPLIER, FMA_ADDEND);
+    }
+}
+
+fn calibrate_fma_repetitions(acc: &mut [f64; LANES]) -> usize {
+    let mut repetitions = 1usize;
+    loop {
+        let start = std::time::Instant::now();
+        run_fma_repetitions(acc, repetitions);
+        if start.elapsed().as_secs_f64() >= MIN_FMA_SAMPLE_SECONDS
+            || repetitions >= MAX_FMA_REPETITIONS
+        {
+            return repetitions;
+        }
+        repetitions *= 2;
+    }
+}
 
 /// Best-of-passes single-thread FMA throughput in GFLOP/s.
 ///
@@ -204,45 +229,160 @@ mod fma_kernel;
 #[must_use]
 pub fn fma_gflops_single() -> f64 {
     let mut acc = [1.0f64; LANES];
-    // Multiplier chosen so accumulators orbit without overflow/denormal.
-    let (m, a) = (0.999_999_9, 1.0e-9);
     let flops_per_pass = (2 * LANES * STEPS) as f64;
-    // Calibrate the repeat count to reach the 5 ms sample floor.
-    let mut reps = 1usize;
-    loop {
-        let start = std::time::Instant::now();
-        for _ in 0..reps {
-            fma_pass(&mut acc, m, a);
-        }
-        if start.elapsed().as_secs_f64() >= 5e-3 || reps >= 1 << 20 {
-            break;
-        }
-        reps *= 2;
-    }
+    let repetitions = calibrate_fma_repetitions(&mut acc);
     let mut best = 0.0f64;
     for _ in 0..PASSES {
         let start = std::time::Instant::now();
-        for _ in 0..reps {
-            fma_pass(&mut acc, m, a);
-        }
+        run_fma_repetitions(&mut acc, repetitions);
         let dt = start.elapsed().as_secs_f64();
         if dt > 0.0 {
-            best = best.max(flops_per_pass * reps as f64 / dt / 1e9);
+            best = best.max(flops_per_pass * repetitions as f64 / dt / 1e9);
         }
     }
-    std::hint::black_box(acc[LANES / 2]);
+    std::hint::black_box(acc);
     best
 }
 
-/// All-core FMA throughput: every logical CPU runs the single-thread bench
-/// concurrently; the sum is the aggregate compute axis.
+fn synchronized_worker_rate<F>(threads: usize, work_per_worker: f64, work: F) -> f64
+where
+    F: Fn(usize) + Sync,
+{
+    synchronized_worker_rate_with_spawn_limit(threads, work_per_worker, usize::MAX, work)
+}
+
+#[derive(Default)]
+struct WorkerStartGate {
+    ready: usize,
+    released: bool,
+    aborted: bool,
+}
+
+fn synchronized_worker_rate_with_spawn_limit<F>(
+    threads: usize,
+    work_per_worker: f64,
+    spawn_limit: usize,
+    work: F,
+) -> f64
+where
+    F: Fn(usize) + Sync,
+{
+    let threads = threads.max(1);
+    if threads > MAX_FMA_WORKERS || !work_per_worker.is_finite() || work_per_worker <= 0.0 {
+        return f64::NAN;
+    }
+
+    let start_gate = (
+        std::sync::Mutex::new(WorkerStartGate::default()),
+        std::sync::Condvar::new(),
+        std::sync::Condvar::new(),
+    );
+    let (elapsed, worker_failed) = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        let mut spawn_failed = false;
+        for worker in 0..threads {
+            if worker >= spawn_limit {
+                spawn_failed = true;
+                break;
+            }
+            let start_gate = &start_gate;
+            let work = &work;
+            match std::thread::Builder::new().spawn_scoped(scope, move || {
+                let (state_lock, ready_changed, start_changed) = start_gate;
+                let mut state = state_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.ready += 1;
+                ready_changed.notify_one();
+                while !state.released && !state.aborted {
+                    state = start_changed
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                let aborted = state.aborted;
+                drop(state);
+                if !aborted {
+                    work(worker);
+                }
+            }) {
+                Ok(handle) => handles.push(handle),
+                Err(_) => {
+                    spawn_failed = true;
+                    break;
+                }
+            }
+        }
+
+        let (state_lock, ready_changed, start_changed) = &start_gate;
+        let mut state = state_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let start = if spawn_failed {
+            state.aborted = true;
+            start_changed.notify_all();
+            None
+        } else {
+            while state.ready < threads {
+                state = ready_changed
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            let start = std::time::Instant::now();
+            state.released = true;
+            start_changed.notify_all();
+            Some(start)
+        };
+        drop(state);
+
+        let mut worker_failed = spawn_failed;
+        for handle in handles {
+            worker_failed |= handle.join().is_err();
+        }
+        (
+            start.map_or(f64::NAN, |start| start.elapsed().as_secs_f64()),
+            worker_failed,
+        )
+    });
+
+    let total_work = work_per_worker * threads as f64;
+    if worker_failed || !elapsed.is_finite() || elapsed <= 0.0 || !total_work.is_finite() {
+        return f64::NAN;
+    }
+    let rate = total_work / elapsed;
+    if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        f64::NAN
+    }
+}
+
+/// All-core FMA throughput from one synchronized wall-clock window.
+///
+/// A single caller-side calibration supplies the identical workload to every
+/// logical worker. An abortable start gate releases the complete worker wave;
+/// any creation failure or worker unwind invalidates the whole axis rather than
+/// silently turning it into a partial-machine observation. Failure is exposed
+/// as `NaN`; [`MachineAxes::plausibility_error`] rejects that sentinel and JSON
+/// reports the unavailable axis as `null`. Requests above 4096 workers are
+/// refused through the same sentinel before any worker is created.
 #[must_use]
 pub fn fma_gflops_all_core(logical_cpus: usize) -> f64 {
     let threads = logical_cpus.max(1);
-    std::thread::scope(|s| {
-        let handles: Vec<_> = (0..threads).map(|_| s.spawn(fma_gflops_single)).collect();
-        handles.into_iter().map(|h| h.join().unwrap_or(0.0)).sum()
-    })
+    if threads > MAX_FMA_WORKERS {
+        return f64::NAN;
+    }
+    let mut calibration_acc = [1.0f64; LANES];
+    let repetitions = calibrate_fma_repetitions(&mut calibration_acc);
+    std::hint::black_box(calibration_acc);
+    let flops_per_worker = (2 * LANES * STEPS) as f64 * repetitions as f64 * PASSES as f64;
+
+    synchronized_worker_rate(threads, flops_per_worker, |_| {
+        let mut acc = [1.0f64; LANES];
+        for _ in 0..PASSES {
+            run_fma_repetitions(&mut acc, repetitions);
+        }
+        std::hint::black_box(acc);
+    }) / 1e9
 }
 
 #[cfg(test)]
@@ -256,6 +396,56 @@ mod tests {
             gflops > 0.05,
             "implausibly low FMA throughput: {gflops} GFLOP/s"
         );
+    }
+
+    #[test]
+    fn all_core_rate_uses_the_staggered_workers_common_window() {
+        // G3: summing independent 5/15/45 ms worker rates would imply a
+        // much shorter aggregate window than the slowest concurrent worker.
+        let worker_count = 3usize;
+        let visits: [std::sync::atomic::AtomicUsize; 3] =
+            std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0));
+        let rate = synchronized_worker_rate(worker_count, 1.0, |worker| {
+            visits[worker].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let delay_ms = [5, 15, 45][worker];
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        });
+        let inferred_common_seconds = worker_count as f64 / rate;
+        assert!(
+            inferred_common_seconds >= 0.035,
+            "aggregate rate did not retain the slowest worker's common window: {inferred_common_seconds}s"
+        );
+        assert!(
+            visits
+                .iter()
+                .all(|count| count.load(std::sync::atomic::Ordering::SeqCst) == 1),
+            "each requested worker must execute the shared workload exactly once"
+        );
+    }
+
+    #[test]
+    fn all_core_rate_is_unavailable_after_any_worker_panics() {
+        let drained = std::sync::atomic::AtomicUsize::new(0);
+        let rate = synchronized_worker_rate(3, 1.0, |worker| {
+            assert_ne!(worker, 1, "synthetic all-core worker failure");
+            if worker == 2 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            drained.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(rate.is_nan(), "partial-machine rate escaped: {rate}");
+        assert_eq!(drained.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn all_core_spawn_refusal_aborts_and_drains_the_waiting_wave() {
+        let executed = std::sync::atomic::AtomicUsize::new(0);
+        let rate = synchronized_worker_rate_with_spawn_limit(3, 1.0, 1, |_| {
+            executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(rate.is_nan(), "incomplete worker wave escaped: {rate}");
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(synchronized_worker_rate(MAX_FMA_WORKERS + 1, 1.0, |_| {}).is_nan());
     }
 
     #[test]
@@ -302,6 +492,16 @@ mod tests {
         let mut no_cpus = healthy;
         no_cpus.logical_cpus = 0;
         assert!(!no_cpus.plausible());
+
+        let mut unavailable_worker_wave = no_cpus;
+        unavailable_worker_wave.logical_cpus = 8;
+        unavailable_worker_wave.peak_all_core_gflops = f64::NAN;
+        assert!(!unavailable_worker_wave.plausible());
+        assert!(
+            unavailable_worker_wave
+                .to_jsonl()
+                .contains("\"peak_all_core_gflops\":null")
+        );
     }
 
     #[test]

@@ -18,7 +18,14 @@ crates plus `std`.
 - `MachineAxes` (`axes::probe()`) — measured axes only: STREAM-triad
   bandwidth (single/all-core, from fs-substrate) and FMA-chain peak FLOPs
   (single/all-core, in-house microbench), plus the fs-substrate topology
-  fingerprint. Never spec-sheet numbers.
+  fingerprint. Never spec-sheet numbers. The all-core FMA axis gives every
+  logical worker one shared, caller-calibrated operation count, releases them
+  through one abortable start rendezvous, and divides their aggregate logical
+  FLOPs by one common wall-clock window ending only after every worker joins.
+  Independent per-worker peak windows are never summed. A worker creation
+  failure or unwind makes the aggregate axis unavailable (`NaN` internally,
+  `null` in JSON), so plausibility admission rejects the entire observation
+  instead of accepting a partial-machine axis.
 - `KernelSpec` — identity + intensity model (`bytes_per_elem`,
   `flops_per_elem`), threading axis, explicit `TargetAxis`, and optional
   `target_fraction`.
@@ -318,7 +325,13 @@ crates plus `std`.
    ramp/scheduler noise floor and wandered tens of percent), and the
    accumulator lane count is REGISTER-FILE-sized per arch (48 on
    aarch64, 64 on x86) — the former 64-lane constant spilled on NEON
-   and read the axis ~25% low, which inflated attainments past 1.0.
+   and read the axis ~25% low, which inflated attainments past 1.0. The
+   all-core sample (bead 3iq7) uses one calibrated repeat count and one
+   synchronized timing window for all workers. Its numerator is the
+   exact common operation count times the worker count; its denominator covers
+   start release through every join. Any worker creation failure or unwind
+   aborts or invalidates the whole axis rather than subtracting that worker or
+   retaining a partial sum.
 2. `attainment = measured_rate / min(bandwidth_limit, compute_limit)` with
    limits derived from the spec's intensity model (meta-tested against
    hand calculations). This remains the binding-roof report. Verdicts compare
@@ -431,6 +444,13 @@ failure invokes every kernel's idempotent, non-publishing `abort_tuning` hook;
 process-local tune rows and decision bindings from a tokenless partial run
 cannot survive into registry reuse. The production GEMM propagates session,
 tune-key, and execution-receipt refusals through this path rather than panicking.
+The existing raw `f64` axis API represents a request above 4096 workers, worker
+creation refusal, or all-core worker-wave failure as `NaN`:
+`MachineAxes::probe` remains source-compatible and returns an unavailable
+`peak_all_core_gflops`, `plausibility_error` refuses it, and JSON emits `null`.
+No surviving-worker subset can become a positive partial-machine axis. Worker
+creation is fallible; an abortable start gate releases and drains any
+already-created peers without executing the partial wave.
 Observations such as zero rates remain successful measurements with invalid
 evidence normalized to finite JSON plus an explicit reason. Ledger interaction returns `fs_ledger::LedgerError`
 (structured, machine-actionable). The external gate recorder uses the same
@@ -472,7 +492,10 @@ and never-measured states (rf-004), plus rejection-without-publication (rf-004b)
 re-run reproducibility
 within stated dispersion allowance (rf-005); CLI smoke incl. §14.1
 coverage table and structured refusals (rf-006). Unit tests cover
-attainment hand-calculations, order statistics, axes sanity, exact-cap
+attainment hand-calculations, order statistics, axes sanity, a deliberately
+staggered all-core sample that retains the slowest worker's common window,
+whole-axis invalidation after a worker unwind, abort-and-drain after an injected
+worker-creation refusal, exact-cap
 dependency evidence accepted by both roofline and fs-plan, and a retained
 cap+1 dependency classified as `CorruptEvidence` by roofline while fs-plan
 returns the typed pre-materialization refusal. The GEMM
@@ -513,6 +536,9 @@ store unchanged.
   target.
 - Per-CCD bandwidth axes, P/E-core-class split, frequency-state capture,
   and thermal controls are future scope (v0 measures whole-machine axes).
+- The all-core FMA start and elapsed window are synchronized, but v0 does not
+  yet bind requested versus observed CPU/NUMA/CCD placement for those exact
+  workers. It therefore makes no pinning or topology-placement claim.
 - Static floors plus pre/post agreement cannot detect a host that is already
   degraded before the first probe and remains equally degraded through the
   second. Every citable API and the CLI therefore require a separately attested
