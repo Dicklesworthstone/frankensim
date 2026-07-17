@@ -36,10 +36,33 @@ use super::{
     TerminalQuantitySpec, TerminalShape,
 };
 
-/// Current equation-variable hypergraph schema version.
+/// Shared candidate version for equation, variable, and incidence entity-ID
+/// auxiliaries; this is not the top-level causal-structure identity version.
 pub const CAUSAL_GRAPH_SCHEMA_VERSION_V1: u32 = 1;
-/// Current causalization-receipt schema version.
+/// Shared candidate version for matching-set and conditional-outcome-set
+/// auxiliaries; this is not the complete causalization-receipt version.
 pub const CAUSALIZATION_RECEIPT_SCHEMA_VERSION_V1: u32 = 1;
+/// Schema version of normalized causal-structure identities.
+pub const CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1: u32 = 1;
+/// Schema version of provenance-bearing causal-graph artifacts.
+pub const CAUSAL_GRAPH_ARTIFACT_IDENTITY_SCHEMA_VERSION_V1: u32 = 1;
+/// Schema version of producer-independent causal outcomes.
+pub const CAUSAL_OUTCOME_IDENTITY_SCHEMA_VERSION_V1: u32 = 1;
+/// Schema version of complete causalization evidence receipts.
+pub const CAUSALIZATION_RECEIPT_IDENTITY_SCHEMA_VERSION_V1: u32 = 1;
+/// Domain of normalized equation-variable structure identities.
+pub const CAUSAL_STRUCTURE_IDENTITY_DOMAIN_V1: &str =
+    "org.frankensim.fs-ir.machine.causal-structure.v1";
+/// Domain of provenance-bearing causal graph artifacts.
+pub const CAUSAL_GRAPH_ARTIFACT_IDENTITY_DOMAIN_V1: &str =
+    "org.frankensim.fs-ir.machine.causal-graph-artifact.v1";
+/// Domain of producer-independent normalized causal outcomes.
+pub const CAUSAL_OUTCOME_IDENTITY_DOMAIN_V1: &str =
+    "org.frankensim.fs-ir.machine.causal-outcome.v1";
+/// Domain of complete provenance-bearing causalization receipts.
+pub const CAUSALIZATION_RECEIPT_IDENTITY_DOMAIN_V1: &str =
+    "org.frankensim.fs-ir.machine.causalization-receipt.v1";
+
 /// Maximum equations in one graph draft.
 pub const MAX_CAUSAL_EQUATIONS: usize = 65_536;
 /// Maximum variables in one graph draft.
@@ -1205,12 +1228,12 @@ const INCIDENCE_CHILD: ChildSpec = ChildSpec::for_identity::<IncidenceEntityIdV1
 pub enum CausalStructureIdentitySchemaV1 {}
 
 impl CanonicalSchema for CausalStructureIdentitySchemaV1 {
-    const DOMAIN: &'static str = "org.frankensim.fs-ir.machine.causal-structure.v1";
+    const DOMAIN: &'static str = CAUSAL_STRUCTURE_IDENTITY_DOMAIN_V1;
     const NAME: &'static str = "normalized-causal-equation-variable-hypergraph";
-    const VERSION: u32 = CAUSAL_GRAPH_SCHEMA_VERSION_V1;
+    const VERSION: u32 = CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1;
     const CONTEXT: &'static str = "normalized structural incidence bound to one admitted Machine graph; producer provenance, numerical rank, and physical causality excluded";
     const FIELDS: &'static [FieldSpec] = &[
-        FieldSpec::required("causal-graph-schema-version", WireType::U64),
+        FieldSpec::required("causal-structure-schema-version", WireType::U64),
         FieldSpec::child_of("machine-graph-id", &MACHINE_GRAPH_CHILD),
         FieldSpec::required("machine-graph-receipt-adjudication", WireType::Bytes),
         FieldSpec::required("unit-convention", WireType::Variant),
@@ -1232,9 +1255,9 @@ const CAUSAL_STRUCTURE_CHILD: ChildSpec = ChildSpec::for_identity::<CausalStruct
 pub enum CausalGraphArtifactIdentitySchemaV1 {}
 
 impl CanonicalSchema for CausalGraphArtifactIdentitySchemaV1 {
-    const DOMAIN: &'static str = "org.frankensim.fs-ir.machine.causal-graph-artifact.v1";
+    const DOMAIN: &'static str = CAUSAL_GRAPH_ARTIFACT_IDENTITY_DOMAIN_V1;
     const NAME: &'static str = "provenance-bearing-causal-graph-artifact";
-    const VERSION: u32 = CAUSAL_GRAPH_SCHEMA_VERSION_V1;
+    const VERSION: u32 = CAUSAL_GRAPH_ARTIFACT_IDENTITY_SCHEMA_VERSION_V1;
     const CONTEXT: &'static str =
         "one normalized causal structure plus exact generated, derived, or audited-escape lineage";
     const FIELDS: &'static [FieldSpec] = &[
@@ -1305,7 +1328,7 @@ pub enum CausalGraphRule {
     UnknownIncidenceEquation = 22,
     /// Incidence named an unknown variable.
     UnknownIncidenceVariable = 23,
-    /// Derivative order exceeded the frozen v1 bound.
+    /// Derivative order exceeded the current candidate-v1 public bound.
     DerivativeOrderLimit = 24,
     /// Incidence term did not equal the equation's residual contract.
     ResidualTermMismatch = 25,
@@ -2898,6 +2921,7 @@ fn compare_conditional_outcomes_cancellable<E>(
         .then_with(|| identity_receipt_adjudication_cmp(left.artifact, right.artifact))
         .then_with(|| left.determination.cmp(&right.determination))
         .then_with(|| left.structural_rank.cmp(&right.structural_rank))
+        .then_with(|| left.unknown_axes.cmp(&right.unknown_axes))
         .then_with(|| identity_receipt_adjudication_cmp(left.outcome, right.outcome))
         .then_with(|| identity_receipt_adjudication_cmp(left.receipt, right.receipt)))
 }
@@ -4135,8 +4159,8 @@ fn causal_structure_identity(
         cx.checkpoint().is_err()
     })?
     .u64(
-        Field::new(0, "causal-graph-schema-version"),
-        u64::from(CAUSAL_GRAPH_SCHEMA_VERSION_V1),
+        Field::new(0, "causal-structure-schema-version"),
+        u64::from(CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1),
     )?
     .child(Field::new(1, "machine-graph-id"), machine.identity())?
     .bytes(
@@ -4208,7 +4232,7 @@ fn causal_artifact_identity(
     })?
     .u64(
         Field::new(0, "causal-graph-artifact-schema-version"),
-        u64::from(CAUSAL_GRAPH_SCHEMA_VERSION_V1),
+        u64::from(CAUSAL_GRAPH_ARTIFACT_IDENTITY_SCHEMA_VERSION_V1),
     )?
     .child(Field::new(1, "causal-structure-id"), structure.id())?
     .bytes(
@@ -4407,7 +4431,17 @@ fn condition_row(
 }
 
 fn condition_artifact_row(condition: &ActivationConditionSpec) -> Vec<u8> {
-    let mut out = Vec::with_capacity(320);
+    let source_bytes = match &condition.source {
+        ActivationConditionSource::GuardEquation { .. } => 0,
+        ActivationConditionSource::AuditedPredicate(escape) => {
+            causal_ref_canonical_len(escape.audit.namespace())
+                .saturating_add(causal_ref_canonical_len(escape.audited_source.namespace()))
+        }
+    };
+    let canonical_bytes = causal_ref_canonical_len(condition.condition.namespace())
+        .saturating_add(1)
+        .saturating_add(source_bytes);
+    let mut out = Vec::with_capacity(canonical_bytes);
     condition.condition.append_canonical(&mut out);
     match &condition.source {
         ActivationConditionSource::GuardEquation { .. } => out.push(1),
@@ -4417,6 +4451,7 @@ fn condition_artifact_row(condition: &ActivationConditionSpec) -> Vec<u8> {
             escape.audited_source.append_canonical(&mut out);
         }
     }
+    debug_assert_eq!(out.len(), canonical_bytes);
     out
 }
 
@@ -5023,6 +5058,11 @@ pub enum DeterminationClass {
     Mixed,
     /// Analyzer did not make a determination claim.
     Unknown,
+    /// Both structural bipartition sides are empty in the exact analysis
+    /// domain. This is a concrete domain result, not a vacuous full-rank or
+    /// solvability claim; it is required for honest off/disengaged mode cells.
+    /// Declared last to preserve the established tag/order of earlier states.
+    EmptyProjection,
 }
 
 /// Generic structural-rank state, orthogonal to graph cardinality.
@@ -5032,8 +5072,8 @@ pub enum StructuralRankState {
     FullRelativeToMinSide,
     /// A checker-supported structural deficiency remains.
     Deficient,
-    /// One bipartition side is empty, so min-side rank is vacuous rather than
-    /// an informative full-rank claim.
+    /// At least one bipartition side is empty, so min-side rank is vacuous
+    /// rather than an informative full-rank claim.
     NotApplicable,
     /// No structural-rank claim.
     Unknown,
@@ -5079,14 +5119,15 @@ pub enum CausalUnknownReason {
     BudgetExhausted,
     /// Required source metadata was unavailable.
     IncompleteMetadata,
-    /// Complete mode-cell results exist but are not uniform across modes.
+    /// At least two bound, concretely analyzed mode cells disagree. This does
+    /// not by itself claim complete Cartesian mode coverage.
     NonUniformAcrossModes,
 }
 
 /// Orthogonal receipt axis whose claim remains unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CausalOutcomeAxis {
-    /// Under/over/well/mixed determination.
+    /// Empty-projection/under/over/well/mixed determination.
     Determination,
     /// Generic block-structural rank.
     StructuralRank,
@@ -5120,6 +5161,9 @@ pub struct ConditionalCausalOutcome {
     determination: DeterminationClass,
     /// Branch-local structural-rank state.
     structural_rank: StructuralRankState,
+    /// Branch-local progress reasons and deterministic resume points for any
+    /// axes left unknown by an incomplete mode-cell analysis.
+    unknown_axes: Vec<CausalUnknownAxisState>,
     /// Producer-independent child outcome identity.
     outcome: IdentityReceipt<CausalOutcomeIdV1>,
     /// Exact child receipt identity.
@@ -5133,6 +5177,7 @@ impl PartialEq for ConditionalCausalOutcome {
             && identity_receipt_adjudication_eq(self.artifact, other.artifact)
             && self.determination == other.determination
             && self.structural_rank == other.structural_rank
+            && self.unknown_axes == other.unknown_axes
             && identity_receipt_adjudication_eq(self.outcome, other.outcome)
             && identity_receipt_adjudication_eq(self.receipt, other.receipt)
     }
@@ -5154,6 +5199,7 @@ impl Ord for ConditionalCausalOutcome {
             .then_with(|| identity_receipt_adjudication_cmp(self.artifact, other.artifact))
             .then_with(|| self.determination.cmp(&other.determination))
             .then_with(|| self.structural_rank.cmp(&other.structural_rank))
+            .then_with(|| self.unknown_axes.cmp(&other.unknown_axes))
             .then_with(|| identity_receipt_adjudication_cmp(self.outcome, other.outcome))
             .then_with(|| identity_receipt_adjudication_cmp(self.receipt, other.receipt))
     }
@@ -5166,6 +5212,7 @@ impl Hash for ConditionalCausalOutcome {
         hash_identity_receipt_adjudication(self.artifact, state);
         self.determination.hash(state);
         self.structural_rank.hash(state);
+        self.unknown_axes.hash(state);
         hash_identity_receipt_adjudication(self.outcome, state);
         hash_identity_receipt_adjudication(self.receipt, state);
     }
@@ -5781,7 +5828,7 @@ pub enum ConditionalCoverageBindingError {
     },
     /// One child assignment or the aggregate assignments exceeded a public cap.
     SelectionLimit {
-        /// Child being copied, or `None` for aggregate overflow.
+        /// Child in canonical order, or `None` for aggregate overflow.
         outcome_index: Option<usize>,
         /// Observed selection count.
         submitted: usize,
@@ -5790,12 +5837,12 @@ pub enum ConditionalCoverageBindingError {
     },
     /// A child receipt analyzed another graph.
     ForeignGraph {
-        /// Submitted child position.
+        /// Child position after canonical ordering.
         outcome_index: usize,
     },
     /// A child left determination or rank unknown and therefore cannot witness a cell theorem.
     NonConcreteChild {
-        /// Submitted child position.
+        /// Child position after canonical ordering.
         outcome_index: usize,
     },
     /// Two children describe the same exact mode assignment.
@@ -5852,17 +5899,23 @@ impl fmt::Display for ConditionalCoverageBindingError {
                 outcome_index,
                 submitted,
                 max,
-            } => write!(
-                f,
-                "conditional coverage selection count {submitted} exceeds {max} at child {outcome_index:?}"
-            ),
+            } => match outcome_index {
+                Some(index) => write!(
+                    f,
+                    "conditional coverage canonical child {index} has {submitted} selections above the {max}-selection cap"
+                ),
+                None => write!(
+                    f,
+                    "conditional coverage aggregate has {submitted} selections above the {max}-selection cap"
+                ),
+            },
             Self::ForeignGraph { outcome_index } => write!(
                 f,
-                "conditional coverage child {outcome_index} belongs to another causal graph"
+                "conditional coverage canonical child {outcome_index} belongs to another causal graph"
             ),
             Self::NonConcreteChild { outcome_index } => write!(
                 f,
-                "conditional coverage child {outcome_index} has a non-concrete outcome axis"
+                "conditional coverage canonical child {outcome_index} has a non-concrete outcome axis"
             ),
             Self::DuplicateAssignment { index } => write!(
                 f,
@@ -6100,11 +6153,37 @@ fn canonicalize_coverage_outcomes(
     cx: &Cx<'_>,
 ) -> Result<Vec<ConditionalCausalOutcome>, ConditionalCoverageBindingError> {
     let mut conditional_selections = 0usize;
-    let mut canonical_outcomes = Vec::with_capacity(outcomes.len());
     for (outcome_index, outcome) in outcomes.iter().enumerate() {
         identity_materialization_poll(cx, outcome_index, 0)
             .map_err(ConditionalCoverageBindingError::Identity)?;
         conditional_selections = conditional_selections.saturating_add(outcome.assignment.len());
+    }
+    if conditional_selections > MAX_CAUSAL_CONDITIONAL_SELECTIONS {
+        return Err(ConditionalCoverageBindingError::SelectionLimit {
+            outcome_index: None,
+            submitted: conditional_selections,
+            max: MAX_CAUSAL_CONDITIONAL_SELECTIONS,
+        });
+    }
+
+    // Canonicalize references before reporting any child-local defect. The
+    // same invalid multiset must therefore choose the same rule and index
+    // regardless of caller order, without cloning untrusted assignments first.
+    let mut ordered_outcomes = outcomes.iter().collect::<Vec<_>>();
+    cancellable_sort_by_fallible(
+        &mut ordered_outcomes,
+        |left, right| {
+            compare_conditional_outcomes_cancellable(left, right, || {
+                identity_materialization_checkpoint(cx, 0)
+            })
+        },
+        || identity_materialization_checkpoint(cx, 0),
+    )
+    .map_err(ConditionalCoverageBindingError::Identity)?;
+
+    for (outcome_index, outcome) in ordered_outcomes.iter().enumerate() {
+        identity_materialization_poll(cx, outcome_index, 0)
+            .map_err(ConditionalCoverageBindingError::Identity)?;
         if outcome.assignment.len() > MAX_CAUSAL_CONDITIONS {
             return Err(ConditionalCoverageBindingError::SelectionLimit {
                 outcome_index: Some(outcome_index),
@@ -6112,13 +6191,10 @@ fn canonicalize_coverage_outcomes(
                 max: MAX_CAUSAL_CONDITIONS,
             });
         }
-        if conditional_selections > MAX_CAUSAL_CONDITIONAL_SELECTIONS {
-            return Err(ConditionalCoverageBindingError::SelectionLimit {
-                outcome_index: None,
-                submitted: conditional_selections,
-                max: MAX_CAUSAL_CONDITIONAL_SELECTIONS,
-            });
-        }
+    }
+    for (outcome_index, outcome) in ordered_outcomes.iter().enumerate() {
+        identity_materialization_poll(cx, outcome_index, 0)
+            .map_err(ConditionalCoverageBindingError::Identity)?;
         if !identity_receipt_adjudication_eq(outcome.structure, graph.structure_identity_receipt())
             || !identity_receipt_adjudication_eq(
                 outcome.artifact,
@@ -6127,11 +6203,19 @@ fn canonicalize_coverage_outcomes(
         {
             return Err(ConditionalCoverageBindingError::ForeignGraph { outcome_index });
         }
+    }
+    for (outcome_index, outcome) in ordered_outcomes.iter().enumerate() {
+        identity_materialization_poll(cx, outcome_index, 0)
+            .map_err(ConditionalCoverageBindingError::Identity)?;
         if outcome.determination == DeterminationClass::Unknown
             || outcome.structural_rank == StructuralRankState::Unknown
         {
             return Err(ConditionalCoverageBindingError::NonConcreteChild { outcome_index });
         }
+    }
+
+    let mut canonical_outcomes = Vec::with_capacity(outcomes.len());
+    for outcome in ordered_outcomes {
         let mut assignment = Vec::with_capacity(outcome.assignment.len());
         for (selection_index, selection) in outcome.assignment.iter().enumerate() {
             identity_materialization_poll(cx, selection_index, 0)
@@ -6144,20 +6228,11 @@ fn canonicalize_coverage_outcomes(
             artifact: outcome.artifact,
             determination: outcome.determination,
             structural_rank: outcome.structural_rank,
+            unknown_axes: outcome.unknown_axes.clone(),
             outcome: outcome.outcome,
             receipt: outcome.receipt,
         });
     }
-    cancellable_sort_by_fallible(
-        &mut canonical_outcomes,
-        |left, right| {
-            compare_conditional_outcomes_cancellable(left, right, || {
-                identity_materialization_checkpoint(cx, 0)
-            })
-        },
-        || identity_materialization_checkpoint(cx, 0),
-    )
-    .map_err(ConditionalCoverageBindingError::Identity)?;
     for (index, pair) in canonical_outcomes.windows(2).enumerate() {
         identity_materialization_poll(cx, index, 0)
             .map_err(ConditionalCoverageBindingError::Identity)?;
@@ -6219,6 +6294,7 @@ const fn causal_axes_compatible(
 ) -> bool {
     match (determination, structural_rank) {
         (DeterminationClass::Unknown, _) | (_, StructuralRankState::Unknown) => true,
+        (DeterminationClass::EmptyProjection, StructuralRankState::NotApplicable) => true,
         (
             DeterminationClass::WellDetermined
             | DeterminationClass::UnderDetermined
@@ -6237,7 +6313,8 @@ const fn causal_axes_compatible(
 /// Explicit evidence state of a structurally admitted receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CausalReceiptEvidence {
-    /// Schema and internal closure only; no independent checker is claimed.
+    /// Local runtime/admission closure only; no independent checker or
+    /// recursive schema-governance authority is claimed.
     Unverified,
     /// Exact checker artifact is referenced, but its presence alone does not
     /// authenticate or admit checker authority.
@@ -6255,7 +6332,7 @@ pub struct CausalizationReceiptDraft {
     pub analysis: CausalAnalysisContext,
     /// Unconditional graph, exact mode cell, or cross-mode summary domain.
     pub domain: CausalReceiptDomain,
-    /// Under/over/mixed/well/unknown axis.
+    /// Empty-projection/under/over/mixed/well/unknown axis.
     pub determination: DeterminationClass,
     /// Structural-rank axis.
     pub structural_rank: StructuralRankState,
@@ -6306,9 +6383,9 @@ impl Eq for CausalizationReceiptDraft {}
 pub enum CausalOutcomeIdentitySchemaV1 {}
 
 impl CanonicalSchema for CausalOutcomeIdentitySchemaV1 {
-    const DOMAIN: &'static str = "org.frankensim.fs-ir.machine.causal-outcome.v1";
+    const DOMAIN: &'static str = CAUSAL_OUTCOME_IDENTITY_DOMAIN_V1;
     const NAME: &'static str = "normalized-causal-outcome";
-    const VERSION: u32 = CAUSALIZATION_RECEIPT_SCHEMA_VERSION_V1;
+    const VERSION: u32 = CAUSAL_OUTCOME_IDENTITY_SCHEMA_VERSION_V1;
     const CONTEXT: &'static str = "producer-independent structural outcome over one normalized graph; analyzer, provenance artifact, certificates, and progress metadata excluded";
     const FIELDS: &'static [FieldSpec] = &[
         FieldSpec::required("causal-outcome-schema-version", WireType::U64),
@@ -6332,10 +6409,10 @@ const CAUSAL_OUTCOME_CHILD: ChildSpec = ChildSpec::for_identity::<CausalOutcomeI
 pub enum CausalizationReceiptIdentitySchemaV1 {}
 
 impl CanonicalSchema for CausalizationReceiptIdentitySchemaV1 {
-    const DOMAIN: &'static str = "org.frankensim.fs-ir.machine.causalization-receipt.v1";
+    const DOMAIN: &'static str = CAUSALIZATION_RECEIPT_IDENTITY_DOMAIN_V1;
     const NAME: &'static str = "causalization-structural-receipt";
-    const VERSION: u32 = CAUSALIZATION_RECEIPT_SCHEMA_VERSION_V1;
-    const CONTEXT: &'static str = "internally closed structural outcome; no numerical-rank, solvability, DAE-index, or physical-causality authority";
+    const VERSION: u32 = CAUSALIZATION_RECEIPT_IDENTITY_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str = "locally admission-closed structural outcome; recursive schema governance and numerical-rank, solvability, DAE-index, or physical-causality authority excluded";
     const FIELDS: &'static [FieldSpec] = &[
         FieldSpec::required("causalization-receipt-schema-version", WireType::U64),
         FieldSpec::child_of("causal-structure-id", &CAUSAL_STRUCTURE_CHILD),
@@ -6420,6 +6497,14 @@ impl CausalReceiptRule {
 pub enum CausalReceiptSubject {
     /// Complete receipt.
     Receipt,
+    /// Normalized structure identity supplied by the receipt.
+    StructureIdentity,
+    /// Provenance-bearing graph artifact identity supplied by the receipt.
+    GraphArtifactIdentity,
+    /// Submitted unmatched-equation complement.
+    UnmatchedEquations,
+    /// Submitted unmatched-variable complement.
+    UnmatchedVariables,
     /// One matching pair.
     Matching(CausalMatchingPair),
     /// One equation.
@@ -6679,7 +6764,8 @@ pub enum ConditionalOutcomeError {
     /// Only an exact [`CausalReceiptDomain::ModeCell`] receipt may become a
     /// conditional child.
     NotModeCell,
-    /// Construction was cancelled before the child assignment was copied.
+    /// Construction was cancelled before all child assignment/progress state
+    /// was copied and the completed object passed its final checkpoint.
     Cancelled,
 }
 
@@ -6698,12 +6784,13 @@ impl std::error::Error for ConditionalOutcomeError {}
 
 impl ConditionalCausalOutcome {
     /// Construct a non-forgeable child commitment from an admitted mode-cell
-    /// receipt. Graph identity, assignment, axes, and typed receipt identity
-    /// are copied together and cannot be independently substituted later.
+    /// receipt. Graph identity, assignment, outcome axes, unknown-axis resume
+    /// state, and typed receipt identity are copied together and cannot be
+    /// independently substituted later.
     ///
     /// # Errors
     /// Refuses an unconditional-graph or hybrid-summary receipt, or
-    /// cancellation before the assignment copy completes.
+    /// cancellation before the assignment/progress-state copy completes.
     pub fn from_mode_cell(
         child: &AdmittedCausalizationReceipt,
         cx: &Cx<'_>,
@@ -6721,6 +6808,14 @@ impl ConditionalCausalOutcome {
             }
             copied_assignment.push(selection.clone());
         }
+        let mut copied_unknown_axes = Vec::with_capacity(child.unknown_axes().len());
+        for (index, state) in child.unknown_axes().iter().enumerate() {
+            if index.is_multiple_of(CAUSAL_CANCELLATION_POLL_STRIDE) {
+                cx.checkpoint()
+                    .map_err(|_| ConditionalOutcomeError::Cancelled)?;
+            }
+            copied_unknown_axes.push(state.clone());
+        }
         cx.checkpoint()
             .map_err(|_| ConditionalOutcomeError::Cancelled)?;
         Ok(Self {
@@ -6729,6 +6824,7 @@ impl ConditionalCausalOutcome {
             artifact: child.artifact_identity_receipt(),
             determination: child.determination(),
             structural_rank: child.structural_rank(),
+            unknown_axes: copied_unknown_axes,
             outcome: child.outcome_identity_receipt(),
             receipt: child.identity_receipt(),
         })
@@ -6776,6 +6872,12 @@ impl ConditionalCausalOutcome {
     #[must_use]
     pub const fn structural_rank(&self) -> StructuralRankState {
         self.structural_rank
+    }
+
+    /// Branch-local explanations and resume points for unknown axes.
+    #[must_use]
+    pub fn unknown_axes(&self) -> &[CausalUnknownAxisState] {
+        &self.unknown_axes
     }
 
     /// Exact typed child receipt identity.
@@ -7090,12 +7192,16 @@ fn admit_causalization_receipt(
     )?;
 
     let mut findings = Vec::new();
-    if !identity_receipt_adjudication_eq(draft.structure, graph.structure_identity_receipt())
-        || !identity_receipt_adjudication_eq(draft.artifact, graph.artifact_identity_receipt())
-    {
+    if !identity_receipt_adjudication_eq(draft.structure, graph.structure_identity_receipt()) {
         findings.push(CausalReceiptFinding::new(
             CausalReceiptRule::GraphIdentityMismatch,
-            CausalReceiptSubject::Receipt,
+            CausalReceiptSubject::StructureIdentity,
+        ));
+    }
+    if !identity_receipt_adjudication_eq(draft.artifact, graph.artifact_identity_receipt()) {
+        findings.push(CausalReceiptFinding::new(
+            CausalReceiptRule::GraphIdentityMismatch,
+            CausalReceiptSubject::GraphArtifactIdentity,
         ));
     }
 
@@ -7185,27 +7291,38 @@ fn admit_causalization_receipt(
     }
     let mut matched_equations = BTreeSet::new();
     let mut matched_variables = BTreeSet::new();
+    let mut accepted_matching_rows = 0usize;
     for (index, pair) in draft.matching.iter().enumerate() {
         receipt_poll(cx, index)?;
-        if !equation_ids.contains(&pair.equation) || !unknown_vertices.contains(&pair.variable) {
+        let endpoints_valid =
+            equation_ids.contains(&pair.equation) && unknown_vertices.contains(&pair.variable);
+        let incidence_valid = incidence_keys.contains(pair);
+        if !endpoints_valid {
             findings.push(CausalReceiptFinding::new(
                 CausalReceiptRule::UnknownMatchingEndpoint,
                 CausalReceiptSubject::Matching(pair.clone()),
             ));
         }
-        if !incidence_keys.contains(pair) {
+        if !incidence_valid {
             findings.push(CausalReceiptFinding::new(
                 CausalReceiptRule::NonIncidenceMatch,
                 CausalReceiptSubject::Matching(pair.clone()),
             ));
         }
-        if !matched_equations.insert(pair.equation.clone())
-            || !matched_variables.insert(pair.variable.clone())
-        {
-            findings.push(CausalReceiptFinding::new(
-                CausalReceiptRule::DuplicateMatchingEndpoint,
-                CausalReceiptSubject::Matching(pair.clone()),
-            ));
+        if endpoints_valid && incidence_valid {
+            if matched_equations.contains(&pair.equation)
+                || matched_variables.contains(&pair.variable)
+            {
+                findings.push(CausalReceiptFinding::new(
+                    CausalReceiptRule::DuplicateMatchingEndpoint,
+                    CausalReceiptSubject::Matching(pair.clone()),
+                ));
+            } else {
+                let equation_was_new = matched_equations.insert(pair.equation.clone());
+                let variable_was_new = matched_variables.insert(pair.variable.clone());
+                debug_assert!(equation_was_new && variable_was_new);
+                accepted_matching_rows += 1;
+            }
         }
         enforce_receipt_finding_budget(&findings)?;
     }
@@ -7227,7 +7344,7 @@ fn admit_causalization_receipt(
     )? {
         findings.push(CausalReceiptFinding::new(
             CausalReceiptRule::UnmatchedSetMismatch,
-            CausalReceiptSubject::Receipt,
+            CausalReceiptSubject::UnmatchedEquations,
         ));
     }
     if !cancellable_slice_eq(
@@ -7237,22 +7354,24 @@ fn admit_causalization_receipt(
     )? {
         findings.push(CausalReceiptFinding::new(
             CausalReceiptRule::UnmatchedSetMismatch,
-            CausalReceiptSubject::Receipt,
+            CausalReceiptSubject::UnmatchedVariables,
         ));
     }
 
+    let vacuous_empty_graph = equation_ids.is_empty() && unknown_vertices.is_empty();
     let witness_determination = match (
+        vacuous_empty_graph,
         expected_unmatched_equations.is_empty(),
         expected_unmatched_variables.is_empty(),
     ) {
-        (true, true) => DeterminationClass::WellDetermined,
-        (true, false) => DeterminationClass::UnderDetermined,
-        (false, true) => DeterminationClass::OverDetermined,
-        (false, false) => DeterminationClass::Mixed,
+        (true, _, _) => DeterminationClass::EmptyProjection,
+        (false, true, true) => DeterminationClass::WellDetermined,
+        (false, true, false) => DeterminationClass::UnderDetermined,
+        (false, false, true) => DeterminationClass::OverDetermined,
+        (false, false, false) => DeterminationClass::Mixed,
     };
     let smaller_side = equation_ids.len().min(unknown_vertices.len());
-    let vacuous_empty_graph = equation_ids.is_empty() && unknown_vertices.is_empty();
-    let saturates_min_side = !vacuous_empty_graph && draft.matching.len() == smaller_side;
+    let saturates_min_side = !vacuous_empty_graph && accepted_matching_rows == smaller_side;
     let evidence_checker = match &draft.evidence {
         CausalReceiptEvidence::Unverified => None,
         CausalReceiptEvidence::CheckerReferenced(checker) => Some(checker),
@@ -7287,21 +7406,85 @@ fn admit_causalization_receipt(
     } else {
         StructuralRankState::Deficient
     };
-    let mut uniform_child_determination = draft
-        .conditional_outcomes
-        .first()
-        .map(|first| first.determination);
-    let mut uniform_child_rank = draft
-        .conditional_outcomes
-        .first()
-        .map(|first| first.structural_rank);
-    for (index, outcome) in draft.conditional_outcomes.iter().enumerate() {
+    let mut uniform_child_determination = None;
+    let mut uniform_child_rank = None;
+    let mut child_determination_nonuniform = false;
+    let mut child_rank_nonuniform = false;
+
+    let mut graph_condition_ids = BTreeSet::new();
+    for (index, condition) in graph_conditions.keys().enumerate() {
         receipt_poll(cx, index)?;
-        if uniform_child_determination != Some(outcome.determination) {
-            uniform_child_determination = None;
+        graph_condition_ids.insert(condition.clone());
+    }
+    let mut duplicate_outcome = false;
+    let mut children_bound_valid = true;
+    let mut children_all_concrete = true;
+    for (outcome_index, outcome) in draft.conditional_outcomes.iter().enumerate() {
+        receipt_poll(cx, outcome_index)?;
+        let duplicate_assignment = if outcome_index > 0 {
+            cancellable_slice_eq(
+                &draft.conditional_outcomes[outcome_index - 1].assignment,
+                &outcome.assignment,
+                || receipt_checkpoint(cx),
+            )?
+        } else {
+            false
+        };
+        duplicate_outcome |= duplicate_assignment;
+        let mut duplicate_selection = false;
+        let mut branches_valid = true;
+        let mut selected_conditions = BTreeSet::new();
+        for (selection_index, selection) in outcome.assignment.iter().enumerate() {
+            receipt_poll(cx, selection_index)?;
+            duplicate_selection |= selection_index > 0
+                && outcome.assignment[selection_index - 1].condition == selection.condition;
+            selected_conditions.insert(selection.condition.clone());
+            branches_valid &= graph_conditions
+                .get(&selection.condition)
+                .is_some_and(|branches| branches.contains(&selection.branch));
         }
-        if uniform_child_rank != Some(outcome.structural_rank) {
-            uniform_child_rank = None;
+        let condition_set_valid =
+            cancellable_set_eq(&selected_conditions, &graph_condition_ids, || {
+                receipt_checkpoint(cx)
+            })?;
+        let child_bound_valid = !outcome.assignment.is_empty()
+            && identity_receipt_adjudication_eq(
+                outcome.structure,
+                graph.structure_identity_receipt(),
+            )
+            && identity_receipt_adjudication_eq(
+                outcome.artifact,
+                graph.artifact_identity_receipt(),
+            )
+            && !duplicate_selection
+            && condition_set_valid
+            && branches_valid;
+        children_bound_valid &= child_bound_valid;
+        children_all_concrete &= outcome.determination != DeterminationClass::Unknown
+            && outcome.structural_rank != StructuralRankState::Unknown;
+        if child_bound_valid && !duplicate_assignment {
+            if outcome.determination != DeterminationClass::Unknown
+                && !child_determination_nonuniform
+            {
+                match uniform_child_determination {
+                    None => uniform_child_determination = Some(outcome.determination),
+                    Some(existing) if existing != outcome.determination => {
+                        uniform_child_determination = None;
+                        child_determination_nonuniform = true;
+                    }
+                    Some(_) => {}
+                }
+            }
+            if outcome.structural_rank != StructuralRankState::Unknown && !child_rank_nonuniform {
+                match uniform_child_rank {
+                    None => uniform_child_rank = Some(outcome.structural_rank),
+                    Some(existing) if existing != outcome.structural_rank => {
+                        uniform_child_rank = None;
+                        child_rank_nonuniform = true;
+                    }
+                    Some(_) => {}
+                }
+            }
         }
     }
     let determination_valid = if is_summary {
@@ -7314,7 +7497,10 @@ fn admit_causalization_receipt(
             Conditionality::Unknown => draft.determination == DeterminationClass::Unknown,
         }
     } else if vacuous_empty_graph {
-        draft.determination == DeterminationClass::Unknown
+        matches!(
+            draft.determination,
+            DeterminationClass::EmptyProjection | DeterminationClass::Unknown
+        )
     } else if maximum_supported {
         matches!(draft.determination, DeterminationClass::Unknown)
             || draft.determination == witness_determination
@@ -7356,54 +7542,6 @@ fn admit_causalization_receipt(
             CausalReceiptRule::OutcomeAxisMismatch,
             CausalReceiptSubject::Receipt,
         ));
-    }
-
-    let mut graph_condition_ids = BTreeSet::new();
-    for (index, condition) in graph_conditions.keys().enumerate() {
-        receipt_poll(cx, index)?;
-        graph_condition_ids.insert(condition.clone());
-    }
-    let mut duplicate_outcome = false;
-    let mut assignment_valid = true;
-    for (outcome_index, outcome) in draft.conditional_outcomes.iter().enumerate() {
-        receipt_poll(cx, outcome_index)?;
-        if outcome_index > 0 {
-            duplicate_outcome |= cancellable_slice_eq(
-                &draft.conditional_outcomes[outcome_index - 1].assignment,
-                &outcome.assignment,
-                || receipt_checkpoint(cx),
-            )?;
-        }
-        let mut duplicate_selection = false;
-        let mut branches_valid = true;
-        let mut selected_conditions = BTreeSet::new();
-        for (selection_index, selection) in outcome.assignment.iter().enumerate() {
-            receipt_poll(cx, selection_index)?;
-            duplicate_selection |= selection_index > 0
-                && outcome.assignment[selection_index - 1].condition == selection.condition;
-            selected_conditions.insert(selection.condition.clone());
-            branches_valid &= graph_conditions
-                .get(&selection.condition)
-                .is_some_and(|branches| branches.contains(&selection.branch));
-        }
-        let condition_set_valid =
-            cancellable_set_eq(&selected_conditions, &graph_condition_ids, || {
-                receipt_checkpoint(cx)
-            })?;
-        assignment_valid &= !outcome.assignment.is_empty()
-            && identity_receipt_adjudication_eq(
-                outcome.structure,
-                graph.structure_identity_receipt(),
-            )
-            && identity_receipt_adjudication_eq(
-                outcome.artifact,
-                graph.artifact_identity_receipt(),
-            )
-            && !duplicate_selection
-            && condition_set_valid
-            && branches_valid
-            && outcome.determination != DeterminationClass::Unknown
-            && outcome.structural_rank != StructuralRankState::Unknown;
     }
     let actual_conditional_outcome_set = match draft
         .conditional_coverage
@@ -7457,14 +7595,15 @@ fn admit_causalization_receipt(
         (CausalReceiptDomain::HybridSummary, Conditionality::Conditional) => {
             !draft.conditional_outcomes.is_empty()
                 && !duplicate_outcome
-                && assignment_valid
+                && children_bound_valid
+                && children_all_concrete
                 && coverage_binding_valid
         }
         (CausalReceiptDomain::HybridSummary, Conditionality::Unconditional) => {
             draft.conditional_outcomes.is_empty() && coverage_binding_valid
         }
         (CausalReceiptDomain::HybridSummary, Conditionality::Unknown) => {
-            !duplicate_outcome && assignment_valid && draft.conditional_coverage.is_none()
+            !duplicate_outcome && children_bound_valid && draft.conditional_coverage.is_none()
         }
         _ => false,
     };
@@ -7499,10 +7638,6 @@ fn admit_causalization_receipt(
         );
         checkpoint_required != state.resume_checkpoint.is_some()
     });
-    let child_determination_nonuniform =
-        draft.conditional_outcomes.len() > 1 && uniform_child_determination.is_none();
-    let child_rank_nonuniform =
-        draft.conditional_outcomes.len() > 1 && uniform_child_rank.is_none();
     let nonuniform_reason_mismatch = draft.unknown_axes.iter().any(|state| {
         let children_are_nonuniform = match state.axis {
             CausalOutcomeAxis::Determination => child_determination_nonuniform,
@@ -7628,7 +7763,7 @@ fn causal_outcome_identity(
     })?
     .u64(
         Field::new(0, "causal-outcome-schema-version"),
-        u64::from(CAUSALIZATION_RECEIPT_SCHEMA_VERSION_V1),
+        u64::from(CAUSAL_OUTCOME_IDENTITY_SCHEMA_VERSION_V1),
     )?
     .child(Field::new(1, "causal-structure-id"), structure.id())?
     .bytes(
@@ -7722,7 +7857,7 @@ fn causalization_receipt_identity(
     })?
     .u64(
         Field::new(0, "causalization-receipt-schema-version"),
-        u64::from(CAUSALIZATION_RECEIPT_SCHEMA_VERSION_V1),
+        u64::from(CAUSALIZATION_RECEIPT_IDENTITY_SCHEMA_VERSION_V1),
     )?
     .child(Field::new(1, "causal-structure-id"), structure.id())?
     .bytes(
@@ -7922,6 +8057,10 @@ fn conditional_outcome_row_cancellable(
     outcome: &ConditionalCausalOutcome,
     cx: &Cx<'_>,
 ) -> Result<Vec<u8>, CanonicalError> {
+    // The full child receipt below already commits its ordered unknown-axis
+    // reasons and checkpoints. Keep those progress coordinates out of the
+    // normalized child outcome while retaining them transitively in this
+    // provenance-bearing parent row and directly on the typed child object.
     let assignment_bytes = assignment_canonical_len_cancellable(&outcome.assignment, cx)?;
     let canonical_bytes = assignment_bytes
         .saturating_add(2)
@@ -8016,6 +8155,7 @@ const fn determination_tag(state: DeterminationClass) -> u8 {
         DeterminationClass::OverDetermined => 3,
         DeterminationClass::Mixed => 4,
         DeterminationClass::Unknown => 5,
+        DeterminationClass::EmptyProjection => 6,
     }
 }
 
@@ -8241,8 +8381,9 @@ impl NativeCausalTargetReceipt {
 
     const fn schema_version(self) -> u32 {
         match self {
-            Self::Structure(_) | Self::GraphArtifact(_) => CAUSAL_GRAPH_SCHEMA_VERSION_V1,
-            Self::Causalization(_) => CAUSALIZATION_RECEIPT_SCHEMA_VERSION_V1,
+            Self::Structure(_) => CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1,
+            Self::GraphArtifact(_) => CAUSAL_GRAPH_ARTIFACT_IDENTITY_SCHEMA_VERSION_V1,
+            Self::Causalization(_) => CAUSALIZATION_RECEIPT_IDENTITY_SCHEMA_VERSION_V1,
         }
     }
 
@@ -8518,8 +8659,9 @@ impl CausalSchemaMigrationDraft {
     /// # Errors
     /// Refuses a predecessor from another artifact family, a non-older
     /// predecessor, an incomplete target receipt, or bounded canonical
-    /// publication error.
-    pub fn admit(self) -> Result<AdmittedCausalSchemaMigration, CausalMigrationError> {
+    /// publication error, including cancellation before publication.
+    pub fn admit(self, cx: &Cx<'_>) -> Result<AdmittedCausalSchemaMigration, CausalMigrationError> {
+        identity_materialization_checkpoint(cx, 0).map_err(CausalMigrationError::Identity)?;
         let kind = self.target.kind();
         let target_version = self.target.schema_version();
         if self.predecessor.artifact_kind != kind {
@@ -8541,7 +8683,9 @@ impl CausalSchemaMigrationDraft {
             return Err(CausalMigrationError::InvalidTargetReceipt);
         }
         let receipt =
-            causal_schema_migration_identity(&self).map_err(CausalMigrationError::Identity)?;
+            causal_schema_migration_identity(&self, cx).map_err(CausalMigrationError::Identity)?;
+        identity_materialization_checkpoint(cx, receipt.canonical_bytes() as usize)
+            .map_err(CausalMigrationError::Identity)?;
         Ok(AdmittedCausalSchemaMigration {
             kind,
             predecessor: self.predecessor,
@@ -8559,7 +8703,9 @@ impl CausalSchemaMigrationDraft {
 
 fn causal_schema_migration_identity(
     draft: &CausalSchemaMigrationDraft,
+    cx: &Cx<'_>,
 ) -> Result<IdentityReceipt<CausalSchemaMigrationIdV1>, CanonicalError> {
+    identity_materialization_checkpoint(cx, 0)?;
     let predecessor = historical_receipt_row(&draft.predecessor);
     let mut target = Vec::with_capacity(116);
     target.extend_from_slice(&draft.target.identity());
@@ -8570,10 +8716,9 @@ fn causal_schema_migration_identity(
     target.extend_from_slice(&draft.target.collection_items().to_le_bytes());
     let mut migration = Vec::with_capacity(128);
     draft.migration.append_canonical(&mut migration);
-    CanonicalEncoder::<CausalSchemaMigrationIdV1, _>::new(
-        CAUSAL_RECEIPT_IDENTITY_LIMITS,
-        NeverCancel,
-    )?
+    CanonicalEncoder::<CausalSchemaMigrationIdV1, _>::new(CAUSAL_RECEIPT_IDENTITY_LIMITS, || {
+        cx.checkpoint().is_err()
+    })?
     .u64(Field::new(0, "migration-receipt-schema-version"), 1)?
     .variant(
         Field::new(1, "artifact-kind"),
@@ -8610,6 +8755,23 @@ const fn migration_artifact_kind_tag(kind: CausalMigrationArtifactKind) -> u8 {
 #[cfg(test)]
 mod internal_tests {
     use super::*;
+
+    #[test]
+    fn g0_determination_order_tracks_preserved_wire_tags() {
+        let states = [
+            DeterminationClass::WellDetermined,
+            DeterminationClass::UnderDetermined,
+            DeterminationClass::OverDetermined,
+            DeterminationClass::Mixed,
+            DeterminationClass::Unknown,
+            DeterminationClass::EmptyProjection,
+        ];
+        assert_eq!(states.map(determination_tag), [1, 2, 3, 4, 5, 6]);
+        assert!(
+            states.windows(2).all(|pair| pair[0] < pair[1]),
+            "public Ord must remain aligned with canonical wire-tag order"
+        );
+    }
 
     /// Test-only constructor capability for the nominal identity roles used by
     /// these law fixtures. `StrongIdentity` intentionally has no generic

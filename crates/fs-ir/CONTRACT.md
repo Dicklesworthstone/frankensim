@@ -127,6 +127,11 @@ admitted derived-geometry boundary.
   equality propagates through admitted graph, receipt, theorem-claim, decision,
   and migration wrappers, so evidence-only encoder
   limits cannot reappear as user-visible semantic inequality at an outer API.
+  Public raw `IdentityReceipt` getters remain evidence-object views whose own
+  equality includes encoder limits; callers that need map/set/cache keys must
+  use causal adjudication rather than raw receipt equality. The typed public
+  key that makes this distinction unambiguous is the required I02.3 predecessor
+  `frankensim-leapfrog-2026-program-i94v.1.2.10`.
   Pre-canonicalization resource telemetry is itself a cancellation-polled pass:
   top-level vector lengths remain exact, nested aggregates carry an explicit
   `complete` bit, and cancellation or the first early cap refusal returns a
@@ -149,6 +154,16 @@ admitted derived-geometry boundary.
   incidence rows. Complete receipts remain attached to their public handles;
   parent identities never duplicate a potentially huge child canonical
   preimage, but they also do not collapse composition to a child digest alone.
+- The canonical byte/count caps are not yet a peak-memory certificate. The
+  current encoder callers retain `Vec<Vec<u8>>` rows and deterministic
+  map/set/sort workspaces, and those temporary allocations are not yet
+  fallibly admitted against the active operation-memory lease. A legal
+  maximum-incidence graph can therefore exceed available process memory before
+  returning a typed refusal. I02.1 remains blocked on the allocation-free
+  encoder leaf `frankensim-sj31i.52.1.1` and lease-admitted causal workspace
+  leaf `frankensim-leapfrog-2026-program-i94v.1.2.9`; neither this contract nor
+  an intermediate receipt claims bounded peak memory until those leaves are
+  green. The target public envelope is unchanged.
 - Canonical graph and receipt ordering uses a deterministic stable index-map
   sort with cancellation checkpoints through index initialization, cumulative
   bottom-up merge work, inverse-permutation construction, fixed-point scans,
@@ -161,6 +176,22 @@ admitted derived-geometry boundary.
   and identity stages, cancellation therefore returns a typed refusal before
   structure, artifact, outcome, or evidence identity publication rather than
   being deferred across one maximum-size legal row or collection.
+- The four top-level causal identity families are runtime-typed and have
+  independent candidate domains, versions, field layouts, and quotient-law
+  tests, but their central identity-governance closure is **not yet certified**.
+  A declaration DAG cannot honestly encode the self-recursive and mutually
+  recursive schema closure formed by conditional child outcomes and complete
+  receipts. The current byte-schema fingerprint also does not prove the actual
+  `FIELDS` table plus encoder closure, and the child-authority, nested-exclusion,
+  family-local guard, mutation-matrix, generated-registry, and golden migration
+  obligations must move through the minimal SCC bundle set and its condensation
+  DAG without co-bundling or version-locking acyclic structure/artifact
+  families with recursive normalized or full-evidence families. Those
+  obligations are the
+  P0 I02 blocker `frankensim-leapfrog-2026-program-i94v.1.2.12`; no partial
+  owner declaration, central required-ID row, or golden is an authority claim,
+  and I02.1 cannot close until that SCC bundle set and its condensation
+  governance are green.
 - Causal graph identity has two deliberate axes. `CausalStructureIdV1` is the
   normalized, producer-independent equation-variable structure bound to the
   exact Machine graph. `CausalGraphArtifactIdV1` is the provenance-bearing
@@ -173,13 +204,20 @@ admitted derived-geometry boundary.
   silently name two different coordinates. This equality check does not
   authenticate the opaque audit artifact, inspect its contents, or prove that
   the referenced checker actually audited that source.
-- The I02.1 `v1` identity grammar stabilizes at its first buildable, centrally
-  verified minting implementation. The earlier pre-verification landing could
-  not publish receipts because it called a canonical-schema API already removed
-  by an ancestor revision; correcting its condition provenance quotient
-  therefore remains a `v1` repair rather than a migration from a mint-capable
-  predecessor. After that first green boundary, any canonical-row semantic
-  change requires a new schema version plus an explicit migration receipt.
+- The current `v1` labels name a **candidate runtime grammar**, not a durable
+  schema freeze. Early centralized tests minted only ephemeral conformance
+  values without recursive governance, migration closure, lease-admitted peak-
+  memory proof, ledger persistence, or release authority; those values are not
+  durable migration predecessors. Stabilization requires the resource,
+  migration, and recursive-governance blockers
+  `frankensim-leapfrog-2026-program-i94v.1.2.9`,
+  `frankensim-leapfrog-2026-program-i94v.1.2.11`, and
+  `frankensim-leapfrog-2026-program-i94v.1.2.12` plus a fresh central
+  proof/golden boundary. That ratification must inventory every
+  candidate-era semantic addition, including `EmptyProjection`, and either
+  freeze it coherently as the first governed version or assign a new version
+  with explicit migration. After ratification, every canonical-row semantic
+  change requires a version and migration ratchet.
 - Every structural incidence names an exact equation, base variable,
   derivative order, solve participation, coefficient dimensions, term signal,
   optional transform/operator, clock relation, and activation domain. Unit
@@ -222,17 +260,21 @@ admitted derived-geometry boundary.
   general Boolean-minimal/BDD-canonical identity remains a future theorem and
   canonicalization ratchet rather than an implied claim.
 - `CausalizationReceiptDraft` records three separately encoded axes: determination
-  (well/under/over/mixed/unknown), generic block-structural rank
+  (empty-projection/well/under/over/mixed/unknown), generic block-structural rank
   (full-relative-to-min-side/deficient/not-applicable/unknown), and
   conditionality (unconditional/conditional/unknown). Determination and rank
   are not allowed to contradict the same bipartition: Full pairs with
   Well/Under/Over, Deficient pairs with Mixed, and NotApplicable pairs with
-  Under/Over; an Unknown axis honestly declines its side of this implication.
+  Under/Over, and concrete `EmptyProjection` pairs only with `NotApplicable`;
+  an Unknown axis honestly declines its side of this implication.
   The same law is enforced both when constructing a uniform-mode theorem and
   defensively during receipt admission. Matching pairs bind the
   exact admitted `IncidenceId`, equation, and derivative-variable endpoint;
-  unmatched sets must be the exact complements. Empty bipartitions use
-  `NotApplicable` and cannot mint vacuous Well/Full claims. Min-side saturation
+  unmatched sets must be the exact complements. A domain with neither active
+  matching equations nor unknown vertices uses concrete
+  `EmptyProjection`/`NotApplicable`, allowing an honest off/disengaged mode
+  without minting vacuous Well/Full authority. One-sided empty bipartitions use
+  Under/Over with `NotApplicable`. Min-side saturation
   proves maximum directly. Any non-saturating maximum claim requires an opaque-
   field, constructor-validated `MaximumMatchingBinding` tied to the exact
   graph, inhabited domain, canonical matching set, complete set-identity
@@ -250,16 +292,24 @@ admitted derived-geometry boundary.
 - A mode-cell receipt requires exactly one branch for every graph condition and
   projects active rows before constructing matching vertices. Hybrid summaries
   carry no union-graph matching. `ConditionalCausalOutcome` can be constructed
-  only from an admitted mode-cell receipt, so its graph, assignment, axes, and
-  typed receipt identity cannot be substituted independently. Explicit
+  only from an admitted mode-cell receipt, so its graph, assignment, axes,
+  unknown-axis reasons/checkpoints, and typed receipt identity cannot be
+  substituted independently. Explicit
   conditional coverage binds the exact graph and the complete Cartesian set
   of every declared condition/branch cell, not merely a nonempty unique subset;
   children must have concrete determination/rank axes, and products beyond the
   public child/selection envelope refuse before theorem publication. A future
   reachability theorem may soundly shrink that product, but v1 does not infer
   unreachable cells. A uniform theorem instead binds exact concrete summary
-  axes. Both paths require checker-referenced evidence. Heterogeneous child axes
-  force the corresponding top axis to `Unknown` with `NonUniformAcrossModes`.
+  axes. Both paths require checker-referenced evidence. A
+  `Conditionality::Unknown` summary may retain a bound partial set containing
+  incomplete or cancelled children, but it carries no coverage commitment and
+  cannot enter the complete-coverage constructor. Heterogeneous concrete child
+  axes force the corresponding top axis to `Unknown` with
+  `NonUniformAcrossModes`; missing or Unknown child evidence is not itself a
+  contradictory concrete value. Invalid coverage diagnostics canonicalize
+  children and apply fixed resource/foreign/non-concrete precedence before
+  reporting canonical indices, so caller permutation cannot select the error.
   Cancelled or budget-exhausted unknown axes require a deterministic resume
   checkpoint; other reasons forbid one. Receipt resource telemetry uses the
   same cancellation-aware completeness
@@ -269,7 +319,7 @@ admitted derived-geometry boundary.
   cancellation-polled cloning or canonical sorting. Their private theorem-set
   commitments retain and revalidate complete identity receipts, not only
   semantic roots. Public child projection likewise copies a bounded mode
-  assignment under an explicit `Cx`.
+  assignment and its bounded progress state under an explicit `Cx`.
 - Invalid-draft diagnostics are themselves resource-bounded. Graph and receipt
   admission retain at most `MAX_CAUSAL_GRAPH_FINDINGS` and
   `MAX_CAUSAL_RECEIPT_FINDINGS` detailed rows respectively; crossing either
@@ -282,14 +332,25 @@ admitted derived-geometry boundary.
   canonical-metadata completeness checks, and the target is a private typed
   native receipt enum. Admission therefore derives rather than trusts target
   family, schema version, identity, preimage, and receipt metrics, and only
-  admits strictly older same-family predecessors. It does not authenticate the
-  truth of caller-supplied legacy metrics.
+  admits strictly older same-family predecessors. Admission and identity
+  publication accept an explicit `Cx`, checkpoint before and after minting, and
+  publish nothing after observed cancellation. It does not authenticate the
+  truth of caller-supplied legacy metrics. V1 currently covers the top-level
+  structure, graph-artifact, and causalization-receipt families; the required
+  child/outcome/matching migration closure is tracked by
+  `frankensim-leapfrog-2026-program-i94v.1.2.11`, and I02.1 cannot close before
+  that typed family closure lands.
 - Graph and receipt admission require an explicit `fs_exec::Cx`, poll at
   bounded validation/identity boundaries, publish no identity after observed
   cancellation, expose structured decision counts/codes, and keep all library
   output silent. Resource caps cover outer collections plus aggregate supports,
   condition dependencies/branches, DNF selections/cubes, derived parents,
   labels, matching vertices, conditional children, and conditional selections.
+  Structure identity, graph-artifact identity, unmatched-equation, and
+  unmatched-variable failures retain distinct diagnostic subjects.
+  Invalid/non-incidence or endpoint-duplicating matching pairs never enter the
+  matched witness sets, so they cannot suppress complement or downstream axis
+  diagnostics.
   Duplicate nominal identities are a terminal ambiguity and refuse before an
   ID-keyed map can select a caller-order-dependent payload.
 - `machine::codec` and `machine::assurance_codec` are the additive
@@ -942,14 +1003,24 @@ material/interface card digests.
 
 `tests/machine_causalization.rs` (I02.1, G0/G3/G4/G5): minimal graph/receipt
 admission with complete node, structure, artifact, normalized-outcome, and
-evidence-receipt metadata; exact state-contract/behavior-overlay binding,
+evidence-receipt metadata; explicit candidate four-family domains/versions/
+top-level field layouts and representative semantic/provenance/analysis/
+evidence quotient mutations over both typed IDs and canonical preimages; exact
+state-contract/behavior-overlay binding,
 missing/foreign behavior refusal, and normalized-structure versus behavior-
 provenance separation; outer-collection permutation and presentation-label
 invariance; normalized structure versus extractor provenance; exact incidence/
-derivative matching and complement closure; non-vacuous empty-graph axes;
+derivative matching, atomic duplicate-endpoint rejection, and complement
+closure; concrete empty-projection axes without vacuous rank authority plus
+directed equation-only and variable-only bipartition semantics;
 graph/domain/witness/checker-bound maximum-matching commitments; exact finite-
-domain `ModeDependent` coverage; admitted mode-cell projection; typed hybrid
-children and exact coverage roots; asymmetric 2x3 Cartesian completeness under
+domain `ModeDependent` coverage; admitted mode-cell projection; concrete empty
+off-mode aggregation; partial Unknown child resume-state retention without a
+coverage claim; mixed concrete/incomplete summaries without invented
+nonuniformity plus agreeing/disagreeing concrete-only aggregation over a 2x3
+partial cell set; typed hybrid children and exact coverage roots; deterministic
+foreign/non-concrete diagnostic precedence under invalid child permutation;
+asymmetric 2x3 Cartesian completeness under
 shuffled caller order; missing/duplicate/foreign/non-concrete child refusal;
 explicit Cartesian-envelope refusal; heterogeneous child-axis honesty;
 unrelated-checker substitution refusal; duplicate-identity ambiguity; orphan/
@@ -960,6 +1031,7 @@ missing-branch counterexample; exclusion of auxiliary condition-only reads
 from mode-dependent solve totality; refusal of conditionally unavailable guard/
 predicate dependencies; exact structure/graph-artifact/causalization migration
 metadata plus zero-digest, incomplete-history, family, and version refusals;
+pre-cancelled migration publication refusal;
 compatible and contradictory uniform-theorem axis tables; oversized
 conditional-child and maximum-binding mode-domain refusal before nested
 scans/clones/sorts; uninhabitable/wrong-condition/wrong-branch theorem-domain
@@ -1047,8 +1119,13 @@ boundary without widening it.
 
 ## No-claim boundaries
 
-- I02.1 defines and internally closes the equation-variable graph and receipt
-  grammars; it does not extract equations from `fs-opdsl`/`fs-couple`, compute
+- I02.1 defines and locally validates the current candidate equation-variable
+  graph and receipt runtime grammars. Peak-memory/resource closure, complete
+  identity-family migration, and recursive schema governance remain explicitly
+  open under `frankensim-leapfrog-2026-program-i94v.1.2.9`,
+  `frankensim-leapfrog-2026-program-i94v.1.2.11`, and
+  `frankensim-leapfrog-2026-program-i94v.1.2.12`; this boundary does not
+  extract equations from `fs-opdsl`/`fs-couple`, compute
   a matching, Dulmage-Mendelsohn or BLT decomposition, perform Pantelides/
   dummy-derivative index reduction, choose tears, solve a system, or execute an
   end-to-end mechanism. Those source-owned adapters and algorithms are I02.2+

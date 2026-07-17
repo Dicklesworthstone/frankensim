@@ -6,7 +6,9 @@
 
 use core::num::NonZeroU64;
 
-use fs_blake3::identity::{CanonicalError, CanonicalSchema, LimitKind, StrongIdentity, WireType};
+use fs_blake3::identity::{
+    CanonicalError, CanonicalSchema, LimitKind, Presence, StrongIdentity, WireType,
+};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ir::machine::causalization::*;
 use fs_ir::machine::semantics::{
@@ -27,6 +29,13 @@ fn nz(value: u64) -> NonZeroU64 {
 
 fn schema_field_count<S: CanonicalSchema>() -> u32 {
     u32::try_from(S::FIELDS.len()).expect("test schema field count fits u32")
+}
+
+fn schema_layout<S: CanonicalSchema>() -> Vec<(&'static str, WireType, Presence)> {
+    S::FIELDS
+        .iter()
+        .map(|field| (field.name(), field.wire_type(), field.presence()))
+        .collect()
 }
 
 macro_rules! cref {
@@ -494,6 +503,22 @@ fn assert_receipt_rule(refusal: &CausalReceiptRefusal, expected: CausalReceiptRu
     );
 }
 
+fn assert_receipt_finding(
+    refusal: &CausalReceiptRefusal,
+    rule: CausalReceiptRule,
+    subject: &CausalReceiptSubject,
+) {
+    assert!(
+        refusal
+            .findings()
+            .iter()
+            .any(|finding| finding.rule() == rule && finding.subject() == subject),
+        "expected finding rule={} ({rule:?}), subject={subject:?}; findings={:#?}",
+        rule.code(),
+        refusal.findings()
+    );
+}
+
 fn assert_receipt_rules_exact(refusal: &CausalReceiptRefusal, expected: &[CausalReceiptRule]) {
     let rules = receipt_rules(refusal);
     assert_eq!(
@@ -582,6 +607,387 @@ fn g0_minimal_graph_and_receipt_admit_with_complete_identity_receipts() {
     );
     assert_eq!(receipt.domain(), &CausalReceiptDomain::UnconditionalGraph);
     assert_eq!(receipt.matching().len(), 1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exact candidate top-level layouts remain reviewable together.
+fn g0_causal_identity_family_candidate_top_level_layout_is_explicit() {
+    assert_eq!(CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1, 1);
+    assert_eq!(CAUSAL_GRAPH_ARTIFACT_IDENTITY_SCHEMA_VERSION_V1, 1);
+    assert_eq!(CAUSAL_OUTCOME_IDENTITY_SCHEMA_VERSION_V1, 1);
+    assert_eq!(CAUSALIZATION_RECEIPT_IDENTITY_SCHEMA_VERSION_V1, 1);
+    assert_eq!(
+        CausalStructureIdentitySchemaV1::VERSION,
+        CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1
+    );
+    assert_eq!(
+        CausalGraphArtifactIdentitySchemaV1::VERSION,
+        CAUSAL_GRAPH_ARTIFACT_IDENTITY_SCHEMA_VERSION_V1
+    );
+    assert_eq!(
+        CausalOutcomeIdentitySchemaV1::VERSION,
+        CAUSAL_OUTCOME_IDENTITY_SCHEMA_VERSION_V1
+    );
+    assert_eq!(
+        CausalizationReceiptIdentitySchemaV1::VERSION,
+        CAUSALIZATION_RECEIPT_IDENTITY_SCHEMA_VERSION_V1
+    );
+    assert_eq!(
+        CausalStructureIdentitySchemaV1::DOMAIN,
+        CAUSAL_STRUCTURE_IDENTITY_DOMAIN_V1
+    );
+    assert_eq!(
+        CausalGraphArtifactIdentitySchemaV1::DOMAIN,
+        CAUSAL_GRAPH_ARTIFACT_IDENTITY_DOMAIN_V1
+    );
+    assert_eq!(
+        CausalOutcomeIdentitySchemaV1::DOMAIN,
+        CAUSAL_OUTCOME_IDENTITY_DOMAIN_V1
+    );
+    assert_eq!(
+        CausalizationReceiptIdentitySchemaV1::DOMAIN,
+        CAUSALIZATION_RECEIPT_IDENTITY_DOMAIN_V1
+    );
+    assert_eq!(
+        schema_layout::<CausalStructureIdentitySchemaV1>(),
+        vec![
+            (
+                "causal-structure-schema-version",
+                WireType::U64,
+                Presence::Required
+            ),
+            ("machine-graph-id", WireType::Child, Presence::Required),
+            (
+                "machine-graph-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Required
+            ),
+            ("unit-convention", WireType::Variant, Presence::Required),
+            ("extraction-scope", WireType::Bytes, Presence::Required),
+            ("equations", WireType::OrderedBytes, Presence::Required),
+            ("variables", WireType::OrderedBytes, Presence::Required),
+            (
+                "activation-conditions",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            ("incidences", WireType::OrderedChildren, Presence::Required),
+            (
+                "incidence-receipt-adjudications",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+        ]
+    );
+    assert_eq!(
+        schema_layout::<CausalGraphArtifactIdentitySchemaV1>(),
+        vec![
+            (
+                "causal-graph-artifact-schema-version",
+                WireType::U64,
+                Presence::Required
+            ),
+            ("causal-structure-id", WireType::Child, Presence::Required),
+            (
+                "causal-structure-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Required
+            ),
+            (
+                "machine-behavior-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Optional
+            ),
+            ("extraction-context", WireType::Bytes, Presence::Required),
+            (
+                "equation-lineage",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "variable-lineage",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "activation-condition-provenance",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "incidence-provenance",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+        ]
+    );
+    assert_eq!(
+        schema_layout::<CausalOutcomeIdentitySchemaV1>(),
+        vec![
+            (
+                "causal-outcome-schema-version",
+                WireType::U64,
+                Presence::Required
+            ),
+            ("causal-structure-id", WireType::Child, Presence::Required),
+            (
+                "causal-structure-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Required
+            ),
+            ("analysis-domain", WireType::Bytes, Presence::Required),
+            ("outcome-axes", WireType::Bytes, Presence::Required),
+            ("matching", WireType::OrderedBytes, Presence::Required),
+            (
+                "unmatched-equations",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "unmatched-variables",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "conditional-outcome-semantics",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+        ]
+    );
+    assert_eq!(
+        schema_layout::<CausalizationReceiptIdentitySchemaV1>(),
+        vec![
+            (
+                "causalization-receipt-schema-version",
+                WireType::U64,
+                Presence::Required
+            ),
+            ("causal-structure-id", WireType::Child, Presence::Required),
+            (
+                "causal-structure-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Required
+            ),
+            (
+                "causal-graph-artifact-id",
+                WireType::Child,
+                Presence::Required
+            ),
+            (
+                "causal-graph-artifact-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Required
+            ),
+            ("analysis-context", WireType::Bytes, Presence::Required),
+            ("analysis-domain", WireType::Bytes, Presence::Required),
+            ("outcome-axes", WireType::Bytes, Presence::Required),
+            ("matching", WireType::OrderedBytes, Presence::Required),
+            (
+                "unmatched-equations",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "unmatched-variables",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "conditional-outcomes",
+                WireType::OrderedBytes,
+                Presence::Required
+            ),
+            (
+                "maximum-matching-certificate",
+                WireType::Bytes,
+                Presence::Optional
+            ),
+            ("conditional-coverage", WireType::Bytes, Presence::Optional),
+            ("unknown-axes", WireType::OrderedBytes, Presence::Required),
+            ("evidence-state", WireType::Variant, Presence::Required),
+            (
+                "normalized-causal-outcome-id",
+                WireType::Child,
+                Presence::Required
+            ),
+            (
+                "normalized-causal-outcome-receipt-adjudication",
+                WireType::Bytes,
+                Presence::Required
+            ),
+        ]
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One representative cross-family quotient mutation matrix.
+fn g0_causal_identity_family_semantic_mutations_move_receipts() {
+    let (machine, owner, clock) = minimal_machine();
+    let baseline_graph =
+        with_cx(|cx| minimal_causal_draft(&owner, &clock).admit_against(&machine, cx))
+            .expect("baseline causal graph admits");
+    let baseline_receipt =
+        with_cx(|cx| complete_receipt(&baseline_graph).admit_against(&baseline_graph, cx))
+            .expect("baseline causal receipt admits");
+
+    let mut scoped_draft = minimal_causal_draft(&owner, &clock);
+    scoped_draft.scope = CausalGraphScope::Partial {
+        boundary: cref!(CausalPartialScopeRef, "test/identity-scope", 134),
+    };
+    let scoped_graph =
+        with_cx(|cx| scoped_draft.admit_against(&machine, cx)).expect("partial-scope graph admits");
+    assert_ne!(
+        baseline_graph.structure_identity(),
+        scoped_graph.structure_identity()
+    );
+    assert_ne!(
+        baseline_graph
+            .structure_identity_receipt()
+            .canonical_preimage(),
+        scoped_graph
+            .structure_identity_receipt()
+            .canonical_preimage()
+    );
+    let scoped_receipt =
+        with_cx(|cx| complete_receipt(&scoped_graph).admit_against(&scoped_graph, cx))
+            .expect("partial-scope causal receipt admits");
+    assert_ne!(
+        baseline_receipt.outcome_identity(),
+        scoped_receipt.outcome_identity(),
+        "normalized structure is part of normalized outcome semantics"
+    );
+    assert_ne!(
+        baseline_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage(),
+        scoped_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage()
+    );
+    assert_ne!(baseline_receipt.identity(), scoped_receipt.identity());
+    assert_ne!(
+        baseline_receipt.identity_receipt().canonical_preimage(),
+        scoped_receipt.identity_receipt().canonical_preimage()
+    );
+
+    let mut provenance_draft = minimal_causal_draft(&owner, &clock);
+    provenance_draft.extraction = extraction(135);
+    let provenance_graph = with_cx(|cx| provenance_draft.admit_against(&machine, cx))
+        .expect("provenance-substituted graph admits");
+    assert_eq!(
+        baseline_graph.structure_identity(),
+        provenance_graph.structure_identity(),
+        "producer context must remain outside normalized structure"
+    );
+    assert_eq!(
+        baseline_graph
+            .structure_identity_receipt()
+            .canonical_preimage(),
+        provenance_graph
+            .structure_identity_receipt()
+            .canonical_preimage(),
+        "producer context must preserve normalized structure bytes"
+    );
+    assert_ne!(
+        baseline_graph.artifact_identity(),
+        provenance_graph.artifact_identity(),
+        "producer context must move the graph artifact"
+    );
+    assert_ne!(
+        baseline_graph
+            .artifact_identity_receipt()
+            .canonical_preimage(),
+        provenance_graph
+            .artifact_identity_receipt()
+            .canonical_preimage(),
+        "producer context must move graph-artifact bytes"
+    );
+    let provenance_receipt =
+        with_cx(|cx| complete_receipt(&provenance_graph).admit_against(&provenance_graph, cx))
+            .expect("provenance-substituted causal receipt admits");
+    assert_eq!(
+        baseline_receipt.outcome_identity(),
+        provenance_receipt.outcome_identity(),
+        "graph-artifact provenance must remain outside normalized outcome semantics"
+    );
+    assert_eq!(
+        baseline_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage(),
+        provenance_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage(),
+        "equal normalized outcomes must have byte-identical canonical preimages"
+    );
+    assert_ne!(
+        baseline_receipt.identity(),
+        provenance_receipt.identity(),
+        "graph-artifact provenance must move the complete evidence receipt"
+    );
+    assert_ne!(
+        baseline_receipt.identity_receipt().canonical_preimage(),
+        provenance_receipt.identity_receipt().canonical_preimage()
+    );
+
+    let mut analysis_variant = complete_receipt(&baseline_graph);
+    analysis_variant.analysis.analyzer =
+        cref!(CausalAnalyzerRef, "test/identity-analysis-variant", 136);
+    let analysis_receipt = with_cx(|cx| analysis_variant.admit_against(&baseline_graph, cx))
+        .expect("analysis-context variant admits");
+    assert_eq!(
+        baseline_receipt.outcome_identity(),
+        analysis_receipt.outcome_identity(),
+        "producer analysis context must remain outside normalized outcome"
+    );
+    assert_eq!(
+        baseline_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage(),
+        analysis_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage()
+    );
+    assert_ne!(
+        baseline_receipt.identity(),
+        analysis_receipt.identity(),
+        "producer analysis context must move the full receipt"
+    );
+    assert_ne!(
+        baseline_receipt.identity_receipt().canonical_preimage(),
+        analysis_receipt.identity_receipt().canonical_preimage()
+    );
+
+    let mut evidence_variant = complete_receipt(&baseline_graph);
+    evidence_variant.evidence = CausalReceiptEvidence::CheckerReferenced(cref!(
+        CausalCheckerRef,
+        "test/identity-evidence-variant",
+        137
+    ));
+    let evidence_receipt = with_cx(|cx| evidence_variant.admit_against(&baseline_graph, cx))
+        .expect("evidence-state variant admits");
+    assert_eq!(
+        baseline_receipt.outcome_identity(),
+        evidence_receipt.outcome_identity(),
+        "checker provenance must remain outside normalized outcome semantics"
+    );
+    assert_eq!(
+        baseline_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage(),
+        evidence_receipt
+            .outcome_identity_receipt()
+            .canonical_preimage()
+    );
+    assert_ne!(
+        baseline_receipt.identity(),
+        evidence_receipt.identity(),
+        "checker provenance must move the complete evidence receipt"
+    );
+    assert_ne!(
+        baseline_receipt.identity_receipt().canonical_preimage(),
+        evidence_receipt.identity_receipt().canonical_preimage()
+    );
 }
 
 #[test]
@@ -813,10 +1219,145 @@ fn g0_matching_binds_the_exact_incidence_and_derivative_vertex() {
         reason: CausalUnknownReason::IncompleteMetadata,
         resume_checkpoint: None,
     }];
-    let refusal = with_cx(|cx| wrong_order.admit_against(&graph, cx))
+    let refusal = with_cx(|cx| wrong_order.clone().admit_against(&graph, cx))
         .expect_err("wrong derivative endpoint refuses");
     assert_receipt_rule(&refusal, CausalReceiptRule::UnknownMatchingEndpoint);
     assert_receipt_rule(&refusal, CausalReceiptRule::NonIncidenceMatch);
+
+    wrong_order.unmatched_equations.clear();
+    wrong_order.unmatched_variables.clear();
+    wrong_order.determination = DeterminationClass::Unknown;
+    wrong_order.unknown_axes.push(CausalUnknownAxisState {
+        axis: CausalOutcomeAxis::Determination,
+        reason: CausalUnknownReason::IncompleteMetadata,
+        resume_checkpoint: None,
+    });
+    let refusal = with_cx(|cx| wrong_order.admit_against(&graph, cx))
+        .expect_err("invalid matching cannot suppress either complement diagnostic");
+    assert_receipt_finding(
+        &refusal,
+        CausalReceiptRule::UnmatchedSetMismatch,
+        &CausalReceiptSubject::UnmatchedEquations,
+    );
+    assert_receipt_finding(
+        &refusal,
+        CausalReceiptRule::UnmatchedSetMismatch,
+        &CausalReceiptSubject::UnmatchedVariables,
+    );
+}
+
+#[test]
+fn g0_duplicate_variable_match_does_not_consume_the_other_equation() {
+    let (machine, owner, clock) = minimal_machine();
+    let mut graph_draft = minimal_causal_draft(&owner, &clock);
+    let second_equation = equation(&owner, &clock, "test/equation/duplicate-variable", 137);
+    let second_incidence = incidence(&second_equation, &graph_draft.variables[0]);
+    graph_draft.equations.push(second_equation);
+    graph_draft.incidences.push(second_incidence);
+    let graph = with_cx(|cx| graph_draft.admit_against(&machine, cx))
+        .expect("two equations sharing one unknown variable admit structurally");
+
+    let mut matching = graph
+        .incidences()
+        .iter()
+        .map(|incidence| CausalMatchingPair {
+            incidence: incidence.id.clone(),
+            equation: incidence.equation.clone(),
+            variable: DerivativeVariableKey {
+                variable: incidence.variable.clone(),
+                derivative_order: incidence.derivative_order,
+            },
+        })
+        .collect::<Vec<_>>();
+    matching.sort();
+    let unmatched_equations = vec![matching[1].equation.clone()];
+    let refusal = with_cx(|cx| {
+        CausalizationReceiptDraft {
+            structure: graph.structure_identity_receipt(),
+            artifact: graph.artifact_identity_receipt(),
+            analysis: analysis(),
+            domain: CausalReceiptDomain::UnconditionalGraph,
+            determination: DeterminationClass::OverDetermined,
+            structural_rank: StructuralRankState::FullRelativeToMinSide,
+            conditionality: Conditionality::Unconditional,
+            matching,
+            unmatched_equations,
+            unmatched_variables: Vec::new(),
+            conditional_outcomes: Vec::new(),
+            maximum_matching_certificate: None,
+            conditional_coverage: None,
+            unknown_axes: Vec::new(),
+            evidence: CausalReceiptEvidence::Unverified,
+        }
+        .admit_against(&graph, cx)
+    })
+    .expect_err("one unknown variable cannot be matched to two equations");
+    assert_receipt_rule(&refusal, CausalReceiptRule::DuplicateMatchingEndpoint);
+    assert!(
+        !refusal
+            .findings()
+            .iter()
+            .any(|finding| finding.rule() == CausalReceiptRule::UnmatchedSetMismatch),
+        "the rejected second edge must leave its equation in the exact unmatched complement: {:#?}",
+        refusal.findings()
+    );
+}
+
+#[test]
+fn g0_duplicate_equation_match_does_not_consume_the_other_variable() {
+    let (machine, owner, clock) = minimal_machine();
+    let mut graph_draft = minimal_causal_draft(&owner, &clock);
+    let second_variable = variable(&owner, &clock, "test/variable/duplicate-equation", 142);
+    let second_incidence = incidence(&graph_draft.equations[0], &second_variable);
+    graph_draft.variables.push(second_variable);
+    graph_draft.incidences.push(second_incidence);
+    let graph = with_cx(|cx| graph_draft.admit_against(&machine, cx))
+        .expect("one equation incident to two unknown variables admits structurally");
+
+    let mut matching = graph
+        .incidences()
+        .iter()
+        .map(|incidence| CausalMatchingPair {
+            incidence: incidence.id.clone(),
+            equation: incidence.equation.clone(),
+            variable: DerivativeVariableKey {
+                variable: incidence.variable.clone(),
+                derivative_order: incidence.derivative_order,
+            },
+        })
+        .collect::<Vec<_>>();
+    matching.sort();
+    let unmatched_variables = vec![matching[1].variable.clone()];
+    let refusal = with_cx(|cx| {
+        CausalizationReceiptDraft {
+            structure: graph.structure_identity_receipt(),
+            artifact: graph.artifact_identity_receipt(),
+            analysis: analysis(),
+            domain: CausalReceiptDomain::UnconditionalGraph,
+            determination: DeterminationClass::UnderDetermined,
+            structural_rank: StructuralRankState::FullRelativeToMinSide,
+            conditionality: Conditionality::Unconditional,
+            matching,
+            unmatched_equations: Vec::new(),
+            unmatched_variables,
+            conditional_outcomes: Vec::new(),
+            maximum_matching_certificate: None,
+            conditional_coverage: None,
+            unknown_axes: Vec::new(),
+            evidence: CausalReceiptEvidence::Unverified,
+        }
+        .admit_against(&graph, cx)
+    })
+    .expect_err("one equation cannot be matched to two unknown variables");
+    assert_receipt_rule(&refusal, CausalReceiptRule::DuplicateMatchingEndpoint);
+    assert!(
+        !refusal
+            .findings()
+            .iter()
+            .any(|finding| finding.rule() == CausalReceiptRule::UnmatchedSetMismatch),
+        "the rejected second edge must leave its variable in the exact unmatched complement: {:#?}",
+        refusal.findings()
+    );
 }
 
 #[test]
@@ -852,8 +1393,107 @@ fn g0_empty_graph_refuses_vacuous_well_or_full_claims() {
         unknown_axes: Vec::new(),
         evidence: CausalReceiptEvidence::Unverified,
     };
-    let refusal = with_cx(|cx| false_claim.admit_against(&graph, cx))
+    let refusal = with_cx(|cx| false_claim.clone().admit_against(&graph, cx))
         .expect_err("empty graph cannot mint vacuous Well/Full authority");
+    assert_receipt_rule(&refusal, CausalReceiptRule::OutcomeAxisMismatch);
+
+    let mut concrete_empty = false_claim;
+    concrete_empty.determination = DeterminationClass::EmptyProjection;
+    concrete_empty.structural_rank = StructuralRankState::NotApplicable;
+    let admitted = with_cx(|cx| concrete_empty.admit_against(&graph, cx))
+        .expect("a structurally empty projection is a concrete non-rank result");
+    assert_eq!(
+        admitted.determination(),
+        DeterminationClass::EmptyProjection
+    );
+    assert_eq!(
+        admitted.structural_rank(),
+        StructuralRankState::NotApplicable
+    );
+}
+
+#[test]
+fn g0_one_sided_bipartitions_use_directed_determination_not_empty_projection() {
+    let (machine, owner, clock) = minimal_machine();
+    let isolated_equation = equation(&owner, &clock, "test/equation/isolated", 140);
+    let equation_graph = with_cx(|cx| {
+        CausalGraphDraft {
+            units: CausalUnitConvention::SiBaseDimensions,
+            scope: CausalGraphScope::CompleteMachineModel,
+            extraction: extraction(10),
+            equations: vec![isolated_equation.clone()],
+            variables: Vec::new(),
+            conditions: Vec::new(),
+            incidences: Vec::new(),
+        }
+        .admit_against(&machine, cx)
+    })
+    .expect("an equation-only structural projection is representable");
+    let equation_receipt = CausalizationReceiptDraft {
+        structure: equation_graph.structure_identity_receipt(),
+        artifact: equation_graph.artifact_identity_receipt(),
+        analysis: analysis(),
+        domain: CausalReceiptDomain::UnconditionalGraph,
+        determination: DeterminationClass::OverDetermined,
+        structural_rank: StructuralRankState::NotApplicable,
+        conditionality: Conditionality::Unconditional,
+        matching: Vec::new(),
+        unmatched_equations: vec![isolated_equation.id],
+        unmatched_variables: Vec::new(),
+        conditional_outcomes: Vec::new(),
+        maximum_matching_certificate: None,
+        conditional_coverage: None,
+        unknown_axes: Vec::new(),
+        evidence: CausalReceiptEvidence::Unverified,
+    };
+    with_cx(|cx| equation_receipt.clone().admit_against(&equation_graph, cx))
+        .expect("equation-only projection is concretely overdetermined");
+    let mut false_equation_empty = equation_receipt;
+    false_equation_empty.determination = DeterminationClass::EmptyProjection;
+    let refusal = with_cx(|cx| false_equation_empty.admit_against(&equation_graph, cx))
+        .expect_err("an equation-only projection is not empty");
+    assert_receipt_rule(&refusal, CausalReceiptRule::OutcomeAxisMismatch);
+
+    let isolated_variable = variable(&owner, &clock, "test/variable/isolated", 141);
+    let variable_graph = with_cx(|cx| {
+        CausalGraphDraft {
+            units: CausalUnitConvention::SiBaseDimensions,
+            scope: CausalGraphScope::CompleteMachineModel,
+            extraction: extraction(10),
+            equations: Vec::new(),
+            variables: vec![isolated_variable.clone()],
+            conditions: Vec::new(),
+            incidences: Vec::new(),
+        }
+        .admit_against(&machine, cx)
+    })
+    .expect("an isolated order-zero unknown is a structural vertex");
+    let variable_receipt = CausalizationReceiptDraft {
+        structure: variable_graph.structure_identity_receipt(),
+        artifact: variable_graph.artifact_identity_receipt(),
+        analysis: analysis(),
+        domain: CausalReceiptDomain::UnconditionalGraph,
+        determination: DeterminationClass::UnderDetermined,
+        structural_rank: StructuralRankState::NotApplicable,
+        conditionality: Conditionality::Unconditional,
+        matching: Vec::new(),
+        unmatched_equations: Vec::new(),
+        unmatched_variables: vec![DerivativeVariableKey {
+            variable: isolated_variable.id,
+            derivative_order: 0,
+        }],
+        conditional_outcomes: Vec::new(),
+        maximum_matching_certificate: None,
+        conditional_coverage: None,
+        unknown_axes: Vec::new(),
+        evidence: CausalReceiptEvidence::Unverified,
+    };
+    with_cx(|cx| variable_receipt.clone().admit_against(&variable_graph, cx))
+        .expect("variable-only projection is concretely underdetermined");
+    let mut false_variable_empty = variable_receipt;
+    false_variable_empty.determination = DeterminationClass::EmptyProjection;
+    let refusal = with_cx(|cx| false_variable_empty.admit_against(&variable_graph, cx))
+        .expect_err("a variable-only projection is not empty");
     assert_receipt_rule(&refusal, CausalReceiptRule::OutcomeAxisMismatch);
 }
 
@@ -1308,11 +1948,14 @@ fn mode_cell_receipt(
         .iter()
         .find(|incidence| incidence.solve_participation == SolveParticipation::Unknown)
         .expect("unknown branch incidence");
-    let unknown_branch = assignment[0].branch
-        == match &active_unknown.activation {
-            ActivationDomain::Conditional { cubes } => cubes[0].selections[0].branch.clone(),
-            ActivationDomain::Always => unreachable!("fixture incidence is conditional"),
-        };
+    let unknown_branch = match &active_unknown.activation {
+        ActivationDomain::Conditional { cubes } => cubes.iter().any(|cube| {
+            cube.selections
+                .iter()
+                .all(|selection| assignment.binary_search(selection).is_ok())
+        }),
+        ActivationDomain::Always => unreachable!("fixture incidence is conditional"),
+    };
     let (determination, rank, matching, unmatched_equations) = if unknown_branch {
         (
             DeterminationClass::WellDetermined,
@@ -1356,6 +1999,64 @@ fn mode_cell_receipt(
         .admit_against(graph, cx)
     })
     .expect("mode-cell receipt admits")
+}
+
+fn incomplete_mode_cell_receipt(
+    graph: &AdmittedCausalGraph,
+    assignment: Vec<ConditionBranchSelection>,
+) -> AdmittedCausalizationReceipt {
+    let active_unknown = graph
+        .incidences()
+        .iter()
+        .find(|incidence| incidence.solve_participation == SolveParticipation::Unknown)
+        .expect("hybrid fixture has an unknown structural incidence");
+    let unknown_active = match &active_unknown.activation {
+        ActivationDomain::Always => true,
+        ActivationDomain::Conditional { cubes } => cubes.iter().any(|cube| {
+            cube.selections
+                .iter()
+                .all(|selection| assignment.binary_search(selection).is_ok())
+        }),
+    };
+    with_cx(|cx| {
+        CausalizationReceiptDraft {
+            structure: graph.structure_identity_receipt(),
+            artifact: graph.artifact_identity_receipt(),
+            analysis: analysis(),
+            domain: CausalReceiptDomain::ModeCell { assignment },
+            determination: DeterminationClass::Unknown,
+            structural_rank: StructuralRankState::Unknown,
+            conditionality: Conditionality::Unconditional,
+            matching: Vec::new(),
+            unmatched_equations: vec![active_unknown.equation.clone()],
+            unmatched_variables: if unknown_active {
+                vec![DerivativeVariableKey {
+                    variable: active_unknown.variable.clone(),
+                    derivative_order: active_unknown.derivative_order,
+                }]
+            } else {
+                Vec::new()
+            },
+            conditional_outcomes: Vec::new(),
+            maximum_matching_certificate: None,
+            conditional_coverage: None,
+            unknown_axes: vec![
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::Determination,
+                    reason: CausalUnknownReason::IncompleteMetadata,
+                    resume_checkpoint: None,
+                },
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::StructuralRank,
+                    reason: CausalUnknownReason::IncompleteMetadata,
+                    resume_checkpoint: None,
+                },
+            ],
+            evidence: CausalReceiptEvidence::Unverified,
+        }
+        .admit_against(graph, cx)
+    })
+    .expect("incomplete hybrid mode-cell receipt admits")
 }
 
 #[test]
@@ -1420,6 +2121,601 @@ fn g3_hybrid_summary_uses_typed_children_and_bound_coverage() {
         .expect("heterogeneous hybrid summary admits honestly");
     assert_eq!(receipt.conditional_outcomes().len(), 2);
     assert_eq!(receipt.unknown_axes().len(), 2);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Both concrete on/off cells and their summary stay visible.
+fn g3_hybrid_summary_retains_a_concrete_empty_off_mode() {
+    let (machine, owner, clock) = minimal_machine();
+    let mut draft = hybrid_draft(&owner, &clock);
+    let active_domain = draft
+        .incidences
+        .iter()
+        .find(|incidence| incidence.solve_participation == SolveParticipation::Unknown)
+        .expect("hybrid fixture has an active unknown incidence")
+        .activation
+        .clone();
+    draft.equations[0].activation = active_domain.clone();
+    draft.variables[0].activation = active_domain;
+    draft
+        .incidences
+        .retain(|incidence| incidence.solve_participation == SolveParticipation::Unknown);
+    let graph = with_cx(|cx| draft.admit_against(&machine, cx))
+        .expect("hybrid graph with a structurally empty off mode admits");
+    let incidence = graph
+        .incidences()
+        .first()
+        .expect("on mode retains its structural incidence");
+    let active_branch = match &incidence.activation {
+        ActivationDomain::Conditional { cubes } => cubes[0].selections[0].branch.clone(),
+        ActivationDomain::Always => panic!("off-mode fixture incidence is conditional"),
+    };
+
+    let mut children = Vec::new();
+    for ordinal in 0..2 {
+        let assignment = mode_assignment(&graph, ordinal);
+        let active = assignment[0].branch == active_branch;
+        let child = with_cx(|cx| {
+            CausalizationReceiptDraft {
+                structure: graph.structure_identity_receipt(),
+                artifact: graph.artifact_identity_receipt(),
+                analysis: analysis(),
+                domain: CausalReceiptDomain::ModeCell { assignment },
+                determination: if active {
+                    DeterminationClass::WellDetermined
+                } else {
+                    DeterminationClass::EmptyProjection
+                },
+                structural_rank: if active {
+                    StructuralRankState::FullRelativeToMinSide
+                } else {
+                    StructuralRankState::NotApplicable
+                },
+                conditionality: Conditionality::Unconditional,
+                matching: active
+                    .then(|| CausalMatchingPair {
+                        incidence: incidence.id.clone(),
+                        equation: incidence.equation.clone(),
+                        variable: DerivativeVariableKey {
+                            variable: incidence.variable.clone(),
+                            derivative_order: incidence.derivative_order,
+                        },
+                    })
+                    .into_iter()
+                    .collect(),
+                unmatched_equations: Vec::new(),
+                unmatched_variables: Vec::new(),
+                conditional_outcomes: Vec::new(),
+                maximum_matching_certificate: None,
+                conditional_coverage: None,
+                unknown_axes: Vec::new(),
+                evidence: CausalReceiptEvidence::Unverified,
+            }
+            .admit_against(&graph, cx)
+        })
+        .expect("both on and empty off mode cells admit concretely");
+        children.push(child);
+    }
+    assert!(children.iter().any(|child| {
+        child.determination() == DeterminationClass::EmptyProjection
+            && child.structural_rank() == StructuralRankState::NotApplicable
+    }));
+    let outcomes = children
+        .iter()
+        .map(|child| conditional_outcome(child).expect("concrete mode child"))
+        .collect::<Vec<_>>();
+    let checker = cref!(CausalCheckerRef, "test/off-mode-summary-checker", 120);
+    let coverage = conditional_coverage_binding(
+        &graph,
+        &outcomes,
+        cref!(
+            ConditionalCoverageRef,
+            "test/off-mode-summary-coverage",
+            121
+        ),
+        checker.clone(),
+    )
+    .expect("complete coverage accepts the concrete empty mode");
+    let summary = CausalizationReceiptDraft {
+        structure: graph.structure_identity_receipt(),
+        artifact: graph.artifact_identity_receipt(),
+        analysis: analysis(),
+        domain: CausalReceiptDomain::HybridSummary,
+        determination: DeterminationClass::Unknown,
+        structural_rank: StructuralRankState::Unknown,
+        conditionality: Conditionality::Conditional,
+        matching: Vec::new(),
+        unmatched_equations: Vec::new(),
+        unmatched_variables: Vec::new(),
+        conditional_outcomes: outcomes,
+        maximum_matching_certificate: None,
+        conditional_coverage: Some(coverage),
+        unknown_axes: vec![
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Determination,
+                reason: CausalUnknownReason::NonUniformAcrossModes,
+                resume_checkpoint: None,
+            },
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::StructuralRank,
+                reason: CausalUnknownReason::NonUniformAcrossModes,
+                resume_checkpoint: None,
+            },
+        ],
+        evidence: CausalReceiptEvidence::CheckerReferenced(checker),
+    };
+    let admitted = with_cx(|cx| summary.admit_against(&graph, cx))
+        .expect("hybrid summary retains both the on and empty off mode");
+    assert_eq!(admitted.conditional_outcomes().len(), 2);
+    assert!(
+        admitted.conditional_outcomes().iter().any(|outcome| {
+            outcome.determination() == DeterminationClass::EmptyProjection
+                && outcome.structural_rank() == StructuralRankState::NotApplicable
+                && outcome.unknown_axes().is_empty()
+        }),
+        "the admitted summary must retain the concrete empty off-mode child"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Progress mutation, coverage refusal, and parent identity are one law.
+fn g3_unknown_hybrid_summary_retains_child_resume_state_without_claiming_coverage() {
+    let (machine, owner, clock) = minimal_machine();
+    let graph = hybrid_graph(&machine, &owner, &clock);
+    let incidence = graph
+        .incidences()
+        .iter()
+        .find(|incidence| incidence.solve_participation == SolveParticipation::Unknown)
+        .expect("hybrid fixture has an unknown structural incidence");
+    let active_branch = match &incidence.activation {
+        ActivationDomain::Conditional { cubes } => cubes[0].selections[0].branch.clone(),
+        ActivationDomain::Always => panic!("hybrid fixture incidence is conditional"),
+    };
+    let assignment = (0..2)
+        .map(|ordinal| mode_assignment(&graph, ordinal))
+        .find(|assignment| assignment[0].branch == active_branch)
+        .expect("one mode activates the unknown incidence");
+    let child_draft = CausalizationReceiptDraft {
+        structure: graph.structure_identity_receipt(),
+        artifact: graph.artifact_identity_receipt(),
+        analysis: analysis(),
+        domain: CausalReceiptDomain::ModeCell { assignment },
+        determination: DeterminationClass::Unknown,
+        structural_rank: StructuralRankState::Unknown,
+        conditionality: Conditionality::Unconditional,
+        matching: Vec::new(),
+        unmatched_equations: vec![incidence.equation.clone()],
+        unmatched_variables: vec![DerivativeVariableKey {
+            variable: incidence.variable.clone(),
+            derivative_order: incidence.derivative_order,
+        }],
+        conditional_outcomes: Vec::new(),
+        maximum_matching_certificate: None,
+        conditional_coverage: None,
+        unknown_axes: vec![
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Determination,
+                reason: CausalUnknownReason::BudgetExhausted,
+                resume_checkpoint: Some(cref!(
+                    CausalCheckpointRef,
+                    "test/mode-determination-resume",
+                    126
+                )),
+            },
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::StructuralRank,
+                reason: CausalUnknownReason::BudgetExhausted,
+                resume_checkpoint: Some(cref!(CausalCheckpointRef, "test/mode-rank-resume", 127)),
+            },
+        ],
+        evidence: CausalReceiptEvidence::Unverified,
+    };
+    let mut changed_progress = child_draft.clone();
+    changed_progress.unknown_axes[0].reason = CausalUnknownReason::Cancelled;
+    changed_progress.unknown_axes[0].resume_checkpoint = Some(cref!(
+        CausalCheckpointRef,
+        "test/mode-determination-cancelled",
+        128
+    ));
+    let child_a = with_cx(|cx| child_draft.admit_against(&graph, cx))
+        .expect("incomplete mode-cell receipt admits with exact resume state");
+    let child_b = with_cx(|cx| changed_progress.admit_against(&graph, cx))
+        .expect("alternate honest progress state admits");
+    assert_eq!(
+        child_a.outcome_identity(),
+        child_b.outcome_identity(),
+        "progress metadata is excluded from producer-independent outcome semantics"
+    );
+    assert_eq!(
+        child_a.outcome_identity_receipt().canonical_preimage(),
+        child_b.outcome_identity_receipt().canonical_preimage(),
+        "progress-only mutations must preserve the normalized outcome bytes"
+    );
+    assert_ne!(
+        child_a.identity(),
+        child_b.identity(),
+        "progress metadata remains bound by the full evidence receipt"
+    );
+    assert_ne!(
+        child_a.identity_receipt().canonical_preimage(),
+        child_b.identity_receipt().canonical_preimage(),
+        "progress-only mutations must move the complete receipt bytes"
+    );
+    let outcome_a = conditional_outcome(&child_a).expect("incomplete mode child projects");
+    let outcome_b = conditional_outcome(&child_b).expect("alternate mode child projects");
+    assert_eq!(outcome_a.unknown_axes(), child_a.unknown_axes());
+    assert_eq!(outcome_b.unknown_axes(), child_b.unknown_axes());
+    assert_eq!(
+        conditional_coverage_binding(
+            &graph,
+            core::slice::from_ref(&outcome_a),
+            cref!(ConditionalCoverageRef, "test/incomplete-mode-coverage", 129),
+            cref!(CausalCheckerRef, "test/incomplete-mode-checker", 130),
+        ),
+        Err(ConditionalCoverageBindingError::NonConcreteChild { outcome_index: 0 }),
+        "an incomplete child must never enter a complete-coverage commitment"
+    );
+
+    let mut foreign_draft = hybrid_draft(&owner, &clock);
+    foreign_draft.extraction = extraction(131);
+    let foreign_graph = with_cx(|cx| foreign_draft.admit_against(&machine, cx))
+        .expect("provenance-distinct foreign hybrid graph admits");
+    let foreign_child = mode_cell_receipt(&foreign_graph, mode_assignment(&foreign_graph, 0));
+    let foreign_outcome = conditional_outcome(&foreign_child).expect("foreign mode child");
+    let first_order = [outcome_a.clone(), foreign_outcome.clone()];
+    let reverse_order = [foreign_outcome, outcome_a.clone()];
+    let invalid_a = conditional_coverage_binding(
+        &graph,
+        &first_order,
+        cref!(ConditionalCoverageRef, "test/invalid-order-coverage", 132),
+        cref!(CausalCheckerRef, "test/invalid-order-checker", 133),
+    )
+    .expect_err("foreign and nonconcrete children refuse complete coverage");
+    let invalid_b = conditional_coverage_binding(
+        &graph,
+        &reverse_order,
+        cref!(ConditionalCoverageRef, "test/invalid-order-coverage", 132),
+        cref!(CausalCheckerRef, "test/invalid-order-checker", 133),
+    )
+    .expect_err("reversed invalid child multiset also refuses");
+    assert_eq!(
+        invalid_a, invalid_b,
+        "invalid coverage diagnostics must use fixed precedence and canonical indices"
+    );
+    assert!(matches!(
+        invalid_a,
+        ConditionalCoverageBindingError::ForeignGraph { .. }
+    ));
+
+    let summary_for = |outcome: ConditionalCausalOutcome| CausalizationReceiptDraft {
+        structure: graph.structure_identity_receipt(),
+        artifact: graph.artifact_identity_receipt(),
+        analysis: analysis(),
+        domain: CausalReceiptDomain::HybridSummary,
+        determination: DeterminationClass::Unknown,
+        structural_rank: StructuralRankState::Unknown,
+        conditionality: Conditionality::Unknown,
+        matching: Vec::new(),
+        unmatched_equations: Vec::new(),
+        unmatched_variables: Vec::new(),
+        conditional_outcomes: vec![outcome],
+        maximum_matching_certificate: None,
+        conditional_coverage: None,
+        unknown_axes: vec![
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Determination,
+                reason: CausalUnknownReason::IncompleteMetadata,
+                resume_checkpoint: None,
+            },
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::StructuralRank,
+                reason: CausalUnknownReason::IncompleteMetadata,
+                resume_checkpoint: None,
+            },
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Conditionality,
+                reason: CausalUnknownReason::IncompleteMetadata,
+                resume_checkpoint: None,
+            },
+        ],
+        evidence: CausalReceiptEvidence::Unverified,
+    };
+    let summary_a = with_cx(|cx| summary_for(outcome_a).admit_against(&graph, cx))
+        .expect("unknown summary retains incomplete child without coverage authority");
+    let summary_b = with_cx(|cx| summary_for(outcome_b).admit_against(&graph, cx))
+        .expect("unknown summary retains alternate progress state");
+    assert_eq!(summary_a.outcome_identity(), summary_b.outcome_identity());
+    assert_eq!(
+        summary_a.outcome_identity_receipt().canonical_preimage(),
+        summary_b.outcome_identity_receipt().canonical_preimage()
+    );
+    assert_ne!(summary_a.identity(), summary_b.identity());
+    assert_ne!(
+        summary_a.identity_receipt().canonical_preimage(),
+        summary_b.identity_receipt().canonical_preimage()
+    );
+    assert_eq!(summary_a.conditional_outcomes()[0].unknown_axes().len(), 2);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Concrete and incomplete child semantics are one aggregation law.
+fn g3_partial_hybrid_summary_does_not_confuse_missing_evidence_with_nonuniformity() {
+    let (machine, owner, clock) = minimal_machine();
+    let graph = hybrid_graph(&machine, &owner, &clock);
+    let active_unknown = graph
+        .incidences()
+        .iter()
+        .find(|incidence| incidence.solve_participation == SolveParticipation::Unknown)
+        .expect("hybrid fixture has an unknown structural incidence");
+    let active_branch = match &active_unknown.activation {
+        ActivationDomain::Conditional { cubes } => cubes[0].selections[0].branch.clone(),
+        ActivationDomain::Always => panic!("hybrid fixture incidence is conditional"),
+    };
+    let (active_assignment, inactive_assignment) = (0..2)
+        .map(|ordinal| mode_assignment(&graph, ordinal))
+        .partition::<Vec<_>, _>(|assignment| assignment[0].branch == active_branch);
+    let active_assignment = active_assignment
+        .into_iter()
+        .next()
+        .expect("one mode activates the unknown incidence");
+    let inactive_assignment = inactive_assignment
+        .into_iter()
+        .next()
+        .expect("one mode excludes the unknown incidence");
+
+    let concrete_child = mode_cell_receipt(&graph, active_assignment);
+    let incomplete_child = with_cx(|cx| {
+        CausalizationReceiptDraft {
+            structure: graph.structure_identity_receipt(),
+            artifact: graph.artifact_identity_receipt(),
+            analysis: analysis(),
+            domain: CausalReceiptDomain::ModeCell {
+                assignment: inactive_assignment,
+            },
+            determination: DeterminationClass::Unknown,
+            structural_rank: StructuralRankState::Unknown,
+            conditionality: Conditionality::Unconditional,
+            matching: Vec::new(),
+            unmatched_equations: vec![graph.equations()[0].id.clone()],
+            unmatched_variables: Vec::new(),
+            conditional_outcomes: Vec::new(),
+            maximum_matching_certificate: None,
+            conditional_coverage: None,
+            unknown_axes: vec![
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::Determination,
+                    reason: CausalUnknownReason::IncompleteMetadata,
+                    resume_checkpoint: None,
+                },
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::StructuralRank,
+                    reason: CausalUnknownReason::IncompleteMetadata,
+                    resume_checkpoint: None,
+                },
+            ],
+            evidence: CausalReceiptEvidence::Unverified,
+        }
+        .admit_against(&graph, cx)
+    })
+    .expect("honestly incomplete inactive mode admits");
+    let CausalReceiptDomain::ModeCell {
+        assignment: concrete_assignment,
+    } = concrete_child.domain()
+    else {
+        panic!("fixture child is a mode cell");
+    };
+    let expected_concrete_assignment = concrete_assignment.clone();
+    let CausalReceiptDomain::ModeCell {
+        assignment: incomplete_assignment,
+    } = incomplete_child.domain()
+    else {
+        panic!("fixture child is a mode cell");
+    };
+    let expected_incomplete_assignment = incomplete_assignment.clone();
+    let outcomes = vec![
+        conditional_outcome(&concrete_child).expect("concrete mode child projects"),
+        conditional_outcome(&incomplete_child).expect("incomplete mode child projects"),
+    ];
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome.determination() != DeterminationClass::Unknown)
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome.determination() == DeterminationClass::Unknown)
+    );
+    assert!(matches!(
+        conditional_coverage_binding(
+            &graph,
+            &outcomes,
+            cref!(ConditionalCoverageRef, "test/partial-mode-coverage", 138),
+            cref!(CausalCheckerRef, "test/partial-mode-checker", 139),
+        ),
+        Err(ConditionalCoverageBindingError::NonConcreteChild { .. })
+    ));
+
+    let summary = CausalizationReceiptDraft {
+        structure: graph.structure_identity_receipt(),
+        artifact: graph.artifact_identity_receipt(),
+        analysis: analysis(),
+        domain: CausalReceiptDomain::HybridSummary,
+        determination: DeterminationClass::Unknown,
+        structural_rank: StructuralRankState::Unknown,
+        conditionality: Conditionality::Unknown,
+        matching: Vec::new(),
+        unmatched_equations: Vec::new(),
+        unmatched_variables: Vec::new(),
+        conditional_outcomes: outcomes,
+        maximum_matching_certificate: None,
+        conditional_coverage: None,
+        unknown_axes: vec![
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Determination,
+                reason: CausalUnknownReason::IncompleteMetadata,
+                resume_checkpoint: None,
+            },
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::StructuralRank,
+                reason: CausalUnknownReason::IncompleteMetadata,
+                resume_checkpoint: None,
+            },
+            CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Conditionality,
+                reason: CausalUnknownReason::IncompleteMetadata,
+                resume_checkpoint: None,
+            },
+        ],
+        evidence: CausalReceiptEvidence::Unverified,
+    };
+    let admitted = with_cx(|cx| summary.admit_against(&graph, cx)).expect(
+        "partial summary retains concrete and incomplete children without inventing nonuniformity",
+    );
+    assert_eq!(admitted.conditional_outcomes().len(), 2);
+    let retained_concrete = admitted
+        .conditional_outcomes()
+        .iter()
+        .find(|outcome| outcome.assignment() == expected_concrete_assignment.as_slice())
+        .expect("admitted summary retains the concrete assignment");
+    assert_ne!(
+        retained_concrete.determination(),
+        DeterminationClass::Unknown
+    );
+    assert!(retained_concrete.unknown_axes().is_empty());
+    let retained_incomplete = admitted
+        .conditional_outcomes()
+        .iter()
+        .find(|outcome| outcome.assignment() == expected_incomplete_assignment.as_slice())
+        .expect("admitted summary retains the incomplete assignment");
+    assert_eq!(
+        retained_incomplete.determination(),
+        DeterminationClass::Unknown
+    );
+    assert_eq!(retained_incomplete.unknown_axes().len(), 2);
+    assert!(
+        retained_incomplete
+            .unknown_axes()
+            .iter()
+            .all(|state| state.reason == CausalUnknownReason::IncompleteMetadata)
+    );
+    assert!(
+        admitted
+            .unknown_axes()
+            .iter()
+            .all(|state| state.reason != CausalUnknownReason::NonUniformAcrossModes),
+        "one concrete value plus missing evidence is not a disagreement theorem"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Agreeing and disagreeing concrete folds share one fixture.
+fn g3_partial_hybrid_aggregation_uses_only_concrete_disagreements() {
+    let (machine, owner, clock) = minimal_machine();
+    let graph = cartesian_hybrid_graph(&machine, &owner, &clock, 3);
+    let concrete_outcomes = (0..6)
+        .map(|ordinal| {
+            let child = mode_cell_receipt(&graph, cartesian_mode_assignment(&graph, ordinal));
+            conditional_outcome(&child).expect("concrete Cartesian mode child projects")
+        })
+        .collect::<Vec<_>>();
+    let anchor = concrete_outcomes[0].clone();
+    let agreeing = concrete_outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.determination() == anchor.determination()
+                && outcome.structural_rank() == anchor.structural_rank()
+        })
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        agreeing.len(),
+        3,
+        "the 2x3 fixture supplies three concrete cells with equal axes"
+    );
+    let disagreeing = concrete_outcomes
+        .iter()
+        .find(|outcome| {
+            outcome.determination() != anchor.determination()
+                && outcome.structural_rank() != anchor.structural_rank()
+        })
+        .cloned()
+        .expect("the other primary mode supplies a concrete axis disagreement");
+    let incomplete_child = incomplete_mode_cell_receipt(&graph, agreeing[2].assignment().to_vec());
+    let incomplete =
+        conditional_outcome(&incomplete_child).expect("incomplete Cartesian child projects");
+
+    let summary_for = |conditional_outcomes: Vec<ConditionalCausalOutcome>, nonuniform: bool| {
+        let aggregate_reason = if nonuniform {
+            CausalUnknownReason::NonUniformAcrossModes
+        } else {
+            CausalUnknownReason::IncompleteMetadata
+        };
+        CausalizationReceiptDraft {
+            structure: graph.structure_identity_receipt(),
+            artifact: graph.artifact_identity_receipt(),
+            analysis: analysis(),
+            domain: CausalReceiptDomain::HybridSummary,
+            determination: DeterminationClass::Unknown,
+            structural_rank: StructuralRankState::Unknown,
+            conditionality: Conditionality::Unknown,
+            matching: Vec::new(),
+            unmatched_equations: Vec::new(),
+            unmatched_variables: Vec::new(),
+            conditional_outcomes,
+            maximum_matching_certificate: None,
+            conditional_coverage: None,
+            unknown_axes: vec![
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::Determination,
+                    reason: aggregate_reason,
+                    resume_checkpoint: None,
+                },
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::StructuralRank,
+                    reason: aggregate_reason,
+                    resume_checkpoint: None,
+                },
+                CausalUnknownAxisState {
+                    axis: CausalOutcomeAxis::Conditionality,
+                    reason: CausalUnknownReason::IncompleteMetadata,
+                    resume_checkpoint: None,
+                },
+            ],
+            evidence: CausalReceiptEvidence::Unverified,
+        }
+    };
+
+    let agreeing_summary = with_cx(|cx| {
+        summary_for(
+            vec![agreeing[0].clone(), agreeing[1].clone(), incomplete.clone()],
+            false,
+        )
+        .admit_against(&graph, cx)
+    })
+    .expect("two agreeing concrete cells plus one unknown cell are not nonuniform");
+    assert!(
+        agreeing_summary
+            .unknown_axes()
+            .iter()
+            .all(|state| state.reason != CausalUnknownReason::NonUniformAcrossModes)
+    );
+
+    let disagreeing_summary = with_cx(|cx| {
+        summary_for(vec![agreeing[0].clone(), disagreeing, incomplete], true)
+            .admit_against(&graph, cx)
+    })
+    .expect("two disagreeing concrete cells require nonuniformity despite an unknown peer");
+    assert_eq!(
+        disagreeing_summary
+            .unknown_axes()
+            .iter()
+            .filter(|state| state.reason == CausalUnknownReason::NonUniformAcrossModes)
+            .count(),
+        2,
+        "only the two disagreeing concrete axes are classified as nonuniform"
+    );
 }
 
 #[test]
@@ -1633,6 +2929,14 @@ fn g0_uniform_theorem_axes_obey_exact_bipartition_semantics() {
             DeterminationClass::Mixed,
             StructuralRankState::NotApplicable,
         ),
+        (
+            DeterminationClass::EmptyProjection,
+            StructuralRankState::FullRelativeToMinSide,
+        ),
+        (
+            DeterminationClass::EmptyProjection,
+            StructuralRankState::Deficient,
+        ),
     ] {
         let refusal = ConditionalCoverageBinding::for_uniform_theorem(
             &graph,
@@ -1674,6 +2978,10 @@ fn g0_uniform_theorem_axes_obey_exact_bipartition_semantics() {
     }
 
     for (determination, rank) in [
+        (
+            DeterminationClass::EmptyProjection,
+            StructuralRankState::NotApplicable,
+        ),
         (
             DeterminationClass::WellDetermined,
             StructuralRankState::FullRelativeToMinSide,
@@ -2379,12 +3687,14 @@ fn g0_schema_migration_binds_complete_same_family_native_receipt() {
         0,
     )
     .expect("legacy predecessor receipt");
-    let migration = CausalSchemaMigrationDraft::for_structure(
-        predecessor,
-        &graph,
-        cref!(CausalMigrationRef, "test/causal-migration", 62),
-    )
-    .admit()
+    let migration = with_cx(|cx| {
+        CausalSchemaMigrationDraft::for_structure(
+            predecessor,
+            &graph,
+            cref!(CausalMigrationRef, "test/causal-migration", 62),
+        )
+        .admit(cx)
+    })
     .expect("same-family migration admits");
     let target = graph.structure_identity_receipt();
     assert_eq!(migration.target_identity(), *target.id().as_bytes());
@@ -2446,17 +3756,19 @@ fn g0_schema_migration_refuses_incomplete_history_and_family_or_version_substitu
     )
     .expect("legacy wrong-family receipt");
     assert_eq!(
-        CausalSchemaMigrationDraft::for_structure(
-            wrong_family,
-            &graph,
-            cref!(CausalMigrationRef, "test/wrong-family-migration", 115),
-        )
-        .admit(),
+        with_cx(|cx| {
+            CausalSchemaMigrationDraft::for_structure(
+                wrong_family,
+                &graph,
+                cref!(CausalMigrationRef, "test/wrong-family-migration", 115),
+            )
+            .admit(cx)
+        }),
         Err(CausalMigrationError::ArtifactKindMismatch)
     );
     let same_version = HistoricalCausalIdentityReceipt::new(
         CausalMigrationArtifactKind::Structure,
-        CAUSAL_GRAPH_SCHEMA_VERSION_V1,
+        CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1,
         [7; 32],
         [8; 32],
         [9; 32],
@@ -2466,15 +3778,17 @@ fn g0_schema_migration_refuses_incomplete_history_and_family_or_version_substitu
     )
     .expect("canonical same-version predecessor");
     assert_eq!(
-        CausalSchemaMigrationDraft::for_structure(
-            same_version,
-            &graph,
-            cref!(CausalMigrationRef, "test/not-older-migration", 116),
-        )
-        .admit(),
+        with_cx(|cx| {
+            CausalSchemaMigrationDraft::for_structure(
+                same_version,
+                &graph,
+                cref!(CausalMigrationRef, "test/not-older-migration", 116),
+            )
+            .admit(cx)
+        }),
         Err(CausalMigrationError::PredecessorNotOlder {
-            predecessor: CAUSAL_GRAPH_SCHEMA_VERSION_V1,
-            target: CAUSAL_GRAPH_SCHEMA_VERSION_V1,
+            predecessor: CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1,
+            target: CAUSAL_STRUCTURE_IDENTITY_SCHEMA_VERSION_V1,
         })
     );
 }
@@ -2493,12 +3807,14 @@ fn g0_schema_migration_binds_graph_artifact_and_causalization_receipt_targets() 
         0,
     )
     .expect("legacy graph-artifact predecessor");
-    let graph_migration = CausalSchemaMigrationDraft::for_graph_artifact(
-        graph_predecessor,
-        &graph,
-        cref!(CausalMigrationRef, "test/graph-artifact-migration", 117),
-    )
-    .admit()
+    let graph_migration = with_cx(|cx| {
+        CausalSchemaMigrationDraft::for_graph_artifact(
+            graph_predecessor,
+            &graph,
+            cref!(CausalMigrationRef, "test/graph-artifact-migration", 117),
+        )
+        .admit(cx)
+    })
     .expect("graph-artifact migration admits");
     let graph_target = graph.artifact_identity_receipt();
     assert_eq!(
@@ -2543,12 +3859,14 @@ fn g0_schema_migration_binds_graph_artifact_and_causalization_receipt_targets() 
         0,
     )
     .expect("legacy causalization predecessor");
-    let receipt_migration = CausalSchemaMigrationDraft::for_causalization_receipt(
-        receipt_predecessor,
-        &causalization,
-        cref!(CausalMigrationRef, "test/causalization-migration", 118),
-    )
-    .admit()
+    let receipt_migration = with_cx(|cx| {
+        CausalSchemaMigrationDraft::for_causalization_receipt(
+            receipt_predecessor,
+            &causalization,
+            cref!(CausalMigrationRef, "test/causalization-migration", 118),
+        )
+        .admit(cx)
+    })
     .expect("causalization migration admits");
     let receipt_target = causalization.identity_receipt();
     assert_eq!(
@@ -2811,6 +4129,29 @@ fn g4_pre_cancelled_public_identity_constructors_publish_nothing() {
     assert_eq!(
         maximum_error,
         MaximumMatchingBindingError::Identity(CanonicalError::Cancelled { absorbed_bytes: 0 })
+    );
+
+    let predecessor = HistoricalCausalIdentityReceipt::new(
+        CausalMigrationArtifactKind::Structure,
+        0,
+        [122; 32],
+        [123; 32],
+        [124; 32],
+        0,
+        0,
+        0,
+    )
+    .expect("legacy predecessor receipt");
+    let migration = CausalSchemaMigrationDraft::for_structure(
+        predecessor,
+        &graph,
+        cref!(CausalMigrationRef, "test/cancelled-migration", 125),
+    );
+    let migration_error = with_cancelled_cx(|cx| migration.admit(cx))
+        .expect_err("pre-cancelled migration must publish no identity");
+    assert_eq!(
+        migration_error,
+        CausalMigrationError::Identity(CanonicalError::Cancelled { absorbed_bytes: 0 })
     );
 
     let conditional_graph = hybrid_graph(&machine, &owner, &clock);
