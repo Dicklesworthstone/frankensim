@@ -11,6 +11,9 @@ use fs_obs::containment::{
 };
 use fs_obs::{lint_failure_record, validate_line};
 
+const SUITE: &str = "fs-obs/containment";
+const FIXED_INPUT_SEED: u64 = 0;
+
 fn ctx() -> ContainmentContext {
     ContainmentContext {
         dsr_run: Some(DsrRunId::new("dsr-7").unwrap()),
@@ -53,10 +56,22 @@ fn node(record: &ContainmentRecord) -> LocalParent {
 }
 
 fn verdict(case: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-obs/containment\",\"case\":\"{case}\",\
-         \"verdict\":\"pass\",\"detail\":\"{detail}\"}}"
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed: FIXED_INPUT_SEED,
+        },
+        None,
     );
+    lint_failure_record(&event).expect("containment verdict must be replayable");
+    let line = event.to_jsonl();
+    validate_line(&line).expect("containment verdict must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 #[test]
