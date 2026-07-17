@@ -388,6 +388,23 @@ one structured red record plus `assert_green` refusal. This Casebook tranche is
 portable G0 evidence; it preserves the larger batteries and makes no new
 performance or dual-ISA execution claim. The structured tranche remains
 central-package-proof pending.
+`tests/frankenscipy_linalg_oracle_casebook.rs` adds a dev-only external oracle
+for the public dense factorization solve seam. It retains an exact manufactured
+system plus finite general-LU and positive-definite Cholesky fixtures, comparing
+`factor::{lu, cholesky}` with the declared `fsci-linalg = 0.1.0` Rust oracle.
+Canonical input frames bind the authoritative `constellation.lock` sibling pin,
+both crate versions, exact factorization choices and oracle options, matrices,
+right-hand sides, reference solutions, residual policy, and agreement ceilings. Output
+receipts retain both implementations' solution bits, residuals, deltas, and
+margins and must replay exactly within one executing build. Non-finite output,
+scaled residual above its ceiling, or excess cross-oracle or
+manufactured-reference delta fails closed. A disclosed seeded reference-bit
+mutation must reproduce one stable red record that the
+`assert_green` merge gate refuses. The path dependency does not itself attest
+the live sibling checkout identity. This finite battery is not Python SciPy
+evidence, a conditioning survey, or a forward-error certificate; it makes no
+claim for singular or ill-conditioned systems, QR/SVD/eigen/least-squares,
+performance, cancellation, or fresh cross-ISA execution.
 `fs-ad/tests/la_dual_bridge_casebook.rs` is the cross-crate G0 seam for the
 generic reference kernel. It runs a literal `Dual64<2>` 2x2 product inside
 fs-la, pins both derivative lanes, compares them bitwise with two `Dual64<1>`

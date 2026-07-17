@@ -23,6 +23,7 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-casebook = { path = "../fs-casebook" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-roofline = { path = "../fs-roofline" }
+fsci-linalg = { path = "../../../frankenscipy/crates/fsci-linalg", version = "=0.1.0" }
 
 [build-dependencies]
 fs-blake3 = { path = "../fs-blake3" }
