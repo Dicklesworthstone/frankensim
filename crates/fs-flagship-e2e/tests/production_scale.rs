@@ -1,8 +1,9 @@
 //! Ignored production-scale battery scaffold for `frankensim-ei3b`.
 //!
 //! The scalar-field tranche exercises the arena/operation-lease path at exact
-//! 128^3 and 256^3 shapes. The sparse tranche compares one serial and one real
-//! TilePool sweep over exactly 1,000,000 active D3Q19 cells. Both preserve
+//! 128^3 and 256^3 shapes. The sparse tranche compares one serial sweep with
+//! two sequential real TilePool sweeps at distinct worker counts over exactly
+//! 1,000,000 active D3Q19 cells. Both preserve
 //! explicit no-claim boundaries for NUMA, CCD, quiet-host, cross-ISA, and
 //! macOS peak-RSS acceptance that still need admitted host evidence.
 //!
@@ -844,6 +845,63 @@ fn sparse_mass_roundoff_bound(population_values: usize) -> f64 {
     8.0 * scaled_epsilon / (1.0 - scaled_epsilon)
 }
 
+#[derive(Clone, Copy)]
+struct SparseStateComparison {
+    first_divergence: Option<usize>,
+    population_counts_exact: bool,
+    populations_finite: bool,
+}
+
+impl SparseStateComparison {
+    fn exact(self) -> bool {
+        self.first_divergence.is_none() && self.population_counts_exact && self.populations_finite
+    }
+}
+
+fn compare_sparse_states(
+    reference: &SparseGrid3,
+    candidate: &SparseGrid3,
+    expected_population_values: usize,
+) -> SparseStateComparison {
+    let reference_bits = reference.state_bits();
+    let candidate_bits = candidate.state_bits();
+    let first_divergence = reference_bits
+        .iter()
+        .zip(&candidate_bits)
+        .position(|(reference, candidate)| reference != candidate)
+        .or_else(|| {
+            (reference_bits.len() != candidate_bits.len())
+                .then_some(reference_bits.len().min(candidate_bits.len()))
+        });
+    let population_counts_exact = reference_bits.len() == expected_population_values
+        && candidate_bits.len() == expected_population_values;
+    let populations_finite = reference_bits
+        .iter()
+        .chain(&candidate_bits)
+        .all(|bits| f64::from_bits(*bits).is_finite());
+    SparseStateComparison {
+        first_divergence,
+        population_counts_exact,
+        populations_finite,
+    }
+}
+
+fn sparse_reports_complete(reports: &[RunReport], pool: &TilePool, expected_groups: usize) -> bool {
+    let expected_groups = u64::try_from(expected_groups).expect("groups fit u64");
+    reports.len() == 2
+        && reports[0].kernel == "fs-lbm/d3q19-sparse-collide"
+        && reports[1].kernel == "fs-lbm/d3q19-sparse-stream"
+        && reports.iter().all(|report| {
+            report.mode == "deterministic"
+                && report.declared_run.0 == 0
+                && report.completed == expected_groups
+                && report.total == expected_groups
+                && report.cancel_latencies_ns.is_empty()
+                && report.tiles_by_worker.len() == pool.workers()
+                && report.tiles_by_worker.iter().sum::<u64>() == expected_groups
+        })
+}
+
 fn named_sparse_open_claims(evidence: &mut Evidence, profile: Profile) {
     let domain = format!("{} sparse D3Q19 million-cell acceptance", profile.name);
     for (capability, detail) in [
@@ -865,11 +923,7 @@ fn named_sparse_open_claims(evidence: &mut Evidence, profile: Profile) {
         ),
         (
             "million-cell-mid-stream-cancellation",
-            "this tranche runs one open-gate sweep; the scale cancellation-latency bead owns timed mid-stream request, drain, and finalize evidence",
-        ),
-        (
-            "million-cell-worker-count-bit-identity",
-            "pooled output is compared bit-for-bit with one serial reference, but no second pooled worker-count run is retained at this scale",
+            "this tranche runs two sequential open-gate pooled sweeps; the scale cancellation-latency bead owns timed mid-stream request, drain, and finalize evidence",
         ),
         (
             "cross-isa-bit-identity",
@@ -919,12 +973,18 @@ fn production_scale_sparse_lbm_million_cells() {
     let published_bytes = published_values
         .checked_mul(size_of::<f64>())
         .expect("sparse published-population bytes fit usize");
-    let harness_retained_state_bytes = retained_state_bytes
+    let peak_harness_retained_state_bytes = retained_state_bytes
         .checked_mul(2)
-        .expect("serial plus pooled retained-state bytes fit usize");
-    let oracle_copy_bytes = published_bytes
+        .expect("serial plus one pooled retained-state payload fit usize");
+    let total_grid_state_allocation_bytes = retained_state_bytes
+        .checked_mul(3)
+        .expect("serial plus two sequential pooled state allocations fit usize");
+    let peak_oracle_copy_bytes = published_bytes
         .checked_mul(2)
-        .expect("serial plus pooled oracle-copy bytes fit usize");
+        .expect("one serial/pool oracle comparison fits usize");
+    let total_oracle_copy_bytes = peak_oracle_copy_bytes
+        .checked_mul(2)
+        .expect("two serial/pool oracle comparisons fit usize");
     let expected_groups = tiles.len().div_ceil(SPARSE_SWEEP_GROUP_TILES);
     let mass_bound = sparse_mass_roundoff_bound(published_values);
     let tile_domain_edge = SPARSE_DOMAIN_EDGE / TILE;
@@ -944,15 +1004,26 @@ fn production_scale_sparse_lbm_million_cells() {
         .finish();
 
     let logical_cpus = std::thread::available_parallelism().map_or(1, usize::from);
-    let pool = TilePool::for_host(logical_cpus, SPARSE_POOL_SEED);
-    let placement_identity = pool.placement_identity();
-    let placement_round_trips = pool
+    let alternate_workers = logical_cpus.div_ceil(2).max(1);
+    let worker_counts_distinct = alternate_workers != logical_cpus;
+    let primary_pool = TilePool::for_host(logical_cpus, SPARSE_POOL_SEED);
+    let alternate_pool = TilePool::for_host(alternate_workers, SPARSE_POOL_SEED);
+    let primary_placement_identity = primary_pool.placement_identity();
+    let alternate_placement_identity = alternate_pool.placement_identity();
+    let placement_identities_distinct = primary_placement_identity != alternate_placement_identity;
+    let primary_placement_round_trips = primary_pool
         .admit_retained_placement_identity(
             TilePool::PLACEMENT_IDENTITY_VERSION,
-            &placement_identity,
+            &primary_placement_identity,
         )
         .is_ok();
-    let identity = fs_obs::ident::IdentityBuilder::new("production-scale-sparse-d3q19-v1")
+    let alternate_placement_round_trips = alternate_pool
+        .admit_retained_placement_identity(
+            TilePool::PLACEMENT_IDENTITY_VERSION,
+            &alternate_placement_identity,
+        )
+        .is_ok();
+    let identity = fs_obs::ident::IdentityBuilder::new("production-scale-sparse-d3q19-v2")
         .str("profile", profile.name)
         .str("build-mode", "debug-assertions-off-profile-unattested")
         .str("os", std::env::consts::OS)
@@ -1002,12 +1073,21 @@ fn production_scale_sparse_lbm_million_cells() {
             u64::try_from(retained_state_bytes).expect("retained bytes fit u64"),
         )
         .u64(
-            "serial-plus-pooled-retained-state-bytes",
-            u64::try_from(harness_retained_state_bytes).expect("harness bytes fit u64"),
+            "peak-serial-plus-one-pooled-retained-state-bytes",
+            u64::try_from(peak_harness_retained_state_bytes).expect("peak bytes fit u64"),
         )
         .u64(
-            "oracle-copy-bytes",
-            u64::try_from(oracle_copy_bytes).expect("oracle bytes fit u64"),
+            "total-three-grid-state-allocation-bytes",
+            u64::try_from(total_grid_state_allocation_bytes)
+                .expect("total grid state bytes fit u64"),
+        )
+        .u64(
+            "peak-oracle-copy-bytes",
+            u64::try_from(peak_oracle_copy_bytes).expect("peak oracle bytes fit u64"),
+        )
+        .u64(
+            "total-oracle-copy-bytes",
+            u64::try_from(total_oracle_copy_bytes).expect("total oracle bytes fit u64"),
         )
         .str("collision-model", "D3Q19-BGK")
         .f64_bits("tau", SPARSE_TAU)
@@ -1018,14 +1098,18 @@ fn production_scale_sparse_lbm_million_cells() {
         .f64_bits("perturb-amplitude", SPARSE_PERTURB_AMPLITUDE)
         .u64("pooled-run-seed", SPARSE_POOL_SEED)
         .u64("declared-run-id", 0)
-        .u64("pooled-steps", 1)
+        .u64("pooled-runs", 2)
+        .u64("pooled-steps-per-run", 1)
         .str("serial-activation-order", "ascending-coordinate-input")
         .str("pooled-activation-order", "descending-coordinate-input")
         .str("canonical-active-order", "ascending-morton")
         .child("active-key-set", &active_set_identity)
         .str("serial-step", "SparseGrid3::step_serial-one-step")
         .str("pooled-step", "SparseGrid3::step_pooled-two-pass-v1")
-        .str("state-oracle", "full-u64-bit-vector-equality")
+        .str(
+            "state-oracle",
+            "serial-vs-primary-and-alternate-full-u64-bit-vector-equality",
+        )
         .str("mass-bound-policy", "sparse-mass-roundoff-envelope-v1")
         .str("mass-bound-formula", "8*n*epsilon/(1-n*epsilon)")
         .u64("mass-bound-multiplier", 8)
@@ -1043,14 +1127,25 @@ fn production_scale_sparse_lbm_million_cells() {
             u64::try_from(expected_groups).expect("group count fits u64"),
         )
         .u64(
-            "pool-workers",
-            u64::try_from(pool.workers()).expect("pool workers fit u64"),
+            "primary-pool-workers",
+            u64::try_from(primary_pool.workers()).expect("primary workers fit u64"),
+        )
+        .u64(
+            "alternate-pool-workers",
+            u64::try_from(alternate_pool.workers()).expect("alternate workers fit u64"),
         )
         .u64(
             "pool-placement-identity-version",
             u64::from(TilePool::PLACEMENT_IDENTITY_VERSION),
         )
-        .str("pool-placement-identity", &placement_identity)
+        .str(
+            "primary-pool-placement-identity",
+            &primary_placement_identity,
+        )
+        .str(
+            "alternate-pool-placement-identity",
+            &alternate_placement_identity,
+        )
         .u64(
             "d3q19-bit-semantics-version",
             u64::from(D3Q19_BIT_SEMANTICS_VERSION),
@@ -1059,7 +1154,7 @@ fn production_scale_sparse_lbm_million_cells() {
         .str("harness-version", env!("CARGO_PKG_VERSION"))
         .str(
             "memory-admission",
-            "coarse-caller-held-two-grid-retained-population-state-only",
+            "coarse-caller-held-serial-plus-one-sequential-pooled-state-only",
         )
         .exclude(
             "phase-wall-ns",
@@ -1094,20 +1189,26 @@ fn production_scale_sparse_lbm_million_cells() {
                  \"active_cube_edge_tiles\":{active_edge},\"active_tiles\":{active_tiles},\
                  \"active_cells\":{active_cells},\"bytes_per_tile\":{bytes_per_tile},\
                  \"workload_retained_state_bytes\":{retained_state_bytes},\
-                 \"harness_retained_state_bytes\":{harness_retained_state_bytes},\
-                 \"oracle_copy_bytes\":{oracle_copy_bytes},\
+                 \"peak_harness_retained_state_bytes\":{peak_harness_retained_state_bytes},\
+                 \"total_grid_state_allocation_bytes\":{total_grid_state_allocation_bytes},\
+                 \"peak_oracle_copy_bytes\":{peak_oracle_copy_bytes},\
+                 \"total_oracle_copy_bytes\":{total_oracle_copy_bytes},\
                  \"collision_model\":\"D3Q19-BGK\",\"tau_bits\":{tau_bits_json},\
                  \"force_bits\":[{force_x_json},{force_y_json},{force_z_json}],\
                  \"perturb_seed\":{perturb_seed_json},\
                  \"perturb_amplitude_bits\":{perturb_amplitude_json},\
-                 \"pool_seed\":{pool_seed_json},\"steps\":1,\
+                 \"pool_seed\":{pool_seed_json},\"pooled_runs\":2,\"steps_per_run\":1,\
                  \"expected_kernel_groups\":{expected_groups},\
                  \"mass_bound_policy\":\"sparse-mass-roundoff-envelope-v1\",\
                  \"mass_bound_formula\":\"8*n*epsilon/(1-n*epsilon)\",\
                  \"mass_bound_multiplier\":8,\"mass_bound\":{mass_bound_json},\
                  \"mass_bound_bits\":{mass_bound_bits_json},\
-                 \"workers\":{logical_cpus},\
-                 \"placement_identity\":{placement_json},\
+                 \"primary_workers\":{logical_cpus},\
+                 \"alternate_workers\":{alternate_workers},\
+                 \"worker_counts_distinct\":{worker_counts_distinct},\
+                 \"placement_identities_distinct\":{placement_identities_distinct},\
+                 \"primary_placement_identity\":{primary_placement_json},\
+                 \"alternate_placement_identity\":{alternate_placement_json},\
                  \"active_key_set_identity\":{active_set_json},\
                  \"active_key_set_identity_root\":{active_set_root},\
                  \"replay_identity\":{identity_json},\
@@ -1131,7 +1232,8 @@ fn production_scale_sparse_lbm_million_cells() {
                 pool_seed_json = json_string(&format!("0x{SPARSE_POOL_SEED:016x}")),
                 mass_bound_json = json_f64(mass_bound),
                 mass_bound_bits_json = json_string(&format!("0x{:016x}", mass_bound.to_bits())),
-                placement_json = json_string(&placement_identity),
+                primary_placement_json = json_string(&primary_placement_identity),
+                alternate_placement_json = json_string(&alternate_placement_identity),
                 active_set_json = json_string(&active_set_identity.hex()),
                 active_set_root = active_set_identity.root(),
                 identity_json = json_string(&identity.hex()),
@@ -1159,13 +1261,13 @@ fn production_scale_sparse_lbm_million_cells() {
         &sparse_domain,
         CapabilityDecision::Restricted,
         format!(
-            "the planned {harness_retained_state_bytes}-byte charge is detached accounting for two exact {retained_state_bytes}-byte retained population payloads only; actual grid, oracle, and TilePool allocations are not charged"
+            "the planned {peak_harness_retained_state_bytes}-byte charge is detached peak accounting for the serial grid plus one of two sequential pooled grids; three grid constructions allocate {total_grid_state_allocation_bytes} logical state bytes in total, and actual grid, oracle, and TilePool allocations are not charged"
         ),
     );
 
     let rss_before = linux_peak_rss_bytes();
     let retained_lease_bytes =
-        u64::try_from(harness_retained_state_bytes).expect("harness bytes fit u64");
+        u64::try_from(peak_harness_retained_state_bytes).expect("peak harness bytes fit u64");
     let retained_lease = OperationMemoryLease::bounded(retained_lease_bytes);
     let retained_charge =
         match retained_lease.reserve(SPARSE_STATE_LEASE_SITE, retained_lease_bytes) {
@@ -1354,15 +1456,15 @@ fn production_scale_sparse_lbm_million_cells() {
         );
     }
 
-    let gate = CancelGate::new();
-    let runner = RecordingRunner::new(&pool);
+    let primary_gate = CancelGate::new();
+    let primary_runner = RecordingRunner::new(&primary_pool);
     let pooled_step_start = Instant::now();
-    let pooled_step = pooled.step_pooled(&runner, &gate);
+    let pooled_step = pooled.step_pooled(&primary_runner, &primary_gate);
     let pooled_step_time = pooled_step_start.elapsed();
     emit_phase(
         &mut evidence,
         "sparse-d3q19-million-active",
-        "tilepool_step_ns",
+        "primary_tilepool_step_ns",
         pooled_step_time,
         identity.root(),
     );
@@ -1370,64 +1472,164 @@ fn production_scale_sparse_lbm_million_cells() {
         evidence.verdict(
             "scale-sparse-lbm-million-active",
             false,
-            format!("pooled million-cell sweep refused: {error}"),
+            format!("primary pooled million-cell sweep refused: {error}"),
         );
     }
-    let reports = runner.reports();
+    let primary_reports = primary_runner.reports();
 
     let oracle_start = Instant::now();
-    let serial_bits = serial.state_bits();
-    let pooled_bits = pooled.state_bits();
-    let first_divergence = serial_bits
-        .iter()
-        .zip(&pooled_bits)
-        .position(|(serial, pooled)| serial != pooled)
-        .or_else(|| {
-            (serial_bits.len() != pooled_bits.len())
-                .then_some(serial_bits.len().min(pooled_bits.len()))
-        });
-    let state_bits_equal = first_divergence.is_none();
-    let population_values_exact = pooled_bits.len() == published_values;
-    let populations_finite = pooled_bits
-        .iter()
-        .all(|bits| f64::from_bits(*bits).is_finite());
-    drop(serial_bits);
-    drop(pooled_bits);
+    let primary_comparison = compare_sparse_states(&serial, &pooled, published_values);
     let oracle_time = oracle_start.elapsed();
     emit_phase(
         &mut evidence,
         "sparse-d3q19-million-active",
-        "exact_full_state_oracle_ns",
+        "primary_exact_full_state_oracle_ns",
         oracle_time,
         identity.root(),
     );
 
     let serial_final_mass = serial.total_mass();
-    let pooled_final_mass = pooled.total_mass();
+    let primary_final_mass = pooled.total_mass();
     let mass_scale = serial_initial_mass.abs().max(1.0);
     let serial_mass_residual = (serial_final_mass - serial_initial_mass).abs() / mass_scale;
-    let pooled_mass_residual = (pooled_final_mass - pooled_initial_mass).abs() / mass_scale;
-    let mass_pass = serial_initial_mass.is_finite()
+    let primary_mass_residual = (primary_final_mass - pooled_initial_mass).abs() / mass_scale;
+    let primary_mass_pass = serial_initial_mass.is_finite()
         && serial_final_mass.is_finite()
         && pooled_initial_mass.is_finite()
-        && pooled_final_mass.is_finite()
+        && primary_final_mass.is_finite()
         && serial_mass_residual <= mass_bound
-        && pooled_mass_residual <= mass_bound
-        && serial_final_mass.to_bits() == pooled_final_mass.to_bits();
-    let report_pass = reports.len() == 2
-        && reports[0].kernel == "fs-lbm/d3q19-sparse-collide"
-        && reports[1].kernel == "fs-lbm/d3q19-sparse-stream"
-        && reports.iter().all(|report| {
-            report.mode == "deterministic"
-                && report.declared_run.0 == 0
-                && report.completed == u64::try_from(expected_groups).expect("groups fit u64")
-                && report.total == u64::try_from(expected_groups).expect("groups fit u64")
-                && report.cancel_latencies_ns.is_empty()
-                && report.tiles_by_worker.len() == pool.workers()
-                && report.tiles_by_worker.iter().sum::<u64>()
-                    == u64::try_from(expected_groups).expect("groups fit u64")
-        });
-    let pool_stats = pool.arena_pool().stats();
+        && primary_mass_residual <= mass_bound
+        && serial_final_mass.to_bits() == primary_final_mass.to_bits();
+    let primary_report_pass =
+        sparse_reports_complete(&primary_reports, &primary_pool, expected_groups);
+    let primary_pool_stats = primary_pool.arena_pool().stats();
+    let primary_pass = layout_pass
+        && serial.steps() == 1
+        && pooled.steps() == 1
+        && serial.allocated_state_bytes() == retained_state_bytes
+        && pooled.allocated_state_bytes() == retained_state_bytes
+        && primary_comparison.exact()
+        && primary_mass_pass
+        && primary_report_pass
+        && !primary_gate.is_requested()
+        && primary_placement_round_trips
+        && primary_pool_stats.quiescent()
+        && primary_pool_stats.arenas_live == 0;
+
+    let primary_drop_start = Instant::now();
+    drop(pooled);
+    let primary_drop = primary_drop_start.elapsed();
+    emit_phase(
+        &mut evidence,
+        "sparse-d3q19-million-active",
+        "drop_primary_pooled_grid_ns",
+        primary_drop,
+        identity.root(),
+    );
+
+    let alternate_setup_start = Instant::now();
+    let mut alternate = match SparseGrid3::new(
+        SPARSE_DOMAIN_EDGE,
+        SPARSE_DOMAIN_EDGE,
+        SPARSE_DOMAIN_EDGE,
+        SPARSE_TAU,
+        SPARSE_FORCE,
+    ) {
+        Ok(grid) => grid,
+        Err(error) => {
+            evidence.verdict(
+                "scale-sparse-lbm-million-active",
+                false,
+                format!("alternate pooled sparse-grid construction refused: {error}"),
+            );
+            unreachable!("failing verdict asserts")
+        }
+    };
+    if let Err(error) = alternate.activate_tiles(&reverse_tiles) {
+        evidence.verdict(
+            "scale-sparse-lbm-million-active",
+            false,
+            format!("alternate pooled million-cell activation refused: {error}"),
+        );
+    }
+    alternate.perturb(SPARSE_PERTURB_SEED, SPARSE_PERTURB_AMPLITUDE);
+    let alternate_setup = alternate_setup_start.elapsed();
+    emit_phase(
+        &mut evidence,
+        "sparse-d3q19-million-active",
+        "alternate_construct_activate_perturb_ns",
+        alternate_setup,
+        identity.root(),
+    );
+
+    let alternate_initial_mass = alternate.total_mass();
+    let alternate_state_bytes = alternate.allocated_state_bytes();
+    let alternate_layout_pass = worker_counts_distinct
+        && alternate.active_tiles() == SPARSE_ACTIVE_TILES
+        && alternate_state_bytes == retained_state_bytes
+        && tiles
+            .iter()
+            .all(|&(tx, ty, tz)| alternate.is_active(tx, ty, tz))
+        && !alternate.is_active(
+            active_end,
+            SPARSE_ACTIVE_TILE_ORIGIN,
+            SPARSE_ACTIVE_TILE_ORIGIN,
+        )
+        && alternate_initial_mass.to_bits() == serial_initial_mass.to_bits();
+
+    let alternate_gate = CancelGate::new();
+    let alternate_runner = RecordingRunner::new(&alternate_pool);
+    let alternate_step_start = Instant::now();
+    let alternate_step = alternate.step_pooled(&alternate_runner, &alternate_gate);
+    let alternate_step_time = alternate_step_start.elapsed();
+    emit_phase(
+        &mut evidence,
+        "sparse-d3q19-million-active",
+        "alternate_tilepool_step_ns",
+        alternate_step_time,
+        identity.root(),
+    );
+    if let Err(error) = alternate_step {
+        evidence.verdict(
+            "scale-sparse-lbm-million-active",
+            false,
+            format!("alternate pooled million-cell sweep refused: {error}"),
+        );
+    }
+    let alternate_reports = alternate_runner.reports();
+
+    let alternate_oracle_start = Instant::now();
+    let alternate_comparison = compare_sparse_states(&serial, &alternate, published_values);
+    let alternate_oracle_time = alternate_oracle_start.elapsed();
+    emit_phase(
+        &mut evidence,
+        "sparse-d3q19-million-active",
+        "alternate_exact_full_state_oracle_ns",
+        alternate_oracle_time,
+        identity.root(),
+    );
+
+    let alternate_final_mass = alternate.total_mass();
+    let alternate_mass_residual =
+        (alternate_final_mass - alternate_initial_mass).abs() / mass_scale;
+    let alternate_mass_pass = alternate_initial_mass.is_finite()
+        && alternate_final_mass.is_finite()
+        && alternate_mass_residual <= mass_bound
+        && serial_final_mass.to_bits() == alternate_final_mass.to_bits();
+    let alternate_report_pass =
+        sparse_reports_complete(&alternate_reports, &alternate_pool, expected_groups);
+    let alternate_pool_stats = alternate_pool.arena_pool().stats();
+    let alternate_pass = alternate_layout_pass
+        && alternate.steps() == 1
+        && alternate.allocated_state_bytes() == retained_state_bytes
+        && alternate_comparison.exact()
+        && alternate_mass_pass
+        && alternate_report_pass
+        && !alternate_gate.is_requested()
+        && alternate_placement_round_trips
+        && alternate_pool_stats.quiescent()
+        && alternate_pool_stats.arenas_live == 0;
+
     let lease_while_live = retained_lease.receipt();
     let lease_live_pass = retained_charge.bytes() == retained_lease_bytes
         && lease_while_live.limit_bytes == Some(retained_lease_bytes)
@@ -1437,25 +1639,23 @@ fn production_scale_sparse_lbm_million_cells() {
         && lease_while_live.refusals == 0
         && lease_while_live.first_refusal.is_none()
         && lease_while_live.release_invariant_violations == 0;
-    let step_pass = layout_pass
-        && serial.steps() == 1
-        && pooled.steps() == 1
-        && serial.allocated_state_bytes() == retained_state_bytes
-        && pooled.allocated_state_bytes() == retained_state_bytes
-        && state_bits_equal
-        && population_values_exact
-        && populations_finite
-        && mass_pass
-        && report_pass
-        && !gate.is_requested()
-        && placement_round_trips
-        && pool_stats.quiescent()
-        && pool_stats.arenas_live == 0
-        && lease_live_pass;
+    let worker_count_pass =
+        worker_counts_distinct && placement_identities_distinct && primary_pass && alternate_pass;
+    let step_pass = worker_count_pass && lease_live_pass;
+
+    let alternate_drop_start = Instant::now();
+    drop(alternate);
+    let alternate_drop = alternate_drop_start.elapsed();
+    emit_phase(
+        &mut evidence,
+        "sparse-d3q19-million-active",
+        "drop_alternate_pooled_grid_ns",
+        alternate_drop,
+        identity.root(),
+    );
 
     let reclaim_start = Instant::now();
     drop(serial);
-    drop(pooled);
     drop(retained_charge);
     let reclaim = reclaim_start.elapsed();
     let lease_after_drop = retained_lease.receipt();
@@ -1470,7 +1670,7 @@ fn production_scale_sparse_lbm_million_cells() {
     emit_phase(
         &mut evidence,
         "sparse-d3q19-million-active",
-        "drop_two_grids_and_shadow_lease_ns",
+        "drop_serial_grid_and_shadow_lease_ns",
         reclaim,
         identity.root(),
     );
@@ -1484,6 +1684,65 @@ fn production_scale_sparse_lbm_million_cells() {
         rss_before,
         rss_after,
     );
+    let primary_reports_json = format!(
+        "[{},{}]",
+        primary_reports
+            .first()
+            .map_or_else(|| "null".to_string(), RunReport::to_json),
+        primary_reports
+            .get(1)
+            .map_or_else(|| "null".to_string(), RunReport::to_json)
+    );
+    let alternate_reports_json = format!(
+        "[{},{}]",
+        alternate_reports
+            .first()
+            .map_or_else(|| "null".to_string(), RunReport::to_json),
+        alternate_reports
+            .get(1)
+            .map_or_else(|| "null".to_string(), RunReport::to_json)
+    );
+    evidence.emit(
+        if worker_count_pass {
+            Severity::Info
+        } else {
+            Severity::Error
+        },
+        EventKind::Custom {
+            name: "production-scale-worker-count-identity".to_string(),
+            json: format!(
+                "{{\"primary_workers\":{},\"alternate_workers\":{},\
+                 \"worker_counts_distinct\":{worker_counts_distinct},\
+                 \"placement_identities_distinct\":{placement_identities_distinct},\
+                 \"primary_placement_identity\":{},\
+                 \"alternate_placement_identity\":{},\
+                 \"primary_state_exact\":{},\"alternate_state_exact\":{},\
+                 \"primary_first_divergence\":{},\
+                 \"alternate_first_divergence\":{},\
+                 \"serial_final_mass\":{},\"primary_final_mass\":{},\
+                 \"alternate_final_mass\":{},\
+                 \"primary_reports\":{primary_reports_json},\
+                 \"alternate_reports\":{alternate_reports_json},\
+                 \"worker_count_pass\":{worker_count_pass}}}",
+                primary_pool.workers(),
+                alternate_pool.workers(),
+                json_string(&primary_placement_identity),
+                json_string(&alternate_placement_identity),
+                primary_comparison.exact(),
+                alternate_comparison.exact(),
+                primary_comparison
+                    .first_divergence
+                    .map_or_else(|| "null".to_string(), |index| index.to_string()),
+                alternate_comparison
+                    .first_divergence
+                    .map_or_else(|| "null".to_string(), |index| index.to_string()),
+                json_f64(serial_final_mass),
+                json_f64(primary_final_mass),
+                json_f64(alternate_final_mass)
+            ),
+        },
+        None,
+    );
     evidence.emit(
         if scale_pass {
             Severity::Info
@@ -1496,14 +1755,26 @@ fn production_scale_sparse_lbm_million_cells() {
                 "{{\"profile\":{},\"active_tiles\":{},\"active_cells\":{active_cells},\
                  \"published_population_values\":{published_values},\
                  \"retained_state_bytes_each\":{retained_state_bytes},\
+                 \"peak_harness_retained_state_bytes\":{peak_harness_retained_state_bytes},\
+                 \"total_grid_state_allocation_bytes\":{total_grid_state_allocation_bytes},\
                  \"serial_initial_mass\":{},\"serial_final_mass\":{},\
-                 \"pooled_initial_mass\":{},\"pooled_final_mass\":{},\
+                 \"primary_initial_mass\":{},\"primary_final_mass\":{},\
+                 \"alternate_initial_mass\":{},\"alternate_final_mass\":{},\
                  \"serial_relative_mass_residual\":{},\
-                 \"pooled_relative_mass_residual\":{},\"mass_roundoff_bound\":{},\
-                 \"state_bits_equal\":{state_bits_equal},\"first_divergence\":{},\
-                 \"populations_finite\":{populations_finite},\
-                 \"placement_identity_round_trips\":{placement_round_trips},\
-                 \"gate_requested\":{},\"reports\":[{},{}],\"pool\":{},\
+                 \"primary_relative_mass_residual\":{},\
+                 \"alternate_relative_mass_residual\":{},\
+                 \"mass_roundoff_bound\":{},\
+                 \"primary_state_exact\":{},\"alternate_state_exact\":{},\
+                 \"primary_first_divergence\":{},\
+                 \"alternate_first_divergence\":{},\
+                 \"primary_populations_finite\":{},\
+                 \"alternate_populations_finite\":{},\
+                 \"primary_placement_identity_round_trips\":{primary_placement_round_trips},\
+                 \"alternate_placement_identity_round_trips\":{alternate_placement_round_trips},\
+                 \"primary_gate_requested\":{},\"alternate_gate_requested\":{},\
+                 \"primary_reports\":{primary_reports_json},\
+                 \"alternate_reports\":{alternate_reports_json},\
+                 \"primary_pool\":{},\"alternate_pool\":{},\
                  \"shadow_lease_while_live\":{},\"shadow_lease_after_drop\":{},\
                  \"logical_scale_pass\":{scale_pass}}}",
                 json_string(profile.name),
@@ -1511,19 +1782,27 @@ fn production_scale_sparse_lbm_million_cells() {
                 json_f64(serial_initial_mass),
                 json_f64(serial_final_mass),
                 json_f64(pooled_initial_mass),
-                json_f64(pooled_final_mass),
+                json_f64(primary_final_mass),
+                json_f64(alternate_initial_mass),
+                json_f64(alternate_final_mass),
                 json_f64(serial_mass_residual),
-                json_f64(pooled_mass_residual),
+                json_f64(primary_mass_residual),
+                json_f64(alternate_mass_residual),
                 json_f64(mass_bound),
-                first_divergence.map_or_else(|| "null".to_string(), |index| index.to_string()),
-                gate.is_requested(),
-                reports
-                    .first()
-                    .map_or_else(|| "null".to_string(), RunReport::to_json),
-                reports
-                    .get(1)
-                    .map_or_else(|| "null".to_string(), RunReport::to_json),
-                pool_stats.to_json(),
+                primary_comparison.exact(),
+                alternate_comparison.exact(),
+                primary_comparison
+                    .first_divergence
+                    .map_or_else(|| "null".to_string(), |index| index.to_string()),
+                alternate_comparison
+                    .first_divergence
+                    .map_or_else(|| "null".to_string(), |index| index.to_string()),
+                primary_comparison.populations_finite,
+                alternate_comparison.populations_finite,
+                primary_gate.is_requested(),
+                alternate_gate.is_requested(),
+                primary_pool_stats.to_json(),
+                alternate_pool_stats.to_json(),
                 lease_while_live.to_json(),
                 lease_after_drop.to_json()
             ),
@@ -1539,20 +1818,41 @@ fn production_scale_sparse_lbm_million_cells() {
             CapabilityDecision::Refused
         },
         format!(
-            "exactly {SPARSE_ACTIVE_TILES} whole tiles / {active_cells} cells; serial/pool exact_state={state_bits_equal}; mass residuals={serial_mass_residual:e}/{pooled_mass_residual:e} <= {mass_bound:e}"
+            "exactly {SPARSE_ACTIVE_TILES} whole tiles / {active_cells} cells; primary/alternate exact versus serial={}/{}; mass residuals={serial_mass_residual:e}/{primary_mass_residual:e}/{alternate_mass_residual:e} <= {mass_bound:e}",
+            primary_comparison.exact(),
+            alternate_comparison.exact()
         ),
     );
     evidence.decision(
         "tile-pool-ownership",
         &sparse_domain,
-        if scale_pass && report_pass {
+        if scale_pass && primary_report_pass && alternate_report_pass {
             CapabilityDecision::Admitted
         } else {
             CapabilityDecision::Refused
         },
         format!(
-            "one collide plus one stream pass retained {} reports over {expected_groups} canonical kernel groups with placement identity {placement_identity}",
-            reports.len()
+            "two distinct pooled worker counts ({}/{}) each retained collide+stream reports over {expected_groups} canonical kernel groups; placements={}/{}",
+            primary_pool.workers(),
+            alternate_pool.workers(),
+            primary_placement_identity,
+            alternate_placement_identity
+        ),
+    );
+    evidence.decision(
+        "million-cell-worker-count-bit-identity",
+        &sparse_domain,
+        if worker_count_pass {
+            CapabilityDecision::Admitted
+        } else {
+            CapabilityDecision::Refused
+        },
+        format!(
+            "primary_workers={}; alternate_workers={}; worker_counts_distinct={worker_counts_distinct}; placement_identities_distinct={placement_identities_distinct}; serial/primary exact={}; serial/alternate exact={}",
+            primary_pool.workers(),
+            alternate_pool.workers(),
+            primary_comparison.exact(),
+            alternate_comparison.exact()
         ),
     );
     named_sparse_open_claims(&mut evidence, profile);
@@ -1560,10 +1860,18 @@ fn production_scale_sparse_lbm_million_cells() {
         "scale-sparse-lbm-million-active",
         scale_pass,
         format!(
-            "active_tiles={}/{SPARSE_ACTIVE_TILES}; active_cells={active_cells}; state_bytes_each={retained_state_bytes}; exact_state={state_bits_equal}; first_divergence={first_divergence:?}; finite={populations_finite}; serial_mass={serial_initial_mass:.17e}->{serial_final_mass:.17e} ({serial_mass_residual:e}); pooled_mass={pooled_initial_mass:.17e}->{pooled_final_mass:.17e} ({pooled_mass_residual:e}); bound={mass_bound:e}; reports={}; pool={}; shadow_lease_live={}; shadow_lease_after={}",
+            "active_tiles={}/{SPARSE_ACTIVE_TILES}; active_cells={active_cells}; state_bytes_each={retained_state_bytes}; workers={}/{}; primary_exact={} alternate_exact={}; primary_first_divergence={:?}; alternate_first_divergence={:?}; serial_mass={serial_initial_mass:.17e}->{serial_final_mass:.17e} ({serial_mass_residual:e}); primary_mass={pooled_initial_mass:.17e}->{primary_final_mass:.17e} ({primary_mass_residual:e}); alternate_mass={alternate_initial_mass:.17e}->{alternate_final_mass:.17e} ({alternate_mass_residual:e}); bound={mass_bound:e}; primary_reports={}; alternate_reports={}; primary_pool={}; alternate_pool={}; shadow_lease_live={}; shadow_lease_after={}",
             tiles.len(),
-            reports.len(),
-            pool_stats.to_json(),
+            primary_pool.workers(),
+            alternate_pool.workers(),
+            primary_comparison.exact(),
+            alternate_comparison.exact(),
+            primary_comparison.first_divergence,
+            alternate_comparison.first_divergence,
+            primary_reports.len(),
+            alternate_reports.len(),
+            primary_pool_stats.to_json(),
+            alternate_pool_stats.to_json(),
             lease_while_live.to_json(),
             lease_after_drop.to_json()
         ),

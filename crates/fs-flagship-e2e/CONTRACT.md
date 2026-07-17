@@ -180,26 +180,33 @@ and the true peak claim is named-skipped.
 The companion sparse-D3Q19 rung activates a near-centered 25x25x25 cube of
 whole 4x4x4 tiles in a 200^3 domain, leaving 12 tile layers before and 13 after
 on each axis: exactly 15,625 tiles and 1,000,000 active cells.
-It builds a serial reference from ascending coordinate input and a pooled grid
-from the reverse input, then requires both to converge to the same canonical
-Morton order. After one zero-force BGK step, all 19,000,000 published f64
-population values must be finite and bit-for-bit identical between the serial
-reference and the real `TilePool` run. Both canonical mass reductions must
-remain within the emitted `8 gamma_n` roundoff envelope. The pooled receipt
-retains exactly two deterministic reports -- collide then stream -- each with
-1,954 completed kernel groups, per-worker completion accounting, an open
-cancellation gate, and a placement identity that round-trips through the
-current producer-version admission check.
+It builds a serial reference from ascending coordinate input and two pooled
+grids from the reverse input, requiring all three to converge to the same
+canonical Morton order. The pooled grids run sequentially: the primary
+`TilePool` uses the host logical-CPU count, while the alternate uses half that
+count rounded up. The admitted production profiles therefore exercise two
+distinct worker counts without retaining both pooled grids at once. After one
+zero-force BGK step per grid, all 19,000,000 published f64 population values
+must be finite and bit-for-bit identical between the serial reference and each
+real `TilePool` run. All three canonical mass reductions must remain within the
+emitted `8 gamma_n` roundoff envelope. The pooled receipts retain four
+deterministic reports -- collide then stream for each worker count -- with 1,954
+completed kernel groups, per-worker completion accounting, open cancellation
+gates, and placement identities that round-trip through the current
+producer-version admission check.
 
 `allocated_state_bytes()` is used only for its exact logical meaning: three
 population buffers per active tile, 29,184 bytes per tile and 456,000,000 bytes
 per grid. The test holds a 912,000,000-byte `OperationMemoryLease` charge before
-constructing the serial and pooled grids, but labels it a shadow preflight, not
-allocation authority. `SparseGrid3` stores ordinary `Vec` and `BTreeMap`
-allocations, activation has ordinary heap temporaries, the exact-state oracle
-copies another 304,000,000 bytes transiently, and `step_pooled` uses the
-runner's legacy internal unbounded lease. None of those allocations is charged
-to the shadow receipt. The evidence therefore refuses
+constructing the serial grid and one pooled grid at a time, but labels it a
+shadow preflight, not allocation authority. The three sequential grid
+constructions account for 1,368,000,000 logical state bytes in total while the
+peak retained grid state remains 912,000,000 bytes. `SparseGrid3` stores
+ordinary `Vec` and `BTreeMap` allocations, activation has ordinary heap
+temporaries, each exact-state oracle copies another 304,000,000 bytes
+transiently (608,000,000 bytes total across both comparisons), and
+`step_pooled` uses the runner's legacy internal unbounded lease. None of those
+allocations is charged to the shadow receipt. The evidence therefore refuses
 `sparse-state-memory-lease-authority` and separately marks only the
 `shadow-memory-preflight-ledger` as restricted. It also refuses
 `structured-sparse-heap-oom-refusal` before allocating: ordinary infallible
@@ -209,14 +216,15 @@ fallible sparse construction, and a leased pooled-sweep entry point.
 
 Sparse phase rows are likewise report-only `Custom` observations. The stable
 configuration identity binds the active Morton-key set, dimensions, population
-layout, BGK parameters, seeds, serial/pool activation protocols, logical byte
-counts, worker count, TilePool placement identity/version, D3Q19 semantics
-version, harness versions, and the mass-acceptance policy version, formula,
-population count, multiplier, and computed-bound bits. It excludes clocks,
-process RSS, unsurfaced allocator metadata, activation temporaries, and
-observed pin success. Linux `VmHWM` and the macOS peak-RSS refusal keep the
-same semantics as the scalar rung; no quiet-host performance or attributed
-RSS-budget claim follows from them.
+layout, BGK parameters, seeds, serial/pool activation protocols, peak and total
+logical byte counts, both worker counts, both TilePool placement identities and
+their producer version, two pooled runs, D3Q19 semantics version, harness
+versions, and the mass-acceptance policy version, formula, population count,
+multiplier, and computed-bound bits. It excludes clocks, process RSS,
+unsurfaced allocator metadata, activation temporaries, and observed pin
+success. Linux `VmHWM` and the macOS peak-RSS refusal keep the same semantics
+as the scalar rung; no quiet-host performance or attributed RSS-budget claim
+follows from them.
 
 The eight completed aggregates retain their existing case identities
 and emit canonical `ConformanceCase` records with Info/Error severity,
@@ -261,10 +269,10 @@ until their perf/CI cadence lands.
   full lanes are wired as ignored tests with envelope homes. The ignored
   scalar-field rung is limited to arena/lease admission, first-touch
   initialization, serial sweep, and reclaim accounting. The sparse rung is
-  limited to one million whole-tile cells, one serial-versus-pool exact-state
-  comparison, logical retained-state accounting, and two observed TilePool
-  passes. NUMA placement, per-CCD bandwidth, CCD-shaped reductions, a second
-  production-scale pooled worker count, scale cancellation latency, quiet-host
+  limited to one million whole-tile cells, two serial-anchored exact-state
+  comparisons across distinct pooled worker counts, logical retained-state
+  accounting, and four observed TilePool passes. NUMA placement, per-CCD
+  bandwidth, CCD-shaped reductions, scale cancellation latency, quiet-host
   timing promotion, cross-ISA comparison, attributed total-heap/RSS coverage,
   and an admitted M4 peak-RSS budget remain explicit named skips until their
   retained host evidence exists.
