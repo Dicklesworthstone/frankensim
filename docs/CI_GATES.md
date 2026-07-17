@@ -32,6 +32,36 @@ criteria.
 | `nightly.yml` | manual GitHub dispatch only | archived/manual version of the full dev/release suites and retained fs-ledger run record |
 | `ci-self-test.yml` | manual | meta-tests: injected failures demonstrably turn the gates red |
 
+### ASCENT conformance profiles
+
+The ASCENT conformance umbrella has a standalone DSR-compatible profile runner
+at `scripts/ci/ascent_conformance_profile.sh`:
+
+```bash
+scripts/ci/ascent_conformance_profile.sh --list pr
+scripts/ci/ascent_conformance_profile.sh pr
+scripts/ci/ascent_conformance_profile.sh --list nightly
+scripts/ci/ascent_conformance_profile.sh nightly
+```
+
+The `pr` profile is an explicit cheap selector spanning the base gradient,
+constrained, Pareto, Problem-IR runner, and machine-independent budget-ledger
+surfaces. It runs each named integration target separately so one failure does
+not hide the remaining rows. The `nightly` profile runs the complete
+`fs-ascent` package with Cargo fail-fast disabled, so newly added integration
+targets join nightly coverage without hand-maintained selector drift. Both use
+`--locked` and emit structured start, per-target, and terminal profile rows.
+
+The default aggregate wall budgets are 900 seconds for `pr` and 7200 seconds
+for `nightly`; `FS_ASCENT_PR_BUDGET_SECONDS` and
+`FS_ASCENT_NIGHTLY_BUDGET_SECONDS` may override them for an explicitly declared
+host policy. Elapsed time intentionally includes compilation. Exceeding the
+effective budget makes the profile fail even when all assertions pass. This is
+a scheduling guard, not a benchmark or cross-ISA performance claim. The runner
+is a callable lane rather than an additional unconditional invocation inside
+the workspace-wide quality script, avoiding duplicate Cargo work when the full
+DSR gate already owns package execution.
+
 ## Runner honesty
 
 - `macos-14` = Apple Silicon (aarch64, NEON): a true reference-family runner.
