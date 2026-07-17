@@ -142,7 +142,15 @@ empty/non-finite losses, zero sample counts, invalid radii/costs, and
 rows without a zero-cost stay-put support. tests/dro_oracle_battery.rs
 (4 cases): closed-form endpoints and monotonicity in rho, exact
 tiny-LP strong-duality oracle, robust-decision shift demo, and frozen
-DRO golden hash `0xd21c_d092_b4a5_ba98`.
+DRO golden hash `0xd21c_d092_b4a5_ba98`. tests/steer.rs has two logged
+conformance cases plus one empty-population guard regression: a fork leaves
+its parent untouched while both branches replay bitwise, opposite weights
+steer sibling forks toward opposite Pareto extremes, and zero population is
+rejected at construction. Aggregate results use canonical fs-obs
+`ConformanceCase` events with their exact input seeds; fork and steering
+measurements use separate validated fs-obs `Custom` events that also retain
+those seeds. Assertions precede each passing aggregate verdict, so earlier
+failures remain ordinary Rust test diagnostics.
 
 ## No-claim boundaries
 - No published-ERT-table parity claims yet (in-repo BBOB-class fixtures

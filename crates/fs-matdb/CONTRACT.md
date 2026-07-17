@@ -66,6 +66,14 @@ persistence.
   reproduces its semantic id, and then byte-reproduces the full stream.
   `from_bytes_verified` additionally requires the externally pinned whole-pack
   identity before any top-level metadata/statistics mutation can be accepted.
+- `NormalizedInterfacePack` — the `FSINTPK\\0` v1 wrapper for one ordered
+  `InterfaceSystemCard`. It reuses a complete `NormalizedPack` as the sole
+  claim/observation/statistics/normalization payload, then binds both material
+  states, both texture frames, medium, optional third body, environment, and
+  named history. Decode re-admits the nested claim pack and verifies both its
+  hash and the reconstructed interface-card hash before accepting canonical
+  bytes. V1 carries no constitutive model cards; model-law transport requires a
+  separately versioned binding and cannot be smuggled through this wrapper.
 - `NormalizedModelPack` — a separate bounded `FSMODPK` v1 transport for
   immutable `ConstitutiveModelCard`s. Model cards are not laundered into
   scalar property claims: the pack retains each law/version, dimensioned
