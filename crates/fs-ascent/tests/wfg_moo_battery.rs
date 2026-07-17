@@ -10,13 +10,39 @@
 //! t-transformations — gradient sweeps on multimodal distance are
 //! exactly the basin-fragility class the DTLZ x86-64 dispatch on this
 //! bead documents, and exercising it belongs to that resolution, not to
-//! front-geometry conformance. WFG2-class DISCONNECTED fronts need
-//! feasibility-gap handling in the ε sweep and stay a named follow-on.
+//! front-geometry conformance. WFG2-class DISCONNECTED fronts are retained
+//! by exact stable nondominance filtering over a deterministic candidate
+//! stream; this removes dominated bridges without inventing continuity.
 
-use fs_ascent::pareto::{ParetoPoint, epsilon_constraint_sweep, weighted_sum_sweep};
+use fs_ascent::pareto::{
+    ParetoPoint, epsilon_constraint_sweep, nondominated_front, weighted_sum_sweep,
+};
+use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
+use fs_obs::{Emitter, EventKind, Severity};
+
+const SUITE: &str = "fs-ascent/wfg-moo";
 
 fn verdict(name: &str, pass: bool, details: &str) {
-    println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
+    let mut emitter = Emitter::new(SUITE, name);
+    let event = emitter.emit(
+        if pass {
+            Severity::Info
+        } else {
+            Severity::Error
+        },
+        EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: name.to_string(),
+            pass,
+            detail: details.to_string(),
+            seed: 0,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("WFG verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("WFG verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "{name}: {details}");
 }
 
@@ -27,6 +53,10 @@ const S1: f64 = 2.0;
 const S2: f64 = 4.0;
 /// Mixed-front ripple count (WFG1's A = 5).
 const RIPPLES: f64 = 5.0;
+/// WFG2's disconnected shape uses five cosine basins; the record-low
+/// nondominated envelope has six retained segments including both seams.
+const WFG2_BASINS: f64 = 5.0;
+const WFG2_GRID_DENOMINATOR: usize = 1000;
 
 /// Chart: x_i = sin²(θ_i) ∈ [0, 1]; dx/dθ = sin(2θ).
 fn chart(theta: &[f64]) -> Vec<f64> {
@@ -121,6 +151,112 @@ fn mixed_f1(theta: &[f64]) -> (f64, Vec<f64>) {
 fn mixed_f2(theta: &[f64]) -> (f64, Vec<f64>) {
     let t = chart(theta)[0];
     objective(theta, S2, mixed_h2(t), mixed_dh2(t))
+}
+
+// ---- WFG2-class disconnected ----------------------------------------
+
+fn wfg2_disconnected_objectives(t: f64) -> [f64; 2] {
+    let f1 = S1 * (1.0 - fs_math::det::cos(PI * t / 2.0));
+    let ripple = fs_math::det::cos(WFG2_BASINS * PI * t);
+    let f2 = S2 * (1.0 - t * ripple * ripple);
+    [f1, f2]
+}
+
+fn wfg2_candidates() -> Vec<ParetoPoint> {
+    (0..=WFG2_GRID_DENOMINATOR)
+        .map(|index| {
+            #[allow(clippy::cast_precision_loss)]
+            let t = index as f64 / WFG2_GRID_DENOMINATOR as f64;
+            ParetoPoint {
+                x: vec![t],
+                f: wfg2_disconnected_objectives(t),
+                kkt: None,
+                grad_norm: 0.0,
+            }
+        })
+        .collect()
+}
+
+fn disconnected_segment_count(front: &[ParetoPoint]) -> usize {
+    if front.is_empty() {
+        return 0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let step = 1.0 / WFG2_GRID_DENOMINATOR as f64;
+    1 + front
+        .windows(2)
+        .filter(|pair| pair[1].x[0] - pair[0].x[0] > 1.5 * step)
+        .count()
+}
+
+/// Seeded-broken comparator: equality in both objectives is incorrectly
+/// treated as dominance, so two identical nondominated candidates erase each
+/// other instead of retaining the schedule's first occurrence.
+fn broken_non_strict_front(points: &[ParetoPoint]) -> Vec<ParetoPoint> {
+    points
+        .iter()
+        .enumerate()
+        .filter(|(index, point)| {
+            !points.iter().enumerate().any(|(other_index, other)| {
+                other_index != *index && other.f[0] <= point.f[0] && other.f[1] <= point.f[1]
+            })
+        })
+        .map(|(_, point)| point.clone())
+        .collect()
+}
+
+fn wfg2_front_identity(front: &[ParetoPoint], segment_count: usize) -> ReplayIdentity {
+    let mut builder = IdentityBuilder::new("fs-ascent-wfg2-disconnected-front-v1")
+        .str("fs-ascent-version", fs_ascent::VERSION)
+        .str("fs-math-version", fs_math::VERSION)
+        .u64(
+            "candidate-grid-denominator",
+            u64::try_from(WFG2_GRID_DENOMINATOR).expect("grid fits u64"),
+        )
+        .f64_bits("wfg-objective-scale-1", S1)
+        .f64_bits("wfg-objective-scale-2", S2)
+        .f64_bits("wfg2-disconnected-basins", WFG2_BASINS)
+        .u64(
+            "retained-segments",
+            u64::try_from(segment_count).expect("segment count fits u64"),
+        )
+        .u64(
+            "retained-points",
+            u64::try_from(front.len()).expect("front length fits u64"),
+        );
+    for point in front {
+        builder = builder
+            .f64_bits("parameter-t", point.x[0])
+            .f64_bits("objective-f1", point.f[0])
+            .f64_bits("objective-f2", point.f[1]);
+    }
+    builder.finish()
+}
+
+fn emit_wfg2_receipt(
+    identity: &ReplayIdentity,
+    candidate_count: usize,
+    front_count: usize,
+    segment_count: usize,
+    mutation_caught: bool,
+) {
+    let mut emitter = Emitter::new(SUITE, "7tv21-wfg2-disconnected/receipt");
+    let event = emitter.emit(
+        Severity::Info,
+        EventKind::Custom {
+            name: "wfg2-disconnected-front-receipt".to_string(),
+            json: format!(
+                "{{\"identity\":\"{}\",\"input_seed\":0,\"candidate_count\":{candidate_count},\
+                 \"front_count\":{front_count},\"segment_count\":{segment_count},\
+                 \"mutation_caught\":{mutation_caught}}}",
+                identity.hex(),
+            ),
+        },
+        None,
+    );
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("WFG2 receipt must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 // ---- shared conformance walk -----------------------------------------
@@ -343,6 +479,95 @@ fn wfg1_mixed_ripple_curve_membership_and_weighted_sum_hull_gap() {
             r.worst_kkt,
             eps_distinct,
             ws_distinct
+        ),
+    );
+}
+
+#[test]
+fn wfg2_disconnected_front_filters_dominated_bridges_and_replays() {
+    let candidates = wfg2_candidates();
+    let mut duplicated = candidates.clone();
+    duplicated.push(
+        candidates
+            .last()
+            .expect("WFG2 candidate grid has an upper seam")
+            .clone(),
+    );
+
+    let front = nondominated_front(&duplicated);
+    let replay = nondominated_front(&duplicated);
+    let segments = disconnected_segment_count(&front);
+    let identity = wfg2_front_identity(&front, segments);
+    let replay_identity = wfg2_front_identity(&replay, disconnected_segment_count(&replay));
+
+    assert_eq!(
+        segments, 6,
+        "the five-basin WFG2 shape must retain six separated record-low segments"
+    );
+    assert!(
+        front.len() * 2 < candidates.len(),
+        "dominated bridge samples must be removed: {} of {} retained",
+        front.len(),
+        candidates.len()
+    );
+    assert!(
+        front.windows(2).all(|pair| pair[0].x[0] < pair[1].x[0]),
+        "stable filtering must preserve the increasing candidate schedule"
+    );
+    assert!(
+        front.first().expect("nonempty front").f[0].abs() < 1e-15,
+        "the low-f1 seam must survive"
+    );
+    assert!(
+        front.last().expect("nonempty front").f[1].abs() < 1e-12,
+        "the low-f2 seam must survive"
+    );
+    assert_eq!(
+        identity.canonical_bytes(),
+        replay_identity.canonical_bytes(),
+        "the complete filtered front must replay bit for bit"
+    );
+
+    // Input reversal changes only the stable presentation order. Restoring that
+    // order must recover the exact same semantic front and identity.
+    let mut reversed_candidates = candidates.clone();
+    reversed_candidates.reverse();
+    let mut reversed_front = nondominated_front(&reversed_candidates);
+    reversed_front.reverse();
+    let reversed_identity =
+        wfg2_front_identity(&reversed_front, disconnected_segment_count(&reversed_front));
+    assert_eq!(
+        identity.canonical_bytes(),
+        reversed_identity.canonical_bytes(),
+        "candidate permutation must preserve the nondominated objective set"
+    );
+
+    // The duplicate upper seam is the strictness falsifier. Production keeps
+    // the first identical point; the seeded-broken non-strict comparator lets
+    // the pair erase each other and therefore loses the global f2 endpoint.
+    let broken = broken_non_strict_front(&duplicated);
+    let production_has_upper_seam = front.iter().any(|point| point.f[1].abs() < 1e-12);
+    let broken_has_upper_seam = broken.iter().any(|point| point.f[1].abs() < 1e-12);
+    let mutation_caught = production_has_upper_seam && !broken_has_upper_seam;
+    assert!(
+        mutation_caught,
+        "the equality-as-dominance mutant must erase the duplicated WFG2 upper seam"
+    );
+
+    emit_wfg2_receipt(
+        &identity,
+        duplicated.len(),
+        front.len(),
+        segments,
+        mutation_caught,
+    );
+    verdict(
+        "7tv21-wfg2-disconnected",
+        true,
+        &format!(
+            "stable exact nondominance removes dominated bridges from {} candidates, retains {} points across {segments} separated WFG2 segments, replays bitwise under repeat/permutation, and catches the non-strict comparator mutant",
+            duplicated.len(),
+            front.len(),
         ),
     );
 }

@@ -26,6 +26,74 @@ pub struct ParetoPoint {
     pub grad_norm: f64,
 }
 
+fn assert_pareto_point(point: &ParetoPoint) {
+    assert_decision(&point.x);
+    assert!(
+        point.f.iter().all(|value| value.is_finite()),
+        "Pareto objective values must be finite"
+    );
+    assert!(
+        point.grad_norm.is_finite(),
+        "Pareto gradient residual must be finite"
+    );
+    if let Some(kkt) = &point.kkt {
+        assert!(
+            [
+                kkt.stationarity,
+                kkt.feasibility,
+                kkt.dual_feasibility,
+                kkt.complementarity,
+            ]
+            .into_iter()
+            .all(f64::is_finite),
+            "Pareto KKT residuals must be finite"
+        );
+    }
+}
+
+fn strictly_dominates(candidate: &ParetoPoint, target: &ParetoPoint) -> bool {
+    candidate.f[0] <= target.f[0]
+        && candidate.f[1] <= target.f[1]
+        && (candidate.f[0] < target.f[0] || candidate.f[1] < target.f[1])
+}
+
+fn same_objectives(a: &ParetoPoint, b: &ParetoPoint) -> bool {
+    a.f[0].total_cmp(&b.f[0]).is_eq() && a.f[1].total_cmp(&b.f[1]).is_eq()
+}
+
+/// Retain the exact nondominated subset of a two-objective candidate stream.
+///
+/// Dominance uses minimization semantics: a candidate dominates another only
+/// when it is no worse in either objective and STRICTLY better in at least one.
+/// Bit-identical objective candidates are collapsed to their first occurrence,
+/// and every retained point otherwise preserves input order. This stable policy is
+/// useful for disconnected fronts: dominated bridge candidates disappear while
+/// the separated nondominated segments keep the tracing schedule's order.
+///
+/// # Panics
+///
+/// Panics if a public candidate contains an empty/non-finite decision vector,
+/// non-finite objectives, a non-finite gradient residual, or non-finite KKT
+/// evidence. A malformed candidate cannot silently enter a certified front.
+#[must_use]
+pub fn nondominated_front(points: &[ParetoPoint]) -> Vec<ParetoPoint> {
+    for point in points {
+        assert_pareto_point(point);
+    }
+
+    let mut front = Vec::new();
+    for (index, point) in points.iter().enumerate() {
+        let dominated = points
+            .iter()
+            .enumerate()
+            .any(|(other_index, other)| other_index != index && strictly_dominates(other, point));
+        if !dominated && !front.iter().any(|kept| same_objectives(kept, point)) {
+            front.push(point.clone());
+        }
+    }
+    front
+}
+
 /// Objective callback: x ↦ (f, ∇f). `Fn` (not FnMut) so the sweep can
 /// wrap it for the constrained solver's split borrows.
 pub type Objective<'a> = &'a dyn Fn(&[f64]) -> (f64, Vec<f64>);

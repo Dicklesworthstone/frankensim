@@ -42,6 +42,12 @@ so converged and stalled are distinguishable outcomes.
   fronts, where weighted sums provably collapse to extremes —
   exhibited in the battery); every ε-constraint point carries its
   KKT certificate.
+- `pareto::nondominated_front` — exact two-objective minimization filter for
+  tracing and benchmark candidate streams. Dominance requires no worse in
+  either objective and strictly better in at least one; bit-identical objective
+  rows retain the first occurrence. The output preserves input order, so
+  disconnected front segments keep the schedule's stable presentation while
+  dominated bridge rows disappear.
 - `stop::{StopRule, StopReason}` — the stopping-condition algebra:
   grad-norm / objective / budget / stall leaves under Any/All
   combinators, with REASON attribution in every report.
@@ -110,7 +116,9 @@ to the line search, and metadata-only manifolds used in descent
 (modeling errors surfaced loudly). Pareto sweeps reject non-finite
 decisions/objective values/gradients, invalid weights or epsilons,
 non-positive tolerances, and gradient dimension mismatches at the API
-boundary. Optimizer non-convergence with a well-formed problem is a
+boundary. Nondominance filtering also refuses malformed public candidates,
+including non-finite objective, gradient-residual, or KKT evidence. Optimizer
+non-convergence with a well-formed problem is a
 REPORTED outcome (reason + certificate), never a panic.
 
 ## Determinism class
@@ -159,6 +167,21 @@ with all KKT residuals ≤ 1e−7; bitwise replay; Pareto golden
 `0x301b_04df_db91_3965`; fail-fast guards for invalid weights,
 epsilons, tolerances, decision vectors, objective values, and gradient
 dimensions.
+
+`tests/wfg_moo_battery.rs` covers WFG-scale front geometry without claiming
+the full deceptive or multimodal transformation stack. Concave, convex, and
+WFG1-class mixed fixtures retain their measured sweep behavior as linted,
+wire-validated `fs-obs` `ConformanceCase` rows. The WFG2-class disconnected
+fixture samples the deterministic five-basin shape on a fixed 1001-point
+parameter grid, runs the public stable nondominance filter, and requires six
+separated record-low segments with both objective seams retained and every
+dominated bridge removed. Repeat and reversed-input runs must reproduce the
+same complete front identity after presentation order is restored. An exact
+duplicate of the upper seam catches a test-local comparator mutant that treats
+equality as dominance and incorrectly lets the two copies erase each other.
+The structured receipt binds crate versions, grid, objective scales, WFG2
+basin count, every retained parameter/objective bit, segment/front counts, and
+the caught mutation with fixed input seed zero.
 
 `tests/bbob_budget_ledger.rs` and `tests/gradient_budget_ledger.rs` emit the
 four-metric observation envelope for every optimizer fixture: observed nfev/ERT,
@@ -264,3 +287,9 @@ accounting, terminal states, and fixed input seed zero; the aggregate
   separate evidence obligations. The versioned `fs-obs` trace identity is a
   deterministic legacy-FNV drift fingerprint, not a cryptographic authenticity
   or scientific-authority anchor.
+- The WFG2 disconnected battery certifies exact nondominance semantics and the
+  sampled five-basin front geometry only. It does not implement the complete
+  WFG2 reduction/transform pipeline, prove coverage between grid samples,
+  establish optimizer convergence across dominated gaps, cover all nine WFG
+  families, or produce cross-ISA/performance evidence. Its retained identity
+  is replay evidence, not cryptographic scientific authority.
