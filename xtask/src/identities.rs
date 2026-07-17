@@ -4,6 +4,7 @@ use super::depgraph::{JsonParser, JsonValue};
 use super::{Violation, json_escape};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
+use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -13,6 +14,9 @@ const REGISTRY_SCHEMA_V1: &str = "frankensim-identity-schemas-v1";
 const REGISTRY_SCHEMA_V2: &str = "frankensim-identity-schemas-v2";
 const AUTHORITY_FILE: &str = "identity-authorities.json";
 const AUTHORITY_SCHEMA: &str = "frankensim-identity-authorities-v1";
+const BEADS_ISSUES_FILE: &str = ".beads/issues.jsonl";
+const UNRATIFIED_CANDIDATE_REASON_PREFIX: &str = "unratified-candidate-identity@";
+const UNRATIFIED_CANDIDATE_SOURCE_MARKER_PREFIX: &str = "frankensim-unratified-candidate-identity:";
 const GOLDEN_COUPLING_SCHEMA: &str = "frankensim-golden-couplings-v1";
 const SCHEMA_FINGERPRINT_DOMAIN: &str =
     "org.frankensim.xtask.semantic-identity-schema-fingerprint.v1";
@@ -3832,6 +3836,105 @@ fn authority_symbol_is_canonical(symbol: &str) -> bool {
     symbol == "<script>" || canonical_function_reference(symbol)
 }
 
+fn unratified_candidate_tracking_issue(reason: &str) -> Option<&str> {
+    let issue = reason.strip_prefix(UNRATIFIED_CANDIDATE_REASON_PREFIX)?;
+    (issue.starts_with("frankensim-")
+        && issue.len() <= 192
+        && issue
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')))
+    .then_some(issue)
+}
+
+fn tracking_bead_is_nonterminal(root: &Path, issue: &str) -> Result<(), String> {
+    const MAX_BEADS_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_BEAD_ROW_BYTES: usize = 1024 * 1024;
+
+    let path = root.join(BEADS_ISSUES_FILE);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        format!("tracking issue {issue:?} cannot read {BEADS_ISSUES_FILE}: {error}")
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "tracking issue {issue:?} requires {BEADS_ISSUES_FILE} to be a regular non-symlink file"
+        ));
+    }
+    if metadata.len() > MAX_BEADS_BYTES {
+        return Err(format!(
+            "tracking issue {issue:?} refuses {BEADS_ISSUES_FILE} above {MAX_BEADS_BYTES} bytes"
+        ));
+    }
+    let file = std::fs::File::open(&path).map_err(|error| {
+        format!("tracking issue {issue:?} cannot open {BEADS_ISSUES_FILE}: {error}")
+    })?;
+    let mut matched_status = None;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|error| {
+            format!(
+                "tracking issue {issue:?} cannot read {BEADS_ISSUES_FILE} row {}: {error}",
+                index + 1
+            )
+        })?;
+        if line.len() > MAX_BEAD_ROW_BYTES {
+            return Err(format!(
+                "tracking issue {issue:?} refuses {BEADS_ISSUES_FILE} row {} above {MAX_BEAD_ROW_BYTES} bytes",
+                index + 1
+            ));
+        }
+        if !line.contains(issue) {
+            continue;
+        }
+        let parsed = JsonParser::new(&line).finish().map_err(|detail| {
+            format!(
+                "tracking issue {issue:?} found malformed {BEADS_ISSUES_FILE} row {}: {detail}",
+                index + 1
+            )
+        })?;
+        let context = format!("{BEADS_ISSUES_FILE} row {}", index + 1);
+        let object = strict_json_object(&parsed, &context)?;
+        let row_id = strict_json_field(object, "id", &context)
+            .and_then(|value| strict_json_string(value, &format!("{context} id")))?;
+        if row_id != issue {
+            continue;
+        }
+        let status = strict_json_field(object, "status", &context)
+            .and_then(|value| strict_json_string(value, &format!("{context} status")))?;
+        if matched_status.replace(status.to_string()).is_some() {
+            return Err(format!(
+                "tracking issue {issue:?} appears more than once in {BEADS_ISSUES_FILE}"
+            ));
+        }
+    }
+    match matched_status.as_deref() {
+        Some("open" | "in_progress") => Ok(()),
+        Some(status) => Err(format!(
+            "tracking issue {issue:?} is terminal or non-actionable ({status:?}); replace the candidate exemption with governed authority"
+        )),
+        None => Err(format!(
+            "tracking issue {issue:?} is absent from {BEADS_ISSUES_FILE}"
+        )),
+    }
+}
+
+fn unratified_candidate_boundary(
+    root: &Path,
+    exemption: &IdentityExemption,
+    issue: &str,
+) -> Result<(), String> {
+    let source = read_repo_utf8(root, &exemption.path, "unratified candidate source")?;
+    let marker = format!(
+        "{UNRATIFIED_CANDIDATE_SOURCE_MARKER_PREFIX}{issue}:{}",
+        exemption.symbol
+    );
+    if !source.contains(&marker) {
+        return Err(format!(
+            "unratified candidate {}#{} lacks exact source no-claim marker {marker:?}",
+            exemption.path, exemption.symbol
+        ));
+    }
+    tracking_bead_is_nonterminal(root, issue)
+}
+
 #[allow(clippy::too_many_lines)] // Strict row validation stays beside the tiny manifest parser.
 fn load_authority_manifest(root: &Path) -> Result<AuthorityManifest, Vec<Violation>> {
     let text = read_repo_utf8(root, AUTHORITY_FILE, "authority manifest").map_err(|detail| {
@@ -7125,7 +7228,8 @@ fn authority_violations_against(
     }
 
     for exemption in &manifest.exemptions {
-        if !EXEMPTION_REASONS.contains(&exemption.reason.as_str()) {
+        let unratified_issue = unratified_candidate_tracking_issue(&exemption.reason);
+        if !EXEMPTION_REASONS.contains(&exemption.reason.as_str()) && unratified_issue.is_none() {
             violations.push(identity_violation(
                 "<repo>",
                 format!(
@@ -7133,6 +7237,11 @@ fn authority_violations_against(
                     exemption.path, exemption.symbol, exemption.reason
                 ),
             ));
+        }
+        if let Some(issue) = unratified_issue
+            && let Err(detail) = unratified_candidate_boundary(root, exemption, issue)
+        {
+            violations.push(identity_violation("<repo>", detail));
         }
         if exemption.reason == "child-digest-helper" && exemption.covered_by == "none" {
             violations.push(identity_violation(
@@ -11936,6 +12045,83 @@ fn child(payload: &[u8]) -> Digest {
                 .iter()
                 .any(|violation| violation.detail.contains("may not name parent")),
             "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn unratified_candidate_identity_is_explicitly_non_authoritative() {
+        let root = fixture_root("unratified-candidate-identity");
+        let path = root.join("crates/demo/src/lib.rs");
+        std::fs::create_dir_all(path.parent().expect("demo parent")).expect("demo directory");
+        let tracking_issue = "frankensim-demo.1";
+        let source = r#"
+// frankensim-unratified-candidate-identity:frankensim-demo.1:admit_candidate_receipt
+fn admit_candidate_receipt(cache: &mut Cache, value: Value) {
+    let receipt_identity = value.to_canonical_bytes();
+    cache.insert(receipt_identity, value);
+}
+"#;
+        std::fs::write(&path, source).expect("candidate source");
+        let beads = root.join(".beads/issues.jsonl");
+        std::fs::create_dir_all(beads.parent().expect("beads parent")).expect("beads directory");
+        std::fs::write(
+            &beads,
+            format!(
+                "{{\"id\":\"{tracking_issue}\",\"status\":\"open\",\"title\":\"Ratify demo identity\"}}\n"
+            ),
+        )
+        .expect("open tracking bead");
+        let candidates = discover_rust_candidates("crates/demo/src/lib.rs", source);
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].symbol, "admit_candidate_receipt");
+
+        let manifest = AuthorityManifest {
+            required_ids: BTreeSet::new(),
+            external_owners: Vec::new(),
+            exemptions: vec![IdentityExemption {
+                path: "crates/demo/src/lib.rs".to_string(),
+                symbol: "admit_candidate_receipt".to_string(),
+                reason: format!("unratified-candidate-identity@{tracking_issue}"),
+                covered_by: "none".to_string(),
+            }],
+        };
+        let violations = authority_violations_against(&root, &[], &manifest, &candidates);
+        assert!(violations.is_empty(), "{violations:?}");
+        assert!(
+            manifest.required_ids.is_empty(),
+            "candidate grammar must not become a required authority by exemption",
+        );
+
+        std::fs::write(
+            &beads,
+            format!(
+                "{{\"id\":\"{tracking_issue}\",\"status\":\"closed\",\"title\":\"Ratify demo identity\"}}\n"
+            ),
+        )
+        .expect("closed tracking bead");
+        let violations = authority_violations_against(&root, &[], &manifest, &candidates);
+        assert!(
+            violations.iter().any(|violation| violation
+                .detail
+                .contains("replace the candidate exemption with governed authority")),
+            "closing the ratification blocker must invalidate the exemption: {violations:?}",
+        );
+
+        std::fs::write(
+            &beads,
+            format!(
+                "{{\"id\":\"{tracking_issue}\",\"status\":\"in_progress\",\"title\":\"Ratify demo identity\"}}\n"
+            ),
+        )
+        .expect("in-progress tracking bead");
+        let mut falsely_parented = manifest;
+        falsely_parented.exemptions[0].covered_by = "demo:future-authority".to_string();
+        let violations = authority_violations_against(&root, &[], &falsely_parented, &candidates);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("may not name parent")),
+            "an unratified candidate may not borrow authority from a future owner: {violations:?}",
         );
     }
 

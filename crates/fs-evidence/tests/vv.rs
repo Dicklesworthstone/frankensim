@@ -4859,6 +4859,80 @@ fn blind_holdout_identity_version_domain_and_fields_are_exact() {
 }
 
 #[test]
+fn blind_holdout_identity_ignores_noncommitment_split_fields() {
+    let preregistration = hash("blind-noncommitment-preregistration");
+    let blind_sources = vec![
+        (observation_id("blind-a"), hash("source-a")),
+        (observation_id("blind-b"), hash("source-b")),
+    ];
+    let commitment = |split: Result<CalibrationSplit, VvErrors>| {
+        split
+            .expect("noncommitment variant remains a valid calibration split")
+            .blind_commitment()
+    };
+    let baseline = commitment(CalibrationSplit::try_new(
+        header("blind-noncommitment-a", "unitless"),
+        reference(ArtifactKind::ExperimentArtifact, "experiment-a"),
+        preregistration,
+        vec![observation_id("cal-a")],
+        vec![observation_id("val-a")],
+        blind_sources.clone(),
+    ));
+
+    for (field, variant) in [
+        (
+            "CalibrationSplit.header",
+            commitment(CalibrationSplit::try_new(
+                header("blind-noncommitment-b", "m"),
+                reference(ArtifactKind::ExperimentArtifact, "experiment-a"),
+                preregistration,
+                vec![observation_id("cal-a")],
+                vec![observation_id("val-a")],
+                blind_sources.clone(),
+            )),
+        ),
+        (
+            "CalibrationSplit.experiment",
+            commitment(CalibrationSplit::try_new(
+                header("blind-noncommitment-a", "unitless"),
+                reference(ArtifactKind::ExperimentArtifact, "experiment-b"),
+                preregistration,
+                vec![observation_id("cal-a")],
+                vec![observation_id("val-a")],
+                blind_sources.clone(),
+            )),
+        ),
+        (
+            "CalibrationSplit.calibration",
+            commitment(CalibrationSplit::try_new(
+                header("blind-noncommitment-a", "unitless"),
+                reference(ArtifactKind::ExperimentArtifact, "experiment-a"),
+                preregistration,
+                vec![observation_id("cal-b")],
+                vec![observation_id("val-a")],
+                blind_sources.clone(),
+            )),
+        ),
+        (
+            "CalibrationSplit.validation",
+            commitment(CalibrationSplit::try_new(
+                header("blind-noncommitment-a", "unitless"),
+                reference(ArtifactKind::ExperimentArtifact, "experiment-a"),
+                preregistration,
+                vec![observation_id("cal-a")],
+                vec![observation_id("val-b")],
+                blind_sources,
+            )),
+        ),
+    ] {
+        assert_eq!(
+            baseline, variant,
+            "{field} is part of complete split identity but not the narrower blind-release commitment",
+        );
+    }
+}
+
+#[test]
 fn calibration_split_refuses_missing_preregistration_in_model_and_transport() {
     assert_rule(
         CalibrationSplit::try_new(

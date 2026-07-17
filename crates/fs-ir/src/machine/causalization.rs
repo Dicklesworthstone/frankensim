@@ -6406,6 +6406,11 @@ pub type CausalOutcomeIdV1 = ProblemSemanticId<CausalOutcomeIdentitySchemaV1>;
 const CAUSAL_OUTCOME_CHILD: ChildSpec = ChildSpec::for_identity::<CausalOutcomeIdV1>();
 
 /// Canonical schema marker for causalization receipts.
+///
+/// Governance no-claim marker consumed by the identity authority gate:
+/// `frankensim-unratified-candidate-identity:frankensim-leapfrog-2026-program-i94v.1.2.12:admit_causalization_receipt`.
+/// This candidate grammar must be replaced by the recursive SCC-bundle
+/// authority before that tracked blocker becomes terminal.
 pub enum CausalizationReceiptIdentitySchemaV1 {}
 
 impl CanonicalSchema for CausalizationReceiptIdentitySchemaV1 {
