@@ -964,6 +964,49 @@ Seal-interface reference:
 - <https://doi.org/10.3390/app11041370>
 - <https://creativecommons.org/licenses/by/4.0/>
 
+## PTFE CF10/steel-cylinder-bore/ISO VG 32 interface tranche
+
+`deaconescu-2020-ptfe-cf10-steel-bore-interface/` binds the source's coaxial
+hydraulic-piston seal to the cylinder's inner steel surface. Surface A is
+`90 wt%` PTFE plus `10 wt%` carbon fiber, backed by a `70 Shore A` NBR O-ring
+mounted at `15%` initial radial deformation. Surface B is the source-described
+steel cylinder bore. The medium is the source-linked CITGO Anti-Wear Hydraulic
+Oil Grade 32 reference, while its production lot and additive formulation
+remain unknown.
+
+The seven runtime claims transcribe the PTFE CF10 rows of Table 2. They retain
+the exact pressure, oil temperature, piston speed, displayed voltage drop, and
+Equation 11 fluid-film thickness for two velocity-sweep rows, four
+pressure-sweep rows, and the sole populated temperature-sweep row. Thickness
+ranges from `2.5 micrometers` at `200 bar`, `333 K`, `0.2 m/s` to
+`10.8 micrometers` at `100 bar`, `333 K`, `0.5 m/s`. Table 2 prints
+`8.3 micrometers` twice and `8.1 micrometers` once at the same nominal
+`100 bar`, `333 K`, `0.2 m/s` condition. All three source rows remain separate;
+they are not averaged or converted into an invented uncertainty interval.
+
+The film thicknesses are derived by the paper's resistive method from the
+displayed voltage using `Ra = 10 megaohm` and
+`CR = 63.735 megaohm/micrometer`. The paper's `3.5%` maximum error compares
+experimental thickness with its theoretical Equation 6 result; it is not a
+measurement-confidence statement, so runtime uncertainty remains `Unstated`.
+The source omits repeats, raw traces, dispersion, calibration uncertainty,
+exact PTFE constituent grades, supplier/lot/process, bore steel grade, measured
+finish, coating state, oil lot/formulation, opposed-chamber state, leakage,
+friction force, wear, and life.
+
+This is genuine piston-seal/cylinder-bore evidence, but it is not a coated-bore
+card: the source never identifies a bore coating. Recommended catalog
+roughness elsewhere in the paper is not metrology of the tested bore. The pack
+therefore refuses coated-bore film thickness, friction coefficient, leakage,
+wear, service life, and a transferable lubrication law; bead `1sxe` still owns
+the exact coated-bore gap.
+
+PTFE CF10/steel-bore references:
+
+- <https://doi.org/10.3390/polym12010155>
+- <https://www.mdpi.com/2073-4360/12/1/155>
+- <https://creativecommons.org/licenses/by/4.0/>
+
 ## A2017/Seiken long-life-coolant/air wetting tranches
 
 `yilmaz-2026-a2017-seiken-llc-ra005-wetting/` and

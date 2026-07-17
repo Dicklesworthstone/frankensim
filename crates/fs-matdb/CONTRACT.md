@@ -321,7 +321,7 @@ context, and claim reconstruction; and fail-closed missing-context and
 noncanonical-revision cases.
 
 `xtask/tests/interface_pack_seed_cli.rs`: G3 two-pass compilation of the first
-six source-bound interface seeds into byte-identical, externally pinned packs.
+seven source-bound interface seeds into byte-identical, externally pinned packs.
 The battery checks the NASA 52100 dry-air rider/disk identity and `0.45` value,
 the NASA GXL-320A vacuum four-ball identity and distinct `0.11` mean plus
 `0.09..0.23` observed extrema, and NASA-TN-D-2223's SAE 4340/high-lead-bronze
@@ -329,8 +329,12 @@ hexane journal identity plus apparatus-bound `220 psi` maximum-demonstrated
 unit bearing load. It also checks Zhang et al.'s carbon-filled PTFE Sterling
 seal against an electroplated-chromium piston rod in Kunlun 15 aviation
 hydraulic oil, retaining four printed single-seal force endpoints without
-mislabeling the rod as a coated bore. Two further packs bind Seiken long-life
-coolant free surfaces to distinct `Ra = 0.05 micrometer` and EDM
+mislabeling the rod as a coated bore. The PTFE CF10 piston-seal pack retains
+seven Table 2 film-thickness rows against the source's steel cylinder bore in
+source-linked ISO VG 32 oil, including the same-condition `8.3`, `8.3`, and
+`8.1 micrometer` rows without inventing a bore coating or uncertainty band.
+Two further packs bind Seiken long-life coolant free surfaces to distinct
+`Ra = 0.05 micrometer` and EDM
 `Ra = 3 micrometer` A2017 aluminum states in measured ambient air, retaining
 the printed pre-boiling static angles in radians. The tests retain exact
 condition axes, `Unstated` uncertainty, surface-role order, complete context,
@@ -614,6 +618,20 @@ Wankel-housing authority.
   pressure, leakage, quantitative wear, and lifetime remain no-claims. The
   observed coating transfer and seal wear further prevent promotion to a
   transferable friction or durability law.
+  The Deaconescu et al. piston-seal card separately binds `90 wt%` PTFE plus
+  `10 wt%` carbon fiber, a 70-Shore-A NBR energizer at `15%` radial
+  deformation, the source's steel cylinder inner bore, and source-linked
+  CITGO Anti-Wear Hydraulic Oil Grade 32. Its seven claims are only Table 2's
+  resistively derived fluid-film thicknesses at exact pressure, temperature,
+  speed, and voltage-drop conditions. The nominal `100 bar`, `333 K`,
+  `0.2 m/s` rows remain three claims (`8.3`, `8.3`, and `8.1 micrometers`), not
+  an average or confidence interval. The paper's theoretical-versus-measured
+  `3.5%` maximum error is not measurement uncertainty. Missing constituent
+  grades, supplier/lot/process, bore steel grade, tested finish, coating state,
+  oil lot/formulation, opposed-chamber state, repeats, raw traces, dispersion,
+  calibration uncertainty, friction force, leakage, wear, and life remain
+  no-claims. Because the tested bore's coating state is absent, this card does
+  not satisfy or authorize a coated-bore interface.
   The Yilmaz et al. wetting packs represent the liquid as surface B and the
   medium, with ambient air as the environment, exactly matching the
   solid-liquid-gas contract. Each A2017 roughness state receives a separate

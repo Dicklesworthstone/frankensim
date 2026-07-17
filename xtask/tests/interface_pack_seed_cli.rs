@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_matdb::{NormalizedInterfacePack, PropertyValue, UncertaintyModel};
+use fs_qty::Dims;
 
 const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1";
 const DRY_52100_MANIFEST: &str = "data/matdb/seed-v1/nasa-52100-dry-air-interface/manifest.tsv";
@@ -17,6 +18,8 @@ const JOURNAL_4340_BRONZE_MANIFEST: &str =
     "data/matdb/seed-v1/nasa-tn-d-2223-4340-high-lead-bronze-journal/manifest.tsv";
 const CARBON_PTFE_CR_ROD_MANIFEST: &str =
     "data/matdb/seed-v1/zhang-2021-carbon-ptfe-cr-piston-rod/manifest.tsv";
+const PTFE_CF10_STEEL_BORE_MANIFEST: &str =
+    "data/matdb/seed-v1/deaconescu-2020-ptfe-cf10-steel-bore-interface/manifest.tsv";
 const A2017_LLC_RA005_MANIFEST: &str =
     "data/matdb/seed-v1/yilmaz-2026-a2017-seiken-llc-ra005-wetting/manifest.tsv";
 const A2017_LLC_RA3_MANIFEST: &str =
@@ -405,6 +408,168 @@ fn g3_cli_compiles_committed_carbon_ptfe_chrome_rod_interface() {
         assert!(
             pack.card().claims_for(refused_property).is_empty(),
             "seal source crossed the {refused_property} no-claim boundary"
+        );
+    }
+    assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
+}
+
+#[test]
+fn g3_cli_compiles_committed_ptfe_cf10_steel_bore_iso_vg32_interface() {
+    let (pack, decisions) = compile_twice(PTFE_CF10_STEEL_BORE_MANIFEST);
+
+    assert_eq!(
+        pack.pack_id(),
+        "deaconescu-2020-ptfe-cf10-steel-bore-iso-vg32-interface"
+    );
+    assert_eq!(
+        pack.card().surface_a().material.chemistry,
+        "90 wt% PTFE plus 10 wt% carbon fiber"
+    );
+    assert_eq!(
+        pack.card().surface_b().material.chemistry,
+        "hydraulic-cylinder steel inner bore"
+    );
+    assert_eq!(
+        pack.card().surface_b().texture_frame,
+        "cylinder-inner-bore-coating-and-finish-unstated"
+    );
+    assert_ne!(
+        pack.card().surface_a().texture_frame,
+        pack.card().surface_b().texture_frame,
+        "ordered piston-seal and cylinder-bore roles collapsed"
+    );
+    assert_eq!(
+        pack.card().medium(),
+        "source-linked-CITGO-Anti-Wear-Hydraulic-Oil-Grade-32-lot-and-formulation-unstated"
+    );
+    assert_eq!(pack.card().third_body(), None);
+    assert_eq!(
+        pack.card().environment(),
+        "hydraulic-cylinder-opposed-chamber-pressure-and-atmosphere-unstated"
+    );
+    assert_eq!(
+        pack.card().history(),
+        "mounted-coaxial-piston-seal-15pct-o-ring-radial-deformation-table-2-resistive-film-measurement"
+    );
+    assert_eq!(pack.claims_pack().claims().claim_count(), 7);
+
+    let claims = pack.card().claims_for("fluid-film-thickness");
+    assert_eq!(claims.len(), 7);
+    let mut observed = Vec::new();
+    for (_, claim) in claims {
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("PTFE CF10 fluid-film thickness was not scalar");
+        };
+        assert_eq!(*dims, Dims([1, 0, 0, 0, 0, 0]));
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert!(
+            claim
+                .provenance
+                .license
+                .contains("Creative Commons Attribution 4.0")
+        );
+        assert!(claim.provenance.source.contains("10.3390/polym12010155"));
+        assert!(claim.provenance.source.contains("[source:primary]"));
+
+        let pressure = claim
+            .validity
+            .bound("working_pressure")
+            .expect("pressure remains exact")
+            .0;
+        let temperature = claim
+            .validity
+            .bound("oil_temperature")
+            .expect("temperature remains exact")
+            .0;
+        let speed = claim
+            .validity
+            .bound("piston_speed")
+            .expect("speed remains exact")
+            .0;
+        let voltage = claim
+            .validity
+            .bound("source_measured_voltage_drop")
+            .expect("voltage remains exact")
+            .0;
+        for (axis, expected) in [
+            ("source_o_ring_shore_a_scale_reading", (70.0, 70.0)),
+            (
+                "source_o_ring_initial_radial_deformation_fraction",
+                (0.15, 0.15),
+            ),
+            (
+                "source_film_thickness_derived_by_resistive_method",
+                (1.0, 1.0),
+            ),
+            ("source_series_resistance", (10_000_000.0, 10_000_000.0)),
+            ("source_cylinder_material_steel", (1.0, 1.0)),
+            ("source_cylinder_bore_grade_known", (0.0, 0.0)),
+            ("source_cylinder_bore_coating_state_known", (0.0, 0.0)),
+            ("source_cylinder_bore_measured_finish_known", (0.0, 0.0)),
+            ("source_ptfe_cf10_supplier_lot_process_known", (0.0, 0.0)),
+            ("source_oil_lot_and_formulation_known", (0.0, 0.0)),
+            ("source_replicates_dispersion_confidence_known", (0.0, 0.0)),
+        ] {
+            assert_eq!(claim.validity.bound(axis), Some(expected));
+        }
+        assert_eq!(claim.validity.bounds().len(), 15);
+
+        let observation = pack
+            .claims_pack()
+            .claims()
+            .observation(claim.observations[0])
+            .expect("PTFE CF10 observation remains linked");
+        let block = if observation.method.contains("velocity block") {
+            "velocity"
+        } else if observation.method.contains("pressure block") {
+            "pressure"
+        } else if observation.method.contains("temperature block") {
+            "temperature"
+        } else {
+            panic!("unrecognized Table 2 block: {}", observation.method);
+        };
+        assert!(observation.specimen.contains("steel cylinder bore"));
+        observed.push((block, pressure, temperature, speed, voltage, *value));
+    }
+
+    let expected_rows = [
+        ("velocity", 10_000_000.0, 333.0, 0.2, 0.186, 8.3e-6),
+        ("velocity", 10_000_000.0, 333.0, 0.5, 0.143, 10.8e-6),
+        ("pressure", 5_000_000.0, 333.0, 0.2, 0.173, 8.9e-6),
+        ("pressure", 10_000_000.0, 333.0, 0.2, 0.186, 8.3e-6),
+        ("pressure", 15_000_000.0, 333.0, 0.2, 0.222, 6.9e-6),
+        ("pressure", 20_000_000.0, 333.0, 0.2, 0.591, 2.5e-6),
+        ("temperature", 10_000_000.0, 333.0, 0.2, 0.19, 8.1e-6),
+    ];
+    for expected in expected_rows {
+        assert_eq!(
+            observed.iter().filter(|row| **row == expected).count(),
+            1,
+            "missing or duplicate Table 2 row {expected:?}"
+        );
+    }
+
+    let mut same_condition_values = observed
+        .iter()
+        .filter_map(|(_, pressure, temperature, speed, _, thickness)| {
+            (*pressure == 10_000_000.0 && *temperature == 333.0 && *speed == 0.2)
+                .then_some(*thickness)
+        })
+        .collect::<Vec<_>>();
+    same_condition_values.sort_by(f64::total_cmp);
+    assert_eq!(same_condition_values, [8.1e-6, 8.3e-6, 8.3e-6]);
+
+    for refused_property in [
+        "coated-bore-fluid-film-thickness",
+        "kinetic-friction-coefficient",
+        "leakage-rate",
+        "wear-rate",
+        "seal-life",
+        "transferable-lubrication-law",
+    ] {
+        assert!(
+            pack.card().claims_for(refused_property).is_empty(),
+            "steel-bore source crossed the {refused_property} no-claim boundary"
         );
     }
     assert!(decisions.contains("\"reason_code\":\"interface_context_admitted\""));
