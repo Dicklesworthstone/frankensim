@@ -22,7 +22,7 @@
 //! hosts), and awards no certification tiers (that is fs-conform's
 //! converter scope).
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
 /// Version stamped into every emitted record.
 pub const CASEBOOK_RECORD_VERSION: u32 = 1;
@@ -139,7 +139,8 @@ fn escape_json(s: &str, out: &mut String) {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                write!(out, "\\u{:04x}", c as u32)
+                    .expect("writing JSON escape bytes to a String cannot fail");
             }
             c => out.push(c),
         }
