@@ -3,8 +3,12 @@
 //! determinism trip-wire, skip soundness with slack certificates, the
 //! ACROSS-WORKER-COUNTS determinism certification (real threads,
 //! adversarial completion orders — the G5-at-scale primitive), pinning
-//! against eviction, and snapshot/fork stability. JSON-line verdicts;
-//! seeded cases carry seeds.
+//! against eviction, and snapshot/fork stability. Completed cases emit
+//! canonical aggregate fs-obs verdicts; assertions and expectations that
+//! abort before that point remain ordinary Rust test diagnostics. The one
+//! randomized case carries its actual input-generation seed, while
+//! deterministic cases use zero. `NodeRecord::rng_seed` values describe
+//! manifest records and are not treated as hidden test randomness.
 
 use fs_exec::Reduce;
 use fs_exec::reduce::{det_sum, pairwise_fold};
@@ -17,12 +21,28 @@ use fs_recompute::{
 };
 use std::sync::{Arc, Mutex};
 
-fn verdict(case: &str, pass: bool, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-recompute/conformance\",\"case\":\"{case}\",\"verdict\":\"{}\",\
-         \"detail\":\"{detail}\"}}",
-        if pass { "pass" } else { "fail" }
+fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new("fs-recompute/conformance", case);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: "fs-recompute/conformance".to_string(),
+            case: case.to_string(),
+            pass,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("recompute conformance verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)
+        .expect("recompute conformance verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "case {case}: {detail}");
 }
 
@@ -435,6 +455,7 @@ fn rcs_001_hashing_stability() {
              negative={negative} deep_stable={deep_stable} empty={empty_ok} \
              single={single_ok}]"
         ),
+        0,
     );
 }
 
@@ -474,6 +495,7 @@ fn rcs_002_determinism_tripwire() {
         "identical (seven-field record, artifact) dedupes as a write-time memo hit; \
          the same full record with different bytes trips the DETERMINISM CONTRACT, \
          while a changed measured output is honestly a distinct node identity",
+        0,
     );
 }
 
@@ -517,6 +539,7 @@ fn rcs_003_skip_soundness() {
          is a zero-slack hit, tightened tolerances name their deficit (9e-7), \
          malformed tolerances fail closed, unknown identities miss, and the skip \
          identity correctly ignores recorded tolerances",
+        0,
     );
 }
 
@@ -527,6 +550,9 @@ fn rcs_003_skip_soundness() {
 /// certified by the store accepting every re-put as a dedup.
 #[test]
 fn rcs_004_worker_count_certification() {
+    const INPUT_SEED: u64 = 0x1001_2026_0707_0054;
+    const COMPLETION_ORDER_SEEDS: [u64; 2] = [0xA1, 0xB2];
+
     #[derive(Clone, Copy)]
     struct Sum(f64);
     impl Reduce for Sum {
@@ -539,7 +565,7 @@ fn rcs_004_worker_count_certification() {
         }
     }
     let data: Vec<f64> = {
-        let mut rng = Lcg(0x1001_2026_0707_0054);
+        let mut rng = Lcg(INPUT_SEED);
         (0..10_240).map(|_| rng.unit() * 2.0 - 1.0).collect()
     };
     let tiles = 64usize;
@@ -593,7 +619,11 @@ fn rcs_004_worker_count_certification() {
     let mut all_dedup = true;
     let mut runs = 0;
     for workers in [1usize, 2, 4, 8] {
-        for permute in [None, Some(0xA1), Some(0xB2)] {
+        for permute in [
+            None,
+            Some(COMPLETION_ORDER_SEEDS[0]),
+            Some(COMPLETION_ORDER_SEEDS[1]),
+        ] {
             let artifact = run(workers, permute);
             runs += 1;
             match store.put(r.clone(), &artifact) {
@@ -611,8 +641,10 @@ fn rcs_004_worker_count_certification() {
              real worker threads x {{sequential, 2 adversarial permuted completion \
              orders}} = {runs} runs, every re-put accepted as a dedup by the \
              determinism contract (fixed tile partition + order-fixed pairwise \
-             fold); seed 0x1001_2026_0707_0054"
+             fold); fixture-input seed 0x1001_2026_0707_0054, completion-order \
+             seeds [0xA1, 0xB2]; NodeRecord rng_seed 0x54 is manifest data"
         ),
+        INPUT_SEED,
     );
 }
 
@@ -652,6 +684,7 @@ fn rcs_005_pinning() {
         evicted == 5 && pinned_survive && expected_gone && expected_kept && unknown.is_err(),
         "eviction removes exactly the 5 oldest UNPINNED nodes; evidence-package and \
          contract pins are untouchable; pinning unknown nodes teaches",
+        0,
     );
 }
 
@@ -703,17 +736,17 @@ fn rcs_006_rows_and_fork() {
         && escaped.contains("\"params\":[")
         && escaped.contains("\"code_version\":");
     let mut em = fs_obs::Emitter::new("fs-recompute/conformance", "rcs-006/slack");
-    let line = em
-        .emit(
-            fs_obs::Severity::Info,
-            fs_obs::EventKind::Custom {
-                name: "recompute-slack-table".to_string(),
-                json: format!("{{\"nodes\":{},\"rows\":{}}}", s1.len(), r1.len()),
-            },
-            None,
-        )
-        .to_jsonl();
-    fs_obs::validate_line(&line).expect("slack table validates");
+    let event = em.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: "recompute-slack-table".to_string(),
+            json: format!("{{\"nodes\":{},\"rows\":{}}}", s1.len(), r1.len()),
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("slack table must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("slack table must use the fs-obs wire schema");
     println!("{line}");
     verdict(
         "rcs-006",
@@ -721,6 +754,7 @@ fn rcs_006_rows_and_fork() {
         "ledger rows carry all seven fields, exact node/artifact identity metadata, \
          and slack; identical builds give bitwise-identical rows, caller strings are \
          JSON-escaped, and canonical v3 snapshots are fork-stable and admissible",
+        0,
     );
 }
 
@@ -746,5 +780,6 @@ fn rcs_007_invalid_magnitudes_refuse() {
         pass,
         "NaN/negative error budgets and negative slack burns refuse without mutating \
          the store; error magnitudes cannot manufacture reusable slack",
+        0,
     );
 }

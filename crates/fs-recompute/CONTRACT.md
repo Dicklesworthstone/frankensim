@@ -191,8 +191,18 @@ stay green. Adds fs-evidence (the verified-color skip claims).
 ## Conformance tests
 
 `tests/conformance.rs`, cases rcs-001..rcs-007 plus the snapshot-v3 admission
-matrix — JSON-line verdicts, seeded LCG randomness, the fs-obs slack-table
-event, and fail-closed legacy/version/domain/canonical-header cases. Any
+matrix — canonical fs-obs `ConformanceCase` aggregate verdicts, seeded LCG
+randomness, the fs-obs slack-table event, and fail-closed
+legacy/version/domain/canonical-header cases. Each completed rcs-001..rcs-007
+case emits one linted, wire-validated aggregate event; assertions and
+expectations that abort earlier remain Rust test-harness diagnostics rather
+than claiming aggregate-event coverage. rcs-004 carries its fixture-input seed
+(`0x1001_2026_0707_0054`) in the aggregate field and records both adversarial
+completion-order seeds (`0xA1`, `0xB2`) in its detail; rcs-001..rcs-003 and
+rcs-005..rcs-007 are deterministic and use aggregate seed zero. The
+`NodeRecord::rng_seed` values exercised throughout, including rcs-004's
+`0x54`, are manifest data under test, not test-input randomness. rcs-006
+preserves its linted, wire-validated `Custom` slack-table companion. Any
 reimplementation must pass the suite unchanged.
 
 ## No-claim boundaries
