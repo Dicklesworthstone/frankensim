@@ -29,6 +29,7 @@ const ALUMINUM_6061_T6_SEED_MANIFEST: &str =
 const OFHC_COPPER_SEED_MANIFEST: &str = "data/matdb/seed-v1/ofhc-copper-rrr100/manifest.tsv";
 const PTFE_TEFLON_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/ptfe-teflon-nist-cryogenic/manifest.tsv";
+const PEEK_THERMIC_SEED_MANIFEST: &str = "data/matdb/seed-v1/peek-nasa-thermic-plate/manifest.tsv";
 const AISI_4140_RC33_SEED_MANIFEST: &str = "data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv";
 const AISI_1045_COLD_DRAWN_SEED_MANIFEST: &str =
     "data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv";
@@ -972,6 +973,185 @@ fn g3_cli_compiles_committed_ptfe_teflon_cryogenic_seed() {
                 .contains("does not identify resin grade")
         );
     }
+
+    let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
+    assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));
+    assert!(decisions.contains("\"reason_code\":\"runtime_pack_self_verified\""));
+    assert!(
+        decisions
+            .lines()
+            .all(|row| row.contains(&format!("\"pack_hash\":\"{pack_hash}\"")))
+    );
+}
+
+#[test]
+fn g3_cli_compiles_committed_peek_thermic_plate_seed() {
+    let manifest = workspace_path(PEEK_THERMIC_SEED_MANIFEST);
+    assert!(
+        manifest.is_file(),
+        "committed PEEK THERMIC seed manifest is missing"
+    );
+    let directory = fixture_dir();
+    let first_path = directory.join("peek-thermic-first.fsmatpk");
+    let second_path = directory.join("peek-thermic-second.fsmatpk");
+
+    let first = run_compiler(&manifest, &first_path);
+    let second = run_compiler(&manifest, &second_path);
+    assert!(
+        first.status.success(),
+        "first PEEK THERMIC seed compilation failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "second PEEK THERMIC seed compilation failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "PEEK THERMIC decision stream moved"
+    );
+    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+
+    let first_bytes = fs::read(first_path).expect("read first PEEK THERMIC pack");
+    let second_bytes = fs::read(second_path).expect("read second PEEK THERMIC pack");
+    assert_eq!(first_bytes, second_bytes, "PEEK THERMIC pack bytes moved");
+    let decoded = NormalizedPack::from_bytes(&first_bytes).expect("decode PEEK THERMIC pack");
+    let pack_hash = decoded.content_hash();
+    let decoded = NormalizedPack::from_bytes_verified(pack_hash, &first_bytes)
+        .expect("verify PEEK THERMIC pack identity");
+
+    assert_eq!(decoded.pack_id(), "peek-nasa-thermic-plate-2021");
+    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert!(
+        decoded
+            .redistribution_terms()
+            .contains("public use is permitted")
+    );
+    assert_eq!(decoded.claims().claim_count(), 9);
+    assert!(decoded.joint_statistics().is_empty());
+
+    let conductivity = [
+        (300.0, 0.224_458_9),
+        (400.0, 0.243_077_8),
+        (500.0, 0.265_855_5),
+        (525.0, 0.274_943_823_437_5),
+    ];
+    for (temperature, expected_value) in conductivity {
+        let (_, claim) = decoded
+            .claims()
+            .claims_for("thermal_conductivity")
+            .into_iter()
+            .find(|(_, claim)| {
+                claim.validity.bound("temperature") == Some((temperature, temperature))
+            })
+            .unwrap_or_else(|| panic!("missing PEEK conductivity at {temperature} K"));
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("PEEK conductivity at {temperature} K was not scalar");
+        };
+        assert_eq!(*dims, Dims([1, 1, -3, -1, 0, 0]));
+        assert_eq!(*value, expected_value);
+        assert_eq!(
+            claim.validity.bound("source_pressure_atmospheric"),
+            Some((1.0, 1.0))
+        );
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(
+            claim.interpolation,
+            InterpolationPolicy::ConstantWithinValidity
+        );
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        assert!(claim.provenance.source.contains("NASA/TM-20210014330"));
+        assert!(
+            claim
+                .provenance
+                .source
+                .contains("[source:nasa-thermic-peek]")
+        );
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("PEEK conductivity observation remains linked");
+        assert_eq!(
+            observation.specimen,
+            "nasa-larc-thermic-peek-plate-grade-and-process-unspecified"
+        );
+        assert!(observation.method.contains("Continuous Genetic Algorithm"));
+        assert!(observation.caveats.contains("c0..c3=-4.0607e-2"));
+        assert!(
+            observation
+                .caveats
+                .contains("narrower repeated range governs")
+        );
+        assert!(observation.caveats.contains("differed by about 3 percent"));
+        assert!(observation.caveats.contains("does not identify PEEK grade"));
+    }
+
+    let specific_heat = [
+        (300.0, 1_058.931),
+        (400.0, 1_347.916),
+        (500.0, 1_765.685),
+        (525.0, 1_897.616_390_625),
+    ];
+    for (temperature, expected_value) in specific_heat {
+        let (_, claim) = decoded
+            .claims()
+            .claims_for("specific_heat_capacity")
+            .into_iter()
+            .find(|(_, claim)| {
+                claim.validity.bound("temperature") == Some((temperature, temperature))
+            })
+            .unwrap_or_else(|| panic!("missing PEEK specific heat at {temperature} K"));
+        let PropertyValue::Scalar { value, dims } = &claim.value else {
+            panic!("PEEK specific heat at {temperature} K was not scalar");
+        };
+        assert_eq!(*dims, Dims([2, 0, -2, -1, 0, 0]));
+        assert_eq!(*value, expected_value);
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
+        let observation = decoded
+            .claims()
+            .observation(claim.observations[0])
+            .expect("PEEK specific-heat observation remains linked");
+        assert!(
+            observation
+                .method
+                .contains("differential-scanning-calorimeter")
+        );
+        assert!(observation.caveats.contains("1.0477e-5*T^3"));
+        assert!(
+            observation
+                .caveats
+                .contains("Equation 1's dimensional balance")
+        );
+        assert!(observation.caveats.contains("no residual, dispersion"));
+    }
+
+    let density_claims = decoded.claims().claims_for("density");
+    assert_eq!(density_claims.len(), 1);
+    let (_, density) = density_claims[0];
+    let PropertyValue::Scalar { value, dims } = &density.value else {
+        panic!("PEEK density was not scalar");
+    };
+    assert_eq!(*value, 1_264.0);
+    assert_eq!(*dims, Dims([-3, 1, 0, 0, 0, 0]));
+    assert_eq!(
+        density.validity.bound("source_test_temperature_known"),
+        Some((0.0, 0.0))
+    );
+    assert_eq!(density.uncertainty, UncertaintyModel::Unstated);
+    assert_eq!(density.provenance.license, NASA_SEED_LICENSE);
+    let density_observation = decoded
+        .claims()
+        .observation(density.observations[0])
+        .expect("PEEK density observation remains linked");
+    assert!(density_observation.method.contains("Commercial-laboratory"));
+    assert!(
+        density_observation
+            .caveats
+            .contains("Netzsch report 621004797")
+    );
+    assert!(density_observation.caveats.contains("test temperature"));
 
     let decisions = String::from_utf8(first.stdout).expect("decision stream is UTF-8");
     assert!(decisions.contains("\"reason_code\":\"uncertainty_policy_admitted\""));

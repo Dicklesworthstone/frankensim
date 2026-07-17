@@ -156,6 +156,41 @@ PTFE/Teflon references:
 - <https://trc.nist.gov/cryogenics/materials/materialproperties.htm>
 - <https://www.nist.gov/copyrights-disclaimers>
 
+## NASA LaRC PEEK THERMIC-plate tranche
+
+`peek-nasa-thermic-plate/` pins NASA/TM-20210014330's instrumented PEEK test
+plate rather than treating the polymer family name as a universal card. LaRC
+removed three `7.9 mm`-diameter by `12.7 mm` plugs from the plate, instrumented
+each with three Type K thermocouples through its thickness, and used the center
+plug's transient temperatures with a one-dimensional Crank-Nicolson model and
+Continuous Genetic Algorithm. The source does not report the PEEK grade,
+supplier, crystallinity, filler, or processing history, so all observations
+carry that missing identity explicitly.
+
+The tranche evaluates NASA's final all-thermocouple thermal-conductivity cubic
+and its LaRC DSC specific-heat cubic at exactly `300 K`, `400 K`, `500 K`, and
+`525 K`. It also retains the `1264 kg/m3` commercial-laboratory density used by
+the thermal model, with a fail-closed flag because the density measurement's
+temperature is not reported. Equation 2 does not print a specific-heat unit
+inline; `J/(kg K)` is retained because it is the SI unit required by Equation
+1's dimensional balance with the paper's stated conductivity, density, length,
+and time units. The source describes conductivity testing at atmospheric
+pressure without assigning a numeric pressure, so conductivity claims carry
+`source_pressure_atmospheric = 1` instead of inventing `101325 Pa`.
+
+NASA's Abstract and Results state a `300..525 K` range, while the Concluding
+Remarks say `300..550 K`; the pack deliberately adopts the narrower repeated
+range. Four thermocouple-subset conductivity estimates differed by about `3%`,
+and the chosen CGA fit was about `35%` below the prior laser-flash series. Those
+comparisons are diagnostics, not confidence intervals, so all nine runtime
+claims retain `Unstated` uncertainty. Exact-temperature validity prevents the
+offline polynomial evaluations from becoming an implicit continuous curve.
+
+PEEK THERMIC references:
+
+- <https://ntrs.nasa.gov/citations/20210014330>
+- <https://ntrs.nasa.gov/api/citations/20210014330/downloads/NASA-TM-20210014330.pdf>
+
 ## AISI 4140 Rockwell C33 low-temperature tranche
 
 `aisi-4140-rc33/` is a condition-pinned structural-steel tranche from
@@ -464,6 +499,10 @@ cargo run -p xtask -- matdb-pack \
   --out /path/to/ptfe-teflon-nist-cryogenic.fsmatpk
 
 cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/peek-nasa-thermic-plate/manifest.tsv \
+  --out /path/to/peek-nasa-thermic-plate-2021.fsmatpk
+
+cargo run -p xtask -- matdb-pack \
   --manifest data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv \
   --out /path/to/aisi-4140-qq-s-624-rc33.fsmatpk
 
@@ -534,6 +573,14 @@ polynomial-derived exact-temperature points; it does not select a resin grade,
 crystallinity, filler, processing state, supplier, or density. The published
 fit errors are not confidence intervals, and no interpolation, extrapolation,
 Young's-modulus, or thermal-expansion-coefficient claim is admitted.
+
+The PEEK THERMIC tranche is likewise not a generic PEEK card, seal design, or
+service-temperature qualification. It binds one NASA test plate and its thermal
+model inputs without supplying grade, supplier, crystallinity, filler,
+processing history, thermal-expansion behavior, mechanical properties,
+tribology, permeability, chemical compatibility, radiation response, creep,
+aging, or lifetime authority. The fit diagnostics are not statistical
+uncertainty, and the density's unknown test temperature must be acknowledged.
 
 The AISI 4140 tranche applies only to the exact NASA heat/process/hardness/bar
 condition above and the two retained temperatures. It does not provide a

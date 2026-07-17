@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	peek-nasa-thermic-plate-2021
+redistribution	permitted	NASA NTRS record 20210014330 marks NASA/TM-20210014330 public and a work of the U.S. Government whose public use is permitted
+citation	Kurz, Elora and Daryabeigi, Kamran, Thermal Conductivity Estimation from Transient Test Data with Embedded Thermocouples using Genetic Algorithm Optimization, NASA/TM-20210014330, May 2021, PEEK THERMIC plate, equations 2-3, and Table 2
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	nasa-thermic-peek	properties.tsv	material-tsv-v1
