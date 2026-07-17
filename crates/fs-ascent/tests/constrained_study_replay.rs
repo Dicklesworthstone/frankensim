@@ -7,11 +7,13 @@
 //! field. An independent analytic oracle reconstructs the objective,
 //! constraint values and gradients, multipliers, raw KKT components, and a
 //! scaled KKT residual at the returned point. Same-input repeats must reproduce
-//! the receipt byte for byte. Engine-keyed deterministic red mutations target
-//! the returned decision, each constraint value/gradient family, multiplier
-//! and KKT claims, and the declared solver configuration; stale and correctly
-//! resealed forms are refused by distinct typed admission errors, and a
-//! resealed semantic mutant cannot authorize itself as its own reference.
+//! the receipt byte for byte. Engine/lane-namespaced deterministic red
+//! mutations target the returned decision, each constraint callback value/JT
+//! family, multiplier and KKT claims, and the declared solver configuration;
+//! their seeds causally choose only the within-lane coordinate and direction.
+//! Stale and correctly resealed forms are refused by distinct typed admission
+//! errors, and a resealed semantic mutant cannot authorize itself as its own
+//! reference.
 //!
 //! This is one small dense fixture. It does not claim all constrained problems,
 //! large-scale sparse behavior, cancellation, checkpointing, cross-ISA
@@ -40,20 +42,21 @@ const ANALYTIC_MULTIPLIERS: [f64; 2] = [0.4, 1.2];
 const ANALYTIC_X_TOLERANCE: f64 = 1e-4;
 const ANALYTIC_MULTIPLIER_TOLERANCE: f64 = 1e-3;
 // The production certificate and this oracle evaluate the same finite affine
-// fixture through independent code. Sixty-four epsilons admit only a small
-// reassociation envelope; the much looser solver tolerance remains a separate
-// convergence gate and cannot mask a materially wrong certificate.
+// fixture through independent code. The absolute and relative coefficients are
+// each sixty-four epsilons (at unit scale their sum is 128 epsilons), admitting
+// only a small reassociation envelope. The much looser solver tolerance remains
+// a separate convergence gate and cannot mask a materially wrong certificate.
 const ORACLE_ABS_TOLERANCE: f64 = 64.0 * f64::EPSILON;
 const ORACLE_REL_TOLERANCE: f64 = 64.0 * f64::EPSILON;
 
 const CONFIG_SCHEMA_VERSION: u64 = 1;
 const OBJECTIVE_ORACLE_VERSION: u64 = 1;
 const CONSTRAINT_ORACLE_VERSION: u64 = 1;
-const CALLBACK_ORACLE_VERSION: u64 = 1;
+const CALLBACK_ORACLE_VERSION: u64 = 2;
 const KKT_ORACLE_VERSION: u64 = 1;
 const SCALED_KKT_ORACLE_VERSION: u64 = 1;
-const ACCEPTANCE_GATE_VERSION: u64 = 1;
-const MUTATION_PROTOCOL_VERSION: u64 = 2;
+const ACCEPTANCE_GATE_VERSION: u64 = 2;
+const MUTATION_PROTOCOL_VERSION: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
@@ -98,13 +101,13 @@ impl Engine {
     const fn schedule(self) -> &'static str {
         match self {
             Self::AugmentedLagrangian => {
-                "cold-zero-multipliers;mu0=10;grow-if-feasibility>0.25*previous;mu-growth=10;mu-cap=1e10;inner-memory=10;inner-grad-gate=0.1*tolerance;inner-lbfgs-cap=300"
+                "cold-zero-multipliers;phr-inequality;mu0=10;grow-if-feasibility>0.25*previous;mu-growth=10;mu-cap=1e10;inner-memory=10;inner-grad-gate=0.1*tolerance;inner-lbfgs-cap=300;update-lambda=lambda+mu*ce;update-nu=max(0,nu+mu*ci);certificate-after-update"
             }
             Self::InteriorPoint => {
-                "phase1-margin=1e-9;phase1-beta=30;phase1-memory=8;phase1-gates=objective<-2margin-or-grad<1e-12;phase1-cap=300;mu0=1;mu-factor=0.2;rho0=10;rho-factor=2;inner-memory=10;inner-grad=max(0.1mu,0.1tol);inner-cap=400"
+                "phase1-if-any-ci>=-margin;phase1-margin=1e-9;phase1-beta=30;phase1-memory=8;phase1-gates=objective<-2margin-or-grad<1e-12;phase1-cap=300;mu0=1;mu-factor=0.2;rho0=10;rho-factor=2;inner-memory=10;inner-grad=max(0.1mu,0.1tol);inner-cap=400;update-lambda=lambda+rho*ce;nu=mu/max(-ci,1e-300);certificate-before-mu-rho-update"
             }
             Self::Sqp => {
-                "identity-bfgs;initial-active-ci>-1e-8;activate-ci>-1e-10;drop-multiplier<-1e-10;merit-weight=10;backtrack-cap=40;alpha-factor=0.5;accept-merit<m0-1e-12"
+                "initial-hessian=identity;dense-kkt-lu;powell-damped-bfgs;initial-active-ci>-1e-8;activate-ci>-1e-10;clamp-active-nu=max(multiplier,0);drop-multiplier<-1e-10;converge-if-not-dropped-and-step-inf<tol-and-kkt<tol;merit-weight=10;backtrack-cap=40;alpha-factor=0.5;accept-merit<m0-1e-12"
             }
         }
     }
@@ -252,7 +255,8 @@ struct ReceiptPayload {
 impl ReceiptPayload {
     #[allow(clippy::too_many_lines)] // Every acceptance and oracle field is intentionally bound.
     fn identity(&self) -> ReplayIdentity {
-        let mut builder = IdentityBuilder::new("fs-ascent-constrained-study-receipt-v2")
+        let mut builder = IdentityBuilder::new("fs-ascent-constrained-study-receipt-v3")
+            .str("suite", SUITE)
             .str("fs-ascent-version", fs_ascent::VERSION)
             .str("fs-la-version", fs_la::VERSION)
             .str("fs-math-version", fs_math::VERSION)
@@ -278,11 +282,23 @@ impl ReceiptPayload {
                 "event-seed-semantics",
                 "zero-is-null-ConformanceCase-schema-sentinel-not-optimizer-input",
             )
+            .u64("event-seed-none", EVENT_SEED_NONE)
+            .u64("mutation-base-seed", MUTATION_SEED)
+            .str(
+                "mutation-seed-semantics",
+                "engine-and-lane-namespaced;causally-selects-only-within-lane-coordinate-and-direction",
+            )
+            .str(
+                "mutation-lanes",
+                "returned-decision;equality-callback-value;equality-callback-jt;inequality-callback-value;inequality-callback-jt;equality-multiplier;inequality-multiplier;kkt-claim;scaled-kkt-claim;schedule-config",
+            )
             .u64("dimension", DIMENSION as u64)
             .u64("equality-count", EQUALITY_COUNT as u64)
             .u64("inequality-count", INEQUALITY_COUNT as u64)
             .f64_bits("objective-center-x", 2.0)
             .f64_bits("objective-center-y", 1.0)
+            .f64_bits("objective-x-quadratic-weight", 1.0)
+            .f64_bits("objective-y-quadratic-weight", 1.0)
             .f64_bits("equality-x-coefficient", 1.0)
             .f64_bits("equality-y-coefficient", 1.0)
             .f64_bits("equality-rhs", 2.0)
@@ -362,11 +378,11 @@ impl ReceiptPayload {
             )
             .str(
                 "callback-gate",
-                "every-callback-input-output-recomputed-and-all-five-kinds-required-at-returned-point",
+                "every-callback-input-output-recomputed;value-kinds-required-at-returned-point;JT-kinds-required-at-returned-point-with-exact-reported-multipliers",
             )
             .str(
                 "accounting-gate",
-                "iterations-in-1-through-cap;positive-reported-evals;objective-callback-minus-report-offset=AL3,IP2..3,SQP1-or-3",
+                "iterations-in-1-through-cap;positive-reported-evals;objective-callback-minus-report-offset=AL3,IP2-before-cap-or-2..3-at-cap,SQP1-in-loop-or-3-with-terminal-adjacent-final-f-and-kkt-objectives",
             )
             .u64("start-values", self.start_bits.len() as u64);
         for &value_bits in &self.start_bits {
@@ -739,7 +755,9 @@ fn callback_mismatch(index: usize, call: &CallbackCall) -> Option<String> {
                     && call.output_bits
                         == bits(&[
                             weights[0] * inequality_gradients[0][0],
-                            weights[0] * inequality_gradients[0][1],
+                            // The production fixture canonicalizes the structural
+                            // zero to +0.0 even for a negative probe weight.
+                            0.0,
                         ]) =>
             {
                 None
@@ -874,6 +892,20 @@ fn semantic_mismatch(payload: &ReceiptPayload) -> Option<String> {
         .iter()
         .filter(|call| call.kind == "objective-gradient")
         .count();
+    let objective_callback_indices: Vec<usize> = payload
+        .callbacks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| (call.kind == "objective-gradient").then_some(index))
+        .collect();
+    let terminal_adjacent_objective_pair = match objective_callback_indices.as_slice() {
+        [.., earlier, later] => {
+            *earlier + 1 == *later
+                && payload.callbacks[*earlier].point_bits == payload.report.x_bits
+                && payload.callbacks[*later].point_bits == payload.report.x_bits
+        }
+        _ => false,
+    };
     let Some(uncounted_objective_callbacks) =
         objective_callbacks.checked_sub(payload.report.evaluations)
     else {
@@ -888,10 +920,15 @@ fn semantic_mismatch(payload: &ReceiptPayload) -> Option<String> {
         Engine::AugmentedLagrangian => uncounted_objective_callbacks == 3,
         // IP has one initial validation; convergence may occur in-loop (+final
         // objective) or at the post-cap final KKT/objective pair.
+        Engine::InteriorPoint if payload.report.iterations < payload.config.iteration_cap => {
+            uncounted_objective_callbacks == 2
+        }
         Engine::InteriorPoint => (2..=3).contains(&uncounted_objective_callbacks),
-        // SQP has one initial validation; a post-loop certificate adds the
-        // otherwise uncounted final objective and KKT objective reads.
-        Engine::Sqp => matches!(uncounted_objective_callbacks, 1 | 3),
+        // SQP has one initial validation. Its post-loop path performs a final
+        // objective read immediately before the KKT objective read, so the
+        // terminal adjacent pair distinguishes the otherwise uncounted +2.
+        Engine::Sqp if terminal_adjacent_objective_pair => uncounted_objective_callbacks == 3,
+        Engine::Sqp => uncounted_objective_callbacks == 1,
     };
     if !accounting_matches {
         return Some(format!(
@@ -911,10 +948,14 @@ fn semantic_mismatch(payload: &ReceiptPayload) -> Option<String> {
             ));
         }
     }
-    for required_kind in ["equality-jt", "inequality-jt"] {
+    for (required_kind, expected_weights) in [
+        ("equality-jt", payload.report.lambda_bits.as_slice()),
+        ("inequality-jt", payload.report.nu_bits.as_slice()),
+    ] {
         if !payload.callbacks.iter().any(|call| {
             call.kind == required_kind
                 && call.point_bits == payload.report.x_bits
+                && call.weight_bits.as_slice() == expected_weights
                 && call
                     .weight_bits
                     .iter()
@@ -1091,10 +1132,10 @@ impl MutationKind {
     const fn name(self) -> &'static str {
         match self {
             Self::ReturnedDecision => "returned-decision",
-            Self::EqualityValue => "equality-value",
-            Self::EqualityGradient => "equality-gradient",
-            Self::InequalityValue => "inequality-value",
-            Self::InequalityGradient => "inequality-gradient",
+            Self::EqualityValue => "equality-callback-value",
+            Self::EqualityGradient => "equality-callback-jt",
+            Self::InequalityValue => "inequality-callback-value",
+            Self::InequalityGradient => "inequality-callback-jt",
             Self::EqualityMultiplier => "equality-multiplier",
             Self::InequalityMultiplier => "inequality-multiplier",
             Self::KktClaim => "kkt-claim",
@@ -1147,6 +1188,29 @@ fn mutate_f64(slot: &mut u64, mutation_seed: u64, magnitude: f64) -> (u64, u64) 
     (before, after)
 }
 
+fn returned_callback_index(payload: &ReceiptPayload, kind: &str) -> usize {
+    let expected_weights = match kind {
+        "equality-jt" => Some(payload.report.lambda_bits.as_slice()),
+        "inequality-jt" => Some(payload.report.nu_bits.as_slice()),
+        _ => None,
+    };
+    payload
+        .callbacks
+        .iter()
+        .position(|call| {
+            call.kind == kind
+                && call.point_bits == payload.report.x_bits
+                && expected_weights.is_none_or(|weights| {
+                    call.weight_bits.as_slice() == weights
+                        && call
+                            .weight_bits
+                            .iter()
+                            .any(|bits| *bits & 0x7fff_ffff_ffff_ffff != 0)
+                })
+        })
+        .unwrap_or_else(|| panic!("reference receipt lacks returned-point callback {kind}"))
+}
+
 #[allow(clippy::too_many_lines)] // One explicit independent lane per semantic claim family.
 fn apply_mutation(
     payload: &mut ReceiptPayload,
@@ -1164,43 +1228,55 @@ fn apply_mutation(
             (format!("report.x[{coordinate}]"), before, after)
         }
         MutationKind::EqualityValue => {
+            let callback = returned_callback_index(payload, "equality");
             let (before, after) = mutate_f64(
-                &mut payload.oracle.equality_value_bits[0],
-                mutation_seed,
-                0.125,
-            );
-            ("oracle.equality_values[0]".to_string(), before, after)
-        }
-        MutationKind::EqualityGradient => {
-            let coordinate = (mutation_seed as usize) % DIMENSION;
-            let (before, after) = mutate_f64(
-                &mut payload.oracle.equality_gradient_bits[0][coordinate],
+                &mut payload.callbacks[callback].output_bits[0],
                 mutation_seed,
                 0.125,
             );
             (
-                format!("oracle.equality_gradients[0][{coordinate}]"),
+                format!("callbacks[{callback}].equality.output[0]"),
+                before,
+                after,
+            )
+        }
+        MutationKind::EqualityGradient => {
+            let callback = returned_callback_index(payload, "equality-jt");
+            let coordinate = (mutation_seed as usize) % DIMENSION;
+            let (before, after) = mutate_f64(
+                &mut payload.callbacks[callback].output_bits[coordinate],
+                mutation_seed,
+                0.125,
+            );
+            (
+                format!("callbacks[{callback}].equality_jt.output[{coordinate}]"),
                 before,
                 after,
             )
         }
         MutationKind::InequalityValue => {
+            let callback = returned_callback_index(payload, "inequality");
             let (before, after) = mutate_f64(
-                &mut payload.oracle.inequality_value_bits[0],
-                mutation_seed,
-                0.125,
-            );
-            ("oracle.inequality_values[0]".to_string(), before, after)
-        }
-        MutationKind::InequalityGradient => {
-            let coordinate = (mutation_seed as usize) % DIMENSION;
-            let (before, after) = mutate_f64(
-                &mut payload.oracle.inequality_gradient_bits[0][coordinate],
+                &mut payload.callbacks[callback].output_bits[0],
                 mutation_seed,
                 0.125,
             );
             (
-                format!("oracle.inequality_gradients[0][{coordinate}]"),
+                format!("callbacks[{callback}].inequality.output[0]"),
+                before,
+                after,
+            )
+        }
+        MutationKind::InequalityGradient => {
+            let callback = returned_callback_index(payload, "inequality-jt");
+            let coordinate = (mutation_seed as usize) % DIMENSION;
+            let (before, after) = mutate_f64(
+                &mut payload.callbacks[callback].output_bits[coordinate],
+                mutation_seed,
+                0.125,
+            );
+            (
+                format!("callbacks[{callback}].inequality_jt.output[{coordinate}]"),
                 before,
                 after,
             )
@@ -1279,7 +1355,7 @@ fn emit_receipt(engine: Engine, reference: &RetainedReceipt, mutations: &[Mutati
         .map(|mutation| {
             format!(
                 concat!(
-                    "{{\"kind\":\"{}\",\"seed\":{},\"target\":\"{}\",",
+                    "{{\"kind\":\"{}\",\"seed\":\"0x{:016x}\",\"target\":\"{}\",",
                     "\"before\":\"0x{:016x}\",\"after\":\"0x{:016x}\",",
                     "\"resealed_payload_identity\":\"{}\",",
                     "\"stale_refusal\":\"{:?}\",\"resealed_refusal\":\"{:?}\",",
@@ -1337,7 +1413,7 @@ fn emit_receipt(engine: Engine, reference: &RetainedReceipt, mutations: &[Mutati
             case: engine.name().to_string(),
             pass: true,
             detail: format!(
-                "fixed deterministic input (no optimizer seed; event seed zero is a null schema sentinel) replayed the complete {} callback/report/oracle receipt; {} independent mutation lanes each reproduced stable stale PayloadIdentityMismatch, resealed ReferenceIdentityMismatch, and mutant-as-own-reference SemanticOracleMismatch refusals",
+                "fixed deterministic input (no optimizer seed; event seed zero is a null schema sentinel) replayed the complete {} callback/report/oracle receipt; {} engine/lane-namespaced mutation seeds causally selected only within-lane coordinates/directions, and every lane reproduced stable stale PayloadIdentityMismatch, resealed ReferenceIdentityMismatch, and mutant-as-own-reference SemanticOracleMismatch refusals",
                 engine.name(),
                 mutations.len(),
             ),
@@ -1401,7 +1477,7 @@ fn constrained_families_replay_and_reject_seeded_red_mutations() {
             assert_eq!(
                 mutation.mutation_seed,
                 MUTATION_SEED ^ engine.tag() ^ kind.tag(),
-                "mutation seed must be the causal engine-and-lane selector"
+                "mutation seed namespace must be derived from the explicit engine and lane"
             );
             assert!(
                 matches!(
