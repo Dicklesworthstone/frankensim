@@ -509,10 +509,17 @@ fn pressure_driven_duct_has_the_poiseuille_shape() {
     );
 }
 
-/// Candidate preimage for the boundary golden. The hard-coded registry freeze
-/// is intentionally deferred until the policy-required committed-tree
-/// debug/release and cross-ISA reproductions exist. This replay check prevents
-/// an unfrozen candidate from becoming nondeterministic in the meantime.
+/// Frozen boundary golden (fs-lbm:d3q19-boundary-bits, registered in
+/// golden-couplings.json). Frozen 2026-07-17 after all four policy quadrants
+/// reproduced the value bit-identically on a committed tree: aarch64 M4 Pro
+/// debug + release and x86-64 ts1 debug + release, at the d99f5a60/2919144
+/// boundary (empty fs-lbm diff between them). Bump only with a semantic
+/// change to the D3Q19 boundary bits, per docs/GOLDEN_POLICY.md.
+const BOUNDARY_GOLDEN_HASH: u64 = 0x6683_0bf8_5cbb_3750;
+
+/// Preimage for the boundary golden: link masks, densities, velocities, and
+/// total mass across a voxelized-sphere lid cavity and a velocity/pressure
+/// duct, hashed FNV-1a over exact bit patterns.
 fn boundary_candidate_hash() -> u64 {
     let mut accumulator = 0xcbf2_9ce4_8422_2325u64;
     let mut feed = |bytes: &[u8]| {
@@ -576,6 +583,12 @@ fn d3q19_boundary_candidate_hash_is_replay_stable() {
     assert_eq!(
         first, second,
         "D3Q19 boundary candidate hash is not replay-stable"
+    );
+    assert_eq!(
+        first, BOUNDARY_GOLDEN_HASH,
+        "d3q19 boundary bits changed: {first:#018x} vs {BOUNDARY_GOLDEN_HASH:#018x} — bump \
+         only with a semantic boundary change and a same-commit registry re-pin \
+         (docs/GOLDEN_POLICY.md)"
     );
 }
 
