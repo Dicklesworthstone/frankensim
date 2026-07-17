@@ -132,11 +132,21 @@ and RQ-* requirement-to-evidence catalog.
   refuses final symlinks, bounds both individual and aggregate reads, rejects
   metadata/read length races, and hashes the exact admitted bytes. Its receipt
   records the adapter version, effective limits, canonical locator/class,
-  byte count, exact BLAKE3 identity, Beads record count where applicable, and
-  the resulting source-snapshot identity. Contract and registry sources must
-  be nonempty NUL-free UTF-8. Beads sources additionally receive a bounded
-  lexical JSON-object-envelope audit and a unique canonical top-level string
-  `id` audit before snapshot admission.
+  byte count, exact BLAKE3 identity, Beads record count and canonical id index
+  where applicable, and the resulting source-snapshot identity. Contract and
+  registry sources must be nonempty NUL-free UTF-8. Beads sources additionally
+  receive a bounded lexical JSON-object-envelope audit and a unique canonical
+  top-level string `id` audit before snapshot admission; the same id appearing
+  in two bound Beads sources refuses as an ambiguous index.
+- `audit_traceability_owner_join(obligations, loaded)` checks that every Bead id
+  named by the complete PO index is lexically present in those exact loaded
+  Beads bytes. Its sorted diagnostics name the missing PO and owner id.
+  `generate_traceability_ledger_from_loaded_sources(rows, obligations, loaded)`
+  validates declarations first, performs that presence join, and returns no
+  partial ledger on either failure. A green `TraceabilityOwnerJoinReceipt`
+  binds the join version, owner-reference/distinct-owner/source/index counts,
+  and exact source-snapshot identity. It does not inspect or grant meaning to
+  tracker status, assignment, dependencies, closure, or evidence fields.
 - `generate_traceability_ledger_from_snapshot(rows, obligations, snapshot)`
   retains `authority: "declaration-only"` while adding three explicit roots:
   the admitted source-snapshot identity, the canonical unbound declaration
@@ -150,9 +160,10 @@ and RQ-* requirement-to-evidence catalog.
   PO, 16 KiB per scalar field, 512 source artifacts, and 4 KiB per source
   locator. The core `traceability` module remains pure. `traceability_fs` owns
   bounded standard-filesystem reads only; it does not open the Beads database,
-  perform network I/O, or persist immutable artifacts. Higher tooling owns the
-  semantic join and persistence and must use these validators instead of
-  hand-maintaining a dashboard.
+  perform network I/O, or persist immutable artifacts. `traceability_join`
+  owns only canonical owner-id presence. Higher tooling owns lifecycle,
+  dependency, contract-clause, evidence, and persistence semantics and must use
+  these validators instead of hand-maintaining a dashboard.
 
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
@@ -342,7 +353,10 @@ generated JSON column/index coverage.
 order, source-mutation identity sensitivity, declaration-only ledger binding,
 bounded Beads record/line/nesting envelope and unique-id refusals, individual
 and aggregate byte caps, strict relative paths, regular-file metadata, complete
-source-class coverage, limit validation, and duplicate-locator refusal.
+source-class coverage, limit validation, duplicate-locator/cross-source-id
+refusal, complete PO-owner presence, exact missing-PO/owner diagnostics,
+declaration-before-join failure order, and proof that tracker status changes
+move the bound source identity without changing lexical owner admission.
 
 `tests/lanes_e2e.rs` (bead rjoq.6 slice 2): the cross-crate no-mock
 composition — fs-govern admission persisted into a FrankenSQLite-backed
@@ -383,15 +397,18 @@ identity guard has a test that fails if the guard is removed.
 - Bead-id owners in governance declarations remain string references. The
   filesystem adapter may read exact caller-selected Beads JSONL bytes, but it
   validates only a conservative lexical object envelope and unique canonical
-  top-level ids. It does not open the Beads database or interpret status,
-  dependencies, closure, ownership, or scientific evidence semantics.
+  top-level ids. The owner join additionally confirms that every declared PO
+  owner id is present. Neither path opens the Beads database nor interprets
+  status, dependencies, closure, assignment, ownership truth, or scientific
+  evidence semantics.
 - The canonical traceability rows are governance declarations. They do not
   attest that an owner exists in the current tracker snapshot, that a benchmark
   ran, that a milestone closed, or that a scientific claim is verified. A
-  filesystem receipt binds exact Beads/contracts/registry bytes but does not
-  perform that semantic join. Higher tooling must join the admitted sources and
-  V&V evidence before persisting an immutable generated artifact; a closed Bead
-  must never be translated directly into scientific proof status.
+  filesystem receipt binds exact Beads/contracts/registry bytes and the owner
+  join proves lexical owner-id presence only. Higher tooling must join admitted
+  lifecycle, dependency, contract-clause, and V&V evidence semantics before
+  persisting an immutable generated artifact; a closed Bead must never be
+  translated directly into scientific proof status.
 - Filesystem loading uses bounded synchronous `std` I/O and has no `Cx`; it
   makes no cancellation-latency, hostile-directory race resistance, sandbox,
   signature, authorization, or durable-persistence claim. Deployments that

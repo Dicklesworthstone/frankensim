@@ -2,11 +2,15 @@
 
 use fs_blake3::hash_bytes;
 use fs_govern::{
-    TRACEABILITY_FILESYSTEM_ADAPTER_VERSION, TraceabilityFileSpec, TraceabilityFilesystemField,
-    TraceabilityFilesystemLimits, TraceabilitySourceKind,
-    generate_traceability_ledger_from_snapshot, load_traceability_source_snapshot,
-    proof_obligations, requirements,
+    LoadedTraceabilityGenerationError, TRACEABILITY_FILESYSTEM_ADAPTER_VERSION,
+    TRACEABILITY_OWNER_JOIN_VERSION, TraceabilityField, TraceabilityFileSpec,
+    TraceabilityFilesystemField, TraceabilityFilesystemLimits, TraceabilityOwnerJoinField,
+    TraceabilitySourceKind, audit_traceability_owner_join,
+    generate_traceability_ledger_from_loaded_sources, generate_traceability_ledger_from_snapshot,
+    load_traceability_source_snapshot, proof_obligations, requirements,
 };
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -92,6 +96,44 @@ fn audit_with_text(
     .expect_err("invalid text source must fail closed")
 }
 
+fn owner_beads_json(status: &str, omitted: Option<&str>, extra: &[&str]) -> String {
+    let mut ids = BTreeSet::new();
+    for obligation in proof_obligations() {
+        for owner in obligation.owner_beads {
+            if Some(*owner) != omitted {
+                ids.insert(*owner);
+            }
+        }
+    }
+    ids.extend(extra.iter().copied());
+    let mut jsonl = String::new();
+    for id in ids {
+        writeln!(
+            jsonl,
+            "{{\"id\":\"{id}\",\"status\":\"{status}\",\"dependencies\":[]}}"
+        )
+        .expect("writing to a String is infallible");
+    }
+    jsonl
+}
+
+fn loaded_owner_fixture(
+    label: &str,
+    status: &str,
+    omitted: Option<&str>,
+    extra: &[&str],
+) -> fs_govern::LoadedTraceabilitySourceSnapshot {
+    let root = unique_root(label);
+    let beads = owner_beads_json(status, omitted, extra);
+    write_complete_fixture(&root, beads.as_bytes(), REGISTRY_BYTES);
+    load_traceability_source_snapshot(
+        &root,
+        &complete_specs(),
+        TraceabilityFilesystemLimits::default(),
+    )
+    .expect("owner fixture is a valid concrete source snapshot")
+}
+
 #[test]
 fn concrete_sources_bind_exact_bytes_in_canonical_order() {
     let root = unique_root("canonical");
@@ -126,6 +168,10 @@ fn concrete_sources_bind_exact_bytes_in_canonical_order() {
     assert_eq!(beads_receipt.content_identity(), hash_bytes(BEADS_BYTES));
     assert_eq!(beads_receipt.byte_count(), BEADS_BYTES.len());
     assert_eq!(beads_receipt.beads_record_count(), Some(2));
+    assert_eq!(
+        beads_receipt.beads_ids(),
+        &["bead-a".to_string(), "bead-b".to_string()]
+    );
     assert!(
         receipt
             .sources()
@@ -189,6 +235,146 @@ fn source_order_is_nonsemantic_and_content_mutation_moves_the_root() {
     )
     .expect("changed registry source");
     assert_ne!(forward.snapshot().identity(), changed.snapshot().identity());
+}
+
+#[test]
+fn loaded_owner_join_emits_a_declaration_only_ledger_and_receipt() {
+    let loaded = loaded_owner_fixture("owner-complete", "closed", None, &[]);
+    let audit = audit_traceability_owner_join(proof_obligations(), &loaded);
+    assert!(
+        audit.ok(),
+        "unexpected owner diagnostics: {:?}",
+        audit.diagnostics
+    );
+
+    let expected_total = proof_obligations()
+        .iter()
+        .map(|obligation| obligation.owner_beads.len())
+        .sum();
+    let expected_distinct = proof_obligations()
+        .iter()
+        .flat_map(|obligation| obligation.owner_beads.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .len();
+    assert_eq!(audit.total_owner_references, expected_total);
+    assert_eq!(audit.distinct_owner_beads, expected_distinct);
+    assert_eq!(audit.indexed_beads, expected_distinct);
+    assert_eq!(audit.beads_source_count, 1);
+
+    let generated = generate_traceability_ledger_from_loaded_sources(
+        requirements(),
+        proof_obligations(),
+        &loaded,
+    )
+    .expect("every declared owner is present");
+    assert_eq!(
+        generated.owner_join().version(),
+        TRACEABILITY_OWNER_JOIN_VERSION
+    );
+    assert_eq!(
+        generated.owner_join().total_owner_references(),
+        expected_total
+    );
+    assert_eq!(
+        generated.owner_join().distinct_owner_beads(),
+        expected_distinct
+    );
+    assert_eq!(generated.owner_join().indexed_beads(), expected_distinct);
+    assert_eq!(generated.owner_join().beads_source_count(), 1);
+    assert_eq!(
+        generated.owner_join().source_snapshot_identity(),
+        loaded.snapshot().identity()
+    );
+    assert_eq!(
+        generated.ledger().source_snapshot_identity(),
+        loaded.snapshot().identity()
+    );
+    assert!(
+        generated
+            .ledger()
+            .json()
+            .contains("\"authority\":\"declaration-only\"")
+    );
+}
+
+#[test]
+fn owner_join_refuses_one_missing_id_with_exact_obligation_context() {
+    const MISSING: &str = "frankensim-ext-couple-port-schema-3feh";
+    let loaded = loaded_owner_fixture("owner-missing", "open", Some(MISSING), &[]);
+    let audit = audit_traceability_owner_join(proof_obligations(), &loaded);
+    assert!(!audit.ok());
+    assert_eq!(
+        audit
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.owner_bead == MISSING)
+            .count(),
+        1
+    );
+    assert!(audit.diagnostics.iter().any(|diagnostic| {
+        diagnostic.proof_obligation_id == "PO-2"
+            && diagnostic.owner_bead == MISSING
+            && diagnostic.field == TraceabilityOwnerJoinField::OwnerBead
+            && diagnostic.reason.contains("absent")
+    }));
+
+    let error = generate_traceability_ledger_from_loaded_sources(
+        requirements(),
+        proof_obligations(),
+        &loaded,
+    )
+    .expect_err("missing owner refuses without a partial ledger");
+    assert!(matches!(
+        error,
+        LoadedTraceabilityGenerationError::OwnerJoin(owner_audit)
+            if owner_audit.diagnostics == audit.diagnostics
+    ));
+}
+
+#[test]
+fn tracker_status_is_bound_but_never_interpreted_as_owner_authority() {
+    let open = loaded_owner_fixture("owners-open", "open", None, &[]);
+    let closed = loaded_owner_fixture("owners-closed", "closed", None, &[]);
+    let open_ledger = generate_traceability_ledger_from_loaded_sources(
+        requirements(),
+        proof_obligations(),
+        &open,
+    )
+    .expect("open lexical owners are present");
+    let closed_ledger = generate_traceability_ledger_from_loaded_sources(
+        requirements(),
+        proof_obligations(),
+        &closed,
+    )
+    .expect("closed lexical owners are present");
+
+    assert_ne!(open.snapshot().identity(), closed.snapshot().identity());
+    assert_eq!(
+        open_ledger.owner_join().total_owner_references(),
+        closed_ledger.owner_join().total_owner_references()
+    );
+    assert_eq!(
+        open_ledger.owner_join().distinct_owner_beads(),
+        closed_ledger.owner_join().distinct_owner_beads()
+    );
+}
+
+#[test]
+fn declaration_validation_precedes_the_loaded_owner_join() {
+    let loaded = loaded_owner_fixture("invalid-declaration", "open", None, &[]);
+    let mut rows = requirements().to_vec();
+    rows[0].owner_artifact = "";
+    let error =
+        generate_traceability_ledger_from_loaded_sources(&rows, proof_obligations(), &loaded)
+            .expect_err("orphaned declaration refuses before source joining");
+    assert!(matches!(
+        error,
+        LoadedTraceabilityGenerationError::Declaration(audit)
+            if audit.diagnostics.iter().any(|diagnostic| {
+                diagnostic.requirement_id == "B1"
+                    && diagnostic.field == TraceabilityField::OwnerArtifact
+            })
+    ));
 }
 
 #[test]
@@ -429,5 +615,41 @@ fn non_regular_sources_and_duplicate_locators_refuse() {
     assert!(duplicate_audit.diagnostics.iter().any(|diagnostic| {
         diagnostic.field == TraceabilityFilesystemField::RelativePath
             && diagnostic.reason.contains("duplicate source locator")
+    }));
+
+    let duplicate_id_root = unique_root("duplicate-beads-id");
+    write_source(
+        &duplicate_id_root,
+        ".beads/first.jsonl",
+        b"{\"id\":\"same-bead\"}\n",
+    );
+    write_source(
+        &duplicate_id_root,
+        ".beads/second.jsonl",
+        b"{\"id\":\"same-bead\"}\n",
+    );
+    write_source(&duplicate_id_root, CONTRACT_PATH, CONTRACT_BYTES);
+    write_source(&duplicate_id_root, REGISTRY_PATH, REGISTRY_BYTES);
+    let duplicate_id_specs = [
+        TraceabilityFileSpec {
+            kind: TraceabilitySourceKind::Beads,
+            relative_path: Path::new(".beads/first.jsonl"),
+        },
+        TraceabilityFileSpec {
+            kind: TraceabilitySourceKind::Beads,
+            relative_path: Path::new(".beads/second.jsonl"),
+        },
+        complete_specs()[0],
+        complete_specs()[2],
+    ];
+    let duplicate_id_audit = load_traceability_source_snapshot(
+        &duplicate_id_root,
+        &duplicate_id_specs,
+        TraceabilityFilesystemLimits::default(),
+    )
+    .expect_err("one Bead id cannot appear in two bound sources");
+    assert!(duplicate_id_audit.diagnostics.iter().any(|diagnostic| {
+        diagnostic.field == TraceabilityFilesystemField::BeadsJsonl
+            && diagnostic.reason.contains("more than one Beads source")
     }));
 }

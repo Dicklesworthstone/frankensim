@@ -19,7 +19,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Versioned meaning of the bounded filesystem source adapter.
 pub const TRACEABILITY_FILESYSTEM_ADAPTER_VERSION: &str =
-    "frankensim-traceability-filesystem-adapter-v1";
+    "frankensim-traceability-filesystem-adapter-v2";
 
 /// Hard maximum bytes read from one source artifact.
 pub const MAX_TRACEABILITY_SOURCE_FILE_BYTES: usize = 64 * 1024 * 1024;
@@ -143,6 +143,7 @@ pub struct TraceabilityFilesystemSourceReceipt {
     content_identity: ContentHash,
     byte_count: usize,
     beads_record_count: Option<usize>,
+    beads_ids: Vec<String>,
 }
 
 impl TraceabilityFilesystemSourceReceipt {
@@ -174,6 +175,16 @@ impl TraceabilityFilesystemSourceReceipt {
     #[must_use]
     pub const fn beads_record_count(&self) -> Option<usize> {
         self.beads_record_count
+    }
+
+    /// Canonically ordered top-level ids parsed from a Beads source.
+    ///
+    /// This index proves only lexical presence in the bound bytes. It carries
+    /// no status, dependency, ownership, closure, or evidence authority. The
+    /// slice is empty for contract and registry sources.
+    #[must_use]
+    pub fn beads_ids(&self) -> &[String] {
+        &self.beads_ids
     }
 }
 
@@ -419,6 +430,25 @@ pub fn load_traceability_source_snapshot(
         return Err(finish_audit(specs.len(), diagnostics));
     }
 
+    let mut seen_beads_ids = BTreeSet::new();
+    for receipt in &receipts {
+        if receipt.kind != TraceabilitySourceKind::Beads {
+            continue;
+        }
+        for id in &receipt.beads_ids {
+            if !seen_beads_ids.insert(id.as_str()) {
+                diagnostics.push(diagnostic(
+                    &receipt.locator,
+                    TraceabilityFilesystemField::BeadsJsonl,
+                    format!("canonical id {id:?} appears in more than one Beads source"),
+                ));
+            }
+        }
+    }
+    if !diagnostics.is_empty() {
+        return Err(finish_audit(specs.len(), diagnostics));
+    }
+
     let mut references = Vec::new();
     if let Err(error) = references.try_reserve_exact(receipts.len()) {
         return Err(finish_audit(
@@ -657,9 +687,9 @@ fn load_one_source(
             )]);
         }
     };
-    let beads_record_count = match source.kind {
+    let (beads_record_count, beads_ids) = match source.kind {
         TraceabilitySourceKind::Beads => match audit_beads_jsonl(&bytes, limits) {
-            Ok(records) => Some(records),
+            Ok(ids) => (Some(ids.len()), ids),
             Err(reason) => {
                 return Err(vec![diagnostic(
                     &source.locator,
@@ -670,7 +700,7 @@ fn load_one_source(
         },
         TraceabilitySourceKind::Contract | TraceabilitySourceKind::Registry => {
             match core::str::from_utf8(&bytes) {
-                Ok(text) if !text.contains('\0') => None,
+                Ok(text) if !text.contains('\0') => (None, Vec::new()),
                 Ok(_) => {
                     return Err(vec![diagnostic(
                         &source.locator,
@@ -694,6 +724,7 @@ fn load_one_source(
         content_identity: hash_bytes(&bytes),
         byte_count: bytes.len(),
         beads_record_count,
+        beads_ids,
     })
 }
 
@@ -722,7 +753,10 @@ fn read_bounded(path: &Path, expected_len: usize, limit: usize) -> Result<Vec<u8
     Ok(bytes)
 }
 
-fn audit_beads_jsonl(bytes: &[u8], limits: TraceabilityFilesystemLimits) -> Result<usize, String> {
+fn audit_beads_jsonl(
+    bytes: &[u8],
+    limits: TraceabilityFilesystemLimits,
+) -> Result<Vec<String>, String> {
     core::str::from_utf8(bytes).map_err(|error| format!("Beads JSONL is not UTF-8: {error}"))?;
     let mut ids = BTreeSet::new();
     let mut record_count = 0usize;
@@ -770,7 +804,12 @@ fn audit_beads_jsonl(bytes: &[u8], limits: TraceabilityFilesystemLimits) -> Resu
     if record_count == 0 {
         return Err("Beads JSONL contains no nonblank records".to_string());
     }
-    Ok(record_count)
+    let mut ordered_ids = Vec::new();
+    ordered_ids
+        .try_reserve_exact(ids.len())
+        .map_err(|error| format!("allocation refused for canonical Beads id index: {error}"))?;
+    ordered_ids.extend(ids);
+    Ok(ordered_ids)
 }
 
 fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {

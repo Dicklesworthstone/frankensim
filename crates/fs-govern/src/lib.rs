@@ -30,7 +30,9 @@
 //! extension charter's generated B1--B14/RQ-* requirement-to-evidence registry,
 //! complete PO-1..PO-25 index, and fail-closed renderer live in
 //! [`traceability`]. Bounded concrete source loading lives at the explicit
-//! world boundary in [`traceability_fs`].
+//! world boundary in [`traceability_fs`], and [`traceability_join`] checks the
+//! deliberately narrow claim that every declared PO owner id is lexically
+//! present in the bound Beads bytes.
 
 pub mod crates;
 pub mod doctrine;
@@ -39,6 +41,7 @@ pub mod program_risks;
 pub mod proposals;
 pub mod traceability;
 pub mod traceability_fs;
+pub mod traceability_join;
 
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
@@ -72,6 +75,12 @@ pub use traceability_fs::{
     TraceabilityFilesystemDiagnostic, TraceabilityFilesystemField, TraceabilityFilesystemLimits,
     TraceabilityFilesystemReceipt, TraceabilityFilesystemSourceReceipt,
     load_traceability_source_snapshot,
+};
+pub use traceability_join::{
+    LoadedTraceabilityGenerationError, LoadedTraceabilityLedger, TRACEABILITY_OWNER_JOIN_VERSION,
+    TraceabilityOwnerJoinAudit, TraceabilityOwnerJoinDiagnostic, TraceabilityOwnerJoinField,
+    TraceabilityOwnerJoinReceipt, audit_traceability_owner_join,
+    generate_traceability_ledger_from_loaded_sources,
 };
 
 /// The ten addendum risks (Part V).
