@@ -7,7 +7,7 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
 ## Public types and semantics
 - `Event { session, scope, seq, severity, kind, wall_ns }` — envelope + typed
   payload; `to_jsonl()` canonical single-line display transport;
-  `content_identity()` is the version-3 typed, exact-bit replay encoding and
+  `content_identity()` is the version-9 typed, exact-bit replay encoding and
   `content_hash()` is its FNV-1a root, EXCLUDING wall-clock.
 - `EventIdentityReceipt { declared identity version, canonical bytes, root }`
   retains the complete event-identity proof. `content_identity_receipt()`
@@ -17,12 +17,24 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   admitted event's current canonical identity.
 - `EventKind` v1 registry: solver_residual, tile_complete, cancellation,
   budget_delta, gradient_check, conformance_case, benchmark_result,
-  storm_assertion, race_record, degradation_event, import_receipt,
-  certificate_verdict, custom (pre-serialized JSON escape hatch whose UTF-8
-  is identity-bearing opaque bytes, not alleged canonical JSON).
-- `Severity` (trace/info/warn/error), `Emitter` (per-scope monotone seq),
-  `validate_line` (strict structural validator), `lint_failure_record`
-  (failure-records-must-reproduce lint v1), `fnv1a64`, `SCHEMA_VERSION`.
+  storm_assertion, manifest_selection, stratum_expansion, dsr_run,
+  campaign_run, submission_decision, work_identity_binding, lease_cursor,
+  attach_detach, journey_phase, scope_tile_progress, heartbeat,
+  observation_gap, oracle_comparison, tolerance_derivation,
+  claim_adjudication, capability_domain_decision, lifecycle_transition,
+  artifact_lifecycle, visualization_transform, diagnostic_repair,
+  containment_node, containment_gap, race_record, degradation_event,
+  import_receipt, certificate_verdict, custom (pre-serialized JSON escape
+  hatch whose UTF-8 is identity-bearing opaque bytes, not alleged canonical
+  JSON).
+- `Severity` (trace/info/warn/error), opaque `SamplingCadence`
+  (`never` or `every(NonZeroU64)`), and opaque `EmissionGate` (independent
+  trace/info cadences; warn/error always admitted). `Emitter` owns the
+  per-scope monotone emitted-event sequence; `emit_gated` takes an explicit
+  logical opportunity ordinal and a lazy builder for both payload and optional
+  caller clock. `validate_line` is the strict structural validator;
+  `lint_failure_record` is failure-records-must-reproduce lint v1.
+- `fnv1a64`, `SCHEMA_VERSION`.
 - `ident::ReplayIdentity` and `ident::IdentityBuilder` — schema-v1 canonical
   replay identity and the original infallible builder for already-bounded
   internal producers. `ident::BoundedIdentityBuilder` emits exactly the same
@@ -64,6 +76,12 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   an unchecked JSON canonicalizer; the identity battery decodes the typed
   byte field and proves it round-trips exactly.
 - Additive schema evolution only: kinds may be added, fields never repurposed.
+- Gated sampling is zero-based and keyed by a caller-supplied logical
+  opportunity ordinal: `every(N)` admits `0, N, 2N, ...`. Trace and info use
+  independent cadences; warn and error cannot be suppressed. A rejected
+  opportunity invokes neither the payload/clock builder nor `Emitter::emit`,
+  so only returned `Some(Event)` values advance the ordinary emitted-event
+  sequence.
 - Process capture never drops a critical frame. Queue/inline pressure returns
   the untouched frame for drain/spill/retry; cancellation or sink failure
   returns incomplete evidence, unchecked integrity, and demoted promotion.
@@ -103,10 +121,17 @@ constructors reject zero bounds, malformed identities/hashes, and zero
 ordinals; non-monotone frames are returned untouched. Privacy constructors
 reject malformed paths/realms/tokens, zero bounds, duplicate paths, byte/count
 budget overflow, and dictionary-testable correlation for protected labels.
+`SamplingCadence::every` accepts only `NonZeroU64`; a zero cadence is therefore
+not representable. Admission uses divisibility without incrementing the
+logical ordinal, so it is defined at `u64::MAX` and introduces no hidden
+opportunity-counter overflow. Callers own ordinal epochs and any rollover
+policy.
 
 ## Determinism class
 Deterministic: pure functions; no clocks (callers supply `wall_ns`), no I/O,
-no RNG.
+no RNG. Gated decisions depend only on severity, cadence, and the explicit
+logical ordinal. Producers must derive that ordinal from stable logical work
+identity rather than worker, thread, or arrival order.
 
 ## Cancellation behavior
 All operations O(event size). No Cx required. Process runners project external
@@ -120,15 +145,19 @@ None.
 None.
 
 ## Conformance tests
-The unit and integration batteries cover all 13 kinds' serialize+validate
-round-trip; an ordered count-locked mutation of all 42 payload fields; golden
+The unit and integration batteries cover all 35 kinds' serialize+validate
+round-trip; an ordered count-locked mutation of all 154 payload fields; golden
 line; envelope/content hash split; every top-level semantic event field;
 independent event-identity-version and wire-schema bytes/roots;
 same-display/different-bit NaNs; exact opaque Custom bytes; retained receipt
 admission and each refusal class; stale identity versions; monotone sequences;
-corruption rejection; failure-record lint; hostile-string escaping;
-non-finite tagging; FNV known answers; and exhaustive replay-frame mutations,
-including direct domain-prefix binding.
+zero-based and maximum-ordinal sampling; independent trace/info cadences;
+unconditional warn/error admission; lazy rejected builders; emitted-only
+sequence advancement; corruption rejection; failure-record lint;
+hostile-string escaping; non-finite tagging; FNV known answers; and exhaustive
+replay-frame mutations, including direct domain-prefix binding. The public
+conformance case also proves gated events retain the canonical wire and exact
+identity contracts while direct `emit` continues the same sequence stream.
 
 The process-capture battery covers critical queue pressure and cancellation,
 sink failure, deterministic telemetry sampling, diagnostic drop coalescing,
@@ -155,8 +184,13 @@ privilege downgrade.
   re-encoding. The sink implementation itself lives with fs-ledger's owners;
   committed `*.events.jsonl` fixtures are schema-enforced in CI by
   `xtask check-obs-events`, whose validator authority is
-  `fs_obs::validate_line` (never a second dialect). Overhead budgeting
-  (roofline harness) remains unclaimed bead scope.
+  `fs_obs::validate_line` (never a second dialect).
+- `emit_gated` guarantees that rejection does not invoke its payload/clock
+  builder, clone the emitter envelope, materialize an `Event`, or serialize it.
+  It does not assign logical ordinals, run a sink, or promise that unrelated
+  caller work is optimized away. No ns/op or end-to-end percentage overhead
+  is claimed until an ignored release roofline harness records an explicit
+  machine fingerprint and acceptance band.
 - The validator is structural, not a full JSON parser (the writer is ours;
   external JSON is out of scope). The JSON line is presentation/transport, not
   the exact-bit content-identity preimage. Public `Custom` construction still

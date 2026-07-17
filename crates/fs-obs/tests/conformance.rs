@@ -59,3 +59,66 @@ fn obs_001_conformance_verdict_self_hosts() {
     println!("{line}");
     assert!(pass, "obs-001: {detail}");
 }
+
+#[test]
+fn obs_002_gated_emission_preserves_public_contract() {
+    use core::cell::Cell;
+    use core::num::NonZeroU64;
+
+    let gate = fs_obs::EmissionGate::new(
+        fs_obs::SamplingCadence::every(
+            NonZeroU64::new(2).expect("two is a non-zero trace cadence"),
+        ),
+        fs_obs::SamplingCadence::never(),
+    );
+    let builds = Cell::new(0_u64);
+    let mut emitter = fs_obs::Emitter::new("fs-obs/conformance", "obs-002/gate");
+
+    let rejected = emitter.emit_gated(gate, fs_obs::Severity::Trace, 1, || {
+        panic!("a rejected public opportunity must not evaluate its builder")
+    });
+    assert!(rejected.is_none());
+    assert_eq!(builds.get(), 0);
+
+    let trace = emitter
+        .emit_gated(gate, fs_obs::Severity::Trace, 2, || {
+            builds.set(builds.get() + 1);
+            (
+                fs_obs::EventKind::TileComplete {
+                    tile: 2,
+                    kernel: "obs-002".to_string(),
+                },
+                Some(20),
+            )
+        })
+        .expect("even trace opportunity must be emitted");
+    let warn = emitter
+        .emit_gated(gate, fs_obs::Severity::Warn, u64::MAX, || {
+            builds.set(builds.get() + 1);
+            (
+                fs_obs::EventKind::Cancellation {
+                    reason: "budget".to_string(),
+                },
+                Some(30),
+            )
+        })
+        .expect("warn events must bypass sampling");
+    let direct = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: "direct".to_string(),
+            json: "{}".to_string(),
+        },
+        None,
+    );
+
+    assert_eq!(builds.get(), 2);
+    assert_eq!((trace.seq, warn.seq, direct.seq), (0, 1, 2));
+    for event in [&trace, &warn, &direct] {
+        fs_obs::validate_line(&event.to_jsonl())
+            .expect("gated and direct events must share the canonical wire schema");
+        event
+            .admit_content_identity(&event.content_identity_receipt())
+            .expect("gated and direct events must share exact identity semantics");
+    }
+}

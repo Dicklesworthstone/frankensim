@@ -29,6 +29,7 @@ pub mod privacy;
 pub mod process;
 
 use core::fmt;
+use core::num::NonZeroU64;
 use std::fmt::Write as _;
 
 /// Crate version, re-exported for provenance stamping.
@@ -652,6 +653,57 @@ impl Severity {
             Severity::Info => "info",
             Severity::Warn => "warn",
             Severity::Error => "error",
+        }
+    }
+}
+
+/// Deterministic sampling policy for one severity's logical opportunities.
+///
+/// The representation is intentionally opaque: callers choose either
+/// [`Self::never`] or [`Self::every`] and cannot construct a zero cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplingCadence(Option<NonZeroU64>);
+
+impl SamplingCadence {
+    /// Reject every logical opportunity.
+    #[must_use]
+    pub const fn never() -> Self {
+        Self(None)
+    }
+
+    /// Admit logical ordinal zero and every `period`-th opportunity after it.
+    #[must_use]
+    pub const fn every(period: NonZeroU64) -> Self {
+        Self(Some(period))
+    }
+
+    fn admits(self, logical_ordinal: u64) -> bool {
+        self.0
+            .is_some_and(|period| logical_ordinal.is_multiple_of(period.get()))
+    }
+}
+
+/// Independent deterministic sampling policy for trace and info events.
+///
+/// Warn and error events bypass both cadences and are always admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmissionGate {
+    trace: SamplingCadence,
+    info: SamplingCadence,
+}
+
+impl EmissionGate {
+    /// Build a gate with explicit trace and info cadences.
+    #[must_use]
+    pub const fn new(trace: SamplingCadence, info: SamplingCadence) -> Self {
+        Self { trace, info }
+    }
+
+    fn admits(self, severity: Severity, logical_ordinal: u64) -> bool {
+        match severity {
+            Severity::Trace => self.trace.admits(logical_ordinal),
+            Severity::Info => self.info.admits(logical_ordinal),
+            Severity::Warn | Severity::Error => true,
         }
     }
 }
@@ -2118,6 +2170,29 @@ impl Emitter {
         };
         self.seq += 1;
         e
+    }
+
+    /// Build and emit an event only when `gate` admits its logical opportunity.
+    ///
+    /// Trace and info decisions use the caller-supplied, zero-based
+    /// `logical_ordinal`, not the emitter sequence or invocation order. Warn
+    /// and error events are always admitted. The builder supplies both the
+    /// typed payload and optional caller clock so a rejected opportunity does
+    /// not construct either. `Some` events consume the same sequence stream as
+    /// [`Self::emit`]; `None` does not advance it.
+    pub fn emit_gated(
+        &mut self,
+        gate: EmissionGate,
+        severity: Severity,
+        logical_ordinal: u64,
+        build: impl FnOnce() -> (EventKind, Option<u64>),
+    ) -> Option<Event> {
+        if !gate.admits(severity, logical_ordinal) {
+            return None;
+        }
+
+        let (kind, wall_ns) = build();
+        Some(self.emit(severity, kind, wall_ns))
     }
 }
 
@@ -5243,6 +5318,101 @@ mod tests {
         for (i, e) in events.iter().enumerate() {
             assert_eq!(e.seq, i as u64);
         }
+    }
+
+    #[test]
+    fn sampling_cadence_is_zero_based_and_total_at_u64_max() {
+        let every_one = SamplingCadence::every(NonZeroU64::MIN);
+        let every_two =
+            SamplingCadence::every(NonZeroU64::new(2).expect("two is a non-zero test cadence"));
+
+        assert!(!SamplingCadence::never().admits(0));
+        assert!(!SamplingCadence::never().admits(u64::MAX));
+        assert!(every_one.admits(0));
+        assert!(every_one.admits(u64::MAX));
+        assert!(every_two.admits(0));
+        assert!(!every_two.admits(1));
+        assert!(every_two.admits(2));
+        assert!(!every_two.admits(u64::MAX));
+    }
+
+    #[test]
+    fn emission_gate_samples_levels_independently() {
+        let gate = EmissionGate::new(
+            SamplingCadence::every(NonZeroU64::new(2).expect("two is a non-zero trace cadence")),
+            SamplingCadence::every(NonZeroU64::new(3).expect("three is a non-zero info cadence")),
+        );
+
+        assert!(gate.admits(Severity::Trace, 0));
+        assert!(!gate.admits(Severity::Trace, 1));
+        assert!(gate.admits(Severity::Trace, 2));
+        assert!(!gate.admits(Severity::Info, 2));
+        assert!(gate.admits(Severity::Info, 3));
+
+        let quiet = EmissionGate::new(SamplingCadence::never(), SamplingCadence::never());
+        assert!(!quiet.admits(Severity::Trace, u64::MAX));
+        assert!(!quiet.admits(Severity::Info, u64::MAX));
+        assert!(quiet.admits(Severity::Warn, u64::MAX));
+        assert!(quiet.admits(Severity::Error, u64::MAX));
+    }
+
+    #[test]
+    fn emit_gated_is_lazy_and_sequences_count_only_emissions() {
+        use core::cell::Cell;
+
+        let quiet = EmissionGate::new(SamplingCadence::never(), SamplingCadence::never());
+        let trace_even = EmissionGate::new(
+            SamplingCadence::every(NonZeroU64::new(2).expect("two is a non-zero trace cadence")),
+            SamplingCadence::never(),
+        );
+        let builds = Cell::new(0_u64);
+        let mut emitter = Emitter::new("sampling", "gate");
+
+        let rejected = emitter.emit_gated(quiet, Severity::Trace, u64::MAX, || {
+            panic!("a rejected opportunity must not build its payload or caller clock")
+        });
+        assert!(rejected.is_none());
+        assert_eq!(builds.get(), 0);
+
+        let trace = emitter
+            .emit_gated(trace_even, Severity::Trace, 2, || {
+                builds.set(builds.get() + 1);
+                (
+                    EventKind::TileComplete {
+                        tile: 2,
+                        kernel: "sampled".into(),
+                    },
+                    Some(20),
+                )
+            })
+            .expect("even trace opportunity is admitted");
+        let info = emitter.emit_gated(trace_even, Severity::Info, 0, || {
+            panic!("the disabled info cadence must stay lazy")
+        });
+        let warn = emitter
+            .emit_gated(quiet, Severity::Warn, u64::MAX, || {
+                builds.set(builds.get() + 1);
+                (
+                    EventKind::Cancellation {
+                        reason: "budget".into(),
+                    },
+                    Some(30),
+                )
+            })
+            .expect("warn events bypass sampling");
+        let direct = emitter.emit(
+            Severity::Info,
+            EventKind::Custom {
+                name: "direct".into(),
+                json: "{}".into(),
+            },
+            None,
+        );
+
+        assert!(info.is_none());
+        assert_eq!(builds.get(), 2);
+        assert_eq!((trace.seq, warn.seq, direct.seq), (0, 1, 2));
+        assert_eq!((trace.wall_ns, warn.wall_ns), (Some(20), Some(30)));
     }
 
     #[test]
