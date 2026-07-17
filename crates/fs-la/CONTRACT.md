@@ -161,7 +161,12 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   use fs-math STRICT sin — platform libm here caused a real cross-ISA
   golden-hash divergence, caught by the trj pipeline and fixed; this is
   now a contract rule: NO platform libm in any path that feeds solver
-  state.
+  state. The structured BEDROCK replay Casebook additionally binds every
+  public `EigenPair` bit plus end-of-run progress from one matrix-free 1D
+  Laplacian fixture. It requires genuine clone-checkpoint cuts and exact
+  split-vs-straight plus same-run replay for both Lanczos and LOBPCG, and
+  carries a disclosed seeded eigenvalue-reference corruption that turns the
+  suite red.
 - `eigen_complex::{eig, det_complex, EigFailure}` — general complex
   nonsymmetric eigenvalues: Givens Hessenberg reduction + explicitly
   shifted QR (Wilkinson shifts with total_cmp tie-breaks, exceptional
@@ -488,6 +493,13 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   cross-ISA golden evidence above. Its seeded red proves that Casebook's merge
   gate rejects one disclosed synthetic RSVD-reference mutation; it is not a
   general production-memory or artifact-corruption detector.
+- The eigensolver replay Casebook is same-build, same-ISA G5 evidence for one
+  finite stencil, two disclosed split schedules, fixed deterministic starts,
+  and the public pair/progress fields. It does not prove eigenvalue accuracy,
+  convergence order, persisted checkpoint transport, arbitrary caller-operator
+  determinism, cancellation/drain behavior, performance, or fresh cross-ISA
+  equality. Its seeded red is one synthetic derived eigenvalue-reference
+  mutation, not a general runtime-corruption detector.
 - `gemm_scalar_checked` is a correctness/reference and integration surface,
   not the optimized packed microkernel. It claims no dual SIMD packing,
   roofline attainment, parallel scheduling, cancellation latency, or
