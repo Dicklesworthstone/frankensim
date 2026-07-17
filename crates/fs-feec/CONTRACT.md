@@ -537,13 +537,45 @@ mean the zero cochain), then requires integer `d₁d₀ = 0` and `d₂d₁ = 0`
 exactly. The historical three Philox trials per fixture and golden
 `0xa973_ca6b_07c3_9639` remain unchanged; this generated suite is scoped to
 the fixture zoo rather than claiming exhaustive topology coverage.
-`tests/highorder_battery.rs` (slice 1): Gauss–Legendre exactness to
-degree 2n−1 (n = 1..10) + node symmetry; Lobatto endpoint structure;
-sum-factorized apply vs the dense assembled Kronecker reference to
-1e−12 relative on four (m, r) fixtures — the acceptance roundoff
-gate; Jacobi diagonal vs operator columns; G1 MMS Poisson through the
-matrix-free Jacobi-PCG path with slope gates ≥ r + 0.6 for r = 1..6
-(measured ≈ r + 1); its own golden hash.
+`tests/highorder_battery.rs` (slice 1) emits schema-validated `fs-obs` JSONL
+under suite `fs-feec/highorder`. Its aggregate identities are
+`gauss-legendre`, `lobatto`, `sumfact-vs-assembled/m-2/r-1`,
+`sumfact-vs-assembled/m-2/r-3`, `sumfact-vs-assembled/m-1/r-5`,
+`sumfact-vs-assembled/m-3/r-2`, `jacobi-diag`, `mms-ho-order/r-1` through
+`mms-ho-order/r-6`. Gauss–Legendre exactness to degree 2n−1 (n = 1..10) plus
+node symmetry, Lobatto endpoint structure, the Jacobi diagonal check, and the
+G1 MMS Poisson ladders are fixed-input cases with seed zero. The sum-factorized
+reference fixtures and golden-hash measurement record their actual `StreamKey`
+base seed 6; their replay metadata retains kernel `0x460` and tiles 51, 53, 45,
+62, and 90 respectively.
+
+Each sum-factorized aggregate has a same-prefix `/measurement` `Custom`
+companion retaining `(m, r)`, deviation, scale, and stream provenance. The
+twelve MMS diagnostics use distinct
+`mms-ho-order/r-{r}/measurement/m-{m}` identities: `m = 4, 8` for `r = 1, 2`
+and `m = 2, 4` for `r = 3..6`. They remain at the original per-ladder point
+after PCG convergence and before the order gate; the corresponding aggregate
+is emitted only after that gate passes. `ho-golden/measurement` retains the
+observed and expected hashes at the original info-only boundary before the
+unchanged equality assertion; no post-assert aggregate is synthesized. Every
+companion and aggregate is failure-linted, serialized, wire-validated, then
+printed; floating measurements serialize as finite JSON numbers or `null`.
+These events preserve the existing 1e−12 sum-factorized roundoff gate, slope
+gates ≥ r + 0.6 for r = 1..6 (measured ≈ r + 1), and frozen-bit golden
+semantics; they do not upgrade the G1, reference-fixture, performance,
+cross-ISA, or golden authority.
+
+`tests/derham_battery.rs` emits schema-validated `fs-obs` JSONL under suite
+`fs-feec/derham`. Post-assert identities are `dd-highorder/m{m}-r{r}`, `dims`,
+`commute-1d/m{m}-r{r}`, `commute-3d`, `proj-orders/r{r}`, and
+`legendre-mass`. Fixed-input rows carry seed zero; `dd-highorder` carries input
+root 8 and records stream kernel `0xDE4A` plus both tile coordinates. Loop rows
+remain at their original per-iteration gates. The frozen hash remains an Info
+Custom event named `derham-golden` under `derham-golden/measurement`, before
+the terminal equality gate, recording root 8, kernel `0xDE4A`, tiles 300–302,
+and actual/expected hashes. It is diagnostic replay evidence, not a pre-gate
+passing verdict or an upgrade of the existing G1 claims.
+
 `tests/ho_probe.rs`: per-mode convergence regression — the diagnosis
 that single-cell symmetric fixtures superconverge at even r (a metric
 trap, so MMS ladders start at m ≥ 2).

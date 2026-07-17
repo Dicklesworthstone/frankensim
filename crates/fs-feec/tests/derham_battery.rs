@@ -9,16 +9,50 @@
 use fs_feec::highorder::derham::TensorDeRham;
 use fs_rand::StreamKey;
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-feec-ho\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-feec/derham";
+const FIXED_INPUT_SEED: u64 = 0;
+const STREAM_INPUT_SEED: u64 = 8;
+const STREAM_KERNEL: u32 = 0xDE4A;
+
+fn verdict(case: &str, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("de Rham verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("de Rham verdict must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn measurement(identity: &str, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("de Rham measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("de Rham measurement must use the fs-obs wire schema");
+    println!("{line}");
 }
 
 fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
     let mut s = StreamKey {
-        seed: 8,
-        kernel: 0xDE4A,
+        seed: STREAM_INPUT_SEED,
+        kernel: STREAM_KERNEL,
         tile,
     }
     .stream();
@@ -34,24 +68,29 @@ fn dd_vanishes_to_machine_cancellation() {
         // O(1), so second derivatives reach O((m·r)²); the residual
         // must sit at ε relative to that.
         let scale = (m * r * m * r) as f64;
-        let s = rand_vec(ns, 100 + u32::try_from(10 * m + r).expect("small"));
+        let scalar_tile = 100 + u32::try_from(10 * m + r).expect("small");
+        let s = rand_vec(ns, scalar_tile);
         let cg = dr.curl(&dr.grad(&s));
         let worst = cg.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         assert!(
             worst < 1e-13 * scale,
             "m={m} r={r}: curl grad = {worst:.3e} (scale {scale})"
         );
-        let e = rand_vec(ne, 200 + u32::try_from(10 * m + r).expect("small"));
+        let edge_tile = 200 + u32::try_from(10 * m + r).expect("small");
+        let e = rand_vec(ne, edge_tile);
         let dc = dr.div(&dr.curl(&e));
         let worst_dc = dc.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         assert!(
             worst_dc < 1e-13 * scale,
             "m={m} r={r}: div curl = {worst_dc:.3e}"
         );
-        log(
-            "dd-highorder",
-            "pass",
-            &format!("m={m} r={r} cg={worst:.1e} dc={worst_dc:.1e}"),
+        verdict(
+            &format!("dd-highorder/m{m}-r{r}"),
+            &format!(
+                "m={m} r={r} cg={worst:.1e} dc={worst_dc:.1e}; input_root=8 \
+                 kernel=0xDE4A scalar_tile={scalar_tile} edge_tile={edge_tile}"
+            ),
+            STREAM_INPUT_SEED,
         );
     }
 }
@@ -75,7 +114,7 @@ fn exact_sequence_dimensions() {
             assert_eq!(chi, 1, "m={m} r={r}: Euler characteristic {chi}");
         }
     }
-    log("dims", "pass", "chi = 1 for m=1..3, r=1..6");
+    verdict("dims", "chi = 1 for m=1..3, r=1..6", FIXED_INPUT_SEED);
 }
 
 #[test]
@@ -107,10 +146,10 @@ fn commuting_diagram_1d_and_3d() {
             worst < 1e-11,
             "m={m} r={r}: 1D commuting residual {worst:.3e}"
         );
-        log(
-            "commute-1d",
-            "pass",
+        verdict(
+            &format!("commute-1d/m{m}-r{r}"),
             &format!("m={m} r={r} res={worst:.1e}"),
+            FIXED_INPUT_SEED,
         );
     }
     // 3D on a product field f(x)g(y)h(z): grad_x(Π_S f) must equal
@@ -152,7 +191,7 @@ fn commuting_diagram_1d_and_3d() {
         }
     }
     assert!(worst < 1e-11, "3D commuting residual {worst:.3e}");
-    log("commute-3d", "pass", &format!("res={worst:.1e}"));
+    verdict("commute-3d", &format!("res={worst:.1e}"), FIXED_INPUT_SEED);
 }
 
 #[test]
@@ -183,14 +222,14 @@ fn projection_convergence_both_families() {
             order_d > r as f64 - 0.4,
             "r={r}: D-family order {order_d:.2} (errors {errs_d:?})"
         );
-        log(
-            "proj-orders",
-            "pass",
+        verdict(
+            &format!("proj-orders/r{r}"),
             &format!(
                 "r={r} C={order_c:.2} (gate {}) D={order_d:.2} (gate {})",
                 r + 1,
                 r
             ),
+            FIXED_INPUT_SEED,
         );
     }
 }
@@ -211,7 +250,11 @@ fn legendre_masses_are_diagonal_and_positive() {
             dr.mass_d[j]
         );
     }
-    log("legendre-mass", "pass", "diagonal, positive, closed form");
+    verdict(
+        "legendre-mass",
+        "diagonal, positive, closed form",
+        FIXED_INPUT_SEED,
+    );
 }
 
 const GOLDEN_HASH: u64 = 0x14f9_beb9_cec8_4078; // recorded at tfz.6 slice 2, frozen
@@ -245,7 +288,15 @@ fn derham_golden_hash() {
     for v in dr.div(&f).iter().step_by(5) {
         feed(*v);
     }
-    log("derham-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "derham-golden/measurement",
+        "derham-golden",
+        format!(
+            "{{\"input_root\":8,\"kernel\":\"0xDE4A\",\"tiles\":{{\"scalar\":300,\
+             \"edge\":301,\"face\":302}},\"actual_hash\":\"{acc:#018x}\",\
+             \"expected_hash\":\"{GOLDEN_HASH:#018x}\"}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "derham bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \

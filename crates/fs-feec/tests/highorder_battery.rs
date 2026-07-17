@@ -9,15 +9,56 @@ use fs_feec::highorder::quad1d::{gauss_legendre, legendre, lobatto_shapes};
 use fs_math::det;
 use fs_rand::StreamKey;
 
-fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-feec-ho\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+const SUITE: &str = "fs-feec/highorder";
+const FIXED_INPUT_SEED: u64 = 0;
+const STREAM_INPUT_SEED: u64 = 6;
+
+fn verdict(case: &str, detail: &str, seed: u64) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, case);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: case.to_string(),
+            pass: true,
+            detail: detail.to_string(),
+            seed,
+        },
+        None,
     );
+    fs_obs::lint_failure_record(&event).expect("high-order verdict must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("high-order verdict must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn measurement(identity: &str, name: &str, json: String) {
+    let mut emitter = fs_obs::Emitter::new(SUITE, identity);
+    let event = emitter.emit(
+        fs_obs::Severity::Info,
+        fs_obs::EventKind::Custom {
+            name: name.to_string(),
+            json,
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("high-order measurement must be replayable");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("high-order measurement must use the fs-obs wire schema");
+    println!("{line}");
+}
+
+fn finite_json(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
 }
 
 fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
     let mut s = StreamKey {
-        seed: 6,
+        seed: STREAM_INPUT_SEED,
         kernel: 0x460,
         tile,
     }
@@ -56,7 +97,11 @@ fn gauss_legendre_exactness_and_symmetry() {
             );
         }
     }
-    log("gauss-legendre", "pass", "n=1..10 exact to degree 2n-1");
+    verdict(
+        "gauss-legendre",
+        "n=1..10 exact to degree 2n-1",
+        FIXED_INPUT_SEED,
+    );
 }
 
 #[test]
@@ -86,7 +131,7 @@ fn lobatto_bubbles_vanish_at_endpoints() {
         }
         assert!(inner.abs() < 1e-13, "r={r}: Legendre orthogonality {inner}");
     }
-    log("lobatto", "pass", "endpoint structure r=1..6");
+    verdict("lobatto", "endpoint structure r=1..6", FIXED_INPUT_SEED);
 }
 
 #[test]
@@ -99,7 +144,8 @@ fn sum_factorized_matches_assembled_kronecker() {
         let sp = TensorSpace::new(m, r);
         let n1 = sp.n1();
         let (m1, k1) = sp.assembled_1d();
-        let u = rand_vec(sp.ndof(), 30 + u32::try_from(10 * m + r).expect("small"));
+        let stream_tile = 30 + u32::try_from(10 * m + r).expect("small");
+        let u = rand_vec(sp.ndof(), stream_tile);
         let y_fast = sp.apply_stiffness(&u);
         // Dense Kronecker apply (small fixtures only).
         let mut y_ref = vec![0.0f64; sp.ndof()];
@@ -137,10 +183,22 @@ fn sum_factorized_matches_assembled_kronecker() {
             worst < 1e-12 * scale,
             "m={m} r={r}: sum-factorized deviates {worst:.3e} (scale {scale:.3e})"
         );
-        log(
+        let case = format!("sumfact-vs-assembled/m-{m}/r-{r}");
+        measurement(
+            &format!("{case}/measurement"),
             "sumfact-vs-assembled",
-            "pass",
+            format!(
+                "{{\"m\":{m},\"r\":{r},\"deviation\":{},\"scale\":{},\
+                 \"input_seed\":{STREAM_INPUT_SEED},\"stream_kernel\":\"0x460\",\
+                 \"stream_tile\":{stream_tile}}}",
+                finite_json(worst),
+                finite_json(scale)
+            ),
+        );
+        verdict(
+            &case,
             &format!("m={m} r={r} dev={worst:.2e}"),
+            STREAM_INPUT_SEED,
         );
     }
 }
@@ -161,10 +219,10 @@ fn jacobi_diagonal_is_exact() {
             diag[d]
         );
     }
-    log(
+    verdict(
         "jacobi-diag",
-        "pass",
         "Kronecker diagonal == operator diagonal",
+        FIXED_INPUT_SEED,
     );
 }
 
@@ -183,6 +241,7 @@ fn mms_orders_r1_through_r6() {
     let u_exact = move |p: [f64; 3]| (pi * p[0]).sin() * (pi * p[1]).sin() * (pi * p[2]).sin();
     let f_exact = move |p: [f64; 3]| 3.0 * pi * pi * u_exact(p);
     for r in 1..=6usize {
+        let case = format!("mms-ho-order/r-{r}");
         // Low r needs finer ladders to reach asymptotics; high r must
         // stay above the 1e-13 solver floor.
         let ladder: [usize; 2] = if r <= 2 { [4, 8] } else { [2, 4] };
@@ -211,10 +270,14 @@ fn mms_orders_r1_through_r6() {
             assert!(converged, "r={r} m={m}: PCG failed after {iters} iters");
             let err = sp.l2_error(&x, &u_exact);
             errs.push(err);
-            log(
+            measurement(
+                &format!("{case}/measurement/m-{m}"),
                 "mms-ho",
-                "info",
-                &format!("r={r} m={m} L2={err:.4e} iters={iters}"),
+                format!(
+                    "{{\"r\":{r},\"m\":{m},\"l2_error\":{},\"iterations\":{iters},\
+                     \"input_seed\":{FIXED_INPUT_SEED}}}",
+                    finite_json(err)
+                ),
             );
         }
         let order = (errs[0] / errs[1]).ln() / (ladder[1] as f64 / ladder[0] as f64).ln();
@@ -223,7 +286,7 @@ fn mms_orders_r1_through_r6() {
             "r={r}: observed order {order:.2} below gate {} (errors {errs:?})",
             r as f64 + 0.6
         );
-        log("mms-ho-order", "pass", &format!("r={r} order={order:.2}"));
+        verdict(&case, &format!("r={r} order={order:.2}"), FIXED_INPUT_SEED);
     }
 }
 
@@ -263,7 +326,15 @@ fn highorder_golden_hash() {
     for v in sp.stiffness_diagonal().iter().step_by(23) {
         feed(*v);
     }
-    log("ho-golden", "info", &format!("{acc:#018x}"));
+    measurement(
+        "ho-golden/measurement",
+        "ho-golden",
+        format!(
+            "{{\"hash\":\"{acc:#018x}\",\"expected_hash\":\"{GOLDEN_HASH:#018x}\",\
+             \"input_seed\":{STREAM_INPUT_SEED},\"stream_kernel\":\"0x460\",\
+             \"stream_tile\":90}}"
+        ),
+    );
     assert_eq!(
         acc, GOLDEN_HASH,
         "high-order bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
