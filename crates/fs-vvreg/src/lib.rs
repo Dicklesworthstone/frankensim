@@ -33,6 +33,9 @@ use std::sync::LazyLock;
 
 mod seed;
 
+/// Versioned standards-edition, source-lineage, and derived-rule manifest.
+pub mod standards;
+
 /// The registry payload version (rows are only comparable within a version).
 pub const VVREG_VERSION: u32 = 1;
 /// Maximum QoIs accepted on one entry (checked before the duplicate-name

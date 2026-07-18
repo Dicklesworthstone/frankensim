@@ -7,12 +7,20 @@ refused until it is one.
 
 ## Purpose and layer
 
-Layer UTIL (versioned registry data + fail-closed citation gates). Depends
+Layer UTIL (versioned registry data + fail-closed citation and standards-source
+gates). Depends
 only on `fs-blake3` (domain-separated content identity) and `fs-evidence`
 (`ColorRank` for the citation color caps). A family name (TEAM, NAFEMS,
 CFR, IFToMM, ECN) is NOT an executable benchmark: every G1/G2 entry needs
 exact version/edition, source, license, input-deck identity, oracle binding,
 QoIs, and acceptance envelopes before any solver claims against it.
+
+The `standards` module is the metadata-only source boundary for
+standards-derived rules. It represents an exact standard, part, edition,
+ordered amendment or corrigendum chain, jurisdiction/profile, lifecycle state,
+external locator, source hash, license/access policy, supersession edge, and
+explicit reference state without accepting or storing a protected standards
+body.
 
 ## Public types and semantics
 
@@ -74,6 +82,25 @@ QoIs, and acceptance envelopes before any solver claims against it.
   (Geneva, Atkinson, Bennett mobility, isentropic nozzle, Sod, Lax —
   registered, non-citable until their delegated oracle/deck content is
   pinned), and 15 deliberately unpinned G2 targets.
+- `standards::StandardEditionKey` — exact `(standard_id, part, edition)`
+  identity. `part=None` means the standard is not partitioned; it never means
+  "choose any part." Lookups never inherit support from another edition.
+- `standards::StandardSourceDraft` / `StandardManifest` — untrusted metadata
+  input and its validated, sorted, sealed form. Admission rejects exact-key
+  collisions, duplicate typed changes, missing/self/cyclic supersession
+  targets, zero source hashes, invalid text, and explicit resource-cap
+  violations. The canonical `FSMF` schema is versioned, length-framed, and
+  rejects semantic-but-noncanonical encodings on decode.
+- `standards::ProtectedTextReference` — publisher/repository catalog plus an
+  external locator only. There is deliberately no protected-text/body field;
+  authorized bytes remain out of band and are presented only as an observed
+  hash at the binding gate.
+- `standards::RuleBindingRequest` / `RuleProvenance` — untrusted request and
+  sealed exact provenance for a derived rule. Binding requires an exact
+  admitted edition, a nonzero pinned source hash matching the observed bytes,
+  currently available access, a nonzero derived-rule hash, and an explicit
+  read/derived/reproduced state. Historical editions additionally require
+  `RuleUsePolicy::HistoricalReplay`.
 
 ## Invariants
 
@@ -118,6 +145,25 @@ QoIs, and acceptance envelopes before any solver claims against it.
   produce a passing verdict. Pre-verdict arithmetic failures retain the exact
   definition and observation needed for replay. The gate cannot mint
   `CitationReceipt`, `ColorRank`, or trust.
+- EXACT STANDARDS SOURCE BINDING: standard family, part, edition, and ordered
+  amendment/corrigendum chain are semantic identity. Unknown editions never
+  fall back; current-use rules cannot bind withdrawn or superseded rows; and a
+  supersession edge must resolve to an exact in-manifest key without cycles.
+- SOURCE AUTHENTICATION AND ACCESS ARE FAIL-CLOSED: unpinned, zero-hash,
+  revoked, mismatched, or unread sources cannot mint `RuleProvenance`.
+  Historical rows remain inspectable and may bind only under an explicit replay
+  policy; they never regain current support through a successor.
+- PROTECTED TEXT STAYS OUT OF THE MODEL: source bytes are supplied out of band.
+  The manifest retains bibliographic metadata, an external locator, a complete
+  source hash, policy identifiers, and derived-rule identity. Redacted rows
+  additionally omit title, license terms, revocation reason, and no-claim prose
+  while preserving exact keys, locator, source/row hashes, status, and coarse
+  access state.
+- CANONICAL STANDARDS IDENTITY: source rows sort by exact key before encoding;
+  every semantic row field, ordered change, status edge, and policy variant is
+  length-framed into the row and manifest identities. Rule provenance binds the
+  schema, manifest, source row, authenticated source hash, exact clause,
+  derived-rule id/hash, reference state, use policy, and historical bit.
 
 ## Error model
 
@@ -129,6 +175,12 @@ non-finite-input/arithmetic-overflow refusal; consumption binding failures are
 `ConsumptionRefusal`; seed-authoring defects surface as `IntegrityFinding`s
 from `lint()`, not as crashes.
 
+Standards-manifest admission and decoding return typed `ManifestError` values
+for validation, graph, cap, allocation, framing, UTF-8, tag, version, and
+canonicality refusals. Rule admission returns `RuleBindingError`, retaining the
+exact edition and expected/observed hashes where relevant. No partially
+admitted manifest or provenance object is published on error.
+
 ## Determinism class
 
 Fully deterministic: all seed data is `const`; serialization renders
@@ -136,6 +188,10 @@ floats as bit tokens (never locale/formatting dependent); digests are
 domain-separated BLAKE3 over length-framed canonical bytes. Bitwise
 reproducible across runs, thread counts, and ISAs. Envelope-verdict JSON uses a
 fixed field order and exact IEEE-754 bit tokens for every floating-point value.
+The standards manifest is likewise fully deterministic: input order is erased
+by exact-key sorting; its integer/framing encoding is fixed little-endian; row,
+manifest, and rule identities are domain-separated; and canonical decode
+re-encodes and byte-compares before admission.
 
 ## Cancellation behavior
 
@@ -155,6 +211,13 @@ entry validation, `Registry::cite`, and `Registry::check_acceptance_envelope`,
 and `MAX_BEAD_ID_LEN` on
 `ConsumptionRecord::bind` (validated before any trim or copy).
 Row/reference COUNTS are uncapped — see no-claim boundaries.
+
+Standards-manifest work is synchronous and non-preemptible, but explicitly
+bounded before traversal/allocation by `ManifestLimits`: record count,
+changes-per-record, bytes per string, and total canonical bytes. Default hard
+caps are 4,096 rows, 64 changes per row, 4,096 bytes per string, and 16 MiB per
+manifest. Construction sorts rows and validates the functional supersession
+graph in `O(n log n)`; exact lookup is `O(log n)`.
 
 ## Unsafe boundary
 
@@ -191,6 +254,15 @@ lattice, the complete 1..=30 primary-reference seed pinned by ordered
 (key, locator) identity, and per-field reference digest mutation locks
 (index, key, citation, locator, anchors, boundary each move the registry
 digest).
+
+`tests/standards_manifest.rs`: G0 exact-edition, source-pin, hash-match,
+access-revocation, explicit-reference-state, zero-hash, collision, change-chain,
+resource-cap, and closed-acyclic-supersession refusals; explicit historical
+replay admission; G3 input-order invariance, ordered-change sensitivity, and a
+protected-text leakage/redacted-JSON fixture; G5 every-field source identity
+mutation, rule-provenance mutation, canonical v1 round trip, frozen `FSMF`
+header, future-schema refusal, truncation/trailing-byte refusal, and
+semantic-but-unsorted wire rejection.
 
 ## No-claim boundaries
 
@@ -229,3 +301,20 @@ digest).
 - A blank authored spec has no well-formed deck digest (`DeckPin::digest`
   is `None`) and renders as `{"authored":null}` — a distinct visible
   state; the entry identity still covers the raw state bytes.
+- A standards manifest proves only that metadata is structurally valid and
+  content-addressed. It does not prove that a publisher locator resolves, that
+  a hash is publisher-authoritative, that access is legally authorized, that a
+  declared edition is actually current in a jurisdiction, or that a derived
+  rule is semantically correct.
+- `ProtectedTextReference` excludes a body from the API and redacted rows omit
+  sensitive metadata, but arbitrary public metadata strings cannot be
+  cryptographically classified as copyright-safe. Callers remain responsible
+  for supplying only identifiers/locators/policy codes and for keeping licensed
+  source bytes out of manifest fields.
+- `ReferenceState::{Read, Derived, Reproduced}` is explicit provenance state,
+  not independent proof that the human or agent performed the declared work.
+  It affects identity and makes unread use impossible; downstream evidence must
+  substantiate stronger claims.
+- Historical replay is provenance preservation, not standards support: a
+  withdrawn or superseded edition remains historical even when its exact bytes
+  are still pinned and accessible.
