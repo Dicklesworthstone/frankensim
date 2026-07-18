@@ -6,39 +6,44 @@ use std::collections::BTreeMap;
 
 use fs_blake3::identity::{
     CancellationProbe, CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, Field,
-    FieldSpec, NoClaimState, SchemaId, SourceId, StrongIdentity, TrustState, WireType,
+    FieldSpec, NoClaimState, SchemaId, SemanticId, SourceId, StrongIdentity, TrustState, WireType,
 };
 use fs_evidence::{
-    Ambition, COLOR_ALGEBRA_VERSION, Certified, CertifiedF64DecisionAssessmentIdV1,
-    CertifiedF64DecisionAssessmentIdentityError, CertifiedF64DecisionAssessmentReceiptV1,
-    CertifiedF64EvidenceIdV1, CertifiedF64EvidenceIdentityError, CertifiedF64EvidenceReceiptV1,
-    CertifiedF64SourceIdV1, CertifiedF64SourceIdentityError, CertifiedF64SourceReceiptV1,
-    CertifiedF64SourceV1, Color, ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError,
-    ColorEvidenceNodeIdV1, ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1,
-    ColorEvidenceNodeV1, ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1,
-    ColorEvidenceSourceIdV1, ColorEvidenceSourceV1, DECISION_ASSESSMENT_ALGORITHM_VERSION_V1,
-    DecisionStatus, DiscrepancyBand, DiscrepancyBandIdV1, DiscrepancyBandIdentityError,
-    DiscrepancyBandReceiptV1, EscalationAdvice, Evidence, FidelityPair, FidelityPairIdV1,
-    FidelityPairIdentityError, FidelityPairReceiptV1, IdentifiedCertifiedF64DecisionAssessmentV1,
-    IdentifiedCertifiedF64EvidenceV1, IdentifiedModelBracketV1, IdentifiedModelCardV1,
-    IdentifiedModelEvidenceV1, IdentifiedSourcedCertifiedF64EvidenceV1, IdentifiedValidityDomainV1,
+    Ambition, COLOR_ALGEBRA_VERSION, CardBoundModelEvidenceIdV1,
+    CardBoundModelEvidenceIdentityError, CardBoundModelEvidenceReceiptV1, Certified,
+    CertifiedF64DecisionAssessmentIdV1, CertifiedF64DecisionAssessmentIdentityError,
+    CertifiedF64DecisionAssessmentReceiptV1, CertifiedF64EvidenceIdV1,
+    CertifiedF64EvidenceIdentityError, CertifiedF64EvidenceReceiptV1, CertifiedF64SourceIdV1,
+    CertifiedF64SourceIdentityError, CertifiedF64SourceReceiptV1, CertifiedF64SourceV1, Color,
+    ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError, ColorEvidenceNodeIdV1,
+    ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1, ColorEvidenceNodeV1,
+    ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1, ColorEvidenceSourceIdV1,
+    ColorEvidenceSourceV1, DECISION_ASSESSMENT_ALGORITHM_VERSION_V1, DecisionStatus,
+    DiscrepancyBand, DiscrepancyBandIdV1, DiscrepancyBandIdentityError, DiscrepancyBandReceiptV1,
+    EscalationAdvice, Evidence, FidelityPair, FidelityPairIdV1, FidelityPairIdentityError,
+    FidelityPairReceiptV1, IdentifiedCardBoundModelEvidenceV1,
+    IdentifiedCertifiedF64DecisionAssessmentV1, IdentifiedCertifiedF64EvidenceV1,
+    IdentifiedModelBracketV1, IdentifiedModelCardV1, IdentifiedModelEvidenceV1,
+    IdentifiedSourcedCertifiedF64EvidenceV1, IdentifiedValidityDomainV1,
     MAX_CERTIFIED_F64_SOURCE_FIELD_BYTES_V1, MAX_MODEL_BRACKET_MEMBERS_V1, ModelBracket,
     ModelBracketIdV1, ModelBracketIdentityError, ModelBracketReceiptV1, ModelCard,
     ModelCardCalibrationSourceIdV1, ModelCardCalibrationSourceReceiptV1, ModelCardIdV1,
-    ModelCardIdentityError, ModelCardReceiptV1, ModelEvidence, ModelEvidenceIdV1,
-    ModelEvidenceIdentityError, ModelEvidenceReceiptV1, NumericalCertificate,
-    NumericalCertificateIdV1, NumericalCertificateIdentityError, NumericalCertificateReceiptV1,
-    NumericalKind, ProvenanceHash, SensitivitySummary, SourcedCertifiedF64EvidenceIdV1,
+    ModelCardIdentityError, ModelCardIdentitySchemaV1, ModelCardReceiptV1, ModelEvidence,
+    ModelEvidenceIdV1, ModelEvidenceIdentityError, ModelEvidenceIdentitySchemaV1,
+    ModelEvidenceReceiptV1, NumericalCertificate, NumericalCertificateIdV1,
+    NumericalCertificateIdentityError, NumericalCertificateReceiptV1, NumericalKind,
+    ProvenanceHash, SensitivitySummary, SourcedCertifiedF64EvidenceIdV1,
     SourcedCertifiedF64EvidenceIdentityError, SourcedCertifiedF64EvidenceReceiptV1,
     StatisticalCertificate, StatisticalCertificateIdV1, StatisticalCertificateIdentityError,
     StatisticalCertificateReceiptV1, UncertaintySource, ValidityDomain, ValidityDomainIdV1,
     ValidityDomainIdentityError, compose_color_evidence_nodes_v1,
-    identify_certified_f64_decision_assessment_v1, identify_certified_f64_evidence_v1,
-    identify_certified_f64_source_v1, identify_color_evidence_source_node_v1,
-    identify_color_evidence_source_v1, identify_discrepancy_band_v1, identify_fidelity_pair_v1,
-    identify_model_bracket_v1, identify_model_card_v1, identify_model_evidence_v1,
-    identify_numerical_certificate_v1, identify_sourced_certified_f64_evidence_v1,
-    identify_statistical_certificate_v1, identify_validity_domain_v1,
+    identify_card_bound_model_evidence_v1, identify_certified_f64_decision_assessment_v1,
+    identify_certified_f64_evidence_v1, identify_certified_f64_source_v1,
+    identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
+    identify_discrepancy_band_v1, identify_fidelity_pair_v1, identify_model_bracket_v1,
+    identify_model_card_v1, identify_model_evidence_v1, identify_numerical_certificate_v1,
+    identify_sourced_certified_f64_evidence_v1, identify_statistical_certificate_v1,
+    identify_validity_domain_v1,
 };
 
 const LIMITS: CanonicalLimits = CanonicalLimits::new(16_384, 8_192, 32, 64, 256);
@@ -690,6 +695,70 @@ fn manual_model_card_receipts(
         .finish()
         .expect("manual model-card identity");
     (calibration, card_receipt)
+}
+
+fn card_bound_model_card(name: &str, version: &str) -> IdentifiedModelCardV1 {
+    identified_model_card(
+        ModelCard::new(
+            name,
+            version,
+            Ambition::Solid,
+            Vec::new(),
+            ValidityDomain::unconstrained(),
+            Vec::new(),
+            0.0,
+        ),
+        None,
+    )
+}
+
+fn card_bound_model_evidence_fixture() -> IdentifiedCardBoundModelEvidenceV1 {
+    identify_card_bound_model_evidence_v1(
+        identified_model_evidence(model_evidence_fixture()),
+        vec![
+            card_bound_model_card("card-a", "1.0.0"),
+            card_bound_model_card("card-b", "2.0.0"),
+        ],
+        LIMITS,
+        || false,
+    )
+    .expect("valid card-bound model-evidence fixture")
+}
+
+fn manual_card_bound_model_evidence_receipt(
+    model_evidence: &IdentifiedModelEvidenceV1,
+    model_cards: &[IdentifiedModelCardV1],
+    limits: CanonicalLimits,
+) -> CardBoundModelEvidenceReceiptV1 {
+    CanonicalEncoder::<CardBoundModelEvidenceIdV1, _>::new(limits, || false)
+        .expect("card-bound model-evidence schema")
+        .child(Field::new(0, "model-evidence"), model_evidence.id())
+        .expect("model-evidence child")
+        .ordered_children(
+            Field::new(1, "model-card-declarations"),
+            u64::try_from(model_cards.len()).expect("model-card count"),
+            model_cards.iter().map(IdentifiedModelCardV1::id),
+        )
+        .expect("model-card declarations")
+        .finish()
+        .expect("manual card-bound model-evidence identity")
+}
+
+fn card_bound_model_card_field_bytes(card_count: u64) -> u64 {
+    let descriptor_bytes = [
+        1_u64,
+        u64::from(u64::BITS / 8),
+        u64::try_from(ModelCardIdentitySchemaV1::DOMAIN.len()).expect("domain bytes"),
+        u64::from(u64::BITS / 8),
+        u64::try_from(ModelCardIdentitySchemaV1::NAME.len()).expect("name bytes"),
+        32,
+        u64::from(u32::BITS / 8),
+        u64::from(u64::BITS / 8),
+        u64::try_from(ModelCardIdentitySchemaV1::CONTEXT.len()).expect("context bytes"),
+    ]
+    .into_iter()
+    .sum::<u64>();
+    u64::from(u64::BITS / 8) + descriptor_bytes + card_count * 32
 }
 
 #[test]
@@ -3092,6 +3161,504 @@ fn model_evidence_identity_enforces_exact_resources_and_cancellation() {
     assert!(matches!(
         late,
         Err(ModelEvidenceIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
+}
+
+#[test]
+fn card_bound_model_evidence_replays_manual_frame_and_retains_children() {
+    let first = card_bound_model_evidence_fixture();
+    let replay = card_bound_model_evidence_fixture();
+    let manual = manual_card_bound_model_evidence_receipt(
+        first.model_evidence(),
+        first.model_cards(),
+        LIMITS,
+    );
+
+    assert_eq!(first.id(), replay.id());
+    assert_eq!(first.id(), manual.id());
+    assert_eq!(
+        first.receipt().canonical_preimage(),
+        manual.canonical_preimage()
+    );
+    assert_eq!(first.id_bytes(), first.receipt().audit_record().id());
+    assert_eq!(first.trust_state(), TrustState::Unanchored);
+    assert_eq!(
+        first.receipt().audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
+    assert_eq!(
+        first.model_evidence().model_evidence(),
+        &model_evidence_fixture()
+    );
+    assert_eq!(
+        first
+            .model_cards()
+            .iter()
+            .map(|card| card.card().name.as_str())
+            .collect::<Vec<_>>(),
+        ["card-a", "card-b"]
+    );
+
+    let none_child = identified_model_evidence(ModelEvidence::none());
+    let none = identify_card_bound_model_evidence_v1(none_child, Vec::new(), LIMITS, || false)
+        .expect("empty evidence binds to an empty card vector");
+    assert_eq!(
+        none.id(),
+        manual_card_bound_model_evidence_receipt(
+            none.model_evidence(),
+            none.model_cards(),
+            LIMITS,
+        )
+        .id()
+    );
+
+    let mut diagnostic = ModelEvidence::none();
+    diagnostic.assumptions = vec!["diagnostic without a card".to_string()];
+    diagnostic.validity = diagnostic.validity.with("Re", 1.0, 2.0);
+    diagnostic.discrepancy_rel = 0.25;
+    diagnostic.in_domain = false;
+    let diagnostic = identify_card_bound_model_evidence_v1(
+        identified_model_evidence(diagnostic),
+        Vec::new(),
+        LIMITS,
+        || false,
+    )
+    .expect("card-free diagnostic model evidence remains bindable");
+    assert_ne!(none.id(), diagnostic.id());
+
+    let expected_evidence_id = first.model_evidence().id();
+    let expected_card_ids = first
+        .model_cards()
+        .iter()
+        .map(IdentifiedModelCardV1::id)
+        .collect::<Vec<_>>();
+    let (model_evidence, model_cards) = first.into_parts();
+    assert_eq!(model_evidence.id(), expected_evidence_id);
+    assert_eq!(
+        model_cards
+            .iter()
+            .map(IdentifiedModelCardV1::id)
+            .collect::<Vec<_>>(),
+        expected_card_ids
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one adversarial matrix shares the exact positional card-binding baseline"
+)]
+fn card_bound_model_evidence_binds_card_content_and_refuses_name_mismatch() {
+    let base = card_bound_model_evidence_fixture();
+    let changed_card = identified_model_card(
+        ModelCard::new(
+            "card-a",
+            "9.9.9",
+            Ambition::Moonshot,
+            vec!["contradicts the evidence assumptions".to_string()],
+            ValidityDomain::unconstrained().with("outside-evidence-axis", 100.0, 200.0),
+            vec!["known incompatible regime".to_string()],
+            0.875,
+        ),
+        None,
+    );
+    let contradictory = identify_card_bound_model_evidence_v1(
+        identified_model_evidence(model_evidence_fixture()),
+        vec![changed_card, card_bound_model_card("card-b", "2.0.0")],
+        LIMITS,
+        || false,
+    )
+    .expect("the join checks names, not semantic agreement");
+    assert_eq!(
+        base.model_evidence().id(),
+        contradictory.model_evidence().id()
+    );
+    assert_ne!(
+        base.model_cards()[0].id(),
+        contradictory.model_cards()[0].id()
+    );
+    assert_ne!(base.id(), contradictory.id());
+
+    let bind_names = |names: &[&str]| {
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            names
+                .iter()
+                .map(|name| card_bound_model_card(name, "test"))
+                .collect(),
+            LIMITS,
+            || false,
+        )
+    };
+    assert_eq!(
+        bind_names(&["card-a"]).expect_err("one missing declaration must refuse"),
+        CardBoundModelEvidenceIdentityError::CardCountMismatch {
+            declared: 2,
+            supplied: 1,
+        }
+    );
+    assert_eq!(
+        bind_names(&["card-a", "card-b", "card-c"]).expect_err("one extra declaration must refuse"),
+        CardBoundModelEvidenceIdentityError::CardCountMismatch {
+            declared: 2,
+            supplied: 3,
+        }
+    );
+
+    for (names, expected_index, declared_bytes, supplied_bytes, first_difference) in [
+        (&["card-b", "card-a"][..], 0, 6, 6, 5),
+        (&["card-a", "card-a"][..], 1, 6, 6, 5),
+        (&["card-a-long", "card-b"][..], 0, 6, 11, 6),
+        (&["Card-a", "card-b"][..], 0, 6, 6, 0),
+        (&["card-a ", "card-b"][..], 0, 6, 7, 6),
+    ] {
+        assert_eq!(
+            bind_names(names).expect_err("byte-inexact positional name must refuse"),
+            CardBoundModelEvidenceIdentityError::CardNameMismatch {
+                card_index: expected_index,
+                declared_bytes,
+                supplied_bytes,
+                first_different_byte: first_difference,
+            }
+        );
+    }
+
+    let unicode_evidence = ModelEvidence {
+        cards: vec!["café".to_string()],
+        ..ModelEvidence::none()
+    };
+    assert_eq!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(unicode_evidence),
+            vec![card_bound_model_card("cafe\u{301}", "test")],
+            LIMITS,
+            || false,
+        )
+        .expect_err("Unicode-normalization differences must remain visible"),
+        CardBoundModelEvidenceIdentityError::CardNameMismatch {
+            card_index: 0,
+            declared_bytes: 5,
+            supplied_bytes: 6,
+            first_different_byte: 3,
+        }
+    );
+
+    let long_prefix = "p".repeat(300);
+    let late_declared = format!("{long_prefix}x");
+    let late_supplied = format!("{long_prefix}y");
+    let late_mismatch_evidence = ModelEvidence {
+        cards: vec![late_declared],
+        ..ModelEvidence::none()
+    };
+    assert_eq!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(late_mismatch_evidence),
+            vec![card_bound_model_card(&late_supplied, "test")],
+            LIMITS,
+            || false,
+        )
+        .expect_err("a mismatch after one complete poll stride must retain its absolute offset"),
+        CardBoundModelEvidenceIdentityError::CardNameMismatch {
+            card_index: 0,
+            declared_bytes: 301,
+            supplied_bytes: 301,
+            first_different_byte: 300,
+        }
+    );
+
+    let long_prefix_evidence = ModelEvidence {
+        cards: vec![format!("{long_prefix}x")],
+        ..ModelEvidence::none()
+    };
+    assert_eq!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(long_prefix_evidence),
+            vec![card_bound_model_card(&long_prefix, "test")],
+            LIMITS,
+            || false,
+        )
+        .expect_err("a strict-prefix mismatch after one poll stride must retain its offset"),
+        CardBoundModelEvidenceIdentityError::CardNameMismatch {
+            card_index: 0,
+            declared_bytes: 301,
+            supplied_bytes: 300,
+            first_different_byte: 300,
+        }
+    );
+
+    let model_evidence = identified_model_evidence(model_evidence_fixture());
+    let reversed_cards = vec![
+        card_bound_model_card("card-b", "2.0.0"),
+        card_bound_model_card("card-a", "1.0.0"),
+    ];
+    let raw_mismatched =
+        manual_card_bound_model_evidence_receipt(&model_evidence, &reversed_cards, LIMITS);
+    assert_eq!(
+        raw_mismatched.audit_record().trust(),
+        TrustState::Unanchored
+    );
+    assert_eq!(
+        raw_mismatched.audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
+    assert_ne!(raw_mismatched.id(), base.id());
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            model_evidence.clone(),
+            reversed_cards,
+            LIMITS,
+            || false,
+        ),
+        Err(CardBoundModelEvidenceIdentityError::CardNameMismatch { card_index: 0, .. })
+    ));
+
+    let wrong_role =
+        SourceId::<ModelEvidenceIdentitySchemaV1>::parse_slice(model_evidence.id().as_bytes())
+            .expect("same digest bytes under an intentionally wrong source role");
+    let role_refusal = CanonicalEncoder::<CardBoundModelEvidenceIdV1, _>::new(LIMITS, || false)
+        .expect("card-bound schema")
+        .child(Field::new(0, "model-evidence"), wrong_role)
+        .expect_err("the model-evidence child requires the semantic role");
+    assert!(matches!(
+        role_refusal,
+        CanonicalError::ChildBindingMismatch {
+            field: "model-evidence",
+            what: "child role",
+        }
+    ));
+    let wrong_schema =
+        SemanticId::<ModelCardIdentitySchemaV1>::parse_slice(base.model_cards()[0].id().as_bytes())
+            .expect("same digest bytes under an intentionally wrong semantic schema");
+    let schema_refusal = CanonicalEncoder::<CardBoundModelEvidenceIdV1, _>::new(LIMITS, || false)
+        .expect("card-bound schema")
+        .child(Field::new(0, "model-evidence"), wrong_schema)
+        .expect_err("the model-evidence child requires its exact schema");
+    assert!(matches!(
+        schema_refusal,
+        CanonicalError::ChildBindingMismatch {
+            field: "model-evidence",
+            what: "child schema domain",
+        }
+    ));
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exact-limit matrix shares the card-bound schema and poll ledger"
+)]
+fn card_bound_model_evidence_enforces_exact_resources_and_cancellation() {
+    let baseline = card_bound_model_evidence_fixture();
+    let exact_field_bytes = card_bound_model_card_field_bytes(2);
+    let exact_field_limits = CanonicalLimits::new(16_384, exact_field_bytes, 32, 2, 256);
+    identify_card_bound_model_evidence_v1(
+        identified_model_evidence(model_evidence_fixture()),
+        vec![
+            card_bound_model_card("card-a", "1.0.0"),
+            card_bound_model_card("card-b", "2.0.0"),
+        ],
+        exact_field_limits,
+        || false,
+    )
+    .expect("exact ordered-card field and collection budgets");
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            CanonicalLimits::new(16_384, exact_field_bytes - 1, 32, 2, 256),
+            || false,
+        ),
+        Err(CardBoundModelEvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested,
+                limit,
+            }
+        )) if requested == exact_field_bytes && limit == exact_field_bytes - 1
+    ));
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            CanonicalLimits::new(16_384, 8_192, 32, 1, 256),
+            || false,
+        ),
+        Err(CardBoundModelEvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 2,
+                limit: 1,
+            }
+        ))
+    ));
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            CanonicalLimits::new(16_384, 8_192, 8, 2, 256),
+            || false,
+        ),
+        Err(CardBoundModelEvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::Fields,
+                requested,
+                limit: 8,
+            }
+        )) if requested > 8
+    ));
+
+    let frame = baseline.receipt().canonical_bytes();
+    identify_card_bound_model_evidence_v1(
+        identified_model_evidence(model_evidence_fixture()),
+        vec![
+            card_bound_model_card("card-a", "1.0.0"),
+            card_bound_model_card("card-b", "2.0.0"),
+        ],
+        CanonicalLimits::new(frame, 8_192, 32, 2, 256),
+        || false,
+    )
+    .expect("exact complete-frame budget");
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            CanonicalLimits::new(frame - 1, 8_192, 32, 2, 256),
+            || false,
+        ),
+        Err(CardBoundModelEvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == frame - 1
+    ));
+    assert_eq!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            CanonicalLimits::new(16_384, 8_192, 32, 2, 0),
+            || false,
+        )
+        .expect_err("zero cancellation stride must refuse"),
+        CardBoundModelEvidenceIdentityError::Canonical(CanonicalError::InvalidLimits(
+            "cancellation_poll_bytes must be positive"
+        ))
+    );
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            LIMITS,
+            || true,
+        ),
+        Err(CardBoundModelEvidenceIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+
+    let long_name = "l".repeat(600);
+    let long_evidence = ModelEvidence {
+        cards: vec![long_name.clone()],
+        ..ModelEvidence::none()
+    };
+    assert_eq!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(long_evidence),
+            vec![card_bound_model_card(&long_name, "1.0.0")],
+            CanonicalLimits::new(16_384, 8_192, 32, 1, 256),
+            CancelAfter {
+                successful_polls: 2,
+            },
+        )
+        .expect_err("long-name comparison must observe cancellation"),
+        CardBoundModelEvidenceIdentityError::CardNameComparisonCancelled {
+            card_index: 0,
+            compared_bytes: 256,
+        }
+    );
+    assert_eq!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            LIMITS,
+            CancelAfter {
+                successful_polls: 3,
+            },
+        )
+        .expect_err("cancellation between positional card comparisons must refuse"),
+        CardBoundModelEvidenceIdentityError::CardNameComparisonCancelled {
+            card_index: 1,
+            compared_bytes: 0,
+        }
+    );
+
+    let polls = std::cell::Cell::new(0_usize);
+    identify_card_bound_model_evidence_v1(
+        identified_model_evidence(model_evidence_fixture()),
+        vec![
+            card_bound_model_card("card-a", "1.0.0"),
+            card_bound_model_card("card-b", "2.0.0"),
+        ],
+        LIMITS,
+        || {
+            polls.set(polls.get() + 1);
+            false
+        },
+    )
+    .expect("baseline card-bound poll count");
+    assert!(polls.get() > 1);
+    assert!(matches!(
+        identify_card_bound_model_evidence_v1(
+            identified_model_evidence(model_evidence_fixture()),
+            vec![
+                card_bound_model_card("card-a", "1.0.0"),
+                card_bound_model_card("card-b", "2.0.0"),
+            ],
+            LIMITS,
+            CancelAfter {
+                successful_polls: polls.get() - 1,
+            },
+        ),
+        Err(CardBoundModelEvidenceIdentityError::Canonical(
             CanonicalError::Cancelled { absorbed_bytes }
         )) if absorbed_bytes > 0
     ));

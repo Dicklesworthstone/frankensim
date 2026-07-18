@@ -42,6 +42,8 @@ pub const COLOR_EVIDENCE_NODE_IDENTITY_VERSION_V1: u32 = 1;
 pub const VALIDITY_DOMAIN_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one model-evidence semantic slice.
 pub const MODEL_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one exact model-evidence/card declaration join.
+pub const CARD_BOUND_MODEL_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one standalone numerical-certificate declaration.
 pub const NUMERICAL_CERTIFICATE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one standalone statistical-certificate declaration.
@@ -72,6 +74,8 @@ pub const MAX_COLOR_EVIDENCE_NODE_BYTES_V1: u64 = 1 << 20;
 pub const MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for each variable model-evidence identity field.
 pub const MAX_MODEL_EVIDENCE_IDENTITY_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Hard payload ceiling for the ordered typed-card field of one bound model-evidence join.
+pub const MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for each variable certified-evidence field.
 pub const MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for each exact certified-f64 source field.
@@ -427,6 +431,88 @@ impl IdentifiedModelCardV1 {
     #[must_use]
     pub fn into_parts(self) -> (ModelCard, Option<Vec<u8>>) {
         (self.card, self.calibration_bytes)
+    }
+}
+
+static CARD_BOUND_MODEL_EVIDENCE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<ModelEvidenceIdV1>();
+static CARD_BOUND_MODEL_CARD_CHILD_V1: ChildSpec = ChildSpec::for_identity::<ModelCardIdV1>();
+
+/// Canonical identity schema joining one exact model-evidence declaration to
+/// the ordered typed model-card declarations named by that evidence.
+pub enum CardBoundModelEvidenceIdentitySchemaV1 {}
+
+impl CanonicalSchema for CardBoundModelEvidenceIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.card-bound-model-evidence.v1";
+    const NAME: &'static str = "card-bound-model-evidence";
+    const VERSION: u32 = CARD_BOUND_MODEL_EVIDENCE_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "typed model-evidence child plus exact ordered typed model-card declarations after byte-exact positional name matching; no derivation, execution, registry membership, occupancy, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::child_of("model-evidence", &CARD_BOUND_MODEL_EVIDENCE_CHILD_V1),
+        FieldSpec::ordered_children_of("model-card-declarations", &CARD_BOUND_MODEL_CARD_CHILD_V1),
+    ];
+}
+
+/// Low-level schema-shaped identity for one model-evidence/card declaration
+/// join.
+///
+/// Only [`IdentifiedCardBoundModelEvidenceV1`] proves exact positional name
+/// correspondence with retained opaque children.
+pub type CardBoundModelEvidenceIdV1 = SemanticId<CardBoundModelEvidenceIdentitySchemaV1>;
+
+/// Low-level producer receipt for one card-bound model-evidence frame.
+pub type CardBoundModelEvidenceReceiptV1 = IdentityReceipt<CardBoundModelEvidenceIdV1>;
+
+/// One opaque model-evidence child kept attached to the exact ordered opaque
+/// model-card declarations named by its canonical card-name set.
+#[derive(Debug, Clone)]
+pub struct IdentifiedCardBoundModelEvidenceV1 {
+    model_evidence: IdentifiedModelEvidenceV1,
+    model_cards: Vec<IdentifiedModelCardV1>,
+    receipt: CardBoundModelEvidenceReceiptV1,
+}
+
+impl IdentifiedCardBoundModelEvidenceV1 {
+    /// Opaque model-evidence child committed by this join.
+    #[must_use]
+    pub const fn model_evidence(&self) -> &IdentifiedModelEvidenceV1 {
+        &self.model_evidence
+    }
+
+    /// Exact ordered opaque model-card declarations committed by this join.
+    #[must_use]
+    pub fn model_cards(&self) -> &[IdentifiedModelCardV1] {
+        &self.model_cards
+    }
+
+    /// Typed card-bound model-evidence identity.
+    #[must_use]
+    pub const fn id(&self) -> CardBoundModelEvidenceIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> CardBoundModelEvidenceReceiptV1 {
+        self.receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the join while preserving every retained opaque child.
+    #[must_use]
+    pub fn into_parts(self) -> (IdentifiedModelEvidenceV1, Vec<IdentifiedModelCardV1>) {
+        (self.model_evidence, self.model_cards)
     }
 }
 
@@ -1918,6 +2004,89 @@ impl From<CanonicalError> for ModelCardIdentityError {
     }
 }
 
+/// Fail-closed refusal from card-bound model-evidence construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardBoundModelEvidenceIdentityError {
+    /// The canonical card-name set and supplied opaque declarations differ in
+    /// cardinality.
+    CardCountMismatch {
+        /// Number of names committed by the model-evidence child.
+        declared: u64,
+        /// Number of opaque card declarations supplied for binding.
+        supplied: u64,
+    },
+    /// One supplied card name differs byte-for-byte from its declared name.
+    CardNameMismatch {
+        /// Zero-based position in canonical card-name order.
+        card_index: u64,
+        /// Declared model-evidence name length in bytes.
+        declared_bytes: u64,
+        /// Supplied model-card name length in bytes.
+        supplied_bytes: u64,
+        /// First differing byte, or the common-prefix length when lengths differ.
+        first_different_byte: u64,
+    },
+    /// Cancellation was observed while comparing one potentially long name.
+    CardNameComparisonCancelled {
+        /// Zero-based position in canonical card-name order.
+        card_index: u64,
+        /// Common-prefix bytes compared before cancellation observation.
+        compared_bytes: u64,
+    },
+    /// Parent framing, resources, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for CardBoundModelEvidenceIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CardCountMismatch { declared, supplied } => write!(
+                formatter,
+                "card-bound model-evidence identity refused {supplied} declaration(s): model evidence names {declared}"
+            ),
+            Self::CardNameMismatch {
+                card_index,
+                declared_bytes,
+                supplied_bytes,
+                first_different_byte,
+            } => write!(
+                formatter,
+                "card-bound model-evidence identity refused card {card_index}: declared {declared_bytes} name bytes and supplied {supplied_bytes} name bytes first differ at byte {first_different_byte}"
+            ),
+            Self::CardNameComparisonCancelled {
+                card_index,
+                compared_bytes,
+            } => write!(
+                formatter,
+                "card-bound model-evidence identity cancelled while comparing card {card_index} after {compared_bytes} name bytes"
+            ),
+            Self::Canonical(error) => {
+                write!(
+                    formatter,
+                    "card-bound model-evidence identity refused: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CardBoundModelEvidenceIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::CardCountMismatch { .. }
+            | Self::CardNameMismatch { .. }
+            | Self::CardNameComparisonCancelled { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for CardBoundModelEvidenceIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
 /// Fail-closed refusal from certified-f64 semantic-identity construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertifiedF64EvidenceIdentityError {
@@ -3372,6 +3541,204 @@ where
     })
 }
 
+fn card_bound_model_card_field_bytes_v1(card_count: u64) -> Result<u64, CanonicalError> {
+    let descriptor_bytes = [
+        1_u64,
+        u64::from(u64::BITS / 8),
+        bounded_len(ModelCardIdentitySchemaV1::DOMAIN.len())?,
+        u64::from(u64::BITS / 8),
+        bounded_len(ModelCardIdentitySchemaV1::NAME.len())?,
+        32,
+        u64::from(u32::BITS / 8),
+        u64::from(u64::BITS / 8),
+        bounded_len(ModelCardIdentitySchemaV1::CONTEXT.len())?,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |sum, value| {
+        sum.checked_add(value).ok_or(CanonicalError::LengthOverflow)
+    })?;
+    u64::from(u64::BITS / 8)
+        .checked_add(descriptor_bytes)
+        .and_then(|bytes| {
+            card_count
+                .checked_mul(32)
+                .and_then(|roots| bytes.checked_add(roots))
+        })
+        .ok_or(CanonicalError::LengthOverflow)
+}
+
+fn preflight_card_bound_model_card_field_v1(
+    card_count: u64,
+    limits: EvidenceIdentityLimits,
+) -> Result<u64, CanonicalError> {
+    let requested_field_bytes = card_bound_model_card_field_bytes_v1(card_count)?;
+    let field_limit = limits
+        .max_field_bytes()
+        .min(MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1);
+    if requested_field_bytes > field_limit {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested: requested_field_bytes,
+            limit: field_limit,
+        });
+    }
+    Ok(requested_field_bytes)
+}
+
+fn compare_card_bound_model_name_v1<C>(
+    card_index: u64,
+    declared: &str,
+    supplied: &str,
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<(), CardBoundModelEvidenceIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    let stride = usize::try_from(limits.cancellation_poll_bytes())
+        .map_err(|_| CanonicalError::LengthOverflow)?;
+    let declared = declared.as_bytes();
+    let supplied = supplied.as_bytes();
+    let common_bytes = declared.len().min(supplied.len());
+    let mut compared_bytes = 0_usize;
+    if cancellation.is_cancelled() {
+        return Err(
+            CardBoundModelEvidenceIdentityError::CardNameComparisonCancelled {
+                card_index,
+                compared_bytes: 0,
+            },
+        );
+    }
+    while compared_bytes < common_bytes {
+        if compared_bytes != 0 && cancellation.is_cancelled() {
+            return Err(
+                CardBoundModelEvidenceIdentityError::CardNameComparisonCancelled {
+                    card_index,
+                    compared_bytes: bounded_len(compared_bytes)?,
+                },
+            );
+        }
+        let end = compared_bytes.saturating_add(stride).min(common_bytes);
+        let declared_chunk = &declared[compared_bytes..end];
+        let supplied_chunk = &supplied[compared_bytes..end];
+        if let Some(different_in_chunk) = declared_chunk
+            .iter()
+            .zip(supplied_chunk)
+            .position(|(left, right)| left != right)
+        {
+            return Err(CardBoundModelEvidenceIdentityError::CardNameMismatch {
+                card_index,
+                declared_bytes: bounded_len(declared.len())?,
+                supplied_bytes: bounded_len(supplied.len())?,
+                first_different_byte: bounded_len(
+                    compared_bytes
+                        .checked_add(different_in_chunk)
+                        .ok_or(CanonicalError::LengthOverflow)?,
+                )?,
+            });
+        }
+        compared_bytes = end;
+    }
+    if cancellation.is_cancelled() {
+        return Err(
+            CardBoundModelEvidenceIdentityError::CardNameComparisonCancelled {
+                card_index,
+                compared_bytes: bounded_len(compared_bytes)?,
+            },
+        );
+    }
+    if declared.len() != supplied.len() {
+        return Err(CardBoundModelEvidenceIdentityError::CardNameMismatch {
+            card_index,
+            declared_bytes: bounded_len(declared.len())?,
+            supplied_bytes: bounded_len(supplied.len())?,
+            first_different_byte: bounded_len(common_bytes)?,
+        });
+    }
+    Ok(())
+}
+
+/// Bind one exact model-evidence declaration to the ordered opaque model-card
+/// declarations named by its canonical card-name set.
+///
+/// The helper consumes and retains both the opaque model-evidence child and all
+/// opaque model-card children. Counts must agree, and every card name must
+/// match the corresponding model-evidence name byte-for-byte in the caller's
+/// existing canonical order. No sorting, normalization, aliasing, or implicit
+/// lookup occurs.
+///
+/// This join proves only positional name-to-declaration attachment. It does not
+/// prove that the model evidence was derived from or agrees with the cards,
+/// that any model ran, or that assumptions, validity, discrepancy, occupancy,
+/// calibration, registry state, or scientific claims are correct.
+///
+/// # Errors
+/// Refuses count/name mismatch, invalid limits, exact ordered-child field or
+/// collection overflow, or cancellation during comparison/framing. No partial
+/// join is published.
+pub fn identify_card_bound_model_evidence_v1<C>(
+    model_evidence: IdentifiedModelEvidenceV1,
+    model_cards: Vec<IdentifiedModelCardV1>,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedCardBoundModelEvidenceV1, CardBoundModelEvidenceIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+
+    let declared_names = &model_evidence.model_evidence().cards;
+    let declared_count = bounded_len(declared_names.len())?;
+    let supplied_count = bounded_len(model_cards.len())?;
+    if declared_count != supplied_count {
+        return Err(CardBoundModelEvidenceIdentityError::CardCountMismatch {
+            declared: declared_count,
+            supplied: supplied_count,
+        });
+    }
+    if supplied_count > limits.max_collection_items() {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::CollectionItems,
+            requested: supplied_count,
+            limit: limits.max_collection_items(),
+        }
+        .into());
+    }
+    preflight_card_bound_model_card_field_v1(supplied_count, limits)?;
+
+    for (card_index, (declared_name, supplied_card)) in
+        declared_names.iter().zip(&model_cards).enumerate()
+    {
+        compare_card_bound_model_name_v1(
+            bounded_len(card_index)?,
+            declared_name,
+            &supplied_card.card().name,
+            limits,
+            &mut cancellation,
+        )?;
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+
+    let receipt = CanonicalEncoder::<CardBoundModelEvidenceIdV1, _>::new(limits, cancellation)?
+        .child(Field::new(0, "model-evidence"), model_evidence.id())?
+        .ordered_children(
+            Field::new(1, "model-card-declarations"),
+            supplied_count,
+            model_cards.iter().map(IdentifiedModelCardV1::id),
+        )?
+        .finish()?;
+    Ok(IdentifiedCardBoundModelEvidenceV1 {
+        model_evidence,
+        model_cards,
+        receipt,
+    })
+}
+
 fn preflight_certified_f64_sensitivity_v1<C>(
     certified: &Certified<f64>,
     limits: EvidenceIdentityLimits,
@@ -4377,6 +4744,37 @@ mod tests {
         assert_eq!(
             model_card_legacy_provenance_v1(&bytes, limits, &mut cancel),
             Err(ModelCardIdentityError::CalibrationCrosswalkCancelled { processed_bytes: 8 })
+        );
+    }
+
+    #[test]
+    fn ordered_card_field_arithmetic_straddles_the_hard_cap_exactly() {
+        let empty_field = card_bound_model_card_field_bytes_v1(0).expect("empty field size");
+        let root_bytes = 32_u64;
+        let maximum_cards =
+            (MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1 - empty_field) / root_bytes;
+        let maximum_field =
+            card_bound_model_card_field_bytes_v1(maximum_cards).expect("maximum field size");
+        let first_oversized = card_bound_model_card_field_bytes_v1(maximum_cards + 1)
+            .expect("first oversized field arithmetic");
+
+        assert!(maximum_field <= MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1);
+        assert!(first_oversized > MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1);
+        assert_eq!(first_oversized - maximum_field, root_bytes);
+
+        let caller_above_hard_cap =
+            EvidenceIdentityLimits::new(1 << 22, 1 << 21, 32, maximum_cards + 1, 256);
+        assert_eq!(
+            preflight_card_bound_model_card_field_v1(maximum_cards, caller_above_hard_cap),
+            Ok(maximum_field)
+        );
+        assert_eq!(
+            preflight_card_bound_model_card_field_v1(maximum_cards + 1, caller_above_hard_cap),
+            Err(CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: first_oversized,
+                limit: MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1,
+            })
         );
     }
 

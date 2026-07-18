@@ -100,9 +100,10 @@ telemetry/legacy correlation.
   explicit unbounded state, and signed zero stays bit-distinct. Empty card or
   assumption sets are bound literally and are not interpreted as model absence
   by this helper. Card names remain identifiers rather than `ModelCardIdV1`
-  children because `ModelEvidence` currently carries no card content or typed
-  card receipts. Raw aliases prove schema-shaped framing only, not
-  correspondence with an attached slice.
+  children in this bare identity because `ModelEvidence` currently carries no
+  card content or typed card receipts. The separate card-bound parent below is
+  an explicit, non-transitive join. Raw aliases prove schema-shaped framing
+  only, not correspondence with an attached slice.
 - `identity` module (sj31i.52.2 standalone-certificate tranche) —
   `NumericalCertificateIdV1` and `StatisticalCertificateIdV1` are strong
   `SemanticId` roles for exact, helper-admitted structural declarations. The
@@ -214,6 +215,25 @@ telemetry/legacy correlation.
   child and parent receipts remain unanchored. Raw ID/receipt aliases prove
   only schema-shaped framing, not correspondence with retained card/source
   inputs.
+- `identity` module (sj31i.52.2 card-bound model-evidence tranche) —
+  `CardBoundModelEvidenceIdV1` is a strong `SemanticId` parent over one exact
+  typed `ModelEvidenceIdV1` child and the exact ordered typed
+  `ModelCardIdV1` declarations named by that child. The opaque
+  `IdentifiedCardBoundModelEvidenceV1` consumes and retains both the opaque
+  evidence child and every opaque card child, requires equal counts, and
+  compares each name byte-for-byte at the same canonical position without
+  sorting, normalization, lookup, deduplication, or version selection. The
+  ordered child field binds the complete child role/schema descriptor, count,
+  order, and every typed root; same-name card content changes therefore move
+  the parent. Exact name comparison is cancellation-bounded, the ordered field
+  is hard-capped at 1 MiB, and caller collection/field/frame/recursive-schema
+  limits remain authoritative. An empty evidence card-name set binds only an
+  empty card vector, including when the retained evidence carries other
+  diagnostics. The
+  join proves positional attachment only, not semantic agreement, derivation,
+  execution, registry authority, scientific correctness, or trust. Raw
+  ID/receipt aliases prove schema-shaped framing and can encode mismatched
+  names; they cannot construct the opaque helper result.
 
 - `color` module (bead qmao.1): the THREE-COLOR epistemic schema —
   `Color::{Verified{lo,hi}, Validated{regime: ValidityDomain, dataset},
@@ -469,11 +489,27 @@ telemetry/legacy correlation.
     or late framing cancellation publish no opaque result. Both source and
     parent receipts remain explicitly unanchored; raw aliases prove neither
     retained correspondence nor the crosswalk.
+23. Opaque card-bound model-evidence identities (sj31i.52.2, G0/G3/G4)
+    retain one exact typed model-evidence child plus the ordered exact typed
+    card declarations whose names matched byte-for-byte at construction. They
+    agree with independent canonical framing; replay is stable, while any
+    accepted evidence-child or card-content mutation moves the parent. An
+    accepted joint change to the declared names and corresponding card vector
+    also moves the parent; an isolated count/order mismatch produces no opaque
+    parent. Missing, extra, reordered, duplicated, prefix/case/whitespace, or
+    Unicode-normalization-distinct names refuse with bounded index/length/first-
+    difference diagnostics. Exact collection/field/frame/recursive-schema
+    overflow, zero cancellation stride, and entry, mid-name, between-card, or
+    late framing cancellation publish no opaque result. Empty/empty succeeds,
+    and card-free diagnostic evidence remains distinct from exact
+    `ModelEvidence::none()`. Raw aliases can frame mismatched children but do
+    not prove the opaque positional join; all receipts remain unanchored.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
 `OutOfDomain`, `FitError`, `FalsifyError`, and typed identity refusals including
 `ModelEvidenceIdentityError`, `ModelCardIdentityError`,
+`CardBoundModelEvidenceIdentityError`,
 `NumericalCertificateIdentityError`, `StatisticalCertificateIdentityError`,
 `FidelityPairIdentityError`, `DiscrepancyBandIdentityError`,
 `ModelBracketIdentityError`, `CertifiedF64SourceIdentityError`,
@@ -492,7 +528,8 @@ divergence.
 ## Cancellation behavior
 Core certificate/color algebra is bounded small synchronous work. Typed color,
 validity-domain, standalone-certificate, fidelity/discrepancy, model-bracket,
-model-evidence, certified-f64, exact-source-bound certified-f64,
+model-evidence, card-bound model-evidence, certified-f64,
+exact-source-bound certified-f64,
 decision-assessment, and model-card identity helpers accept an explicit
 cancellation probe. Standalone certificate,
 discrepancy-band, and decision-assessment helpers poll at entry before bounded
@@ -506,6 +543,9 @@ calibration and sourced-certified producer/adjoint crosswalks recompute legacy
 FNV incrementally with entry, exact byte-stride, and final polls before a
 second bounded encoder pass binds strong typed source children. Every refusal
 consumes any in-flight encoder and publishes no partial opaque result.
+Card-bound model-evidence construction additionally polls at entry, at each
+positional card boundary, and at exact byte strides while comparing potentially
+long names before its final bounded parent-framing pass.
 Falsifier allocation
 and history review iterate caller data without a `Cx`; allocation length and
 distinct history rows are defensively capped, but these diagnostic APIs are not
@@ -875,6 +915,21 @@ physical validation, process-standard conformance, or decision fitness.
   directly rather than binding `ModelEvidenceIdV1`, so this additive helper is
   not a transitive authority upgrade. Raw IDs/receipts remain schema-shaped
   framing without attached-value consistency or external trust.
+- `IdentifiedCardBoundModelEvidenceV1` proves only that one retained opaque
+  `ModelEvidence` child and an ordered vector of retained opaque `ModelCard`
+  children had equal counts and byte-exact names at every position when the
+  helper constructed the parent. Its root binds child roles, schemas, typed
+  identities, and order. It does not prove that evidence was derived from or
+  agrees with those cards; that any model ran; or that assumptions, validity,
+  discrepancy, `in_domain`, calibration, failures, ambition, versions,
+  registry membership, solver binding, units, QoI, seeds, budgets,
+  capabilities, provenance, scientific correctness, ledger admission, or
+  trust are valid. Same-name card versions or contents remain caller-selected:
+  they are identity-distinct, not ranked as unique, latest, or authoritative.
+  Empty/free-form exact names gain no namespace validity, and name matching
+  does not inherit `ModelRegistry` overwrite semantics. Raw aliases prove only
+  schema-shaped framing and may bind name-mismatched children; only the opaque
+  helper result proves the narrow positional check.
 - `IdentifiedNumericalCertificateV1` proves only exact local structural framing
   of the retained kind and bound bits. It binds no carried scalar or QoI, units,
   quantity kind, checker or algorithm, rounding method, operation, operands,
@@ -981,8 +1036,10 @@ physical validation, process-standard conformance, or decision fitness.
   or authority; matching FNV is compatibility consistency only, and the
   false-plus-empty child is an absence sentinel rather than an empty artifact
   claim. Existing `ModelEvidence::from_card` copies only a subset of card
-  fields, while certified-f64 identity still binds card names only; neither is
-  transitively bound to `ModelCardIdV1` by this additive tranche. Seeds,
+  fields, while certified-f64 identity still binds card names only; neither
+  bare identity becomes transitively card-bound. Callers must explicitly build
+  `IdentifiedCardBoundModelEvidenceV1`, whose positional name join adds none of
+  the semantic authority disclaimed here. Seeds,
   budgets, capabilities, hardware/build/dependency versions, signatures,
   external trust, and ledger admission remain outside the root.
 - A successful opaque helper build proves canonical source framing or exact
