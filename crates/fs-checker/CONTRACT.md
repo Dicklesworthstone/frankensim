@@ -368,3 +368,37 @@ solver and the checker cannot run a solve by construction.
   supplied `A`, `x`, and `b`; it does not establish conditioning, uniqueness,
   discretization error, convergence, or model fidelity. Origin authentication
   remains a separate mandatory authority boundary for source certificates.
+
+## Certificate-plugin registry (bead frankensim-checker-semantic-plugins-9e8n)
+
+`plugins` adds the INDEPENDENT SEMANTIC VERIFICATION axis for solver-free
+witness families: a closed versioned registry (`PluginRegistry::v1` owns
+exactly `interval-enclosure-chain@1` and `linear-residual-linf@1`) where
+each plugin owns a closed canonical witness schema (magic + protocol +
+bounded fields), explicit resource bounds (256 KiB transport, 4096 tape
+ops, 1024 inputs, 64x64 dense), a semantic RECHECK that recomputes the
+claim from witness data with outward-rounded native IEEE arithmetic, and
+failure localization (exact op index / matrix row). The chain family
+replays the interval tape and requires the claimed enclosure to CONTAIN
+the recomputed one; the residual family recomputes every row residual as
+an outward interval and requires the whole enclosure inside
+[-bound, bound]. Unknown families and version substitutions are explicit
+`CapabilityRefused` — never a generic Pass. `PluginVerdict` keeps the
+four outcomes typed and distinct; only `SemanticallyVerified` grants the
+semantic axis, and integrity/origin authority remain the existing
+`IntegrityStatus`/`OriginStatus` surfaces.
+
+### No-claim boundaries (certificate plugins)
+
+- A refutation refutes THE CERTIFICATE ("this witness proves the claim"),
+  not necessarily the underlying mathematical fact — an enclosure the
+  outward replay cannot fit inside the claimed bound is unprovable BY
+  THIS WITNESS, which is exactly what fail-closed certification means.
+- Witness content identity is a transport-level FNV digest, not an
+  authenticated ledger identity; origin authentication stays on the
+  existing checker surfaces.
+- The registry is closed per protocol version: new families arrive as new
+  (family, version) rows with their own schemas, never by widening an
+  existing plugin's acceptance.
+- No solver, no geometry, no new dependencies: recomputation is native
+  IEEE arithmetic only, keeping WASM/standalone builds green.

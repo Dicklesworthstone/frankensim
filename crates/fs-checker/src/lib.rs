@@ -22,6 +22,7 @@
 //! budget pie only after package verification succeeds. Everything is
 //! deterministic for deterministic injected capabilities.
 
+pub mod plugins;
 mod semantic;
 
 pub use semantic::{
