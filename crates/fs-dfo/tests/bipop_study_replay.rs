@@ -25,6 +25,9 @@ use fs_rand::{StreamCheckpoint, StreamKey};
 use std::fmt::Write as _;
 use std::panic::catch_unwind;
 
+#[path = "support/bipop_study_replay_goldens.rs"]
+mod goldens;
+
 const SUITE: &str = "fs-dfo/bipop-study-replay";
 const CASE: &str = "shifted-rastrigin-4d-full-public-state";
 const RED_CASE: &str = "seeded-returned-coordinate-corruption";
@@ -54,6 +57,10 @@ const STRONG_EVENT_IDENTITY_DOMAIN: &str =
 const SOURCE_FILE_IDENTITY_DOMAIN: &str = "frankensim.fs-dfo.bipop-study.source-file-identity.v1";
 const SOURCE_SNAPSHOT_FILES: &[(&str, &[u8])] = &[
     ("crates/fs-dfo/Cargo.toml", include_bytes!("../Cargo.toml")),
+    (
+        "crates/fs-dfo/tests/bipop_study_replay.rs",
+        include_bytes!("bipop_study_replay.rs"),
+    ),
     ("crates/fs-dfo/src/lib.rs", include_bytes!("../src/lib.rs")),
     ("crates/fs-dfo/src/cma.rs", include_bytes!("../src/cma.rs")),
     (
@@ -2917,13 +2924,42 @@ fn bipop_full_study_replays_and_seeded_failure_is_refused() {
         fixture_identity(causal_seed_mutant.input_seed, &causal_seed_mutant.admission);
     assert_resealed_semantic_refusal(causal_seed_mutant, &green_verdict, "restart[");
 
-    let red_event_blake3 = exercise_disclosed_corruption(&first, &replay);
+    let observed = [
+        strong_identity_hash(&first.fixture).to_string(),
+        strong_identity_hash(&first.result).to_string(),
+        strong_event_identity_hash(&green_receipt).to_string(),
+        strong_event_identity_hash(&green_verdict).to_string(),
+        exercise_disclosed_corruption(&first, &replay).to_string(),
+    ];
     println!(
         "BIPOP_STUDY_FREEZE fixture_blake3={} result_blake3={} green_receipt_event_blake3={} green_verdict_event_blake3={} red_event_blake3={}",
-        strong_identity_hash(&first.fixture),
-        strong_identity_hash(&first.result),
-        strong_event_identity_hash(&green_receipt),
-        strong_event_identity_hash(&green_verdict),
-        red_event_blake3,
+        observed[0], observed[1], observed[2], observed[3], observed[4],
     );
+    if let Some(expected) = goldens::EXPECTED_FOR_TARGET {
+        let labels = [
+            "fixture_blake3",
+            "result_blake3",
+            "green_receipt_event_blake3",
+            "green_verdict_event_blake3",
+            "red_event_blake3",
+        ];
+        for ((label, observed), expected) in labels.iter().zip(&observed).zip(expected) {
+            assert_eq!(
+                observed, expected,
+                "target-specific BIPOP study golden moved at {label}"
+            );
+        }
+    } else {
+        println!(
+            "BIPOP_STUDY_UNFROZEN target={}-{}-{}-bit-{}-endian; emitted hashes are sentinels, not regression goldens",
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            usize::BITS,
+            if cfg!(target_endian = "little") {
+                "little"
+            } else {
+                "big"
+            },
+        );
+    }
 }

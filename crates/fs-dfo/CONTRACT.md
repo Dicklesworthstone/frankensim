@@ -270,8 +270,9 @@ present, the supported fs-rand checkpoint version and checkpoint identity
 domain, both strong-hash domain identifiers, target architecture/operating
 system/pointer width/endianness, and full-width `u128` counter maxima as
 high/low limbs. Under `SOURCE_FILE_IDENTITY_DOMAIN`, it also binds an ordered
-path plus path-domain-separated BLAKE3 for exactly fifteen `include_bytes!` inputs:
-`crates/fs-dfo/Cargo.toml`, `crates/fs-dfo/src/lib.rs`,
+path plus path-domain-separated BLAKE3 for exactly sixteen `include_bytes!` inputs:
+`crates/fs-dfo/Cargo.toml`, `crates/fs-dfo/tests/bipop_study_replay.rs`,
+`crates/fs-dfo/src/lib.rs`,
 `crates/fs-dfo/src/cma.rs`, `crates/fs-la/src/lib.rs`,
 `crates/fs-la/src/eigen.rs`, `crates/fs-rand/src/lib.rs`,
 `crates/fs-rand/src/philox.rs`, `crates/fs-math/src/lib.rs`,
@@ -319,7 +320,7 @@ hashes the exact canonical fixture and result bytes, while a distinct
 event-content domain hashes the canonical fs-obs content identities of the green
 Custom receipt, green `ConformanceCase` verdict, and deterministic red
 corruption event. Because the result embeds the complete fixture preimage, its
-strong hash transitively binds the ordered fifteen-file source snapshot as well as
+strong hash transitively binds the ordered sixteen-file source snapshot as well as
 the target and admission provenance.
 
 The Custom receipt passes structural fs-obs wire validation and exposes the
@@ -346,10 +347,19 @@ and replay diagnostics, not immutable goldens. Because fixture, receipt, and
 verdict bind architecture, operating system, pointer width, and endianness, the
 forthcoming tuple is target-specific; it must not be reused as a cross-target or
 cross-ISA golden without separately captured, labeled evidence for that target.
-It is also specific to the ordered fifteen-file source snapshot and the executing
+It is also specific to the ordered sixteen-file source snapshot and the executing
 test binary. Neither the source hashes nor the target tuple binds compiler
 version/executable, flags, profile, or broader build identity; the fixture and
 receipt explicitly record that compiler fingerprint as `not-bound-no-claim`.
+The ordered snapshot includes the complete test harness itself, so weakening an
+oracle, mutation, admission, or merge assertion moves the fixture identity.
+Target-specific expected values live in the separate
+`tests/support/bipop_study_replay_goldens.rs` data module and are deliberately
+excluded from that snapshot: embedding an expected fixture digest in a source
+preimage of the same fixture would require a cryptographic fixed point. The
+snapshotted test root owns the comparison logic and treats `None` as explicit
+unfrozen/no-claim state; the external data module is reviewed regression
+authority, not a self-authenticating or signed root of trust.
 
 A disclosed corruption seed drives stable one-field red evidence over a
 returned coordinate. Its deterministic red-event detail retains both compact
