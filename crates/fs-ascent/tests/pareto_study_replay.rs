@@ -4,15 +4,16 @@
 //! front, then production epsilon-constraint continuation traces the known
 //! concave Fonseca-Fleming front. The retained receipt binds both schedules,
 //! starts, every objective callback input/value/gradient, and every public
-//! `ParetoPoint` decision/objective/gradient/KKT field. An independent repeat
-//! must reproduce the receipt byte for byte. A test-local semantic oracle also
-//! recomputes both objective/gradient pairs from every returned decision,
-//! checks each point against its declared schedule entry, and reconstructs the
-//! one-constraint KKT witness independently of the production report.
+//! `ParetoPoint` decision/objective/gradient/KKT field. A separately executed
+//! repeat must reproduce the receipt byte for byte. A test-local semantic
+//! oracle also recomputes both objective/gradient pairs from every returned
+//! decision, checks each point against its declared schedule entry, and
+//! establishes the existence of a nonnegative one-constraint KKT witness
+//! independently of the production report.
 //! Deterministic red mutations cover a finite returned-decision bit flip,
-//! point/schedule permutations, missing returned-point callback coverage, and
-//! corrupted public report fields; even self-consistently resealed forms must
-//! fail closed.
+//! point/schedule permutations, callback phase/order and returned-point pair
+//! coverage, and both invalid and finite-positive corrupted public report
+//! fields; even self-consistently resealed forms must fail closed.
 //!
 //! This is the two-objective tracing family only. It does not claim
 //! tri-objective behavior, the full WFG transformation stack, cancellation,
@@ -36,7 +37,10 @@ const KKT_ROUNDOFF_SCALE: f64 = 128.0;
 const WEIGHTED_DIMENSION: usize = 3;
 const EPSILON_DIMENSION: usize = 2;
 const SEMANTIC_ORACLE_VERSION: &str =
-    "pareto-independent-objective-gradient-callback-schedule-kkt-v1";
+    "pareto-independent-objective-gradient-paired-callback-schedule-kkt-witness-v2";
+const OBJECTIVE_FIXTURE_VERSION: &str =
+    "quadratic-three-dimensional-v1+fonseca-fleming-two-dimensional-v1";
+const UNIT_CONVENTION: &str = "dimensionless-decisions-objectives-gradients-and-kkt-residuals";
 const WEIGHTED_START: [f64; 3] = [0.5, 0.5, 0.5];
 const EPSILON_START: [f64; 2] = [0.0, 0.0];
 
@@ -101,6 +105,8 @@ impl ReceiptPayload {
             .str("fs-math-version", fs_math::VERSION)
             .str("fs-obs-version", fs_obs::VERSION)
             .str("semantic-oracle-version", SEMANTIC_ORACLE_VERSION)
+            .str("objective-fixture-version", OBJECTIVE_FIXTURE_VERSION)
+            .str("unit-convention", UNIT_CONVENTION)
             .str("family", "two-objective-pareto-tracing")
             .str("weighted-engine", "weighted_sum_sweep/L-BFGS")
             .str(
@@ -260,6 +266,7 @@ enum SemanticRefusal {
     NonFiniteEvidence,
     ObjectiveMismatch,
     CallbackMismatch,
+    CallbackOrderMismatch,
     CallbackCoverageMissing,
     ReturnedPointNotEvaluated,
     UnexpectedWeightedKkt,
@@ -299,6 +306,14 @@ fn comparison_slack(values: &[f64]) -> f64 {
         .map(|value| value.abs())
         .fold(1.0f64, f64::max);
     KKT_ROUNDOFF_SCALE * f64::EPSILON * scale
+}
+
+fn relative_product_slack(values: &[f64]) -> f64 {
+    let scale = values
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f64, f64::max);
+    (KKT_ROUNDOFF_SCALE * f64::EPSILON * scale).max(KKT_ROUNDOFF_SCALE * f64::from_bits(1))
 }
 
 fn quadratic_pair(x: &[f64]) -> ObjectivePair {
@@ -345,7 +360,22 @@ fn fonseca_fleming_pair(x: &[f64]) -> ObjectivePair {
 
 fn validate_callback_receipt(calls: &[ObjectiveCall]) -> Result<(), SemanticRefusal> {
     let mut seen = [false; 4];
+    let mut epsilon_phase_started = false;
+    let mut weighted_expects_f1 = true;
     for call in calls {
+        match call.phase {
+            "weighted" => {
+                if epsilon_phase_started
+                    || (weighted_expects_f1 && call.objective != "f1")
+                    || (!weighted_expects_f1 && call.objective != "f2")
+                {
+                    return Err(SemanticRefusal::CallbackOrderMismatch);
+                }
+                weighted_expects_f1 = !weighted_expects_f1;
+            }
+            "epsilon" => epsilon_phase_started = true,
+            _ => return Err(SemanticRefusal::CallbackMismatch),
+        }
         let (slot, dimension, objective, expected) = match (call.phase, call.objective) {
             ("weighted", "f1") => (
                 0,
@@ -385,29 +415,31 @@ fn validate_callback_receipt(calls: &[ObjectiveCall]) -> Result<(), SemanticRefu
         }
         seen[slot] = true;
     }
+    if !weighted_expects_f1 {
+        return Err(SemanticRefusal::CallbackOrderMismatch);
+    }
     if !seen.into_iter().all(|was_seen| was_seen) {
         return Err(SemanticRefusal::CallbackCoverageMissing);
     }
     Ok(())
 }
 
-fn returned_point_was_evaluated(
+fn returned_point_evaluation_pairs(
     calls: &[ObjectiveCall],
     phase: &'static str,
     point_bits: &[u64],
-    required_occurrences: usize,
-) -> bool {
-    ["f1", "f2"].into_iter().all(|objective| {
-        calls
-            .iter()
-            .filter(|call| {
-                call.phase == phase
-                    && call.objective == objective
-                    && call.point_bits.as_slice() == point_bits
-            })
-            .count()
-            >= required_occurrences
-    })
+) -> usize {
+    calls
+        .windows(2)
+        .filter(|pair| {
+            pair[0].phase == phase
+                && pair[1].phase == phase
+                && pair[0].objective == "f1"
+                && pair[1].objective == "f2"
+                && pair[0].point_bits.as_slice() == point_bits
+                && pair[1].point_bits.as_slice() == point_bits
+        })
+        .count()
 }
 
 fn record_call(
@@ -452,7 +484,8 @@ fn validate_weighted_points(
             .iter()
             .filter(|candidate| candidate.x_bits.as_slice() == point.x_bits.as_slice())
             .count();
-        if !returned_point_was_evaluated(calls, "weighted", &point.x_bits, required_occurrences) {
+        if returned_point_evaluation_pairs(calls, "weighted", &point.x_bits) < required_occurrences
+        {
             return Err(SemanticRefusal::ReturnedPointNotEvaluated);
         }
         let oracle = quadratic_pair(&x);
@@ -530,6 +563,63 @@ fn reconstruct_epsilon_kkt(
     Ok((residuals, multiplier))
 }
 
+fn public_kkt_witness_exists(oracle: &ObjectivePair, constraint: f64, reported: [f64; 4]) -> bool {
+    let objective_gradient = &oracle.gradients[1];
+    let constraint_gradient = &oracle.gradients[0];
+    let mut candidates = Vec::with_capacity(2 * objective_gradient.len() + 2);
+    candidates.push(0.0);
+
+    // When the constraint is not exactly active, complementarity identifies
+    // the only possible nonnegative multiplier up to floating-point roundoff.
+    if constraint != 0.0 {
+        candidates.push(reported[3] / constraint.abs());
+    }
+
+    // If the constraint is exactly active, complementarity is identically
+    // zero and does not identify the multiplier.  At any witness for which
+    // ||g2 + nu*g1||_inf == reported stationarity, at least one component
+    // attains either +reported or -reported.  Solving those two affine
+    // equations for every nonzero row gives a complete finite candidate set.
+    for (&objective, &constraint_row) in objective_gradient.iter().zip(constraint_gradient) {
+        if constraint_row != 0.0 {
+            candidates.push((reported[0] - objective) / constraint_row);
+            candidates.push((-reported[0] - objective) / constraint_row);
+        }
+    }
+
+    candidates.into_iter().any(|multiplier| {
+        if !multiplier.is_finite() || multiplier < 0.0 {
+            return false;
+        }
+        let multiplier_gradient: Vec<f64> = constraint_gradient
+            .iter()
+            .map(|gradient| multiplier * gradient)
+            .collect();
+        if multiplier_gradient.iter().any(|value| !value.is_finite()) {
+            return false;
+        }
+        let stationarity_vector: Vec<f64> = objective_gradient
+            .iter()
+            .zip(&multiplier_gradient)
+            .map(|(objective, constraint)| objective + constraint)
+            .collect();
+        let stationarity = inf_norm(&stationarity_vector);
+        let complementarity = (multiplier * constraint).abs();
+        if !stationarity.is_finite() || !complementarity.is_finite() {
+            return false;
+        }
+        let stationarity_slack = comparison_slack(&[
+            reported[0],
+            stationarity,
+            inf_norm(objective_gradient),
+            inf_norm(&multiplier_gradient),
+        ]);
+        let complementarity_slack = relative_product_slack(&[reported[3], complementarity]);
+        (reported[0] - stationarity).abs() <= stationarity_slack
+            && (reported[3] - complementarity).abs() <= complementarity_slack
+    })
+}
+
 fn validate_epsilon_points(
     points: &[PointPayload],
     schedule: &[f64],
@@ -546,7 +636,7 @@ fn validate_epsilon_points(
             .iter()
             .filter(|candidate| candidate.x_bits.as_slice() == point.x_bits.as_slice())
             .count();
-        if !returned_point_was_evaluated(calls, "epsilon", &point.x_bits, required_occurrences) {
+        if returned_point_evaluation_pairs(calls, "epsilon", &point.x_bits) < required_occurrences {
             return Err(SemanticRefusal::ReturnedPointNotEvaluated);
         }
         let oracle = fonseca_fleming_pair(&x);
@@ -585,22 +675,25 @@ fn validate_epsilon_points(
             return Err(SemanticRefusal::QualityRegression);
         }
 
-        let (independent, multiplier) = reconstruct_epsilon_kkt(&oracle, epsilon)?;
+        let (independent, _independent_multiplier) = reconstruct_epsilon_kkt(&oracle, epsilon)?;
         let constraint = oracle.values[0] - epsilon;
-        let slack = comparison_slack(&[
-            oracle.values[0],
-            oracle.values[1],
-            inf_norm(&oracle.gradients[0]),
-            inf_norm(&oracle.gradients[1]),
-            multiplier,
-        ]);
 
         // Feasibility and dual feasibility have no hidden-multiplier
-        // ambiguity and must agree with the independent reconstruction up to
-        // arithmetic roundoff.
-        if (reported[1] - independent[1]).abs() > slack
-            || (reported[2] - independent[2]).abs() > slack
-        {
+        // ambiguity in this one-inequality production path. They are computed
+        // from the same retained objective bits and the production multiplier
+        // is projected nonnegative, so require exact canonical bits rather
+        // than allowing an arbitrary small positive lie through a tolerance.
+        if kkt_bits[1] != independent[1].to_bits() || kkt_bits[2] != independent[2].to_bits() {
+            return Err(SemanticRefusal::KktResidualMismatch);
+        }
+
+        // The public API does not expose the augmented-Lagrangian multiplier,
+        // but stationarity and complementarity must still be jointly
+        // realizable by at least one finite nonnegative multiplier. Checking
+        // witness existence closes the old loophole where each public field
+        // could be perturbed independently while remaining below the quality
+        // cap and satisfying only loose necessary bounds.
+        if !public_kkt_witness_exists(&oracle, constraint, reported) {
             return Err(SemanticRefusal::KktResidualMismatch);
         }
 
@@ -608,21 +701,13 @@ fn validate_epsilon_points(
         // all ν >= 0. Any valid production multiplier with reported infinity
         // norm r therefore implies ||r_independent||∞ <= sqrt(n) * r.
         let dimension_factor = fs_math::det::sqrt(2.0);
-        if independent[0] > dimension_factor.mul_add(reported[0], slack) {
-            return Err(SemanticRefusal::KktResidualMismatch);
-        }
-
-        // From ||g2 + ν g1||∞, two admissible multipliers can differ by at
-        // most the summed stationarity residuals divided by ||g1||∞. This
-        // gives a necessary, independently reconstructed consistency bound for
-        // the public complementarity residual without trusting the hidden ν.
-        let constraint_gradient_norm = inf_norm(&oracle.gradients[0]);
-        if constraint_gradient_norm <= slack {
-            return Err(SemanticRefusal::KktResidualMismatch);
-        }
-        let complementarity_slack =
-            constraint.abs() * (reported[0] + independent[0]) / constraint_gradient_norm + slack;
-        if (reported[3] - independent[3]).abs() > complementarity_slack {
+        let lower_bound_slack = comparison_slack(&[
+            independent[0],
+            reported[0],
+            inf_norm(&oracle.gradients[0]),
+            inf_norm(&oracle.gradients[1]),
+        ]);
+        if independent[0] > dimension_factor.mul_add(reported[0], lower_bound_slack) {
             return Err(SemanticRefusal::KktResidualMismatch);
         }
 
@@ -771,7 +856,7 @@ fn emit_receipt(
          \"mutated_path\":\"epsilon\",\"mutated_point\":{point},\
          \"mutated_coordinate\":{coordinate},\"mantissa_mask\":\"{mask:#018x}\",\
          \"semantic_oracle\":\"{SEMANTIC_ORACLE_VERSION}\",\
-         \"semantic_red_cases\":[\"point-permutation\",\"paired-schedule-permutation\",\"callback-coverage\",\"objective-corruption\",\"negative-kkt\"],\
+         \"semantic_red_cases\":[\"point-permutation\",\"paired-schedule-permutation\",\"callback-phase-order\",\"callback-pair-coverage\",\"callback-value\",\"callback-gradient\",\"objective-corruption\",\"negative-kkt\",\"finite-positive-kkt-components\"],\
          \"merge_refusal\":\"reference-identity-mismatch\"}}",
         reference.declared_identity.hex(),
         mutant.declared_identity.hex(),
@@ -797,7 +882,7 @@ fn emit_receipt(
             case: "two-objective-tracing".to_string(),
             pass: true,
             detail: format!(
-                "the deterministic weighted and epsilon fixtures replayed every callback/result receipt; the independent objective/gradient, returned-point coverage, schedule-feasibility, and one-row KKT oracle admitted every reference point; point/schedule, callback-coverage, objective-report, and negative-KKT semantic red cases were refused after resealing; mutation seed {MUTATION_SEED:#018x} flipped epsilon point {point} coordinate {coordinate} mask {mask:#018x}, produced stable identity {}, and both merge gates refused it",
+                "the deterministic weighted and epsilon fixtures replayed every callback/result receipt; the independent objective/gradient, phase-ordered returned-point callback-pair, schedule-feasibility, and nonnegative one-row KKT-witness oracle admitted every reference point; point/schedule, callback order/coverage/value/gradient, objective-report, negative-KKT, and finite-positive KKT-component semantic red cases were refused after resealing; mutation seed {MUTATION_SEED:#018x} flipped epsilon point {point} coordinate {coordinate} mask {mask:#018x}, produced stable identity {}, and both merge gates refused it",
                 mutant.declared_identity.hex(),
             ),
             seed: MUTATION_SEED,
@@ -839,6 +924,16 @@ fn assert_resealed_semantic_refusal(
         Err(MergeRefusal::ReferenceIdentityMismatch),
         "self-consistently resealed semantic mutant bypassed the reference identity gate"
     );
+}
+
+fn alternate_positive_residual(original: f64) -> f64 {
+    let high = 0.75 * KKT_RESIDUAL_LIMIT;
+    let low = 0.25 * KKT_RESIDUAL_LIMIT;
+    if original.to_bits() == high.to_bits() {
+        low
+    } else {
+        high
+    }
 }
 
 #[test]
@@ -905,17 +1000,53 @@ fn pareto_tracing_replays_and_rejects_seeded_red_mutation() {
         SemanticRefusal::ScheduleMismatch,
     );
 
+    let mut callback_reordering = reference.payload.clone();
+    let relocated_weighted_pair: Vec<ObjectiveCall> =
+        callback_reordering.objective_calls.drain(0..2).collect();
+    callback_reordering
+        .objective_calls
+        .extend(relocated_weighted_pair);
+    assert_resealed_semantic_refusal(
+        &reference,
+        callback_reordering,
+        SemanticRefusal::CallbackOrderMismatch,
+    );
+
     let mut callback_gap = reference.payload.clone();
     let uncovered_point = callback_gap.weighted_points[0].x_bits.clone();
     callback_gap.objective_calls.retain(|call| {
-        call.phase != "weighted"
-            || call.objective != "f2"
-            || call.point_bits.as_slice() != uncovered_point.as_slice()
+        call.phase != "weighted" || call.point_bits.as_slice() != uncovered_point.as_slice()
     });
     assert_resealed_semantic_refusal(
         &reference,
         callback_gap,
         SemanticRefusal::ReturnedPointNotEvaluated,
+    );
+
+    let mut callback_value_corruption = reference.payload.clone();
+    let callback = callback_value_corruption
+        .objective_calls
+        .iter_mut()
+        .find(|call| call.phase == "epsilon" && call.objective == "f1")
+        .expect("reference receipt must contain an epsilon/f1 callback");
+    callback.value_bits = (f64::from_bits(callback.value_bits) + 0.25).to_bits();
+    assert_resealed_semantic_refusal(
+        &reference,
+        callback_value_corruption,
+        SemanticRefusal::CallbackMismatch,
+    );
+
+    let mut callback_gradient_corruption = reference.payload.clone();
+    let callback = callback_gradient_corruption
+        .objective_calls
+        .iter_mut()
+        .find(|call| call.phase == "epsilon" && call.objective == "f2")
+        .expect("reference receipt must contain an epsilon/f2 callback");
+    callback.gradient_bits[0] = (f64::from_bits(callback.gradient_bits[0]) + 0.25).to_bits();
+    assert_resealed_semantic_refusal(
+        &reference,
+        callback_gradient_corruption,
+        SemanticRefusal::CallbackMismatch,
     );
 
     let mut objective_corruption = reference.payload.clone();
@@ -938,6 +1069,57 @@ fn pareto_tracing_replays_and_rejects_seeded_red_mutation() {
         &reference,
         certificate_corruption,
         SemanticRefusal::InvalidCertificateResidual,
+    );
+
+    let mut stationarity_corruption = reference.payload.clone();
+    let epsilon_point = &mut stationarity_corruption.epsilon_points[0];
+    let kkt_bits = epsilon_point
+        .kkt_bits
+        .as_mut()
+        .expect("reference epsilon point must retain KKT evidence");
+    let corrupted_stationarity = alternate_positive_residual(f64::from_bits(kkt_bits[0]));
+    kkt_bits[0] = corrupted_stationarity.to_bits();
+    epsilon_point.gradient_norm_bits = corrupted_stationarity.to_bits();
+    assert_resealed_semantic_refusal(
+        &reference,
+        stationarity_corruption,
+        SemanticRefusal::KktResidualMismatch,
+    );
+
+    let mut feasibility_corruption = reference.payload.clone();
+    let kkt_bits = feasibility_corruption.epsilon_points[0]
+        .kkt_bits
+        .as_mut()
+        .expect("reference epsilon point must retain KKT evidence");
+    kkt_bits[1] = alternate_positive_residual(f64::from_bits(kkt_bits[1])).to_bits();
+    assert_resealed_semantic_refusal(
+        &reference,
+        feasibility_corruption,
+        SemanticRefusal::KktResidualMismatch,
+    );
+
+    let mut dual_feasibility_corruption = reference.payload.clone();
+    let kkt_bits = dual_feasibility_corruption.epsilon_points[0]
+        .kkt_bits
+        .as_mut()
+        .expect("reference epsilon point must retain KKT evidence");
+    kkt_bits[2] = alternate_positive_residual(f64::from_bits(kkt_bits[2])).to_bits();
+    assert_resealed_semantic_refusal(
+        &reference,
+        dual_feasibility_corruption,
+        SemanticRefusal::KktResidualMismatch,
+    );
+
+    let mut complementarity_corruption = reference.payload.clone();
+    let kkt_bits = complementarity_corruption.epsilon_points[0]
+        .kkt_bits
+        .as_mut()
+        .expect("reference epsilon point must retain KKT evidence");
+    kkt_bits[3] = alternate_positive_residual(f64::from_bits(kkt_bits[3])).to_bits();
+    assert_resealed_semantic_refusal(
+        &reference,
+        complementarity_corruption,
+        SemanticRefusal::KktResidualMismatch,
     );
 
     emit_receipt(&reference, &mutant, point, coordinate, mask);
