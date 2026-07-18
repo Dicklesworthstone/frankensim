@@ -93,16 +93,25 @@ structure; FLUX/UQ execute it.
   `parameter_gradient`, `retract_curve`, and `transport_parameter`. These
   operations validate raw descriptors, exact point/parameter storage lengths,
   finite payloads, point membership, and tangent postconditions before
-  returning. Sphere gradient projection uses the admitted point's actual
+  returning. The reductions governing point membership, parameter-gradient
+  projection, and tangent postconditions use one deterministic
+  Neumaier-compensated order. Every reduction-bearing gradient branch first
+  divides a nonzero finite ambient gradient by its maximum absolute component
+  (with exact zero handled directly), projects that scaled payload, and checks
+  every component while restoring caller scale; an output that cannot be
+  restored as finite `f64` refuses with the exact output component rather than
+  being zeroed or leaking an intermediate overflow.
+  Sphere gradient projection uses the admitted point's actual
   `x.x`, so points inside the membership envelope need not be bit-perfect unit
   vectors. Stiefel gradient projection solves the corresponding near-identity
-  Sylvester tangent equation through a fixed, deterministic sequence of at
-  most four residual corrections; the measured tangent residual, rather than
-  iteration count alone, is authoritative. SO(3) gradients are the pullback of
-  the declared right-composed quaternion exponential into three body-frame
-  coordinates. Retraction curves return the exact public-retraction landing
-  plus its optimizer-parameter velocity; the Stiefel branch differentiates
-  the same modified-Gram-Schmidt QR operation order as `retract`.
+  symmetric Sylvester tangent equation through a fixed, deterministic sequence
+  of at most four residual corrections; the measured compensated tangent
+  residual, rather than iteration count alone, is authoritative. SO(3)
+  gradients are the scale-safe pullback of the declared right-composed
+  quaternion exponential into three body-frame coordinates. Retraction curves
+  return the exact public-retraction landing plus its optimizer-parameter
+  velocity; the Stiefel branch differentiates the same modified-Gram-Schmidt QR
+  operation order as `retract`.
   `transport_parameter` requires its destination to match the authoritative
   retraction bit for bit. Rn transport is identity, SO(3) transport preserves
   right/body coordinates (not a Levi-Civita claim), and Stiefel transport is
@@ -579,12 +588,16 @@ discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
   admission cap. Admitting points whose norm or Gram matrix is within `1e-10`
   is a deliberate numerical extension around the exact manifold, not a proof
   that those stored points satisfy the defining equations exactly. Bounded
-  Sylvester refinement may refuse unresolved conditioning, and numerically
-  unresolved frame-normal remnants below the declared tangent resolution may
-  be represented by exact zero. Sphere transport refuses the antipodal and
-  membership/roundoff-conditioned near-antipodal region; Stiefel transport
-  makes no metric-isometry or superlinear quasi-Newton claim; SO(3) makes no
-  sign-seam or global-chart-smoothness claim.
+  Sylvester refinement may refuse unresolved conditioning. A scaled projection
+  is canonicalized to exact zero only after finite arithmetic proves both its
+  magnitude and its absolute tangent-constraint defect are below the declared
+  tangent resolution; checked output rescaling never uses zero as an overflow
+  fallback. This compensated `f64` path is not an exact-real or interval
+  certificate, and a finite ambient gradient does not imply that its projected
+  result is representable in finite `f64`. Sphere transport refuses the
+  antipodal and membership/roundoff-conditioned near-antipodal region; Stiefel
+  transport makes no metric-isometry or superlinear quasi-Newton claim; SO(3)
+  makes no sign-seam or global-chart-smoothness claim.
 - Gradients here are FD-through-retraction toys; exact adjoints and
   reverse-mode graph gradients are the gradient-stack bead (the
   parked draft's `graph.rs` already prototypes reverse-mode — harvest

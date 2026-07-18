@@ -24,6 +24,51 @@ const STIEFEL_PROJECTION_REFINEMENT_LIMIT: usize = 4;
 /// Candidates below this squared norm are numerically rank-deficient;
 /// normalizing them would fabricate a direction.
 const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
+
+/// Add one term with deterministic Neumaier compensation.
+///
+/// Projection and tangent checks scale unconstrained vectors to unit max norm;
+/// point-membership checks apply it to the declared unit/orthonormal domain.
+/// A non-finite accumulator is therefore an explicit domain failure, not an
+/// intermediate projection overflow that later cancellation should repair.
+fn compensated_add(sum: &mut f64, correction: &mut f64, term: f64) {
+    let next = *sum + term;
+    if !next.is_finite() {
+        *sum = next;
+        *correction = 0.0;
+        return;
+    }
+    let roundoff = if sum.abs() >= term.abs() {
+        (*sum - next) + term
+    } else {
+        (term - next) + *sum
+    };
+    let corrected = *correction + roundoff;
+    if !corrected.is_finite() {
+        *sum = corrected;
+        *correction = 0.0;
+        return;
+    }
+    *sum = next;
+    *correction = corrected;
+}
+
+fn compensated_sum(terms: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut correction = 0.0_f64;
+    for term in terms {
+        compensated_add(&mut sum, &mut correction, term);
+    }
+    sum + correction
+}
+
+fn max_abs(values: &[f64]) -> f64 {
+    values
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max)
+}
+
 /// Maximum traversed scalar elements between retraction/domain cancellation polls.
 const RETRACTION_CHECKPOINT_STRIDE: usize = 256;
 /// Maximum evaluator work items between cancellation polls inside one phase.
@@ -1024,10 +1069,12 @@ impl Manifold {
             Manifold::Rn { .. } => checkpoint(),
             Manifold::Sphere { .. } | Manifold::So3 => {
                 let mut norm_sq = 0.0;
+                let mut norm_correction = 0.0;
                 for (component, value) in x.iter().enumerate() {
                     checkpoint_retraction_work(component, checkpoint)?;
-                    norm_sq += value * value;
+                    compensated_add(&mut norm_sq, &mut norm_correction, value * value);
                 }
+                norm_sq += norm_correction;
                 checkpoint()?;
                 if !norm_sq.is_finite() {
                     return Err(self.domain_error(
@@ -1051,10 +1098,16 @@ impl Manifold {
                     for against in 0..=column {
                         checkpoint()?;
                         let mut dot = 0.0;
+                        let mut dot_correction = 0.0;
                         for row in 0..n {
                             checkpoint_retraction_work(row, checkpoint)?;
-                            dot += x[column * n + row] * x[against * n + row];
+                            compensated_add(
+                                &mut dot,
+                                &mut dot_correction,
+                                x[column * n + row] * x[against * n + row],
+                            );
                         }
+                        dot += dot_correction;
                         checkpoint()?;
                         let location = Some((column as u32, against as u32));
                         if !dot.is_finite() {
@@ -1207,33 +1260,31 @@ impl Manifold {
     }
 
     fn parameter_tangency_residual(&self, point: &[f64], parameter: &[f64]) -> f64 {
-        let scale = parameter
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f64, f64::max);
+        let scale = max_abs(parameter);
         if scale == 0.0 {
             return 0.0;
         }
         match *self {
             Manifold::Rn { .. } | Manifold::So3 => 0.0,
-            Manifold::Sphere { .. } => point
-                .iter()
-                .zip(parameter)
-                .map(|(coordinate, tangent)| coordinate * (tangent / scale))
-                .sum::<f64>()
-                .abs(),
+            Manifold::Sphere { .. } => compensated_sum(
+                point
+                    .iter()
+                    .zip(parameter)
+                    .map(|(coordinate, tangent)| coordinate * (tangent / scale)),
+            )
+            .abs(),
             Manifold::Stiefel { n, p } => {
                 let (n, p) = (n as usize, p as usize);
                 let mut residual = 0.0_f64;
                 for row in 0..p {
                     for column in 0..p {
-                        let symmetric = (0..n)
-                            .map(|index| {
-                                point[row * n + index] * (parameter[column * n + index] / scale)
-                                    + (parameter[row * n + index] / scale)
-                                        * point[column * n + index]
-                            })
-                            .sum::<f64>();
+                        let left = compensated_sum((0..n).map(|index| {
+                            point[row * n + index] * (parameter[column * n + index] / scale)
+                        }));
+                        let right = compensated_sum((0..n).map(|index| {
+                            (parameter[row * n + index] / scale) * point[column * n + index]
+                        }));
+                        let symmetric = compensated_sum([left, right]);
                         residual = residual.max(symmetric.abs());
                     }
                 }
@@ -1242,22 +1293,52 @@ impl Manifold {
         }
     }
 
+    fn checked_manifold_work_len(
+        &self,
+        left: usize,
+        right: usize,
+        rule: &'static str,
+    ) -> Result<usize, OptError> {
+        left.checked_mul(right)
+            .ok_or_else(|| self.domain_error(rule, None, (left as f64) * (right as f64)))
+    }
+
+    fn rescale_parameter_gradient(output: &mut [f64], ambient_scale: f64) -> Result<(), OptError> {
+        for (component, value) in output.iter_mut().enumerate() {
+            let rescaled = *value * ambient_scale;
+            if !rescaled.is_finite() {
+                return Err(OptError::RetractionNonFinite {
+                    input: "parameter gradient output",
+                    component: component as u32,
+                    bits: rescaled.to_bits(),
+                });
+            }
+            *value = rescaled;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // explicit Sylvester residual/refusal phases stay auditable
     fn refine_stiefel_projection(
         &self,
         point: &[f64],
-        ambient_gradient: &[f64],
         projected: &mut [f64],
     ) -> Result<(), OptError> {
         let Manifold::Stiefel { n, p } = *self else {
             unreachable!("Stiefel projection refinement is Stiefel-only");
         };
         let (n, p) = (n as usize, p as usize);
-        let ambient_scale = ambient_gradient
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f64, f64::max);
-        let mut residual =
-            try_vec_capacity("manifold-ops/stiefel-gradient-sylvester", None, None, p * p)?;
+        let residual_storage = self.checked_manifold_work_len(
+            p,
+            p,
+            "Stiefel projection Sylvester workspace must be representable",
+        )?;
+        let mut residual = try_vec_capacity(
+            "manifold-ops/stiefel-gradient-sylvester",
+            None,
+            None,
+            residual_storage,
+        )?;
 
         // For an admitted frame M = X^T X differs from I by at most the
         // membership tolerance entrywise. Starting from the usual
@@ -1275,12 +1356,13 @@ impl Manifold {
             residual.clear();
             for left in 0..p {
                 for right in 0..p {
-                    let symmetric = (0..n)
-                        .map(|row| {
-                            point[left * n + row] * projected[right * n + row]
-                                + projected[left * n + row] * point[right * n + row]
-                        })
-                        .sum::<f64>();
+                    let first = compensated_sum(
+                        (0..n).map(|row| point[left * n + row] * projected[right * n + row]),
+                    );
+                    let second = compensated_sum(
+                        (0..n).map(|row| projected[left * n + row] * point[right * n + row]),
+                    );
+                    let symmetric = compensated_sum([first, second]);
                     if !symmetric.is_finite() {
                         return Err(self.domain_error(
                             "Stiefel projection Sylvester residual must be finite",
@@ -1295,9 +1377,10 @@ impl Manifold {
             for column in 0..p {
                 for row in 0..n {
                     let correction = 0.5
-                        * (0..p)
-                            .map(|basis| point[basis * n + row] * residual[basis * p + column])
-                            .sum::<f64>();
+                        * compensated_sum(
+                            (0..p)
+                                .map(|basis| point[basis * n + row] * residual[basis * p + column]),
+                        );
                     projected[column * n + row] -= correction;
                 }
             }
@@ -1307,13 +1390,21 @@ impl Manifold {
                 &mut || Ok(()),
             )?;
 
-            let projected_scale = projected
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            if projected_scale <= MANIFOLD_TANGENCY_TOL * ambient_scale
-                && self.parameter_tangency_residual(point, projected) > MANIFOLD_TANGENCY_TOL
+            let projected_scale = max_abs(projected);
+            let relative_residual = self.parameter_tangency_residual(point, projected);
+            if relative_residual <= MANIFOLD_TANGENCY_TOL {
+                return Ok(());
+            }
+            let absolute_residual = projected_scale * relative_residual;
+            if projected_scale <= MANIFOLD_TANGENCY_TOL
+                && absolute_residual.is_finite()
+                && absolute_residual <= MANIFOLD_TANGENCY_TOL
             {
+                // The exact projection is numerically indistinguishable from
+                // zero at the declared scaled tangent resolution. This
+                // canonicalization occurs only after finite arithmetic and a
+                // bounded absolute constraint-defect check; it cannot hide an
+                // overflow or an unresolved large projection.
                 projected.fill(0.0);
                 return Ok(());
             }
@@ -1366,12 +1457,15 @@ impl Manifold {
     /// Rn is the identity. Sphere and Stiefel use embedded-metric tangent
     /// projection. SO(3) applies the differential of the declared
     /// right-composed quaternion exponential, producing three body-frame
-    /// components from a four-coordinate ambient quaternion gradient.
+    /// components from a four-coordinate ambient quaternion gradient. Every
+    /// reduction-bearing branch projects a max-abs-scaled ambient gradient,
+    /// then checks the component-attributed rescale back to caller units.
     ///
     /// # Errors
     /// Returns the typed manifold/retraction error family for invalid points,
     /// lengths, domains, non-finite inputs, or non-finite projected output.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one explicit scale/project/rescale branch per manifold
     pub fn parameter_gradient(
         &self,
         point: &[f64],
@@ -1389,91 +1483,134 @@ impl Manifold {
         match *self {
             Manifold::Rn { .. } => output.extend_from_slice(ambient_gradient),
             Manifold::Sphere { .. } => {
-                let norm_sq: f64 = point.iter().map(|coordinate| coordinate * coordinate).sum();
-                let normal: f64 = point
-                    .iter()
-                    .zip(ambient_gradient)
-                    .map(|(coordinate, gradient)| coordinate * gradient)
-                    .sum::<f64>()
-                    / norm_sq;
-                for (coordinate, gradient) in point.iter().zip(ambient_gradient) {
-                    output.push((-normal).mul_add(*coordinate, *gradient));
-                }
-
-                // Membership deliberately admits tiny norm error. Remove the
-                // resulting roundoff-normal component using the same x.x
-                // geometry, rather than rejecting an otherwise valid radial
-                // gradient after scale-free tangency validation.
-                for _ in 0..2 {
-                    let residual = point
-                        .iter()
-                        .zip(&output)
-                        .map(|(coordinate, gradient)| coordinate * gradient)
-                        .sum::<f64>()
-                        / norm_sq;
-                    if residual == 0.0 {
-                        break;
-                    }
+                let ambient_scale = max_abs(ambient_gradient);
+                if ambient_scale == 0.0 {
+                    output.resize(ambient_gradient.len(), 0.0);
+                } else {
+                    output.extend(ambient_gradient.iter().map(|value| value / ambient_scale));
+                    let norm_sq =
+                        compensated_sum(point.iter().map(|coordinate| coordinate * coordinate));
+                    let normal = compensated_sum(
+                        point
+                            .iter()
+                            .zip(&output)
+                            .map(|(coordinate, gradient)| coordinate * gradient),
+                    ) / norm_sq;
                     for (coordinate, gradient) in point.iter().zip(&mut output) {
-                        *gradient = (-residual).mul_add(*coordinate, *gradient);
+                        *gradient = (-normal).mul_add(*coordinate, *gradient);
                     }
-                }
-                let output_scale = output
-                    .iter()
-                    .map(|value| value.abs())
-                    .fold(0.0_f64, f64::max);
-                let ambient_scale = ambient_gradient
-                    .iter()
-                    .map(|value| value.abs())
-                    .fold(0.0_f64, f64::max);
-                if output_scale <= MANIFOLD_TANGENCY_TOL * ambient_scale
-                    && self.parameter_tangency_residual(point, &output) > MANIFOLD_TANGENCY_TOL
-                {
-                    output.fill(0.0);
+
+                    // Membership deliberately admits tiny norm error. Remove
+                    // the resulting roundoff-normal component using the same
+                    // x.x geometry, rather than rejecting an otherwise valid
+                    // radial gradient after scale-free tangent validation.
+                    for _ in 0..2 {
+                        let residual = compensated_sum(
+                            point
+                                .iter()
+                                .zip(&output)
+                                .map(|(coordinate, gradient)| coordinate * gradient),
+                        ) / norm_sq;
+                        if residual == 0.0 {
+                            break;
+                        }
+                        for (coordinate, gradient) in point.iter().zip(&mut output) {
+                            *gradient = (-residual).mul_add(*coordinate, *gradient);
+                        }
+                    }
+
+                    let output_scale = max_abs(&output);
+                    let relative_residual = self.parameter_tangency_residual(point, &output);
+                    let absolute_residual = output_scale * relative_residual;
+                    if relative_residual > MANIFOLD_TANGENCY_TOL
+                        && output_scale <= MANIFOLD_TANGENCY_TOL
+                        && absolute_residual.is_finite()
+                        && absolute_residual <= MANIFOLD_TANGENCY_TOL
+                    {
+                        // The scaled projection is below the declared tangent
+                        // resolution and has a bounded absolute defect. This
+                        // cannot mask overflow: all arithmetic above is scaled
+                        // and the rescale below is checked component by
+                        // component.
+                        output.fill(0.0);
+                    }
+                    Self::rescale_parameter_gradient(&mut output, ambient_scale)?;
                 }
             }
             Manifold::So3 => {
                 let [w, x, y, z] = [point[0], point[1], point[2], point[3]];
-                let [gw, gx, gy, gz] = [
-                    ambient_gradient[0],
-                    ambient_gradient[1],
-                    ambient_gradient[2],
-                    ambient_gradient[3],
-                ];
-                output.extend([
-                    0.5 * (-x * gw + w * gx + z * gy - y * gz),
-                    0.5 * (-y * gw - z * gx + w * gy + x * gz),
-                    0.5 * (-z * gw + y * gx - x * gy + w * gz),
-                ]);
+                let ambient_scale = max_abs(ambient_gradient);
+                if ambient_scale == 0.0 {
+                    output.extend([0.0; 3]);
+                } else {
+                    let [gw, gx, gy, gz] = [
+                        ambient_gradient[0] / ambient_scale,
+                        ambient_gradient[1] / ambient_scale,
+                        ambient_gradient[2] / ambient_scale,
+                        ambient_gradient[3] / ambient_scale,
+                    ];
+                    output.extend([
+                        0.5 * compensated_sum([-x * gw, w * gx, z * gy, -y * gz]),
+                        0.5 * compensated_sum([-y * gw, -z * gx, w * gy, x * gz]),
+                        0.5 * compensated_sum([-z * gw, y * gx, -x * gy, w * gz]),
+                    ]);
+                    Self::rescale_parameter_gradient(&mut output, ambient_scale)?;
+                }
             }
             Manifold::Stiefel { n, p } => {
                 let (n, p) = (n as usize, p as usize);
-                let mut gram =
-                    try_vec_capacity("manifold-ops/stiefel-gradient-gram", None, None, p * p)?;
-                for left in 0..p {
-                    for right in 0..p {
-                        gram.push(
-                            (0..n)
-                                .map(|row| {
-                                    point[left * n + row] * ambient_gradient[right * n + row]
-                                })
-                                .sum::<f64>(),
-                        );
+                let ambient_scale = max_abs(ambient_gradient);
+                if ambient_scale == 0.0 {
+                    output.resize(ambient_gradient.len(), 0.0);
+                } else {
+                    output.extend(ambient_gradient.iter().map(|value| value / ambient_scale));
+                    let gram_storage = self.checked_manifold_work_len(
+                        p,
+                        p,
+                        "Stiefel projection Gram workspace must be representable",
+                    )?;
+                    let mut gram = try_vec_capacity(
+                        "manifold-ops/stiefel-gradient-gram",
+                        None,
+                        None,
+                        gram_storage,
+                    )?;
+                    for left in 0..p {
+                        for right in 0..p {
+                            let entry = compensated_sum(
+                                (0..n).map(|row| point[left * n + row] * output[right * n + row]),
+                            );
+                            if !entry.is_finite() {
+                                return Err(self.domain_error(
+                                    "Stiefel projection Gram entry must be finite",
+                                    Some((left as u32, right as u32)),
+                                    entry,
+                                ));
+                            }
+                            gram.push(entry);
+                        }
                     }
-                }
-                for column in 0..p {
-                    for row in 0..n {
-                        let correction: f64 = (0..p)
-                            .map(|basis| {
-                                let symmetric =
-                                    0.5 * (gram[basis * p + column] + gram[column * p + basis]);
+                    for column in 0..p {
+                        for row in 0..n {
+                            let correction = compensated_sum((0..p).map(|basis| {
+                                let symmetric = 0.5
+                                    * compensated_sum([
+                                        gram[basis * p + column],
+                                        gram[column * p + basis],
+                                    ]);
                                 point[basis * n + row] * symmetric
-                            })
-                            .sum();
-                        output.push(ambient_gradient[column * n + row] - correction);
+                            }));
+                            output[column * n + row] -= correction;
+                        }
                     }
+                    Self::validate_retraction_finite_with_checkpoint(
+                        "scaled Stiefel parameter gradient",
+                        &output,
+                        &mut || Ok(()),
+                    )?;
+                    self.refine_stiefel_projection(point, &mut output)?;
+                    Self::rescale_parameter_gradient(&mut output, ambient_scale)?;
                 }
-                self.refine_stiefel_projection(point, ambient_gradient, &mut output)?;
             }
         }
         Self::validate_retraction_finite_with_checkpoint(
@@ -1566,7 +1703,11 @@ impl Manifold {
             }
         }
 
-        let storage = n * p;
+        let storage = self.checked_manifold_work_len(
+            n,
+            p,
+            "Stiefel differentiated QR storage must be representable",
+        )?;
         let mut output = try_vec_capacity("manifold-ops/stiefel-qr-output", None, None, storage)?;
         let mut velocity =
             try_vec_capacity("manifold-ops/stiefel-qr-velocity", None, None, storage)?;

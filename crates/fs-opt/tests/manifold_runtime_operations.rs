@@ -166,6 +166,36 @@ fn independent_stiefel_projection(point: &[f64], ambient: &[f64]) -> Vec<f64> {
     projected
 }
 
+fn independent_stiefel_sylvester_projection(
+    point: &[f64],
+    ambient: &[f64],
+) -> (Vec<f64>, [[f64; P]; P]) {
+    // Independent closed-form solve for the symmetric 2x2 correction S in
+    //     M S + S M = X^T G + G^T X,  M = X^T X.
+    // This deliberately does not reuse production's Richardson iteration.
+    let m00 = dot(column(point, 0), column(point, 0));
+    let m01 = dot(column(point, 0), column(point, 1));
+    let m11 = dot(column(point, 1), column(point, 1));
+    let a00 = 2.0 * dot(column(point, 0), column(ambient, 0));
+    let a01 = dot(column(point, 0), column(ambient, 1)) + dot(column(ambient, 0), column(point, 1));
+    let a11 = 2.0 * dot(column(point, 1), column(ambient, 1));
+    let denominator = m00 + m11 - m01 * m01 * (m00.recip() + m11.recip());
+    let s01 = (a01 - m01 * (a00 / (2.0 * m00) + a11 / (2.0 * m11))) / denominator;
+    let s00 = (0.5 * a00 - m01 * s01) / m00;
+    let s11 = (0.5 * a11 - m01 * s01) / m11;
+    let correction = [[s00, s01], [s01, s11]];
+
+    let mut projected = vec![0.0; STORAGE];
+    for output_column in 0..P {
+        for row in 0..N {
+            let normal = point[row] * correction[0][output_column]
+                + point[N + row] * correction[1][output_column];
+            projected[output_column * N + row] = ambient[output_column * N + row] - normal;
+        }
+    }
+    (projected, correction)
+}
+
 fn independent_so3_parameter_gradient(point: &[f64], ambient: &[f64]) -> [f64; 3] {
     let [w, x, y, z] = [point[0], point[1], point[2], point[3]];
     let [gw, gx, gy, gz] = [ambient[0], ambient[1], ambient[2], ambient[3]];
@@ -243,8 +273,11 @@ fn g0_parameter_gradients_respect_point_and_parameter_representations() {
     let expected_sphere: [f64; 4] = core::array::from_fn(|index| {
         SPHERE_AMBIENT_GRADIENT[index] - sphere_radial * SPHERE_BASE[index]
     });
-    assert!(max_error(&sphere, &expected_sphere) <= 2.0 * f64::EPSILON);
-    assert!(dot(&SPHERE_BASE, &sphere).abs() <= 2.0 * f64::EPSILON);
+    assert!(
+        max_error(&sphere, &expected_sphere)
+            <= 16.0 * f64::EPSILON * (1.0 + norm(&expected_sphere))
+    );
+    assert!(dot(&SPHERE_BASE, &sphere).abs() <= 16.0 * f64::EPSILON);
 
     let so3 = Manifold::So3
         .parameter_gradient(&SO3_BASE, &SO3_AMBIENT_GRADIENT)
@@ -268,8 +301,11 @@ fn g0_parameter_gradients_respect_point_and_parameter_representations() {
         .expect("Stiefel parameter gradient");
     let expected_stiefel = independent_stiefel_projection(&STIEFEL_BASE, &STIEFEL_AMBIENT_GRADIENT);
     assert_eq!(stiefel.len(), STORAGE);
-    assert!(max_error(&stiefel, &expected_stiefel) <= 4.0 * f64::EPSILON);
-    assert!(stiefel_tangent_residual(&STIEFEL_BASE, &stiefel) <= 4.0e-15);
+    assert!(
+        max_error(&stiefel, &expected_stiefel)
+            <= 32.0 * f64::EPSILON * (1.0 + norm(&expected_stiefel))
+    );
+    assert!(stiefel_tangent_residual(&STIEFEL_BASE, &stiefel) <= 8.0e-15);
 }
 
 #[test]
@@ -301,6 +337,7 @@ fn g0_parameter_gradients_are_dual_to_zero_parameter_curve_velocities() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one audit keeps all near-manifold projection obligations together
 fn g0_projection_is_total_and_idempotent_on_accepted_near_manifold_points() {
     let scale = accepted_near_unit_scale();
     let sphere = Manifold::Sphere { ambient: 3 };
@@ -313,9 +350,13 @@ fn g0_projection_is_total_and_idempotent_on_accepted_near_manifold_points() {
     let sphere_radial = sphere
         .parameter_gradient(&sphere_point, &sphere_point)
         .expect("near-unit Sphere radial gradient must project without refusal");
+    let sphere_radial_scale = sphere_radial
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
     assert!(
-        sphere_radial.iter().all(|value| *value == 0.0),
-        "purely radial Sphere gradient must project to exact zero: point={sphere_point:?}; projected={sphere_radial:?}"
+        sphere_radial_scale <= 4.0 * f64::EPSILON,
+        "purely radial Sphere gradient must collapse within roundoff without refusal: point={sphere_point:?}; projected={sphere_radial:?}; max={sphere_radial_scale:.17e}"
     );
 
     let sphere_landed = sphere
@@ -341,9 +382,13 @@ fn g0_projection_is_total_and_idempotent_on_accepted_near_manifold_points() {
     let stiefel_radial = stiefel_line
         .parameter_gradient(&stiefel_near, &stiefel_near)
         .expect("near-orthonormal Stiefel normal gradient must project without refusal");
+    let stiefel_radial_scale = stiefel_radial
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
     assert!(
-        stiefel_radial.iter().all(|value| *value == 0.0),
-        "purely normal Stiefel(n,1) gradient must project to exact zero: point={stiefel_near:?}; projected={stiefel_radial:?}"
+        stiefel_radial_scale <= 4.0 * f64::EPSILON,
+        "purely normal Stiefel(n,1) gradient must collapse within roundoff without refusal: point={stiefel_near:?}; projected={stiefel_radial:?}; max={stiefel_radial_scale:.17e}"
     );
 
     let cross_gram = 1.0 / (1_u64 << 35) as f64;
@@ -359,9 +404,13 @@ fn g0_projection_is_total_and_idempotent_on_accepted_near_manifold_points() {
     let crossed_normal = STIEFEL
         .parameter_gradient(&stiefel_crossed, &stiefel_crossed)
         .expect("generalized projection of a frame-normal gradient");
+    let crossed_normal_scale = crossed_normal
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
     assert!(
-        crossed_normal.iter().all(|value| *value == 0.0),
-        "generalized projection must remove a normal gradient at an accepted nonorthonormal frame: point={stiefel_crossed:?}; projected={crossed_normal:?}"
+        crossed_normal_scale <= 1.0e-14,
+        "generalized projection must remove a normal gradient at an accepted nonorthonormal frame within its declared resolution: point={stiefel_crossed:?}; projected={crossed_normal:?}; max={crossed_normal_scale:.17e}"
     );
     let crossed_first = STIEFEL
         .parameter_gradient(&stiefel_crossed, &STIEFEL_AMBIENT_GRADIENT)
@@ -378,6 +427,75 @@ fn g0_projection_is_total_and_idempotent_on_accepted_near_manifold_points() {
     assert!(
         crossed_tangency_residual <= 6.4e-9 * norm(&crossed_first),
         "generalized projection must satisfy the near-frame tangent equation: point={stiefel_crossed:?}; projected={crossed_first:?}; residual={crossed_tangency_residual:.17e}"
+    );
+
+    let (direct_projection, direct_correction) =
+        independent_stiefel_sylvester_projection(&stiefel_crossed, &STIEFEL_AMBIENT_GRADIENT);
+    let direct_error = max_error(&crossed_first, &direct_projection);
+    let direct_tangency = stiefel_tangent_residual(&stiefel_crossed, &direct_projection);
+    let direct_gram = [
+        [
+            dot(column(&stiefel_crossed, 0), column(&stiefel_crossed, 0)),
+            dot(column(&stiefel_crossed, 0), column(&stiefel_crossed, 1)),
+        ],
+        [
+            dot(column(&stiefel_crossed, 1), column(&stiefel_crossed, 0)),
+            dot(column(&stiefel_crossed, 1), column(&stiefel_crossed, 1)),
+        ],
+    ];
+    let direct_rhs = [
+        [
+            2.0 * dot(
+                column(&stiefel_crossed, 0),
+                column(&STIEFEL_AMBIENT_GRADIENT, 0),
+            ),
+            dot(
+                column(&stiefel_crossed, 0),
+                column(&STIEFEL_AMBIENT_GRADIENT, 1),
+            ) + dot(
+                column(&STIEFEL_AMBIENT_GRADIENT, 0),
+                column(&stiefel_crossed, 1),
+            ),
+        ],
+        [
+            dot(
+                column(&stiefel_crossed, 1),
+                column(&STIEFEL_AMBIENT_GRADIENT, 0),
+            ) + dot(
+                column(&STIEFEL_AMBIENT_GRADIENT, 1),
+                column(&stiefel_crossed, 0),
+            ),
+            2.0 * dot(
+                column(&stiefel_crossed, 1),
+                column(&STIEFEL_AMBIENT_GRADIENT, 1),
+            ),
+        ],
+    ];
+    let mut sylvester_residual = 0.0_f64;
+    let mut rhs_scale = 0.0_f64;
+    for row in 0..P {
+        for column in 0..P {
+            let lhs: f64 = (0..P)
+                .map(|basis| {
+                    direct_gram[row][basis] * direct_correction[basis][column]
+                        + direct_correction[row][basis] * direct_gram[basis][column]
+                })
+                .sum();
+            sylvester_residual = sylvester_residual.max((lhs - direct_rhs[row][column]).abs());
+            rhs_scale = rhs_scale.max(direct_rhs[row][column].abs());
+        }
+    }
+    assert!(
+        direct_error <= 2.0e-14 * (1.0 + norm(&direct_projection)),
+        "Richardson projection must match the independent closed-form symmetric-Sylvester oracle: point={stiefel_crossed:?}; production={crossed_first:?}; oracle={direct_projection:?}; S={direct_correction:?}; error={direct_error:.17e}"
+    );
+    assert!(
+        sylvester_residual <= 64.0 * f64::EPSILON * (1.0 + rhs_scale),
+        "closed-form oracle must independently satisfy M*S + S*M = X^T*G + G^T*X: M={direct_gram:?}; S={direct_correction:?}; rhs={direct_rhs:?}; residual={sylvester_residual:.17e}"
+    );
+    assert!(
+        direct_tangency <= 2.0e-15 * (1.0 + norm(&direct_projection)),
+        "independent Sylvester projection must be orthogonal to the frame-normal space: point={stiefel_crossed:?}; oracle={direct_projection:?}; S={direct_correction:?}; residual={direct_tangency:.17e}"
     );
 
     let stiefel_landed = STIEFEL
@@ -445,6 +563,99 @@ fn g3_so3_parameter_gradient_matches_an_independent_scalar_objective_difference(
         fine_error < 0.27 * coarse_error && fine_error <= 2.0e-7,
         "independent scalar-objective differences must converge to the declared right/body pullback: expected={expected:?}; coarse_error={coarse_error:.17e}; fine_error={fine_error:.17e}"
     );
+}
+
+#[test]
+fn g0_extreme_finite_sphere_and_stiefel_gradients_project_without_intermediate_overflow() {
+    let third = 0.28_f64.sqrt();
+    let point = [0.6, 0.6, third];
+    let ambient = [f64::MAX, f64::MAX, -0.5 * f64::MAX];
+    let scaled_ambient = [1.0, 1.0, -0.5];
+    let norm_sq = dot(&point, &point);
+    let normal = dot(&point, &scaled_ambient) / norm_sq;
+    let expected_scaled: [f64; 3] =
+        core::array::from_fn(|index| scaled_ambient[index] - normal * point[index]);
+    let expected: [f64; 3] = core::array::from_fn(|index| expected_scaled[index] * f64::MAX);
+    assert!(
+        expected.iter().all(|value| value.is_finite()),
+        "fixture must have a finite representable projection even though its naive first two dot terms overflow: point={point:?}; scaled_expected={expected_scaled:?}; expected={expected:?}"
+    );
+
+    let sphere = Manifold::Sphere { ambient: 3 };
+    let sphere_projection = sphere
+        .parameter_gradient(&point, &ambient)
+        .expect("scale-safe Sphere projection");
+    sphere
+        .validate_parameter_tangent(&point, &sphere_projection)
+        .expect("extreme Sphere projection tangent postcondition");
+    let sphere_relative_error = max_error(&sphere_projection, &expected) / f64::MAX;
+    assert!(
+        sphere_projection.iter().all(|value| value.is_finite()) && sphere_relative_error <= 2.0e-15,
+        "Sphere projection must avoid intermediate overflow and match the independently scaled oracle: point={point:?}; ambient={ambient:?}; output={sphere_projection:?}; expected={expected:?}; relative_error={sphere_relative_error:.17e}"
+    );
+
+    let stiefel = Manifold::Stiefel { n: 3, p: 1 };
+    let stiefel_projection = stiefel
+        .parameter_gradient(&point, &ambient)
+        .expect("scale-safe Stiefel(n,1) projection");
+    stiefel
+        .validate_parameter_tangent(&point, &stiefel_projection)
+        .expect("extreme Stiefel projection tangent postcondition");
+    let stiefel_relative_error = max_error(&stiefel_projection, &expected) / f64::MAX;
+    assert!(
+        stiefel_projection.iter().all(|value| value.is_finite())
+            && stiefel_relative_error <= 2.0e-15,
+        "Stiefel(n,1) projection must avoid intermediate overflow and match the independently scaled oracle: point={point:?}; ambient={ambient:?}; output={stiefel_projection:?}; expected={expected:?}; relative_error={stiefel_relative_error:.17e}"
+    );
+
+    let nonrepresentable_point = [0.5, 0.75_f64.sqrt()];
+    let nonrepresentable = (Manifold::Sphere { ambient: 2 })
+        .parameter_gradient(&nonrepresentable_point, &[f64::MAX, -f64::MAX]);
+    assert!(
+        matches!(
+            nonrepresentable,
+            Err(OptError::RetractionNonFinite {
+                input: "parameter gradient output",
+                component: 0,
+                bits,
+            }) if bits == f64::INFINITY.to_bits()
+        ),
+        "a genuinely nonrepresentable projected component must refuse at its exact output lane rather than overflow internally or canonicalize to zero: point={nonrepresentable_point:?}; result={nonrepresentable:?}"
+    );
+}
+
+#[test]
+fn g0_compensated_tangency_reduction_accepts_high_dimensional_exact_cancellation() {
+    // This 2^20 fixture is the smallest convenient power-of-two version of
+    // the max-admission counterexample. It retains the same four-quarter
+    // cancellation, but uses only 16 MiB for the two vectors rather than the
+    // 256 MiB required by two 2^24-lane f64 payloads.
+    const AMBIENT: usize = 1 << 20;
+    const QUARTER: usize = AMBIENT / 4;
+    let point_coordinate = 1.0 / 1024.0;
+    let tiny = 1.0 / (1_u64 << 35) as f64;
+    let point = vec![point_coordinate; AMBIENT];
+    let mut tangent = vec![1.0; AMBIENT];
+    tangent[QUARTER..2 * QUARTER].fill(tiny);
+    tangent[2 * QUARTER..3 * QUARTER].fill(-1.0);
+    tangent[3 * QUARTER..].fill(-tiny);
+
+    let naive_residual = dot(&point, &tangent).abs();
+    assert!(
+        naive_residual > 6.4e-9,
+        "fixture must independently reproduce the ordered left-fold false rejection: ambient={AMBIENT}; point_coordinate={point_coordinate:.17e}; tiny={tiny:.17e}; naive_residual={naive_residual:.17e}"
+    );
+    (Manifold::Sphere {
+        ambient: AMBIENT as u32,
+    })
+    .validate_parameter_tangent(&point, &tangent)
+    .expect("compensated reduction must accept the exactly cancelling tangent");
+    (Manifold::Stiefel {
+        n: AMBIENT as u32,
+        p: 1,
+    })
+    .validate_parameter_tangent(&point, &tangent)
+    .expect("compensated Gram reduction must accept the exactly cancelling Stiefel tangent");
 }
 
 #[test]
