@@ -28,9 +28,30 @@
 //! report is evidence of classified divergence, not a cross-ISA equality
 //! certificate.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 use std::collections::BTreeMap;
 use std::time::Instant;
+
+fn escape_json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{0000}'..='\u{001f}' => {
+                write!(&mut escaped, "\\u{:04x}", u32::from(ch))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
 
 /// FNV-1a 64 over raw bytes — the artifact/content hash helper.
 #[must_use]
@@ -190,20 +211,25 @@ impl AuditReport {
     #[must_use]
     pub fn json_lines(&self) -> Vec<String> {
         let mut out = Vec::with_capacity(self.rows.len() + self.divergences.len());
+        let subject = escape_json_string(self.subject);
         for row in &self.rows {
             out.push(format!(
                 "{{\"detaudit\":\"row\",\"subject\":\"{}\",\"workers\":{},\"repeat\":{},\"final_hash\":\"{:016x}\",\"identical\":{}}}",
-                self.subject, row.workers, row.repeat, row.final_hash, row.identical
+                subject,
+                row.workers,
+                row.repeat,
+                row.final_hash,
+                row.identical
             ));
         }
         for d in &self.divergences {
             out.push(format!(
                 "{{\"detaudit\":\"divergence\",\"subject\":\"{}\",\"workers\":{},\"repeat\":{},\"first_stage\":{},\"stage_label\":\"{}\",\"baseline\":\"{:016x}\",\"observed\":\"{:016x}\"}}",
-                self.subject,
+                subject,
                 d.workers,
                 d.repeat,
                 d.first_stage,
-                d.stage_label,
+                escape_json_string(&d.stage_label),
                 d.baseline_hash,
                 d.observed_hash
             ));

@@ -92,6 +92,46 @@ fn deterministic_subject_audits_identical_across_the_matrix() {
 }
 
 #[test]
+fn audit_json_lines_escape_subjects_and_stage_labels() {
+    const SUBJECT: &str = "probe\"\\name\nsecond\u{0001}";
+    const STAGE: &str = "stage\"\\label\r\t\u{0008}\u{000c}\u{0002}";
+    let subject = Subject {
+        name: SUBJECT,
+        run: Box::new(|workers| StagedTrace {
+            stages: vec![stage(
+                STAGE,
+                u64::try_from(workers).expect("worker count fits u64"),
+            )],
+        }),
+    };
+    let report = audit(
+        &subject,
+        &AuditConfig {
+            matrix: WorkerMatrix::explicit(vec![1, 2]),
+            repeats: 1,
+        },
+    );
+    assert_eq!(report.divergences.len(), 1);
+    let lines = report.json_lines();
+    for line in &lines {
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(!line.chars().any(|ch| ch < ' '), "{line}");
+        assert!(
+            line.contains("\"subject\":\"probe\\\"\\\\name\\nsecond\\u0001\""),
+            "{line}"
+        );
+    }
+    let divergence = lines
+        .iter()
+        .find(|line| line.contains("\"detaudit\":\"divergence\""))
+        .expect("one divergence record");
+    assert!(
+        divergence.contains("\"stage_label\":\"stage\\\"\\\\label\\r\\t\\b\\f\\u0002\""),
+        "{divergence}"
+    );
+}
+
+#[test]
 fn seeded_arrival_order_violation_is_caught_and_localized_to_the_reduce_stage() {
     let config = AuditConfig {
         matrix: WorkerMatrix::explicit(vec![1, 2, 4]),
