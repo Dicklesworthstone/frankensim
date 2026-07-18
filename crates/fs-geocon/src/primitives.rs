@@ -186,43 +186,89 @@ pub struct DraftReport {
     pub worst_deficit: f64,
 }
 
-/// Assess draft for the mold half pulled along `pull` (unit): surface
-/// normals must satisfy `n·pull ≥ sin(min_draft)`. Samples whose
+/// Assess draft for the mold half pulled along finite, nonzero `pull`
+/// (normalized internally): surface normals must satisfy
+/// `n·pull ≥ sin(min_draft)`. Samples whose
 /// normals oppose the pull are undercuts. Samples nearly perpendicular
 /// to the pull's mirror-half (`n·pull < −cos_tolerance`) belong to the
 /// other mold half and are skipped — the v1 parting model is the plane
 /// perpendicular to the pull.
 ///
 /// # Errors
-/// [`fs_query::QueryError::NoGradient`] where the chart has no normal.
+/// [`QueryError::InvalidPointArithmetic`] for a zero/non-finite pull direction
+/// or non-finite draft angle, [`QueryError::InvalidPointSample`] for non-finite
+/// sample coordinates or malformed chart output, and [`QueryError::NoGradient`]
+/// where the chart has no usable normal. [`QueryError::Cancelled`] refuses
+/// before chart evaluation or report publication when cancellation is pending.
 pub fn draft_violations(
     chart: &dyn Chart,
     samples: &[Point3],
     pull: Vec3,
     min_draft: f64,
     cx: &Cx<'_>,
-) -> Result<DraftReport, fs_query::QueryError> {
-    let pn = pull.norm().max(1e-300);
-    let d = pull.scale(1.0 / pn);
+) -> Result<DraftReport, QueryError> {
+    let d = finite_unit_direction(pull).ok_or(QueryError::InvalidPointArithmetic {
+        reason: "the draft pull direction must be finite and non-zero",
+    })?;
+    if !min_draft.is_finite() {
+        return Err(QueryError::InvalidPointArithmetic {
+            reason: "the minimum draft angle must be finite",
+        });
+    }
     let sin_a = det::sin(min_draft);
+    if !sin_a.is_finite() {
+        return Err(QueryError::InvalidPointArithmetic {
+            reason: "the minimum draft angle produced a non-finite sine",
+        });
+    }
+    for &sample in samples {
+        cx.checkpoint().map_err(|_| QueryError::Cancelled)?;
+        if !(sample.x.is_finite() && sample.y.is_finite() && sample.z.is_finite()) {
+            return Err(QueryError::InvalidPointSample {
+                at: [sample.x, sample.y, sample.z],
+            });
+        }
+    }
     let mut penalty = 0.0;
     let mut violating = Vec::new();
     let mut undercuts = Vec::new();
     let mut worst = 0.0f64;
     let mut assessed = 0u32;
     for (i, &s) in samples.iter().enumerate() {
+        cx.checkpoint().map_err(|_| QueryError::Cancelled)?;
         let sample = chart.eval(s, cx);
+        cx.checkpoint().map_err(|_| QueryError::Cancelled)?;
+        if !sample.signed_distance.is_finite()
+            || sample.gradient.is_some_and(|gradient| {
+                !(gradient.x.is_finite() && gradient.y.is_finite() && gradient.z.is_finite())
+            })
+        {
+            return Err(QueryError::InvalidPointSample {
+                at: [s.x, s.y, s.z],
+            });
+        }
         let Some(g) = sample.gradient else {
-            return Err(fs_query::QueryError::NoGradient {
+            return Err(QueryError::NoGradient {
                 at: [s.x, s.y, s.z],
             });
         };
-        let n = g.scale(1.0 / g.norm().max(1e-300));
+        let n = finite_unit_direction(g).ok_or(QueryError::NoGradient {
+            at: [s.x, s.y, s.z],
+        })?;
         let nd = n.dot(d);
+        if !nd.is_finite() {
+            return Err(QueryError::InvalidPointArithmetic {
+                reason: "a finite draft normal produced a non-finite pull projection",
+            });
+        }
         if nd < -0.5 {
             continue; // the other mold half's face
         }
-        assessed += 1;
+        assessed = assessed
+            .checked_add(1)
+            .ok_or(QueryError::InvalidPointArithmetic {
+                reason: "the assessed draft-sample count overflowed",
+            })?;
         let deficit = sin_a - nd;
         if deficit > 0.0 {
             if nd < -1e-9 {
@@ -235,12 +281,46 @@ pub fn draft_violations(
         }
     }
     penalty /= f64::from(assessed.max(1));
+    cx.checkpoint().map_err(|_| QueryError::Cancelled)?;
     Ok(DraftReport {
         penalty,
         violating,
         undercuts,
         worst_deficit: worst,
     })
+}
+
+fn finite_unit_direction(direction: Vec3) -> Option<Vec3> {
+    if !(direction.x.is_finite() && direction.y.is_finite() && direction.z.is_finite()) {
+        return None;
+    }
+    let direct_norm = direction.norm();
+    if direct_norm.is_finite() && direct_norm > 0.0 {
+        let normalized = direction.scale(1.0 / direct_norm);
+        if normalized.x.is_finite() && normalized.y.is_finite() && normalized.z.is_finite() {
+            return Some(normalized);
+        }
+    }
+    let scale = direction
+        .x
+        .abs()
+        .max(direction.y.abs())
+        .max(direction.z.abs());
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let scaled = Vec3::new(
+        direction.x / scale,
+        direction.y / scale,
+        direction.z / scale,
+    );
+    let norm = scaled.norm();
+    if !norm.is_finite() || norm <= 0.0 {
+        return None;
+    }
+    let normalized = scaled.scale(1.0 / norm);
+    (normalized.x.is_finite() && normalized.y.is_finite() && normalized.z.is_finite())
+        .then_some(normalized)
 }
 
 /// Envelope containment assessment.

@@ -29,7 +29,9 @@ constraint SEMANTICS.
   regions; normals opposing the pull within the half's own reach are
   UNDERCUTS, flagged separately; faces beyond `n·d < −0.5` belong to
   the other mold half (the v1 parting model is the plane perpendicular
-  to the pull).
+  to the pull). Finite nonzero pulls are normalized without scale overflow;
+  zero/non-finite pulls, non-finite angles or sample points, and malformed or
+  degenerate chart normals refuse instead of producing a zero-penalty report.
 - `QuotientChart` + `SymmetryGroup` (`ReflectX`, `Cyclic{n}`,
   `Periodic{period}`) — symmetry ENFORCED BY CONSTRUCTION: evaluation
   points fold into the fundamental domain, so the shape is invariant
@@ -81,7 +83,9 @@ constraint SEMANTICS.
 2. Draft: a 10° wall passes 5° and fails 15° with all samples
    localized; vertical walls violate any positive draft; a mushroom
    shoulder is flagged as an UNDERCUT, not low draft; the smooth
-   penalty's FD derivative matches the analytic hinge slope (gcp-002).
+   penalty's FD derivative matches the analytic hinge slope. Invalid inputs
+   refuse before chart evaluation, and rescaling the canonical axis-aligned
+   pull by `1e200` leaves the report bitwise unchanged (gcp-002).
 3. Symmetry: quotient shapes are invariant under their groups for
    ARBITRARY asymmetric inner designs (bitwise for reflection,
    fp-scale for cyclic/periodic) across random levers × groups ×
@@ -113,6 +117,9 @@ math; per-axis counts and their product are checked; the deterministic work cap
 is enforced before evaluation; weak chart theorems, weak or malformed
 per-sample certificates, non-representable cell measures, and non-finite chart
 samples are structured failures rather than false enclosures or NaN results.
+Draft assessment carries `QueryError`: malformed pull/angle arithmetic,
+non-finite points or chart samples, and missing/degenerate normals refuse before
+an authoritative `DraftReport` is published.
 
 ## Determinism class
 
@@ -129,7 +136,9 @@ rounding).
 Volume integrations poll `cx.checkpoint()` at most every 256 completed cells
 and once before publication, returning `VolumeError::Cancelled` with the exact
 completed-cell count; thickness aggregation polls through the fs-query oracle
-and returns its carried `QueryError::Cancelled` teaching error.
+and returns its carried `QueryError::Cancelled` teaching error. Draft assessment
+polls during sample preflight and around every chart evaluation, returning the
+same teaching cancellation error.
 
 ## Unsafe boundary
 

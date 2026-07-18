@@ -104,6 +104,8 @@ struct MalformedSupportChart;
 
 struct MalformedThicknessChart;
 
+struct DraftGradientProbe(Vec3);
+
 struct CertificateProbeChart {
     certificate: NumericalCertificate,
     support: Aabb,
@@ -150,6 +152,25 @@ impl Chart for MalformedThicknessChart {
     }
 }
 
+impl Chart for DraftGradientProbe {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: 0.0,
+            gradient: Some(self.0),
+            lipschitz: None,
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::WHOLE_SPACE
+    }
+
+    fn name(&self) -> &'static str {
+        "geocon/draft-gradient-probe"
+    }
+}
+
 impl Chart for CertificateProbeChart {
     fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
         fs_geom::ChartSample {
@@ -174,7 +195,7 @@ impl Chart for EvalProbe<'_> {
         self.evals.fetch_add(1, Ordering::Relaxed);
         assert!(
             !self.panic_on_eval,
-            "volume preflight reached chart evaluation"
+            "input preflight reached chart evaluation"
         );
         let mut sample = SphereChart {
             center: Point3::new(0.0, 0.0, 0.0),
@@ -451,6 +472,65 @@ fn gcp_001c_thickness_aggregation_fails_closed() {
 fn gcp_002_draft_angles() {
     with_cx(|cx| {
         let pull = Vec3::new(0.0, 0.0, 1.0);
+        let preflight_evals = AtomicUsize::new(0);
+        let preflight_probe = EvalProbe {
+            evals: &preflight_evals,
+            panic_on_eval: true,
+            claim: TraceStepClaim::NoClaim,
+            weak_evidence: false,
+        };
+        let finite_sample = [Point3::new(1.0, 0.0, 0.0)];
+        for invalid_pull in [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(f64::NAN, 0.0, 1.0),
+            Vec3::new(0.0, f64::INFINITY, 1.0),
+        ] {
+            assert!(matches!(
+                draft_violations(&preflight_probe, &finite_sample, invalid_pull, 0.1, cx),
+                Err(fs_query::QueryError::InvalidPointArithmetic { .. })
+            ));
+        }
+        for invalid_angle in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                draft_violations(&preflight_probe, &finite_sample, pull, invalid_angle, cx),
+                Err(fs_query::QueryError::InvalidPointArithmetic { .. })
+            ));
+        }
+        assert!(matches!(
+            draft_violations(
+                &preflight_probe,
+                &[Point3::new(f64::NAN, 0.0, 0.0)],
+                pull,
+                0.1,
+                cx,
+            ),
+            Err(fs_query::QueryError::InvalidPointSample { .. })
+        ));
+        assert_eq!(preflight_evals.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            draft_violations(&MalformedThicknessChart, &finite_sample, pull, 0.1, cx),
+            Err(fs_query::QueryError::InvalidPointSample { .. })
+        ));
+        assert!(matches!(
+            draft_violations(
+                &DraftGradientProbe(Vec3::new(f64::NAN, 0.0, 1.0)),
+                &finite_sample,
+                pull,
+                0.1,
+                cx,
+            ),
+            Err(fs_query::QueryError::InvalidPointSample { .. })
+        ));
+        assert!(matches!(
+            draft_violations(
+                &DraftGradientProbe(Vec3::new(0.0, 0.0, 0.0)),
+                &finite_sample,
+                pull,
+                0.1,
+                cx,
+            ),
+            Err(fs_query::QueryError::NoGradient { .. })
+        ));
         // Tapered cone via F-rep: cylinder radius shrinking with z is
         // not in the primitive zoo — use a rotated half-space wall:
         // plane with normal tilted 10° from horizontal models the wall.
@@ -485,10 +565,22 @@ fn gcp_002_draft_angles() {
         }
         let pass5 =
             draft_violations(&wall10, &wall_samples, pull, 5.0f64.to_radians(), cx).expect("5deg");
+        let scaled_pass5 = draft_violations(
+            &wall10,
+            &wall_samples,
+            pull.scale(1e200),
+            5.0f64.to_radians(),
+            cx,
+        )
+        .expect("scaled pull");
         let fail15 = draft_violations(&wall10, &wall_samples, pull, 15.0f64.to_radians(), cx)
             .expect("15deg");
         let cone_ok = pass5.violating.is_empty()
             && pass5.penalty == 0.0
+            && scaled_pass5.penalty.to_bits() == pass5.penalty.to_bits()
+            && scaled_pass5.violating == pass5.violating
+            && scaled_pass5.undercuts == pass5.undercuts
+            && scaled_pass5.worst_deficit.to_bits() == pass5.worst_deficit.to_bits()
             && fail15.violating.len() == wall_samples.len()
             && fail15.worst_deficit > 0.0;
         // Vertical box walls: any positive draft fails.
