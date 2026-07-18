@@ -28,8 +28,9 @@ Layer: L1.
   failed), never a wrong gradient.
 - `revolve::{checkpointed_adjoint, full_adjoint, min_budget,
   RevolveStats}` — binary-treeverse checkpointed reverse sweeps: peak
-  snapshots ≤ ⌈log₂L⌉+1 (asserted via instrumentation), forward
-  re-evaluations ≤ L·⌈log₂L⌉ (asserted). HEADLINE INVARIANT: the
+  snapshots = ⌊log₂L⌋+1 for L > 0 and zero for an empty chain (asserted
+  via instrumentation), forward re-evaluations ≤ L·⌈log₂L⌉ (asserted).
+  HEADLINE INVARIANT: the
   checkpointed adjoint is BITWISE equal to the full-storage adjoint
   (deterministic recomputation reproduces identical states) — tested.
   Insufficient budget is a structured panic, not a silent overrun.
@@ -38,7 +39,7 @@ Layer: L1.
   FIXED budgets down to s = 1: measured forward re-evaluations EQUAL
   the theorem minimum r·L − β(s+1, r−1) (gated as equality, budgets
   1..8), bitwise-equal to full storage, and never worse than treeverse
-  at equal RAM (gated: 255 vs 356 at L = 100, RAM 8). Budget counts
+  at equal RAM (gated: 280 vs 356 at L = 100, RAM 7). Budget counts
   PARKED checkpoints (β semantics); RAM peak is budget + 1 (the live
   state), reported truthfully in `RevolveStats`. The optimal split is
   found by scanning the O(r) β-breakpoints of the piecewise-linear DP

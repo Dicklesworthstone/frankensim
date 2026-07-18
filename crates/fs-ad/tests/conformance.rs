@@ -26,7 +26,7 @@ const POLYNOMIAL_OUTPUTS: [(&str, f64); 8] = [
     ("second_directional.second", 30.0),
 ];
 const REVOLVE_STEPS: usize = 100;
-const REVOLVE_BUDGET: usize = 8;
+const REVOLVE_BUDGET: usize = 7;
 const REVOLVE_LOG2_BOUND: u64 = 7;
 const REVOLVE_MIN_FORWARD: u64 = 1;
 const REVOLVE_MAX_FORWARD: u64 = 700;
@@ -107,7 +107,7 @@ fn boundary_inputs() -> Vec<u8> {
 }
 
 fn revolve_inputs() -> Vec<u8> {
-    let mut bytes = b"fs-ad:treeverse-bitwise-budget-policy:v1".to_vec();
+    let mut bytes = b"fs-ad:treeverse-bitwise-budget-policy:v2".to_vec();
     for operation in ["full_adjoint", "checkpointed_adjoint", "min_budget"] {
         push_text(&mut bytes, operation);
     }
@@ -369,7 +369,7 @@ fn bedrock_casebook_suite_emits_replay_complete_green_records() {
     let revolve_digest = fnv1a64(&revolve_inputs());
     assert_eq!(analytic_digest, 0xb978_99e3_2eea_35e6);
     assert_eq!(boundary_digest, 0x62a4_f4f0_1c0b_e3c9);
-    assert_eq!(revolve_digest, 0x4c0b_c870_5b1b_a371);
+    assert_eq!(revolve_digest, 0xbfd8_5455_7ecc_26a8);
 
     let report = Suite::new(SUITE)
         .case(

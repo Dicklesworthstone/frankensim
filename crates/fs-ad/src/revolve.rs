@@ -1,7 +1,8 @@
 //! Checkpointed reverse sweeps (plan §6.6): adjoint a length-L step chain
 //! holding only O(log L) states instead of L. v1 implements BINARY
-//! TREEVERSE (recursive bisection): peak snapshots ≤ ⌈log₂ L⌉ + 1, total
-//! forward re-evaluations ≤ L·⌈log₂ L⌉. Bead o3ui adds the
+//! TREEVERSE (recursive bisection): peak snapshots are ⌊log₂ L⌋ + 1 for
+//! L > 0 (zero for an empty chain), and total forward re-evaluations are
+//! ≤ L·⌈log₂ L⌉. Bead o3ui adds the
 //! binomially-OPTIMAL Griewank–Walther schedule
 //! ([`checkpointed_adjoint_binomial`]: recomputations exactly
 //! r·L − β(s+1, r−1), the proven minimum for a fixed snapshot budget)
@@ -30,7 +31,13 @@ pub struct RevolveStats {
 /// Minimum snapshot budget binary treeverse needs for `steps` steps.
 #[must_use]
 pub fn min_budget(steps: usize) -> usize {
-    (usize::BITS - steps.next_power_of_two().leading_zeros()) as usize
+    (usize::BITS - steps.leading_zeros()) as usize
+}
+
+fn ceil_midpoint(begin: usize, end: usize) -> usize {
+    debug_assert!(begin <= end);
+    let span = end - begin;
+    begin + span / 2 + span % 2
 }
 
 /// Reverse-sweep a deterministic step chain with checkpointing.
@@ -118,7 +125,7 @@ where
     if end - begin == 1 {
         return reverse(begin, state, bar);
     }
-    let mid = usize::midpoint(begin, end + 1); // ceil((begin+end)/2)
+    let mid = ceil_midpoint(begin, end);
     // Advance a copy to mid while HOLDING `state` (the live snapshot at
     // this depth); the right half reverses first.
     let mut s_mid = state.clone();
@@ -450,7 +457,7 @@ where
     if end - begin == 1 {
         return reverse(begin, &state, bar);
     }
-    let mid = usize::midpoint(begin, end + 1);
+    let mid = ceil_midpoint(begin, end);
     let mut s_mid = state;
     for i in begin..mid {
         s_mid = forward(i, &s_mid);
@@ -501,6 +508,72 @@ mod tests {
     const STEPS: usize = 100;
     const X0: f64 = 0.3;
     const THETA: f64 = 0.8;
+
+    #[test]
+    fn minimum_budget_matches_binary_treeverse_depth() {
+        for (steps, expected) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 2),
+            (4, 3),
+            (5, 3),
+            (7, 3),
+            (8, 4),
+            (9, 4),
+            (usize::MAX, usize::BITS as usize),
+        ] {
+            assert_eq!(min_budget(steps), expected, "steps={steps}");
+        }
+        assert_eq!(
+            ceil_midpoint(0, usize::MAX),
+            usize::MAX / 2 + 1,
+            "the first split is overflow-free at the full usize boundary"
+        );
+        assert_eq!(ceil_midpoint(usize::MAX - 2, usize::MAX), usize::MAX - 1);
+    }
+
+    #[test]
+    fn zero_step_chain_needs_no_budget_or_callbacks() {
+        let forward_calls = std::cell::Cell::new(0usize);
+        let reverse_calls = std::cell::Cell::new(0usize);
+        let forward = |_: usize, state: &f64| {
+            forward_calls.set(forward_calls.get() + 1);
+            *state
+        };
+        let reverse = |_: usize, _: &f64, bar: (f64, f64)| {
+            reverse_calls.set(reverse_calls.get() + 1);
+            bar
+        };
+
+        let seed = (2.0, 3.0);
+        let (bar, stats) = checkpointed_adjoint(&X0, 0, 0, &forward, &reverse, seed);
+        assert_eq!(bar, seed);
+        assert_eq!(
+            stats,
+            RevolveStats {
+                forward_steps: 0,
+                peak_snapshots: 0,
+            }
+        );
+        assert_eq!(forward_calls.get(), 0);
+        assert_eq!(reverse_calls.get(), 0);
+    }
+
+    #[test]
+    fn non_power_of_two_chains_run_at_the_exact_minimum() {
+        let forward = fwd(THETA);
+        let reverse = rev(THETA);
+        for steps in [3usize, 5] {
+            let full = full_adjoint(&X0, steps, &forward, &reverse, (1.0, 0.0));
+            let budget = min_budget(steps);
+            let (checkpointed, stats) =
+                checkpointed_adjoint(&X0, steps, budget, &forward, &reverse, (1.0, 0.0));
+            assert_eq!(full.0.to_bits(), checkpointed.0.to_bits());
+            assert_eq!(full.1.to_bits(), checkpointed.1.to_bits());
+            assert_eq!(stats.peak_snapshots, budget, "steps={steps}");
+        }
+    }
 
     #[test]
     fn checkpointed_equals_full_storage_bitwise() {
@@ -609,6 +682,11 @@ mod tests {
         let tb = min_budget(STEPS);
         let (_, bin) = checkpointed_adjoint_binomial(&X0, STEPS, tb - 1, &f, &r, (1.0, 0.0));
         let (_, tree) = checkpointed_adjoint(&X0, STEPS, tb, &f, &r, (1.0, 0.0));
+        assert_eq!(tb, 7, "100-step treeverse has an exact seven-state peak");
+        assert_eq!(tree.peak_snapshots, tb);
+        assert_eq!(bin.forward_steps, binomial_reevals(STEPS, tb - 1));
+        assert_eq!(bin.forward_steps, 280);
+        assert_eq!(tree.forward_steps, 356);
         assert!(
             bin.forward_steps <= tree.forward_steps,
             "binomial {} must be <= treeverse {} at equal RAM {tb}",
@@ -694,7 +772,7 @@ mod tests {
     fn zero_and_one_step_chains() {
         let f = fwd(THETA);
         let r = rev(THETA);
-        let (bar, stats) = checkpointed_adjoint(&X0, 0, 1, &f, &r, (2.0, 3.0));
+        let (bar, stats) = checkpointed_adjoint(&X0, 0, 0, &f, &r, (2.0, 3.0));
         assert_eq!(bar, (2.0, 3.0), "empty chain returns the seed");
         assert_eq!(stats.forward_steps, 0);
         let (bar1, _) = checkpointed_adjoint(&X0, 1, 1, &f, &r, (1.0, 0.0));
