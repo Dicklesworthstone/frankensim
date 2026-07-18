@@ -22,10 +22,12 @@ use fs_blake3::identity::{
 };
 use fsqlite::SqliteValue;
 
-use crate::{ContentHash, Ledger, LedgerError, blob_param, now_wall_ns, sql_err};
+use crate::{ContentHash, EdgeRole, Ledger, LedgerError, blob_param, now_wall_ns, sql_err};
 
 /// Schema version of one artifact compatibility-hash to typed-content-ID row.
 pub const ARTIFACT_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
+/// Schema version of one lineage-edge typed-content-ID companion row.
+pub const EDGE_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
 
 /// Identity schema version for immutable migration receipts.
 pub const IDENTITY_MIGRATION_RECEIPT_VERSION: u32 = 1;
@@ -468,6 +470,52 @@ impl ArtifactContentIdentity {
     }
 }
 
+/// Independently verified typed artifact identity carried by one lineage edge.
+///
+/// Operation identity and edge role remain separate from the artifact's raw
+/// byte identity. This row makes no claim about the artifact's semantic type
+/// or the authority of the producing operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeContentIdentity {
+    op: i64,
+    role: EdgeRole,
+    artifact_hash: ContentHash,
+    content_id: ContentId,
+    row_schema_version: u32,
+}
+
+impl EdgeContentIdentity {
+    /// Operation owning this role-qualified lineage edge.
+    #[must_use]
+    pub const fn op(self) -> i64 {
+        self.op
+    }
+
+    /// Whether the operation consumes or produces the artifact.
+    #[must_use]
+    pub const fn role(self) -> EdgeRole {
+        self.role
+    }
+
+    /// Schema-v1 artifact compatibility hash stored by the edge.
+    #[must_use]
+    pub const fn artifact_hash(self) -> ContentHash {
+        self.artifact_hash
+    }
+
+    /// Typed raw-byte identity of the linked artifact.
+    #[must_use]
+    pub const fn content_id(self) -> ContentId {
+        self.content_id
+    }
+
+    /// Exact sidecar row schema version.
+    #[must_use]
+    pub const fn row_schema_version(self) -> u32 {
+        self.row_schema_version
+    }
+}
+
 impl IdentityMigrationCandidates {
     /// Deterministic receipt-ID prefix in bytewise order.
     #[must_use]
@@ -495,6 +543,13 @@ fn artifact_identity_corrupt(
 ) -> LedgerError {
     LedgerError::Corrupt {
         hash_hex: artifact_hash.to_hex(),
+        detail: detail.into(),
+    }
+}
+
+fn edge_identity_corrupt(op: i64, detail: impl Into<String>) -> LedgerError {
+    LedgerError::OpCorrupt {
+        op,
         detail: detail.into(),
     }
 }
@@ -1093,6 +1148,192 @@ impl Ledger {
         Ok(())
     }
 
+    /// Return the typed artifact content identity carried by one exact lineage
+    /// edge. Absence means the compatibility edge itself does not exist.
+    ///
+    /// The read verifies the edge sidecar, the v14 artifact sidecar, and the
+    /// retained artifact bytes. It never projects a semantic identity or
+    /// operation authority from edge presence.
+    ///
+    /// # Errors
+    /// [`LedgerError::OpCorrupt`] for a missing or malformed v15 edge sidecar;
+    /// [`LedgerError::Corrupt`] when the linked artifact identity or bytes are
+    /// invalid; storage failures otherwise.
+    pub fn edge_content_identity(
+        &self,
+        op: i64,
+        artifact_hash: &ContentHash,
+        role: EdgeRole,
+    ) -> Result<Option<EdgeContentIdentity>, LedgerError> {
+        let role_text = match role {
+            EdgeRole::In => "in",
+            EdgeRole::Out => "out",
+        };
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT i.op, i.artifact_hash, i.role, i.content_id, i.row_schema_version \
+                 FROM edges AS e \
+                 LEFT JOIN edge_content_identities AS i \
+                   ON i.op = e.op AND i.artifact_hash = e.artifact AND i.role = e.role \
+                 WHERE e.op = ?1 AND e.artifact = ?2 AND e.role = ?3 LIMIT 2",
+                &[
+                    SqliteValue::Integer(op),
+                    blob_param(artifact_hash.as_bytes()),
+                    SqliteValue::Text(role_text.into()),
+                ],
+            )
+            .map_err(|error| sql_err("edge content identity read", &error))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != 1 {
+            return Err(edge_identity_corrupt(
+                op,
+                "one role-qualified edge selected multiple typed identity sidecars",
+            ));
+        }
+        let row = rows.first().expect("non-empty row set checked above");
+        if !matches!(row.first(), Some(SqliteValue::Integer(stored)) if *stored == op) {
+            return Err(edge_identity_corrupt(
+                op,
+                "edge identity sidecar has a missing or divergent operation identity",
+            ));
+        }
+        let stored_hash = match row.get(1) {
+            Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            edge_identity_corrupt(
+                op,
+                "edge identity sidecar has no exact 32-byte artifact compatibility hash",
+            )
+        })?;
+        if stored_hash != *artifact_hash {
+            return Err(edge_identity_corrupt(
+                op,
+                "edge identity sidecar names a different artifact compatibility hash",
+            ));
+        }
+        if !matches!(row.get(2), Some(SqliteValue::Text(stored)) if stored.as_str() == role_text) {
+            return Err(edge_identity_corrupt(
+                op,
+                "edge identity sidecar has a missing or divergent in/out role",
+            ));
+        }
+        let content_id = match row.get(3) {
+            Some(SqliteValue::Blob(bytes)) => ContentId::parse_slice(bytes),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            edge_identity_corrupt(
+                op,
+                "edge content_id is not an exact 32-byte typed content identity",
+            )
+        })?;
+        if content_id.as_bytes() != artifact_hash.as_bytes() {
+            return Err(edge_identity_corrupt(
+                op,
+                "edge typed content ID differs from its artifact compatibility hash",
+            ));
+        }
+        let row_schema_version = match row.get(4) {
+            Some(SqliteValue::Integer(value)) => u32::try_from(*value).ok(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            edge_identity_corrupt(op, "edge content-identity row version is not a u32 integer")
+        })?;
+        if row_schema_version != EDGE_CONTENT_IDENTITY_ROW_VERSION {
+            return Err(edge_identity_corrupt(
+                op,
+                format!(
+                    "edge content-identity row version {row_schema_version} differs from supported {}",
+                    EDGE_CONTENT_IDENTITY_ROW_VERSION
+                ),
+            ));
+        }
+        let artifact_identity =
+            self.artifact_content_identity(artifact_hash)?
+                .ok_or_else(|| {
+                    edge_identity_corrupt(op, "edge identity names an artifact that disappeared")
+                })?;
+        if artifact_identity.content_id() != content_id {
+            return Err(edge_identity_corrupt(
+                op,
+                "edge and artifact typed content identities disagree",
+            ));
+        }
+        Ok(Some(EdgeContentIdentity {
+            op,
+            role,
+            artifact_hash: stored_hash,
+            content_id,
+            row_schema_version,
+        }))
+    }
+
+    /// Authenticate the complete v15 edge backfill before its marker commits.
+    pub(crate) fn verify_edge_content_identity_backfill(&self) -> Result<(), LedgerError> {
+        self.verify_artifact_content_identity_backfill()?;
+        let invalid_rows = self
+            .conn
+            .query(
+                "SELECT e.op, e.artifact \
+                 FROM edges AS e \
+                 LEFT JOIN edge_content_identities AS i \
+                   ON i.op = e.op AND i.artifact_hash = e.artifact AND i.role = e.role \
+                 WHERE i.op IS NULL \
+                    OR typeof(i.op) != 'integer' \
+                    OR i.op != e.op \
+                    OR typeof(i.artifact_hash) != 'blob' \
+                    OR length(i.artifact_hash) != 32 \
+                    OR i.artifact_hash != e.artifact \
+                    OR typeof(i.role) != 'text' \
+                    OR i.role != e.role \
+                    OR typeof(i.content_id) != 'blob' \
+                    OR length(i.content_id) != 32 \
+                    OR i.content_id != e.artifact \
+                    OR typeof(i.row_schema_version) != 'integer' \
+                    OR i.row_schema_version != 1 \
+                 LIMIT 1",
+            )
+            .map_err(|error| sql_err("verify edge identity backfill", &error))?;
+        if let Some(row) = invalid_rows.first() {
+            let op = match row.first() {
+                Some(SqliteValue::Integer(op)) => *op,
+                _ => -1,
+            };
+            return Err(edge_identity_corrupt(
+                op,
+                "v15 backfill did not produce one exact typed content identity for every edge",
+            ));
+        }
+
+        let orphan_rows = self
+            .conn
+            .query(
+                "SELECT i.op \
+                 FROM edge_content_identities AS i \
+                 LEFT JOIN edges AS e \
+                   ON e.op = i.op AND e.artifact = i.artifact_hash AND e.role = i.role \
+                 WHERE e.op IS NULL LIMIT 1",
+            )
+            .map_err(|error| sql_err("verify edge identity orphan", &error))?;
+        if let Some(row) = orphan_rows.first() {
+            let op = match row.first() {
+                Some(SqliteValue::Integer(op)) => *op,
+                _ => -1,
+            };
+            return Err(edge_identity_corrupt(
+                op,
+                "v15 edge content-identity sidecar has no compatibility edge",
+            ));
+        }
+        Ok(())
+    }
+
     fn stored_identity_migration(
         &self,
         receipt_id: IdentityMigrationReceiptId,
@@ -1528,9 +1769,40 @@ mod tests {
         }
     }
 
+    fn drop_v15_objects(ledger: &Ledger) {
+        for ddl in [
+            "DROP TRIGGER IF EXISTS trg_edge_content_identity_guard_delete",
+            "DROP TRIGGER IF EXISTS trg_edge_content_identity_immutable_update",
+            "DROP TRIGGER IF EXISTS trg_edge_content_identity_dual_write",
+            "DROP INDEX IF EXISTS idx_edge_content_identity_content",
+            "DROP TABLE IF EXISTS edge_content_identities",
+        ] {
+            ledger.conn.execute(ddl).expect("remove v15 fixture object");
+        }
+    }
+
+    fn v14_edge_fixture(ledger: &Ledger) -> (i64, ContentHash) {
+        let artifact = ledger
+            .put_artifact("v14-edge-artifact", b"exact v14 edge bytes", None)
+            .expect("store v14 edge artifact");
+        let explicits = crate::FiveExplicits {
+            seed: b"v14-edge-seed",
+            versions: "{}",
+            budget: "{}",
+            capability: "{}",
+        };
+        let op = ledger
+            .begin_op(None, "{}", &explicits, 1)
+            .expect("begin v14 edge operation");
+        ledger
+            .link(op, &artifact.hash, EdgeRole::Out)
+            .expect("store pre-v15 edge");
+        (op, artifact.hash)
+    }
+
     #[test]
-    fn genuine_v12_and_stale_v13_markers_migrate_through_v14() {
-        let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+    fn genuine_v12_and_stale_v13_markers_migrate_through_v15() {
+        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -1561,7 +1833,7 @@ mod tests {
 
     #[test]
     fn divergent_early_v13_object_refuses_before_marker_advances() {
-        let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -1584,7 +1856,7 @@ mod tests {
     #[test]
     fn v14_backfills_v13_artifacts_and_replays_a_stale_marker() {
         for preapply_v14 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
             drop_v14_objects(&ledger);
             ledger
                 .conn
@@ -1624,7 +1896,7 @@ mod tests {
 
     #[test]
     fn v14_corrupt_source_rolls_back_rows_objects_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
         drop_v14_objects(&ledger);
         ledger
             .conn
@@ -1653,12 +1925,89 @@ mod tests {
     }
 
     #[test]
-    fn migration_ladder_ends_with_v14() {
+    fn v15_backfills_v14_edges_and_replays_a_stale_marker() {
+        for preapply_v15 in [false, true] {
+            let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+            drop_v15_objects(&ledger);
+            ledger
+                .conn
+                .execute("PRAGMA user_version = 14")
+                .expect("mark genuine v14 fixture");
+            let (op, artifact) = v14_edge_fixture(&ledger);
+            if preapply_v15 {
+                for ddl in schema::V15 {
+                    ledger
+                        .conn
+                        .execute(ddl)
+                        .expect("preapply exact v15 migration batch");
+                }
+            }
+
+            ledger
+                .migrate_from_observed_version(14)
+                .expect("authenticate and backfill exact v14 edge");
+            assert_eq!(ledger.schema_version().unwrap(), SCHEMA_VERSION);
+            let identity = ledger
+                .edge_content_identity(op, &artifact, EdgeRole::Out)
+                .unwrap()
+                .expect("backfilled edge identity exists");
+            assert_eq!(identity.op(), op);
+            assert_eq!(identity.artifact_hash(), artifact);
+            assert_eq!(
+                identity.content_id(),
+                ContentId::of_bytes(b"exact v14 edge bytes")
+            );
+            assert_eq!(ledger.table_count("edge_content_identities").unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn v15_missing_artifact_sidecar_rolls_back_objects_rows_and_marker() {
+        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+        drop_v15_objects(&ledger);
+        ledger
+            .conn
+            .execute("PRAGMA user_version = 14")
+            .expect("mark genuine v14 fixture");
+        let (_op, artifact) = v14_edge_fixture(&ledger);
+        ledger
+            .conn
+            .execute("DROP TRIGGER trg_artifact_content_identity_guard_delete")
+            .expect("open corruption-injection window");
+        ledger
+            .conn
+            .prepare("DELETE FROM artifact_content_identities WHERE artifact_hash = ?1")
+            .expect("prepare sidecar corruption")
+            .execute_with_params(&[blob_param(artifact.as_bytes())])
+            .expect("remove exact artifact sidecar");
+        ledger
+            .conn
+            .execute(schema::V14.last().expect("v14 delete-guard DDL"))
+            .expect("restore exact v14 guard");
+
+        assert!(matches!(
+            ledger.migrate_from_observed_version(14),
+            Err(LedgerError::Corrupt { .. })
+        ));
+        assert_eq!(ledger.schema_version().unwrap(), 14);
+        let objects = ledger
+            .conn
+            .query(
+                "SELECT name FROM sqlite_master \
+                 WHERE name = 'edge_content_identities' LIMIT 1",
+            )
+            .expect("inspect rolled-back v15 schema");
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn migration_ladder_ends_with_v15() {
         assert_eq!(
             schema::MIGRATIONS.len(),
             usize::try_from(SCHEMA_VERSION).unwrap()
         );
         assert_eq!(schema::MIGRATIONS.get(12), Some(&schema::V13));
-        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V14));
+        assert_eq!(schema::MIGRATIONS.get(13), Some(&schema::V14));
+        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V15));
     }
 }

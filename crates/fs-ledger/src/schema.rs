@@ -36,10 +36,11 @@
 //! typed semantic IDs, legacy FNV replay tokens, and authority state. Schema
 //! v14 gives every artifact an exact typed content-identity companion row;
 //! migration backfills existing hashes and a trigger dual-writes later rows
-//! without guessing a semantic schema.
+//! without guessing a semantic schema. Schema v15 carries that typed raw-byte
+//! identity across every role-qualified operation/artifact lineage edge.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -48,8 +49,9 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] =
-    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -1061,7 +1063,58 @@ pub const V14: &[&str] = &[
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 through v14 additions); the
+/// v15: typed artifact content identity for every role-qualified lineage edge.
+///
+/// The v1 `edges.artifact` BLOB remains the compatibility key. This companion
+/// repeats it only as a typed raw-byte `ContentId`, never as a semantic ID or
+/// authority. Backfill joins through the authenticated v14 artifact sidecar;
+/// a trigger dual-writes every later edge, including old-handle inserts.
+pub const V15: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS edge_content_identities(
+        op INTEGER NOT NULL,
+        artifact_hash BLOB NOT NULL CHECK(length(artifact_hash) = 32),
+        role TEXT NOT NULL CHECK(role IN ('in','out')),
+        content_id BLOB NOT NULL CHECK(length(content_id) = 32),
+        row_schema_version INTEGER NOT NULL CHECK(row_schema_version = 1),
+        PRIMARY KEY(op, artifact_hash, role),
+        FOREIGN KEY(op, artifact_hash, role)
+            REFERENCES edges(op, artifact, role) ON DELETE CASCADE,
+        FOREIGN KEY(content_id)
+            REFERENCES artifact_content_identities(content_id),
+        CHECK(content_id = artifact_hash)
+    ) STRICT",
+    "CREATE INDEX IF NOT EXISTS idx_edge_content_identity_content
+     ON edge_content_identities(content_id, role, op)",
+    "INSERT OR IGNORE INTO edge_content_identities(
+         op, artifact_hash, role, content_id, row_schema_version
+     )
+     SELECT e.op, e.artifact, e.role, i.content_id, 1
+     FROM edges AS e
+     JOIN artifact_content_identities AS i ON i.artifact_hash = e.artifact",
+    "CREATE TRIGGER IF NOT EXISTS trg_edge_content_identity_dual_write
+     AFTER INSERT ON edges
+     BEGIN
+       INSERT INTO edge_content_identities(
+           op, artifact_hash, role, content_id, row_schema_version
+       ) VALUES (NEW.op, NEW.artifact, NEW.role, NEW.artifact, 1);
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_edge_content_identity_immutable_update
+     BEFORE UPDATE ON edge_content_identities
+     BEGIN
+       SELECT RAISE(ABORT, 'edge content identity is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_edge_content_identity_guard_delete
+     BEFORE DELETE ON edge_content_identities
+     WHEN EXISTS(
+         SELECT 1 FROM edges
+         WHERE op = OLD.op AND artifact = OLD.artifact_hash AND role = OLD.role
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'edge content identity is retained with its edge');
+     END",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 through v15 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -1095,4 +1148,5 @@ pub const ALL_TABLES: &[&str] = &[
     "semantic_state_checkpoint_receipts",
     "identity_migration_receipts",
     "artifact_content_identities",
+    "edge_content_identities",
 ];

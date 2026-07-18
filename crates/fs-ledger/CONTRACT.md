@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v14). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v15). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -269,6 +269,17 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   sidecars. The sidecar carries no semantic ID, FNV value, verifier, anchor, or
   authority; those require an exact typed migration receipt and are not guessed
   from artifact kind or metadata.
+- Lineage-edge typed-content sidecars (`identity_migration`, schema v15): every
+  role-qualified `edges(op, artifact, role)` row has one
+  `edge_content_identities` companion carrying the same exact artifact digest
+  as a typed raw-byte `ContentId`. Migration joins through the authenticated
+  v14 artifact sidecar, audits the one-to-one mapping inside the version
+  transaction, and rolls back on any missing, divergent, or orphan row. The
+  edge insert trigger dual-writes links created by current or already-open old
+  handles. Reads reverify both sidecars and the artifact bytes. Operation ID,
+  in/out role, content identity, semantic identity, and authority remain
+  distinct; an edge proves lineage membership only, never semantic meaning or
+  producer trust.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -343,6 +354,12 @@ content-ID index and trigger-based dual-write. Its `INSERT OR IGNORE ... SELECT`
 backfill is idempotent, but marker advancement additionally requires a Rust
 full-content re-hash and complete mapping/orphan audit in the same migration
 transaction. No semantic schema or authority is inferred.
+Schema v15 adds `edge_content_identities`, keyed by the exact v1 composite edge
+identity `(op, artifact_hash, role)`. Its content ID must equal the artifact
+compatibility hash and reference the v14 typed-content row. Idempotent backfill,
+insert-trigger dual-write, cascade-aligned retention, and a pre-marker
+artifact/edge mapping audit preserve old-handle compatibility without semantic
+or authority inference.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -556,7 +573,11 @@ refusal, or verifier panic).
     hash and typed `ContentId` are the same exact 32 bytes, its row schema is
     supported, and the retained artifact independently re-hashes to that
     digest. Backfill and dual-write never infer a semantic identity or trust.
-17. The nightly writer publishes op + metric + benchmark event + terminal
+17. A lineage-edge content-identity sidecar is valid only when operation, role,
+    compatibility hash, typed `ContentId`, and row schema agree with one exact
+    retained edge and its independently verified artifact. Edge presence does
+    not confer semantic meaning or producer authority.
+18. The nightly writer publishes op + metric + benchmark event + terminal
     outcome in one explicit transaction. A write or commit failure is primary;
     rollback is always attempted, and a rollback failure is retained after the
     primary failure in a deterministic combined diagnostic. Cleanup failure
@@ -721,8 +742,11 @@ stale-marker healing, divergent early-object refusal, and migration-ladder
 placement. The same suite covers v14 trigger dual-write, typed content-ID
 projection, dedupe cardinality, genuine-v13 artifact backfill, exact preapplied
 stale-marker replay, independent source re-hash, and transactional rollback of
-objects, rows, and marker on corrupt input. These code-first tests require the
-central batch-proof pass before their results may be cited as green evidence.
+objects, rows, and marker on corrupt input. V15 coverage repeats those proofs
+for role-qualified lineage edges, including exact role separation, genuine-v14
+backfill, preapplied stale-marker replay, and missing-artifact-sidecar rollback.
+These code-first tests require the central batch-proof pass before their results
+may be cited as green evidence.
 `tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
 positive/negative zero, infinite dispersion, infinite interval endpoints, a
 maximum-length identity, and validated/derived rows; it independently rehashes
@@ -932,8 +956,9 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   state. It does not prove that the owner-defined semantic rule is scientifically
   correct, that legacy FNV named the supplied bytes, or that an admitted
   authority is promotion authority. Schema v14 migrates and dual-writes only
-  the exact raw content identity of artifact rows; it does not supply artifact
-  semantics. Historical evidence/op/edge/cache/package rows remain untouched;
+  the exact raw content identity of artifact rows and v15 carries that same
+  typed content ID through lineage edges; neither supplies artifact semantics.
+  Historical evidence/op/cache/package rows remain untouched;
   cross-surface database-wire-package parity, resumable fleet backfill, a
   declared multi-version compatibility window beyond already-open trigger
   coverage, cancellation/crash fault injection, and rollback views remain

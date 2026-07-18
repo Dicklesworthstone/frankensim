@@ -3,7 +3,8 @@ use fs_blake3::identity::{
     IdentityReceipt, SemanticId, TrustState, WireType, legacy::LegacyProvenanceV1,
 };
 use fs_ledger::{
-    ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, IdentityMigrationClaim, Ledger, LedgerError,
+    ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, EDGE_CONTENT_IDENTITY_ROW_VERSION, EdgeRole,
+    FiveExplicits, IdentityMigrationClaim, Ledger, LedgerError,
     MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
 };
 
@@ -60,7 +61,7 @@ fn claim<'a>(
 
 #[test]
 fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
-    let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
     let legacy = br#"{"legacy":"shape-a","provenance":1}"#;
     let canonical = br#"{"schema":1,"shape":"a"}"#;
     let semantic = semantic_receipt(b"shape-a");
@@ -135,7 +136,7 @@ fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
 
 #[test]
 fn typed_projection_refuses_a_different_schema() {
-    let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
     let semantic = semantic_receipt(b"typed-subject");
     let write = ledger
         .record_identity_migration(claim(semantic, b"legacy", b"canonical", "demo-v0-to-v1"))
@@ -153,7 +154,7 @@ fn typed_projection_refuses_a_different_schema() {
 
 #[test]
 fn ambiguous_legacy_candidates_are_bounded_and_never_selected() {
-    let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
     let legacy = b"same-legacy-source";
     let semantic = semantic_receipt(b"same-subject");
     let first = ledger
@@ -185,7 +186,7 @@ fn ambiguous_legacy_candidates_are_bounded_and_never_selected() {
 
 #[test]
 fn payload_limit_refuses_before_any_row_is_published() {
-    let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
     let oversized = vec![0xA5; MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES + 1];
     let semantic = semantic_receipt(b"bounded-subject");
     assert!(matches!(
@@ -205,7 +206,7 @@ fn payload_limit_refuses_before_any_row_is_published() {
 
 #[test]
 fn artifact_writes_dual_write_an_exact_typed_content_identity() {
-    let ledger = Ledger::open(":memory:").expect("fresh v14 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
     let bytes = b"artifact identity dual-write fixture";
     let write = ledger
         .put_artifact("identity-fixture", bytes, None)
@@ -234,5 +235,49 @@ fn artifact_writes_dual_write_an_exact_typed_content_identity() {
         ledger.table_count("artifact_content_identities").unwrap(),
         1,
         "artifact dedupe must not duplicate typed identity rows"
+    );
+}
+
+#[test]
+fn lineage_edges_dual_write_the_linked_artifact_content_identity() {
+    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let artifact = ledger
+        .put_artifact("edge-identity-fixture", b"lineage payload", None)
+        .expect("store linked artifact");
+    let explicits = FiveExplicits {
+        seed: b"edge-seed",
+        versions: "{}",
+        budget: "{}",
+        capability: "{}",
+    };
+    let op = ledger
+        .begin_op(None, "{}", &explicits, 1)
+        .expect("begin lineage operation");
+    ledger
+        .link(op, &artifact.hash, EdgeRole::Out)
+        .expect("link typed artifact output");
+
+    let identity = ledger
+        .edge_content_identity(op, &artifact.hash, EdgeRole::Out)
+        .expect("verify edge content identity")
+        .expect("linked edge has a sidecar");
+    assert_eq!(identity.op(), op);
+    assert_eq!(identity.role(), EdgeRole::Out);
+    assert_eq!(identity.artifact_hash(), artifact.hash);
+    assert_eq!(
+        identity.content_id(),
+        ContentId::of_bytes(b"lineage payload")
+    );
+    assert_eq!(
+        identity.row_schema_version(),
+        EDGE_CONTENT_IDENTITY_ROW_VERSION
+    );
+    assert_eq!(ledger.table_count("edge_content_identities").unwrap(), 1);
+    assert_eq!(
+        ledger
+            .edge_content_identity(op, &artifact.hash, EdgeRole::In)
+            .unwrap(),
+        None,
+        "role remains a separate part of edge identity"
     );
 }
