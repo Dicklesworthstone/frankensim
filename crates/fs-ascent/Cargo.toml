@@ -20,9 +20,10 @@ fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-casebook = { path = "../fs-casebook" }
 # Constellation (FrankenScipy 0.1.0 per constellation.lock): the
 # section-12 cross-validation oracle — TEST-ONLY.
-fsci-opt = { path = "../../../frankenscipy/crates/fsci-opt" }
+fsci-opt = { path = "../../../frankenscipy/crates/fsci-opt", version = "=0.1.0" }
 fs-eproc = { path = "../fs-eproc" }
 fs-obs = { path = "../fs-obs" }
 fs-qty = { path = "../fs-qty" }
