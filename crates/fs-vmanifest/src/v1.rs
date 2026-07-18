@@ -29,7 +29,7 @@
 //! frozen inventory compiler is V.1.2 scope, the lint battery V.1.3, and
 //! ledger persistence is fs-obs/fs-ledger scope.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::{ContentHash, hash_domain};
@@ -147,6 +147,27 @@ fn bounded_text(field: &'static str, value: &str) -> Result<(), V1Error> {
         )));
     }
     Ok(())
+}
+
+fn escape_json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{0000}'..='\u{001f}' => {
+                write!(&mut escaped, "\\u{:04x}", u32::from(ch))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// The continuing conceptual lineage of one claim.
@@ -494,7 +515,7 @@ impl NormalizedGraph {
                 e.kind,
                 e.from.to_hex(),
                 e.to.to_hex(),
-                e.checker,
+                escape_json_string(&e.checker),
                 e.policy_version
             ));
         }

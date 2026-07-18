@@ -370,6 +370,36 @@ fn projections_are_semantic_views_of_one_digest() {
 }
 
 #[test]
+fn json_lines_escape_untrusted_checker_text() {
+    let a = revision("claim/a", "a holds");
+    let b = revision("claim/b", "b holds");
+    let mut receipt = edge(
+        RelationKind::Implication,
+        &a,
+        &b,
+        QuantifierVariance::Preserved,
+    );
+    receipt.checker = "checker\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}é".to_owned();
+    let graph = admit_graph(&[a.clone(), b.clone()], &[receipt]).expect("graph admits");
+
+    let json = graph.render_json_lines();
+    assert_eq!(json.len(), 2, "one edge remains one JSON-lines record");
+    assert_eq!(
+        json[1],
+        format!(
+            "{{\"vmanifest\":\"edge\",\"kind\":\"Implication\",\"from\":\"{}\",\"to\":\"{}\",\"checker\":\"checker\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001fé\",\"policy\":1}}",
+            a.revision_id().to_hex(),
+            b.revision_id().to_hex()
+        )
+    );
+    assert_eq!(json[1].lines().count(), 1);
+    assert!(
+        json[1].chars().all(|ch| ch >= ' '),
+        "JSON-lines output must not contain literal control characters"
+    );
+}
+
+#[test]
 fn malformed_identities_and_empty_fields_refuse_with_stable_rules() {
     assert_eq!(ClaimId::new("").expect_err("empty").rule(), "v1-id-bounds");
     assert_eq!(
