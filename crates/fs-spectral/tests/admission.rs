@@ -2528,8 +2528,12 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     let reobserved_descriptor = RegularityClaimV1::new(
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
-        AdmittedSpectralWitnessV1::from_authority(&admitted, reobserved_promotion, observation_root.charter())
-            .unwrap(),
+        AdmittedSpectralWitnessV1::from_authority(
+            &admitted,
+            reobserved_promotion,
+            observation_root.charter(),
+        )
+        .unwrap(),
     );
     let reobserved = validate_problem(default_spec(
         axes,
@@ -2558,8 +2562,12 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     let changed_length_descriptor = RegularityClaimV1::new(
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
-        AdmittedSpectralWitnessV1::from_authority(&admitted, length_promotion, length_root.charter())
-            .unwrap(),
+        AdmittedSpectralWitnessV1::from_authority(
+            &admitted,
+            length_promotion,
+            length_root.charter(),
+        )
+        .unwrap(),
     );
     let changed_length_problem = validate_problem(default_spec(
         axes,
@@ -2589,8 +2597,12 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     let changed_policy_descriptor = RegularityClaimV1::new(
         RegularityClassV1::RegularDescriptor,
         WitnessDispositionV1::Witnessed,
-        AdmittedSpectralWitnessV1::from_authority(&admitted, policy_promotion, policy_root.charter())
-            .unwrap(),
+        AdmittedSpectralWitnessV1::from_authority(
+            &admitted,
+            policy_promotion,
+            policy_root.charter(),
+        )
+        .unwrap(),
     );
     let changed_policy_problem = validate_problem(default_spec(
         axes,

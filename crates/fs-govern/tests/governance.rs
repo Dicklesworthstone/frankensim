@@ -111,8 +111,14 @@ fn empty_or_inconsistent_governance_audit_fails_closed() {
         schema_gaps: vec![],
         operational_gaps: vec![],
     };
-    assert!(!empty.declared_schema_ok(), "empty scope must not be schema-ok");
-    assert!(!empty.operationally_managed(), "empty scope must not be managed");
+    assert!(
+        !empty.declared_schema_ok(),
+        "empty scope must not be schema-ok"
+    );
+    assert!(
+        !empty.operationally_managed(),
+        "empty scope must not be managed"
+    );
 
     // Rows declared but NONE verified, yet an empty operational_gaps list: the
     // count check (not just the list) has to catch it.
@@ -123,7 +129,10 @@ fn empty_or_inconsistent_governance_audit_fails_closed() {
         schema_gaps: vec![],
         operational_gaps: vec![],
     };
-    assert!(inconsistent.declared_schema_ok(), "3/3 declared is schema-ok");
+    assert!(
+        inconsistent.declared_schema_ok(),
+        "3/3 declared is schema-ok"
+    );
     assert!(
         !inconsistent.operationally_managed(),
         "0/3 verified must fail even with an empty gap list"

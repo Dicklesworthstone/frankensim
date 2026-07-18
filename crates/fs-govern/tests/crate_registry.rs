@@ -77,7 +77,10 @@ fn empty_crate_audit_fails_closed() {
         complete: 1,
         gaps: vec![],
     };
-    assert!(!inconsistent.ok(), "1/3 complete must fail even with no listed gaps");
+    assert!(
+        !inconsistent.ok(),
+        "1/3 complete must fail even with no listed gaps"
+    );
 
     // The genuine complete path still passes.
     let green = CrateAudit {

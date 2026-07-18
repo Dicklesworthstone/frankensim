@@ -172,12 +172,14 @@ fn authority_context<'a>(
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
-            ops: ops.iter().map(|op| (*op).to_string()).collect(),
-            cores: 1,
-            mem_bytes: 1 << 30,
-            wall_s: 3_600.0,
-        })),
+        capability: Some(SealedSessionCapability::caller_declared(
+            SessionCapability {
+                ops: ops.iter().map(|op| (*op).to_string()).collect(),
+                cores: 1,
+                mem_bytes: 1 << 30,
+                wall_s: 3_600.0,
+            },
+        )),
         regime,
         regime_policy,
     }
@@ -718,12 +720,14 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
-            ops: vec!["flux.*".to_string()],
-            cores: 0,
-            mem_bytes: 0,
-            wall_s: f64::INFINITY,
-        })),
+        capability: Some(SealedSessionCapability::caller_declared(
+            SessionCapability {
+                ops: vec!["flux.*".to_string()],
+                cores: 0,
+                mem_bytes: 0,
+                wall_s: f64::INFINITY,
+            },
+        )),
         regime: None,
         regime_policy: RegimePolicy::Warn,
     };
@@ -745,12 +749,14 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
-            ops: vec!["flux*".to_string()],
-            cores: 1,
-            mem_bytes: 0,
-            wall_s: 1.0,
-        })),
+        capability: Some(SealedSessionCapability::caller_declared(
+            SessionCapability {
+                ops: vec!["flux*".to_string()],
+                cores: 1,
+                mem_bytes: 0,
+                wall_s: 1.0,
+            },
+        )),
         regime: None,
         regime_policy: RegimePolicy::Warn,
     };
@@ -852,12 +858,14 @@ fn ad_002c_exact_count_authority_boundaries_do_not_alias() {
         cost_freshness: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(SealedSessionCapability::caller_declared(SessionCapability {
-            ops: vec!["flux.*".to_string()],
-            cores,
-            mem_bytes,
-            wall_s: 3_600.0,
-        })),
+        capability: Some(SealedSessionCapability::caller_declared(
+            SessionCapability {
+                ops: vec!["flux.*".to_string()],
+                cores,
+                mem_bytes,
+                wall_s: 3_600.0,
+            },
+        )),
         regime: None,
         regime_policy: RegimePolicy::Warn,
     };

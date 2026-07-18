@@ -55,7 +55,10 @@ impl Governor {
         SessionGovernor::idempotency_key(agent_key, program_text)
     }
 
-    fn open_session_declared(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
+    fn open_session_declared(
+        &self,
+        token: CapabilityToken,
+    ) -> Result<ScopeFlushPermit, SessionError> {
         let open_id = self
             .inner
             .session_open_id(token.session, &self.next_key("open", token.session))?;
@@ -282,7 +285,9 @@ fn ss_001_token_bridges_into_static_admission() {
         router: None,
         chart_requirements: Vec::new(),
         cost_models: BTreeMap::new(),
-        capability: Some(fs_ir::admission::SealedSessionCapability::caller_declared(cap)),
+        capability: Some(fs_ir::admission::SealedSessionCapability::caller_declared(
+            cap,
+        )),
         regime: None,
         regime_policy: fs_ir::admission::RegimePolicy::Warn,
     };
@@ -297,7 +302,8 @@ fn ss_001_token_bridges_into_static_admission() {
 #[test]
 fn ss_002_enforcement_throttles_then_pauses_never_kills() {
     let gov = Governor::new();
-    gov.open_session_declared(token(7, 100.0, 1e9)).expect("valid token");
+    gov.open_session_declared(token(7, 100.0, 1e9))
+        .expect("valid token");
     // Under the grant: Ok.
     let e1 = gov
         .charge(
@@ -377,7 +383,8 @@ fn ss_002a_memory_enforcement_is_exact_above_f64_integer_precision() {
     let gov = Governor::new();
     let mut below = token(70, f64::MAX, f64::MAX);
     below.mem_bytes = GRANT;
-    gov.open_session_declared(below).expect("valid exact-byte token");
+    gov.open_session_declared(below)
+        .expect("valid exact-byte token");
     assert_eq!(
         gov.charge(
             SessionId(70),
@@ -527,7 +534,8 @@ fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
 #[test]
 fn ss_003_idempotency_races_execute_exactly_once() {
     let gov = Arc::new(Governor::new());
-    gov.open_session_declared(token(3, 1e9, 1e9)).expect("valid token");
+    gov.open_session_declared(token(3, 1e9, 1e9))
+        .expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
     let key = Governor::idempotency_key("agent-a", SPOUT).expect("bounded canonical key");
     let mut handles = Vec::new();
@@ -638,8 +646,10 @@ fn ss_003a_same_thread_reentrant_duplicate_returns_in_flight() {
 #[test]
 fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
     let gov = Governor::new();
-    gov.open_session_declared(token(31, 1e9, 1e9)).expect("session 31");
-    gov.open_session_declared(token(32, 1e9, 1e9)).expect("session 32");
+    gov.open_session_declared(token(31, 1e9, 1e9))
+        .expect("session 31");
+    gov.open_session_declared(token(32, 1e9, 1e9))
+        .expect("session 32");
     let key =
         Governor::idempotency_key("agent:alpha", "program:beta").expect("bounded canonical key");
     assert!(key.starts_with("fs-session-idem-v3:"));
@@ -1121,14 +1131,19 @@ fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
     );
     let foreign_gated = SessionGovernor::new();
     assert!(matches!(
-        foreign_gated.open_session_declared_gated(gated_id, gated_token.clone(), Arc::clone(&gate),),
+        foreign_gated
+            .open_session_declared_gated(gated_id, gated_token.clone(), Arc::clone(&gate),),
         Err(SessionError::MutationAuthorityMismatch {
             kind: "session-open",
             ..
         })
     ));
     assert!(matches!(
-        gated.open_session_declared_gated(gated_id, gated_token.clone(), Arc::new(CancelGate::new())),
+        gated.open_session_declared_gated(
+            gated_id,
+            gated_token.clone(),
+            Arc::new(CancelGate::new())
+        ),
         Err(SessionError::MutationConflict {
             kind: "session-open",
             ..
@@ -2369,7 +2384,8 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         .expect("valid token");
     gov.open_session_declared_gated(token(42, 1e9, 1e9), Arc::clone(&gate_b))
         .expect("valid token");
-    gov.open_session_declared(token(43, 1e9, 1e9)).expect("valid token"); // ungated
+    gov.open_session_declared(token(43, 1e9, 1e9))
+        .expect("valid token"); // ungated
 
     // (a) Levels 0 and > 3 are REFUSED, never clamped, nothing ledgered.
     for bad in [0u8, 4, 200] {
@@ -2833,7 +2849,8 @@ fn ss_007_governor_storm_structured_outcomes_only() {
 fn ss_008_panicking_submission_is_non_blocking_and_terminal() {
     const WAITERS: usize = 8;
     let gov = Arc::new(Governor::new());
-    gov.open_session_declared(token(80, 1e9, 1e9)).expect("valid token");
+    gov.open_session_declared(token(80, 1e9, 1e9))
+        .expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
