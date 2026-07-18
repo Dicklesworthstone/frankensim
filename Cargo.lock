@@ -2187,6 +2187,11 @@ dependencies = [
 [[package]]
 name = "fs-viz"
 version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-blake3",
+ "fs-exec",
+]
 
 [[package]]
 name = "fs-vmanifest"
