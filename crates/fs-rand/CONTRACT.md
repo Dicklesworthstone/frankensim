@@ -55,7 +55,8 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   yet (later 6ys.20 tranches); `Lattice::cbc` itself remains the
   synchronous convenience authority.
 - `cbc_cert::{CbcPrefixCertificate, CbcCertError, verify_consistency,
-  audit_minimality}` — schema-v1 per-prefix selection evidence produced by
+  audit_minimality, verify_consistency_admitted, audit_minimality_admitted}` —
+  schema-v2 per-prefix selection evidence produced by
   the executor when `enable_certificates` is called before any work: each
   scanned component binds the exact reduction root (the committed prefix
   itself — products are a pure function of `(n, prefix)`, no hash
@@ -67,15 +68,22 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   only, with two honestly named modes: `verify_consistency` (cheap
   `O(n·|claims|)`: the declared candidates score as claimed) and
   `audit_minimality` (full `O(n²)` rescan: minimality by exhaustion);
-  tampering with any bound field refuses in a named error class.
+  tampering with any bound field refuses in a named error class. The admitted
+  variants additionally require a current schema-v4 `Certified` receipt for
+  the same point count and a dimension covering the declared prefix; they
+  reject hostile prefix/score/tie vector lengths against that receipt before
+  checker allocation or exact arithmetic. This bounds the checker invocation's
+  problem and input shape; it does not assert that checker work debits equal
+  the executor schedule.
   Certificate production requires a schema-v4 `Certified` admission; its
   retained owner/prefix/score/tie payloads, third live score, and deterministic
   emission debits are included from admission. NO-CLAIM: no compact
   sub-quadratic minimality proof (the [M] ratchet); the theorem-fixed first
   component carries no certificate (the [F] unit-residue ratchet); the checker
-  itself remains an unbudgeted validation API; certificates mint no
-  fs-blake3 identity — durable-store identity governance belongs to
-  consumers.
+  legacy checker entry points remain unbudgeted validation APIs, and an
+  admitted receipt is a reusable shape bound rather than a consumable
+  aggregate meter; certificates mint no fs-blake3 identity — durable-store
+  identity governance belongs to consumers.
 
 ### Extended distributions (bead 6ys.19, module `dist`)
 - `Stream::{next_gamma, next_beta, next_dirichlet, next_truncated_normal,
@@ -266,11 +274,13 @@ pending an actual 32-bit test lane.
   not an upper bound on allocator-reported `Vec::capacity`, allocator usable
   size, metadata, stacks, or process RSS. Runtime observations prove logical
   product lengths stay below the requested ceiling and report allocator
-  capacity separately. `Lattice::cbc` is not yet receipt-gated or metered, and
-  the independent certificate checker does not yet accept a work/memory
-  admission. Strict per-call allowance atomicity, limb-granular cancellation,
-  serialized cross-process resume, compact certificates, elapsed time, and
-  energy remain explicit no-claims.
+  capacity separately. `Lattice::cbc` is not yet receipt-gated or metered.
+  Admitted certificate checker entry points gate one invocation's problem and
+  vector shapes against the same current certified authority, but do not debit
+  that receipt, prove checker/executor work-unit equality, or aggregate repeated
+  calls; the legacy entry points remain unmetered. Strict per-call allowance
+  atomicity, limb-granular cancellation, serialized cross-process resume,
+  compact certificates, elapsed time, and energy remain explicit no-claims.
   Both 64-bit and 32-bit fixtures are retained, but neither is execution
   evidence until its cfg-specific lane is actually green; passing either
   necessary impossibility filter is not a claim that an OS can map the admitted

@@ -5,21 +5,26 @@
 //! pause/resume, structural mirror ties are really captured, and seeded
 //! tampering of every bound field fails closed in the named error class.
 
-use fs_rand::cbc::{CbcBudget, CbcExecutionMode, CbcProblem};
+use fs_rand::cbc::{CbcAdmission, CbcBudget, CbcExecutionMode, CbcProblem};
 use fs_rand::cbc_cert::{
     ADMISSIBLE_RULE_UNITS, CBC_CERTIFICATE_SCHEMA_VERSION, CbcCertError, CbcPrefixCertificate,
-    TIE_RULE_LOWEST_CANDIDATE, audit_minimality, verify_consistency,
+    TIE_RULE_LOWEST_CANDIDATE, audit_minimality, audit_minimality_admitted, verify_consistency,
+    verify_consistency_admitted,
 };
 use fs_rand::cbc_exec::{CbcControl, CbcExecutor, CbcRunStatus, CbcTileShape};
 use fs_rand::qmc::Lattice;
 
 const CASES: [(u32, usize); 4] = [(5, 3), (8, 3), (16, 4), (127, 4)];
 
-fn certified_run(n: u32, dim: usize, tile: CbcTileShape) -> CbcExecutor {
+fn certified_admission(n: u32, dim: usize) -> CbcAdmission {
     let problem = CbcProblem::new(n, dim).expect("battery cases are structurally valid");
-    let admission = problem
+    problem
         .admit_for(CbcExecutionMode::Certified, CbcBudget::UNBOUNDED)
-        .expect("battery cases admit under the unbounded budget");
+        .expect("battery cases admit under the unbounded budget")
+}
+
+fn certified_run(n: u32, dim: usize, tile: CbcTileShape) -> CbcExecutor {
+    let admission = certified_admission(n, dim);
     let mut executor =
         CbcExecutor::new(admission).expect("fresh certified admission matches authority");
     executor
@@ -42,6 +47,7 @@ fn certified_run(n: u32, dim: usize, tile: CbcTileShape) -> CbcExecutor {
 fn crt_001_certified_runs_match_the_authority_and_both_checker_modes() {
     for (n, dim) in CASES {
         let reference = Lattice::cbc(n, dim);
+        let checker_admission = certified_admission(n, dim);
         let executor = certified_run(n, dim, CbcTileShape::new(3, 7).expect("static tile"));
         let certificates = executor.certificates().to_vec();
         assert_eq!(
@@ -63,6 +69,12 @@ fn crt_001_certified_runs_match_the_authority_and_both_checker_modes() {
             audit_minimality(certificate).unwrap_or_else(|error| {
                 panic!("n={n} certificate {index} failed the full audit: {error:?}")
             });
+            verify_consistency_admitted(checker_admission, certificate).unwrap_or_else(|error| {
+                panic!("n={n} certificate {index} failed admitted consistency: {error:?}")
+            });
+            audit_minimality_admitted(checker_admission, certificate).unwrap_or_else(|error| {
+                panic!("n={n} certificate {index} failed the admitted audit: {error:?}")
+            });
         }
         assert_eq!(
             executor
@@ -73,7 +85,7 @@ fn crt_001_certified_runs_match_the_authority_and_both_checker_modes() {
             "n={n} dim={dim}: certifying changed the constructed bytes"
         );
     }
-    assert_eq!(CBC_CERTIFICATE_SCHEMA_VERSION, 1);
+    assert_eq!(CBC_CERTIFICATE_SCHEMA_VERSION, 2);
 }
 
 #[test]
@@ -274,5 +286,80 @@ fn crt_005_uncertified_runs_emit_nothing_and_late_enabling_refuses() {
         executor.enable_certificates()
             == Err(fs_rand::cbc_exec::CbcExecError::CertificatesNotAdmitted),
         "enabling after work must refuse (certificates cover all or none)"
+    );
+}
+
+#[test]
+fn crt_006_admitted_checkers_refuse_wrong_authority_and_hostile_lengths_first() {
+    let good = baseline_certificate();
+    let admission = certified_admission(good.point_count, 4);
+    verify_consistency_admitted(admission, &good).expect("current receipt covers consistency");
+    audit_minimality_admitted(admission, &good).expect("current receipt covers the full audit");
+
+    let construction_only = CbcProblem::new(good.point_count, 4)
+        .expect("fixture is structural")
+        .admit(CbcBudget::UNBOUNDED)
+        .expect("fixture admits");
+    assert_eq!(
+        verify_consistency_admitted(construction_only, &good),
+        Err(CbcCertError::AdmissionMismatch),
+        "a construction receipt cannot authorize certificate checking"
+    );
+
+    let wrong_point_count = certified_admission(good.point_count + 1, 4);
+    assert_eq!(
+        verify_consistency_admitted(wrong_point_count, &good),
+        Err(CbcCertError::AdmissionMismatch)
+    );
+
+    let short_problem = certified_admission(good.point_count, good.prefix.len() - 1);
+    assert_eq!(
+        verify_consistency_admitted(short_problem, &good),
+        Err(CbcCertError::AdmissionEnvelopeExceeded {
+            storage_class: "prefix words",
+            required: u128::try_from(good.prefix.len()).expect("usize fits u128"),
+            admitted: u128::try_from(good.prefix.len() - 1).expect("usize fits u128"),
+        }),
+        "the receipt must cover the complete declared prefix"
+    );
+
+    let score_limit = usize::try_from(admission.estimate().score_capacity_limbs())
+        .expect("the admitted target bound fits usize");
+    let mut oversized_winner = good.clone();
+    oversized_winner
+        .winning_score_limbs
+        .resize(score_limit + 1, 1);
+    assert_eq!(
+        verify_consistency_admitted(admission, &oversized_winner),
+        Err(CbcCertError::AdmissionEnvelopeExceeded {
+            storage_class: "winning score limbs",
+            required: u128::try_from(score_limit + 1).expect("usize fits u128"),
+            admitted: admission.estimate().score_capacity_limbs(),
+        })
+    );
+
+    let tie_limit = usize::try_from(admission.estimate().admissible_candidates_per_prefix())
+        .expect("the admitted target bound fits usize");
+    let mut oversized_ties = good.clone();
+    oversized_ties.tie_class.resize(tie_limit + 1, 1);
+    assert_eq!(
+        audit_minimality_admitted(admission, &oversized_ties),
+        Err(CbcCertError::AdmissionEnvelopeExceeded {
+            storage_class: "tie-class words",
+            required: u128::try_from(tie_limit + 1).expect("usize fits u128"),
+            admitted: admission.estimate().admissible_candidates_per_prefix(),
+        }),
+        "envelope refusal must precede semantic tie-class parsing"
+    );
+
+    let mut oversized_runner = good.clone();
+    oversized_runner.runner_up = Some((vec![1; score_limit + 1], 1));
+    assert_eq!(
+        verify_consistency_admitted(admission, &oversized_runner),
+        Err(CbcCertError::AdmissionEnvelopeExceeded {
+            storage_class: "runner-up score limbs",
+            required: u128::try_from(score_limit + 1).expect("usize fits u128"),
+            admitted: admission.estimate().score_capacity_limbs(),
+        })
     );
 }

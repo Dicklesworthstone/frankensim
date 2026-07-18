@@ -1341,7 +1341,11 @@ fn target_bound(
 
 #[cfg(test)]
 mod authority_tests {
-    use super::{CBC_ADMISSION_SCHEMA_VERSION, CbcBudget, CbcProblem};
+    use super::{CBC_ADMISSION_SCHEMA_VERSION, CbcBudget, CbcExecutionMode, CbcProblem};
+    use crate::cbc_cert::{
+        ADMISSIBLE_RULE_UNITS, CbcCertError, CbcPrefixCertificate, TIE_RULE_LOWEST_CANDIDATE,
+        verify_consistency_admitted,
+    };
     use crate::cbc_exec::{CbcExecError, CbcExecutor};
 
     fn receipt() -> super::CbcAdmission {
@@ -1349,6 +1353,26 @@ mod authority_tests {
             .expect("fixture is structural")
             .admit(CbcBudget::UNBOUNDED)
             .expect("fixture admits")
+    }
+
+    fn certified_receipt() -> super::CbcAdmission {
+        CbcProblem::new(5, 3)
+            .expect("fixture is structural")
+            .admit_for(CbcExecutionMode::Certified, CbcBudget::UNBOUNDED)
+            .expect("certified fixture admits")
+    }
+
+    fn certificate_shape() -> CbcPrefixCertificate {
+        CbcPrefixCertificate {
+            point_count: 5,
+            prefix: vec![1, 1],
+            winning_score_limbs: vec![1],
+            tie_class: vec![1],
+            runner_up: None,
+            denominator_exponent: 2,
+            tie_rule: TIE_RULE_LOWEST_CANDIDATE,
+            admissible_rule: ADMISSIBLE_RULE_UNITS,
+        }
     }
 
     #[test]
@@ -1385,5 +1409,34 @@ mod authority_tests {
             CbcExecutor::new(uncovered),
             Err(CbcExecError::AdmissionAuthorityMismatch)
         ));
+    }
+
+    #[test]
+    fn g0_certificate_checker_rejects_stale_or_mutated_authority() {
+        let certificate = certificate_shape();
+
+        let mut stale_schema = certified_receipt();
+        stale_schema.schema_version = CBC_ADMISSION_SCHEMA_VERSION - 1;
+        assert_eq!(
+            verify_consistency_admitted(stale_schema, &certificate),
+            Err(CbcCertError::AdmissionMismatch)
+        );
+
+        let mut stale_certificate_schema = certified_receipt();
+        stale_certificate_schema.estimate.certificate_schema_version -= 1;
+        assert_eq!(
+            verify_consistency_admitted(stale_certificate_schema, &certificate),
+            Err(CbcCertError::AdmissionMismatch)
+        );
+
+        let mut changed_schedule = certified_receipt();
+        changed_schedule
+            .estimate
+            .execution_schedule
+            .candidate_visit_units += 1;
+        assert_eq!(
+            verify_consistency_admitted(changed_schedule, &certificate),
+            Err(CbcCertError::AdmissionMismatch)
+        );
     }
 }

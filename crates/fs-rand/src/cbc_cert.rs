@@ -21,18 +21,27 @@
 //! - [`audit_minimality`] rescans every admissible candidate at the
 //!   declared prefix (`O(n²)` exact work per certificate): the full
 //!   minimality proof by exhaustion.
+//! - [`verify_consistency_admitted`] and [`audit_minimality_admitted`] first
+//!   require a current certified CBC admission whose problem covers the
+//!   declared prefix, then bound every hostile vector length before invoking
+//!   the corresponding checker.
 //!
-//! NO-CLAIM: a compact sub-quadratic minimality proof (branch-and-bound /
-//! sheaf-glued sections) is the bead's [M] ratchet, not this tranche; the
-//! first component's unit-residue-permutation theorem certificate is the
-//! [F] ratchet, so certificates here start at the first SCANNED component.
-//! Certificates are plain data with no fs-blake3 identity minting; identity
-//! governance for durable certificate stores belongs to consumers.
+//! NO-CLAIM: the legacy checker entry points do not require admission. A
+//! receipt supplied to an admitted checker bounds one call's problem shape and
+//! hostile vector lengths, but it is not a consumable meter and does not claim
+//! checker debit equality with the executor schedule. A compact sub-quadratic
+//! minimality proof (branch-and-bound / sheaf-glued sections) is the bead's [M]
+//! ratchet, not this tranche; the first component's unit-residue-permutation
+//! theorem certificate is the [F] ratchet, so certificates here start at the
+//! first SCANNED component. Certificates are plain data with no fs-blake3
+//! identity minting; identity governance for durable certificate stores
+//! belongs to consumers.
 
+use crate::cbc::{CbcAdmission, CbcExecutionMode};
 use crate::qmc::{ExactNat, exact_kernel_numerator, gcd, lattice_residue};
 
 /// Version of the certificate schema and checker semantics.
-pub const CBC_CERTIFICATE_SCHEMA_VERSION: u32 = 1;
+pub const CBC_CERTIFICATE_SCHEMA_VERSION: u32 = 2;
 
 /// The declared tie rule token (the only rule this schema admits).
 pub const TIE_RULE_LOWEST_CANDIDATE: &str = "lowest-candidate-wins";
@@ -87,6 +96,19 @@ impl CbcPrefixCertificate {
 /// lands in exactly one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CbcCertError {
+    /// The supplied CBC receipt is stale, construction-only, or for another
+    /// point count.
+    AdmissionMismatch,
+    /// A public certificate vector exceeds the certified admission's checked
+    /// logical envelope and is refused before checker allocation/work.
+    AdmissionEnvelopeExceeded {
+        /// Stable certificate storage class.
+        storage_class: &'static str,
+        /// Declared elements.
+        required: u128,
+        /// Elements covered by the receipt.
+        admitted: u128,
+    },
     /// The prefix was empty or the certified component is the theorem-fixed
     /// first component (certificates start at the first scanned component).
     MalformedPrefix,
@@ -118,6 +140,61 @@ pub enum CbcCertError {
     },
     /// Full audit: the true equality class differs from the declaration.
     TieClassIncomplete,
+}
+
+fn validate_admission(
+    admission: CbcAdmission,
+    certificate: &CbcPrefixCertificate,
+) -> Result<(), CbcCertError> {
+    if !admission.has_current_authority()
+        || admission.mode() != CbcExecutionMode::Certified
+        || admission.problem().point_count() != certificate.point_count
+        || admission.estimate().certificate_schema_version() != CBC_CERTIFICATE_SCHEMA_VERSION
+    {
+        return Err(CbcCertError::AdmissionMismatch);
+    }
+    let estimate = admission.estimate();
+    envelope_bound(
+        "prefix words",
+        certificate.prefix.len(),
+        admission.problem().dimension(),
+    )?;
+    envelope_bound(
+        "winning score limbs",
+        certificate.winning_score_limbs.len(),
+        usize::try_from(estimate.score_capacity_limbs())
+            .map_err(|_| CbcCertError::AdmissionMismatch)?,
+    )?;
+    envelope_bound(
+        "tie-class words",
+        certificate.tie_class.len(),
+        usize::try_from(estimate.admissible_candidates_per_prefix())
+            .map_err(|_| CbcCertError::AdmissionMismatch)?,
+    )?;
+    if let Some((runner_limbs, _)) = &certificate.runner_up {
+        envelope_bound(
+            "runner-up score limbs",
+            runner_limbs.len(),
+            usize::try_from(estimate.score_capacity_limbs())
+                .map_err(|_| CbcCertError::AdmissionMismatch)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn envelope_bound(
+    storage_class: &'static str,
+    required: usize,
+    admitted: usize,
+) -> Result<(), CbcCertError> {
+    if required > admitted {
+        return Err(CbcCertError::AdmissionEnvelopeExceeded {
+            storage_class,
+            required: u128::try_from(required).map_err(|_| CbcCertError::AdmissionMismatch)?,
+            admitted: u128::try_from(admitted).map_err(|_| CbcCertError::AdmissionMismatch)?,
+        });
+    }
+    Ok(())
 }
 
 /// Recompute the prefix products (the reduction root) from `(n, prefix)`.
@@ -192,6 +269,40 @@ fn structural<'a>(certificate: &'a CbcPrefixCertificate) -> Result<&'a [u32], Cb
         }
     }
     Ok(&certificate.prefix[..certificate.prefix.len() - 1])
+}
+
+/// Admission-gated compact consistency check. The certified receipt must be
+/// current, match `point_count`, cover at least the declared prefix dimension,
+/// and bound every public vector before the checker performs allocation or
+/// exact arithmetic. The receipt is a conservative problem/input-shape
+/// authority, not an assertion that checker work debits equal the executor
+/// schedule; certificate input storage is caller-owned and already allocated.
+///
+/// # Errors
+/// [`CbcCertError::AdmissionMismatch`] or
+/// [`CbcCertError::AdmissionEnvelopeExceeded`] before checker work, otherwise
+/// the first semantic [`CbcCertError`] from [`verify_consistency`].
+pub fn verify_consistency_admitted(
+    admission: CbcAdmission,
+    certificate: &CbcPrefixCertificate,
+) -> Result<(), CbcCertError> {
+    validate_admission(admission, certificate)?;
+    verify_consistency(certificate)
+}
+
+/// Admission-gated full minimality audit. The same certified receipt and
+/// hostile-input bounds as [`verify_consistency_admitted`] apply before the
+/// exhaustive candidate rescan.
+///
+/// # Errors
+/// Admission/envelope mismatch or the first semantic [`CbcCertError`] from
+/// [`audit_minimality`].
+pub fn audit_minimality_admitted(
+    admission: CbcAdmission,
+    certificate: &CbcPrefixCertificate,
+) -> Result<(), CbcCertError> {
+    validate_admission(admission, certificate)?;
+    audit_minimality(certificate)
 }
 
 /// Compact consistency check: recompute the declared candidates' exact
