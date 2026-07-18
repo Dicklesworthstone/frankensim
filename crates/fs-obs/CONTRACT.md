@@ -218,6 +218,12 @@ privilege downgrade.
   independently authenticate committed artifacts. `DurableArtifactPointer`
   records constructor-level admission; it cannot prove an external store
   truthful by itself.
+- `check-casual-print` lexes workspace Rust source fail-closed, treats comments
+  as trivia, recognizes structurally attached exact `cfg(test)` item scopes,
+  rejects protected-macro renames, and ratchets each pre-policy emitter by one
+  unique function body plus exact normalized invocation tokens. It makes no
+  semantic claim about output hidden inside an external or generated macro
+  whose protected spelling is absent from workspace source.
 - `privacy` is a labeled-data policy core, not a secret detector, cryptographic
   implementation, access-control service, jurisdiction engine, or artifact
   scanner. External salted/keyed tokens remain caller assertions until an
