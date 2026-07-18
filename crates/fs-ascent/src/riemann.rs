@@ -512,6 +512,13 @@ impl RiemannianLbfgs {
         assert_valid_stop_rule(rule);
         self.assert_valid_state();
         let hard_budget = evaluation_budget(rule);
+        if let Some(budget) = hard_budget {
+            assert!(
+                budget >= self.evals,
+                "evaluation budget {budget} cannot underwrite {} callbacks already retained by the Riemannian state",
+                self.evals,
+            );
+        }
         let mut reason = StopReason::IterationCap;
         let initial = StopObservation {
             grad_norm: inf_norm(&self.g),
@@ -759,6 +766,29 @@ mod tests {
             report.iters, 0,
             "failed search must not partially mutate state"
         );
+    }
+
+    #[test]
+    fn absolute_budget_cannot_underwrite_existing_state() {
+        let calls = Cell::new(0usize);
+        let mut objective = |x: &[f64]| {
+            calls.set(calls.get() + 1);
+            (0.5 * x[0] * x[0], vec![x[0]])
+        };
+        let mut state = RiemannianLbfgs::new(Manifold::Rn { dim: 1 }, &[1.0], 4, &mut objective);
+        assert_eq!(calls.get(), 1, "construction retains its initial callback");
+
+        let refusal = catch_unwind(AssertUnwindSafe(|| {
+            state.run(&mut objective, &StopRule::Budget(0), 10)
+        }));
+        assert!(
+            refusal.is_err(),
+            "an absolute budget below already-spent state must refuse"
+        );
+        assert_eq!(calls.get(), 1, "refusal must occur before another callback");
+        assert_eq!(state.evals, 1);
+        assert_eq!(state.iters, 0);
+        assert_eq!(state.history, vec![0.5]);
     }
 
     #[test]
