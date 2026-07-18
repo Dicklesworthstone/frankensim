@@ -51,25 +51,44 @@ surfaces. It runs each named integration target separately so one failure does
 not hide the remaining rows. The `nightly` profile runs the complete
 `fs-ascent` package with Cargo fail-fast disabled, so newly added integration
 targets join nightly coverage without hand-maintained selector drift. Both use
-`--locked` and emit structured start, per-target, and terminal profile rows.
+`--locked`. Python 3 is required for the process supervisor; `--list` remains a
+non-executing selector description and labels its output unsealed.
 
-The default aggregate wall budgets are 900 seconds for `pr` and 7200 seconds
-for `nightly`; `FS_ASCENT_PR_BUDGET_SECONDS` and
+The default aggregate monotonic budgets are 900 seconds for `pr` and 7200
+seconds for `nightly`; `FS_ASCENT_PR_BUDGET_SECONDS` and
 `FS_ASCENT_NIGHTLY_BUDGET_SECONDS` may override them for an explicitly declared
-host policy. Elapsed time intentionally includes compilation. The runner checks
-one aggregate deadline before every target and while each Cargo child is live.
-At the deadline it sends TERM, then bounded KILL if needed, to only the process
-group and descendant PIDs it launched; it waits until that owned tree is drained
-before returning. The timed-out target and terminal run rows both report
-`status: "budget_exceeded"`, including whether drain completed, and the PR
-profile never launches a later target after the deadline. Exceeding the
-effective budget therefore makes the profile fail even when prior assertions
-passed. `--self-test` deterministically exercises the passing and timed-out
-paths with an internal fake clock and fake process tree; it never invokes
-Cargo. This is a scheduling guard, not a benchmark or cross-ISA performance
-claim. The runner is a callable lane rather than an additional unconditional
-invocation inside the workspace-wide quality script, avoiding duplicate Cargo
-work when the full DSR gate already owns package execution.
+host policy. Elapsed time intentionally includes compilation and test execution.
+Each Cargo target starts in a new session and process group. The supervisor pins
+the unreaped leader identity while inspecting that group, forwards HUP, INT, or
+TERM, and uses bounded grace and KILL-drain intervals. A deadline failure stops
+later PR targets from launching. A completely drained deadline exits 124; an
+incomplete drain fails closed with 125 or 127. Launch failure exits 126, ordinary
+test failure exits 1, and handled HUP, INT, and TERM exit 129, 130, and 143.
+
+Every execution gets a unique retained directory below
+`FS_ASCENT_PROFILE_LOG_DIR` (default
+`target/ascent-conformance-profile`). Child stdout and stderr go only to a
+per-target log; canonical run-start, target-result, run-summary, and proof-seal
+rows go to the authoritative `verdicts.jsonl` and are mirrored to stdout. Target
+rows retain the exact argument vector, log hash and size, and the leader's exact
+exit code or signal. The terminal, exactly-once proof seal hashes every preceding
+JSONL byte and records source identities observed before and after execution:
+HEAD, HEAD tree, index, materialized tracked/untracked tree, Git status,
+`Cargo.lock`, and `constellation.lock`. A proof is `sealed` only when those
+identities match; source drift fails closed with exit 127.
+
+`FS_ASCENT_TERMINATION_GRACE_SECONDS` and
+`FS_ASCENT_KILL_DRAIN_SECONDS` bound shutdown. Containment claims cover only the
+new session/process group: a descendant that deliberately escapes into another
+session is outside the claim. SIGKILL of the supervisor, host failure, or power
+loss can also prevent a terminal seal; an absent seal is not proof. `--self-test`
+uses fake executables only—never real Cargo—and covers clean passage, paths with
+spaces, stdout isolation, exact nonzero-exit mapping, launch failure, a stubborn
+child/grandchild deadline, HUP/INT/TERM forwarding, and the incomplete-exit seal
+guard. Its artifacts are retained and reported rather than deleted. This lane is
+a scheduling and evidence guard, not a benchmark or cross-ISA performance
+claim. It remains callable instead of duplicating package execution inside the
+workspace-wide DSR quality gate.
 
 ### Casebook conformance profiles
 
