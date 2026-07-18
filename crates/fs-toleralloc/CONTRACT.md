@@ -176,16 +176,18 @@ strictly convex optimum is
 The implementation evaluates this formula with deterministic max-shifted
 log-sum-exp, stable ordinal order, compensated public sums, and one common
 binary64 scale correction that preserves every KKT ratio while tightening the
-published budget residual. It refuses a vanished positive max-shifted
-log-sum-exp tail, including a nonzero tail lost only by final compensated-sum
-rounding or by reconstruction against the dominant log term, and refuses a
-zero coherent-minus-independent delta for any multi-member group or grouped
-model because its positive loading cross terms make the exact delta strictly
-positive. It also refuses nonrepresentable tolerance/loading/cost/variance,
-empty or oversized group and feature tables (128 each), empty groups, unstable
-or colliding names, invalid
-group references, and nonpositive/non-finite inputs. No iterative optimizer or
-callback is used.
+published budget residual. Every positive max-shifted log-sum-exp contribution
+must make both the common-scale deterministic sum and the independently
+re-centered reconstructed LSE strictly larger than their leave-one-out
+counterfactuals. Evaluation therefore refuses any individually erased term,
+including a smaller tail masked by another tail that keeps the aggregate above
+the dominant term. It also refuses a zero coherent-minus-independent delta for
+any multi-member group or grouped model
+because its positive loading cross terms make the exact delta strictly
+positive, plus nonrepresentable tolerance/loading/cost/variance, empty or
+oversized group and feature tables (128 each), empty groups, unstable or
+colliding names, invalid group references, and nonpositive/non-finite inputs.
+No iterative optimizer or callback is used.
 
 The privately constructed receipt retains the exact caller model and identity,
 budget, `k`, feature order and membership, tolerances, baseline actions, costs,
@@ -205,7 +207,9 @@ budget by a large margin. An unequal coherent pair independently checks the
 within-group sensitivity/cost ratio and receipt closure. The battery also
 covers common sensitivity and cost rescaling, singleton reduction, exact
 retained replay, group/name/reference admission, positive-domain refusals, and
-lost log-domain contribution refusal.
+whole-tail, individually masked-tail, and reconstruction-stage log-domain
+contribution refusals. A source-local unit test directly exercises both the
+group-scoped and model-scoped zero dependency-delta guards.
 
 Group membership and perfect `+1` dependence are supplied assertions, not
 inferred or calibrated facts. This lane makes no negative/partial correlation,

@@ -466,3 +466,104 @@ fn grouped_allocation_refuses_bad_scalars_and_lost_log_contributions() {
         })
     );
 }
+
+#[test]
+fn grouped_allocation_refuses_one_masked_lse_term_despite_a_visible_aggregate_tail() {
+    // The epsilon contribution moves the sum above 1.0, so aggregate-only
+    // guards pass. The smaller 3/8-ULP term is nevertheless erased: including
+    // it produces the same binary64 scaled sum as omitting it, even though its
+    // exact coherent cross terms move the correctly rounded variance by one
+    // additional ULP.
+    let visible = f64::EPSILON;
+    let masked = 3.0 * f64::EPSILON / 8.0;
+    let visible_sum = 1.0 + visible;
+    assert_eq!((visible_sum + masked).to_bits(), visible_sum.to_bits());
+
+    let visible_variance_increment = 2.0 * visible + visible * visible;
+    let complete_tail = visible + masked;
+    let complete_variance_increment = 2.0 * complete_tail + complete_tail * complete_tail;
+    assert_eq!(
+        (1.0 + visible_variance_increment).to_bits(),
+        1.0_f64.to_bits() + 2
+    );
+    assert_eq!(
+        (1.0 + complete_variance_increment).to_bits(),
+        1.0_f64.to_bits() + 3
+    );
+
+    let model = GroupedDependenceModel {
+        identity: GroupedDependenceIdentity::try_new(
+            "gear/masked-positive-shape-tail",
+            nz(1),
+            [0x5a; 32],
+        )
+        .expect("fixture identity is canonical"),
+        groups: vec![DependencyGroup {
+            key: "coherent-triple".into(),
+        }],
+        features: vec![
+            GroupedFeature {
+                feature: feature("dominant", 1.0, 1.0),
+                group: DependencyGroupId(0),
+            },
+            GroupedFeature {
+                feature: feature("visible-tail", visible, visible),
+                group: DependencyGroupId(0),
+            },
+            GroupedFeature {
+                feature: feature("masked-tail", masked, masked),
+                group: DependencyGroupId(0),
+            },
+        ],
+    };
+    assert_eq!(
+        allocate_grouped(&model, 1.0, 1.0),
+        Err(GroupedAllocationError::InvalidDerived {
+            quantity: GroupedDerivedQuantity::LogSumExpContribution,
+            feature_index: None,
+            group: Some(DependencyGroupId(0)),
+            issue: ScalarIssue::Underflow,
+        })
+    );
+}
+
+#[test]
+fn grouped_allocation_refuses_tail_erased_only_during_lse_reconstruction() {
+    // At the scaled-sum stage this ratio is a full ULP and therefore visible.
+    // Reconstructing against ln(MAX), whose local ULP is hundreds of times
+    // larger, erases the positive logarithmic increment and must fail closed.
+    let dominant = f64::MAX;
+    let visible_tail = dominant * f64::EPSILON;
+    assert!(visible_tail.is_finite() && visible_tail > 0.0);
+    assert_eq!((visible_tail / dominant).to_bits(), f64::EPSILON.to_bits());
+    let model = GroupedDependenceModel {
+        identity: GroupedDependenceIdentity::try_new(
+            "gear/reconstructed-positive-shape-tail",
+            nz(1),
+            [0x5c; 32],
+        )
+        .expect("fixture identity is canonical"),
+        groups: vec![DependencyGroup {
+            key: "coherent-pair".into(),
+        }],
+        features: vec![
+            GroupedFeature {
+                feature: feature("dominant", dominant, dominant),
+                group: DependencyGroupId(0),
+            },
+            GroupedFeature {
+                feature: feature("visible-tail", visible_tail, visible_tail),
+                group: DependencyGroupId(0),
+            },
+        ],
+    };
+    assert_eq!(
+        allocate_grouped(&model, 1.0, 1.0),
+        Err(GroupedAllocationError::InvalidDerived {
+            quantity: GroupedDerivedQuantity::LogSumExpContribution,
+            feature_index: None,
+            group: Some(DependencyGroupId(0)),
+            issue: ScalarIssue::Underflow,
+        })
+    );
+}

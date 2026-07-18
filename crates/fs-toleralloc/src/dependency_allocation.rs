@@ -721,6 +721,32 @@ fn validate_nonnegative_derived(
     }
 }
 
+fn validate_dependency_variance_delta(
+    group: Option<DependencyGroupId>,
+    has_coherent_cross_terms: bool,
+    value: f64,
+) -> Result<(), GroupedAllocationError> {
+    validate_nonnegative_derived(
+        GroupedDerivedQuantity::DependencyVarianceDelta,
+        None,
+        group,
+        value,
+    )?;
+    // Every pair of strictly positive coherent loadings contributes the
+    // strictly positive cross term 2 a_i a_j. A multi-member group, or a
+    // grouped model containing one, can therefore never have an exact zero
+    // coherent-minus-independent delta.
+    if has_coherent_cross_terms && value == 0.0 {
+        return Err(invalid_derived(
+            GroupedDerivedQuantity::DependencyVarianceDelta,
+            None,
+            group,
+            ScalarIssue::Underflow,
+        ));
+    }
+    Ok(())
+}
+
 fn compensated_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut sum = 0.0_f64;
     let mut correction = 0.0_f64;
@@ -771,7 +797,7 @@ fn log_sum_exp(
         }
         scaled_terms.push(scaled);
     }
-    let scaled_sum = compensated_sum(scaled_terms);
+    let scaled_sum = compensated_sum(scaled_terms.iter().copied());
     if !scaled_sum.is_finite() || scaled_sum <= 0.0 {
         return Err(invalid_derived(
             quantity,
@@ -812,6 +838,91 @@ fn log_sum_exp(
             group,
             ScalarIssue::Underflow,
         ));
+    }
+    // Aggregate monotonicity is insufficient: one visible tail term can move
+    // the sum while a smaller retained term vanishes behind it. Audit every
+    // contribution against the deterministic leave-one-out counterfactual.
+    // The full scaled sum and reconstructed LSE must each be strictly greater
+    // than their counterpart without that positive term. The quadratic audit
+    // is bounded by the schema's 128-term maximum.
+    if scaled_terms.len() > 1 {
+        for omitted_index in 0..scaled_terms.len() {
+            let leave_one_out_sum = compensated_sum(
+                scaled_terms
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted_index)
+                    .map(|(_, scaled)| *scaled),
+            );
+            if !leave_one_out_sum.is_finite() {
+                return Err(invalid_derived(
+                    GroupedDerivedQuantity::LogSumExpContribution,
+                    None,
+                    group,
+                    ScalarIssue::NonFinite,
+                ));
+            }
+            if leave_one_out_sum <= 0.0 || scaled_sum <= leave_one_out_sum {
+                return Err(invalid_derived(
+                    GroupedDerivedQuantity::LogSumExpContribution,
+                    None,
+                    group,
+                    ScalarIssue::Underflow,
+                ));
+            }
+            // Re-center the reconstructed counterfactual on its own maximum.
+            // The common-scale sum above audits accumulation influence; this
+            // independent max shift audits the actual leave-one-out LSE
+            // without inheriting avoidable precision loss when the omitted
+            // term is the unique maximum.
+            let leave_one_out_maximum = terms
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != omitted_index)
+                .map(|(_, term)| *term)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let leave_one_out_recentered_sum = compensated_sum(
+                terms
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted_index)
+                    .map(|(_, term)| det::exp(*term - leave_one_out_maximum)),
+            );
+            if !leave_one_out_recentered_sum.is_finite() {
+                return Err(invalid_derived(
+                    GroupedDerivedQuantity::LogSumExpContribution,
+                    None,
+                    group,
+                    ScalarIssue::NonFinite,
+                ));
+            }
+            if leave_one_out_recentered_sum <= 0.0 {
+                return Err(invalid_derived(
+                    GroupedDerivedQuantity::LogSumExpContribution,
+                    None,
+                    group,
+                    ScalarIssue::Underflow,
+                ));
+            }
+            let leave_one_out_result =
+                leave_one_out_maximum + det::ln(leave_one_out_recentered_sum);
+            if !leave_one_out_result.is_finite() {
+                return Err(invalid_derived(
+                    GroupedDerivedQuantity::LogSumExpContribution,
+                    None,
+                    group,
+                    ScalarIssue::NonFinite,
+                ));
+            }
+            if result <= leave_one_out_result {
+                return Err(invalid_derived(
+                    GroupedDerivedQuantity::LogSumExpContribution,
+                    None,
+                    group,
+                    ScalarIssue::Underflow,
+                ));
+            }
+        }
     }
     Ok(result)
 }
@@ -1144,24 +1255,7 @@ pub fn allocate_grouped(
             independent_variance,
         )?;
         let dependency_variance_delta = variance - independent_variance;
-        validate_nonnegative_derived(
-            GroupedDerivedQuantity::DependencyVarianceDelta,
-            None,
-            Some(id),
-            dependency_variance_delta,
-        )?;
-        // Every pair of strictly positive coherent loadings contributes the
-        // strictly positive cross term 2 a_i a_j. A multi-member group can
-        // therefore never have an exact zero coherent-minus-independent
-        // delta; zero here means binary64 subtraction erased the dependence.
-        if members.len() > 1 && dependency_variance_delta == 0.0 {
-            return Err(invalid_derived(
-                GroupedDerivedQuantity::DependencyVarianceDelta,
-                None,
-                Some(id),
-                ScalarIssue::Underflow,
-            ));
-        }
+        validate_dependency_variance_delta(Some(id), members.len() > 1, dependency_variance_delta)?;
         let total_cost =
             compensated_sum(members.iter().map(|index| items[*index].cost_contribution));
         validate_positive_derived(
@@ -1221,20 +1315,11 @@ pub fn allocate_grouped(
         independent_variance,
     )?;
     let dependency_variance_delta = achieved_variance - independent_variance;
-    validate_nonnegative_derived(
-        GroupedDerivedQuantity::DependencyVarianceDelta,
+    validate_dependency_variance_delta(
         None,
-        None,
+        group_features.iter().any(|members| members.len() > 1),
         dependency_variance_delta,
     )?;
-    if group_features.iter().any(|members| members.len() > 1) && dependency_variance_delta == 0.0 {
-        return Err(invalid_derived(
-            GroupedDerivedQuantity::DependencyVarianceDelta,
-            None,
-            None,
-            ScalarIssue::Underflow,
-        ));
-    }
 
     let mut stationarity_terms = Vec::with_capacity(model.features.len());
     for (index, grouped) in model.features.iter().enumerate() {
@@ -1288,4 +1373,28 @@ pub fn allocate_grouped(
         dependency_variance_delta,
         max_stationarity_log_residual,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DependencyGroupId, GroupedAllocationError, GroupedDerivedQuantity, ScalarIssue,
+        validate_dependency_variance_delta,
+    };
+
+    #[test]
+    fn coherent_dependency_delta_guard_refuses_zero_at_group_and_model_scope() {
+        for group in [Some(DependencyGroupId(3)), None] {
+            assert_eq!(
+                validate_dependency_variance_delta(group, true, 0.0),
+                Err(GroupedAllocationError::InvalidDerived {
+                    quantity: GroupedDerivedQuantity::DependencyVarianceDelta,
+                    feature_index: None,
+                    group,
+                    issue: ScalarIssue::Underflow,
+                })
+            );
+        }
+        assert_eq!(validate_dependency_variance_delta(None, false, 0.0), Ok(()));
+    }
 }

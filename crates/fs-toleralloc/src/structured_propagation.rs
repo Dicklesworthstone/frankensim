@@ -327,7 +327,8 @@ pub enum StructuredNumericIssue {
     NonFinite,
     /// Exact zero used the noncanonical negative-zero encoding.
     NonCanonicalNegativeZero,
-    /// A nonzero product or rescaling rounded to zero.
+    /// A nonzero result or retained distinction was erased by binary64
+    /// arithmetic.
     Underflow,
     /// A normalized mean escaped the convex hull scale because of arithmetic.
     OutsideNormalizedRange,
