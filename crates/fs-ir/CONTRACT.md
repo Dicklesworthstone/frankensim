@@ -622,6 +622,56 @@ admitted derived-geometry boundary.
   authenticate presentation links, calibrate metrology, prove assembly
   feasibility, or transport datum attachments across lineage. A successor graph
   must readmit both body and feature attachments before reusing a declaration.
+- `machine::manufacturing::surface_texture` is the additive native
+  surface-texture seed. `MachineSurfaceTextureDraftV1::admit_against` binds one
+  exact admitted Machine graph to at most 4,096 semantic design requirements
+  and 4,096 separately typed as-built observations. Every requirement names an
+  explicit body and durable surface patch; admission proves only that both
+  exist and share one subsystem owner, not that the patch is geometrically
+  contained on the body. Duplicate IDs and duplicate `(surface, metric)`
+  selectors refuse, so a catalog cannot silently carry two effective limits
+  for one Ra/Rq/Rz/Rt selector.
+- A requirement binds its limit form and unit-bearing values, filter cutoff,
+  evaluation length, exact filter interpretation, nominal lay and optional
+  frame/orientation, material-removal declaration, exact standard/model
+  coordinate, semantic source, and optional presentation. Semantic source and
+  presentation are disjoint nominal Rust types: a graphical presentation link
+  cannot inhabit the machine-readable semantic-source field. `Unspecified` and
+  non-directional `Particulate` lay require no frame; every other lay tag
+  requires one nominal frame.
+- A `SurfaceTextureLengthV1` retains canonical binary64 source bits and the
+  submitted metre/millimetre/micrometre/nanometre unit plus the deterministic
+  binary64 multiplication result in coherent SI metres. This is identity
+  preservation, not exact decimal or rational unit conversion: physically
+  equivalent source spellings remain distinct aggregate inputs even when their
+  retained SI bits agree. Inch and microinch are unsupported in version one.
+- Observations bind their own metric, actual cutoff/evaluation lengths, exact
+  filter interpretation, measured value, standard uncertainty, measurement
+  coordinate, and calibration/context coordinate. Admission requires metric,
+  normalized cutoff/evaluation bits, and filter coordinate to match the named
+  requirement. The measurement and calibration roles are nominally disjoint.
+  Measured values above or below a design limit are retained rather than
+  rejected: this module deliberately publishes no pass/fail or acceptance
+  authority.
+- `MachineSurfaceTextureIdV1` binds the surface-texture schema and FrankenScript
+  IR versions, exact graph identity, and every canonical requirement and
+  observation field above. Caller collection order is non-semantic; admitted
+  collections are sorted by checked IDs. Raw exact-cap inputs admit, while
+  one-over inputs refuse before duplicate processing.
+  `tests/machine_manufacturing_surface_texture.rs` supplies G0/G3/G5 evidence
+  for role/type separation, SI-unit matching with source-unit retention,
+  identity-field mutation and replay, duplicate/ownership/relationship and
+  observation-context refusal, over-limit observation retention, and the
+  simultaneous exact resource boundary.
+- This structural seed does not prove patch containment or physically resolve a
+  lay frame, origin, or axis. It does not execute a profile filter, establish
+  sampling sufficiency, stylus or form-removal suitability, uncertainty
+  validity, metrology acceptance, or calibration authenticity/traceability. It
+  does not parse or emit AP242, approve drawings, establish ISO/ASME conformance,
+  authenticate artifacts, prove process execution/manufacturability, convert
+  between texture metrics, infer friction/wear/wetting/contact conductance, or
+  transport attachments across lineage. Circular and radial lay tags remain
+  nominal declarations interpreted only by their exact external coordinates.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a
