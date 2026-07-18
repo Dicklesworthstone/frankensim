@@ -7,8 +7,14 @@
 //! final two-member purge. Every candidate has a distinct decision payload.
 //! The retained trajectory binds every public before/after member order and
 //! objective/decision bit, public hypervolume bit, independently computed
-//! denominator-256 area and exclusive contribution, branch reason, purge, and
-//! capacity-eviction choice.
+//! denominator-256 area and exclusive contribution. Branch reason, purge, and
+//! capacity-eviction records are explicitly ORACLE EXPECTATIONS reconstructed
+//! from public before/candidate data; `HvArchive::insert` exposes no internal
+//! branch receipt, so this target never presents those projections as observed
+//! production facts. For each over-capacity projected pre-state, a separate
+//! retained cross-check calls public production `hypervolume` for the full set
+//! and every leave-one-out set and compares the exact binary64 results with the
+//! integer denominator-256 oracle.
 //!
 //! The oracle below is deliberately integer-only: it enumerates the 16 by 16
 //! reference grid and implements minimization dominance itself. It calls
@@ -22,12 +28,13 @@
 //! malformed, non-finite, or outside-reference policy; Monte Carlo
 //! contribution eviction; optimizer convergence or archive quality; sealed
 //! public state; allocation, `Cx`, or cancellation behavior; cross-ISA
-//! authority; authenticated persistence; or performance.
+//! authority; authenticated persistence; performance; or authority over the
+//! unobservable internal purge/rejection/eviction branch path.
 
 #![deny(unsafe_code)]
 
 use fs_blake3::{ContentHash, hash_domain};
-use fs_dfo::{HvArchive, Individual};
+use fs_dfo::{HvArchive, Individual, hypervolume};
 use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
 use fs_obs::{Emitter, Event, EventKind, Severity};
 use fs_rand::StreamKey;
@@ -37,13 +44,13 @@ const SUITE: &str = "fs-dfo/hv-archive-study-replay";
 const CASE: &str = "capacity-two-dyadic-full-lifecycle";
 const RED_CASE: &str = "seeded-retained-checkpoint-corruption";
 
-const FIXTURE_IDENTITY_KIND: &str = "fs-dfo-hv-archive-fixture-v1";
-const RESULT_IDENTITY_KIND: &str = "fs-dfo-hv-archive-result-v1";
-const FIXTURE_DIGEST_DOMAIN: &str = "frankensim.fs-dfo.hv-archive-fixture.v1";
-const RESULT_DIGEST_DOMAIN: &str = "frankensim.fs-dfo.hv-archive-result.v1";
-const EVENT_DIGEST_DOMAIN: &str = "frankensim.fs-dfo.hv-archive-event.v1";
+const FIXTURE_IDENTITY_KIND: &str = "fs-dfo-hv-archive-fixture-v2";
+const RESULT_IDENTITY_KIND: &str = "fs-dfo-hv-archive-result-v2";
+const FIXTURE_DIGEST_DOMAIN: &str = "frankensim.fs-dfo.hv-archive-fixture.v2";
+const RESULT_DIGEST_DOMAIN: &str = "frankensim.fs-dfo.hv-archive-result.v2";
+const EVENT_DIGEST_DOMAIN: &str = "frankensim.fs-dfo.hv-archive-event.v2";
 const SUPPLIED_FIXTURE_DIGEST_TRIPWIRE_DOMAIN: &str =
-    "frankensim.fs-dfo.hv-archive-supplied-fixture-digest-tripwire.v1";
+    "frankensim.fs-dfo.hv-archive-supplied-fixture-digest-tripwire.v2";
 
 const CAPACITY: usize = 2;
 const OBJECTIVES: usize = 2;
@@ -66,7 +73,8 @@ const MUTABLE_STATE_CELLS: [(usize, usize, usize); 4] = [
     (7, 0, 0), // after F: F.f0
 ];
 
-const NO_CLAIMS: &str = "arbitrary-dimensions-capacities-fronts;malformed-nonfinite-outside-reference-policy;mc-contribution-eviction;optimizer-convergence-archive-quality;sealed-public-state;allocation-Cx-cancellation;cross-ISA-authority;authenticated-persistence;performance";
+const NO_CLAIMS: &str = "arbitrary-dimensions-capacities-fronts;malformed-nonfinite-outside-reference-policy;mc-contribution-eviction;optimizer-convergence-archive-quality;sealed-public-state;allocation-Cx-cancellation;cross-ISA-authority;authenticated-persistence;performance;internal-purge-rejection-eviction-branch-authority";
+const ORACLE_BRANCH_PROVENANCE: &str = "integer-oracle-expectation-not-production-observation";
 
 const _: () = assert!(CAPACITY == 2);
 const _: () = assert!(OBJECTIVES == 2);
@@ -106,12 +114,12 @@ struct Checkpoint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RejectionKind {
+enum OracleRejectionKind {
     DuplicateObjective,
     DominatedByMember,
 }
 
-impl RejectionKind {
+impl OracleRejectionKind {
     const fn name(self) -> &'static str {
         match self {
             Self::DuplicateObjective => "duplicate-objective",
@@ -121,24 +129,24 @@ impl RejectionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Rejection {
-    kind: RejectionKind,
+struct OracleRejectionExpectation {
+    kind: OracleRejectionKind,
     blocker_index: usize,
     blocker: IndividualBits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PurgedMember {
+struct OraclePurgedMemberExpectation {
     prior_index: usize,
     member: IndividualBits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapacityEvictionReason {
+enum OracleCapacityEvictionReason {
     LeastExclusiveHypervolumeContributor,
 }
 
-impl CapacityEvictionReason {
+impl OracleCapacityEvictionReason {
     const fn name(self) -> &'static str {
         match self {
             Self::LeastExclusiveHypervolumeContributor => "least-exclusive-hypervolume-contributor",
@@ -147,8 +155,8 @@ impl CapacityEvictionReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CapacityEviction {
-    reason: CapacityEvictionReason,
+struct OracleCapacityEvictionExpectation {
+    reason: OracleCapacityEvictionReason,
     selected_index: usize,
     selected: IndividualBits,
     contribution_units: u16,
@@ -156,16 +164,39 @@ struct CapacityEviction {
     candidate_evicted: bool,
 }
 
+/// Public production-hypervolume recomputation over one ORACLE-EXPECTED
+/// over-capacity pre-state. This observes the public arithmetic API, not the
+/// unexposed control-flow path taken inside `HvArchive::insert`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicHypervolumeCrossCheck {
+    oracle_full_area_units: u16,
+    oracle_leave_one_out_area_units: Vec<u16>,
+    oracle_exclusive_contribution_area_units: Vec<u16>,
+    full_hv_bits: u64,
+    leave_one_out_hv_bits: Vec<u64>,
+    exclusive_contribution_hv_bits: Vec<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TransitionRecord {
     ordinal: usize,
     candidate: IndividualBits,
+    /// Directly observed public `HvArchive::insert` return value.
     insert_returned: bool,
+    /// Directly observed public state and `HvArchive::hv` before insertion.
     before: Checkpoint,
-    pre_capacity: Checkpoint,
-    purged: Vec<PurgedMember>,
-    rejection: Option<Rejection>,
-    capacity_eviction: Option<CapacityEviction>,
+    /// Integer-oracle EXPECTATION, not an observed intermediate production state.
+    oracle_expected_pre_capacity: Checkpoint,
+    /// Integer-oracle EXPECTATION, not an observed production purge receipt.
+    oracle_expected_purged: Vec<OraclePurgedMemberExpectation>,
+    /// Integer-oracle EXPECTATION, not an observed production rejection receipt.
+    oracle_expected_rejection: Option<OracleRejectionExpectation>,
+    /// Integer-oracle EXPECTATION, not an observed production eviction receipt.
+    oracle_expected_capacity_eviction: Option<OracleCapacityEvictionExpectation>,
+    /// Direct public `hypervolume` recomputation over the oracle-expected
+    /// over-capacity set; not an observation of `insert`'s internal branch.
+    public_hypervolume_cross_check: Option<PublicHypervolumeCrossCheck>,
+    /// Directly observed public state and `HvArchive::hv` after insertion.
     after: Checkpoint,
 }
 
@@ -235,7 +266,7 @@ struct SeededCorruption {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExpectedRejection {
-    kind: RejectionKind,
+    kind: OracleRejectionKind,
     blocker_index: usize,
     blocker_candidate: usize,
 }
@@ -265,10 +296,10 @@ struct BranchExpectation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OracleStep {
     insert_returned: bool,
-    pre_capacity: Checkpoint,
-    purged: Vec<PurgedMember>,
-    rejection: Option<Rejection>,
-    capacity_eviction: Option<CapacityEviction>,
+    expected_pre_capacity: Checkpoint,
+    expected_purged: Vec<OraclePurgedMemberExpectation>,
+    expected_rejection: Option<OracleRejectionExpectation>,
+    expected_capacity_eviction: Option<OracleCapacityEvictionExpectation>,
     after: Checkpoint,
 }
 
@@ -278,6 +309,16 @@ fn usize_u64(value: usize) -> u64 {
 
 fn digest_bytes(digest: ContentHash) -> [u8; 32] {
     *digest.as_bytes()
+}
+
+fn bit_hex_json(bits: &[u64]) -> String {
+    format!(
+        "[{}]",
+        bits.iter()
+            .map(|bits| format!("\"0x{bits:016x}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn grid_value(units: u16) -> f64 {
@@ -379,7 +420,7 @@ fn branch_expectations() -> Vec<BranchExpectation> {
             candidate_index: 3,
             insert_returned: false,
             rejection: Some(ExpectedRejection {
-                kind: RejectionKind::DuplicateObjective,
+                kind: OracleRejectionKind::DuplicateObjective,
                 blocker_index: 0,
                 blocker_candidate: 1,
             }),
@@ -394,7 +435,7 @@ fn branch_expectations() -> Vec<BranchExpectation> {
             candidate_index: 4,
             insert_returned: false,
             rejection: Some(ExpectedRejection {
-                kind: RejectionKind::DominatedByMember,
+                kind: OracleRejectionKind::DominatedByMember,
                 blocker_index: 0,
                 blocker_candidate: 1,
             }),
@@ -563,6 +604,120 @@ fn public_checkpoint(archive: &HvArchive) -> Checkpoint {
     checkpoint
 }
 
+/// Recompute the exact capacity-contribution inputs through the PUBLIC
+/// production hypervolume function and compare every binary64 result against
+/// the independent integer oracle. This proves arithmetic parity for the
+/// projected set; it does not observe which internal `insert` branch ran.
+fn public_hypervolume_cross_check(
+    oracle_expected_pre_capacity: &Checkpoint,
+) -> Result<PublicHypervolumeCrossCheck, String> {
+    if oracle_expected_pre_capacity.members.len() <= CAPACITY {
+        return Err(format!(
+            "public-hypervolume-cross-check-needs-over-capacity-set:{}<={CAPACITY}",
+            oracle_expected_pre_capacity.members.len()
+        ));
+    }
+    if oracle_expected_pre_capacity
+        .exclusive_contribution_units
+        .len()
+        != oracle_expected_pre_capacity.members.len()
+    {
+        return Err(format!(
+            "public-hypervolume-cross-check-contribution-count:{}!={}",
+            oracle_expected_pre_capacity
+                .exclusive_contribution_units
+                .len(),
+            oracle_expected_pre_capacity.members.len()
+        ));
+    }
+
+    let oracle_full_area_units = oracle_area(&oracle_expected_pre_capacity.members)?;
+    if oracle_full_area_units != oracle_expected_pre_capacity.area_units {
+        return Err(format!(
+            "public-hypervolume-cross-check-oracle-full:{}!={}",
+            oracle_full_area_units, oracle_expected_pre_capacity.area_units
+        ));
+    }
+    let front: Vec<Vec<f64>> = oracle_expected_pre_capacity
+        .members
+        .iter()
+        .map(|member| member.f.iter().copied().map(f64::from_bits).collect())
+        .collect();
+    let full = hypervolume(&front, &REFERENCE);
+    let oracle_full = area_value(oracle_full_area_units);
+    if full.to_bits() != oracle_full.to_bits() {
+        return Err(format!(
+            "public-hypervolume-full:0x{:016x}!=oracle-0x{:016x}",
+            full.to_bits(),
+            oracle_full.to_bits()
+        ));
+    }
+
+    let mut leave_one_out_hv_bits = Vec::with_capacity(front.len());
+    let mut exclusive_contribution_hv_bits = Vec::with_capacity(front.len());
+    let mut oracle_leave_one_out_area_units = Vec::with_capacity(front.len());
+    let mut oracle_exclusive_contribution_area_units = Vec::with_capacity(front.len());
+    for drop_index in 0..front.len() {
+        let rest: Vec<Vec<f64>> = front
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != drop_index)
+            .map(|(_, point)| point.clone())
+            .collect();
+        let leave_one_out = hypervolume(&rest, &REFERENCE);
+        let oracle_rest: Vec<IndividualBits> = oracle_expected_pre_capacity
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != drop_index)
+            .map(|(_, member)| member.clone())
+            .collect();
+        let oracle_leave_one_out_units = oracle_area(&oracle_rest)?;
+        let oracle_contribution_units = oracle_full_area_units
+            .checked_sub(oracle_leave_one_out_units)
+            .expect("an exclusive contribution cannot exceed the oracle union area");
+        if oracle_contribution_units
+            != oracle_expected_pre_capacity.exclusive_contribution_units[drop_index]
+        {
+            return Err(format!(
+                "public-hypervolume-cross-check-oracle-contribution[{drop_index}]:{}!={}",
+                oracle_contribution_units,
+                oracle_expected_pre_capacity.exclusive_contribution_units[drop_index]
+            ));
+        }
+        let oracle_leave_one_out = area_value(oracle_leave_one_out_units);
+        if leave_one_out.to_bits() != oracle_leave_one_out.to_bits() {
+            return Err(format!(
+                "public-hypervolume-leave-one-out[{drop_index}]:0x{:016x}!=oracle-0x{:016x}",
+                leave_one_out.to_bits(),
+                oracle_leave_one_out.to_bits()
+            ));
+        }
+        let contribution = full - leave_one_out;
+        let oracle_contribution = area_value(oracle_contribution_units);
+        if contribution.to_bits() != oracle_contribution.to_bits() {
+            return Err(format!(
+                "public-hypervolume-contribution[{drop_index}]:0x{:016x}!=oracle-0x{:016x}",
+                contribution.to_bits(),
+                oracle_contribution.to_bits()
+            ));
+        }
+        leave_one_out_hv_bits.push(leave_one_out.to_bits());
+        exclusive_contribution_hv_bits.push(contribution.to_bits());
+        oracle_leave_one_out_area_units.push(oracle_leave_one_out_units);
+        oracle_exclusive_contribution_area_units.push(oracle_contribution_units);
+    }
+
+    Ok(PublicHypervolumeCrossCheck {
+        oracle_full_area_units,
+        oracle_leave_one_out_area_units,
+        oracle_exclusive_contribution_area_units,
+        full_hv_bits: full.to_bits(),
+        leave_one_out_hv_bits,
+        exclusive_contribution_hv_bits,
+    })
+}
+
 fn oracle_step(
     current: &[IndividualBits],
     candidate: &IndividualBits,
@@ -571,9 +726,9 @@ fn oracle_step(
     for (blocker_index, blocker) in current.iter().enumerate() {
         let blocker_point = grid_point(blocker)?;
         let kind = if blocker_point == candidate_point {
-            Some(RejectionKind::DuplicateObjective)
+            Some(OracleRejectionKind::DuplicateObjective)
         } else if oracle_dominates(blocker_point, candidate_point) {
-            Some(RejectionKind::DominatedByMember)
+            Some(OracleRejectionKind::DominatedByMember)
         } else {
             None
         };
@@ -581,71 +736,72 @@ fn oracle_step(
             let checkpoint = oracle_checkpoint(current.to_vec())?;
             return Ok(OracleStep {
                 insert_returned: false,
-                pre_capacity: checkpoint.clone(),
-                purged: Vec::new(),
-                rejection: Some(Rejection {
+                expected_pre_capacity: checkpoint.clone(),
+                expected_purged: Vec::new(),
+                expected_rejection: Some(OracleRejectionExpectation {
                     kind,
                     blocker_index,
                     blocker: blocker.clone(),
                 }),
-                capacity_eviction: None,
+                expected_capacity_eviction: None,
                 after: checkpoint,
             });
         }
     }
 
-    let mut purged = Vec::new();
-    let mut pre_capacity_members = Vec::with_capacity(current.len() + 1);
+    let mut expected_purged = Vec::new();
+    let mut expected_pre_capacity_members = Vec::with_capacity(current.len() + 1);
     for (prior_index, member) in current.iter().enumerate() {
         if oracle_dominates(candidate_point, grid_point(member)?) {
-            purged.push(PurgedMember {
+            expected_purged.push(OraclePurgedMemberExpectation {
                 prior_index,
                 member: member.clone(),
             });
         } else {
-            pre_capacity_members.push(member.clone());
+            expected_pre_capacity_members.push(member.clone());
         }
     }
-    pre_capacity_members.push(candidate.clone());
-    let pre_capacity = oracle_checkpoint(pre_capacity_members.clone())?;
+    expected_pre_capacity_members.push(candidate.clone());
+    let expected_pre_capacity = oracle_checkpoint(expected_pre_capacity_members.clone())?;
 
-    let (capacity_eviction, after_members) = if pre_capacity_members.len() > CAPACITY {
-        let minimum = *pre_capacity
-            .exclusive_contribution_units
-            .iter()
-            .min()
-            .expect("an over-capacity archive is nonempty");
-        let tied_indices: Vec<usize> = pre_capacity
-            .exclusive_contribution_units
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &contribution)| (contribution == minimum).then_some(index))
-            .collect();
-        let selected_index = tied_indices[0];
-        let selected = pre_capacity_members[selected_index].clone();
-        let mut after = pre_capacity_members;
-        after.remove(selected_index);
-        (
-            Some(CapacityEviction {
-                reason: CapacityEvictionReason::LeastExclusiveHypervolumeContributor,
-                selected_index,
-                candidate_evicted: selected.candidate_index == candidate.candidate_index,
-                selected,
-                contribution_units: minimum,
-                tied_indices,
-            }),
-            after,
-        )
-    } else {
-        (None, pre_capacity_members)
-    };
+    let (expected_capacity_eviction, after_members) =
+        if expected_pre_capacity_members.len() > CAPACITY {
+            let minimum = *expected_pre_capacity
+                .exclusive_contribution_units
+                .iter()
+                .min()
+                .expect("an over-capacity archive is nonempty");
+            let tied_indices: Vec<usize> = expected_pre_capacity
+                .exclusive_contribution_units
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &contribution)| (contribution == minimum).then_some(index))
+                .collect();
+            let selected_index = tied_indices[0];
+            let selected = expected_pre_capacity_members[selected_index].clone();
+            let mut after = expected_pre_capacity_members;
+            after.remove(selected_index);
+            (
+                Some(OracleCapacityEvictionExpectation {
+                    reason: OracleCapacityEvictionReason::LeastExclusiveHypervolumeContributor,
+                    selected_index,
+                    candidate_evicted: selected.candidate_index == candidate.candidate_index,
+                    selected,
+                    contribution_units: minimum,
+                    tied_indices,
+                }),
+                after,
+            )
+        } else {
+            (None, expected_pre_capacity_members)
+        };
 
     Ok(OracleStep {
         insert_returned: true,
-        pre_capacity,
-        purged,
-        rejection: None,
-        capacity_eviction,
+        expected_pre_capacity,
+        expected_purged,
+        expected_rejection: None,
+        expected_capacity_eviction,
         after: oracle_checkpoint(after_members)?,
     })
 }
@@ -658,7 +814,7 @@ fn member_candidates(checkpoint: &Checkpoint) -> Vec<usize> {
         .collect()
 }
 
-fn expected_rejection(rejection: &Option<Rejection>) -> Option<ExpectedRejection> {
+fn expected_rejection(rejection: &Option<OracleRejectionExpectation>) -> Option<ExpectedRejection> {
     rejection.as_ref().map(|rejection| ExpectedRejection {
         kind: rejection.kind,
         blocker_index: rejection.blocker_index,
@@ -667,7 +823,7 @@ fn expected_rejection(rejection: &Option<Rejection>) -> Option<ExpectedRejection
 }
 
 fn expected_capacity_eviction(
-    eviction: &Option<CapacityEviction>,
+    eviction: &Option<OracleCapacityEvictionExpectation>,
 ) -> Option<ExpectedCapacityEviction> {
     eviction.as_ref().map(|eviction| ExpectedCapacityEviction {
         selected_index: eviction.selected_index,
@@ -684,22 +840,29 @@ fn branch_mismatch(
     step: &OracleStep,
     expectation: &BranchExpectation,
 ) -> Option<String> {
+    if expectation.purged_prior_indices.len() != expectation.purged_candidates.len() {
+        return Some(format!(
+            "integer-oracle-branch[{ordinal}].purge-pair-count:{}!={}",
+            expectation.purged_prior_indices.len(),
+            expectation.purged_candidates.len()
+        ));
+    }
     let actual = BranchExpectation {
         candidate_index: candidate.candidate_index,
         insert_returned: step.insert_returned,
-        rejection: expected_rejection(&step.rejection),
+        rejection: expected_rejection(&step.expected_rejection),
         purged_prior_indices: step
-            .purged
+            .expected_purged
             .iter()
             .map(|purged| purged.prior_index)
             .collect(),
         purged_candidates: step
-            .purged
+            .expected_purged
             .iter()
             .map(|purged| purged.member.candidate_index)
             .collect(),
-        pre_capacity_candidates: member_candidates(&step.pre_capacity),
-        capacity_eviction: expected_capacity_eviction(&step.capacity_eviction),
+        pre_capacity_candidates: member_candidates(&step.expected_pre_capacity),
+        capacity_eviction: expected_capacity_eviction(&step.expected_capacity_eviction),
         after_candidates: member_candidates(&step.after),
         after_area_units: step.after.area_units,
     };
@@ -789,6 +952,102 @@ fn bind_checkpoint(
     builder
 }
 
+fn bind_public_hypervolume_cross_check(
+    mut builder: IdentityBuilder,
+    cross_check: &PublicHypervolumeCrossCheck,
+) -> IdentityBuilder {
+    builder = builder
+        .str(
+            "public-hypervolume-cross-check-provenance",
+            "public-function-recomputation-over-oracle-expected-pre-state-not-insert-branch-observation",
+        )
+        .u64(
+            "public-hypervolume-cross-check-oracle-full-area-units",
+            u64::from(cross_check.oracle_full_area_units),
+        )
+        .u64(
+            "public-hypervolume-cross-check-oracle-leave-one-out-count",
+            usize_u64(cross_check.oracle_leave_one_out_area_units.len()),
+        )
+        .u64(
+            "public-hypervolume-cross-check-oracle-contribution-count",
+            usize_u64(
+                cross_check
+                    .oracle_exclusive_contribution_area_units
+                    .len(),
+            ),
+        )
+        .f64_bits(
+            "public-hypervolume-cross-check-full",
+            f64::from_bits(cross_check.full_hv_bits),
+        )
+        .u64(
+            "public-hypervolume-cross-check-leave-one-out-count",
+            usize_u64(cross_check.leave_one_out_hv_bits.len()),
+        )
+        .u64(
+            "public-hypervolume-cross-check-contribution-count",
+            usize_u64(cross_check.exclusive_contribution_hv_bits.len()),
+        );
+    for (member_index, &units) in cross_check
+        .oracle_leave_one_out_area_units
+        .iter()
+        .enumerate()
+    {
+        builder = builder
+            .u64(
+                "public-hypervolume-cross-check-oracle-leave-one-out-member-index",
+                usize_u64(member_index),
+            )
+            .u64(
+                "public-hypervolume-cross-check-oracle-leave-one-out-area-units",
+                u64::from(units),
+            );
+    }
+    for (member_index, &units) in cross_check
+        .oracle_exclusive_contribution_area_units
+        .iter()
+        .enumerate()
+    {
+        builder = builder
+            .u64(
+                "public-hypervolume-cross-check-oracle-contribution-member-index",
+                usize_u64(member_index),
+            )
+            .u64(
+                "public-hypervolume-cross-check-oracle-contribution-area-units",
+                u64::from(units),
+            );
+    }
+    for (member_index, &bits) in cross_check.leave_one_out_hv_bits.iter().enumerate() {
+        builder = builder
+            .u64(
+                "public-hypervolume-cross-check-leave-one-out-member-index",
+                usize_u64(member_index),
+            )
+            .f64_bits(
+                "public-hypervolume-cross-check-leave-one-out",
+                f64::from_bits(bits),
+            );
+    }
+    for (member_index, &bits) in cross_check
+        .exclusive_contribution_hv_bits
+        .iter()
+        .enumerate()
+    {
+        builder = builder
+            .u64(
+                "public-hypervolume-cross-check-contribution-member-index",
+                usize_u64(member_index),
+            )
+            .f64_bits(
+                "public-hypervolume-cross-check-contribution",
+                f64::from_bits(bits),
+            );
+    }
+    builder
+}
+
 fn fixture_identity() -> ReplayIdentity {
     fixture_identity_for_capacity(CAPACITY)
 }
@@ -804,12 +1063,18 @@ fn fixture_identity_for_capacity(declared_capacity: usize) -> ReplayIdentity {
         .str("objective-semantics", "two-objective-minimization")
         .str("archive-order", "survivor-order-then-candidate-append")
         .str(
-            "capacity-eviction-rule",
+            "oracle-expected-capacity-eviction-rule",
             "least-exclusive-hypervolume-contribution-strict-less-earliest-index-tie",
         )
         .str(
             "independent-oracle",
             "integer-denominator-16-cell-union-and-leave-one-out-area",
+        )
+        .str("oracle-branch-provenance", ORACLE_BRANCH_PROVENANCE)
+        .flag("internal-branch-authority-observed", false)
+        .str(
+            "public-hypervolume-cross-check",
+            "full-and-every-leave-one-out-for-each-oracle-expected-over-capacity-pre-state",
         )
         .u64("capacity", usize_u64(declared_capacity))
         .u64("objective-count", usize_u64(OBJECTIVES))
@@ -909,9 +1174,18 @@ fn fixture_identity_for_capacity(declared_capacity: usize) -> ReplayIdentity {
         } else {
             builder = builder.str("expectation-rejection", "none");
         }
+        assert_eq!(
+            expectation.purged_prior_indices.len(),
+            expectation.purged_candidates.len(),
+            "branch expectation {ordinal} must pair every oracle-expected purge index with one candidate"
+        );
         builder = builder
             .u64(
-                "expectation-purged-count",
+                "expectation-purged-prior-index-count",
+                usize_u64(expectation.purged_prior_indices.len()),
+            )
+            .u64(
+                "expectation-purged-candidate-count",
                 usize_u64(expectation.purged_candidates.len()),
             )
             .u64(
@@ -944,7 +1218,7 @@ fn fixture_identity_for_capacity(declared_capacity: usize) -> ReplayIdentity {
             builder = builder
                 .str(
                     "expectation-capacity-eviction",
-                    CapacityEvictionReason::LeastExclusiveHypervolumeContributor.name(),
+                    OracleCapacityEvictionReason::LeastExclusiveHypervolumeContributor.name(),
                 )
                 .u64(
                     "expectation-eviction-selected-index",
@@ -1004,6 +1278,8 @@ fn result_identity(
         .child("fixture-compatibility-root", fixture)
         .bytes("fixture-canonical-bytes", fixture.canonical_bytes())
         .bytes("fixture-blake3", strong_fixture.as_bytes())
+        .str("oracle-branch-provenance", ORACLE_BRANCH_PROVENANCE)
+        .flag("internal-branch-authority-observed", false)
         .u64("transition-count", usize_u64(record.transitions.len()));
     builder = bind_checkpoint(builder, "initial", &record.initial);
     for transition in &record.transitions {
@@ -1017,69 +1293,88 @@ fn result_identity(
             &transition.candidate,
         );
         builder = bind_checkpoint(builder, "transition-before", &transition.before);
-        builder = bind_checkpoint(builder, "transition-pre-capacity", &transition.pre_capacity);
-        builder = builder.u64(
-            "transition-purged-count",
-            usize_u64(transition.purged.len()),
+        builder = bind_checkpoint(
+            builder,
+            "transition-oracle-expected-pre-capacity",
+            &transition.oracle_expected_pre_capacity,
         );
-        for purged in &transition.purged {
+        builder = builder.u64(
+            "transition-oracle-expected-purged-count",
+            usize_u64(transition.oracle_expected_purged.len()),
+        );
+        for purged in &transition.oracle_expected_purged {
             builder = builder.u64(
-                "transition-purged-prior-index",
+                "transition-oracle-expected-purged-prior-index",
                 usize_u64(purged.prior_index),
             );
             builder = bind_candidate(
                 builder,
-                "transition-purged-member",
+                "transition-oracle-expected-purged-member",
                 purged.prior_index,
                 &purged.member,
             );
         }
-        if let Some(rejection) = &transition.rejection {
+        if let Some(rejection) = &transition.oracle_expected_rejection {
             builder = builder
-                .str("transition-rejection", rejection.kind.name())
+                .str(
+                    "transition-oracle-expected-rejection",
+                    rejection.kind.name(),
+                )
                 .u64(
-                    "transition-rejection-blocker-index",
+                    "transition-oracle-expected-rejection-blocker-index",
                     usize_u64(rejection.blocker_index),
                 );
             builder = bind_candidate(
                 builder,
-                "transition-rejection-blocker",
+                "transition-oracle-expected-rejection-blocker",
                 rejection.blocker_index,
                 &rejection.blocker,
             );
         } else {
-            builder = builder.str("transition-rejection", "none");
+            builder = builder.str("transition-oracle-expected-rejection", "none");
         }
-        if let Some(eviction) = &transition.capacity_eviction {
+        if let Some(eviction) = &transition.oracle_expected_capacity_eviction {
             builder = builder
-                .str("transition-capacity-eviction", eviction.reason.name())
+                .str(
+                    "transition-oracle-expected-capacity-eviction",
+                    eviction.reason.name(),
+                )
                 .u64(
-                    "transition-eviction-selected-index",
+                    "transition-oracle-expected-eviction-selected-index",
                     usize_u64(eviction.selected_index),
                 )
                 .u64(
-                    "transition-eviction-contribution-units",
+                    "transition-oracle-expected-eviction-contribution-units",
                     u64::from(eviction.contribution_units),
                 )
                 .flag(
-                    "transition-eviction-candidate-evicted",
+                    "transition-oracle-expected-eviction-candidate-evicted",
                     eviction.candidate_evicted,
                 )
                 .u64(
-                    "transition-eviction-tie-count",
+                    "transition-oracle-expected-eviction-tie-count",
                     usize_u64(eviction.tied_indices.len()),
                 );
             builder = bind_candidate(
                 builder,
-                "transition-evicted-member",
+                "transition-oracle-expected-evicted-member",
                 eviction.selected_index,
                 &eviction.selected,
             );
             for &tie_index in &eviction.tied_indices {
-                builder = builder.u64("transition-eviction-tie-index", usize_u64(tie_index));
+                builder = builder.u64(
+                    "transition-oracle-expected-eviction-tie-index",
+                    usize_u64(tie_index),
+                );
             }
         } else {
-            builder = builder.str("transition-capacity-eviction", "none");
+            builder = builder.str("transition-oracle-expected-capacity-eviction", "none");
+        }
+        if let Some(cross_check) = &transition.public_hypervolume_cross_check {
+            builder = builder.str("transition-public-hypervolume-cross-check", "present");
+            builder = bind_public_hypervolume_cross_check(builder, cross_check);
+        } else {
+            builder = builder.str("transition-public-hypervolume-cross-check", "none");
         }
         builder = bind_checkpoint(builder, "transition-after", &transition.after);
     }
@@ -1108,6 +1403,13 @@ fn run_study() -> StudyRun {
         let candidate = member_from_spec(ordinal);
         let oracle = oracle_step(&before.members, &candidate)
             .expect("fixed archive transition stays inside the integer oracle domain");
+        let public_hypervolume_cross_check =
+            (oracle.expected_pre_capacity.members.len() > CAPACITY)
+                .then(|| {
+                    public_hypervolume_cross_check(&oracle.expected_pre_capacity).expect(
+                        "public production hypervolume must match every exact integer-oracle capacity contribution",
+                    )
+                });
         let insert_returned = archive.insert(spec.individual());
         let after = public_checkpoint(&archive);
         transitions.push(TransitionRecord {
@@ -1115,10 +1417,11 @@ fn run_study() -> StudyRun {
             candidate,
             insert_returned,
             before,
-            pre_capacity: oracle.pre_capacity,
-            purged: oracle.purged,
-            rejection: oracle.rejection,
-            capacity_eviction: oracle.capacity_eviction,
+            oracle_expected_pre_capacity: oracle.expected_pre_capacity,
+            oracle_expected_purged: oracle.expected_purged,
+            oracle_expected_rejection: oracle.expected_rejection,
+            oracle_expected_capacity_eviction: oracle.expected_capacity_eviction,
+            public_hypervolume_cross_check,
             after,
         });
     }
@@ -1274,28 +1577,46 @@ fn semantic_mismatch(record: &StudyRecord) -> Option<String> {
             ));
         }
         if let Some(mismatch) = checkpoint_mismatch(
-            &format!("transition[{ordinal}].pre-capacity"),
-            &transition.pre_capacity,
-            &step.pre_capacity,
+            &format!("transition[{ordinal}].oracle-expected-pre-capacity"),
+            &transition.oracle_expected_pre_capacity,
+            &step.expected_pre_capacity,
         ) {
             return Some(mismatch);
         }
-        if transition.purged != step.purged {
+        if transition.oracle_expected_purged != step.expected_purged {
             return Some(format!(
-                "integer-oracle-transition[{ordinal}].purged:{:?}!={:?}",
-                transition.purged, step.purged
+                "integer-oracle-transition[{ordinal}].oracle-expected-purged:{:?}!={:?}",
+                transition.oracle_expected_purged, step.expected_purged
             ));
         }
-        if transition.rejection != step.rejection {
+        if transition.oracle_expected_rejection != step.expected_rejection {
             return Some(format!(
-                "integer-oracle-transition[{ordinal}].rejection:{:?}!={:?}",
-                transition.rejection, step.rejection
+                "integer-oracle-transition[{ordinal}].oracle-expected-rejection:{:?}!={:?}",
+                transition.oracle_expected_rejection, step.expected_rejection
             ));
         }
-        if transition.capacity_eviction != step.capacity_eviction {
+        if transition.oracle_expected_capacity_eviction != step.expected_capacity_eviction {
             return Some(format!(
-                "integer-oracle-transition[{ordinal}].capacity-eviction:{:?}!={:?}",
-                transition.capacity_eviction, step.capacity_eviction
+                "integer-oracle-transition[{ordinal}].oracle-expected-capacity-eviction:{:?}!={:?}",
+                transition.oracle_expected_capacity_eviction, step.expected_capacity_eviction
+            ));
+        }
+        let expected_public_cross_check = if step.expected_pre_capacity.members.len() > CAPACITY {
+            match public_hypervolume_cross_check(&step.expected_pre_capacity) {
+                Ok(cross_check) => Some(cross_check),
+                Err(error) => {
+                    return Some(format!(
+                        "public-hypervolume-cross-check-transition[{ordinal}]:{error}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if transition.public_hypervolume_cross_check != expected_public_cross_check {
+            return Some(format!(
+                "public-hypervolume-cross-check-transition[{ordinal}]:{:?}!={:?}",
+                transition.public_hypervolume_cross_check, expected_public_cross_check
             ));
         }
         if let Some(mismatch) = checkpoint_mismatch(
@@ -1442,6 +1763,14 @@ fn seeded_corruption(reference: &StudyRun) -> SeededCorruption {
 }
 
 fn green_receipt(run: &StudyRun) -> Event {
+    let tie_cross_check = run.record.transitions[2]
+        .public_hypervolume_cross_check
+        .as_ref()
+        .expect("tie pre-state retains the public hypervolume cross-check");
+    let self_eviction_cross_check = run.record.transitions[6]
+        .public_hypervolume_cross_check
+        .as_ref()
+        .expect("self-eviction pre-state retains the public hypervolume cross-check");
     let final_checkpoint = &run
         .record
         .transitions
@@ -1460,6 +1789,19 @@ fn green_receipt(run: &StudyRun) -> Event {
                     "\"algorithm\":\"fs_dfo::HvArchive\",\"algorithm_seed\":null,",
                     "\"capacity\":{},\"reference_bits\":[\"0x{:016x}\",\"0x{:016x}\"],",
                     "\"grid_denominator\":{},\"area_denominator\":{},",
+                    "\"branch_metadata_provenance\":\"{}\",",
+                    "\"internal_branch_authority_observed\":false,",
+                    "\"public_hypervolume_cross_checks\":[",
+                    "{{\"transition\":2,\"oracle_full_area_units\":{},",
+                    "\"oracle_leave_one_out_area_units\":{:?},",
+                    "\"oracle_exclusive_contribution_area_units\":{:?},",
+                    "\"full_hv_bits\":\"0x{:016x}\",",
+                    "\"leave_one_out_hv_bits\":{},\"exclusive_contribution_hv_bits\":{}}},",
+                    "{{\"transition\":6,\"oracle_full_area_units\":{},",
+                    "\"oracle_leave_one_out_area_units\":{:?},",
+                    "\"oracle_exclusive_contribution_area_units\":{:?},",
+                    "\"full_hv_bits\":\"0x{:016x}\",",
+                    "\"leave_one_out_hv_bits\":{},\"exclusive_contribution_hv_bits\":{}}}],",
                     "\"transition_count\":{},\"final_member_candidates\":{:?},",
                     "\"final_hv_bits\":\"0x{:016x}\",\"final_area_units\":{},",
                     "\"mutation_seed\":\"0x{:016x}\",",
@@ -1470,7 +1812,8 @@ fn green_receipt(run: &StudyRun) -> Event {
                     "\"mc-contribution-eviction\",\"optimizer-convergence-archive-quality\",",
                     "\"sealed-public-state\",\"allocation-Cx-cancellation\",",
                     "\"cross-ISA-authority\",\"authenticated-persistence\",",
-                    "\"performance\"]}}"
+                    "\"performance\",",
+                    "\"internal-purge-rejection-eviction-branch-authority\"]}}"
                 ),
                 run.fixture.hex(),
                 run.fixture_digest.to_hex(),
@@ -1481,6 +1824,19 @@ fn green_receipt(run: &StudyRun) -> Event {
                 REFERENCE[1].to_bits(),
                 GRID_DENOMINATOR,
                 AREA_DENOMINATOR,
+                ORACLE_BRANCH_PROVENANCE,
+                tie_cross_check.oracle_full_area_units,
+                &tie_cross_check.oracle_leave_one_out_area_units,
+                &tie_cross_check.oracle_exclusive_contribution_area_units,
+                tie_cross_check.full_hv_bits,
+                bit_hex_json(&tie_cross_check.leave_one_out_hv_bits),
+                bit_hex_json(&tie_cross_check.exclusive_contribution_hv_bits),
+                self_eviction_cross_check.oracle_full_area_units,
+                &self_eviction_cross_check.oracle_leave_one_out_area_units,
+                &self_eviction_cross_check.oracle_exclusive_contribution_area_units,
+                self_eviction_cross_check.full_hv_bits,
+                bit_hex_json(&self_eviction_cross_check.leave_one_out_hv_bits),
+                bit_hex_json(&self_eviction_cross_check.exclusive_contribution_hv_bits),
                 run.record.transitions.len(),
                 member_candidates(final_checkpoint),
                 final_checkpoint.hv_bits,
@@ -1505,7 +1861,7 @@ fn green_verdict(run: &StudyRun) -> Event {
             case: CASE.to_string(),
             pass: true,
             detail: format!(
-                "fixture={}; result={}; blake3={}; transitions={}; tie-eviction=A; self-eviction=E:5/256; final-purge=C,D",
+                "fixture={}; result={}; blake3={}; transitions={}; public-outcomes=tie-removes-A,self-insertion-E-returns-true-with-state-no-op,final-removes-C-D; oracle-expected-contributions=tie:[16,16,16]/256,self:[8,54,5]/256; public-hypervolume-cross-checks=2; branch-metadata-provenance={ORACLE_BRANCH_PROVENANCE}; internal-branch-authority-observed=false; no-claim=internal-purge-rejection-eviction-branch-authority",
                 run.fixture.hex(),
                 run.result.hex(),
                 run.result_digest.to_hex(),
@@ -1521,7 +1877,7 @@ fn corruption_event(reference: &StudyRun, corruption: &SeededCorruption) -> Even
     let mutation = corruption.mutation;
     let coordinate = mutation.coordinate;
     let detail = format!(
-        "reference={}; mutant={}; seed=0x{:016x}; kernel=0x{:04x}; tile={}; selector_draws={}; target=transition[{}].after.members[{}].f[{}]; mantissa_bit={}; before=0x{:016x}; after=0x{:016x}; stale={:?}; reference_gate={:?}; first_semantic_mismatch={:?}",
+        "reference={}; mutant={}; seed=0x{:016x}; kernel=0x{:04x}; tile={}; selector_draws={}; target=transition[{}].after.members[{}].f[{}]; mantissa_bit={}; before=0x{:016x}; after=0x{:016x}; stale={:?}; reference_gate={:?}; first_semantic_mismatch={:?}; branch-metadata-provenance={ORACLE_BRANCH_PROVENANCE}; internal-branch-authority-observed=false; no-claim=internal-purge-rejection-eviction-branch-authority",
         reference.result_digest.to_hex(),
         corruption.run.result_digest.to_hex(),
         mutation.seed,
@@ -1642,17 +1998,53 @@ fn hv_archive_full_lifecycle_replays_and_seeded_failure_is_refused() {
     );
 
     let transitions = &original.record.transitions;
-    let tie_eviction = transitions[2]
-        .capacity_eviction
-        .as_ref()
-        .expect("C must trigger the exact contribution tie");
     assert_eq!(
-        transitions[2].pre_capacity.exclusive_contribution_units,
+        transitions
+            .iter()
+            .filter(|transition| transition.public_hypervolume_cross_check.is_some())
+            .map(|transition| transition.ordinal)
+            .collect::<Vec<_>>(),
+        vec![2, 6],
+        "every and only oracle-expected over-capacity pre-state needs a public hypervolume cross-check"
+    );
+    let tie_eviction = transitions[2]
+        .oracle_expected_capacity_eviction
+        .as_ref()
+        .expect("the integer oracle expects C to trigger the exact contribution tie");
+    assert_eq!(
+        transitions[2]
+            .oracle_expected_pre_capacity
+            .exclusive_contribution_units,
         vec![16, 16, 16]
     );
     assert_eq!(tie_eviction.selected_index, 0);
     assert_eq!(tie_eviction.selected.candidate_index, 0);
     assert_eq!(tie_eviction.tied_indices, vec![0, 1, 2]);
+    let tie_public_cross_check = transitions[2]
+        .public_hypervolume_cross_check
+        .as_ref()
+        .expect("the three-member tie pre-state requires a public hypervolume cross-check");
+    assert_eq!(tie_public_cross_check.oracle_full_area_units, 96);
+    assert_eq!(
+        tie_public_cross_check.oracle_leave_one_out_area_units,
+        vec![80, 80, 80]
+    );
+    assert_eq!(
+        tie_public_cross_check.oracle_exclusive_contribution_area_units,
+        vec![16, 16, 16]
+    );
+    assert_eq!(
+        tie_public_cross_check.full_hv_bits,
+        area_value(96).to_bits()
+    );
+    assert_eq!(
+        tie_public_cross_check.leave_one_out_hv_bits,
+        vec![area_value(80).to_bits(); 3]
+    );
+    assert_eq!(
+        tie_public_cross_check.exclusive_contribution_hv_bits,
+        vec![area_value(16).to_bits(); 3]
+    );
 
     for ordinal in [3usize, 4] {
         assert!(!transitions[ordinal].insert_returned);
@@ -1660,25 +2052,60 @@ fn hv_archive_full_lifecycle_replays_and_seeded_failure_is_refused() {
     }
     assert_eq!(
         transitions[5]
-            .purged
+            .oracle_expected_purged
             .iter()
             .map(|purged| purged.member.candidate_index)
             .collect::<Vec<_>>(),
         vec![1]
     );
     let self_eviction = transitions[6]
-        .capacity_eviction
+        .oracle_expected_capacity_eviction
         .as_ref()
-        .expect("E must be inserted and uniquely evict itself");
+        .expect("the integer oracle expects E to be the unique least contributor");
     assert!(transitions[6].insert_returned);
     assert!(self_eviction.candidate_evicted);
     assert_eq!(self_eviction.selected.candidate_index, 6);
     assert_eq!(self_eviction.contribution_units, 5);
     assert_eq!(self_eviction.tied_indices, vec![2]);
+    let self_eviction_public_cross_check = transitions[6]
+        .public_hypervolume_cross_check
+        .as_ref()
+        .expect(
+            "the three-member self-eviction pre-state requires a public hypervolume cross-check",
+        );
+    assert_eq!(self_eviction_public_cross_check.oracle_full_area_units, 113);
+    assert_eq!(
+        self_eviction_public_cross_check.oracle_leave_one_out_area_units,
+        vec![105, 59, 108]
+    );
+    assert_eq!(
+        self_eviction_public_cross_check.oracle_exclusive_contribution_area_units,
+        vec![8, 54, 5]
+    );
+    assert_eq!(
+        self_eviction_public_cross_check.full_hv_bits,
+        area_value(113).to_bits()
+    );
+    assert_eq!(
+        self_eviction_public_cross_check.leave_one_out_hv_bits,
+        vec![
+            area_value(105).to_bits(),
+            area_value(59).to_bits(),
+            area_value(108).to_bits(),
+        ]
+    );
+    assert_eq!(
+        self_eviction_public_cross_check.exclusive_contribution_hv_bits,
+        vec![
+            area_value(8).to_bits(),
+            area_value(54).to_bits(),
+            area_value(5).to_bits(),
+        ]
+    );
     assert_eq!(transitions[6].before, transitions[6].after);
     assert_eq!(
         transitions[7]
-            .purged
+            .oracle_expected_purged
             .iter()
             .map(|purged| purged.member.candidate_index)
             .collect::<Vec<_>>(),
