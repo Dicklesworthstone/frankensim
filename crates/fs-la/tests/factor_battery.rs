@@ -363,6 +363,9 @@ fn degenerate_shapes() {
     assert!(lu(&[], 0).is_ok());
     let f = qr(&[], 0, 0);
     assert_eq!(f.r(0, 0).to_bits(), 0.0f64.to_bits());
+    assert!(tsqr_r(&[], 0, 0, 0).is_empty());
+    assert!(tsqr_r(&[], 0, 0, 1).is_empty());
+    assert!(tsqr_r(&[], 7, 0, 3).is_empty());
     // 1×1.
     let c = cholesky(&[9.0], 1).unwrap();
     assert!((c.l(0, 0) - 3.0).abs() < 1e-15);

@@ -527,6 +527,9 @@ pub fn tsqr_r(a: &[f64], m: usize, n: usize, row_block: usize) -> Vec<f64> {
     assert!(m >= n, "tsqr requires m >= n");
     assert!(row_block >= n, "row_block must be >= n");
     assert_eq!(a.len(), m * n, "a must be m*n");
+    if n == 0 {
+        return Vec::new();
+    }
     // Leaf QRs. Block boundaries are a pure function of (m, row_block, n):
     // a final fragment shorter than n rows is absorbed into the previous
     // block (a leaf QR needs rows >= n).
