@@ -13,7 +13,29 @@
 //! dense LA and LBM lattices need SIMD lanes running ACROSS elements,
 //! which is only natural in this layout.
 
+use core::fmt::Write as _;
 pub use fs_soa_derive::Soa;
+
+fn escape_json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{0000}'..='\u{001f}' => {
+                write!(&mut escaped, "\\u{:04x}", u32::from(ch))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
 
 /// Target byte alignment for every field buffer: 128 unconditionally
 /// (superset of Apple 128B and x86 64B lines; matches
@@ -223,7 +245,11 @@ impl RawView {
     pub fn descr(&self) -> String {
         format!(
             "{{\"field\":\"{}\",\"len\":{},\"elem_bytes\":{},\"stride_bytes\":{},\"dtype\":\"{}\"}}",
-            self.name, self.len, self.elem_bytes, self.stride_bytes, self.dtype
+            escape_json_string(&self.name),
+            self.len,
+            self.elem_bytes,
+            self.stride_bytes,
+            escape_json_string(self.dtype)
         )
     }
 }
@@ -276,10 +302,11 @@ pub fn view_name(prefix: &str, field: &str) -> String {
 #[must_use]
 pub fn leaf_layout<T>(name: &str) -> String {
     format!(
-        "{{\"field\":\"{name}\",\"elem_bytes\":{},\"elem_align\":{},\"dtype\":\"{}\"}}",
+        "{{\"field\":\"{}\",\"elem_bytes\":{},\"elem_align\":{},\"dtype\":\"{}\"}}",
+        escape_json_string(name),
         size_of::<T>(),
         align_of::<T>(),
-        std::any::type_name::<T>()
+        escape_json_string(std::any::type_name::<T>())
     )
 }
 

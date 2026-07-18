@@ -7,7 +7,9 @@
 
 use fs_qty::{Length, Time};
 use fs_rand::StreamKey;
-use fs_soa::{SOA_ALIGN, Soa, chunk_count, chunks_with_tail, chunks_with_tail_mut};
+use fs_soa::{
+    RawView, SOA_ALIGN, Soa, chunk_count, chunks_with_tail, chunks_with_tail_mut, leaf_layout,
+};
 
 fn log(case: &str, verdict: &str, detail: &str) {
     println!(
@@ -340,6 +342,38 @@ fn layout_and_view_descriptions_are_stable() {
         "{\"field\":\"mass\",\"len\":1,\"elem_bytes\":8,\"stride_bytes\":8,\"dtype\":\"f64\"}"
     );
     log("layout", "pass", "descriptions address-free and exact");
+}
+
+#[test]
+fn descriptor_json_escapes_every_dynamic_string() {
+    const HOSTILE: &str = "field\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}";
+    const ESCAPED: &str = "field\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001f";
+    let view = RawView {
+        name: HOSTILE.to_owned(),
+        addr: 0,
+        len: 3,
+        elem_bytes: 4,
+        stride_bytes: 4,
+        achieved_align: SOA_ALIGN,
+        dtype: HOSTILE,
+    };
+    let descr = view.descr();
+    assert_eq!(
+        descr,
+        format!(
+            "{{\"field\":\"{ESCAPED}\",\"len\":3,\"elem_bytes\":4,\"stride_bytes\":4,\"dtype\":\"{ESCAPED}\"}}"
+        )
+    );
+    assert_eq!(descr.lines().count(), 1, "{descr}");
+    assert!(!descr.chars().any(|ch| ch < ' '), "{descr}");
+
+    let layout = leaf_layout::<u8>(HOSTILE);
+    assert_eq!(
+        layout,
+        format!("{{\"field\":\"{ESCAPED}\",\"elem_bytes\":1,\"elem_align\":1,\"dtype\":\"u8\"}}")
+    );
+    assert_eq!(layout.lines().count(), 1, "{layout}");
+    assert!(!layout.chars().any(|ch| ch < ' '), "{layout}");
 }
 
 #[test]
