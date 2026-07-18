@@ -3,14 +3,15 @@
 //! are data" meets "optimizers are engines".
 //!
 //! - VARIABLE PACKING: all declared variables concatenate into one
-//!   flat vector across the manifold product; per-block Riemannian
-//!   handling (tangent projection + retraction from
-//!   [`crate::riemann`]) keeps orientations orientations.
+//!   point vector across the manifold product, with a distinct packed
+//!   optimizer-parameter vector. Per-block operations delegate to fs-opt's
+//!   authoritative manifold runtime so orientations stay orientations.
 //! - GRADIENTS: central differences through `fs_opt::eval` in the
-//!   TANGENT parameterization (the live IR is evaluation-only — no
+//!   retraction-parameter representation (the live IR is evaluation-only — no
 //!   reverse mode; documented, deterministic fixed h).
 //! - CONSTRAINTS: `EqZero`/`LeZero` roots route to the constrained
-//!   engines (AL always; IP/SQP by option) through packed adapters.
+//!   engines (AL always; IP/SQP by option) through raw point-coordinate
+//!   adapters for Euclidean packings; non-Euclidean packings fail closed.
 //! - BUDGET: `Problem.budget.limit` threads into the stop algebra
 //!   (`StopRule::Budget`) alongside the caller's rules.
 //! - RESUMABLE: [`Study`] is the checkpoint (clone = checkpoint); a
@@ -22,7 +23,6 @@
 //!   identity, so cached objective state cannot cross problem meanings;
 //!   reweight steering is an explicit immutable-parent world fork.
 
-use crate::riemann::{retract, tangent_project};
 use crate::stop::{StopObservation, StopReason, StopRule};
 use fs_exec::Cx;
 use fs_opt::{
@@ -41,82 +41,177 @@ pub const STUDY_CANCELLATION_BOUNDARY_VERSION: u16 = 1;
 struct Block {
     manifold: Manifold,
     /// Offset in the packed point vector.
-    start: usize,
+    point_start: usize,
     /// Point storage length.
-    len: usize,
+    point_len: usize,
+    /// Offset in the packed optimizer-parameter vector.
+    parameter_start: usize,
+    /// Optimizer-parameter storage length.
+    parameter_len: usize,
 }
 
 /// The packed view of a problem's variables.
 #[derive(Debug, Clone)]
 pub struct Packing {
     blocks: Vec<Block>,
-    /// Total packed length.
+    /// Total packed point-storage length.
     pub dim: usize,
+    /// Total packed optimizer-parameter length.
+    pub param_dim: usize,
 }
 
 impl Packing {
+    /// Total packed point-storage length.
+    ///
+    /// This is the explicit spelling of the retained public `dim` field.
+    #[must_use]
+    pub const fn point_dim(&self) -> usize {
+        self.dim
+    }
+
     /// Build the packing for a problem's variable list.
     #[must_use]
     pub fn new(problem: &Problem) -> Packing {
         let mut blocks = Vec::new();
-        let mut start = 0usize;
+        let mut point_start = 0usize;
+        let mut parameter_start = 0usize;
         for v in problem.vars() {
-            let len = usize::try_from(
-                v.manifold
-                    .point_dim()
-                    .expect("sealed problems carry validated manifolds"),
-            )
-            .expect("point storage fits usize");
-            let end = start
-                .checked_add(len)
+            let layout = v
+                .manifold
+                .layout()
+                .expect("sealed problems carry validated manifold layouts");
+            let point_len = usize::try_from(layout.point_dim().get())
+                .expect("point storage dimension fits usize");
+            let parameter_len = usize::try_from(layout.param_dim().get())
+                .expect("parameter storage dimension fits usize");
+            let point_end = point_start
+                .checked_add(point_len)
                 .expect("sealed problem admission bounds total packed storage for this target");
+            let parameter_end = parameter_start.checked_add(parameter_len).expect(
+                "sealed problem admission bounds total packed parameter storage for this target",
+            );
             blocks.push(Block {
                 manifold: v.manifold,
-                start,
-                len,
+                point_start,
+                point_len,
+                parameter_start,
+                parameter_len,
             });
-            start = end;
+            point_start = point_end;
+            parameter_start = parameter_end;
         }
-        Packing { blocks, dim: start }
+        Packing {
+            blocks,
+            dim: point_start,
+            param_dim: parameter_start,
+        }
     }
 
     /// Split a packed point into per-variable bindings for `eval`.
     #[must_use]
     pub fn unpack(&self, x: &[f64]) -> Vec<Vec<f64>> {
+        assert_eq!(
+            x.len(),
+            self.dim,
+            "packed point length must match Packing::dim"
+        );
         self.blocks
             .iter()
-            .map(|b| x[b.start..b.start + b.len].to_vec())
+            .map(|block| x[block.point_start..block.point_start + block.point_len].to_vec())
             .collect()
     }
 
-    /// Per-block tangent projection of an ambient direction.
+    /// Pull a packed ambient point-storage gradient back to the packed
+    /// optimizer-parameter representation block by block.
     #[must_use]
     pub fn project(&self, x: &[f64], g: &[f64]) -> Vec<f64> {
-        let mut out = vec![0.0f64; self.dim];
-        for b in &self.blocks {
-            let seg = tangent_project(
-                &b.manifold,
-                &x[b.start..b.start + b.len],
-                &g[b.start..b.start + b.len],
-            );
-            out[b.start..b.start + b.len].copy_from_slice(&seg);
+        assert_eq!(
+            x.len(),
+            self.dim,
+            "packed point length must match Packing::dim"
+        );
+        assert_eq!(
+            g.len(),
+            self.dim,
+            "packed ambient gradient length must match Packing::dim"
+        );
+        let mut out = vec![0.0f64; self.param_dim];
+        for block in &self.blocks {
+            let point = &x[block.point_start..block.point_start + block.point_len];
+            let ambient = &g[block.point_start..block.point_start + block.point_len];
+            let parameter = block
+                .manifold
+                .parameter_gradient(point, ambient)
+                .unwrap_or_else(|error| {
+                    panic!("packed gradient failed fs-opt manifold authority: {error}")
+                });
+            assert_eq!(parameter.len(), block.parameter_len);
+            out[block.parameter_start..block.parameter_start + block.parameter_len]
+                .copy_from_slice(&parameter);
         }
         out
     }
 
-    /// Per-block retraction of a step.
+    /// Retract a packed optimizer-parameter step into packed point storage.
     #[must_use]
     pub fn retract(&self, x: &[f64], step: &[f64]) -> Vec<f64> {
+        assert_eq!(
+            x.len(),
+            self.dim,
+            "packed point length must match Packing::dim"
+        );
+        assert_eq!(
+            step.len(),
+            self.param_dim,
+            "packed step length must match Packing::param_dim"
+        );
         let mut out = vec![0.0f64; self.dim];
-        for b in &self.blocks {
-            let seg = retract(
-                &b.manifold,
-                &x[b.start..b.start + b.len],
-                &step[b.start..b.start + b.len],
-            );
-            out[b.start..b.start + b.len].copy_from_slice(&seg);
+        for block in &self.blocks {
+            let point = &x[block.point_start..block.point_start + block.point_len];
+            let parameter =
+                &step[block.parameter_start..block.parameter_start + block.parameter_len];
+            let landed = block
+                .manifold
+                .retract(point, parameter)
+                .unwrap_or_else(|error| {
+                    panic!("packed retraction failed fs-opt manifold authority: {error}")
+                });
+            assert_eq!(landed.len(), block.point_len);
+            out[block.point_start..block.point_start + block.point_len].copy_from_slice(&landed);
         }
         out
+    }
+
+    fn authoritative_point(&self, point: &[f64]) -> Result<Vec<f64>, (usize, OptError)> {
+        assert_eq!(
+            point.len(),
+            self.dim,
+            "packed point length must match Packing::dim"
+        );
+        let mut authoritative = point.to_vec();
+        for (variable, block) in self.blocks.iter().enumerate() {
+            let stored = &point[block.point_start..block.point_start + block.point_len];
+            let zero_parameter = vec![0.0; block.parameter_len];
+            let validated = block
+                .manifold
+                .retract(stored, &zero_parameter)
+                .map_err(|source| (variable, source))?;
+            assert_eq!(validated.len(), block.point_len);
+            if matches!(block.manifold, Manifold::So3) {
+                authoritative[block.point_start..block.point_start + block.point_len]
+                    .copy_from_slice(&validated);
+            }
+        }
+        Ok(authoritative)
+    }
+
+    fn matches_problem_schema(&self, problem: &Problem) -> bool {
+        self.blocks.len() == problem.vars().len()
+            && self
+                .blocks
+                .iter()
+                .zip(problem.vars())
+                .all(|(block, variable)| block.manifold == variable.manifold)
     }
 }
 
@@ -151,6 +246,13 @@ pub enum StudyError {
         expected: usize,
         /// Supplied packed storage length.
         actual: usize,
+    },
+    /// A packed variable point violates its authoritative manifold contract.
+    ManifoldPointInvalid {
+        /// Variable-list index whose point was refused.
+        variable: usize,
+        /// Typed fs-opt manifold refusal.
+        source: OptError,
     },
     /// An objective root cannot be evaluated at the branch point.
     ObjectiveUnevaluable {
@@ -197,6 +299,10 @@ impl core::fmt::Display for StudyError {
                 f,
                 "packed study point has length {actual}, but the problem requires {expected}"
             ),
+            StudyError::ManifoldPointInvalid { variable, source } => write!(
+                f,
+                "packed study variable {variable} is not an authoritative manifold point: {source}"
+            ),
             StudyError::ObjectiveUnevaluable { index, source } => {
                 write!(
                     f,
@@ -233,7 +339,8 @@ impl std::error::Error for StudyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             StudyError::ProblemRejected(report) => Some(report),
-            StudyError::ObjectiveUnevaluable { source, .. }
+            StudyError::ManifoldPointInvalid { source, .. }
+            | StudyError::ObjectiveUnevaluable { source, .. }
             | StudyError::ConstraintUnevaluable { source, .. } => Some(source),
             StudyError::PackedPointLength { .. }
             | StudyError::ProblemMismatch { .. }
@@ -280,7 +387,7 @@ pub struct StudyPauseReceipt {
     pub boundary_version: u16,
     /// Semantic problem identity bound to the checkpoint.
     pub problem_id: ProblemSemanticId,
-    /// Completed projected-gradient steps.
+    /// Completed retraction-parameter-gradient steps.
     pub steps: usize,
     /// Objective evaluations spent so far.
     pub evals: usize,
@@ -290,7 +397,7 @@ pub struct StudyPauseReceipt {
     pub history_bits: Vec<u64>,
     /// Cached current objective, when populated.
     pub current_objective_bits: Option<u64>,
-    /// Cached projected-gradient norm, when populated.
+    /// Cached retraction-parameter-gradient norm, when populated.
     pub current_gradient_norm_bits: Option<u64>,
     /// Finite-difference step bits.
     pub fd_h_bits: u64,
@@ -313,7 +420,7 @@ pub enum StudyRunProgress {
 pub struct StudyReport {
     /// Final objective.
     pub f: f64,
-    /// Final ‖projected gradient‖∞.
+    /// Final retraction-parameter gradient infinity norm.
     pub grad_norm: f64,
     /// Why the segment stopped.
     pub reason: StopReason,
@@ -347,15 +454,17 @@ impl Study {
     ///
     /// # Panics
     /// If the problem is refused by admission, `x0` has the wrong packed
-    /// length, or a root is unevaluable. Use [`Study::try_new`] for a typed
-    /// refusal.
+    /// length or violates a declared manifold, or a root is unevaluable. Use
+    /// [`Study::try_new`] for a typed refusal.
     #[must_use]
     pub fn new(problem: &Problem, x0: &[f64], fd_h: f64, lr: f64) -> Study {
         Study::try_new(problem, x0, fd_h, lr)
             .unwrap_or_else(|error| panic!("study construction refused: {error}"))
     }
 
-    /// Start a study with typed admission, binding, and evaluation refusals.
+    /// Start a study with typed admission, manifold, binding, and evaluation
+    /// refusals. SO(3) starts are stored in the authority's deterministic
+    /// antipodal representative before any objective or constraint is read.
     #[must_use]
     pub fn try_new(problem: &Problem, x0: &[f64], fd_h: f64, lr: f64) -> Result<Study, StudyError> {
         let admission = problem.admit().map_err(StudyError::ProblemRejected)?;
@@ -376,7 +485,10 @@ impl Study {
                 actual: x0.len(),
             });
         }
-        let bindings = packing.unpack(x0);
+        let point = packing
+            .authoritative_point(x0)
+            .map_err(|(variable, source)| StudyError::ManifoldPointInvalid { variable, source })?;
+        let bindings = packing.unpack(&point);
         for (index, objective) in problem.objectives().iter().enumerate() {
             let _ = eval(problem, objective.node, &bindings)
                 .map_err(|source| StudyError::ObjectiveUnevaluable { index, source })?;
@@ -389,7 +501,7 @@ impl Study {
             packing,
             problem_id,
             variables: problem.vars().to_vec(),
-            x: x0.to_vec(),
+            x: point,
             history: Vec::new(),
             evals: 0,
             steps: 0,
@@ -465,9 +577,9 @@ impl Study {
         }
     }
 
-    /// Central-difference TANGENT gradient of the total objective.
-    fn tangent_gradient(&mut self, problem: &Problem) -> Vec<f64> {
-        let n = self.packing.dim;
+    /// Central-difference retraction-parameter gradient of the total objective.
+    fn retraction_parameter_gradient(&mut self, problem: &Problem) -> Vec<f64> {
+        let n = self.packing.param_dim;
         let mut g = vec![0.0f64; n];
         for i in 0..n {
             let mut t = vec![0.0f64; n];
@@ -479,7 +591,7 @@ impl Study {
             let fm = objective(problem, &self.packing, &xm, &mut self.evals);
             g[i] = (fp - fm) / (2.0 * self.fd_h);
         }
-        self.packing.project(&self.x, &g)
+        g
     }
 
     /// Run a segment, failing loud if the supplied problem does not match the
@@ -495,7 +607,7 @@ impl Study {
 
     /// Run a segment with typed problem-admission and semantic-binding refusal.
     ///
-    /// Projected-gradient steps retract until the stop rule fires, the bound
+    /// Retraction-parameter-gradient steps retract until the stop rule fires, the bound
     /// problem budget runs out, or `max_steps` is reached. The problem's own
     /// `budget.limit` is always added to the caller's rules (P4).
     pub fn try_run(
@@ -599,7 +711,7 @@ impl Study {
             if cx.is_some_and(Cx::is_cancel_requested) {
                 return StudyRunProgress::Paused(self.pause_receipt());
             }
-            let g = self.tangent_gradient(problem);
+            let g = self.retraction_parameter_gradient(problem);
             gnorm = g.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
             self.current_grad_norm = Some(gnorm);
             self.history.push(f);
@@ -634,8 +746,15 @@ impl Study {
     /// Constrained adapters: expose the problem's `EqZero`/`LeZero`
     /// roots as packed callbacks for [`crate::augmented_lagrangian`],
     /// [`crate::interior_point`] or [`crate::sqp`] — with FD
-    /// Jacobian-transpose actions in the packed coordinates. Returns
-    /// (ce, ce_jt, ci, ci_jt) closures over the problem.
+    /// Jacobian-transpose actions in raw packed point coordinates. These
+    /// adapters deliberately do not reinterpret constrained-manifold
+    /// derivatives as optimizer parameters; constrained manifold solving
+    /// remains outside this compatibility path's claim. Returns (ce, ce_jt,
+    /// ci, ci_jt) closures over the problem.
+    ///
+    /// # Panics
+    /// If the problem or `packing` contains a non-Euclidean block, or if the
+    /// packing's variable schema differs from the problem's.
     #[allow(clippy::type_complexity)]
     pub fn constraint_adapters<'p>(
         problem: &'p Problem,
@@ -647,6 +766,24 @@ impl Study {
         impl Fn(&[f64]) -> Vec<f64> + 'p,
         impl Fn(&[f64], &[f64]) -> Vec<f64> + 'p,
     ) {
+        assert!(
+            problem
+                .vars()
+                .iter()
+                .all(|variable| matches!(variable.manifold, Manifold::Rn { .. })),
+            "raw point-coordinate constraint adapters support Rn problem variables only"
+        );
+        assert!(
+            packing.matches_problem_schema(problem),
+            "constraint adapter packing must match the problem variable schema"
+        );
+        assert!(
+            packing
+                .blocks
+                .iter()
+                .all(|block| matches!(block.manifold, Manifold::Rn { .. })),
+            "raw point-coordinate constraint adapters support Rn blocks only"
+        );
         let eval_kind = move |x: &[f64], kind: ConstraintKind| -> Vec<f64> {
             let bindings = packing.unpack(x);
             problem

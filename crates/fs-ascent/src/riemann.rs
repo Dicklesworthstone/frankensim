@@ -1,10 +1,10 @@
-//! Riemannian L-BFGS over fs-opt's manifold METADATA: ambient
-//! gradient → tangent projection → strong-Wolfe search along RETRACTED
-//! curves, with memory pairs moved by deterministic isometric transport.
-//! fs-opt's `Manifold` is metadata (dimensions, kinds); the
-//! OPERATIONS (projection, retraction) live here with the engines
-//! that consume them. Manifold invariants (unit norms) hold to
-//! roundoff along the whole iterate path — tested, not assumed.
+//! Riemannian L-BFGS over fs-opt's authoritative manifold runtime:
+//! ambient point gradient → parameter gradient → strong-Wolfe search along
+//! retracted curves, with memory pairs moved by the transport associated with
+//! each manifold. Point storage and optimizer-parameter storage remain
+//! distinct end to end (notably SO(3): four quaternion lanes versus three
+//! right/body lanes). Manifold invariants hold to roundoff along the whole
+//! iterate path — tested, not assumed.
 
 use crate::stop::{StopObservation, StopReason, StopRule};
 use crate::wolfe::strong_wolfe_with_budget;
@@ -13,29 +13,26 @@ use std::collections::VecDeque;
 
 type CurvaturePair = (Vec<f64>, Vec<f64>, f64);
 
-const MANIFOLD_ADMISSION_TOLERANCE: f64 = 1e-12;
-const TANGENCY_TOLERANCE: f64 = 1e-10;
 const CURVATURE_RELATIVE_FLOOR: f64 = 1e-14;
 
 fn point_dim(man: &Manifold) -> usize {
-    let raw = match *man {
-        Manifold::Rn { dim } => {
-            assert!(dim >= 1, "Rn dimension must be at least one");
-            dim
-        }
-        Manifold::Sphere { ambient } => {
-            assert!(
-                ambient >= 2,
-                "sphere ambient dimension must be at least two"
-            );
-            ambient
-        }
-        Manifold::So3 => 4,
-        Manifold::Stiefel { .. } => {
-            panic!("Stiefel is metadata-only until its consumer bead supplies the retraction")
-        }
-    };
-    usize::try_from(raw).expect("manifold point dimension must fit usize")
+    usize::try_from(
+        man.layout()
+            .expect("Riemannian solver requires a valid manifold descriptor")
+            .point_dim()
+            .get(),
+    )
+    .expect("manifold point dimension must fit usize")
+}
+
+fn parameter_dim(man: &Manifold) -> usize {
+    usize::try_from(
+        man.layout()
+            .expect("Riemannian solver requires a valid manifold descriptor")
+            .param_dim()
+            .get(),
+    )
+    .expect("manifold parameter dimension must fit usize")
 }
 
 fn assert_finite(label: &str, values: &[f64]) {
@@ -93,163 +90,124 @@ fn inf_norm(values: &[f64]) -> f64 {
 fn violation(man: &Manifold, x: &[f64]) -> f64 {
     match man {
         Manifold::Sphere { .. } | Manifold::So3 => (l2_norm(x) - 1.0).abs(),
-        _ => 0.0,
+        Manifold::Stiefel { n, p } => {
+            let (n, p) = (*n as usize, *p as usize);
+            let mut residual = 0.0_f64;
+            for column in 0..p {
+                for against in 0..=column {
+                    let gram: f64 = (0..n)
+                        .map(|row| x[column * n + row] * x[against * n + row])
+                        .sum();
+                    let expected = if column == against { 1.0 } else { 0.0 };
+                    residual = residual.max((gram - expected).abs());
+                }
+            }
+            residual
+        }
+        Manifold::Rn { .. } => 0.0,
     }
 }
 
-fn assert_point(man: &Manifold, x: &[f64]) {
+fn authoritative_point(man: &Manifold, x: &[f64]) -> Vec<f64> {
     assert_eq!(
         x.len(),
         point_dim(man),
         "manifold point dimension does not match its descriptor"
     );
     assert_finite("manifold point", x);
-    assert!(
-        violation(man, x) <= MANIFOLD_ADMISSION_TOLERANCE,
-        "sphere/SO(3) point must have unit norm within {MANIFOLD_ADMISSION_TOLERANCE:e}"
-    );
+    let zero_step = vec![0.0; parameter_dim(man)];
+    let validated = man
+        .retract(x, &zero_step)
+        .unwrap_or_else(|error| panic!("manifold point failed fs-opt authority: {error}"));
+    // SO(3) has an explicit antipodal representative contract. The other
+    // manifolds have no quotient-representative ambiguity, so retain the
+    // caller's already-authority-validated point bits instead of silently
+    // moving a Sphere/Stiefel start by another normalization/QR roundoff.
+    if matches!(man, Manifold::So3) {
+        validated
+    } else {
+        x.to_vec()
+    }
+}
+
+fn assert_point(man: &Manifold, x: &[f64]) {
+    let _canonical = authoritative_point(man, x);
 }
 
 fn assert_tangent(man: &Manifold, x: &[f64], vector: &[f64]) {
     assert_eq!(
         vector.len(),
-        x.len(),
-        "tangent-vector dimension must match the manifold point"
+        parameter_dim(man),
+        "tangent-vector dimension must match the manifold parameter layout"
     );
     assert_finite("tangent vector", vector);
-    if matches!(man, Manifold::Sphere { .. } | Manifold::So3) {
-        let residual = dot(x, vector).abs();
-        let scale = l2_norm(vector).max(f64::MIN_POSITIVE);
-        assert!(
-            residual <= TANGENCY_TOLERANCE * scale,
-            "sphere/SO(3) vector is not tangent: residual {residual:e}"
-        );
-    }
+    man.validate_parameter_tangent(x, vector)
+        .unwrap_or_else(|error| panic!("tangent vector failed fs-opt authority: {error}"));
 }
 
-fn checked_fg(fg: crate::FnGrad<'_>, x: &[f64]) -> (f64, Vec<f64>) {
-    let (f, gradient) = fg(x);
+fn checked_fg(man: &Manifold, fg: crate::FnGrad<'_>, x: &[f64]) -> (f64, Vec<f64>) {
+    let (f, ambient_gradient) = fg(x);
     assert!(f.is_finite(), "objective value must be finite");
     assert_eq!(
-        gradient.len(),
+        ambient_gradient.len(),
         x.len(),
-        "objective gradient dimension must match the decision vector"
+        "objective callback gradient dimension must match point storage"
     );
-    assert_finite("objective gradient", &gradient);
-    (f, gradient)
+    assert_finite("objective ambient gradient", &ambient_gradient);
+    let parameter_gradient = man
+        .parameter_gradient(x, &ambient_gradient)
+        .unwrap_or_else(|error| panic!("objective gradient pullback failed: {error}"));
+    (f, parameter_gradient)
 }
 
-/// Project an ambient vector onto the tangent space at `x`.
+/// Pull an ambient point-storage vector back to optimizer-parameter storage at
+/// `x` through the authoritative fs-opt manifold operation.
+///
+/// For SO(3), the returned vector has three right/body lanes even though `x`
+/// and `v` have four quaternion lanes. This public wrapper is retained for
+/// compatibility; new code may call [`Manifold::parameter_gradient`] directly.
 ///
 /// # Panics
-/// For metadata-only manifolds (Stiefel — its retraction lands with
-/// its consumer bead; using it in a descent today is a modeling
-/// error, surfaced loudly).
+/// If the descriptor, point, ambient vector, or resulting tangent is invalid.
 #[must_use]
 pub fn tangent_project(man: &Manifold, x: &[f64], v: &[f64]) -> Vec<f64> {
-    assert_point(man, x);
-    assert_eq!(
-        v.len(),
-        x.len(),
-        "ambient-vector dimension must match the manifold point"
-    );
-    assert_finite("ambient vector", v);
-    let projected = match man {
-        Manifold::Rn { .. } => v.to_vec(),
-        Manifold::Sphere { .. } | Manifold::So3 => {
-            // v − (v·x)·x.
-            let normal_component = dot(v, x);
-            v.iter()
-                .zip(x)
-                .map(|(vi, xi)| (-normal_component).mul_add(*xi, *vi))
-                .collect()
-        }
-        Manifold::Stiefel { .. } => unreachable!("point admission rejects Stiefel"),
-    };
-    assert_finite("projected tangent vector", &projected);
-    projected
+    man.parameter_gradient(x, v)
+        .unwrap_or_else(|error| panic!("ambient vector failed fs-opt manifold pullback: {error}"))
 }
 
-/// Retract from `x` along `step` (metric-projection retractions).
+/// Retract from point-storage `x` along optimizer-parameter `step` through the
+/// authoritative fs-opt manifold operation.
 ///
 /// # Panics
-/// Same metadata-only policy as [`tangent_project`].
+/// If the descriptor, point, step, or landing is invalid.
 #[must_use]
 pub fn retract(man: &Manifold, x: &[f64], step: &[f64]) -> Vec<f64> {
-    assert_point(man, x);
-    assert_eq!(
-        step.len(),
-        x.len(),
-        "retraction-step dimension must match the manifold point"
-    );
-    assert_finite("retraction step", step);
-    let retracted: Vec<f64> = match man {
-        Manifold::Rn { .. } => x.iter().zip(step).map(|(a, b)| a + b).collect(),
-        Manifold::Sphere { .. } | Manifold::So3 => {
-            let moved: Vec<f64> = x.iter().zip(step).map(|(a, b)| a + b).collect();
-            assert_finite("retraction trial", &moved);
-            let nrm = l2_norm(&moved);
-            assert!(nrm > 0.0, "retraction trial must have nonzero norm");
-            moved.iter().map(|t| t / nrm).collect()
-        }
-        Manifold::Stiefel { .. } => unreachable!("point admission rejects Stiefel"),
-    };
-    assert_point(man, &retracted);
-    retracted
+    man.retract(x, step)
+        .unwrap_or_else(|error| panic!("retraction failed fs-opt manifold authority: {error}"))
 }
 
-/// Isometric vector transport on the sphere/SO(3) shortest geodesic.
-/// Rn transport is the identity. The normalized retraction of a tangent step
-/// cannot reach the antipode, but the denominator is still checked so corrupt
-/// resumed state fails closed instead of contaminating curvature memory.
-fn vector_transport(man: &Manifold, from: &[f64], to: &[f64], vector: &[f64]) -> Vec<f64> {
-    assert_point(man, from);
-    assert_point(man, to);
-    let vector = tangent_project(man, from, vector);
-    let transported = match man {
-        Manifold::Rn { .. } => vector,
-        Manifold::Sphere { .. } | Manifold::So3 => {
-            let denominator = 1.0 + dot(from, to);
-            assert!(
-                denominator.is_finite() && denominator > 64.0 * f64::EPSILON,
-                "sphere/SO(3) vector transport is undefined at antipodal points"
-            );
-            let coefficient = dot(&vector, to) / denominator;
-            vector
-                .iter()
-                .zip(from.iter().zip(to))
-                .map(|(value, (old, new))| (-coefficient).mul_add(old + new, *value))
-                .collect()
-        }
-        Manifold::Stiefel { .. } => unreachable!("point admission rejects Stiefel"),
-    };
-    // Remove the final few ulps of normal component introduced by arithmetic.
-    tangent_project(man, to, &transported)
-}
-
-fn retraction_velocity(
-    man: &Manifold,
-    origin: &[f64],
-    direction: &[f64],
-    alpha: f64,
-    trial: &[f64],
-) -> Vec<f64> {
+fn project_parameter_direction(man: &Manifold, point: &[f64], direction: &[f64]) -> Vec<f64> {
     match man {
-        Manifold::Rn { .. } => direction.to_vec(),
-        Manifold::Sphere { .. } | Manifold::So3 => {
-            let moved: Vec<f64> = origin
-                .iter()
-                .zip(direction)
-                .map(|(x, d)| alpha.mul_add(*d, *x))
-                .collect();
-            let scale = l2_norm(&moved);
-            tangent_project(man, trial, direction)
-                .into_iter()
-                .map(|value| value / scale)
-                .collect()
+        Manifold::Rn { .. } | Manifold::So3 => {
+            man.validate_parameter_tangent(point, direction)
+                .unwrap_or_else(|error| panic!("parameter direction is invalid: {error}"));
+            direction.to_vec()
         }
-        Manifold::Stiefel { .. } => unreachable!("point admission rejects Stiefel"),
+        Manifold::Sphere { .. } | Manifold::Stiefel { .. } => man
+            .parameter_gradient(point, direction)
+            .unwrap_or_else(|error| panic!("parameter direction projection failed: {error}")),
     }
+}
+
+fn vector_transport(
+    man: &Manifold,
+    from: &[f64],
+    step: &[f64],
+    to: &[f64],
+    vector: &[f64],
+) -> Vec<f64> {
+    man.transport_parameter(from, step, to, vector)
+        .unwrap_or_else(|error| panic!("vector transport failed fs-opt authority: {error}"))
 }
 
 fn curvature_rho(s: &[f64], y: &[f64]) -> Option<f64> {
@@ -279,11 +237,17 @@ fn curvature_rho(s: &[f64], y: &[f64]) -> Option<f64> {
     rho.is_finite().then_some(rho)
 }
 
-fn transport_pairs(man: &Manifold, from: &[f64], to: &[f64], pairs: &mut VecDeque<CurvaturePair>) {
+fn transport_pairs(
+    man: &Manifold,
+    from: &[f64],
+    step: &[f64],
+    to: &[f64],
+    pairs: &mut VecDeque<CurvaturePair>,
+) {
     let mut transported = VecDeque::with_capacity(pairs.len());
     while let Some((s, y, _old_rho)) = pairs.pop_front() {
-        let s = vector_transport(man, from, to, &s);
-        let y = vector_transport(man, from, to, &y);
+        let s = vector_transport(man, from, step, to, &s);
+        let y = vector_transport(man, from, step, to, &y);
         if let Some(rho) = curvature_rho(&s, &y) {
             transported.push_back((s, y, rho));
         }
@@ -357,8 +321,8 @@ pub struct RiemannianReport {
     pub iters: usize,
     /// Evaluations.
     pub evals: usize,
-    /// Worst manifold-constraint violation observed along the path
-    /// (the invariant certificate; ~1e−15 for sphere/SO3).
+    /// Worst manifold-constraint violation observed along the path (unit-norm
+    /// residual for Sphere/SO(3), Gram residual for Stiefel).
     pub worst_violation: f64,
 }
 
@@ -371,7 +335,8 @@ pub struct RiemannianLbfgs {
     pub x: Vec<f64>,
     /// Current objective.
     pub f: f64,
-    /// Current RIEMANNIAN gradient (tangent).
+    /// Current Riemannian gradient in optimizer-parameter storage (SO(3):
+    /// three body lanes while [`RiemannianLbfgs::x`] has four quaternion lanes).
     pub g: Vec<f64>,
     pairs: VecDeque<CurvaturePair>,
     memory: usize,
@@ -388,13 +353,12 @@ impl RiemannianLbfgs {
     /// Start at a point ON the manifold.
     #[must_use]
     pub fn new(manifold: Manifold, x0: &[f64], memory: usize, fg: crate::FnGrad<'_>) -> Self {
-        assert_point(&manifold, x0);
-        let (f, g_amb) = checked_fg(fg, x0);
-        let g = tangent_project(&manifold, x0, &g_amb);
-        let worst = violation(&manifold, x0);
+        let x = authoritative_point(&manifold, x0);
+        let (f, g) = checked_fg(&manifold, fg, &x);
+        let worst = violation(&manifold, &x);
         RiemannianLbfgs {
             manifold,
-            x: x0.to_vec(),
+            x,
             f,
             g,
             pairs: VecDeque::new(),
@@ -411,8 +375,8 @@ impl RiemannianLbfgs {
         assert!(self.f.is_finite(), "current objective must be finite");
         assert_eq!(
             self.g.len(),
-            self.x.len(),
-            "current gradient dimension must match the decision vector"
+            parameter_dim(&self.manifold),
+            "current gradient dimension must match the manifold parameter layout"
         );
         assert_tangent(&self.manifold, &self.x, &self.g);
         assert!(
@@ -501,8 +465,9 @@ impl RiemannianLbfgs {
     /// Run a budget-exact strong-Wolfe search along retracted curves.
     ///
     /// Every budget leaf in the stop algebra is a hard callback cap, even
-    /// below `All`: no line-search phase may overshoot it. Sphere/SO(3)
-    /// derivatives use the exact velocity of the normalized retraction.
+    /// below `All`: no line-search phase may overshoot it. Directional
+    /// derivatives pair the fs-opt parameter gradient with the authoritative
+    /// retraction-curve parameter velocity.
     pub fn run(
         &mut self,
         fg: crate::FnGrad<'_>,
@@ -534,7 +499,7 @@ impl RiemannianLbfgs {
             let raw_direction = self.direction();
             let raw_is_finite = raw_direction.iter().all(|value| value.is_finite());
             let mut direction = if raw_is_finite {
-                tangent_project(&self.manifold, &self.x, &raw_direction)
+                project_parameter_direction(&self.manifold, &self.x, &raw_direction)
             } else {
                 Vec::new()
             };
@@ -545,8 +510,8 @@ impl RiemannianLbfgs {
             };
             if !dphi0.is_finite() || dphi0 >= 0.0 {
                 direction = self.g.iter().map(|gradient| -gradient).collect();
-                direction = tangent_project(&self.manifold, &self.x, &direction);
-                dphi0 = -dot(&self.g, &self.g);
+                direction = project_parameter_direction(&self.manifold, &self.x, &direction);
+                dphi0 = dot(&direction, &self.g);
             }
             if !dphi0.is_finite() || dphi0 >= 0.0 {
                 // The configured stop algebra was checked above. If it did
@@ -566,19 +531,21 @@ impl RiemannianLbfgs {
             let mut trial_worst_violation = self.worst_violation;
             let outcome = {
                 let mut curve = |alpha: f64| {
-                    let step: Vec<f64> = direction.iter().map(|value| alpha * value).collect();
-                    let trial = retract(&manifold, &origin, &step);
+                    let raw_step: Vec<f64> = direction.iter().map(|value| alpha * value).collect();
+                    let curve = manifold
+                        .retract_curve(&origin, &direction, alpha)
+                        .unwrap_or_else(|error| {
+                            panic!("line-search curve failed fs-opt authority: {error}")
+                        });
+                    let trial = curve.point;
                     trial_worst_violation = trial_worst_violation.max(violation(&manifold, &trial));
-                    let (f_trial, ambient_gradient) = checked_fg(fg, &trial);
-                    let gradient = tangent_project(&manifold, &trial, &ambient_gradient);
-                    let velocity =
-                        retraction_velocity(&manifold, &origin, &direction, alpha, &trial);
-                    let derivative = dot(&gradient, &velocity);
+                    let (f_trial, gradient) = checked_fg(&manifold, fg, &trial);
+                    let derivative = dot(&gradient, &curve.velocity);
                     assert!(
                         derivative.is_finite(),
                         "retracted curve derivative must remain finite"
                     );
-                    accepted = Some((alpha, trial, f_trial, gradient));
+                    accepted = Some((alpha, raw_step, trial, f_trial, gradient));
                     (f_trial, derivative)
                 };
                 strong_wolfe_with_budget(&mut curve, self.f, dphi0, 1.0, 1e-4, 0.9, remaining)
@@ -598,7 +565,7 @@ impl RiemannianLbfgs {
                 };
                 break;
             }
-            let (alpha, x_new, f_new, g_new) =
+            let (alpha, raw_step, x_new, f_new, g_new) =
                 accepted.expect("successful line search must retain its accepted trial");
             assert_eq!(
                 alpha.to_bits(),
@@ -628,11 +595,10 @@ impl RiemannianLbfgs {
 
             // Every retained pair moves to the new tangent space after every
             // accepted iterate, even when the new secant pair is rejected.
-            transport_pairs(&manifold, &origin, &x_new, &mut self.pairs);
+            transport_pairs(&manifold, &origin, &raw_step, &x_new, &mut self.pairs);
             let transported_old_gradient =
-                vector_transport(&manifold, &origin, &x_new, &origin_gradient);
-            let raw_step: Vec<f64> = direction.iter().map(|value| alpha * value).collect();
-            let s = vector_transport(&manifold, &origin, &x_new, &raw_step);
+                vector_transport(&manifold, &origin, &raw_step, &x_new, &origin_gradient);
+            let s = vector_transport(&manifold, &origin, &raw_step, &x_new, &raw_step);
             let y: Vec<f64> = g_new
                 .iter()
                 .zip(&transported_old_gradient)
@@ -683,18 +649,31 @@ mod tests {
     fn sphere_transport_preserves_tangency_inner_products_and_round_trip() {
         let manifold = Manifold::Sphere { ambient: 3 };
         let from = [1.0, 0.0, 0.0];
-        let to = [0.0, 1.0, 0.0];
+        let step = [0.0, 0.5, 0.0];
+        let to = retract(&manifold, &from, &step);
         let first = [0.0, 1.0, 0.0];
         let second = [0.0, 0.0, 1.0];
-        let moved_first = vector_transport(&manifold, &from, &to, &first);
-        let moved_second = vector_transport(&manifold, &from, &to, &second);
+        let moved_first = vector_transport(&manifold, &from, &step, &to, &first);
+        let moved_second = vector_transport(&manifold, &from, &step, &to, &second);
         assert!(dot(&to, &moved_first).abs() <= 8.0 * f64::EPSILON);
         assert!(dot(&to, &moved_second).abs() <= 8.0 * f64::EPSILON);
         assert!(
             (dot(&first, &second) - dot(&moved_first, &moved_second)).abs() <= 8.0 * f64::EPSILON
         );
         assert!((l2_norm(&first) - l2_norm(&moved_first)).abs() <= 8.0 * f64::EPSILON);
-        let round_trip = vector_transport(&manifold, &to, &from, &moved_first);
+        let scale = dot(&to, &from);
+        let reverse_step: Vec<f64> = from
+            .iter()
+            .zip(&to)
+            .map(|(target, current)| target / scale - current)
+            .collect();
+        let returned = retract(&manifold, &to, &reverse_step);
+        let round_trip = vector_transport(&manifold, &to, &reverse_step, &returned, &moved_first);
+        assert!(
+            from.iter()
+                .zip(&returned)
+                .all(|(expected, actual)| (expected - actual).abs() <= 8.0 * f64::EPSILON)
+        );
         assert!(
             first
                 .iter()
@@ -707,12 +686,13 @@ mod tests {
     fn transported_memory_recomputes_rho_and_drops_invalid_curvature() {
         let manifold = Manifold::Sphere { ambient: 3 };
         let from = [1.0, 0.0, 0.0];
-        let to = [0.0, 1.0, 0.0];
+        let step = [0.0, 0.5, 0.0];
+        let to = retract(&manifold, &from, &step);
         let mut pairs = VecDeque::from([
             (vec![0.0, 1.0, 0.0], vec![0.0, 2.0, 0.0], 99.0),
             (vec![0.0, 0.0, 1.0], vec![0.0, 0.0, -1.0], 1.0),
         ]);
-        transport_pairs(&manifold, &from, &to, &mut pairs);
+        transport_pairs(&manifold, &from, &step, &to, &mut pairs);
         assert_eq!(pairs.len(), 1, "negative transported curvature must drop");
         let (s, y, rho) = pairs.front().expect("positive pair retained");
         assert_eq!(
@@ -722,6 +702,43 @@ mod tests {
                 .to_bits()
         );
         assert_ne!(rho.to_bits(), 99.0f64.to_bits());
+    }
+
+    #[test]
+    fn so3_wrappers_keep_quaternion_points_and_body_parameters_distinct() {
+        let manifold = Manifold::So3;
+        let point = [1.0, 0.0, 0.0, 0.0];
+        let ambient_gradient = [0.0, 2.0, 0.0, 0.0];
+        let gradient = tangent_project(&manifold, &point, &ambient_gradient);
+        assert_eq!(gradient, vec![1.0, 0.0, 0.0]);
+
+        let step = [0.2, -0.1, 0.3];
+        let landed = retract(&manifold, &point, &step);
+        assert_eq!(landed.len(), 4);
+        let transported = vector_transport(&manifold, &point, &step, &landed, &gradient);
+        assert_eq!(transported, gradient);
+        assert_tangent(&manifold, &landed, &transported);
+    }
+
+    #[test]
+    fn stiefel_wrappers_use_qr_retraction_and_its_differential_transport() {
+        let manifold = Manifold::Stiefel { n: 4, p: 2 };
+        let point = [
+            0.5, 0.5, 0.5, 0.5, // first column
+            0.5, -0.5, 0.5, -0.5, // second column
+        ];
+        let ambient = [0.75, -0.5, 0.25, 1.0, -0.25, 0.5, 1.25, -0.75];
+        let tangent = tangent_project(&manifold, &point, &ambient);
+        assert_tangent(&manifold, &point, &tangent);
+        let step: Vec<f64> = tangent.iter().map(|value| 0.125 * value).collect();
+        let landed = retract(&manifold, &point, &step);
+        let transported = vector_transport(&manifold, &point, &step, &landed, &tangent);
+        let authoritative = manifold
+            .transport_parameter(&point, &step, &landed, &tangent)
+            .expect("valid Stiefel transport");
+        assert_eq!(transported, authoritative);
+        assert!(violation(&manifold, &landed) <= 2.0e-15);
+        assert_tangent(&manifold, &landed, &transported);
     }
 
     #[test]
