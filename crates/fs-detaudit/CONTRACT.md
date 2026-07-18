@@ -84,8 +84,10 @@ No `unsafe` (workspace forbids it; nothing here needs it).
 ## Conformance tests
 
 - `tests/detaudit.rs` — deterministic subject audits clean across an
-  explicit matrix; the bead's seeded arrival-order reduction is CAUGHT
-  and localized to the reduce stage with repeat-consistent divergence;
+  explicit matrix; JSON-lines escaping is exact-output tested across every
+  U+0000..U+001F control plus quote and backslash; the bead's seeded
+  arrival-order reduction is CAUGHT and localized to the reduce stage with
+  repeat-consistent divergence;
   cross-ISA fixtures classify every declared category with a clean
   render; undeclared divergence, violated ULP envelopes, and missing
   rows are never clean; mode-delta reproducibility loss is observed.

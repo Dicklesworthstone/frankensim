@@ -132,6 +132,44 @@ fn audit_json_lines_escape_subjects_and_stage_labels() {
 }
 
 #[test]
+fn audit_json_lines_exhaustively_escape_the_json_c0_range() {
+    const RAW: &str = "\u{0000}\u{0001}\u{0002}\u{0003}\u{0004}\u{0005}\u{0006}\u{0007}\u{0008}\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{000e}\u{000f}\u{0010}\u{0011}\u{0012}\u{0013}\u{0014}\u{0015}\u{0016}\u{0017}\u{0018}\u{0019}\u{001a}\u{001b}\u{001c}\u{001d}\u{001e}\u{001f}\"\\";
+    const ESCAPED: &str = "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\\"\\\\";
+
+    let subject = Subject {
+        name: RAW,
+        run: Box::new(|workers| StagedTrace {
+            stages: vec![stage(
+                RAW,
+                u64::try_from(workers).expect("worker count fits u64"),
+            )],
+        }),
+    };
+    let report = audit(
+        &subject,
+        &AuditConfig {
+            matrix: WorkerMatrix::explicit(vec![1, 2]),
+            repeats: 1,
+        },
+    );
+
+    assert_eq!(
+        report.json_lines(),
+        vec![
+            format!(
+                "{{\"detaudit\":\"row\",\"subject\":\"{ESCAPED}\",\"workers\":1,\"repeat\":0,\"final_hash\":\"0000000000000001\",\"identical\":true}}"
+            ),
+            format!(
+                "{{\"detaudit\":\"row\",\"subject\":\"{ESCAPED}\",\"workers\":2,\"repeat\":0,\"final_hash\":\"0000000000000002\",\"identical\":false}}"
+            ),
+            format!(
+                "{{\"detaudit\":\"divergence\",\"subject\":\"{ESCAPED}\",\"workers\":2,\"repeat\":0,\"first_stage\":0,\"stage_label\":\"{ESCAPED}\",\"baseline\":\"0000000000000001\",\"observed\":\"0000000000000002\"}}"
+            ),
+        ]
+    );
+}
+
+#[test]
 fn seeded_arrival_order_violation_is_caught_and_localized_to_the_reduce_stage() {
     let config = AuditConfig {
         matrix: WorkerMatrix::explicit(vec![1, 2, 4]),
