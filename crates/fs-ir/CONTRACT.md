@@ -714,6 +714,52 @@ admitted derived-geometry boundary.
   force or contact mechanics, account for thermal/load/coating/lubrication/wear
   effects, authenticate artifacts, perform inspection/pass-fail, integrate
   gear backlash, or transport fit attachments across lineage.
+- `machine::manufacturing::geometric_tolerance` is the additive native
+  datum-backed geometric-tolerance seed. Version one admits only flatness,
+  parallelism, and perpendicularity controls. Every control binds a stable ID,
+  caller-declared body, durable controlled surface patch, strictly positive
+  zone width, exact standard/model coordinate, machine-readable semantic-source
+  coordinate, and optional presentation coordinate. Admission is against one
+  exact admitted Machine graph and one exact admitted datum-system identity;
+  the datum catalog must itself be bound to that graph.
+- Body and controlled patch must both exist and share one subsystem owner.
+  This is structural co-ownership, not proof that the patch is geometrically
+  contained on the declared body. Flatness forbids a datum frame.
+  Parallelism and perpendicularity require an existing admitted frame whose
+  primary datum feature declares the controlled body. The admitted datum-system
+  invariant already makes each frame single-body; this module neither
+  reconstructs nor strengthens that geometric claim. Duplicate IDs and
+  duplicate `(controlled patch, characteristic, optional datum frame)`
+  selectors refuse. The caller-declared body, numeric width, and artifact
+  coordinates do not make two declarations over that effective selector
+  coexist.
+- `GeometricToleranceLengthV1` retains the submitted binary64 bits, explicit
+  metre/millimetre/micrometre/nanometre unit, and deterministic binary64
+  coherent-SI metre bits. Values must be finite and strictly positive, and SI
+  normalization must remain finite and nonzero. Source spellings remain
+  identity-distinct even when their retained SI bits agree. Specification,
+  semantic source, and graphical presentation are nominally distinct artifact
+  roles; a presentation wrapper cannot inhabit the semantic-source field.
+- `MachineGeometricToleranceIdV1` binds the geometric-tolerance and
+  FrankenScript IR schema versions, exact graph and datum-system identities,
+  and every control ID, body/patch identity and key, characteristic, source/
+  unit/SI width bit pattern, optional frame, and artifact coordinate. Caller
+  order is non-semantic; admitted controls are sorted by ID. Empty and raw
+  one-over inputs refuse before nested processing, and version one retains at
+  most 4,096 controls. `tests/machine_manufacturing_geometric_tolerance.rs`
+  supplies G0/G3/G5 evidence for order-invariant and complete-receipt replay,
+  graph/datum/field identity movement, alias and ownership refusal, datum-use
+  rules, explicit unit retention, and the exact-cap/N+1 boundary.
+- This structural seed does not construct a tolerance zone, plane, axis, or
+  derived geometry; measure flatness, parallelism, or perpendicularity; prove
+  patch containment; or establish inspection/pass-fail authority. It does not
+  support position, profile, angularity, runout, cylindricity, straightness,
+  or circularity; MMC/LMC/RFS or projected/unequally disposed zones; composite
+  controls; combined datum frames; or tolerance propagation. It does not parse
+  or emit AP242/semantic PMI, validate drawings, establish ASME/ISO conformance,
+  authenticate semantic or presentation artifacts, prove assembly or
+  manufacturability, integrate gear/backlash behavior, or transport controls
+  across lineage.
 - `query` (addendum Proposal 8 — declarative query language v0): a query is
   `(QoI, Target, budget_usd, deadline_s)` where `Qoi` is a fixed MENU —
   `MaxOverRegion`, `Integral` (linear), `Exceedance` (probabilistic, needs a

@@ -36,6 +36,8 @@ use super::{
 pub mod datum_system;
 /// Typed mating-feature size envelopes and derived clearance state.
 pub mod fit_clearance;
+/// Datum-backed flatness, parallelism, and perpendicularity controls.
+pub mod geometric_tolerance;
 /// Typed surface-texture requirements and as-built observations.
 pub mod surface_texture;
 /// Exact positional binding from Machine-IR tolerance axes to an admitted
