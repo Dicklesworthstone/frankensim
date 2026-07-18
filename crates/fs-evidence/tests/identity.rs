@@ -9,11 +9,15 @@ use fs_blake3::identity::{
     FieldSpec, NoClaimState, SchemaId, SemanticId, SourceId, StrongIdentity, TrustState, WireType,
 };
 use fs_evidence::{
-    Ambition, COLOR_ALGEBRA_VERSION, CardBoundModelEvidenceIdV1,
-    CardBoundModelEvidenceIdentityError, CardBoundModelEvidenceReceiptV1, Certified,
-    CertifiedF64DecisionAssessmentIdV1, CertifiedF64DecisionAssessmentIdentityError,
-    CertifiedF64DecisionAssessmentReceiptV1, CertifiedF64EvidenceIdV1,
-    CertifiedF64EvidenceIdentityError, CertifiedF64EvidenceReceiptV1, CertifiedF64SourceIdV1,
+    Ambition, CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1, COLOR_ALGEBRA_VERSION,
+    CardBoundModelEvidenceIdV1, CardBoundModelEvidenceIdentityError,
+    CardBoundModelEvidenceReceiptV1, Certified, CertifiedF64DecisionAssessmentIdV1,
+    CertifiedF64DecisionAssessmentIdentityError, CertifiedF64DecisionAssessmentReceiptV1,
+    CertifiedF64EvidenceIdV1, CertifiedF64EvidenceIdentityError, CertifiedF64EvidenceReceiptV1,
+    CertifiedF64LineageCompositionOpV1, CertifiedF64LineageIdentityError,
+    CertifiedF64LineageNodeIdV1, CertifiedF64LineageNodeIdentitySchemaV1,
+    CertifiedF64LineageNodeKindV1, CertifiedF64LineageNodeReceiptV1, CertifiedF64LineageNodeV1,
+    CertifiedF64LineageOperationV1, CertifiedF64LineageParentSemanticsV1, CertifiedF64SourceIdV1,
     CertifiedF64SourceIdentityError, CertifiedF64SourceReceiptV1, CertifiedF64SourceV1, Color,
     ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError, ColorEvidenceNodeIdV1,
     ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1, ColorEvidenceNodeV1,
@@ -36,9 +40,10 @@ use fs_evidence::{
     SourcedCertifiedF64EvidenceIdentityError, SourcedCertifiedF64EvidenceReceiptV1,
     StatisticalCertificate, StatisticalCertificateIdV1, StatisticalCertificateIdentityError,
     StatisticalCertificateReceiptV1, UncertaintySource, ValidityDomain, ValidityDomainIdV1,
-    ValidityDomainIdentityError, compose_color_evidence_nodes_v1,
-    identify_card_bound_model_evidence_v1, identify_certified_f64_decision_assessment_v1,
-    identify_certified_f64_evidence_v1, identify_certified_f64_source_v1,
+    ValidityDomainIdentityError, compose_certified_f64_lineage_nodes_v1,
+    compose_color_evidence_nodes_v1, identify_card_bound_model_evidence_v1,
+    identify_certified_f64_decision_assessment_v1, identify_certified_f64_evidence_v1,
+    identify_certified_f64_lineage_source_v1, identify_certified_f64_source_v1,
     identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
     identify_discrepancy_band_v1, identify_fidelity_pair_v1, identify_model_bracket_v1,
     identify_model_card_v1, identify_model_evidence_v1, identify_numerical_certificate_v1,
@@ -362,6 +367,101 @@ fn sourced_certified(
         adjoint_bytes.map(|bytes| certified_source("org.frankensim.tests.adjoint.v1", 1, bytes));
     identify_sourced_certified_f64_evidence_v1(child, producer, adjoint, LIMITS, || false)
         .expect("matching exact sources")
+}
+
+fn lineage_source_with(
+    domain: &str,
+    schema_version: u32,
+    canonical_bytes: &[u8],
+) -> CertifiedF64LineageNodeV1 {
+    identify_certified_f64_lineage_source_v1(
+        certified_source(domain, schema_version, canonical_bytes),
+        LIMITS,
+        || false,
+    )
+    .expect("valid certified-f64 lineage source")
+}
+
+fn lineage_source(canonical_bytes: &[u8]) -> CertifiedF64LineageNodeV1 {
+    lineage_source_with(
+        "org.frankensim.tests.certified-f64-lineage-source.v1",
+        1,
+        canonical_bytes,
+    )
+}
+
+fn lineage_derived(
+    operation: CertifiedF64LineageCompositionOpV1,
+    left: &CertifiedF64LineageNodeV1,
+    right: &CertifiedF64LineageNodeV1,
+) -> Result<CertifiedF64LineageNodeV1, CertifiedF64LineageIdentityError> {
+    compose_certified_f64_lineage_nodes_v1(operation, left, right, LIMITS, || false)
+}
+
+fn lineage_operation_tag(operation: CertifiedF64LineageOperationV1) -> u32 {
+    match operation {
+        CertifiedF64LineageOperationV1::Source => 1,
+        CertifiedF64LineageOperationV1::Add => 2,
+        CertifiedF64LineageOperationV1::Sub => 3,
+        CertifiedF64LineageOperationV1::Mul => 4,
+        CertifiedF64LineageOperationV1::Min => 5,
+        CertifiedF64LineageOperationV1::Max => 6,
+    }
+}
+
+fn lineage_parent_reference_bytes(parent: CertifiedF64LineageNodeIdV1) -> [u8; 65] {
+    let mut output = [0_u8; 65];
+    output[0] = CertifiedF64LineageNodeIdV1::ROLE.tag();
+    output[1..33].copy_from_slice(
+        SchemaId::<CertifiedF64LineageNodeIdentitySchemaV1>::for_schema().as_bytes(),
+    );
+    output[33..].copy_from_slice(parent.as_bytes());
+    output
+}
+
+fn manual_lineage_receipt(
+    operation: CertifiedF64LineageOperationV1,
+    source: Option<CertifiedF64SourceIdV1>,
+    parents: Option<[CertifiedF64LineageNodeIdV1; 2]>,
+) -> CertifiedF64LineageNodeReceiptV1 {
+    let kind_tag = if operation == CertifiedF64LineageOperationV1::Source {
+        1
+    } else {
+        2
+    };
+    let source_count = u64::from(source.is_some());
+    let parent_count = if parents.is_some() { 2 } else { 0 };
+    let parent_rows = parents.map(|parents| parents.map(lineage_parent_reference_bytes));
+    CanonicalEncoder::<CertifiedF64LineageNodeIdV1, _>::new(LIMITS, || false)
+        .expect("lineage schema")
+        .variant(Field::new(0, "node-kind"), kind_tag, &[])
+        .expect("node kind")
+        .variant(
+            Field::new(1, "operation"),
+            lineage_operation_tag(operation),
+            &[],
+        )
+        .expect("operation")
+        .variant(Field::new(2, "parent-semantics"), 1, &[])
+        .expect("ordered parent semantics")
+        .u64(
+            Field::new(3, "lineage-algorithm-version"),
+            u64::from(CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1),
+        )
+        .expect("lineage algorithm version")
+        .ordered_children(Field::new(4, "source"), source_count, source)
+        .expect("typed source child")
+        .ordered_bytes(
+            Field::new(5, "parents"),
+            parent_count,
+            parent_rows
+                .iter()
+                .flat_map(|rows| rows.iter())
+                .map(|row| row.as_slice()),
+        )
+        .expect("typed ordered parents")
+        .finish()
+        .expect("manual lineage frame")
 }
 
 fn manual_certified_f64_source_receipt(
@@ -5081,6 +5181,474 @@ fn sourced_certified_f64_identity_enforces_resources_and_cancellation() {
             },
         ),
         Err(SourcedCertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one G0 replay matrix covers every versioned lineage operation"
+)]
+fn certified_f64_lineage_helpers_match_manual_typed_frames_and_legacy_crosswalks() {
+    let left = lineage_source(b"lineage-left");
+    let right = lineage_source(b"lineage-right");
+    let source = left.source().expect("source node retains exact source");
+    let manual_source = manual_lineage_receipt(
+        CertifiedF64LineageOperationV1::Source,
+        Some(source.id()),
+        None,
+    );
+
+    assert_eq!(left.id(), manual_source.id());
+    assert_eq!(
+        left.receipt().canonical_preimage(),
+        manual_source.canonical_preimage()
+    );
+    assert_eq!(left.kind(), CertifiedF64LineageNodeKindV1::Source);
+    assert_eq!(left.operation(), CertifiedF64LineageOperationV1::Source);
+    assert_eq!(
+        left.parent_semantics(),
+        CertifiedF64LineageParentSemanticsV1::Ordered
+    );
+    assert!(left.parent_ids().is_empty());
+    assert_eq!(
+        left.legacy_provenance(),
+        ProvenanceHash::of_bytes(b"lineage-left")
+    );
+    assert_eq!(left.trust_state(), TrustState::Unanchored);
+    assert_eq!(
+        left.receipt().audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
+
+    for (composition, operation, legacy_name) in [
+        (
+            CertifiedF64LineageCompositionOpV1::Add,
+            CertifiedF64LineageOperationV1::Add,
+            "add",
+        ),
+        (
+            CertifiedF64LineageCompositionOpV1::Sub,
+            CertifiedF64LineageOperationV1::Sub,
+            "sub",
+        ),
+        (
+            CertifiedF64LineageCompositionOpV1::Mul,
+            CertifiedF64LineageOperationV1::Mul,
+            "mul",
+        ),
+        (
+            CertifiedF64LineageCompositionOpV1::Min,
+            CertifiedF64LineageOperationV1::Min,
+            "min",
+        ),
+        (
+            CertifiedF64LineageCompositionOpV1::Max,
+            CertifiedF64LineageOperationV1::Max,
+            "max",
+        ),
+    ] {
+        let helper = lineage_derived(composition, &left, &right).expect("valid lineage node");
+        let manual = manual_lineage_receipt(operation, None, Some([left.id(), right.id()]));
+        assert_eq!(helper.id(), manual.id());
+        assert_eq!(
+            helper.receipt().canonical_preimage(),
+            manual.canonical_preimage()
+        );
+        assert_eq!(
+            helper.parent_ids(),
+            &[left.id(), right.id()],
+            "parent order must be retained for {legacy_name}"
+        );
+        assert!(helper.source().is_none());
+        assert_eq!(helper.operation(), operation);
+        assert_eq!(helper.kind(), CertifiedF64LineageNodeKindV1::Composition);
+        assert_eq!(
+            helper.parent_semantics(),
+            CertifiedF64LineageParentSemanticsV1::Ordered
+        );
+        assert_eq!(
+            helper.legacy_provenance(),
+            ProvenanceHash::chain(
+                legacy_name,
+                &[left.legacy_provenance(), right.legacy_provenance()]
+            )
+        );
+    }
+}
+
+#[test]
+fn certified_f64_lineage_preserves_order_multiplicity_tree_shape_and_strong_sources() {
+    let a = lineage_source(b"lineage-a");
+    let b = lineage_source(b"lineage-b");
+    let c = lineage_source(b"lineage-c");
+
+    for operation in [
+        CertifiedF64LineageCompositionOpV1::Add,
+        CertifiedF64LineageCompositionOpV1::Sub,
+        CertifiedF64LineageCompositionOpV1::Mul,
+        CertifiedF64LineageCompositionOpV1::Min,
+        CertifiedF64LineageCompositionOpV1::Max,
+    ] {
+        let ab = lineage_derived(operation, &a, &b).expect("a op b");
+        let ba = lineage_derived(operation, &b, &a).expect("b op a");
+        assert_ne!(ab.id(), ba.id(), "every v1 operation is ordered");
+        assert_eq!(ab.parent_ids(), &[a.id(), b.id()]);
+        assert_eq!(ba.parent_ids(), &[b.id(), a.id()]);
+    }
+
+    let aa = lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &a, &a)
+        .expect("duplicate parent derivation");
+    let ab = lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &a, &b)
+        .expect("distinct parent derivation");
+    assert_eq!(aa.parent_ids(), &[a.id(), a.id()]);
+    assert_ne!(aa.id(), ab.id(), "duplicate multiplicity must not collapse");
+
+    let ab_then_c =
+        lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &ab, &c).expect("(a+b)+c");
+    let bc = lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &b, &c).expect("b+c");
+    let a_then_bc =
+        lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &a, &bc).expect("a+(b+c)");
+    assert_ne!(
+        ab_then_c.id(),
+        a_then_bc.id(),
+        "association-tree shape must remain identity-bearing"
+    );
+
+    let collision_a = lineage_source(FNV1A64_ZERO_PREIMAGE);
+    let collision_b = lineage_source(FNV1A64_ZERO_EXTENSION_COLLISION);
+    assert_eq!(
+        collision_a.legacy_provenance(),
+        collision_b.legacy_provenance(),
+        "fixture must collide under legacy FNV"
+    );
+    assert_ne!(
+        collision_a.id(),
+        collision_b.id(),
+        "exact typed sources must separate a weak collision"
+    );
+    let collision_derived_a =
+        lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &collision_a, &c)
+            .expect("first collision branch");
+    let collision_derived_b =
+        lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &collision_b, &c)
+            .expect("second collision branch");
+    assert_eq!(
+        collision_derived_a.legacy_provenance(),
+        collision_derived_b.legacy_provenance(),
+        "the compatibility chain inherits the weak collision"
+    );
+    assert_ne!(
+        collision_derived_a.id(),
+        collision_derived_b.id(),
+        "typed parent descriptors remain authoritative"
+    );
+
+    let same_bytes_a = lineage_source_with("lineage-domain-a", 1, b"same");
+    let same_bytes_b = lineage_source_with("lineage-domain-b", 1, b"same");
+    let same_bytes_v2 = lineage_source_with("lineage-domain-a", 2, b"same");
+    assert_eq!(
+        same_bytes_a.legacy_provenance(),
+        same_bytes_b.legacy_provenance()
+    );
+    assert_eq!(
+        same_bytes_a.legacy_provenance(),
+        same_bytes_v2.legacy_provenance()
+    );
+    assert_ne!(same_bytes_a.id(), same_bytes_b.id());
+    assert_ne!(same_bytes_a.id(), same_bytes_v2.id());
+}
+
+#[test]
+fn certified_f64_lineage_low_level_frames_do_not_gain_helper_invariants() {
+    let source = lineage_source(b"lineage-raw-shape");
+    let source_id = source.source().expect("exact source").id();
+    let raw_missing_source =
+        CanonicalEncoder::<CertifiedF64LineageNodeIdV1, _>::new(LIMITS, || false)
+            .expect("lineage schema")
+            .variant(Field::new(0, "node-kind"), 1, &[])
+            .expect("source kind")
+            .variant(Field::new(1, "operation"), 1, &[])
+            .expect("source operation")
+            .variant(Field::new(2, "parent-semantics"), 1, &[])
+            .expect("ordered parent semantics")
+            .u64(
+                Field::new(3, "lineage-algorithm-version"),
+                u64::from(CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1),
+            )
+            .expect("algorithm version")
+            .ordered_children(
+                Field::new(4, "source"),
+                0,
+                core::iter::empty::<CertifiedF64SourceIdV1>(),
+            )
+            .expect("raw schema permits the wrong semantic arity")
+            .ordered_bytes(Field::new(5, "parents"), 0, core::iter::empty::<&[u8]>())
+            .expect("empty parents")
+            .finish()
+            .expect("schema-shaped raw receipt");
+    assert_ne!(raw_missing_source.id(), source.id());
+
+    let foreign = CanonicalEncoder::<SourceId<ForeignSourceSchema>, _>::new(LIMITS, || false)
+        .expect("foreign source schema")
+        .u64(Field::new(0, "value"), 19)
+        .expect("foreign source value")
+        .finish()
+        .expect("foreign source receipt");
+    let foreign_child_refusal =
+        CanonicalEncoder::<CertifiedF64LineageNodeIdV1, _>::new(LIMITS, || false)
+            .expect("lineage schema")
+            .variant(Field::new(0, "node-kind"), 1, &[])
+            .expect("source kind")
+            .variant(Field::new(1, "operation"), 1, &[])
+            .expect("source operation")
+            .variant(Field::new(2, "parent-semantics"), 1, &[])
+            .expect("ordered parent semantics")
+            .u64(
+                Field::new(3, "lineage-algorithm-version"),
+                u64::from(CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1),
+            )
+            .expect("algorithm version")
+            .ordered_children(Field::new(4, "source"), 1, [foreign.id()])
+            .expect_err("foreign source role/schema must refuse");
+    assert!(matches!(
+        foreign_child_refusal,
+        CanonicalError::ChildBindingMismatch { .. }
+    ));
+
+    let manual = manual_lineage_receipt(
+        CertifiedF64LineageOperationV1::Source,
+        Some(source_id),
+        None,
+    );
+    assert_eq!(manual.id(), source.id());
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one G4 matrix keeps exact lineage budgets and cancellation boundaries together"
+)]
+fn certified_f64_lineage_enforces_exact_resources_and_cancellation() {
+    let exact_source_bytes = vec![0x41; 512];
+    let source_input = || {
+        certified_source(
+            "org.frankensim.tests.lineage-resource.v1",
+            1,
+            &exact_source_bytes,
+        )
+    };
+    identify_certified_f64_lineage_source_v1(
+        source_input(),
+        CanonicalLimits::new(16_384, 512, 32, 64, 16),
+        || false,
+    )
+    .expect("exact source-work field limit is admitted");
+    assert!(matches!(
+        identify_certified_f64_lineage_source_v1(
+            source_input(),
+            CanonicalLimits::new(16_384, 511, 32, 64, 16),
+            || false,
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 512,
+                limit: 511,
+            }
+        ))
+    ));
+    assert!(matches!(
+        identify_certified_f64_lineage_source_v1(
+            source_input(),
+            CanonicalLimits::new(16_384, 512, 32, 64, 0),
+            || false,
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    ));
+    assert!(matches!(
+        identify_certified_f64_lineage_source_v1(source_input(), LIMITS, || true),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+
+    let left = lineage_source(b"resource-left");
+    let right = lineage_source(b"resource-right");
+    compose_certified_f64_lineage_nodes_v1(
+        CertifiedF64LineageCompositionOpV1::Add,
+        &left,
+        &right,
+        CanonicalLimits::new(16_384, 363, 32, 2, 256),
+        || false,
+    )
+    .expect("typed-source descriptor plus exact two-row parent collection are admitted");
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            CanonicalLimits::new(16_384, 153, 32, 2, 256),
+            || false,
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 154,
+                limit: 153,
+            }
+        ))
+    ));
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            CanonicalLimits::new(16_384, 363, 32, 1, 256),
+            || false,
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 2,
+                limit: 1,
+            }
+        ))
+    ));
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            CanonicalLimits::new(16_384, 363, 5, 2, 256),
+            || false,
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::Fields,
+                requested: 6,
+                limit: 5,
+            }
+        ))
+    ));
+
+    let baseline = lineage_derived(CertifiedF64LineageCompositionOpV1::Add, &left, &right)
+        .expect("baseline lineage frame");
+    let frame = baseline.receipt().canonical_bytes();
+    compose_certified_f64_lineage_nodes_v1(
+        CertifiedF64LineageCompositionOpV1::Add,
+        &left,
+        &right,
+        CanonicalLimits::new(frame, 8_192, 32, 64, 256),
+        || false,
+    )
+    .expect("exact canonical frame budget is admitted");
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            CanonicalLimits::new(frame - 1, 8_192, 32, 64, 256),
+            || false,
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested == frame && limit == frame - 1
+    ));
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+
+    let long_source_bytes = vec![0x5c; 600];
+    assert!(matches!(
+        identify_certified_f64_lineage_source_v1(
+            certified_source(
+                "org.frankensim.tests.lineage-cancel.v1",
+                1,
+                &long_source_bytes,
+            ),
+            LIMITS,
+            CancelAfter {
+                successful_polls: 2,
+            },
+        ),
+        Err(CertifiedF64LineageIdentityError::SourceCrosswalkCancelled {
+            processed_bytes: 256,
+        })
+    ));
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            LIMITS,
+            CancelAfter {
+                successful_polls: 1,
+            },
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            LIMITS,
+            CancelAfter {
+                successful_polls: 2,
+            },
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+
+    let poll_count = std::cell::Cell::new(0_usize);
+    compose_certified_f64_lineage_nodes_v1(
+        CertifiedF64LineageCompositionOpV1::Add,
+        &left,
+        &right,
+        LIMITS,
+        || {
+            poll_count.set(poll_count.get() + 1);
+            false
+        },
+    )
+    .expect("baseline lineage composition poll count");
+    assert!(poll_count.get() > 1);
+    assert!(matches!(
+        compose_certified_f64_lineage_nodes_v1(
+            CertifiedF64LineageCompositionOpV1::Add,
+            &left,
+            &right,
+            LIMITS,
+            CancelAfter {
+                successful_polls: poll_count.get() - 1,
+            },
+        ),
+        Err(CertifiedF64LineageIdentityError::Canonical(
             CanonicalError::Cancelled { absorbed_bytes }
         )) if absorbed_bytes > 0
     ));

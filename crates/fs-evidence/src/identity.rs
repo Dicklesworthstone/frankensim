@@ -5,10 +5,11 @@
 //! two-fidelity observations and discrepancy-band declarations, model-form
 //! evidence slices, model-card declarations with exact calibration sources,
 //! an opaque strong-identity projection of locally certified scalar evidence,
-//! its exact-source binding, and its recomputed local decision assessment
-//! through separate schemas. It never promotes [`crate::ProvenanceHash`] into
-//! strong identity: exact-source helpers use retained values only as legacy
-//! FNV correlation checks and exclude them from strong frames. This module
+//! its exact-source binding, its exact ordered provenance-lineage graph, and
+//! its recomputed local decision assessment through separate schemas. It never
+//! promotes [`crate::ProvenanceHash`] into strong identity: exact-source and
+//! lineage helpers use retained values only as legacy FNV compatibility
+//! checks and exclude them from strong frames. This module
 //! publishes only unanchored [`IdentityReceipt`] values. Origin verification,
 //! policy admission, structural [`crate::Certified`] consistency, and
 //! scientific color rank remain separate axes.
@@ -25,11 +26,12 @@ use fs_blake3::identity::{
     OrderedBytesStreamError, SchemaId, SemanticId, SourceByteId, SourceId, StrongIdentity,
     WireType, adjudicate,
 };
+use fs_obs::ident::{BoundedIdentityBuilder, IdentityBuildError};
 
 use crate::{
     Ambition, COLOR_ALGEBRA_VERSION, Certified, Color, ColorPayloadError, DecisionStatus,
     DiscrepancyBand, EscalationAdvice, FidelityPair, IntervalOp, ModelBracket, ModelCard,
-    ModelEvidence, NumericalKind, ProvenanceHash, StatisticalCertificate, UncertaintyBreakdown,
+    ModelEvidence, NumericalKind, Op, ProvenanceHash, StatisticalCertificate, UncertaintyBreakdown,
     UncertaintySource, ValidityDomain, color_identity_reason, color_leaf_identity_reason, compose,
     validate_color_payload,
 };
@@ -64,6 +66,10 @@ pub const CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
 pub const CERTIFIED_F64_SOURCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one exact-source-bound certified-f64 projection.
 pub const SOURCED_CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one exact ordered certified-f64 provenance node.
+pub const CERTIFIED_F64_LINEAGE_NODE_IDENTITY_VERSION_V1: u32 = 1;
+/// Semantic version of the exact-source/ordered-parent lineage law.
+pub const CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1: u32 = 1;
 /// Identity schema version for exact model-card calibration source bytes.
 pub const MODEL_CARD_CALIBRATION_SOURCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one helper-validated model-card declaration.
@@ -80,6 +86,8 @@ pub const MAX_CARD_BOUND_MODEL_EVIDENCE_CARD_FIELD_BYTES_V1: u64 = 1 << 20;
 pub const MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for each exact certified-f64 source field.
 pub const MAX_CERTIFIED_F64_SOURCE_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Hard payload ceiling for one certified-f64 lineage parent field.
+pub const MAX_CERTIFIED_F64_LINEAGE_PARENT_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for each variable model-card declaration field.
 pub const MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard retained-byte ceiling for one model-card calibration source.
@@ -1142,6 +1150,242 @@ impl IdentifiedSourcedCertifiedF64EvidenceV1 {
             self.producer_source,
             self.adjoint_source,
         )
+    }
+}
+
+static CERTIFIED_F64_LINEAGE_SOURCE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<CertifiedF64SourceIdV1>();
+
+/// Canonical graph schema for exact certified-f64 provenance lineage.
+///
+/// The graph binds exact source identities or an ordered binary operation over
+/// typed parent nodes. The legacy FNV compatibility value is deliberately not
+/// a field: it cannot become authority merely by being carried beside this
+/// strong graph.
+pub enum CertifiedF64LineageNodeIdentitySchemaV1 {}
+
+impl CanonicalSchema for CertifiedF64LineageNodeIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.certified-f64-lineage-node.v1";
+    const NAME: &'static str = "certified-f64-lineage-node";
+    const VERSION: u32 = CERTIFIED_F64_LINEAGE_NODE_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "exact typed source or versioned operation over exactly ordered typed parent lineage nodes; legacy FNV compatibility values excluded; no evidence-output semantics, execution, units, origin, custody, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("node-kind", WireType::Variant),
+        FieldSpec::required("operation", WireType::Variant),
+        FieldSpec::required("parent-semantics", WireType::Variant),
+        FieldSpec::required("lineage-algorithm-version", WireType::U64),
+        FieldSpec::ordered_children_of("source", &CERTIFIED_F64_LINEAGE_SOURCE_CHILD_V1),
+        // A self-recursive ChildSpec would make this static schema recursive.
+        // The opaque builder accepts only CertifiedF64LineageNodeIdV1 values
+        // and frames their complete role/schema/root descriptors here.
+        FieldSpec::required("parents", WireType::OrderedBytes),
+    ];
+}
+
+/// Low-level schema-shaped identity for one certified-f64 lineage node.
+///
+/// Direct encoder output proves only canonical framing. Source/parent arity,
+/// exact-source retention, operation mapping, ordered-parent preservation, and
+/// compatibility crosswalk invariants belong to [`CertifiedF64LineageNodeV1`].
+pub type CertifiedF64LineageNodeIdV1 = EvidenceNodeId<CertifiedF64LineageNodeIdentitySchemaV1>;
+
+/// Low-level producer receipt for one certified-f64 lineage frame.
+pub type CertifiedF64LineageNodeReceiptV1 = IdentityReceipt<CertifiedF64LineageNodeIdV1>;
+
+/// Whether a lineage node is an exact source or an ordered composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CertifiedF64LineageNodeKindV1 {
+    /// One retained exact-source child and no parents.
+    Source,
+    /// No source child and exactly two ordered typed parents.
+    Composition,
+}
+
+impl CertifiedF64LineageNodeKindV1 {
+    const fn tag(self) -> u32 {
+        match self {
+            Self::Source => 1,
+            Self::Composition => 2,
+        }
+    }
+}
+
+/// Stable operation vocabulary committed by lineage schema v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CertifiedF64LineageOperationV1 {
+    /// Root a node at one exact retained source.
+    Source,
+    /// Ordered addition derivation.
+    Add,
+    /// Ordered subtraction derivation.
+    Sub,
+    /// Ordered multiplication derivation.
+    Mul,
+    /// Ordered minimum derivation.
+    Min,
+    /// Ordered maximum derivation.
+    Max,
+}
+
+impl CertifiedF64LineageOperationV1 {
+    const fn tag(self) -> u32 {
+        match self {
+            Self::Source => 1,
+            Self::Add => 2,
+            Self::Sub => 3,
+            Self::Mul => 4,
+            Self::Min => 5,
+            Self::Max => 6,
+        }
+    }
+
+    const fn kind(self) -> CertifiedF64LineageNodeKindV1 {
+        match self {
+            Self::Source => CertifiedF64LineageNodeKindV1::Source,
+            Self::Add | Self::Sub | Self::Mul | Self::Min | Self::Max => {
+                CertifiedF64LineageNodeKindV1::Composition
+            }
+        }
+    }
+
+    const fn parent_semantics(self) -> CertifiedF64LineageParentSemanticsV1 {
+        CertifiedF64LineageParentSemanticsV1::Ordered
+    }
+}
+
+/// The five operations supported by [`crate::Evidence::combine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CertifiedF64LineageCompositionOpV1 {
+    /// Addition.
+    Add,
+    /// Subtraction.
+    Sub,
+    /// Multiplication.
+    Mul,
+    /// Pointwise minimum.
+    Min,
+    /// Pointwise maximum.
+    Max,
+}
+
+impl CertifiedF64LineageCompositionOpV1 {
+    const fn node_operation(self) -> CertifiedF64LineageOperationV1 {
+        match self {
+            Self::Add => CertifiedF64LineageOperationV1::Add,
+            Self::Sub => CertifiedF64LineageOperationV1::Sub,
+            Self::Mul => CertifiedF64LineageOperationV1::Mul,
+            Self::Min => CertifiedF64LineageOperationV1::Min,
+            Self::Max => CertifiedF64LineageOperationV1::Max,
+        }
+    }
+
+    const fn legacy_operation(self) -> Op {
+        match self {
+            Self::Add => Op::Add,
+            Self::Sub => Op::Sub,
+            Self::Mul => Op::Mul,
+            Self::Min => Op::Min,
+            Self::Max => Op::Max,
+        }
+    }
+}
+
+/// Parent ordering law for lineage schema v1.
+///
+/// All operations are ordered, including mathematically commutative ones,
+/// because this schema mirrors the current ordered legacy chain and preserves
+/// evaluation order, multiplicity, and association exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CertifiedF64LineageParentSemanticsV1 {
+    /// Preserve the caller's left/right order without sorting or deduplication.
+    Ordered,
+}
+
+impl CertifiedF64LineageParentSemanticsV1 {
+    const fn tag(self) -> u32 {
+        match self {
+            Self::Ordered => 1,
+        }
+    }
+}
+
+/// An exact source or ordered derivation kept attached to its strong receipt.
+///
+/// The legacy provenance is retained only to interoperate with current
+/// `Evidence` constructors. It is recomputed by the helper and excluded from
+/// the strong root. Fields remain private so callers cannot detach exact source
+/// bytes or typed parent IDs from the receipt that commits them.
+#[derive(Debug, Clone)]
+pub struct CertifiedF64LineageNodeV1 {
+    source: Option<CertifiedF64SourceV1>,
+    parents: Option<[CertifiedF64LineageNodeIdV1; 2]>,
+    legacy_provenance: ProvenanceHash,
+    receipt: CertifiedF64LineageNodeReceiptV1,
+    operation: CertifiedF64LineageOperationV1,
+}
+
+impl CertifiedF64LineageNodeV1 {
+    /// Exact source retained by a source node; absent for compositions.
+    #[must_use]
+    pub const fn source(&self) -> Option<&CertifiedF64SourceV1> {
+        self.source.as_ref()
+    }
+
+    /// Ordered typed parent IDs; empty for a source node.
+    #[must_use]
+    pub fn parent_ids(&self) -> &[CertifiedF64LineageNodeIdV1] {
+        self.parents
+            .as_ref()
+            .map_or(&[], |parents| parents.as_slice())
+    }
+
+    /// Weak compatibility correlation recomputed from exact source bytes or
+    /// the current ordered `ProvenanceHash::chain` law. Never use as authority.
+    #[must_use]
+    pub const fn legacy_provenance(&self) -> ProvenanceHash {
+        self.legacy_provenance
+    }
+
+    /// Typed strong lineage-node identity.
+    #[must_use]
+    pub const fn id(&self) -> CertifiedF64LineageNodeIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> CertifiedF64LineageNodeReceiptV1 {
+        self.receipt
+    }
+
+    /// Stable operation committed by this node.
+    #[must_use]
+    pub const fn operation(&self) -> CertifiedF64LineageOperationV1 {
+        self.operation
+    }
+
+    /// Source or composition node kind.
+    #[must_use]
+    pub const fn kind(&self) -> CertifiedF64LineageNodeKindV1 {
+        self.operation.kind()
+    }
+
+    /// Exact ordered-parent law committed by schema v1.
+    #[must_use]
+    pub const fn parent_semantics(&self) -> CertifiedF64LineageParentSemanticsV1 {
+        self.operation.parent_semantics()
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
     }
 }
 
@@ -2254,6 +2498,69 @@ impl std::error::Error for SourcedCertifiedF64EvidenceIdentityError {
 impl From<CanonicalError> for SourcedCertifiedF64EvidenceIdentityError {
     fn from(error: CanonicalError) -> Self {
         Self::Canonical(error)
+    }
+}
+
+/// Fail-closed refusal from certified-f64 lineage construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertifiedF64LineageIdentityError {
+    /// Two parents presented the same typed identity with conflicting receipt
+    /// observations. Neither observation wins.
+    ParentObservationConflict,
+    /// Cancellation was observed while deriving the weak compatibility token
+    /// from exact source bytes.
+    SourceCrosswalkCancelled {
+        /// Exact source bytes processed before cancellation observation.
+        processed_bytes: u64,
+    },
+    /// The fixed-size fallible compatibility-chain builder refused its byte
+    /// budget, framing arithmetic, or allocation.
+    LegacyChain(IdentityBuildError),
+    /// Canonical framing, resource admission, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for CertifiedF64LineageIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParentObservationConflict => write!(
+                formatter,
+                "certified-f64 lineage refused conflicting observations for one parent identity"
+            ),
+            Self::SourceCrosswalkCancelled { processed_bytes } => write!(
+                formatter,
+                "certified-f64 lineage cancelled during exact-source legacy crosswalk after {processed_bytes} bytes"
+            ),
+            Self::LegacyChain(error) => write!(
+                formatter,
+                "certified-f64 lineage legacy compatibility chain refused: {error}"
+            ),
+            Self::Canonical(error) => {
+                write!(formatter, "certified-f64 lineage identity refused: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CertifiedF64LineageIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::LegacyChain(error) => Some(error),
+            Self::ParentObservationConflict | Self::SourceCrosswalkCancelled { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for CertifiedF64LineageIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+impl From<IdentityBuildError> for CertifiedF64LineageIdentityError {
+    fn from(error: IdentityBuildError) -> Self {
+        Self::LegacyChain(error)
     }
 }
 
@@ -4006,16 +4313,30 @@ where
 
 const CERTIFIED_F64_LEGACY_FNV_OFFSET_BASIS_V1: u64 = 0xcbf2_9ce4_8422_2325;
 const CERTIFIED_F64_LEGACY_FNV_PRIME_V1: u64 = 0x0000_0100_0000_01b3;
+// Exact fs-obs replay-identity v1 bytes for kind `provenance-chain`, one
+// three-byte operation name, and two eight-byte `operand` child roots.
+const CERTIFIED_F64_LEGACY_CHAIN_CANONICAL_BYTES_V1: usize = 118;
 const _: () =
     assert!(CERTIFIED_F64_LEGACY_FNV_OFFSET_BASIS_V1 == MODEL_CARD_LEGACY_FNV_OFFSET_BASIS_V1);
 const _: () = assert!(CERTIFIED_F64_LEGACY_FNV_PRIME_V1 == MODEL_CARD_LEGACY_FNV_PRIME_V1);
 
-fn sourced_certified_f64_legacy_provenance_v1<C>(
-    source: &'static str,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CertifiedF64LegacyProvenanceError {
+    Cancelled { processed_bytes: u64 },
+    Canonical(CanonicalError),
+}
+
+impl From<CanonicalError> for CertifiedF64LegacyProvenanceError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+fn certified_f64_legacy_provenance_v1<C>(
     bytes: &[u8],
     limits: EvidenceIdentityLimits,
     cancellation: &mut C,
-) -> Result<ProvenanceHash, SourcedCertifiedF64EvidenceIdentityError>
+) -> Result<ProvenanceHash, CertifiedF64LegacyProvenanceError>
 where
     C: EvidenceIdentityCancellationProbe,
 {
@@ -4029,21 +4350,11 @@ where
     let mut processed_bytes = 0_u64;
     let mut hash = CERTIFIED_F64_LEGACY_FNV_OFFSET_BASIS_V1;
     if cancellation.is_cancelled() {
-        return Err(
-            SourcedCertifiedF64EvidenceIdentityError::SourceCrosswalkCancelled {
-                source,
-                processed_bytes,
-            },
-        );
+        return Err(CertifiedF64LegacyProvenanceError::Cancelled { processed_bytes });
     }
     for chunk in bytes.chunks(stride) {
         if processed_bytes != 0 && cancellation.is_cancelled() {
-            return Err(
-                SourcedCertifiedF64EvidenceIdentityError::SourceCrosswalkCancelled {
-                    source,
-                    processed_bytes,
-                },
-            );
+            return Err(CertifiedF64LegacyProvenanceError::Cancelled { processed_bytes });
         }
         for byte in chunk {
             hash ^= u64::from(*byte);
@@ -4054,14 +4365,51 @@ where
             .ok_or(CanonicalError::LengthOverflow)?;
     }
     if cancellation.is_cancelled() {
-        return Err(
+        return Err(CertifiedF64LegacyProvenanceError::Cancelled { processed_bytes });
+    }
+    Ok(ProvenanceHash(hash))
+}
+
+fn sourced_certified_f64_legacy_provenance_v1<C>(
+    source: &'static str,
+    bytes: &[u8],
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<ProvenanceHash, SourcedCertifiedF64EvidenceIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    certified_f64_legacy_provenance_v1(bytes, limits, cancellation).map_err(|error| match error {
+        CertifiedF64LegacyProvenanceError::Cancelled { processed_bytes } => {
             SourcedCertifiedF64EvidenceIdentityError::SourceCrosswalkCancelled {
                 source,
                 processed_bytes,
-            },
-        );
-    }
-    Ok(ProvenanceHash(hash))
+            }
+        }
+        CertifiedF64LegacyProvenanceError::Canonical(error) => {
+            SourcedCertifiedF64EvidenceIdentityError::Canonical(error)
+        }
+    })
+}
+
+fn certified_f64_bounded_legacy_chain_v1(
+    operation: Op,
+    left: ProvenanceHash,
+    right: ProvenanceHash,
+) -> Result<ProvenanceHash, IdentityBuildError> {
+    let identity = BoundedIdentityBuilder::new(
+        "provenance-chain",
+        CERTIFIED_F64_LEGACY_CHAIN_CANONICAL_BYTES_V1,
+    )?
+    .str("op", operation.name())?
+    .child_root64("operand", left.0)?
+    .child_root64("operand", right.0)?
+    .finish();
+    debug_assert_eq!(
+        identity.canonical_bytes().len(),
+        CERTIFIED_F64_LEGACY_CHAIN_CANONICAL_BYTES_V1
+    );
+    Ok(ProvenanceHash(identity.root()))
 }
 
 /// Attach exact producer and optional adjoint sources to one opaque certified
@@ -4077,8 +4425,9 @@ where
 /// This v1 helper provides only a leaf-source binding. It cannot recover how a
 /// bare legacy `u64` was formed or distinguish an accidental/adversarial FNV
 /// collision from the intended source. Callers must not represent
-/// `ProvenanceHash::chain` lineage with this API; chained derivations need a
-/// future typed-lineage identity.
+/// `ProvenanceHash::chain` lineage with this leaf API; use
+/// [`identify_certified_f64_lineage_source_v1`] and
+/// [`compose_certified_f64_lineage_nodes_v1`] for chained derivations.
 ///
 /// # Errors
 /// Refuses adjoint-source presence mismatch, either legacy-FNV correlation
@@ -4174,6 +4523,187 @@ where
         producer_source,
         adjoint_source,
         receipt,
+    })
+}
+
+const CERTIFIED_F64_LINEAGE_PARENT_REFERENCE_BYTES_V1: usize = 65;
+
+fn certified_f64_lineage_parent_reference_bytes_v1(
+    parent: CertifiedF64LineageNodeIdV1,
+) -> [u8; CERTIFIED_F64_LINEAGE_PARENT_REFERENCE_BYTES_V1] {
+    let mut output = [0_u8; CERTIFIED_F64_LINEAGE_PARENT_REFERENCE_BYTES_V1];
+    output[0] = CertifiedF64LineageNodeIdV1::ROLE.tag();
+    output[1..33].copy_from_slice(
+        SchemaId::<CertifiedF64LineageNodeIdentitySchemaV1>::for_schema().as_bytes(),
+    );
+    output[33..].copy_from_slice(parent.as_bytes());
+    output
+}
+
+fn build_certified_f64_lineage_node_v1<C>(
+    operation: CertifiedF64LineageOperationV1,
+    source: Option<CertifiedF64SourceIdV1>,
+    parents: Option<[CertifiedF64LineageNodeIdV1; 2]>,
+    limits: EvidenceIdentityLimits,
+    cancellation: C,
+) -> Result<CertifiedF64LineageNodeReceiptV1, CertifiedF64LineageIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    let source_count = u64::from(source.is_some());
+    let parent_count = if parents.is_some() { 2_u64 } else { 0 };
+    let parent_count_usize = if parents.is_some() { 2 } else { 0 };
+    let parent_field_bytes = core::mem::size_of::<u64>()
+        + parent_count_usize
+            * (core::mem::size_of::<u64>() + CERTIFIED_F64_LINEAGE_PARENT_REFERENCE_BYTES_V1);
+    preflight_bounded_field_bytes_v1(
+        parent_field_bytes,
+        limits,
+        MAX_CERTIFIED_F64_LINEAGE_PARENT_FIELD_BYTES_V1,
+    )?;
+    let parent_rows =
+        parents.map(|parents| parents.map(certified_f64_lineage_parent_reference_bytes_v1));
+    let kind = operation.kind();
+    let parent_semantics = operation.parent_semantics();
+
+    Ok(
+        CanonicalEncoder::<CertifiedF64LineageNodeIdV1, _>::new(limits, cancellation)?
+            .variant(Field::new(0, "node-kind"), kind.tag(), &[])?
+            .variant(Field::new(1, "operation"), operation.tag(), &[])?
+            .variant(
+                Field::new(2, "parent-semantics"),
+                parent_semantics.tag(),
+                &[],
+            )?
+            .u64(
+                Field::new(3, "lineage-algorithm-version"),
+                u64::from(CERTIFIED_F64_LINEAGE_ALGORITHM_VERSION_V1),
+            )?
+            .ordered_children(Field::new(4, "source"), source_count, source)?
+            .ordered_bytes(
+                Field::new(5, "parents"),
+                parent_count,
+                parent_rows
+                    .iter()
+                    .flat_map(|rows| rows.iter())
+                    .map(|row| row.as_slice()),
+            )?
+            .finish()?,
+    )
+}
+
+/// Root one strong lineage node at a retained exact certified-f64 source.
+///
+/// The exact source domain, version, and bytes remain authoritative through
+/// the typed source child. A pinned, cancellable FNV-1a-64 pass also derives the
+/// legacy compatibility token, but that weak value is excluded from the strong
+/// frame and proves no source origin or authenticity.
+///
+/// # Errors
+/// Refuses invalid limits, source-work or frame budget overflow, and
+/// cancellation. No partial lineage node is published.
+pub fn identify_certified_f64_lineage_source_v1<C>(
+    source: CertifiedF64SourceV1,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<CertifiedF64LineageNodeV1, CertifiedF64LineageIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    poll_identity_cancellation(&mut cancellation)?;
+    preflight_bounded_field_bytes_v1(
+        source.canonical_bytes().len(),
+        limits,
+        MAX_CERTIFIED_F64_SOURCE_FIELD_BYTES_V1,
+    )?;
+    let legacy_provenance =
+        certified_f64_legacy_provenance_v1(source.canonical_bytes(), limits, &mut cancellation)
+            .map_err(|error| match error {
+                CertifiedF64LegacyProvenanceError::Cancelled { processed_bytes } => {
+                    CertifiedF64LineageIdentityError::SourceCrosswalkCancelled { processed_bytes }
+                }
+                CertifiedF64LegacyProvenanceError::Canonical(error) => {
+                    CertifiedF64LineageIdentityError::Canonical(error)
+                }
+            })?;
+    let receipt = build_certified_f64_lineage_node_v1(
+        CertifiedF64LineageOperationV1::Source,
+        Some(source.id()),
+        None,
+        limits,
+        cancellation,
+    )?;
+    Ok(CertifiedF64LineageNodeV1 {
+        source: Some(source),
+        parents: None,
+        legacy_provenance,
+        receipt,
+        operation: CertifiedF64LineageOperationV1::Source,
+    })
+}
+
+/// Identify one ordered binary provenance derivation over typed parent nodes.
+///
+/// Parent order, duplicates, and association-tree shape are all semantic for
+/// every operation, including Add/Mul/Min/Max. This exactly preserves the
+/// current order-sensitive legacy chain and avoids silently claiming float or
+/// evidence-metadata commutativity. The helper derives a weak compatibility
+/// token through a fixed 118-byte, allocation-fallible builder that is
+/// schema-equivalent to `ProvenanceHash::chain`, but only the exact operation
+/// and typed ordered parents enter the strong root.
+///
+/// This graph does not bind an output `Evidence`, scalar value, certificate,
+/// units, quantity kind, or execution. Those require a separate typed semantic
+/// attachment rather than inference from lineage alone.
+///
+/// # Errors
+/// Refuses conflicting parent observations, bounded compatibility-chain
+/// allocation/framing failure, invalid limits, resource overflow, or
+/// cancellation. No partial lineage node is published.
+pub fn compose_certified_f64_lineage_nodes_v1<C>(
+    operation: CertifiedF64LineageCompositionOpV1,
+    left: &CertifiedF64LineageNodeV1,
+    right: &CertifiedF64LineageNodeV1,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<CertifiedF64LineageNodeV1, CertifiedF64LineageIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    poll_identity_cancellation(&mut cancellation)?;
+    if matches!(
+        adjudicate(
+            ObservedIdentity::from_receipt(left.receipt()),
+            ObservedIdentity::from_receipt(right.receipt()),
+        ),
+        IdentityAdjudication::Refused(_)
+    ) {
+        return Err(CertifiedF64LineageIdentityError::ParentObservationConflict);
+    }
+
+    let node_operation = operation.node_operation();
+    let parents = [left.id(), right.id()];
+    poll_identity_cancellation(&mut cancellation)?;
+    let legacy_operation = operation.legacy_operation();
+    let legacy_provenance = certified_f64_bounded_legacy_chain_v1(
+        legacy_operation,
+        left.legacy_provenance(),
+        right.legacy_provenance(),
+    )?;
+    poll_identity_cancellation(&mut cancellation)?;
+    let receipt = build_certified_f64_lineage_node_v1(
+        node_operation,
+        None,
+        Some(parents),
+        limits,
+        cancellation,
+    )?;
+    Ok(CertifiedF64LineageNodeV1 {
+        source: None,
+        parents: Some(parents),
+        legacy_provenance,
+        receipt,
+        operation: node_operation,
     })
 }
 

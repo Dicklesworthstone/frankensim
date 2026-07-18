@@ -179,9 +179,30 @@ telemetry/legacy correlation.
   hard-capped at 1 MiB and caller frame/field/collection/cancellation limits
   remain authoritative. Numeric FNV agreement cannot reveal whether a bare
   token came from `of_bytes`, `chain`, or a collision; callers must not use this
-  leaf-source API for derived lineage, which requires a future typed-lineage
-  identity. Raw aliases prove schema-shaped framing only, not the retained
-  source or crosswalk correspondence.
+  leaf-source API for derived lineage. Use the separate typed lineage graph
+  below. Raw aliases prove schema-shaped framing only, not the retained source
+  or crosswalk correspondence.
+- `identity` module (sj31i.52.2 lineage tranche) —
+  `CertifiedF64LineageNodeIdV1` is a strong `EvidenceNodeId` for one exact
+  certified-f64 source or one binary Add/Sub/Mul/Min/Max derivation over typed
+  lineage parents. Source nodes consume and retain one
+  `CertifiedF64SourceV1`; composition nodes retain exactly two full typed
+  parent descriptors. Schema v1 preserves caller order, duplicates, and
+  association-tree shape for every operation, including mathematically
+  commutative operations, because the current legacy chain is ordered and
+  evidence/float evaluation order is not generally interchangeable. The
+  source helper incrementally derives `ProvenanceHash::of_bytes` compatibility
+  under explicit cancellation; composition derives the current ordered
+  `ProvenanceHash::chain` through the schema-equivalent 118-byte fallible
+  bounded builder. Those weak values are inspectable migration data but never
+  enter the strong root. Exact source domains, source versions, source bytes,
+  operation tags, algorithm version, and typed ordered parents are the
+  authority. Parent rows are fixed 65-byte role/schema/root descriptors, the
+  two-row ordered field occupies exactly 154 canonical payload bytes and is
+  additionally hard-capped at 1 MiB, source work remains under the exact-source
+  1 MiB cap, and caller field/frame/collection/cancellation limits remain
+  authoritative. Low-level aliases prove schema-shaped framing only;
+    source/parent arity and retained attachment belong to the opaque helper.
 - `identity` module (sj31i.52.2 decision-assessment tranche) —
   `CertifiedF64DecisionAssessmentIdV1` is a strong `SemanticId` for the current
   local uncertainty assessment over one typed `CertifiedF64EvidenceIdV1`
@@ -504,6 +525,21 @@ telemetry/legacy correlation.
     and card-free diagnostic evidence remains distinct from exact
     `ModelEvidence::none()`. Raw aliases can frame mismatched children but do
     not prove the opaque positional join; all receipts remain unanchored.
+24. Opaque certified-f64 lineage nodes (sj31i.52.2, G0/G3/G4) agree with
+    independent manual framing for exact sources and all five binary
+    operations. Every operation preserves left/right order; duplicate parents
+    and distinct association trees remain distinct. Known equal-FNV exact
+    sources and their derived weak chains retain equal compatibility tokens but
+    produce distinct strong roots. Source domain/version mutations move the
+    strong root despite unchanged source bytes and weak tokens. Raw frames with
+    invalid semantic arity cannot produce the opaque wrapper, and foreign typed
+    source children refuse. Exact source-work and full-frame budgets admit
+    their boundary and refuse one below it; the fixed parent payload reports
+    its exact 154/153-byte refusal, while collection and field-count limits
+    refuse independently at the 363-byte typed-source-descriptor floor. Zero
+    cancellation stride plus entry, mid-source, pre-chain, post-chain, and
+    late-frame cancellation publish no opaque result. The 118-byte weak-chain
+    builder is allocation-fallible. Receipts remain unanchored.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
@@ -513,7 +549,7 @@ Structured teaching errors throughout: `CertifyError`, `RegistryError`,
 `NumericalCertificateIdentityError`, `StatisticalCertificateIdentityError`,
 `FidelityPairIdentityError`, `DiscrepancyBandIdentityError`,
 `ModelBracketIdentityError`, `CertifiedF64SourceIdentityError`,
-`SourcedCertifiedF64EvidenceIdentityError`, and
+`SourcedCertifiedF64EvidenceIdentityError`, `CertifiedF64LineageIdentityError`, and
 `CertifiedF64DecisionAssessmentIdentityError` — all `core::error::Error` with
 actionable Display text. Constructors are total
 (enclosure bounds normalize by swapping); no panics cross the boundary.
@@ -529,7 +565,7 @@ divergence.
 Core certificate/color algebra is bounded small synchronous work. Typed color,
 validity-domain, standalone-certificate, fidelity/discrepancy, model-bracket,
 model-evidence, card-bound model-evidence, certified-f64,
-exact-source-bound certified-f64,
+exact-source-bound certified-f64, certified-f64 lineage,
 decision-assessment, and model-card identity helpers accept an explicit
 cancellation probe. Standalone certificate,
 discrepancy-band, and decision-assessment helpers poll at entry before bounded
@@ -543,6 +579,10 @@ calibration and sourced-certified producer/adjoint crosswalks recompute legacy
 FNV incrementally with entry, exact byte-stride, and final polls before a
 second bounded encoder pass binds strong typed source children. Every refusal
 consumes any in-flight encoder and publishes no partial opaque result.
+Certified-f64 lineage sources use the same bounded incremental crosswalk;
+composition polls before parent adjudication, before and after its fixed-size,
+allocation-fallible legacy-chain compatibility step, and throughout final
+canonical framing.
 Card-bound model-evidence construction additionally polls at entry, at each
 positional card boundary, and at exact byte strides while comparing potentially
 long names before its final bounded parent-framing pass.
@@ -1008,6 +1048,23 @@ physical validation, process-standard conformance, or decision fitness.
   colliding source is the intended source. Raw source/parent ID or receipt
   aliases do not prove helper admission, retained-input correspondence, or
   either crosswalk.
+- `CertifiedF64LineageNodeV1` proves only exact local framing of a declared
+  source or versioned operation over ordered typed parent lineage nodes. It
+  does not bind an `Evidence` output, scalar value, QoI, numerical/statistical/
+  model certificate state, validity, sensitivity, adjoint, units, quantity
+  kind, model-card declaration, execution, solver or run, seeds, budgets,
+  capabilities, hardware, origin, custody, signature, ledger admission,
+  scientific correctness, or external trust. A composition node proves the
+  declared graph edge, not that the operation ran or that any result was
+  honestly derived. Self-declared source domain/version metadata is not format
+  or authenticity proof. The retained legacy `ProvenanceHash` is weak
+  compatibility correlation only: it is excluded from the strong root, and an
+  FNV collision or equal chained token never establishes lineage equality.
+  Parent ordering does not claim the underlying operation is mathematically
+  noncommutative; it preserves the exact v1 derivation record and makes no
+  reassociation, canonical-float, cross-ISA, or evidence-composition claim.
+  Raw ID/receipt aliases do not prove helper arity, retention, crosswalk, or
+  opaque-wrapper correspondence.
 - `IdentifiedCertifiedF64DecisionAssessmentV1` proves only exact replay of the
   current local first-order breakdown, declaration-order dominance rule,
   threshold comparison, status, and advice over its retained typed child. It
