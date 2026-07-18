@@ -12,11 +12,11 @@ use std::fmt;
 /// Canonical binary envelope magic.
 pub const ADMISSION_MAGIC: &[u8; 8] = b"FSADM\0\0\0";
 /// Canonical schema name retained by human and ledger adapters.
-pub const ADMISSION_SCHEMA: &str = "frankensim-constellation-admission-v2";
+pub const ADMISSION_SCHEMA: &str = "frankensim-constellation-admission-v3";
 /// Domain separating this protocol from every other identity surface.
-pub const ADMISSION_DOMAIN: &str = "org.frankensim.xtask.constellation-admission.v2";
+pub const ADMISSION_DOMAIN: &str = "org.frankensim.xtask.constellation-admission.v3";
 /// Canonical schema version.
-pub const ADMISSION_VERSION: u16 = 2;
+pub const ADMISSION_VERSION: u16 = 3;
 /// Maximum path-capability slots retained by one request.
 pub const MAX_PATH_CAPABILITIES: usize = 5;
 /// Maximum executable-capability slots retained by one request.
@@ -160,23 +160,26 @@ impl CommandClass {
     fn admits_publication(self, publication: PublicationAuthority) -> bool {
         matches!(
             (self, publication),
-            (_, PublicationAuthority::Prohibited)
-                | (
-                    Self::Bootstrap,
-                    PublicationAuthority::BootstrapReceipt { .. }
-                )
-                | (
-                    Self::ShellBootstrap,
-                    PublicationAuthority::BootstrapReceipt { .. }
-                )
-                | (
-                    Self::LockConstellation,
-                    PublicationAuthority::ConstellationLock { .. }
-                )
-                | (
-                    Self::DsrQuality | Self::DsrBuild | Self::RchProbe,
-                    PublicationAuthority::ProofReceipt { .. }
-                )
+            (
+                Self::Diagnostic
+                    | Self::VerifyOnly
+                    | Self::Snapshot
+                    | Self::ShellVerifyOnly
+                    | Self::ShellSnapshot,
+                PublicationAuthority::Prohibited
+            ) | (
+                Self::Bootstrap,
+                PublicationAuthority::BootstrapReceipt { .. }
+            ) | (
+                Self::ShellBootstrap,
+                PublicationAuthority::BootstrapReceipt { .. }
+            ) | (
+                Self::LockConstellation,
+                PublicationAuthority::ConstellationLock { .. }
+            ) | (
+                Self::DsrQuality | Self::DsrBuild | Self::RchProbe,
+                PublicationAuthority::ProofReceipt { .. }
+            )
         )
     }
 
@@ -245,6 +248,82 @@ pub enum PublicationAuthority {
 impl PublicationAuthority {
     fn is_prohibited(self) -> bool {
         matches!(self, Self::Prohibited)
+    }
+}
+
+/// Typed evidence that one authorized publication transaction succeeded.
+///
+/// The adapter establishes the external observation, but the admission core
+/// binds that observation to the exact request, attempt, publication target,
+/// conditional fence, and receipt that were authorized before the effect. A
+/// payload from another request or publication transaction cannot finalize the
+/// current machine. Every identity is nonzero because [`AuthorityId`] has no
+/// public zero-valued constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicationSuccessEvidence {
+    request_identity: AuthorityId,
+    attempt: u16,
+    publication_capability: AuthorityId,
+    fence: AuthorityId,
+    receipt: AuthorityId,
+    observation: AuthorityId,
+}
+
+impl PublicationSuccessEvidence {
+    /// Bind an external success observation to one authorized transaction.
+    #[must_use]
+    pub const fn new(
+        request_identity: AuthorityId,
+        attempt: u16,
+        publication_capability: AuthorityId,
+        fence: AuthorityId,
+        receipt: AuthorityId,
+        observation: AuthorityId,
+    ) -> Self {
+        Self {
+            request_identity,
+            attempt,
+            publication_capability,
+            fence,
+            receipt,
+            observation,
+        }
+    }
+
+    /// Request whose publication was observed.
+    #[must_use]
+    pub const fn request_identity(self) -> AuthorityId {
+        self.request_identity
+    }
+
+    /// Attempt whose publication was observed.
+    #[must_use]
+    pub const fn attempt(self) -> u16 {
+        self.attempt
+    }
+
+    /// Publication-target capability consumed by the external commit.
+    #[must_use]
+    pub const fn publication_capability(self) -> AuthorityId {
+        self.publication_capability
+    }
+
+    /// Conditional fence consumed by the external commit.
+    #[must_use]
+    pub const fn fence(self) -> AuthorityId {
+        self.fence
+    }
+
+    /// Exact authorized content/receipt identity that became durable.
+    #[must_use]
+    pub const fn receipt(self) -> AuthorityId {
+        self.receipt
+    }
+
+    /// Strong identity of the external success/durability observation.
+    #[must_use]
+    pub const fn observation(self) -> AuthorityId {
+        self.observation
     }
 }
 
@@ -641,9 +720,14 @@ impl AdmissionContext {
             ));
         }
         if !spec.command.admits_publication(spec.publication) {
-            return Err(AdmissionError::new(
-                AdmissionRule::PublicationForbiddenForCommand,
-            ));
+            let rule = if spec.publication.is_prohibited()
+                && !spec.command.admits_read_only_completion()
+            {
+                AdmissionRule::PublicationRequiredForCommand
+            } else {
+                AdmissionRule::PublicationForbiddenForCommand
+            };
+            return Err(AdmissionError::new(rule));
         }
         if !spec.publication.is_prohibited() && spec.budgets.io.output_bytes == 0 {
             return Err(AdmissionError::new(
@@ -922,10 +1006,12 @@ pub enum AdmittedPhase {
         /// Evidence that work was quiesced before authorization.
         quiescence: AuthorityId,
     },
-    /// Publication finalized with one exact receipt identity.
+    /// Publication finalized with one exact receipt and success observation.
     Published {
         /// Inert identity of the finalized publication receipt.
         receipt: AuthorityId,
+        /// Transaction-bound evidence of external commit and durability success.
+        success: PublicationSuccessEvidence,
     },
 }
 
@@ -1417,7 +1503,10 @@ pub enum AdmissionTransition {
         at_tick: u64,
     },
     /// Finalize the already-authorized receipt after a successful external commit.
-    FinalizePublication,
+    FinalizePublication {
+        /// Nonzero observation bound to the exact authorized transaction.
+        success: PublicationSuccessEvidence,
+    },
     /// Preserve uncertainty when the authorized external commit fails or is ambiguous.
     PublicationFailed {
         /// Closed publication failure or uncertainty reason.
@@ -1475,7 +1564,7 @@ impl AdmissionTransition {
             Self::BeginPublication { .. } => TransitionKind::BeginPublication,
             Self::PublicationRecheck { .. } => TransitionKind::PublicationRecheck,
             Self::AuthorizePublication { .. } => TransitionKind::AuthorizePublication,
-            Self::FinalizePublication => TransitionKind::FinalizePublication,
+            Self::FinalizePublication { .. } => TransitionKind::FinalizePublication,
             Self::PublicationFailed { .. } => TransitionKind::PublicationFailed,
             Self::BeginReadOnlyCompletion { .. } => TransitionKind::BeginReadOnlyCompletion,
             Self::CompleteReadOnly { .. } => TransitionKind::CompleteReadOnly,
@@ -1501,7 +1590,7 @@ impl AdmissionTransition {
             | Self::Drain { .. }
             | Self::FinalizeTerminal { .. }
             | Self::DeclareIndeterminate { .. }
-            | Self::FinalizePublication
+            | Self::FinalizePublication { .. }
             | Self::PublicationFailed { .. } => None,
         }
     }
@@ -2161,10 +2250,31 @@ impl AdmissionMachine {
                 });
             }
             (
-                AdmissionState::Admitted(AdmittedPhase::PublicationCommitting { receipt, .. }),
-                AdmissionTransition::FinalizePublication,
+                AdmissionState::Admitted(AdmittedPhase::PublicationCommitting {
+                    fence,
+                    receipt,
+                    ..
+                }),
+                AdmissionTransition::FinalizePublication { success },
             ) => {
-                evaluated.state = AdmissionState::Admitted(AdmittedPhase::Published { receipt });
+                let Some(publication_capability) = publication_identity(self.context.publication)
+                else {
+                    return Err(AdmissionError::new(
+                        AdmissionRule::PublicationAuthorityDenied,
+                    ));
+                };
+                if success.request_identity != self.context.request_identity
+                    || success.attempt != self.attempt
+                    || success.publication_capability != publication_capability
+                    || success.fence != fence
+                    || success.receipt != receipt
+                {
+                    return Err(AdmissionError::new(
+                        AdmissionRule::PublicationSuccessEvidenceMismatch,
+                    ));
+                }
+                evaluated.state =
+                    AdmissionState::Admitted(AdmittedPhase::Published { receipt, success });
             }
             (
                 AdmissionState::Admitted(AdmittedPhase::PublicationCommitting { .. }),
@@ -2567,7 +2677,7 @@ pub enum AdmissionRule {
     OfflineNetworkBudgetConflict = 9,
     /// Fetch authority had no positive request and byte budget.
     FetchAuthorityWithoutBudget = 10,
-    /// The command class forbids publication.
+    /// The publication-authority variant is forbidden for the command class.
     PublicationForbiddenForCommand = 11,
     /// Publication authority had no output budget.
     PublicationWithoutOutputBudget = 12,
@@ -2667,6 +2777,10 @@ pub enum AdmissionRule {
     PublicationFinalizationUnknown = 59,
     /// The command or publication policy cannot complete through read-only success.
     ReadOnlyCompletionForbidden = 60,
+    /// Publication-success evidence did not bind the authorized transaction.
+    PublicationSuccessEvidenceMismatch = 61,
+    /// A publication-producing command omitted its required publication authority.
+    PublicationRequiredForCommand = 62,
 }
 
 impl AdmissionRule {
@@ -2735,6 +2849,10 @@ impl AdmissionRule {
             Self::PublicationDurabilityUnknown => "admission-publication-durability-unknown",
             Self::PublicationFinalizationUnknown => "admission-publication-finalization-unknown",
             Self::ReadOnlyCompletionForbidden => "admission-read-only-completion-forbidden",
+            Self::PublicationSuccessEvidenceMismatch => {
+                "admission-publication-success-evidence-mismatch"
+            }
+            Self::PublicationRequiredForCommand => "admission-publication-required-command",
         }
     }
 
@@ -2779,6 +2897,9 @@ impl AdmissionRule {
             Self::PublicationForbiddenForCommand => {
                 &[Remedy::UseDiagnosticMode, Remedy::InspectDiagnostic]
             }
+            Self::PublicationRequiredForCommand => {
+                &[Remedy::BindPublicationCapability, Remedy::UseDiagnosticMode]
+            }
             Self::RetryCxNotFresh | Self::CxIdentityAliasing => {
                 &[Remedy::BindFreshChildCx, Remedy::StartNewRequest]
             }
@@ -2793,6 +2914,9 @@ impl AdmissionRule {
             Self::BudgetInfeasible => &[Remedy::ReduceWork, Remedy::IncreaseExplicitBudget],
             Self::PolicyDenied | Self::ReadOnlyCompletionForbidden => {
                 &[Remedy::UseDiagnosticMode, Remedy::InspectDiagnostic]
+            }
+            Self::PublicationSuccessEvidenceMismatch => {
+                &[Remedy::MarkIndeterminate, Remedy::InspectDiagnostic]
             }
             Self::EffectOutcomeUnknown
             | Self::FinalizationOutcomeUnknown
@@ -3228,6 +3352,28 @@ fn decode_obligations(decoder: &mut Decoder<'_>) -> Result<DrainObligations, Adm
     })
 }
 
+fn encode_publication_success(encoder: &mut Encoder, success: PublicationSuccessEvidence) {
+    encoder.id(success.request_identity);
+    encoder.u16(success.attempt);
+    encoder.id(success.publication_capability);
+    encoder.id(success.fence);
+    encoder.id(success.receipt);
+    encoder.id(success.observation);
+}
+
+fn decode_publication_success(
+    decoder: &mut Decoder<'_>,
+) -> Result<PublicationSuccessEvidence, AdmissionError> {
+    Ok(PublicationSuccessEvidence::new(
+        decoder.id()?,
+        decoder.u16()?,
+        decoder.id()?,
+        decoder.id()?,
+        decoder.id()?,
+        decoder.id()?,
+    ))
+}
+
 fn encode_transition(encoder: &mut Encoder, transition: AdmissionTransition) {
     encoder.u8(transition.kind() as u8);
     match transition {
@@ -3346,7 +3492,9 @@ fn encode_transition(encoder: &mut Encoder, transition: AdmissionTransition) {
             encoder.id(receipt);
             encoder.u64(at_tick);
         }
-        AdmissionTransition::FinalizePublication => {}
+        AdmissionTransition::FinalizePublication { success } => {
+            encode_publication_success(encoder, success);
+        }
         AdmissionTransition::PublicationFailed {
             reason,
             observation,
@@ -3447,7 +3595,9 @@ fn decode_transition(decoder: &mut Decoder<'_>) -> Result<AdmissionTransition, A
             receipt: decoder.id()?,
             at_tick: decoder.u64()?,
         },
-        TransitionKind::FinalizePublication => AdmissionTransition::FinalizePublication,
+        TransitionKind::FinalizePublication => AdmissionTransition::FinalizePublication {
+            success: decode_publication_success(decoder)?,
+        },
         TransitionKind::PublicationFailed => AdmissionTransition::PublicationFailed {
             reason: PublicationFailureReason::from_tag(decoder.u8()?)
                 .ok_or_else(|| AdmissionError::new(AdmissionRule::UnknownTag))?,

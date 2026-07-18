@@ -11,8 +11,8 @@ use admission::{
     DeadlineBudget, DiagnosticPhase, DrainObligations, ExecutableCapability, ExecutableSlot,
     FetchAuthority, IndeterminateReason, IoBudget, MAX_ADMISSION_BYTES, MAX_ADMISSION_EVENTS,
     MAX_EXECUTABLE_CAPABILITIES, MAX_PATH_CAPABILITIES, NetworkBudget, PathCapability, PathSlot,
-    PublicationAuthority, PublicationFailureReason, RefusalReason, StateKind, TerminalPhase,
-    TransitionKind, TrustAnchorState, transition_kind_may_apply,
+    PublicationAuthority, PublicationFailureReason, PublicationSuccessEvidence, RefusalReason,
+    StateKind, TerminalPhase, TransitionKind, TrustAnchorState, transition_kind_may_apply,
 };
 
 const DEADLINE: u64 = 100;
@@ -134,7 +134,30 @@ fn read_only_context(command: CommandClass) -> AdmissionContext {
     .expect("valid offline context")
 }
 
-fn context_for_command(command: CommandClass, reverse: bool) -> AdmissionContext {
+fn publication_for_command(command: CommandClass) -> PublicationAuthority {
+    match command {
+        CommandClass::Bootstrap | CommandClass::ShellBootstrap => {
+            PublicationAuthority::BootstrapReceipt { capability: id(13) }
+        }
+        CommandClass::LockConstellation => {
+            PublicationAuthority::ConstellationLock { capability: id(13) }
+        }
+        CommandClass::DsrQuality | CommandClass::DsrBuild | CommandClass::RchProbe => {
+            PublicationAuthority::ProofReceipt { capability: id(13) }
+        }
+        CommandClass::Diagnostic
+        | CommandClass::VerifyOnly
+        | CommandClass::Snapshot
+        | CommandClass::ShellVerifyOnly
+        | CommandClass::ShellSnapshot => PublicationAuthority::Prohibited,
+    }
+}
+
+fn try_context_for_command_and_publication(
+    command: CommandClass,
+    publication: PublicationAuthority,
+    reverse: bool,
+) -> Result<AdmissionContext, admission::AdmissionError> {
     let mut paths = vec![PathCapability::new(PathSlot::WorkspaceRoot, id(10))];
     if !matches!(command, CommandClass::Diagnostic) {
         paths.push(PathCapability::new(PathSlot::ConstellationLock, id(11)));
@@ -153,22 +176,6 @@ fn context_for_command(command: CommandClass, reverse: bool) -> AdmissionContext
         paths.push(PathCapability::new(PathSlot::OutputRoot, id(12)));
     }
 
-    let publication = match command {
-        CommandClass::Bootstrap | CommandClass::ShellBootstrap => {
-            PublicationAuthority::BootstrapReceipt { capability: id(13) }
-        }
-        CommandClass::LockConstellation => {
-            PublicationAuthority::ConstellationLock { capability: id(13) }
-        }
-        CommandClass::DsrQuality | CommandClass::DsrBuild | CommandClass::RchProbe => {
-            PublicationAuthority::ProofReceipt { capability: id(13) }
-        }
-        CommandClass::Diagnostic
-        | CommandClass::VerifyOnly
-        | CommandClass::Snapshot
-        | CommandClass::ShellVerifyOnly
-        | CommandClass::ShellSnapshot => PublicationAuthority::Prohibited,
-    };
     if !matches!(publication, PublicationAuthority::Prohibited) {
         paths.push(PathCapability::new(PathSlot::PublicationTarget, id(13)));
     }
@@ -247,7 +254,11 @@ fn context_for_command(command: CommandClass, reverse: bool) -> AdmissionContext
         path_capabilities: &paths,
         executable_capabilities: &executables,
     })
-    .expect("valid command context")
+}
+
+fn context_for_command(command: CommandClass, reverse: bool) -> AdmissionContext {
+    try_context_for_command_and_publication(command, publication_for_command(command), reverse)
+        .expect("valid command context")
 }
 
 fn preflight(machine: &mut AdmissionMachine) {
@@ -299,6 +310,69 @@ fn complete_read_only(machine: &mut AdmissionMachine) {
             at_tick: 4,
         })
         .expect("stable read-only completion");
+}
+
+fn publication_success_evidence(
+    machine: &AdmissionMachine,
+    fence: AuthorityId,
+    receipt: AuthorityId,
+    observation: AuthorityId,
+) -> PublicationSuccessEvidence {
+    let publication_capability = match machine.context().publication() {
+        PublicationAuthority::BootstrapReceipt { capability }
+        | PublicationAuthority::ConstellationLock { capability }
+        | PublicationAuthority::ProofReceipt { capability } => capability,
+        PublicationAuthority::Prohibited => {
+            panic!("publication success evidence requires publication authority")
+        }
+    };
+    PublicationSuccessEvidence::new(
+        machine.context().request_identity(),
+        machine.attempt(),
+        publication_capability,
+        fence,
+        receipt,
+        observation,
+    )
+}
+
+fn fixture_publication_success() -> PublicationSuccessEvidence {
+    PublicationSuccessEvidence::new(id(1), 0, id(13), id(71), id(60), id(72))
+}
+
+fn authorize_publication(machine: &mut AdmissionMachine) {
+    machine
+        .apply(AdmissionTransition::BeginPublication {
+            quiescence: id(70),
+            at_tick: 3,
+        })
+        .expect("publication preparation");
+    machine
+        .apply(AdmissionTransition::PublicationRecheck {
+            snapshot: id(50),
+            anchor: AnchorObservation::Observed {
+                identity: id(40),
+                generation: 7,
+            },
+            fence: id(71),
+            at_tick: 4,
+        })
+        .expect("publication recheck");
+    machine
+        .apply(AdmissionTransition::AuthorizePublication {
+            receipt: id(60),
+            at_tick: 5,
+        })
+        .expect("publication authorization");
+}
+
+fn complete_publication(machine: &mut AdmissionMachine) -> PublicationSuccessEvidence {
+    authorize_publication(machine);
+    let success = publication_success_evidence(machine, id(71), id(60), id(72));
+    machine
+        .apply(AdmissionTransition::FinalizePublication { success })
+        .expect("publication finalization");
+    success
 }
 
 fn assert_rejected_without_mutation(
@@ -371,13 +445,17 @@ fn g0_legal_path_binds_preflight_work_recheck_and_one_publication() {
             at_tick: 6,
         })
         .expect("publication authorization");
+    let success = publication_success_evidence(&machine, id(71), id(60), id(72));
     machine
-        .apply(AdmissionTransition::FinalizePublication)
+        .apply(AdmissionTransition::FinalizePublication { success })
         .expect("publication finalization");
 
     assert_eq!(
         machine.state(),
-        AdmissionState::Admitted(AdmittedPhase::Published { receipt: id(60) })
+        AdmissionState::Admitted(AdmittedPhase::Published {
+            receipt: id(60),
+            success,
+        })
     );
     assert!(machine.state().attempt_is_finalized());
     for (sequence, event) in machine.events().iter().enumerate() {
@@ -386,8 +464,136 @@ fn g0_legal_path_binds_preflight_work_recheck_and_one_publication() {
     }
     assert_rejected_without_mutation(
         &mut machine,
-        AdmissionTransition::FinalizePublication,
+        AdmissionTransition::FinalizePublication { success },
         AdmissionRule::IllegalTransition,
+    );
+}
+
+#[test]
+fn g0_publication_success_evidence_is_mandatory_transaction_bound_and_replay_exact() {
+    let success = fixture_publication_success();
+    assert_eq!(success.request_identity(), id(1));
+    assert_eq!(success.attempt(), 0);
+    assert_eq!(success.publication_capability(), id(13));
+    assert_eq!(success.fence(), id(71));
+    assert_eq!(success.receipt(), id(60));
+    assert_eq!(success.observation(), id(72));
+    assert_eq!(
+        AuthorityId::try_from_bytes([0; 32])
+            .expect_err("zero cannot inhabit publication success evidence")
+            .rule(),
+        AdmissionRule::ZeroIdentity
+    );
+
+    let mut wrong_phase = AdmissionMachine::try_new(online_context()).expect("active machine");
+    admit(&mut wrong_phase);
+    assert_rejected_without_mutation(
+        &mut wrong_phase,
+        AdmissionTransition::FinalizePublication { success },
+        AdmissionRule::IllegalTransition,
+    );
+
+    let mut machine = AdmissionMachine::try_new(online_context()).expect("publishing machine");
+    admit(&mut machine);
+    authorize_publication(&mut machine);
+    assert_rejected_without_mutation(
+        &mut machine,
+        AdmissionTransition::FinalizeTerminal { receipt: id(60) },
+        AdmissionRule::IllegalTransition,
+    );
+
+    for invalid in [
+        PublicationSuccessEvidence::new(id(99), 0, id(13), id(71), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 1, id(13), id(71), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 0, id(14), id(71), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 0, id(13), id(70), id(60), id(72)),
+        PublicationSuccessEvidence::new(id(1), 0, id(13), id(71), id(61), id(72)),
+    ] {
+        assert_rejected_without_mutation(
+            &mut machine,
+            AdmissionTransition::FinalizePublication { success: invalid },
+            AdmissionRule::PublicationSuccessEvidenceMismatch,
+        );
+    }
+
+    let mut retried = AdmissionMachine::try_new(online_context()).expect("retried machine");
+    retried
+        .apply(AdmissionTransition::Refuse {
+            reason: RefusalReason::PolicyDenied,
+            observation: id(90),
+        })
+        .expect("first attempt refusal");
+    retried
+        .apply(AdmissionTransition::FinalizeTerminal { receipt: id(80) })
+        .expect("first attempt finalization");
+    retried
+        .apply(AdmissionTransition::Retry {
+            next_cx: CxBinding::try_new(id(5), id(6), id(4), 8).expect("fresh retry Cx"),
+            at_tick: 1,
+        })
+        .expect("second attempt");
+    admit(&mut retried);
+    authorize_publication(&mut retried);
+    assert_eq!(retried.attempt(), 1);
+    assert_rejected_without_mutation(
+        &mut retried,
+        AdmissionTransition::FinalizePublication {
+            success: fixture_publication_success(),
+        },
+        AdmissionRule::PublicationSuccessEvidenceMismatch,
+    );
+    let retried_success = publication_success_evidence(&retried, id(71), id(60), id(73));
+    retried
+        .apply(AdmissionTransition::FinalizePublication {
+            success: retried_success,
+        })
+        .expect("fresh attempt-bound success evidence");
+
+    machine
+        .apply(AdmissionTransition::FinalizePublication { success })
+        .expect("exact success evidence finalizes publication");
+    assert_eq!(
+        machine.state(),
+        AdmissionState::Admitted(AdmittedPhase::Published {
+            receipt: id(60),
+            success,
+        })
+    );
+    assert_eq!(
+        machine.history().last(),
+        Some(&AdmissionTransition::FinalizePublication { success })
+    );
+
+    let bytes = machine
+        .encode_canonical()
+        .expect("published canonical receipt");
+    let replay = AdmissionMachine::decode_recorded(&bytes).expect("published receipt replay");
+    assert_eq!(replay.state(), machine.state());
+    assert_eq!(replay.history(), machine.history());
+    assert_eq!(
+        &bytes[bytes.len() - 32..],
+        success.observation().as_bytes(),
+        "success observation is the final canonically retained field"
+    );
+
+    let mut zero_observation = bytes.clone();
+    let observation_at = zero_observation.len() - 32;
+    zero_observation[observation_at..].fill(0);
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&zero_observation)
+            .expect_err("zero publication-success observation must refuse")
+            .rule(),
+        AdmissionRule::ZeroIdentity
+    );
+
+    let mut mutated_binding = bytes;
+    let evidence_receipt_at = mutated_binding.len() - 64;
+    mutated_binding[evidence_receipt_at] ^= 1;
+    assert_eq!(
+        AdmissionMachine::decode_recorded(&mutated_binding)
+            .expect_err("mutated success binding must not replay")
+            .rule(),
+        AdmissionRule::ImpossibleHistory
     );
 }
 
@@ -595,7 +801,9 @@ fn g0_transition_table_is_total_and_exact_phase_guards_do_not_mutate() {
             at_tick: 1,
         },
         AdmissionTransition::FinalizeTerminal { receipt: id(80) },
-        AdmissionTransition::FinalizePublication,
+        AdmissionTransition::FinalizePublication {
+            success: fixture_publication_success(),
+        },
         AdmissionTransition::RequestCancellation {
             cause: CancellationCause::Requested,
             obligations: DrainObligations::default(),
@@ -664,6 +872,90 @@ fn g0_publication_prohibited_commands_complete_only_after_stable_post_work_reche
         },
         AdmissionRule::ReadOnlyCompletionForbidden,
     );
+}
+
+#[test]
+fn g0_every_command_authority_pair_has_exact_structural_refusal_or_success_liveness() {
+    let commands = [
+        CommandClass::Diagnostic,
+        CommandClass::VerifyOnly,
+        CommandClass::Snapshot,
+        CommandClass::Bootstrap,
+        CommandClass::LockConstellation,
+        CommandClass::DsrQuality,
+        CommandClass::DsrBuild,
+        CommandClass::RchProbe,
+        CommandClass::ShellVerifyOnly,
+        CommandClass::ShellSnapshot,
+        CommandClass::ShellBootstrap,
+    ];
+    let authorities = [
+        PublicationAuthority::Prohibited,
+        PublicationAuthority::BootstrapReceipt { capability: id(13) },
+        PublicationAuthority::ConstellationLock { capability: id(13) },
+        PublicationAuthority::ProofReceipt { capability: id(13) },
+    ];
+    let mut admitted = 0usize;
+    let mut refused = 0usize;
+    let mut prohibited_publication_commands = 0usize;
+
+    for command in commands {
+        let required = publication_for_command(command);
+        for publication in authorities {
+            let result = try_context_for_command_and_publication(command, publication, false);
+            if publication == required {
+                let context = result.unwrap_or_else(|error| {
+                    panic!("{command:?} x {publication:?} must admit: {error:?}")
+                });
+                let mut machine = AdmissionMachine::try_new(context).expect("live matrix machine");
+                admit(&mut machine);
+                match publication {
+                    PublicationAuthority::Prohibited => {
+                        complete_read_only(&mut machine);
+                        assert!(matches!(
+                            machine.state(),
+                            AdmissionState::Admitted(AdmittedPhase::Completed { .. })
+                        ));
+                    }
+                    PublicationAuthority::BootstrapReceipt { .. }
+                    | PublicationAuthority::ConstellationLock { .. }
+                    | PublicationAuthority::ProofReceipt { .. } => {
+                        let success = complete_publication(&mut machine);
+                        assert_eq!(
+                            machine.state(),
+                            AdmissionState::Admitted(AdmittedPhase::Published {
+                                receipt: id(60),
+                                success,
+                            })
+                        );
+                    }
+                }
+                assert!(machine.state().attempt_is_finalized());
+                let bytes = machine.encode_canonical().expect("matrix terminal receipt");
+                let replay = AdmissionMachine::decode_recorded(&bytes)
+                    .expect("matrix terminal receipt replay");
+                assert_eq!(replay.state(), machine.state());
+                assert_eq!(replay.history(), machine.history());
+                admitted += 1;
+            } else {
+                let error = result.expect_err("wrong authority must fail structural admission");
+                let expected_rule = if matches!(publication, PublicationAuthority::Prohibited) {
+                    AdmissionRule::PublicationRequiredForCommand
+                } else {
+                    AdmissionRule::PublicationForbiddenForCommand
+                };
+                assert_eq!(error.rule(), expected_rule, "{command:?} x {publication:?}");
+                if matches!(publication, PublicationAuthority::Prohibited) {
+                    prohibited_publication_commands += 1;
+                }
+                refused += 1;
+            }
+        }
+    }
+
+    assert_eq!(admitted, commands.len());
+    assert_eq!(refused, commands.len() * authorities.len() - admitted);
+    assert_eq!(prohibited_publication_commands, 6);
 }
 
 #[test]
@@ -753,7 +1045,9 @@ fn g0_read_only_exact_phases_classify_every_transition_without_mutating_rejectio
                 fence: id(90),
                 at_tick: 5,
             },
-            TransitionKind::FinalizePublication => AdmissionTransition::FinalizePublication,
+            TransitionKind::FinalizePublication => AdmissionTransition::FinalizePublication {
+                success: fixture_publication_success(),
+            },
             TransitionKind::Retry => AdmissionTransition::Retry {
                 next_cx: CxBinding::try_new(id(5), id(6), id(4), 8).expect("fresh Cx"),
                 at_tick: 5,
@@ -1591,8 +1885,9 @@ fn g5_codec_round_trips_every_payload_family() {
             at_tick: 6,
         })
         .expect("authorize");
+    let success = publication_success_evidence(&published, id(71), id(60), id(72));
     published
-        .apply(AdmissionTransition::FinalizePublication)
+        .apply(AdmissionTransition::FinalizePublication { success })
         .expect("finalize");
     let published_bytes = published.encode_canonical().expect("published bytes");
     assert_eq!(
@@ -1989,7 +2284,7 @@ fn g0_invalid_capability_permutations_choose_one_canonical_first_rule() {
             request_identity: id(1),
             command: CommandClass::Bootstrap,
             fetch: FetchAuthority::PinnedTransport { capability: id(30) },
-            publication: PublicationAuthority::Prohibited,
+            publication: PublicationAuthority::BootstrapReceipt { capability: id(13) },
             cx: CxBinding::try_new(id(2), id(3), id(4), 8).expect("fixture Cx"),
             budgets: online_budgets(),
             trust_anchor: TrustAnchorState::Anchored {
