@@ -276,7 +276,10 @@ pending an actual 32-bit test lane.
   not an upper bound on allocator-reported `Vec::capacity`, allocator usable
   size, metadata, stacks, or process RSS. Runtime observations prove logical
   product lengths stay below the requested ceiling and report allocator
-  capacity separately. `Lattice::cbc` is not yet receipt-gated or metered.
+  capacity separately. Every resident product and the moved old allocation
+  retained during replacement are modeled at the same final requested product
+  capacity from executor construction onward. `Lattice::cbc` is not yet
+  receipt-gated or metered.
   Admitted certificate checker entry points gate one invocation's problem and
   vector shapes against the same current certified authority, but do not debit
   that receipt, prove checker/executor work-unit equality, or aggregate repeated

@@ -101,7 +101,8 @@ fn g0_estimates_are_monotone_in_points_and_dimension() {
 /// not merely the final product — first becomes multi-limb:
 ///
 /// - final product <= 48 bits/two limbs and source <= 40 bits/two limbs,
-/// - score/product capacity = 4 limbs; preceding product capacity = 3,
+/// - score/product capacity = 4 limbs; every resident product is pre-reserved
+///   at that same four-limb requested capacity,
 /// - candidates = 5*4 = 20; visits = 5*5*4 + 6*5 = 130,
 /// - limb work = 260 multiply + 1,040 carry + 200 zero-fill
 ///   + 200 normalize + 40 compare = 1,740,
@@ -131,7 +132,7 @@ fn g0_multilimb_kat_charges_carry_for_every_source_limb() {
     assert_eq!(estimate.max_score_limbs(), 2);
     assert_eq!(estimate.score_capacity_limbs(), 4);
     assert_eq!(estimate.product_capacity_limbs(), 4);
-    assert_eq!(estimate.previous_product_capacity_limbs(), 3);
+    assert_eq!(estimate.previous_product_capacity_limbs(), 4);
     assert_eq!(estimate.candidate_count(), 20);
     assert_eq!(estimate.lattice_visits(), 130);
     assert_eq!(estimate.product_update_visits(), 30);
@@ -401,7 +402,7 @@ fn g0_dimension_one_memory_charges_moved_old_and_new_product_overlap() {
         .expect("finite estimate");
     assert_eq!(estimate.candidate_count(), 0);
     assert_eq!(estimate.candidate_phase_bytes(), 0);
-    assert_eq!(estimate.previous_product_capacity_limbs(), 1);
+    assert_eq!(estimate.previous_product_capacity_limbs(), 3);
     assert_eq!(estimate.product_capacity_limbs(), 3);
     let expected = estimate.executor_inline_bytes()
         + estimate.product_owner_array_bytes()

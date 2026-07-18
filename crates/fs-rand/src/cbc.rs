@@ -407,23 +407,12 @@ impl CbcProblem {
             max_score_limbs,
         )?;
 
-        // Immediately before the final update, retained products were created
-        // by the preceding update. Dimension one instead starts from `one`.
-        let previous_product_capacity_limbs = if later_dimensions == 0 {
-            1
-        } else {
-            let previous_source_prefix = later_dimensions
-                .checked_sub(1)
-                .ok_or_else(|| overflow("previous source prefix"))?;
-            let previous_source_bits = kernel_bits
-                .checked_mul(previous_source_prefix)
-                .ok_or_else(|| overflow("previous source-product bit width"))?;
-            limbs_for_bits(previous_source_bits)?
-                .max(1)
-                .checked_add(kernel_factor_limbs)
-                .and_then(|limbs| limbs.checked_add(1))
-                .ok_or_else(|| overflow("previous product limb capacity"))?
-        };
+        // The executor pre-reserves every resident product at the final
+        // admitted capacity before the first update. The moved allocation
+        // retained during replacement therefore has this same requested
+        // capacity even when its normalized mathematical value is still one
+        // limb (notably at dimension one).
+        let previous_product_capacity_limbs = product_capacity_limbs;
 
         let candidate_count = later_dimensions
             .checked_mul(candidates)
@@ -985,7 +974,9 @@ impl CbcEstimate {
         self.product_capacity_limbs
     }
 
-    /// Retained per-product capacity immediately before the final update.
+    /// Requested capacity of the retained/moved product allocation during an
+    /// update. The executor pre-reserves every product at the final product
+    /// capacity; allocator-reported capacity may be larger and is not claimed.
     #[must_use]
     pub const fn previous_product_capacity_limbs(self) -> u128 {
         self.previous_product_capacity_limbs
