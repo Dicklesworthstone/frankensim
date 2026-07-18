@@ -194,7 +194,7 @@ fn owen_scramble(x: u32, seed: u64, dim: u32) -> u32 {
 /// and make overflow impossible except as an explicit allocation/capacity
 /// failure. This avoids importing a general big-integer runtime dependency.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ExactNat {
+pub(crate) struct ExactNat {
     /// Little-endian base-2³² limbs; zero has no limbs.
     limbs: Vec<u32>,
 }
@@ -202,15 +202,15 @@ struct ExactNat {
 impl ExactNat {
     const LIMB_BITS: u32 = 32;
 
-    fn zero() -> Self {
+    pub(crate) fn zero() -> Self {
         Self { limbs: Vec::new() }
     }
 
-    fn one() -> Self {
+    pub(crate) fn one() -> Self {
         Self { limbs: vec![1] }
     }
 
-    fn normalize(&mut self) {
+    pub(crate) fn normalize(&mut self) {
         while self.limbs.last() == Some(&0) {
             let removed = self
                 .limbs
@@ -220,7 +220,7 @@ impl ExactNat {
         }
     }
 
-    fn magnitude_cmp(&self, other: &Self) -> core::cmp::Ordering {
+    pub(crate) fn magnitude_cmp(&self, other: &Self) -> core::cmp::Ordering {
         match self.limbs.len().cmp(&other.limbs.len()) {
             core::cmp::Ordering::Equal => self.limbs.iter().rev().cmp(other.limbs.iter().rev()),
             ordering => ordering,
@@ -230,7 +230,7 @@ impl ExactNat {
     /// Add `multiplicand * factor` exactly using base-2³² schoolbook
     /// arithmetic. The score accumulator deliberately retains spare zero
     /// limbs between additions and normalizes once before comparison.
-    fn add_mul_factor(&mut self, multiplicand: &Self, factor: u128) {
+    pub(crate) fn add_mul_factor(&mut self, multiplicand: &Self, factor: u128) {
         if factor == 0 || multiplicand.limbs.is_empty() {
             return;
         }
@@ -285,12 +285,20 @@ impl ExactNat {
         }
     }
 
-    fn mul_assign_factor(&mut self, factor: u128) {
+    pub(crate) fn mul_assign_factor(&mut self, factor: u128) {
         let multiplicand = Self {
             limbs: core::mem::take(&mut self.limbs),
         };
         self.add_mul_factor(&multiplicand, factor);
         self.normalize();
+    }
+
+    /// Reserve exact limb capacity so subsequent in-envelope arithmetic never
+    /// reallocates (the admission contract's exact-capacity storage
+    /// requirement for the execution tranche).
+    pub(crate) fn reserve_exact_limbs(&mut self, capacity_limbs: usize) {
+        let additional = capacity_limbs.saturating_sub(self.limbs.len());
+        self.limbs.reserve_exact(additional);
     }
 
     #[cfg(test)]
@@ -320,7 +328,7 @@ impl ExactNat {
 
 /// Integer numerator of `1 + B₂(residue/n)` over the candidate-independent
 /// denominator `6*n²`.
-fn exact_kernel_numerator(n: u32, residue: u32) -> u128 {
+pub(crate) fn exact_kernel_numerator(n: u32, residue: u32) -> u128 {
     let n = u128::from(n);
     let residue = u128::from(residue);
     let positive = 7 * n * n + 6 * residue * residue;
@@ -329,7 +337,7 @@ fn exact_kernel_numerator(n: u32, residue: u32) -> u128 {
         .expect("the Bernoulli-B2 kernel numerator is non-negative")
 }
 
-fn lattice_residue(point: usize, generator: u32, n: u32) -> u32 {
+pub(crate) fn lattice_residue(point: usize, generator: u32, n: u32) -> u32 {
     let point = u64::try_from(point).expect("a u32-bounded lattice index fits u64");
     u32::try_from(point * u64::from(generator) % u64::from(n))
         .expect("a modular residue below n fits u32")
@@ -442,7 +450,7 @@ impl Lattice {
     }
 }
 
-fn gcd(a: u32, b: u32) -> u32 {
+pub(crate) fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 

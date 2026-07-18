@@ -37,6 +37,23 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   legitimately exceed one allocation's `isize::MAX` total while refusing live
   modeled state beyond `2^usize::BITS` bytes. This is the prerequisite receipt
   for a future checked executor; legacy `Lattice::cbc` does not consume it yet.
+- `cbc_exec::{CbcExecutor, CbcTileShape, CbcPoll, CbcControl, CbcBoundary,
+  CbcRunStatus, CbcExecError}` — schema-v1 tiled execution of the SAME exact
+  construction over an admission receipt: byte-identical arithmetic in the
+  same logical order as `Lattice::cbc` (proven per-case in the battery, incl.
+  the pinned n=257 KAT), so tile shape and pause/resume splits never change
+  the chosen vector or the debit total. Work debits follow the admission
+  schedule at admitted widths (conservative, monotone, `ScheduleOverrun`
+  fail-closed if they would exceed the receipt); run-scoped allowances slice
+  the admitted budget with exhaustion finalized at named tile boundaries
+  (`Entry`/`PointBlock`/`CandidateBlock`/`Prefix`); cancellation is
+  request→drain→finalize via the L1-local `CbcPoll` boundary (drivers adapt
+  their `Cx`), and the committed prefix never contains a half-chosen
+  component. Product/score limbs are reserved at exact admitted capacity
+  (in-envelope arithmetic never reallocates). NO-CLAIM: no serialized
+  cross-process pause/migrate/fork state, no minimality certificate, no
+  parallel candidate scoring yet (later 6ys.20 tranches); `Lattice::cbc`
+  itself remains the synchronous convenience authority.
 
 ### Extended distributions (bead 6ys.19, module `dist`)
 - `Stream::{next_gamma, next_beta, next_dirichlet, next_truncated_normal,
