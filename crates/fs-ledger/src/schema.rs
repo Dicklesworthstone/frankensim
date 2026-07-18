@@ -1369,7 +1369,14 @@ pub const V20: &[&str] = &[
        SET generation = generation + 1 WHERE singleton = 1;
      END",
     "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_ops_update
-     AFTER UPDATE OF id, session, ir, seed, versions, budget, capability ON ops
+     AFTER UPDATE ON ops
+     WHEN OLD.id IS NOT NEW.id
+       OR OLD.session IS NOT NEW.session
+       OR OLD.ir IS NOT NEW.ir
+       OR OLD.seed IS NOT NEW.seed
+       OR OLD.versions IS NOT NEW.versions
+       OR OLD.budget IS NOT NEW.budget
+       OR OLD.capability IS NOT NEW.capability
      BEGIN
        SELECT CASE
          WHEN NOT EXISTS(

@@ -6076,6 +6076,32 @@ mod tests {
             })
         ));
 
+        // `ops.id` is an INTEGER PRIMARY KEY alias for SQLite's physical
+        // rowid. UPDATE OF id triggers do not fire when a compatible writer
+        // spells the same mutation as `SET rowid = ...`, so exercise that
+        // spelling independently and require the value-aware UPDATE trigger
+        // to invalidate the captured cohort.
+        let before_rowid_alias_update = ledger.begin_identity_reconciliation().unwrap();
+        ledger
+            .conn
+            .execute("UPDATE ops SET rowid = 3 WHERE id = 2")
+            .unwrap();
+        assert_eq!(
+            ledger.identity_reconcile_source_generation().unwrap(),
+            before_rowid_alias_update.source_generation() + 1
+        );
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(
+                before_rowid_alias_update,
+                64,
+                || false
+            ),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+
         ledger
             .conn
             .execute(
@@ -6099,7 +6125,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(ledger.identity_reconcile_source_generation().unwrap(), 7);
+        assert_eq!(ledger.identity_reconcile_source_generation().unwrap(), 8);
     }
 
     #[test]
