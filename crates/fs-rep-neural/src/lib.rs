@@ -21,6 +21,13 @@
 //! [`fs_ivl`], while spectral diagnostics and upper bounds remain in-house.
 
 use fs_ivl::Interval;
+use fs_math::det;
+
+/// Version of the hidden-activation arithmetic shared by point evaluation and
+/// interval certification.
+pub const MLP_ACTIVATION_SEMANTICS_VERSION: u32 = 1;
+/// Stable name of the governed hidden-activation arithmetic.
+pub const MLP_ACTIVATION_SEMANTICS: &str = "fs-rep-neural-det-tanh-v1";
 
 /// A dense affine layer (`out × in` weights + bias).
 #[derive(Debug, Clone, PartialEq)]
@@ -273,7 +280,7 @@ impl MlpSdf {
             }
             if li < last {
                 for zi in &mut z {
-                    *zi = zi.tanh();
+                    *zi = det::tanh(*zi);
                 }
             }
             a = z;

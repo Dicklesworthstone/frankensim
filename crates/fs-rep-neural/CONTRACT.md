@@ -6,8 +6,9 @@ so certified bounds remain available.
 ## Purpose and layer
 
 Layer L2 (MORPH / representation). Pure Rust; depends on L1 `fs-ivl` for
-outward-rounded interval arithmetic and deterministic elementary-function ULP
-budgets. Spectral diagnostics and upper bounds remain in-house.
+outward-rounded interval arithmetic and on `fs-math` for the exact deterministic
+elementary-function implementation covered by those ULP budgets. Spectral
+diagnostics and upper bounds remain in-house.
 
 ## Public types and semantics
 
@@ -30,9 +31,11 @@ budgets. Spectral diagnostics and upper bounds remain in-house.
   violates `|f(x) − f(y)| ≤ L·‖x − y‖`.
 - IBP is SOUND: `eval_interval(lo, hi)` encloses `f(x)` for every `x` in the box.
   Every affine product/sum is outward-rounded and every hidden `tanh` uses
-  `fs-ivl`'s deterministic five-ULP enclosure. A degenerate input box may widen
-  by the accumulated rounding budget but must contain the separately evaluated
-  point.
+  `fs-ivl`'s deterministic five-ULP enclosure. Point evaluation uses the same
+  `fs_math::det::tanh` primitive, exposed as
+  `MLP_ACTIVATION_SEMANTICS=fs-rep-neural-det-tanh-v1`, rather than an
+  ungoverned platform `tanh`. A degenerate input box may widen by the accumulated
+  rounding budget but must contain the separately evaluated point.
 - `‖∇f(x)‖ ≤ L` everywhere.
 - A sphere-trace step of `safe_step_radius(f(x), L)` never tunnels: `f` cannot
   change sign within that radius.
@@ -46,8 +49,9 @@ as structural misuse. A non-finite or inverted interval box returns
 
 ## Determinism class
 
-Fully deterministic: the spectral norm uses a fixed initial vector; eval, IBP,
-and the Lipschitz constant are pure functions of the weights.
+Fully deterministic: the spectral norm uses a fixed initial vector; point and
+interval activation semantics share versioned `fs-math`/`fs-ivl` arithmetic;
+eval, IBP, and the Lipschitz constant are pure functions of the weights.
 
 ## Cancellation behavior
 
@@ -66,8 +70,9 @@ None.
 `tests/neural.rs`: spectral norm vs known values; spectral
 normalization to a bound; the Lipschitz certificate is never violated; IBP
 soundness, degenerate-point enclosure, malformed-box refusal, and deterministic
-endpoint replay; the gradient is bounded by L; a certified sphere-trace step
-never tunnels; topology honestly unknown; determinism.
+endpoint replay; exact point-evaluator binding to the interval certifier's
+deterministic `tanh`; the gradient is bounded by L; a certified sphere-trace
+step never tunnels; topology honestly unknown; determinism.
 
 ## No-claim boundaries
 

@@ -12,6 +12,7 @@ layer = "L2"
 
 [dependencies]
 fs-ivl = { path = "../fs-ivl" }
+fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
 

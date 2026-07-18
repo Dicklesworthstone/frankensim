@@ -6,8 +6,8 @@
 //! surface.
 
 use fs_rep_neural::{
-    Layer, MlpSdf, TopologyHint, safe_step_radius, spectral_norm, spectral_norm_upper_bound,
-    spectral_normalize,
+    Layer, MLP_ACTIVATION_SEMANTICS, MLP_ACTIVATION_SEMANTICS_VERSION, MlpSdf, TopologyHint,
+    safe_step_radius, spectral_norm, spectral_norm_upper_bound, spectral_normalize,
 };
 
 // A deterministic pseudo-random point stream in [-1, 1)^2 (no rand crate).
@@ -254,6 +254,53 @@ fn interval_bound_propagation_is_bit_deterministic() {
         let replay = net.eval_interval(&lo, &hi);
         assert_eq!(replay.0.to_bits(), first.0.to_bits());
         assert_eq!(replay.1.to_bits(), first.1.to_bits());
+    }
+}
+
+#[test]
+fn point_evaluation_uses_the_interval_certifiers_deterministic_tanh() {
+    assert_eq!(MLP_ACTIVATION_SEMANTICS_VERSION, 1);
+    assert_eq!(MLP_ACTIVATION_SEMANTICS, "fs-rep-neural-det-tanh-v1");
+
+    // A zero hidden weight makes the hidden preactivation exactly the bias.
+    // A scalar output layer is normalized to the same deterministic stored
+    // weight whether normalized here or by MlpSdf::new, so this independently
+    // pins the end-to-end point evaluator to fs_math::det::tanh rather than a
+    // platform elementary function outside fs-ivl's declared ULP budget.
+    let normalized_output = spectral_normalize(Layer::new(vec![vec![1.0]], vec![0.0]), 1.0);
+    let output_weight = normalized_output.weights[0][0];
+    assert!(output_weight > 0.0);
+
+    for bias in [
+        -19.0,
+        -1.234_567_890_123_456,
+        -0.73,
+        -1.0e-8,
+        1.0e-8,
+        0.73,
+        1.234_567_890_123_456,
+        19.0,
+    ] {
+        let net = MlpSdf::new(
+            vec![
+                Layer::new(vec![vec![0.0]], vec![bias]),
+                Layer::new(vec![vec![1.0]], vec![0.0]),
+            ],
+            1.0,
+        );
+        let expected = output_weight * fs_math::det::tanh(bias);
+        let observed = net.eval(&[0.0]);
+        assert_eq!(
+            observed.to_bits(),
+            expected.to_bits(),
+            "point activation drift at bias {bias:.17e}"
+        );
+
+        let (lo, hi) = net.eval_interval(&[0.0], &[0.0]);
+        assert!(
+            lo <= observed && observed <= hi,
+            "deterministic point {observed:.17e} escaped [{lo:.17e}, {hi:.17e}]"
+        );
     }
 }
 
