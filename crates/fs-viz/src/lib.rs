@@ -1909,8 +1909,14 @@ pub struct IsoContourReport {
     pub edge_visits: usize,
     /// Exact-node ownership decisions performed.
     pub exact_ownership_checks: usize,
+    /// Exact-node candidates discarded because another incident edge owns them.
+    pub unowned_exact_candidates: usize,
     /// Strict-crossing interpolations attempted.
     pub interpolations: usize,
+    /// Exact-level points staged by their canonical owner edges.
+    pub exact_crossings: usize,
+    /// Strictly interpolated points staged in the private output.
+    pub interpolated_crossings: usize,
     /// Points staged in the private output vector.
     pub crossings: usize,
     /// Cancellation checkpoint attempts.
@@ -1944,7 +1950,10 @@ impl IsoContourReport {
             node_visits: 0,
             edge_visits: 0,
             exact_ownership_checks: 0,
+            unowned_exact_candidates: 0,
             interpolations: 0,
+            exact_crossings: 0,
+            interpolated_crossings: 0,
             crossings: 0,
             polls: 0,
             work_units: 0,
@@ -2818,7 +2827,8 @@ where
                     }
                 };
                 if let Some(crossing) = crossing {
-                    if let Err(error) = push_crossing(&mut crossings, crossing, plan.max_crossings)
+                    if let Err(error) =
+                        push_crossing(&mut crossings, crossing, plan.max_crossings, &mut report)
                     {
                         if let Err(budget_error) = contour_charge(
                             &mut admitted,
@@ -2829,7 +2839,6 @@ where
                         }
                         return Err(terminal_contour_error(error, report));
                     }
-                    report.crossings = crossings.len();
                     report.work_units += 1;
                     pending_work += 1;
                 }
@@ -2882,7 +2891,8 @@ where
                     }
                 };
                 if let Some(crossing) = crossing {
-                    if let Err(error) = push_crossing(&mut crossings, crossing, plan.max_crossings)
+                    if let Err(error) =
+                        push_crossing(&mut crossings, crossing, plan.max_crossings, &mut report)
                     {
                         if let Err(budget_error) = contour_charge(
                             &mut admitted,
@@ -2893,7 +2903,6 @@ where
                         }
                         return Err(terminal_contour_error(error, report));
                     }
-                    report.crossings = crossings.len();
                     report.work_units += 1;
                     pending_work += 1;
                 }
@@ -3117,17 +3126,21 @@ fn edge_crossing(
         report.exact_ownership_checks += 1;
         report.work_units += 1;
         *pending_work += 1;
-        return Ok(
-            edge_owns_exact_node(a_index, b_index, a_index).then_some(EdgeCrossing2::Exact(a))
-        );
+        if edge_owns_exact_node(a_index, b_index, a_index) {
+            return Ok(Some(EdgeCrossing2::Exact(a)));
+        }
+        report.unowned_exact_candidates += 1;
+        return Ok(None);
     }
     if b_exact {
         report.exact_ownership_checks += 1;
         report.work_units += 1;
         *pending_work += 1;
-        return Ok(
-            edge_owns_exact_node(a_index, b_index, b_index).then_some(EdgeCrossing2::Exact(b))
-        );
+        if edge_owns_exact_node(a_index, b_index, b_index) {
+            return Ok(Some(EdgeCrossing2::Exact(b)));
+        }
+        report.unowned_exact_candidates += 1;
+        return Ok(None);
     }
     if (va < iso) == (vb < iso) {
         return Ok(None);
@@ -3220,15 +3233,28 @@ fn push_crossing(
     crossings: &mut Vec<Vec2>,
     crossing: EdgeCrossing2,
     crossing_limit: usize,
+    report: &mut IsoContourReport,
 ) -> Result<(), IsoContourError> {
-    let point = match crossing {
-        EdgeCrossing2::Exact(point) | EdgeCrossing2::Interpolated(point) => point,
+    let (point, exact_increment, interpolated_increment) = match crossing {
+        EdgeCrossing2::Exact(point) => (point, 1, 0),
+        EdgeCrossing2::Interpolated(point) => (point, 0, 1),
     };
     if crossings.len() == crossing_limit {
         return Err(IsoContourError::CrossingBudgetExceeded {
             limit: crossing_limit,
         });
     }
+    let next_exact_crossings = report.exact_crossings.checked_add(exact_increment).ok_or(
+        IsoContourError::PlanOverflow {
+            resource: IsoContourResource::OutputCrossings,
+        },
+    )?;
+    let next_interpolated_crossings = report
+        .interpolated_crossings
+        .checked_add(interpolated_increment)
+        .ok_or(IsoContourError::PlanOverflow {
+            resource: IsoContourResource::OutputCrossings,
+        })?;
     let required = crossings
         .len()
         .checked_add(1)
@@ -3237,6 +3263,13 @@ fn push_crossing(
         })?;
     debug_assert!(crossings.capacity() >= required);
     crossings.push(point);
+    report.exact_crossings = next_exact_crossings;
+    report.interpolated_crossings = next_interpolated_crossings;
+    report.crossings = crossings.len();
+    debug_assert_eq!(
+        report.crossings,
+        report.exact_crossings + report.interpolated_crossings
+    );
     Ok(())
 }
 

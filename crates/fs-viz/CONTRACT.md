@@ -40,7 +40,9 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   ambient deadline/poll/cost enforcement, private staging, final-checkpoint
   publication, a fixed `IsoContourReport` retaining the requested envelope,
   checked plan, actual/peak counters, disposition, and a domain-separated
-  BLAKE3 artifact identity.
+  BLAKE3 artifact identity. Actual counters distinguish canonical exact
+  crossings, strictly interpolated crossings, and exact candidates discarded
+  by static first-edge ownership.
 - `Grid3::from_fn(dimensions, lower, upper, node_limit, field)` and
   `Grid3::from_values(...)` — owned finite scalar samples with x-fastest
   addressing, strict world bounds, and an explicit node budget.
@@ -110,6 +112,11 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   admitted before the output allocation; allocator-reported capacity is then
   checked again before edge work. The private vector cannot escape on any
   refusal, cancellation, allocation fault, or unwind.
+- For every terminal contour report, `crossings == exact_crossings +
+  interpolated_crossings`. `unowned_exact_candidates` counts only exact
+  endpoints rejected by the static first-incident-edge rule, while
+  `exact_ownership_checks` also includes canonical owners and therefore never
+  falls below it.
 - Cancellation is polled before allocation, at deterministic edge chunks, at
   deterministic identity chunks, and immediately before publication. At most
   `items_per_poll` edge/identity-point items occur between checkpoints. The
@@ -227,7 +234,8 @@ overflow, coordinate-collapse, and non-finite-value admission; non-finite-level
 and crossing-budget refusal; exact-node ownership and coincident-edge refusal;
 the adversarial exact/non-exact checkerboard under exact and one-short output
 budgets, both axis shapes, and byte-identical replay;
-complete scoped-plan accounting and artifact identity; exact and one-short
+complete scoped-plan accounting, exact/interpolated/static-owner telemetry,
+and artifact identity; exact and one-short
 refusal for every resource before polling/edge work; pre-requested and
 mid-traversal cancellation; ambient deadline-without-clock, cost-plan, and poll
 exhaustion refusals; injected allocation and

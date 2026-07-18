@@ -946,6 +946,17 @@ fn g0_checkerboard_exact_node_ownership_is_static_and_budget_exact() {
             scoped_plan.edge_visits,
             "every checkerboard edge performs one constant-time ownership decision"
         );
+        assert_eq!(scoped.report().exact_crossings, expected.len());
+        assert_eq!(scoped.report().interpolated_crossings, 0);
+        assert_eq!(
+            scoped.report().unowned_exact_candidates,
+            scoped.report().exact_ownership_checks - scoped.report().exact_crossings,
+            "every non-owner exact candidate is discarded in constant time"
+        );
+        assert_eq!(
+            scoped.report().crossings,
+            scoped.report().exact_crossings + scoped.report().interpolated_crossings
+        );
         assert_eq!(scoped.report().interpolations, 0);
         assert!(scoped.report().work_units <= scoped_plan.work_units);
 
@@ -967,6 +978,8 @@ fn g0_checkerboard_exact_node_ownership_is_static_and_budget_exact() {
             IsoContourError::CrossingBudgetExceeded { limit: one_short }
         );
         assert_eq!(one_short_refusal.report.crossings, one_short);
+        assert_eq!(one_short_refusal.report.exact_crossings, one_short);
+        assert_eq!(one_short_refusal.report.interpolated_crossings, 0);
         assert!(!one_short_refusal.report.published);
     }
 }
@@ -1002,6 +1015,13 @@ fn g0_scoped_contour_plan_is_complete_and_reported() {
     assert_eq!(report.cell_visits, plan.cells);
     assert_eq!(report.edge_visits, plan.edge_visits);
     assert_eq!(report.crossings, first.crossings().len());
+    assert_eq!(report.exact_crossings, 0);
+    assert_eq!(report.unowned_exact_candidates, 0);
+    assert_eq!(report.interpolated_crossings, first.crossings().len());
+    assert_eq!(
+        report.crossings,
+        report.exact_crossings + report.interpolated_crossings
+    );
     assert!(report.polls <= plan.polls);
     assert!(report.work_units <= plan.work_units);
     assert!(report.identity_bytes_hashed <= plan.identity_bytes);
