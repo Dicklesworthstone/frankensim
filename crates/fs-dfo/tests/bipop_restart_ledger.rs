@@ -115,7 +115,7 @@ fn g0_restart_records_partition_the_trace_and_name_the_best_run() {
     assert_eq!(trace_identity.dimension(), 2);
     assert_eq!(
         BIPOP_TRACE_IDENTITY_DOMAIN,
-        "frankensim.fs-dfo.bipop-callback-trace.v2"
+        "frankensim.fs-dfo.bipop-callback-trace.v3"
     );
     let trace = report.evaluations().collect::<Vec<_>>();
     assert_eq!(trace.len(), report.total_evals);

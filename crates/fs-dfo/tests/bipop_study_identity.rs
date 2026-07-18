@@ -51,7 +51,7 @@ fn g5_same_seed_replays_and_admits_the_full_study_identity() {
     assert_ne!(identity.digest(), &[0u8; 32]);
     assert_eq!(
         BIPOP_STUDY_IDENTITY_DOMAIN,
-        "frankensim.fs-dfo.bipop-full-study.v1"
+        "frankensim.fs-dfo.bipop-full-study.v2"
     );
     first
         .admit_study_identity(identity)
