@@ -14,7 +14,29 @@
 //! types, lane-width resolution (once, via fs-substrate dispatch —
 //! never in hot loops), and deterministic/fast reduction combiners.
 
+use core::fmt::Write as _;
 pub use fs_tilelang_macros::kernel;
+
+fn escape_json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{0000}'..='\u{001f}' => {
+                write!(&mut escaped, "\\u{:04x}", u32::from(ch))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
 
 /// Determinism class a kernel declares (part of its metadata).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +96,7 @@ impl KernelMeta {
         format!(
             "{{\"kernel\":\"{}\",\"flops_per_elem\":{},\"bytes_per_elem\":{},\
              \"intensity\":{:.4},\"halo\":{},\"reduction\":\"{:?}\",\"determinism\":\"{:?}\"}}",
-            self.name,
+            escape_json_string(self.name),
             self.flops_per_elem,
             self.bytes_per_elem,
             self.intensity(),

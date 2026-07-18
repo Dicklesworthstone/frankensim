@@ -8,7 +8,7 @@
 //! alongside (visible as `__twin_tests` in the test list).
 
 use fs_rand::StreamKey;
-use fs_tilelang::{DeterminismClass, ReductionKind, kernel};
+use fs_tilelang::{DeterminismClass, KernelMeta, ReductionKind, kernel};
 
 fn log(case: &str, verdict: &str, detail: &str) {
     println!(
@@ -283,4 +283,36 @@ fn metadata_feeds_the_roofline_table() {
         assert!(meta.intensity() > 0.0);
         log("roofline-meta", "info", &meta.descr());
     }
+}
+
+#[test]
+fn metadata_json_escapes_kernel_names() {
+    let plain = KernelMeta {
+        name: "plain",
+        flops_per_elem: 2,
+        bytes_per_elem: 24,
+        halo: 0,
+        reduction: ReductionKind::None,
+        determinism: DeterminismClass::BitwiseAllTiers,
+    };
+    assert_eq!(
+        plain.descr(),
+        "{\"kernel\":\"plain\",\"flops_per_elem\":2,\"bytes_per_elem\":24,\"intensity\":0.0833,\"halo\":0,\"reduction\":\"None\",\"determinism\":\"BitwiseAllTiers\"}"
+    );
+
+    const HOSTILE: &str = "kernel\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}";
+    const ESCAPED: &str = "kernel\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001f";
+    let hostile = KernelMeta {
+        name: HOSTILE,
+        ..plain
+    };
+    let descr = hostile.descr();
+    assert_eq!(
+        descr,
+        format!(
+            "{{\"kernel\":\"{ESCAPED}\",\"flops_per_elem\":2,\"bytes_per_elem\":24,\"intensity\":0.0833,\"halo\":0,\"reduction\":\"None\",\"determinism\":\"BitwiseAllTiers\"}}"
+        )
+    );
+    assert_eq!(descr.lines().count(), 1, "{descr}");
+    assert!(!descr.chars().any(|ch| ch < ' '), "{descr}");
 }
