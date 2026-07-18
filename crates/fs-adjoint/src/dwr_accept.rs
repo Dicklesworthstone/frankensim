@@ -1067,7 +1067,9 @@ impl AcceptWorkPlan {
 /// number is certified. A bracket can only be created by
 /// [`Bracket::cauchy_schwarz`], which reruns the equilibrated-flux verifier on
 /// the exact problem/candidate pairs. It is not yet a QoI-error certificate:
-/// the v0 query type does not bind the dual problem to the requested functional.
+/// although the typed query binds the estimate to the requested functional,
+/// the bracket does not retain or reverify that its dual problem represents
+/// that functional.
 ///
 /// ```compile_fail
 /// use fs_adjoint::dwr_accept::Bracket;
@@ -1732,7 +1734,8 @@ fn functional_binding_refusal(
 /// - no acceptance path → rejected (estimated color on the estimate);
 /// - DWR-only accept (`|η| ≤ tol`, no valid bracket) → ESTIMATED;
 /// - a sealed energy-product bracket is retained in the audit, but cannot
-///   promote or veto because the v0 query does not bind its dual relation.
+///   promote or veto because the bracket does not bind and reverify its dual
+///   problem as the typed query's functional relation.
 pub fn accept(
     query: &DwrQuery,
     estimate: &DwrOutput,
