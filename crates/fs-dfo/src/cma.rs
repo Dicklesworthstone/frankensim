@@ -2251,6 +2251,12 @@ impl BipopReport {
         if self.root.identity != expected_root.identity {
             return Err(BipopLedgerError::global("root-identity"));
         }
+        // Classify a non-finite first retained decision point under the same
+        // stable invariant as every later restart before reporting the broader
+        // root-projection mismatch that it necessarily also causes.
+        if first.start.iter().any(|value| !value.is_finite()) {
+            return Err(BipopLedgerError::at(0, "finite-start"));
+        }
         if !f64_slices_match_bits(&first.start, &self.root.start) {
             return Err(BipopLedgerError::at(0, "root-start-projection"));
         }
