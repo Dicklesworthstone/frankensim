@@ -4886,6 +4886,28 @@ mod tests {
             3,
             "macro-input `fn run` tokens cannot mint a real allowance owner: {owner_violations:?}"
         );
+
+        let braced_header_macro = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "macro_rules! output_ty { () => { Result<(), ()> }; }\n",
+                "pub fn genuine() -> output_ty!{} { println!(\"real body\"); Ok(()) }\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let braced_header_violations = audit_casual_print_sources(&braced_header_macro);
+        assert_eq!(
+            braced_header_violations.len(),
+            1,
+            "a braced type macro is not the apparent function body: {braced_header_violations:?}"
+        );
+        assert!(
+            braced_header_violations[0]
+                .detail
+                .contains("println! in fn genuine")
+        );
     }
 
     #[test]
