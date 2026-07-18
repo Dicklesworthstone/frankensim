@@ -628,10 +628,12 @@ fn perp_distance(f: &[f64], dir: &[f64]) -> f64 {
 }
 
 /// NSGA-III for many-objective minimization: reference-direction
-/// niching replaces crowding distance. Normalization uses the ideal
-/// point and the FIRST-front per-objective maxima as the nadir
-/// estimate (the full ASF extreme-point construction is the recorded
-/// refinement). Deterministic throughout (index tie-breaks).
+/// niching replaces crowding distance. Normalization uses
+/// achievement-scalarizing-function extreme points and the resulting
+/// hyperplane intercepts, with the legacy floored first-front maxima as
+/// a deterministic fail-closed fallback. Deterministic throughout
+/// (index tie-breaks). The cubic intercept solve is bounded to 64
+/// objectives; larger objective vectors retain the legacy normalization.
 pub fn nsga3(
     objectives: &mut dyn FnMut(&[f64]) -> Vec<f64>,
     dim: usize,
@@ -727,7 +729,9 @@ fn nsga3_select(pop: &[Individual], directions: &[Vec<f64>], target: usize) -> V
     if accepted.len() == target || partial.is_empty() {
         return accepted.into_iter().map(|i| pop[i].clone()).collect();
     }
-    // Normalize over accepted ∪ partial: ideal point + first-front max.
+    // Normalize over accepted ∪ partial: ideal point plus ASF extreme
+    // points and hyperplane intercepts, with the legacy floored-maxima
+    // behavior as the fail-closed fallback.
     let considered: Vec<usize> = accepted.iter().chain(&partial).copied().collect();
     let (ideal, span) = nsga3_normalization(pop, &fronts, &considered, m);
     let associate = |i: usize| nsga3_association(pop, directions, &ideal, &span, i);
@@ -789,21 +793,322 @@ fn nsga3_normalization(
     considered: &[usize],
     m: usize,
 ) -> (Vec<f64>, Vec<f64>) {
+    const MIN_SPAN: f64 = 1e-30;
+    const MAX_HYPERPLANE_ENTRIES: usize = 4_096;
+
     let mut ideal = vec![f64::INFINITY; m];
     for &i in considered {
         for (d, v) in ideal.iter_mut().zip(&pop[i].f) {
             *d = d.min(*v);
         }
     }
-    let mut span = vec![1e-30f64; m];
+    let mut fallback_span = vec![MIN_SPAN; m];
     for &i in considered {
         if fronts[i] == 0 {
-            for (d, (v, id)) in span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
+            for (d, (v, id)) in fallback_span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
                 *d = d.max(v - id);
             }
         }
     }
+
+    let matrix_entries = match m.checked_mul(m) {
+        Some(entries) if entries <= MAX_HYPERPLANE_ENTRIES => entries,
+        _ => return (ideal, fallback_span),
+    };
+    if matrix_entries == 0 {
+        return (ideal, fallback_span);
+    }
+    let Some(extreme_indices) = nsga3_extreme_indices(pop, considered, &ideal, &fallback_span, m)
+    else {
+        return (ideal, fallback_span);
+    };
+    let Some(span) = nsga3_hyperplane_span(pop, &extreme_indices, &ideal, &fallback_span) else {
+        return (ideal, fallback_span);
+    };
     (ideal, span)
+}
+
+/// Select one considered extreme per objective with a scale-equilibrated
+/// Deb-Jain-style ASF.
+/// Translated objectives are first divided by the legacy floored
+/// first-front-max fallback
+/// spans. Algebraically this is equivariant under positive objective
+/// scaling above the documented span floor; rounding and ASF tie
+/// boundaries remain explicit no-claim cases. Off-axis objectives
+/// receive a `1e-6` weight. Iteration and explicit index tie-breaking
+/// make equal ASF values replayable.
+fn nsga3_extreme_indices(
+    pop: &[Individual],
+    considered: &[usize],
+    ideal: &[f64],
+    fallback_span: &[f64],
+    m: usize,
+) -> Option<Vec<usize>> {
+    const OFF_AXIS_WEIGHT: f64 = 1e-6;
+
+    if considered.len() < m
+        || fallback_span.len() != m
+        || fallback_span
+            .iter()
+            .any(|span| !span.is_finite() || *span <= 0.0)
+    {
+        return None;
+    }
+
+    let mut extremes = Vec::with_capacity(m);
+    for axis in 0..m {
+        extremes.push(nsga3_asf_extreme_index(
+            pop,
+            considered,
+            ideal,
+            fallback_span,
+            axis,
+            OFF_AXIS_WEIGHT,
+        )?);
+    }
+
+    for i in 0..extremes.len() {
+        if extremes[..i].contains(&extremes[i]) {
+            return None;
+        }
+    }
+    Some(extremes)
+}
+
+fn nsga3_asf_extreme_index(
+    pop: &[Individual],
+    considered: &[usize],
+    ideal: &[f64],
+    fallback_span: &[f64],
+    axis: usize,
+    off_axis_weight: f64,
+) -> Option<usize> {
+    let mut best_index = usize::MAX;
+    let mut best_asf = f64::INFINITY;
+    for &i in considered {
+        let mut asf = f64::NEG_INFINITY;
+        for objective in 0..ideal.len() {
+            let translated = pop[i].f[objective] - ideal[objective];
+            if !translated.is_finite() || translated < 0.0 {
+                return None;
+            }
+            let normalized = if translated == 0.0 {
+                0.0
+            } else {
+                translated / fallback_span[objective]
+            };
+            if !normalized.is_finite() {
+                return None;
+            }
+            let weight = if objective == axis {
+                1.0
+            } else {
+                off_axis_weight
+            };
+            let component = normalized / weight;
+            if !component.is_finite() {
+                return None;
+            }
+            asf = asf.max(component);
+        }
+        let order = asf.total_cmp(&best_asf);
+        if order.is_lt() || (order.is_eq() && i < best_index) {
+            best_index = i;
+            best_asf = asf;
+        }
+    }
+    (best_index != usize::MAX).then_some(best_index)
+}
+
+/// Derive objective spans from the hyperplane through the ASF extreme
+/// points. Columns are scaled by the maxima fallback before elimination;
+/// this is algebraically equivalent to the unscaled system and improves
+/// scale equivariance above the floor without claiming bitwise invariance
+/// at rounding or tie boundaries.
+fn nsga3_hyperplane_span(
+    pop: &[Individual],
+    extreme_indices: &[usize],
+    ideal: &[f64],
+    fallback_span: &[f64],
+) -> Option<Vec<f64>> {
+    const MAX_HYPERPLANE_ENTRIES: usize = 4_096;
+
+    let m = ideal.len();
+    if extreme_indices.len() != m
+        || fallback_span.len() != m
+        || fallback_span
+            .iter()
+            .any(|span| !span.is_finite() || *span <= 0.0)
+    {
+        return None;
+    }
+    match m.checked_mul(m) {
+        Some(1..=MAX_HYPERPLANE_ENTRIES) => {}
+        _ => return None,
+    }
+
+    let mut matrix = vec![vec![0.0; m]; m];
+    for (row, &i) in extreme_indices.iter().enumerate() {
+        for objective in 0..m {
+            let translated = pop[i].f[objective] - ideal[objective];
+            let scaled = translated / fallback_span[objective];
+            if !translated.is_finite() || translated < 0.0 || !scaled.is_finite() {
+                return None;
+            }
+            matrix[row][objective] = scaled;
+        }
+    }
+
+    let coefficients = nsga3_solve_hyperplane(&matrix)?;
+    let mut span = Vec::with_capacity(m);
+    for (fallback, coefficient) in fallback_span.iter().zip(coefficients) {
+        if !coefficient.is_finite() || coefficient <= 0.0 {
+            return None;
+        }
+        let intercept = fallback / coefficient;
+        if !intercept.is_finite() || intercept <= 0.0 {
+            return None;
+        }
+        span.push(intercept);
+    }
+    Some(span)
+}
+
+/// Solve `A x = 1` with deterministic partial-pivot LU factorization.
+/// The matrix is already column-scaled. Small relative pivots, a large
+/// one-norm condition estimate, non-finite arithmetic, or a poor
+/// scale-relative residual refuse the intercept path so the caller can
+/// use its exact legacy fallback.
+fn nsga3_solve_hyperplane(matrix: &[Vec<f64>]) -> Option<Vec<f64>> {
+    const PIVOT_RATIO_TOLERANCE: f64 = 1e-12;
+    const CONDITION_ERROR_LIMIT: f64 = 1e-8;
+
+    let n = matrix.len();
+    if n == 0 || matrix.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    let matrix_scale = matrix
+        .iter()
+        .flatten()
+        .map(|value| value.abs())
+        .fold(0.0f64, f64::max);
+    if !matrix_scale.is_finite() || matrix_scale == 0.0 {
+        return None;
+    }
+
+    let original = matrix.to_vec();
+    let mut lu = original.clone();
+    let mut swaps = vec![0usize; n];
+    let mut smallest_pivot = f64::INFINITY;
+    let mut largest_pivot = 0.0f64;
+
+    for column in 0..n {
+        let mut pivot_row = column;
+        let mut pivot_abs = lu[column][column].abs();
+        for row in column + 1..n {
+            let candidate = lu[row][column].abs();
+            if candidate > pivot_abs {
+                pivot_row = row;
+                pivot_abs = candidate;
+            }
+        }
+        if !pivot_abs.is_finite() || pivot_abs == 0.0 {
+            return None;
+        }
+        lu.swap(column, pivot_row);
+        swaps[column] = pivot_row;
+        smallest_pivot = smallest_pivot.min(pivot_abs);
+        largest_pivot = largest_pivot.max(pivot_abs);
+
+        for row in column + 1..n {
+            let factor = lu[row][column] / lu[column][column];
+            if !factor.is_finite() {
+                return None;
+            }
+            lu[row][column] = factor;
+            for entry in column + 1..n {
+                lu[row][entry] = factor.mul_add(-lu[column][entry], lu[row][entry]);
+                if !lu[row][entry].is_finite() {
+                    return None;
+                }
+            }
+        }
+    }
+
+    if smallest_pivot <= largest_pivot * PIVOT_RATIO_TOLERANCE {
+        return None;
+    }
+
+    let matrix_norm_1 = (0..n)
+        .map(|column| original.iter().map(|row| row[column].abs()).sum::<f64>())
+        .fold(0.0f64, f64::max);
+    let mut inverse_norm_1 = 0.0f64;
+    for column in 0..n {
+        let mut basis = vec![0.0; n];
+        basis[column] = 1.0;
+        let inverse_column = nsga3_lu_solve(&lu, &swaps, &basis)?;
+        inverse_norm_1 = inverse_norm_1.max(inverse_column.iter().map(|v| v.abs()).sum());
+    }
+    let condition_1 = matrix_norm_1 * inverse_norm_1;
+    if !condition_1.is_finite() || condition_1 * f64::EPSILON * n as f64 > CONDITION_ERROR_LIMIT {
+        return None;
+    }
+
+    let solution = nsga3_lu_solve(&lu, &swaps, &vec![1.0; n])?;
+    let residual_tolerance = 512.0 * f64::EPSILON * n as f64;
+    for row in &original {
+        let projected: f64 = row
+            .iter()
+            .zip(&solution)
+            .map(|(coefficient, value)| coefficient * value)
+            .sum();
+        let magnitude: f64 = row
+            .iter()
+            .zip(&solution)
+            .map(|(coefficient, value)| (coefficient * value).abs())
+            .sum();
+        if !projected.is_finite()
+            || !magnitude.is_finite()
+            || (projected - 1.0).abs() > residual_tolerance * (1.0 + magnitude)
+        {
+            return None;
+        }
+    }
+    Some(solution)
+}
+
+fn nsga3_lu_solve(lu: &[Vec<f64>], swaps: &[usize], rhs: &[f64]) -> Option<Vec<f64>> {
+    let n = lu.len();
+    if rhs.len() != n || swaps.len() != n {
+        return None;
+    }
+    let mut solution = rhs.to_vec();
+    for (column, &pivot_row) in swaps.iter().enumerate() {
+        solution.swap(column, pivot_row);
+    }
+    for row in 0..n {
+        let known: f64 = lu[row][..row]
+            .iter()
+            .zip(&solution[..row])
+            .map(|(coefficient, value)| coefficient * value)
+            .sum();
+        solution[row] -= known;
+        if !solution[row].is_finite() {
+            return None;
+        }
+    }
+    for row in (0..n).rev() {
+        let known: f64 = lu[row][row + 1..]
+            .iter()
+            .zip(&solution[row + 1..])
+            .map(|(coefficient, value)| coefficient * value)
+            .sum();
+        solution[row] = (solution[row] - known) / lu[row][row];
+        if !solution[row].is_finite() {
+            return None;
+        }
+    }
+    Some(solution)
 }
 
 fn nsga3_association(
@@ -960,4 +1265,370 @@ pub fn moead(
         .filter(|(_, r)| *r == 0)
         .map(|(ind, _)| ind)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn individual(objectives: [f64; 3]) -> Individual {
+        Individual {
+            x: Vec::new(),
+            f: objectives.to_vec(),
+        }
+    }
+
+    fn intercept_fixture() -> (Vec<Individual>, Vec<usize>, Vec<usize>) {
+        let pop = vec![
+            individual([4.0, 1.0, 2.0]),
+            individual([2.0, 5.0, 1.0]),
+            individual([1.0, 2.0, 6.0]),
+            individual([0.0, 3.0, 3.0]),
+            individual([3.0, 0.0, 3.0]),
+            individual([3.0, 3.0, 0.0]),
+        ];
+        let fronts = vec![0; pop.len()];
+        let considered = (0..pop.len()).collect();
+        (pop, fronts, considered)
+    }
+
+    fn legacy_normalization(
+        pop: &[Individual],
+        fronts: &[usize],
+        considered: &[usize],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let m = pop[0].f.len();
+        let mut ideal = vec![f64::INFINITY; m];
+        for &i in considered {
+            for (d, v) in ideal.iter_mut().zip(&pop[i].f) {
+                *d = d.min(*v);
+            }
+        }
+        let mut span = vec![1e-30f64; m];
+        for &i in considered {
+            if fronts[i] == 0 {
+                for (d, (v, id)) in span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
+                    *d = d.max(v - id);
+                }
+            }
+        }
+        (ideal, span)
+    }
+
+    #[test]
+    fn nsga3_normalization_uses_independent_hyperplane_intercepts() {
+        let (pop, fronts, considered) = intercept_fixture();
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, 3);
+
+        assert_eq!(ideal, vec![0.0, 0.0, 0.0]);
+        let (_, fallback_span) = legacy_normalization(&pop, &fronts, &considered);
+        assert_eq!(
+            nsga3_extreme_indices(&pop, &considered, &ideal, &fallback_span, 3),
+            Some(vec![0, 1, 2])
+        );
+        let expected = [99.0 / 17.0, 9.0, 99.0 / 10.0];
+        for (value, expected) in span.iter().zip(expected) {
+            assert!((value - expected).abs() <= 32.0 * f64::EPSILON * expected);
+        }
+        assert_ne!(
+            span.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            fallback_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_collinear_extremes_use_exact_maxima_fallback() {
+        let pop = vec![
+            individual([2.0, 0.0, 0.0]),
+            individual([0.0, 2.0, 0.0]),
+            individual([1.0, 1.0, 0.0]),
+        ];
+        let fronts = vec![0; pop.len()];
+        let considered: Vec<usize> = (0..pop.len()).collect();
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, 3);
+        let (legacy_ideal, legacy_span) = legacy_normalization(&pop, &fronts, &considered);
+
+        assert_eq!(ideal, vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            ideal
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            legacy_ideal
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            nsga3_extreme_indices(&pop, &considered, &ideal, &legacy_span, 3),
+            Some(vec![0, 1, 2])
+        );
+        assert_eq!(
+            span.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            legacy_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_preserves_associations_under_dyadic_affine_scaling() {
+        let (pop, fronts, considered) = intercept_fixture();
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, 3);
+        let scales = [2.0, 0.5, 4.0];
+        let shifts = [8.0, -3.0, 16.0];
+        let transformed: Vec<Individual> = pop
+            .iter()
+            .map(|individual| Individual {
+                x: Vec::new(),
+                f: individual
+                    .f
+                    .iter()
+                    .enumerate()
+                    .map(|(objective, value)| value.mul_add(scales[objective], shifts[objective]))
+                    .collect(),
+            })
+            .collect();
+        let (transformed_ideal, transformed_span) =
+            nsga3_normalization(&transformed, &fronts, &considered, 3);
+        let (_, fallback_span) = legacy_normalization(&pop, &fronts, &considered);
+        let (_, transformed_fallback_span) =
+            legacy_normalization(&transformed, &fronts, &considered);
+        let directions = das_dennis(3, 3);
+
+        assert_ne!(
+            span.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            fallback_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(
+            transformed_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            transformed_fallback_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            nsga3_extreme_indices(&pop, &considered, &ideal, &fallback_span, 3),
+            nsga3_extreme_indices(
+                &transformed,
+                &considered,
+                &transformed_ideal,
+                &transformed_fallback_span,
+                3,
+            )
+        );
+        for objective in 0..3 {
+            let expected_ideal = ideal[objective].mul_add(scales[objective], shifts[objective]);
+            assert_eq!(
+                transformed_ideal[objective].to_bits(),
+                expected_ideal.to_bits()
+            );
+            let expected_span = span[objective] * scales[objective];
+            assert!(
+                (transformed_span[objective] - expected_span).abs()
+                    <= 128.0 * f64::EPSILON * expected_span.abs().max(1.0)
+            );
+        }
+        for i in &considered {
+            for objective in 0..3 {
+                let normalized = (pop[*i].f[objective] - ideal[objective]) / span[objective];
+                let transformed_normalized = (transformed[*i].f[objective]
+                    - transformed_ideal[objective])
+                    / transformed_span[objective];
+                assert!(
+                    (normalized - transformed_normalized).abs()
+                        <= 128.0 * f64::EPSILON * normalized.abs().max(1.0)
+                );
+            }
+            let base_association = nsga3_association(&pop, &directions, &ideal, &span, *i);
+            let transformed_association = nsga3_association(
+                &transformed,
+                &directions,
+                &transformed_ideal,
+                &transformed_span,
+                *i,
+            );
+            assert_eq!(base_association.0, transformed_association.0);
+            assert!(
+                (base_association.1 - transformed_association.1).abs()
+                    <= 256.0 * f64::EPSILON * base_association.1.abs().max(1.0)
+            );
+        }
+    }
+
+    #[test]
+    fn nsga3_normalization_asf_ties_choose_lowest_population_index() {
+        let (base, _, _) = intercept_fixture();
+        let mut pop = vec![base[0].clone(), base[0].clone()];
+        pop.extend(base.into_iter().skip(1));
+        let fronts = vec![0; pop.len()];
+        let mut considered: Vec<usize> = (1..pop.len()).collect();
+        considered.push(0);
+        let (ideal, _) = nsga3_normalization(&pop, &fronts, &considered, 3);
+        let (_, fallback_span) = legacy_normalization(&pop, &fronts, &considered);
+
+        assert_eq!(
+            nsga3_extreme_indices(&pop, &considered, &ideal, &fallback_span, 3),
+            Some(vec![0, 2, 3])
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_asf_scans_all_considered_points() {
+        let pop = vec![
+            individual([1.0, 1.0, 0.0]),
+            individual([0.0, 1.0, 0.0]),
+            individual([10.0, 0.0, 10.0]),
+        ];
+        let fronts = vec![1, 0, 0];
+        let considered = vec![1, 2, 0];
+        let (ideal, fallback_span) = legacy_normalization(&pop, &fronts, &considered);
+
+        assert_eq!(
+            nsga3_asf_extreme_index(&pop, &considered, &ideal, &fallback_span, 0, 1e-6,),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_duplicate_extremes_use_exact_maxima_fallback() {
+        let pop = vec![
+            individual([0.0, 0.0, 1.0]),
+            individual([1.0, 1.0, 0.0]),
+            individual([2.0, 2.0, 2.0]),
+        ];
+        let fronts = vec![0, 0, 1];
+        let considered: Vec<usize> = (0..pop.len()).collect();
+        let (legacy_ideal, legacy_span) = legacy_normalization(&pop, &fronts, &considered);
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, 3);
+
+        assert_eq!(
+            nsga3_extreme_indices(&pop, &considered, &ideal, &legacy_span, 3),
+            None
+        );
+        assert_eq!(
+            ideal
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            legacy_ideal
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            span.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            legacy_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_tiny_pivot_hyperplane_is_refused() {
+        let delta = 2.0f64.powi(-48);
+        let matrix = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![1.0, 1.0, delta],
+        ];
+        assert_eq!(nsga3_solve_hyperplane(&matrix), None);
+    }
+
+    #[test]
+    fn nsga3_normalization_condition_gate_refuses_nonzero_pivots() {
+        let delta = 2.0f64.powi(-26);
+        let matrix = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![1.0, 1.0, delta],
+        ];
+        assert_eq!(nsga3_solve_hyperplane(&matrix), None);
+    }
+
+    #[test]
+    fn nsga3_normalization_lu_applies_row_permutation_to_nonuniform_rhs() {
+        let lu = vec![vec![1.0, 3.0], vec![0.0, 2.0]];
+        let solution = nsga3_lu_solve(&lu, &[1, 1], &[5.0, 7.0]).expect("LU is valid");
+        assert_eq!(
+            solution
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [-0.5f64, 2.5]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_large_objective_count_uses_exact_bounded_fallback() {
+        let m = 65;
+        let pop: Vec<Individual> = (0..m)
+            .map(|axis| {
+                let mut f = vec![1.0; m];
+                f[axis] = 0.0;
+                Individual { x: Vec::new(), f }
+            })
+            .collect();
+        let fronts = vec![0; pop.len()];
+        let considered: Vec<usize> = (0..pop.len()).collect();
+        let (legacy_ideal, legacy_span) = legacy_normalization(&pop, &fronts, &considered);
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, m);
+
+        assert_eq!(
+            nsga3_hyperplane_span(&pop, &considered, &legacy_ideal, &legacy_span),
+            None
+        );
+        assert_eq!(
+            ideal
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            legacy_ideal
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            span.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            legacy_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_zero_and_near_zero_spans_stay_finite() {
+        let tiny = f64::from_bits(1);
+        let pop = vec![
+            individual([2.0, 0.0, tiny]),
+            individual([0.0, 2.0, tiny]),
+            individual([1.0, 1.0, f64::from_bits(2)]),
+        ];
+        let fronts = vec![0; pop.len()];
+        let considered: Vec<usize> = (0..pop.len()).collect();
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, 3);
+        let directions = das_dennis(3, 2);
+
+        assert!(ideal.iter().all(|value| value.is_finite()));
+        assert!(span.iter().all(|value| value.is_finite() && *value > 0.0));
+        for i in considered {
+            let (_, distance) = nsga3_association(&pop, &directions, &ideal, &span, i);
+            assert!(distance.is_finite());
+        }
+    }
 }
