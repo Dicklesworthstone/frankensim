@@ -136,4 +136,60 @@ fn csl_003_mode_and_budget_boundaries_fail_closed() {
     );
     assert_eq!(certified.work_spent(), estimate.work_units());
     assert_eq!(certified.certificates().len(), 2);
+    let observed = certified.storage_observation();
+    assert_eq!(observed.requested_certificate_records(), 2);
+    assert_eq!(observed.retained_certificate_records(), 2);
+    assert!(observed.observed_certificate_record_capacity() >= 2);
+    assert_eq!(
+        observed.retained_certificate_prefix_words(),
+        usize::try_from(estimate.certificate_prefix_payload_bytes() / 4)
+            .expect("fixture payload fits usize")
+    );
+    assert!(
+        observed.observed_certificate_prefix_capacity_words()
+            >= observed.retained_certificate_prefix_words()
+    );
+    assert!(
+        observed.retained_certificate_score_limbs()
+            <= usize::try_from(estimate.certificate_score_payload_bytes() / 4)
+                .expect("fixture payload fits usize")
+    );
+    assert!(
+        observed.observed_certificate_score_capacity_limbs()
+            >= observed.retained_certificate_score_limbs()
+    );
+    assert!(
+        observed.retained_certificate_tie_words()
+            <= usize::try_from(estimate.certificate_tie_payload_bytes() / 4)
+                .expect("fixture payload fits usize")
+    );
+    assert!(
+        observed.observed_certificate_tie_capacity_words()
+            >= observed.retained_certificate_tie_words()
+    );
+}
+
+#[test]
+fn csl_004_certified_mode_cannot_start_certificate_tracking_late() {
+    let problem = CbcProblem::new(5, 3).expect("structural fixture");
+    let admission = problem
+        .admit_for(CbcExecutionMode::Certified, CbcBudget::UNBOUNDED)
+        .expect("certified mode admits");
+    let mut executor = CbcExecutor::new(admission).expect("fresh authority");
+    let mut keep_going = || CbcControl::Continue;
+    assert!(matches!(
+        executor
+            .run(
+                &mut keep_going,
+                CbcTileShape::new(1, 1).expect("static tile"),
+                1,
+            )
+            .expect("a partial run remains replayable"),
+        CbcRunStatus::AllowanceExhausted(_)
+    ));
+    assert!(executor.work_spent() > 0);
+    assert_eq!(
+        executor.enable_certificates(),
+        Err(CbcExecError::CertificatesAfterStart)
+    );
 }

@@ -123,8 +123,10 @@ pub enum CbcRunStatus {
     AllowanceExhausted(CbcBoundary),
 }
 
-/// Executor refusals. Every variant is fail-closed and leaves the state
-/// unchanged (construction) or replayable (runtime).
+/// Executor refusals. Admission-authority and storage-ceiling refusals happen
+/// before the rejected operation mutates state. `ScheduleOverrun` is an
+/// invariant breach whose transaction/retry semantics remain a separate
+/// atomic-execution ratchet; callers must not retry it as a replayable pause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbcExecError {
     /// The sealed receipt's schema, target layout, schedule, or covered budget
@@ -172,6 +174,15 @@ pub struct CbcStorageObservation {
     maximum_product_length_limbs: usize,
     minimum_observed_product_capacity_limbs: usize,
     maximum_observed_product_capacity_limbs: usize,
+    requested_certificate_records: usize,
+    retained_certificate_records: usize,
+    observed_certificate_record_capacity: usize,
+    retained_certificate_prefix_words: usize,
+    observed_certificate_prefix_capacity_words: usize,
+    retained_certificate_score_limbs: usize,
+    observed_certificate_score_capacity_limbs: usize,
+    retained_certificate_tie_words: usize,
+    observed_certificate_tie_capacity_words: usize,
 }
 
 impl CbcStorageObservation {
@@ -197,6 +208,60 @@ impl CbcStorageObservation {
     #[must_use]
     pub const fn maximum_observed_product_capacity_limbs(self) -> usize {
         self.maximum_observed_product_capacity_limbs
+    }
+
+    /// Certificate record slots requested by a certified receipt.
+    #[must_use]
+    pub const fn requested_certificate_records(self) -> usize {
+        self.requested_certificate_records
+    }
+
+    /// Certificate records retained so far.
+    #[must_use]
+    pub const fn retained_certificate_records(self) -> usize {
+        self.retained_certificate_records
+    }
+
+    /// Allocator-reported capacity of the certificate owner array.
+    #[must_use]
+    pub const fn observed_certificate_record_capacity(self) -> usize {
+        self.observed_certificate_record_capacity
+    }
+
+    /// Logical prefix words retained across all certificates.
+    #[must_use]
+    pub const fn retained_certificate_prefix_words(self) -> usize {
+        self.retained_certificate_prefix_words
+    }
+
+    /// Allocator-reported prefix capacities across all certificates.
+    #[must_use]
+    pub const fn observed_certificate_prefix_capacity_words(self) -> usize {
+        self.observed_certificate_prefix_capacity_words
+    }
+
+    /// Logical winning/runner-up limbs retained across all certificates.
+    #[must_use]
+    pub const fn retained_certificate_score_limbs(self) -> usize {
+        self.retained_certificate_score_limbs
+    }
+
+    /// Allocator-reported score capacities across all certificates.
+    #[must_use]
+    pub const fn observed_certificate_score_capacity_limbs(self) -> usize {
+        self.observed_certificate_score_capacity_limbs
+    }
+
+    /// Logical tie-class words retained across all certificates.
+    #[must_use]
+    pub const fn retained_certificate_tie_words(self) -> usize {
+        self.retained_certificate_tie_words
+    }
+
+    /// Allocator-reported tie-class capacities across all certificates.
+    #[must_use]
+    pub const fn observed_certificate_tie_capacity_words(self) -> usize {
+        self.observed_certificate_tie_capacity_words
     }
 }
 
@@ -355,11 +420,58 @@ impl CbcExecutor {
             minimum_capacity = minimum_capacity.min(capacity);
             maximum_capacity = maximum_capacity.max(capacity);
         }
+        let mut retained_prefix_words = 0_usize;
+        let mut observed_prefix_capacity_words = 0_usize;
+        let mut retained_score_limbs = 0_usize;
+        let mut observed_score_capacity_limbs = 0_usize;
+        let mut retained_tie_words = 0_usize;
+        let mut observed_tie_capacity_words = 0_usize;
+        for certificate in &self.certificates {
+            retained_prefix_words = retained_prefix_words
+                .checked_add(certificate.prefix.len())
+                .expect("admission proved retained prefix accounting fits usize");
+            observed_prefix_capacity_words = observed_prefix_capacity_words
+                .checked_add(certificate.prefix.capacity())
+                .expect("observed prefix capacity accounting fits usize");
+            retained_score_limbs = retained_score_limbs
+                .checked_add(certificate.winning_score_limbs.len())
+                .expect("admission proved retained score accounting fits usize");
+            observed_score_capacity_limbs = observed_score_capacity_limbs
+                .checked_add(certificate.winning_score_limbs.capacity())
+                .expect("observed score capacity accounting fits usize");
+            if let Some((runner_limbs, _)) = &certificate.runner_up {
+                retained_score_limbs = retained_score_limbs
+                    .checked_add(runner_limbs.len())
+                    .expect("admission proved retained runner accounting fits usize");
+                observed_score_capacity_limbs = observed_score_capacity_limbs
+                    .checked_add(runner_limbs.capacity())
+                    .expect("observed runner capacity accounting fits usize");
+            }
+            retained_tie_words = retained_tie_words
+                .checked_add(certificate.tie_class.len())
+                .expect("admission proved retained tie accounting fits usize");
+            observed_tie_capacity_words = observed_tie_capacity_words
+                .checked_add(certificate.tie_class.capacity())
+                .expect("observed tie capacity accounting fits usize");
+        }
         CbcStorageObservation {
             requested_product_limbs: self.product_capacity_limbs,
             maximum_product_length_limbs: maximum_length,
             minimum_observed_product_capacity_limbs: minimum_capacity,
             maximum_observed_product_capacity_limbs: maximum_capacity,
+            requested_certificate_records: if self.certificates_admitted {
+                self.problem.dimension().saturating_sub(1)
+            } else {
+                0
+            },
+            retained_certificate_records: self.certificates.len(),
+            observed_certificate_record_capacity: self.certificates.capacity(),
+            retained_certificate_prefix_words: retained_prefix_words,
+            observed_certificate_prefix_capacity_words: observed_prefix_capacity_words,
+            retained_certificate_score_limbs: retained_score_limbs,
+            observed_certificate_score_capacity_limbs: observed_score_capacity_limbs,
+            retained_certificate_tie_words: retained_tie_words,
+            observed_certificate_tie_capacity_words: observed_tie_capacity_words,
         }
     }
 

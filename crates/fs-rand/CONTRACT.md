@@ -41,8 +41,9 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   same logical order as `Lattice::cbc` (proven per-case in the battery, incl.
   the pinned n=257 KAT), so tile shape and pause/resume splits never change
   the chosen vector or the debit total. Work debits follow the admission
-  schedule at admitted widths (conservative, monotone, `ScheduleOverrun`
-  fail-closed if they would exceed the receipt); run-scoped allowances slice
+  schedule at admitted widths (conservative and monotone;
+  `ScheduleOverrun` detects an invariant breach but is not yet a replayable
+  transaction refusal); run-scoped allowances slice
   the admitted budget with exhaustion finalized at named tile boundaries
   (`Entry`/`PointBlock`/`CandidateBlock`/`Prefix`); cancellation is
   request→drain→finalize via the L1-local `CbcPoll` boundary (drivers adapt
