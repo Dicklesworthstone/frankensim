@@ -21,7 +21,11 @@ implementation shared with fs-la — recorded relocation, beads
   correctly-rounded ops err ≤ ½ ULP), elementary functions by fs-math's
   DECLARED budgets (exp/expm1/ln/sin/cos 3, tanh 5, sqrt 1 after the exact
   hardware sqrt). NO global rounding-mode state anywhere (thread-safe,
-  SIMD-mixing-safe, grep-lintable).
+  SIMD-mixing-safe, grep-lintable). When a basic operation on two finite
+  endpoints overflows, the rounded infinity is not treated as an exact
+  singleton: positive overflow becomes `[f64::MAX,+∞]`, negative overflow
+  becomes `[−∞,−f64::MAX]`, and endpoint hulls compose these one-sided
+  enclosures. Actual infinity operands retain extended-real semantics.
 - `Interval::WHOLE` = [−∞, +∞]: the "no useful enclosure" answer. Division
   by a zero-containing interval returns WHOLE (documented; not a panic —
   certified callers branch on it). 0·∞ ambiguities in mul/div also return
@@ -103,7 +107,8 @@ implementation shared with fs-la — recorded relocation, beads
    platform-libm point oracle, 20k point checks over 4000 random expression
    DAGs, Rump's polynomial containing the exact −54767/66192 (wide-and-
    right beats narrow-and-wrong — asserted width > 1 documents the honest
-   outcome).
+   outcome), and sign-complete finite-overflow cases for add/sub/mul/div that
+   distinguish one-sided finite-real overflow from actual extended infinity.
 2. Affine linear terms cancel EXACTLY on shared symbols: x − x collapses to
    width < 1e−13 (tightness ratio vs plain intervals > 1e10, tested);
    first-order identity-zero DAGs stay O(radius²) wide, independent of
@@ -118,7 +123,10 @@ Domain violations that admit NO enclosure panic with structured messages:
 NaN/inverted constructor endpoints, sqrt of entirely-negative interval,
 ln with hi ≤ 0. Partial-domain overlaps degrade gracefully (sqrt clips at
 0; ln returns lower bound −∞). Division by zero-containing intervals
-returns `WHOLE`, never panics.
+returns `WHOLE`, never panics. Indeterminate extended-real endpoint operations
+such as `+∞ + −∞` and `0 × ∞` also return `WHOLE`. Representable operations
+that merely overflow binary64 remain sound through one-sided infinite
+enclosures rather than false singleton infinities.
 
 Exact coordinate-difference expansion constructors panic on non-finite
 operands and on finite differences outside the representable expansion
@@ -212,9 +220,10 @@ while the exact ladder matches integer ground truth, expansion residual
 laws, and SoS totality/antisymmetry.
 In-crate: dd-oracle arithmetic containment, rewrite pairs, elementary
 containment vs libm oracle, trig extrema capture, zero-divisor semantics,
-Rump's polynomial, set operations, affine cancellation/tightness/
-independence, structured rejections. Reimplementations must pass the
-golden-hash case bit-for-bit.
+positive/negative finite overflow for every basic operation, actual-infinity
+separation, subnormal underflow and extreme cancellation, Rump's polynomial,
+set operations, affine cancellation/tightness/independence, structured
+rejections. Reimplementations must pass the golden-hash case bit-for-bit.
 
 ## No-claim boundaries
 - **Rigor is conditional on fs-math's declared ULP budgets** (empirically

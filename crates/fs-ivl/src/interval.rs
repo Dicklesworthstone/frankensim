@@ -51,6 +51,43 @@ fn up_k(mut x: f64, k: u32) -> f64 {
     x
 }
 
+/// Enclose the exact real result represented by one rounded binary endpoint
+/// operation.
+///
+/// A finite IEEE operation normally needs only the usual one-ULP outward
+/// nudge. The exceptional case is overflow from two finite operands: a rounded
+/// `+inf` stands for some finite real value above `f64::MAX`, and a rounded
+/// `-inf` stands for one below `-f64::MAX`. Treating either as a singleton
+/// infinity would exclude that finite truth. Actual infinity operands retain
+/// their extended-real singleton semantics.
+fn enclose_rounded_binary(value: f64, finite_operands: bool) -> Option<Interval> {
+    if value.is_nan() {
+        return None;
+    }
+    if finite_operands && value == f64::INFINITY {
+        return Some(Interval {
+            lo: f64::MAX,
+            hi: f64::INFINITY,
+        });
+    }
+    if finite_operands && value == f64::NEG_INFINITY {
+        return Some(Interval {
+            lo: f64::NEG_INFINITY,
+            hi: -f64::MAX,
+        });
+    }
+    if value.is_finite() {
+        return Some(Interval {
+            lo: down_k(value, 1),
+            hi: up_k(value, 1),
+        });
+    }
+    Some(Interval {
+        lo: value,
+        hi: value,
+    })
+}
+
 impl Interval {
     /// The whole extended real line — the "no useful enclosure" answer.
     pub const WHOLE: Interval = Interval {
@@ -254,16 +291,17 @@ impl core::ops::Add for Interval {
     type Output = Interval;
     /// Addition, outward-rounded.
     fn add(self, o: Interval) -> Interval {
-        let (lo, hi) = (self.lo + o.lo, self.hi + o.hi);
+        let lo = enclose_rounded_binary(self.lo + o.lo, self.lo.is_finite() && o.lo.is_finite());
+        let hi = enclose_rounded_binary(self.hi + o.hi, self.hi.is_finite() && o.hi.is_finite());
         // ∞ + (−∞) = NaN; a NaN endpoint would bypass `new`'s guard and give a
         // non-enclosing interval — fall back to WHOLE (bead wa8i V3, mirroring
         // the Mul/Div guard).
-        if lo.is_nan() || hi.is_nan() {
-            return Interval::WHOLE;
-        }
-        Interval {
-            lo: down_k(lo, 1),
-            hi: up_k(hi, 1),
+        match (lo, hi) {
+            (Some(lo), Some(hi)) => Interval {
+                lo: lo.lo,
+                hi: hi.hi,
+            },
+            _ => Interval::WHOLE,
         }
     }
 }
@@ -272,14 +310,15 @@ impl core::ops::Sub for Interval {
     type Output = Interval;
     /// Subtraction, outward-rounded.
     fn sub(self, o: Interval) -> Interval {
-        let (lo, hi) = (self.lo - o.hi, self.hi - o.lo);
+        let lo = enclose_rounded_binary(self.lo - o.hi, self.lo.is_finite() && o.hi.is_finite());
+        let hi = enclose_rounded_binary(self.hi - o.lo, self.hi.is_finite() && o.lo.is_finite());
         // ∞ − ∞ = NaN → WHOLE (bead wa8i V3), as in Add/Mul/Div.
-        if lo.is_nan() || hi.is_nan() {
-            return Interval::WHOLE;
-        }
-        Interval {
-            lo: down_k(lo, 1),
-            hi: up_k(hi, 1),
+        match (lo, hi) {
+            (Some(lo), Some(hi)) => Interval {
+                lo: lo.lo,
+                hi: hi.hi,
+            },
+            _ => Interval::WHOLE,
         }
     }
 }
@@ -290,25 +329,24 @@ impl core::ops::Mul for Interval {
     /// 0·∞ ambiguities (NaN products) fall back to [`Interval::WHOLE`] —
     /// conservative, never wrong.
     fn mul(self, o: Interval) -> Interval {
-        let ps = [
-            self.lo * o.lo,
-            self.lo * o.hi,
-            self.hi * o.lo,
-            self.hi * o.hi,
+        let pairs = [
+            (self.lo, o.lo),
+            (self.lo, o.hi),
+            (self.hi, o.lo),
+            (self.hi, o.hi),
         ];
-        if ps.iter().any(|p| p.is_nan()) {
-            return Interval::WHOLE;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for (left, right) in pairs {
+            let Some(product) =
+                enclose_rounded_binary(left * right, left.is_finite() && right.is_finite())
+            else {
+                return Interval::WHOLE;
+            };
+            lo = lo.min(product.lo);
+            hi = hi.max(product.hi);
         }
-        let mut lo = ps[0];
-        let mut hi = ps[0];
-        for &p in &ps[1..] {
-            lo = lo.min(p);
-            hi = hi.max(p);
-        }
-        Interval {
-            lo: down_k(lo, 1),
-            hi: up_k(hi, 1),
-        }
+        Interval { lo, hi }
     }
 }
 
@@ -321,25 +359,25 @@ impl core::ops::Div for Interval {
         if o.contains_zero() {
             return Interval::WHOLE;
         }
-        let qs = [
-            self.lo / o.lo,
-            self.lo / o.hi,
-            self.hi / o.lo,
-            self.hi / o.hi,
+        let pairs = [
+            (self.lo, o.lo),
+            (self.lo, o.hi),
+            (self.hi, o.lo),
+            (self.hi, o.hi),
         ];
-        if qs.iter().any(|q| q.is_nan()) {
-            return Interval::WHOLE;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for (numerator, denominator) in pairs {
+            let Some(quotient) = enclose_rounded_binary(
+                numerator / denominator,
+                numerator.is_finite() && denominator.is_finite(),
+            ) else {
+                return Interval::WHOLE;
+            };
+            lo = lo.min(quotient.lo);
+            hi = hi.max(quotient.hi);
         }
-        let mut lo = qs[0];
-        let mut hi = qs[0];
-        for &q in &qs[1..] {
-            lo = lo.min(q);
-            hi = hi.max(q);
-        }
-        Interval {
-            lo: down_k(lo, 1),
-            hi: up_k(hi, 1),
-        }
+        Interval { lo, hi }
     }
 }
 
@@ -596,6 +634,91 @@ mod tests {
         // Finite arithmetic is unaffected (outward-rounded enclosure).
         let s = Interval::new(1.0, 2.0) + Interval::new(3.0, 4.0);
         assert!(s.contains(4.0) && s.contains(6.0) && s.lo() <= 4.0 && s.hi() >= 6.0);
+    }
+
+    #[test]
+    fn finite_basic_operation_overflow_is_one_sided_not_singleton_infinity() {
+        let max = Interval::point(f64::MAX);
+        let neg_max = Interval::point(-f64::MAX);
+        let two = Interval::point(2.0);
+        let min_positive = Interval::point(f64::MIN_POSITIVE);
+
+        for positive in [max + max, max - neg_max, max * two, max / min_positive] {
+            assert_eq!(
+                positive.lo().to_bits(),
+                f64::MAX.to_bits(),
+                "finite positive overflow lost its finite lower bound: {positive:?}"
+            );
+            assert_eq!(positive.hi(), f64::INFINITY);
+        }
+
+        for negative in [
+            neg_max + neg_max,
+            neg_max - max,
+            neg_max * two,
+            neg_max / min_positive,
+        ] {
+            assert_eq!(negative.lo(), f64::NEG_INFINITY);
+            assert_eq!(
+                negative.hi().to_bits(),
+                (-f64::MAX).to_bits(),
+                "finite negative overflow lost its finite upper bound: {negative:?}"
+            );
+        }
+
+        // If both signs can overflow, the honest hull is the whole line.
+        assert_eq!(Interval::new(-f64::MAX, f64::MAX) * two, Interval::WHOLE);
+    }
+
+    #[test]
+    fn actual_extended_infinities_remain_distinct_from_finite_overflow() {
+        let pinf = Interval::point(f64::INFINITY);
+        let ninf = Interval::point(f64::NEG_INFINITY);
+        let two = Interval::point(2.0);
+
+        assert_eq!(pinf + Interval::point(1.0), pinf);
+        assert_eq!(pinf * two, pinf);
+        assert_eq!(ninf - Interval::point(1.0), ninf);
+        assert_eq!(ninf * two, ninf);
+        assert_eq!(Interval::point(0.0) * pinf, Interval::WHOLE);
+    }
+
+    #[test]
+    fn mixed_finite_and_infinite_endpoint_hulls_keep_every_limit_value() {
+        let positive_tail = Interval::new(f64::MAX, f64::INFINITY);
+        let negative_tail = Interval::new(f64::NEG_INFINITY, -f64::MAX);
+        let one = Interval::point(1.0);
+
+        let shifted_positive = positive_tail + one;
+        assert_eq!(shifted_positive.lo().to_bits(), f64::MAX.to_bits());
+        assert_eq!(shifted_positive.hi(), f64::INFINITY);
+
+        let shifted_negative = negative_tail - one;
+        assert_eq!(shifted_negative.lo(), f64::NEG_INFINITY);
+        assert_eq!(shifted_negative.hi().to_bits(), (-f64::MAX).to_bits());
+
+        // The quotient image approaches zero at the infinite endpoint and
+        // reaches 2/MAX at the finite endpoint.  Outward rounding may include
+        // one negative subnormal around the exact zero limit, but it must not
+        // omit either limiting value.
+        let reciprocal_tail = Interval::new(1.0, 2.0) / positive_tail;
+        assert!(reciprocal_tail.contains(0.0));
+        assert!(reciprocal_tail.lo() <= 0.0);
+        assert!(reciprocal_tail.hi() >= 2.0 / f64::MAX);
+    }
+
+    #[test]
+    fn underflow_and_extreme_cancellation_still_enclose_the_real_result() {
+        let min_subnormal = f64::from_bits(1);
+        let underflow = Interval::point(min_subnormal) * Interval::point(0.5);
+        assert!(
+            underflow.lo() < 0.0 && underflow.hi() > 0.0,
+            "half a minimum subnormal must lie strictly inside {underflow:?}"
+        );
+
+        let cancellation = Interval::point(f64::MAX) + Interval::point(-f64::MAX);
+        assert!(cancellation.contains(0.0));
+        assert!(cancellation.lo() < 0.0 && cancellation.hi() > 0.0);
     }
 
     #[test]
