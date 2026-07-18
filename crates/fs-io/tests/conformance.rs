@@ -351,6 +351,31 @@ fn io_005_catalog_schema_validation_teaches() {
     let json = r#"[{"section": "W14x90", "area_in2": 26.5, "ix_in4": 999}]"#;
     let jcat = schema.parse_json(json).expect("json catalog");
     assert!((jcat.numbers[0]["area_in2"] - 26.5).abs() < 1e-12);
+    let json_whitespace = format!("{json} \n\r\t");
+    assert_eq!(
+        schema
+            .parse_json(&json_whitespace)
+            .expect("JSON whitespace may follow the top-level array"),
+        jcat
+    );
+    let suffix = " \n\t";
+    let trailing = format!("{json}{suffix}THIS_IS_NOT_JSON");
+    let trailing_error = schema
+        .parse_json(&trailing)
+        .expect_err("trailing bytes must not be promoted as a catalog");
+    assert!(
+        matches!(
+            &trailing_error,
+            fs_io::IoError::Malformed { at, what }
+                if *at == json.len() + suffix.len() && what.contains("trailing bytes")
+        ),
+        "unexpected trailing-byte diagnosis: {trailing_error:?}"
+    );
+    let non_json_whitespace = format!("{json}\u{000b}");
+    assert!(matches!(
+        schema.parse_json(&non_json_whitespace),
+        Err(fs_io::IoError::Malformed { at, .. }) if at == json.len()
+    ));
     // regression: a JSON string with multi-byte UTF-8 must round-trip, not be
     // split into Latin-1 chars ("café–90" was becoming "cafÃ©â\u{80}\u{93}90").
     let utf8 = r#"[{"section": "café–90", "area_in2": 26.5, "ix_in4": 999}]"#;

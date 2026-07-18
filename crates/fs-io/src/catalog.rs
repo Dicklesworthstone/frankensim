@@ -211,7 +211,7 @@ fn mini_json_array_of_objects(text: &str) -> Result<Vec<BTreeMap<String, String>
         what: what.to_string(),
     };
     let skip_ws = |pos: &mut usize| {
-        while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+        while *pos < bytes.len() && matches!(bytes[*pos], b' ' | b'\n' | b'\r' | b'\t') {
             *pos += 1;
         }
     };
@@ -224,7 +224,14 @@ fn mini_json_array_of_objects(text: &str) -> Result<Vec<BTreeMap<String, String>
     loop {
         skip_ws(&mut pos);
         match bytes.get(pos) {
-            Some(&b']') => break,
+            Some(&b']') => {
+                pos += 1;
+                skip_ws(&mut pos);
+                if pos != bytes.len() {
+                    return Err(err(pos, "trailing bytes after the JSON array"));
+                }
+                break;
+            }
             Some(&b'{') => {
                 pos += 1;
                 let mut obj = BTreeMap::new();
