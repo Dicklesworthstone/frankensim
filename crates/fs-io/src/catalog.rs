@@ -207,6 +207,81 @@ pub struct Catalog {
     pub numbers: Vec<BTreeMap<String, f64>>,
 }
 
+/// Shared validation/projection/output envelope for CSV and JSON catalogs.
+///
+/// Counts are logical retained payload and deterministic work, not allocator
+/// metadata or `BTreeMap` node size. Format readers compose this envelope with
+/// their syntax-specific input limits before parsing or projecting any row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogProjectionLimits {
+    /// Maximum `(row, schema-column)` validation visits.
+    pub max_validation_visits: usize,
+    /// Maximum numeric entries retained across all projected rows.
+    pub max_numeric_entries: usize,
+    /// Maximum UTF-8 bytes retained by cloned numeric-projection keys.
+    pub max_numeric_key_bytes: usize,
+    /// Maximum logical UTF-8 bytes retained by row and numeric maps.
+    pub max_output_bytes: usize,
+}
+
+impl CatalogProjectionLimits {
+    /// Default projection envelope shared by both formats.
+    pub const DEFAULT: Self = Self {
+        max_validation_visits: 16_000_000,
+        max_numeric_entries: 1_000_000,
+        max_numeric_key_bytes: 32 * 1024 * 1024,
+        max_output_bytes: 256 * 1024 * 1024,
+    };
+}
+
+impl Default for CatalogProjectionLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Resource envelope for CSV syntax, decoded fields, and shared projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogCsvLimits {
+    /// Maximum UTF-8 input bytes, including delimiters and line endings.
+    pub max_input_bytes: usize,
+    /// Maximum nonempty data records, excluding the header.
+    pub max_rows: usize,
+    /// Maximum fields in the header or one data record.
+    pub max_fields_per_record: usize,
+    /// Maximum fields summed over the header and all data records.
+    pub max_total_fields: usize,
+    /// Maximum decoded UTF-8 bytes in one header or data field.
+    pub max_field_bytes: usize,
+    /// Maximum decoded UTF-8 bytes summed over raw header fields before
+    /// whitespace normalization.
+    pub max_header_bytes: usize,
+    /// Maximum decoded UTF-8 bytes summed over every field.
+    pub max_decoded_bytes: usize,
+    /// Shared schema-validation and retained-output envelope.
+    pub projection: CatalogProjectionLimits,
+}
+
+impl CatalogCsvLimits {
+    /// Default bounded CSV world-boundary envelope.
+    pub const DEFAULT: Self = Self {
+        max_input_bytes: 64 * 1024 * 1024,
+        max_rows: 250_000,
+        max_fields_per_record: 4_096,
+        max_total_fields: 1_000_000,
+        max_field_bytes: 1024 * 1024,
+        max_header_bytes: 64 * 1024,
+        max_decoded_bytes: 32 * 1024 * 1024,
+        projection: CatalogProjectionLimits::DEFAULT,
+    };
+}
+
+impl Default for CatalogCsvLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Resource envelope for the strict catalog-JSON reader.
 ///
 /// The limits count logical payload, not allocator metadata: input bytes include
@@ -231,6 +306,8 @@ pub struct CatalogJsonLimits {
     pub max_number_bytes: usize,
     /// Maximum decoded key/value/number bytes summed over the catalog.
     pub max_decoded_bytes: usize,
+    /// Shared schema-validation and retained-output envelope.
+    pub projection: CatalogProjectionLimits,
 }
 
 impl CatalogJsonLimits {
@@ -243,6 +320,7 @@ impl CatalogJsonLimits {
         max_string_bytes: 1024 * 1024,
         max_number_bytes: 256,
         max_decoded_bytes: 32 * 1024 * 1024,
+        projection: CatalogProjectionLimits::DEFAULT,
     };
 }
 
@@ -252,8 +330,89 @@ impl Default for CatalogJsonLimits {
     }
 }
 
-/// Split one CSV record (RFC-4180 subset: quoted fields, `""` escapes).
-fn split_csv(line: &str, row: usize) -> Result<Vec<String>, IoError> {
+#[derive(Debug, Default)]
+struct CsvCounters {
+    total_fields: usize,
+    decoded_bytes: usize,
+    header_decoded_bytes: usize,
+}
+
+fn csv_cap_refusal(cap: &str, limit: usize, row: usize) -> IoError {
+    IoError::ResourceBound {
+        what: format!("catalog CSV {cap} cap {limit} exceeded at record {row}"),
+    }
+}
+
+fn push_csv_char(
+    field: &mut String,
+    character: char,
+    row: usize,
+    limits: CatalogCsvLimits,
+) -> Result<(), IoError> {
+    let width = character.len_utf8();
+    let next = field
+        .len()
+        .checked_add(width)
+        .ok_or_else(|| csv_cap_refusal("field decoded-byte", limits.max_field_bytes, row))?;
+    if next > limits.max_field_bytes {
+        return Err(csv_cap_refusal(
+            "field decoded-byte",
+            limits.max_field_bytes,
+            row,
+        ));
+    }
+    field
+        .try_reserve(width)
+        .map_err(|_| allocation_refusal("decoded CSV field", row))?;
+    field.push(character);
+    Ok(())
+}
+
+fn finish_csv_field(
+    fields: &mut Vec<String>,
+    field: &mut String,
+    row: usize,
+    limits: CatalogCsvLimits,
+    counters: &mut CsvCounters,
+) -> Result<(), IoError> {
+    if fields.len() >= limits.max_fields_per_record {
+        return Err(csv_cap_refusal(
+            "per-record field",
+            limits.max_fields_per_record,
+            row,
+        ));
+    }
+    counters.total_fields = counters
+        .total_fields
+        .checked_add(1)
+        .filter(|total| *total <= limits.max_total_fields)
+        .ok_or_else(|| csv_cap_refusal("aggregate field", limits.max_total_fields, row))?;
+    counters.decoded_bytes = counters
+        .decoded_bytes
+        .checked_add(field.len())
+        .filter(|total| *total <= limits.max_decoded_bytes)
+        .ok_or_else(|| csv_cap_refusal("aggregate decoded-byte", limits.max_decoded_bytes, row))?;
+    if row == 0 {
+        counters.header_decoded_bytes = counters
+            .header_decoded_bytes
+            .checked_add(field.len())
+            .filter(|total| *total <= limits.max_header_bytes)
+            .ok_or_else(|| csv_cap_refusal("header decoded-byte", limits.max_header_bytes, row))?;
+    }
+    fields
+        .try_reserve(1)
+        .map_err(|_| allocation_refusal("CSV field index", row))?;
+    fields.push(core::mem::take(field));
+    Ok(())
+}
+
+/// Split one bounded CSV record (RFC-4180 subset: quoted fields, `""` escapes).
+fn split_csv(
+    line: &str,
+    row: usize,
+    limits: CatalogCsvLimits,
+    counters: &mut CsvCounters,
+) -> Result<Vec<String>, IoError> {
     let mut fields = Vec::new();
     let mut cur = String::new();
     let mut chars = line.chars().peekable();
@@ -262,17 +421,17 @@ fn split_csv(line: &str, row: usize) -> Result<Vec<String>, IoError> {
         if quoted {
             match c {
                 '"' if chars.peek() == Some(&'"') => {
-                    cur.push('"');
+                    push_csv_char(&mut cur, '"', row, limits)?;
                     chars.next();
                 }
                 '"' => quoted = false,
-                other => cur.push(other),
+                other => push_csv_char(&mut cur, other, row, limits)?,
             }
         } else {
             match c {
                 '"' if cur.is_empty() => quoted = true,
-                ',' => fields.push(core::mem::take(&mut cur)),
-                other => cur.push(other),
+                ',' => finish_csv_field(&mut fields, &mut cur, row, limits, counters)?,
+                other => push_csv_char(&mut cur, other, row, limits)?,
             }
         }
     }
@@ -282,7 +441,7 @@ fn split_csv(line: &str, row: usize) -> Result<Vec<String>, IoError> {
             what: "unterminated quoted CSV field".to_string(),
         });
     }
-    fields.push(cur);
+    finish_csv_field(&mut fields, &mut cur, row, limits, counters)?;
     Ok(fields)
 }
 
@@ -409,6 +568,149 @@ fn normalize_csv_header(raw_header: Vec<String>) -> Result<Vec<String>, IoError>
     Ok(header)
 }
 
+fn operation_refusal(format: &str, detail: impl Into<String>) -> IoError {
+    IoError::ResourceBound {
+        what: format!(
+            "catalog {format} operation admission refused: {}",
+            detail.into()
+        ),
+    }
+}
+
+fn checked_operation_add(
+    left: usize,
+    right: usize,
+    format: &str,
+    field: &str,
+) -> Result<usize, IoError> {
+    left.checked_add(right).ok_or_else(|| {
+        operation_refusal(
+            format,
+            format!("{field} arithmetic overflow in checked addition"),
+        )
+    })
+}
+
+fn checked_operation_product(
+    left: usize,
+    right: usize,
+    format: &str,
+    field: &str,
+) -> Result<usize, IoError> {
+    left.checked_mul(right).ok_or_else(|| {
+        operation_refusal(
+            format,
+            format!("{field} arithmetic overflow in checked multiplication"),
+        )
+    })
+}
+
+fn ensure_operation_cap(
+    actual: usize,
+    limit: usize,
+    format: &str,
+    cap: &str,
+) -> Result<(), IoError> {
+    if actual <= limit {
+        Ok(())
+    } else {
+        Err(operation_refusal(
+            format,
+            format!("{cap} requires {actual}; declared limit is {limit}"),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectionPlan {
+    max_rows: usize,
+    numeric_key_bytes: usize,
+}
+
+#[derive(Debug)]
+struct ProjectionUse {
+    format: &'static str,
+    limits: CatalogProjectionLimits,
+    validation_visits: usize,
+    numeric_entries: usize,
+    numeric_key_bytes: usize,
+    output_bytes: usize,
+}
+
+impl ProjectionUse {
+    fn new(
+        format: &'static str,
+        limits: CatalogProjectionLimits,
+        initial_output_bytes: usize,
+    ) -> Result<Self, IoError> {
+        ensure_operation_cap(
+            initial_output_bytes,
+            limits.max_output_bytes,
+            format,
+            "logical output bytes",
+        )?;
+        Ok(Self {
+            format,
+            limits,
+            validation_visits: 0,
+            numeric_entries: 0,
+            numeric_key_bytes: 0,
+            output_bytes: initial_output_bytes,
+        })
+    }
+
+    fn charge(
+        current: &mut usize,
+        amount: usize,
+        limit: usize,
+        format: &str,
+        cap: &str,
+    ) -> Result<(), IoError> {
+        let next = checked_operation_add(*current, amount, format, cap)?;
+        ensure_operation_cap(next, limit, format, cap)?;
+        *current = next;
+        Ok(())
+    }
+
+    fn validation_visit(&mut self) -> Result<(), IoError> {
+        Self::charge(
+            &mut self.validation_visits,
+            1,
+            self.limits.max_validation_visits,
+            self.format,
+            "schema validation visits",
+        )
+    }
+
+    fn output(&mut self, bytes: usize) -> Result<(), IoError> {
+        Self::charge(
+            &mut self.output_bytes,
+            bytes,
+            self.limits.max_output_bytes,
+            self.format,
+            "logical output bytes",
+        )
+    }
+
+    fn numeric_entry(&mut self, key_bytes: usize) -> Result<(), IoError> {
+        Self::charge(
+            &mut self.numeric_entries,
+            1,
+            self.limits.max_numeric_entries,
+            self.format,
+            "numeric projection entries",
+        )?;
+        Self::charge(
+            &mut self.numeric_key_bytes,
+            key_bytes,
+            self.limits.max_numeric_key_bytes,
+            self.format,
+            "numeric projection key bytes",
+        )?;
+        self.output(key_bytes)
+    }
+}
+
 impl Schema {
     /// Admit a schema under [`CatalogSchemaLimits::DEFAULT`].
     ///
@@ -521,6 +823,171 @@ impl Schema {
         &self.receipt
     }
 
+    fn preflight_projection(
+        &self,
+        format: &'static str,
+        max_rows: usize,
+        max_fields_per_row: usize,
+        max_total_fields: usize,
+        csv_header: Option<&[String]>,
+        limits: CatalogProjectionLimits,
+    ) -> Result<ProjectionPlan, IoError> {
+        let required_columns = self.columns.iter().filter(|column| column.required).count();
+        ensure_operation_cap(
+            required_columns,
+            max_fields_per_row,
+            format,
+            "required schema columns per row",
+        )?;
+
+        let header_fields = csv_header.map_or(0, <[String]>::len);
+        ensure_operation_cap(
+            header_fields,
+            max_total_fields,
+            format,
+            "minimum header fields",
+        )?;
+        let data_field_budget = max_total_fields - header_fields;
+        // A CSV record always has the admitted header width, so its aggregate
+        // field cap also bounds row count. JSON admits empty objects; hostile
+        // or schema-invalid rows can therefore still consume the full row and
+        // validation budget without consuming a member.
+        let minimum_fields_per_row = csv_header.map_or(0, <[String]>::len);
+        let jointly_admitted_rows = if minimum_fields_per_row == 0 {
+            max_rows
+        } else {
+            max_rows.min(data_field_budget / minimum_fields_per_row)
+        };
+
+        let validation_visits = checked_operation_product(
+            self.columns.len(),
+            jointly_admitted_rows,
+            format,
+            "schema validation visits",
+        )?;
+        ensure_operation_cap(
+            validation_visits,
+            limits.max_validation_visits,
+            format,
+            "schema validation visits",
+        )?;
+
+        let mut numeric_columns = 0usize;
+        let mut numeric_name_bytes = 0usize;
+        for column in &self.columns {
+            let present =
+                csv_header.is_none_or(|header| header.iter().any(|name| name == column.name));
+            if present && matches!(column.kind, ColumnKind::Number { .. }) {
+                numeric_columns =
+                    checked_operation_add(numeric_columns, 1, format, "numeric schema columns")?;
+                numeric_name_bytes = checked_operation_add(
+                    numeric_name_bytes,
+                    column.name.len(),
+                    format,
+                    "numeric schema-name bytes",
+                )?;
+            }
+        }
+        let numeric_entries = checked_operation_product(
+            numeric_columns.min(max_fields_per_row),
+            jointly_admitted_rows,
+            format,
+            "numeric projection entries",
+        )?
+        .min(data_field_budget);
+        ensure_operation_cap(
+            numeric_entries,
+            limits.max_numeric_entries,
+            format,
+            "numeric projection entries",
+        )?;
+        let numeric_key_bytes = checked_operation_product(
+            numeric_name_bytes,
+            jointly_admitted_rows,
+            format,
+            "numeric projection key bytes",
+        )?;
+        ensure_operation_cap(
+            numeric_key_bytes,
+            limits.max_numeric_key_bytes,
+            format,
+            "numeric projection key bytes",
+        )?;
+        Ok(ProjectionPlan {
+            max_rows: jointly_admitted_rows,
+            numeric_key_bytes,
+        })
+    }
+
+    fn preflight_json_output(
+        max_decoded_bytes: usize,
+        plan: ProjectionPlan,
+        limits: CatalogProjectionLimits,
+    ) -> Result<(), IoError> {
+        let output_bytes = checked_operation_add(
+            max_decoded_bytes,
+            plan.numeric_key_bytes,
+            "JSON",
+            "logical output bytes",
+        )?;
+        ensure_operation_cap(
+            output_bytes,
+            limits.max_output_bytes,
+            "JSON",
+            "logical output bytes",
+        )
+    }
+
+    fn preflight_csv_output(
+        header: &[String],
+        counters: &CsvCounters,
+        limits: CatalogCsvLimits,
+        plan: ProjectionPlan,
+    ) -> Result<(), IoError> {
+        let mut normalized_header_bytes = 0usize;
+        for name in header {
+            normalized_header_bytes = checked_operation_add(
+                normalized_header_bytes,
+                name.len(),
+                "CSV",
+                "normalized header key bytes",
+            )?;
+        }
+        let repeated_header_bytes = checked_operation_product(
+            normalized_header_bytes,
+            plan.max_rows,
+            "CSV",
+            "repeated output header-key bytes",
+        )?;
+        let decoded_value_bytes = limits
+            .max_decoded_bytes
+            .checked_sub(counters.header_decoded_bytes)
+            .ok_or_else(|| {
+                operation_refusal(
+                    "CSV",
+                    "header-byte accounting exceeds the aggregate decoded-byte envelope",
+                )
+            })?;
+        let output_bytes = checked_operation_add(
+            decoded_value_bytes,
+            repeated_header_bytes,
+            "CSV",
+            "logical row output bytes",
+        )?;
+        let output_bytes = checked_operation_add(
+            output_bytes,
+            plan.numeric_key_bytes,
+            "CSV",
+            "logical output bytes",
+        )?;
+        ensure_operation_cap(
+            output_bytes,
+            limits.projection.max_output_bytes,
+            "CSV",
+            "logical output bytes",
+        )
+    }
+
     /// Validate one cell against its spec.
     fn check_cell(spec: &ColumnSpec, text: &str, row: usize) -> Result<Option<f64>, IoError> {
         let trimmed = text.trim();
@@ -561,6 +1028,38 @@ impl Schema {
     /// row/column/expectation for value violations; missing schema
     /// columns are named.
     pub fn parse_csv(&self, text: &str) -> Result<Catalog, IoError> {
+        self.parse_csv_with_limits(text, CatalogCsvLimits::DEFAULT)
+    }
+
+    /// Parse + validate a CSV catalog under one syntax/decoded/projection
+    /// envelope shared with the JSON projection path.
+    ///
+    /// # Errors
+    /// [`IoError::ResourceBound`] is returned before unadmitted field growth,
+    /// schema work, numeric projection, or output retention. Syntax and schema
+    /// mismatches retain their existing structured variants.
+    pub fn parse_csv_with_limits(
+        &self,
+        text: &str,
+        limits: CatalogCsvLimits,
+    ) -> Result<Catalog, IoError> {
+        if text.len() > limits.max_input_bytes {
+            return Err(csv_cap_refusal("input-byte", limits.max_input_bytes, 0));
+        }
+        let required_columns = self.columns.iter().filter(|column| column.required).count();
+        ensure_operation_cap(
+            required_columns,
+            limits.max_fields_per_record,
+            "CSV",
+            "required schema columns per row",
+        )?;
+        ensure_operation_cap(
+            required_columns.max(1),
+            limits.max_total_fields,
+            "CSV",
+            "minimum header fields",
+        )?;
+        let mut counters = CsvCounters::default();
         let mut lines = text
             .lines()
             .enumerate()
@@ -569,7 +1068,7 @@ impl Schema {
             at: 0,
             what: "empty catalog".to_string(),
         })?;
-        let header = normalize_csv_header(split_csv(header_line, 0)?)?;
+        let header = normalize_csv_header(split_csv(header_line, 0, limits, &mut counters)?)?;
         for spec in &self.columns {
             if spec.required && !header.iter().any(|name| name == spec.name) {
                 return Err(IoError::Schema {
@@ -582,11 +1081,24 @@ impl Schema {
                 });
             }
         }
+        let plan = self.preflight_projection(
+            "CSV",
+            limits.max_rows,
+            limits.max_fields_per_record,
+            limits.max_total_fields,
+            Some(&header),
+            limits.projection,
+        )?;
+        Self::preflight_csv_output(&header, &counters, limits, plan)?;
         let mut rows = Vec::new();
         let mut numbers = Vec::new();
+        let mut projection = ProjectionUse::new("CSV", limits.projection, 0)?;
         for (data_row, (ln, line)) in lines.enumerate() {
             let row_no = data_row + 1; // 1-based, header excluded
-            let fields = split_csv(line, row_no)?;
+            if data_row >= limits.max_rows {
+                return Err(csv_cap_refusal("row", limits.max_rows, row_no));
+            }
+            let fields = split_csv(line, row_no, limits, &mut counters)?;
             if fields.len() != header.len() {
                 return Err(IoError::Malformed {
                     at: ln + 1,
@@ -597,25 +1109,30 @@ impl Schema {
                     ),
                 });
             }
+            rows.try_reserve(1)
+                .map_err(|_| allocation_refusal("CSV output row index", row_no))?;
+            numbers
+                .try_reserve(1)
+                .map_err(|_| allocation_refusal("CSV numeric-row index", row_no))?;
             let mut row = BTreeMap::new();
             let mut nums = BTreeMap::new();
             for (name, cell) in header.iter().zip(fields) {
+                let retained_bytes =
+                    checked_operation_add(name.len(), cell.len(), "CSV", "row key/value bytes")?;
+                projection.output(retained_bytes)?;
                 row.insert(fallible_copy(name, "CSV output column key", row_no)?, cell);
             }
             for spec in &self.columns {
+                projection.validation_visit()?;
                 let cell = row.get(spec.name).map(String::as_str).unwrap_or_default();
                 if let Some(v) = Self::check_cell(spec, cell, row_no)? {
+                    projection.numeric_entry(spec.name.len())?;
                     nums.insert(
                         fallible_copy(spec.name, "CSV numeric projection key", row_no)?,
                         v,
                     );
                 }
             }
-            rows.try_reserve(1)
-                .map_err(|_| allocation_refusal("CSV output row index", row_no))?;
-            numbers
-                .try_reserve(1)
-                .map_err(|_| allocation_refusal("CSV numeric-row index", row_no))?;
             rows.push(row);
             numbers.push(nums);
         }
@@ -645,7 +1162,25 @@ impl Schema {
         text: &str,
         limits: CatalogJsonLimits,
     ) -> Result<Catalog, IoError> {
-        let rows = mini_json_array_of_objects(text, limits)?;
+        if text.len() > limits.max_input_bytes {
+            return Err(cap_refusal(
+                "input-byte",
+                limits.max_input_bytes,
+                limits.max_input_bytes,
+            ));
+        }
+        let plan = self.preflight_projection(
+            "JSON",
+            limits.max_rows,
+            limits.max_members_per_object,
+            limits.max_total_members,
+            None,
+            limits.projection,
+        )?;
+        Self::preflight_json_output(limits.max_decoded_bytes, plan, limits.projection)?;
+        let parsed = parse_json_catalog_document(text, limits)?;
+        let mut projection = ProjectionUse::new("JSON", limits.projection, parsed.decoded_bytes)?;
+        let rows = parsed.rows;
         let mut numbers = Vec::new();
         numbers
             .try_reserve_exact(rows.len())
@@ -653,8 +1188,10 @@ impl Schema {
         for (i, obj) in rows.iter().enumerate() {
             let mut nums = BTreeMap::new();
             for spec in &self.columns {
+                projection.validation_visit()?;
                 let cell = obj.get(spec.name).map(String::as_str).unwrap_or_default();
                 if let Some(v) = Self::check_cell(spec, cell, i + 1)? {
+                    projection.numeric_entry(spec.name.len())?;
                     nums.insert(
                         fallible_copy(spec.name, "JSON numeric projection key", i + 1)?,
                         v,
@@ -682,15 +1219,28 @@ fn cap_refusal(cap: &str, limit: usize, at: usize) -> IoError {
 
 fn allocation_refusal(payload: &str, at: usize) -> IoError {
     IoError::ResourceBound {
-        what: format!("allocation failed for {payload} at byte offset {at}"),
+        what: format!("allocation failed for {payload} at deterministic position {at}"),
     }
 }
 
 /// Strict RFC 8259 reader for `[ {"k": "v" | number, ...}, ... ]`.
+#[cfg(test)]
 fn mini_json_array_of_objects(
     text: &str,
     limits: CatalogJsonLimits,
 ) -> Result<Vec<BTreeMap<String, String>>, IoError> {
+    parse_json_catalog_document(text, limits).map(|parsed| parsed.rows)
+}
+
+struct ParsedJsonCatalog {
+    rows: Vec<BTreeMap<String, String>>,
+    decoded_bytes: usize,
+}
+
+fn parse_json_catalog_document(
+    text: &str,
+    limits: CatalogJsonLimits,
+) -> Result<ParsedJsonCatalog, IoError> {
     if text.len() > limits.max_input_bytes {
         return Err(cap_refusal(
             "input-byte",
@@ -717,7 +1267,7 @@ struct JsonCatalogParser<'a> {
 }
 
 impl JsonCatalogParser<'_> {
-    fn parse(mut self) -> Result<Vec<BTreeMap<String, String>>, IoError> {
+    fn parse(mut self) -> Result<ParsedJsonCatalog, IoError> {
         self.skip_ws();
         self.expect(b'[', "expected a JSON array")?;
         self.skip_ws();
@@ -726,7 +1276,10 @@ impl JsonCatalogParser<'_> {
         if self.peek() == Some(b']') {
             self.pos += 1;
             self.finish_document()?;
-            return Ok(rows);
+            return Ok(ParsedJsonCatalog {
+                rows,
+                decoded_bytes: self.decoded_bytes,
+            });
         }
 
         loop {
@@ -751,7 +1304,10 @@ impl JsonCatalogParser<'_> {
                 Some(b']') => {
                     self.pos += 1;
                     self.finish_document()?;
-                    return Ok(rows);
+                    return Ok(ParsedJsonCatalog {
+                        rows,
+                        decoded_bytes: self.decoded_bytes,
+                    });
                 }
                 _ => {
                     return Err(malformed(self.pos, "expected ',' or ']' after JSON object"));
@@ -1429,6 +1985,280 @@ mod tests {
         }
     }
 
+    fn assert_catalog_resource(error: IoError, expected: &str, case: &str) {
+        match error {
+            IoError::ResourceBound { what } => assert!(
+                what.contains(expected),
+                "{case}: expected {expected:?} in resource refusal, got {what:?}"
+            ),
+            other => panic!("{case}: expected ResourceBound, got {other:?}"),
+        }
+    }
+
+    /// G0/G3: CSV and JSON share one exact projection envelope. Every CSV
+    /// syntax/payload dimension and every common projection dimension admits
+    /// its exact boundary and refuses boundary-minus-one before publication.
+    #[test]
+    fn g0_g3_common_catalog_operation_budget_is_exact_and_cross_format() {
+        let schema = Schema::admit(vec![text_column("id", true), number_column("n", 0.0, 9.0)])
+            .expect("valid common catalog schema");
+        let projection = CatalogProjectionLimits {
+            max_validation_visits: 2,
+            max_numeric_entries: 1,
+            max_numeric_key_bytes: 1,
+            max_output_bytes: 6,
+        };
+        let csv_text = "id,n\n\"A\",1\n";
+        let csv_limits = CatalogCsvLimits {
+            max_input_bytes: csv_text.len(),
+            max_rows: 1,
+            max_fields_per_record: 2,
+            max_total_fields: 4,
+            max_field_bytes: 2,
+            max_header_bytes: 3,
+            max_decoded_bytes: 5,
+            projection,
+        };
+        let json_text = r#"[{"id":"A","n":1}]"#;
+        let json_limits = CatalogJsonLimits {
+            max_input_bytes: json_text.len(),
+            max_rows: 1,
+            max_members_per_object: 2,
+            max_total_members: 2,
+            max_string_bytes: 2,
+            max_number_bytes: 1,
+            max_decoded_bytes: 5,
+            projection,
+        };
+
+        let csv = schema
+            .parse_csv_with_limits(csv_text, csv_limits)
+            .expect("CSV exact operation boundary");
+        let unquoted_csv = schema
+            .parse_csv_with_limits("id,n\nA,1\n", csv_limits)
+            .expect("quote-preserving CSV rewrite");
+        let json = schema
+            .parse_json_with_limits(json_text, json_limits)
+            .expect("JSON exact operation boundary");
+        assert_eq!(csv, unquoted_csv);
+        assert_eq!(csv, json);
+
+        for (limits, expected, case) in [
+            (
+                CatalogCsvLimits {
+                    max_input_bytes: csv_text.len() - 1,
+                    ..csv_limits
+                },
+                "input-byte",
+                "CSV input byte boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    max_rows: 0,
+                    ..csv_limits
+                },
+                "row",
+                "CSV row boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    max_fields_per_record: 1,
+                    ..csv_limits
+                },
+                "required schema columns per row",
+                "CSV per-record field boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    max_total_fields: 3,
+                    ..csv_limits
+                },
+                "aggregate field",
+                "CSV aggregate field boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    max_field_bytes: 1,
+                    ..csv_limits
+                },
+                "field decoded-byte",
+                "CSV field byte boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    max_header_bytes: 2,
+                    ..csv_limits
+                },
+                "header decoded-byte",
+                "CSV header byte boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    max_decoded_bytes: 4,
+                    ..csv_limits
+                },
+                "aggregate decoded-byte",
+                "CSV decoded byte boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    projection: CatalogProjectionLimits {
+                        max_validation_visits: 1,
+                        ..projection
+                    },
+                    ..csv_limits
+                },
+                "schema validation visits",
+                "CSV validation visit boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    projection: CatalogProjectionLimits {
+                        max_numeric_entries: 0,
+                        ..projection
+                    },
+                    ..csv_limits
+                },
+                "numeric projection entries",
+                "CSV numeric entry boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    projection: CatalogProjectionLimits {
+                        max_numeric_key_bytes: 0,
+                        ..projection
+                    },
+                    ..csv_limits
+                },
+                "numeric projection key bytes",
+                "CSV numeric key boundary",
+            ),
+            (
+                CatalogCsvLimits {
+                    projection: CatalogProjectionLimits {
+                        max_output_bytes: 5,
+                        ..projection
+                    },
+                    ..csv_limits
+                },
+                "logical output bytes",
+                "CSV output boundary",
+            ),
+        ] {
+            let error = schema.parse_csv_with_limits(csv_text, limits).unwrap_err();
+            assert_catalog_resource(error, expected, case);
+        }
+
+        for (limits, expected, case) in [
+            (
+                CatalogJsonLimits {
+                    projection: CatalogProjectionLimits {
+                        max_validation_visits: 1,
+                        ..projection
+                    },
+                    ..json_limits
+                },
+                "schema validation visits",
+                "JSON validation visit boundary",
+            ),
+            (
+                CatalogJsonLimits {
+                    projection: CatalogProjectionLimits {
+                        max_numeric_entries: 0,
+                        ..projection
+                    },
+                    ..json_limits
+                },
+                "numeric projection entries",
+                "JSON numeric entry boundary",
+            ),
+            (
+                CatalogJsonLimits {
+                    projection: CatalogProjectionLimits {
+                        max_numeric_key_bytes: 0,
+                        ..projection
+                    },
+                    ..json_limits
+                },
+                "numeric projection key bytes",
+                "JSON numeric key boundary",
+            ),
+            (
+                CatalogJsonLimits {
+                    projection: CatalogProjectionLimits {
+                        max_output_bytes: 5,
+                        ..projection
+                    },
+                    ..json_limits
+                },
+                "logical output bytes",
+                "JSON output boundary",
+            ),
+        ] {
+            let error = schema
+                .parse_json_with_limits(json_text, limits)
+                .unwrap_err();
+            assert_catalog_resource(error, expected, case);
+        }
+
+        let optional_schema = Schema::admit(vec![text_column("a", false), text_column("b", false)])
+            .expect("valid optional-only schema");
+        let empty_object_text = "[{},{}]";
+        let empty_object_limits = CatalogJsonLimits {
+            max_input_bytes: empty_object_text.len(),
+            max_rows: 2,
+            max_members_per_object: 0,
+            max_total_members: 0,
+            max_string_bytes: 0,
+            max_number_bytes: 0,
+            max_decoded_bytes: 0,
+            projection: CatalogProjectionLimits {
+                max_validation_visits: 4,
+                max_numeric_entries: 0,
+                max_numeric_key_bytes: 0,
+                max_output_bytes: 0,
+            },
+        };
+        let empty_objects = optional_schema
+            .parse_json_with_limits(empty_object_text, empty_object_limits)
+            .expect("empty objects still fit the exact validation envelope");
+        assert_eq!(empty_objects.rows.len(), 2);
+        assert!(empty_objects.rows.iter().all(|row| row.is_empty()));
+        let error = optional_schema
+            .parse_json_with_limits(
+                empty_object_text,
+                CatalogJsonLimits {
+                    projection: CatalogProjectionLimits {
+                        max_validation_visits: 3,
+                        ..empty_object_limits.projection
+                    },
+                    ..empty_object_limits
+                },
+            )
+            .expect_err("member caps cannot hide empty-object validation work");
+        assert_catalog_resource(
+            error,
+            "schema validation visits",
+            "JSON empty-object validation boundary",
+        );
+
+        let overflow = CatalogCsvLimits {
+            max_rows: usize::MAX,
+            max_total_fields: usize::MAX,
+            projection: CatalogProjectionLimits {
+                max_validation_visits: usize::MAX,
+                max_numeric_entries: usize::MAX,
+                max_numeric_key_bytes: usize::MAX,
+                max_output_bytes: usize::MAX,
+            },
+            ..csv_limits
+        };
+        let error = schema
+            .parse_csv_with_limits(csv_text, overflow)
+            .expect_err("checked operation overflow must refuse before row projection");
+        assert_catalog_resource(error, "arithmetic overflow", "checked preflight overflow");
+    }
+
     /// G0: every RFC 8259 string escape, BMP escape, surrogate pair, and raw
     /// UTF-8 scalar decodes exactly once into the retained catalog payload.
     #[test]
@@ -1750,6 +2580,7 @@ mod tests {
             max_string_bytes: 64,
             max_number_bytes: 64,
             max_decoded_bytes: 256,
+            projection: CatalogProjectionLimits::DEFAULT,
         };
 
         let input = "[]";

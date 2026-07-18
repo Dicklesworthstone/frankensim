@@ -60,7 +60,14 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   normalization; JSON retains exact decoded key spelling. Document
   column/member order is immaterial for the common canonical-name subset.
   Duplicate or empty CSV headers after normalization refuse before row-map
-  insertion.
+  insertion. `CatalogProjectionLimits` supplies a shared validation-visit,
+  numeric-entry/key-byte, and logical-output envelope. `CatalogCsvLimits`
+  composes it with input, row, per-record/aggregate-field, per-field, raw-header,
+  and aggregate-decoded caps; `CatalogJsonLimits` composes the same projection
+  limits with its JSON syntax caps. Joint cap arithmetic recognizes that a CSV
+  header width plus the aggregate field envelope bounds CSV rows, while empty
+  JSON objects can still consume the full row/validation envelope; numeric
+  projection counts compose with each format's aggregate field/member cap.
   JSON strings implement every simple escape plus exact UTF-16 surrogate-pair
   decoding; raw controls, malformed/unknown escapes, duplicate decoded keys,
   non-RFC numbers, delimiter elision/trailing commas, nested values, and
@@ -68,6 +75,8 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   makes input, row, per-object/aggregate member, per-string, per-number, and
   aggregate decoded-byte caps explicit; `parse_json` uses its documented
   default while `parse_json_with_limits` admits a caller-selected envelope.
+  `parse_csv` similarly uses `CatalogCsvLimits::DEFAULT`, while
+  `parse_csv_with_limits` admits an explicit composed envelope.
   Violations name the 1-based data row, column, offending text, and the
   expectation; missing header columns list what WAS found.
 - **STEP structure** (`step` module): bounded, ASCII-only parsing of the
@@ -149,8 +158,15 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
    not. Value errors retain row + column + expectation and at most 96 UTF-8
    bytes of attacker-controlled cell text. CSV header aliases refuse before
    any row map can silently overwrite them.
-6. **Catalog JSON is strict, bounded, and non-overwriting**: only RFC 8259's
-   four ASCII whitespace bytes are skipped. Object/array commas and colons are
+6. **Catalog projection is shared and both readers are bounded**: CSV and JSON
+   preflight checked rows-times-columns validation visits, numeric projection
+   entries and cloned key bytes, and logical retained UTF-8 bytes under one
+   `CatalogProjectionLimits`. Independent maxima are composed without assuming
+   that JSON member limits bound empty-object validation work, and overflow
+   refuses before row projection. CSV additionally bounds raw input, rows,
+   fields per record, aggregate fields, individual decoded fields, raw decoded
+   header bytes, and aggregate decoded bytes. JSON additionally skips only RFC
+   8259's four ASCII whitespace bytes. Object/array commas and colons are
    explicit; the exact JSON number production is retained lexically until
    schema checking; decoded-key duplicates refuse rather than overwrite; all
    string escapes, including paired UTF-16 surrogates, decode exactly; lone
@@ -248,8 +264,9 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
 `SchemaDefinitionRefusal` is the separate typed pre-document refusal for empty,
 ambiguous, over-limit, or numerically invalid schema declarations. `IoError`:
 `Malformed { at, what }`, `Unsupported`, `ResourceBound`, `Schema { row,
-column, what }`. Catalog-JSON syntax errors use byte offsets;
-catalog resource refusals name the cap, limit, and refusal offset in `what`.
+column, what }`. Catalog-JSON syntax errors use byte offsets; CSV resource
+refusals use record positions; common projection refusals name the operation
+dimension and declared limit. Catalog resource refusals remain deterministic.
 `PromotionRefusal` carries blocking
 defects + fixes + the refused receipt. The STEP syntax kernel uses
 `Malformed` for grammar/graph failures, `Unsupported` for staged encoded
@@ -287,10 +304,10 @@ and nested receipts on one target.
 
 ## Cancellation behavior
 
-Legacy mesh parsers are single-pass and element-capped. The catalog-JSON syntax
-reader is a single-pass state machine under explicit input, row, member, token,
-string, and aggregate decoded-payload caps; schema validation then walks the
-admitted rows. It has no `Cx` and makes no cancellation-latency claim. The STEP
+Legacy mesh parsers are single-pass and element-capped. The catalog CSV and JSON
+readers are single-pass state machines under explicit syntax, decoded-payload,
+validation-work, and projection/output caps; schema validation then walks the
+admitted rows. They have no `Cx` and make no cancellation-latency claim. The STEP
 kernel is deliberately multi-pass (parse, shape/graph validation,
 canonical-layout serialization) and cap-bounded, but it has no `Cx` and
 makes no cancellation-latency claim. Native faceted decoding polls at entry,
@@ -346,7 +363,9 @@ schema count/name/aggregate-name boundaries; empty, trim-alias, and duplicate
 names; NaN, infinite, equal, inverted, and extreme finite bounds; stable and
 policy-sensitive schema identity; normalized duplicate CSV headers; optional
 and unknown-column parity across CSV/JSON; document-column permutation; bounded
-value-error witnesses; all raw C0 bytes; all one-byte unknown ASCII escapes;
+value-error witnesses; exact common CSV/JSON projection boundaries; every CSV
+input/row/field/header/decoded boundary; checked operation-overflow refusal;
+quoted-CSV equivalence; all raw C0 bytes; all one-byte unknown ASCII escapes;
 malformed/lone surrogate forms with exact offsets; valid and invalid number
 productions; comma/colon and
 decoded-duplicate-key cases, semantic-preserving whitespace/member/escape
@@ -442,11 +461,12 @@ import identically in both ASCII and binary (conformance-tested).
 - **Receipts hash with FNV-1a**; HELM upgrades to the BLAKE3-class
   content address when writing the `imports` row (same field, stated in
   the receipt schema).
-- **Catalog operation admission is still incomplete**: the sealed schema and
-  duplicate-header gate remove unchecked schema authority and ambiguous CSV
-  overwrite, but `CatalogJsonLimits` still covers syntax/payload rather than
-  the complete schema-validation/projection/output lifetime, and CSV still
-  lacks the shared input/row/field/decoded/output envelope and complete
-  operation receipt. Allocator metadata and `BTreeMap` node allocation remain
-  unmeasured. No whole-operation catalog resource or ledger-promotion claim is
-  made until those proof-pending portions of `frankensim-svlo8` land.
+- **Catalog operation promotion is still incomplete**: the sealed schema,
+  duplicate-header gate, shared projection envelope, and bounded CSV/JSON
+  syntax paths remove the known unchecked work/payload dimensions, but no
+  operation receipt yet binds input identity, exact limits and consumed
+  counters, parser version, or result/no-claim status. There is no `Cx` or
+  allocation-failure injection, and allocator metadata plus `BTreeMap` node
+  allocation remain unmeasured. No cancellation, complete live-byte, or
+  ledger-promotion claim is made until those proof-pending portions of
+  `frankensim-svlo8` land.
