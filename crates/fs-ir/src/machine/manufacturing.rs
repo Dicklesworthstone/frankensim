@@ -32,6 +32,8 @@ use super::{
     AdmittedMachineGraph, BodyId, DependentBinding, DependentKind, MachineGraphIdV1, MachineIdError,
 };
 
+/// Ordered, graph-bound assembly/joining declarations.
+pub mod assembly;
 /// Bounded graph-bound datum features and ordered reference frames.
 pub mod datum_system;
 /// Typed mating-feature size envelopes and derived clearance state.
