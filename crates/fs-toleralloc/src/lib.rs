@@ -45,6 +45,14 @@ pub use dependency_allocation::{
     MAX_DEPENDENCY_NAMESPACE_BYTES_V1, MAX_GROUPED_FEATURES_V1, allocate_grouped,
 };
 pub use fs_evidence::ColorRank;
+pub use gear_backlash::{
+    GEAR_BACKLASH_CONSUMER_SCHEMA_V1, GearBacklashConsumerDraftV1, GearBacklashConsumptionErrorV1,
+    GearBacklashConsumptionReceiptV1, GearBacklashLengthUnitV1, GearBacklashModeShareV1,
+    GearBacklashNumericIssueV1, GearBacklashNumericQuantityV1, GearBacklashProbabilityErrorV1,
+    GearBacklashProbabilityV1, GearBacklashQuantileV1, GearBacklashSupportPointV1,
+    GearBacklashValueV1, GearBacklashVarianceV1, MAX_GEAR_BACKLASH_QUANTILES_V1,
+    consume_structured_backlash,
+};
 pub use structured_propagation::{
     ClampDisposition, InteriorKnotOwner, MAX_EXACT_STRUCTURED_WEIGHT_V1, MAX_STRUCTURED_DEPTH_V1,
     MAX_STRUCTURED_KEY_BYTES_V1, MAX_STRUCTURED_LAWS_V1, MAX_STRUCTURED_LEAVES_V1,
@@ -60,6 +68,7 @@ pub use structured_propagation::{
 };
 
 mod dependency_allocation;
+mod gear_backlash;
 mod structured_propagation;
 
 /// Maximum axis count admitted by the version-one correlated-stack lane.

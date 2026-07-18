@@ -290,6 +290,61 @@ authenticated for the hierarchy/law bytes. Raw clearances and response scalars
 carry no typed units; dimensional compatibility and coefficient units remain a
 caller admission responsibility.
 
+## Structured gear-backlash consumer v1
+
+`GearBacklashConsumerDraftV1::consume(&StructuredPropagationReceipt)` is the
+bounded downstream consumer for the structured gear-backlash fixture. It
+accepts only `STRUCTURED_PROPAGATION_SCHEMA_V1` and does not reevaluate or
+refit the admitted model. The output-length unit is an explicit caller
+declaration over otherwise untyped structured outputs. Version one admits only
+metres, millimetres, micrometres, and nanometres. Signed support, mean, and
+standard deviation are converted in the fixed binary64 order `source * scale`;
+variance is converted as `source * scale * scale`. Both submitted-unit and SI
+bits are retained. Non-finite conversions, nonzero-to-zero underflow, and two
+distinct source support values collapsing to one SI value are atomic refusals.
+
+Each request level is an independently reduced exact rational `n/d` in the
+closed unit interval; the vector is not a probability mass function and need
+not sum to one. Raw request count is capped at 128, caller order is
+non-semantic, and equivalent duplicates after reduction are refused. At least
+one request is required. The deterministic weighted empirical convention is
+
+`Q(0) = min(support)` and, for `0 < n/d <= 1`,
+`Q(n/d) = first x with cumulative_weight(x) * d >= n * total_weight`.
+
+The comparison is exact `u128` integer arithmetic, never binary64 probability
+arithmetic. Equal finite binary64 outputs are grouped before selection. The
+receipt retains the complete ascending support table with source/SI bits,
+exact point weight, and exact cumulative bracket; every quantile retains its
+reduced level, selected support ordinal, value, and bracket. It also retains
+the upstream schema, complete admitted structured model, caller unit, root
+mean/variance/standard deviation, and every law-major/piece-minor mode row as
+`(law ordinal, law key, piece ordinal, mode key, weight, leaf count)`, including
+zero-weight declared modes. Mode weights and leaf counts are independently
+reconstructed from the upstream leaves before publication.
+
+`tests/gear_backlash.rs` supplies G0/G3/G5 evidence using the exhaustive
+64-occurrence oracle. It checks the aggregated support
+`(-4,1), (-1,3), (0,48), (1,9), (4,3)`, exact CDF jump boundaries and
+just-above-boundary queries, `p=0`, `p=1`, source/SI scaling including squared
+variance scaling, law-scoped mode shares, equivalent-fraction request replay,
+duplicate and 128/N+1 request admission, and exact rank selection at the
+upstream `2^53` multiplicity cap. A structural-receipt test changes hierarchy
+content while deliberately reusing the same external identity, proving that
+complete model retention—not the unauthenticated caller digest alone—carries
+the semantic difference.
+
+This consumer publishes signed descriptive response evidence for the supplied
+finite population. Multiplicities are not calibrated probabilities. “Backlash”
+is a caller interpretation, not proof that values are nonnegative physical
+backlash. The report establishes no sampling model, confidence, coverage,
+tail-risk, reliability, capability, tolerance compliance, dimensional
+authenticity, geometry, fit, contact mechanics, interference freedom, causal
+process model, or population generalization. It computes no authenticated or
+content-addressed report identity. Correlation must already be represented by
+the upstream population. There is no `fs-gear`, motion-clearance, fit/GD&T,
+assembly, or machine-IR integration in version one.
+
 ## No-claim boundaries
 
 - Sensitivities are SUPPLIED (from Proposal 1 adjoint `∂QoI/∂geometry` fields);
@@ -319,10 +374,10 @@ caller admission responsibility.
 - Correlation coefficients are dimensionless, but this seed API does not yet
   carry typed QoI/axis units. A caller must bind compatible units before
   constructing terms; the receipt alone does not prove dimensional closure.
-- The receipt is gear-consumable but no gear flagship currently consumes it.
-  Machine-IR lowering, datum/GD&T/surface-texture/fits schemas, assembly/process
-  lineage, and Monte Carlo or experimental population validation remain
-  downstream work.
+- The structured receipt now has the bounded gear-backlash consumer above, but
+  no gear flagship crate consumes that report. Machine-IR lowering,
+  datum/GD&T/surface-texture/fits schemas, assembly/process lineage, and Monte
+  Carlo or experimental population validation remain downstream work.
 - The cost model `cᵢ / tᵢ` is a convex placeholder; a real manufacturing cost
   curve is a drop-in.
 - Canonical ambiguity detection uses deterministic Unicode lowercase comparison,
