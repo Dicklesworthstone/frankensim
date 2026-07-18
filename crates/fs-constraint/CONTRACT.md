@@ -28,19 +28,52 @@ what the constraints MEAN.
   case where the raw empirical rate clears but the bound does not
   (the validity machinery is the feature). Certification kinds refuse
   "satisfied" pointwise REGARDLESS of how good `g(x)` looks.
-- `interval_eval` (the in-house prover): rigorous inclusion over
-  fs-opt graphs per node; refuses (teaching reasons) on division
-  through zero, domain violations, negative powers, PDE/stochastic
-  nodes. Before memo allocation it checks the sealed root depth and
+  Public policy fields are admitted before graph evaluation: active-set
+  tolerances, robust half-widths, and soft weights must be finite and
+  non-negative; robust width count must equal point dimension; chance
+  levels/delta/sample counts must satisfy their declared domains, and
+  `1 - delta` must remain strictly inside `(0,1)` in binary64. A
+  chance noise draw must match the point dimension exactly; extra
+  components cannot be silently ignored. A
+  computed soft penalty must also remain finite and non-negative. No
+  malformed value may turn a violation into satisfaction or a negative
+  objective reward. The currently declared fixed-horizon Monte-Carlo
+  estimator emits a `HalfWidth` certificate; substituting an unbound
+  e-value or no statistical certificate downgrades the ledger row rather
+  than changing the estimator after the fact.
+- `interval_eval` (the in-house prover): dependency-aware interval
+  inclusion formulas over fs-opt graphs per node; refuses (teaching
+  reasons) on division through zero, domain violations, negative powers,
+  and PDE/stochastic nodes. The formulas are conservative over exact
+  endpoint operations, while theorem-strength binary64 endpoint authority
+  remains subject to the explicit outward-rounding no-claim below. Before
+  memo allocation it checks the sealed root depth and
   aggregate admission-work receipt against fs-opt's default cap
   schedule, and the walk itself is EXPLICIT-STACK (reachability
   worklist + bottom-up arena-order sweep; bead frankensim-xf8v7), so a
   graph built under looser caps refuses typed and no admitted graph can
   overflow the call stack; the exact max-depth boundary is a G4 fixture.
-  `prove_interval` turns a provable domain into a `Proven`
-  status + `ProofArtifact::IntervalBound`. Robust kinds are proven
-  conservatively over their uncertainty boxes the same way, carrying
-  ENCLOSURE certificates.
+  The public `interval_eval` boundary admits a zero-variable constant
+  problem with an empty binding, or exactly one `Rn` host with exactly
+  one interval per component. It refuses non-finite, reversed,
+  unrepresentable-span, missing, or extra boxes before graph evaluation
+  and never aliases several host variables onto one binding vector.
+  `prove_interval`
+  accepts only `Certification { proof: Interval }`; it refuses SOS and
+  non-certification requests rather than relabeling an interval result.
+  Proof subjects accept the same zero-variable constant or one-`Rn`
+  host shapes; multi-variable/manifold or dimension-mismatched subjects
+  refuse rather than sharing bindings.
+  A cleared structural bound returns the current `Proven` schema status
+  plus a sealed `ProofArtifact` carrying both interval ends and a
+  `ProofSubject` bound to the
+  full-width admitted fs-opt problem semantic identity, exact node, and
+  ordered endpoint bit patterns. Every `Proven` evidence value also
+  retains those exact proof-bound bits; the artifact/evidence verifier
+  requires the subject and both bound endpoints to match. Robust kinds
+  use the same admitted uncertainty-box path and carry ENCLOSURE
+  certificates; default theorem authority awaits the named outward
+  successor rather than treating fp-slack sampling as a proof.
 - `diagnose_infeasibility(problem, specs, domain, cx) -> Diagnosis`:
   elastic-relaxation solve (multi-start projected subgradient descent
   on total hinge violation, deterministic LCG starts) classifies
@@ -53,14 +86,29 @@ what the constraints MEAN.
   one `Rn` variable, one range per point coordinate, finite ordered
   endpoints, and a finite span. Equal endpoints are valid fixed
   coordinates.
-- `serialize_specs`/`parse_specs`: canonical line form (floats as bit
-  patterns), identical round-trips, line-numbered refusals.
+- `serialize_specs`/`parse_specs`: canonical `fscon v2` line form
+  (floats as bit patterns), identical round-trips for admitted specs,
+  and line-numbered refusals. The infallible writer preserves untrusted
+  public field bits; the parser is the policy-admission boundary, so
+  writer output from an invalid in-memory spec is intentionally refused.
+  Dynamic tokens use canonical uppercase UTF-8 byte-percent
+  encoding: literal percent and space are distinct (`%25` versus
+  `%20`), unsafe bytes cannot split records, and `%` is the unambiguous
+  empty-token sentinel. The parser rejects malformed/noncanonical
+  encodings, legacy v1 ambiguity, trailing fields, and non-finite or
+  negative raw-bit policy values.
 - `ConstraintEvidence::to_ledger_row` and `Diagnosis::to_json`: the
   Rev S ledger row and the agent-facing diagnosis payload. All string
-  fields receive complete JSON escaping; non-finite public numeric
-  fields serialize as `null` rather than malformed JSON numbers. A
-  caller-constructed core index missing from the supplied spec table is
-  represented by `null`, never an invented constraint name.
+  fields receive complete JSON escaping. Publicly forged non-finite,
+  negative, structurally inconsistent, or unbound required evidence
+  emits a canonical `valid:false`/`status:no-claim` representation with
+  a deterministic first reason and no positive satisfied/feasible
+  headline; malformed numbers become `null` only after that downgrade.
+  Diagnosis admission also requires its finite component violations to
+  sum to the reported elastic total, and `elastic_solve` recomputes that
+  published total from the final published component vector in canonical
+  constraint order. A stale optimizer-carried aggregate therefore cannot
+  authorize a feasible or infeasible headline.
 
 ## Invariants
 
@@ -90,12 +138,21 @@ what the constraints MEAN.
    while fixed axes remain admissible; hostile constraint/repair text
    cannot escape its JSON string and every emitted payload remains
    valid JSON.
+8. Policy admission is identical for direct evaluation and raw-bit
+   parsing; interval proof engines cannot satisfy a different declared
+   proof kind; proof subjects change when problem, node, endpoint order,
+   or even signed-zero endpoint bits change, and artifact/evidence
+   verification includes both proof-bound endpoint bits.
+9. Percent encoding is injective and writer/parser bytes are a fixed
+   point. Invalid public evidence always loses positive claim authority
+   with one stable reason rather than preserving a claim beside `null`.
 
 ## Error model
 
 `ConError` teaching errors: `NotScalar`, `Eval` (fs-opt errors carried
 through), `NotProvable{why}` (an honest gap with escalation advice,
-not a failure), `BadParam`, `InvalidDomain(DomainError)`,
+not a failure), `BadParam`, `ProofKindMismatch`,
+`InvalidDomain(DomainError)`,
 `Parse{line, what}`. `DomainError` distinguishes host variable count and
 manifold, point-dimension representation, range-count mismatch, and an
 axis-specific `InvalidRange` reason. The interval engine's
@@ -120,8 +177,16 @@ identity is not misreported as randomized input provenance.
 ## Cancellation behavior
 
 `elastic_solve` (and therefore `diagnose_infeasibility`) polls
-`cx.checkpoint()` per restart and returns the carried `Cancelled`
-teaching error between solves.
+`cx.checkpoint()` before solver allocation/evaluation and between scalar
+graph evaluations at fixed strides through active-set construction,
+constraint totals, restart/step/dimension loops, final evidence,
+deletion filtering, and repair sampling. It returns the carried
+`Cancelled` teaching error and does not publish a partial success. A
+single synchronous fs-opt scalar evaluation is not yet internally
+cancellation-tiled. Full evaluator tiling, cost/poll/deadline admission,
+memory leases, and retained work-consumption receipts are explicitly
+tracked by P0 successor
+`frankensim-constraint-restoration-budget-receipts-x5sev`.
 
 ## Unsafe boundary
 
@@ -141,22 +206,45 @@ The object-shaped Custom companions for ledger rows and the full
 diagnosis payload remain wire-validated and printed, alongside G4
 shared-DAG/work and exact/max+1 depth-boundary fixtures for interval
 evaluation. Adversarial fixed cases cover malformed domain
-bounds/dimensions, fixed axes, hostile JSON text, missing core names,
-and non-finite public numeric payloads. Any reimplementation must pass
-the suite unchanged.
+bounds/dimensions, fixed axes, negative/non-finite policy values and
+their exact boundary neighbors, interval proof-kind confusion, exact
+artifact subject binding, hostile/injective wire and JSON text,
+positive-claim downgrade, deterministic round trips, and pre-cancelled
+evaluation ordering. Any reimplementation must pass the suite
+unchanged.
 
 ## No-claim boundaries
 
 - The interval prover rounds to-nearest; outward-rounded arithmetic
   joins with fs-ivl (containment carries an fp-slack caveat until
-  then). SOS certificates are REPRESENTED (`ProofKind::Sos`), not
-  executable — fs-sos is a later bead.
+  P0 theorem/kernel successor `frankensim-zup19` is green). SOS
+  certificates are REPRESENTED (`ProofKind::Sos`), not executable —
+  fs-sos is a later bead. Evaluation retains the explicit
+  `NeedsProof { Sos }` intent, while the interval-only sealed artifact API
+  refuses to mint or accept an opaque caller-authored SOS reference; this
+  removes false authority without removing the planned SOS capability.
+- `ProofArtifact` subject binding prevents accidental cross-problem,
+  cross-node, or cross-domain reuse and its sealed fields prevent
+  caller-side struct-literal minting. It is not external authenticity,
+  independent proof checking, or a substitute for the future fs-sos
+  verifier/trust channel.
 - The elastic solver is small-fixture machinery (multi-start FD
   subgradient); the production feasibility-restoration solver is a
   later ASCENT bead. Nonconvex fixtures can defeat it — verdicts are
   cross-checked against enumeration only at conformance scale.
+- Cancellation is now polled at bounded logical strides, but the
+  current `Cx::checkpoint` path alone does not interrupt the interior of
+  one scalar graph evaluation, enforce ambient deadline/poll/cost quotas,
+  charge allocations to a lease, or retain a resource receipt. Those
+  claims remain unavailable until the named P0 resource successor is
+  green.
 - Chance estimation is Monte-Carlo/Hoeffding v1; e-process anytime
-  validity and richer estimators join with the UQ beads.
+  validity and richer estimators join with the UQ beads. Its current
+  synchronous closure API has no `Cx`, work admission, cancellation, or
+  resource receipt and must not be used for untrusted large sample
+  counts; P0 successor `frankensim-oxyjg` owns the budgeted, replayable,
+  anytime-valid redesign rather than hiding this gap behind an arbitrary
+  cap.
 - Fabrication/Code kinds carry semantics to the ledger; process
   models (fs-fab) and code-check rule packs bind in their beads.
 - Repair generation covers bound relaxations and soft drops; material

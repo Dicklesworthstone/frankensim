@@ -59,14 +59,39 @@ impl Lcg {
 /// Feasibility tolerance for the elastic optimum.
 pub(crate) const FEAS_TOL: f64 = 1e-6;
 
-/// Penalty charged for a NON-FINITE constraint value (design point outside the
-/// constraint's domain). Large enough to dominate any legitimate violation so
-/// the elastic optimum treats the domain hole as maximally infeasible, but
-/// finite so the finite-difference subgradient stays defined and steers descent
-/// away from it (a raw `NaN.max(0.0)` would DROP the NaN and count it as 0).
+/// Defensive penalty for an evaluator backend that carries a NON-FINITE scalar
+/// instead of returning fs-opt's current typed `EvalNonFinite` refusal. It is
+/// finite so a raw `NaN.max(0.0)` can never be dropped into false feasibility.
 const NONFINITE_PENALTY: f64 = 1e30;
 
-fn validate_domain(problem: &Problem, domain: &DomainBox) -> Result<usize, ConError> {
+const CANCELLATION_STRIDE: usize = 64;
+
+fn checkpoint(cx: &Cx<'_>) -> Result<(), ConError> {
+    cx.checkpoint()
+        .map_err(|_| ConError::Eval(fs_opt::OptError::Cancelled))
+}
+
+fn violation_contribution(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        NONFINITE_PENALTY
+    }
+}
+
+fn checked_total_violation(total: f64, contribution: f64) -> Result<f64, ConError> {
+    let next = total + contribution;
+    if next.is_finite() {
+        Ok(next)
+    } else {
+        Err(ConError::BadParam {
+            what: "elastic total violation",
+            value: next,
+        })
+    }
+}
+
+fn validate_domain(problem: &Problem, domain: &DomainBox, cx: &Cx<'_>) -> Result<usize, ConError> {
     if problem.vars().len() != 1 {
         return Err(ConError::InvalidDomain(DomainError::HostVariableCount {
             got: problem.vars().len(),
@@ -88,6 +113,9 @@ fn validate_domain(problem: &Problem, domain: &DomainBox) -> Result<usize, ConEr
         }));
     }
     for (axis, &(lo, hi)) in domain.ranges.iter().enumerate() {
+        if axis % CANCELLATION_STRIDE == 0 {
+            checkpoint(cx)?;
+        }
         if !lo.is_finite() || !hi.is_finite() {
             return Err(ConError::InvalidDomain(DomainError::InvalidRange {
                 axis,
@@ -122,7 +150,7 @@ fn validate_domain(problem: &Problem, domain: &DomainBox) -> Result<usize, ConEr
 ///
 /// # Errors
 /// [`ConError::InvalidDomain`] before allocation/evaluation, evaluation
-/// teaching errors carried through, or cancellation at a restart poll.
+/// teaching errors carried through, or cancellation at a documented poll.
 pub fn elastic_solve(
     problem: &Problem,
     specs: &[ConstraintSpec],
@@ -130,18 +158,26 @@ pub fn elastic_solve(
     skip: &[usize],
     cx: &Cx<'_>,
 ) -> Result<ElasticReport, ConError> {
-    let n = validate_domain(problem, domain)?;
-    let active: Vec<usize> = (0..specs.len()).filter(|i| !skip.contains(i)).collect();
+    let n = validate_domain(problem, domain, cx)?;
+    checkpoint(cx)?;
+    let mut active = Vec::new();
+    for i in 0..specs.len() {
+        if i % CANCELLATION_STRIDE == 0 {
+            checkpoint(cx)?;
+        }
+        if !skip.contains(&i) {
+            active.push(i);
+        }
+    }
     let mut evals = 0u64;
     let total = |x: &[f64], evals: &mut u64| -> Result<f64, ConError> {
         let mut t = 0.0;
-        for &i in &active {
+        for (ordinal, &i) in active.iter().enumerate() {
+            if ordinal % CANCELLATION_STRIDE == 0 {
+                checkpoint(cx)?;
+            }
             let gi = scalar_at(problem, specs[i].node, x)?;
-            t += if gi.is_finite() {
-                gi.max(0.0)
-            } else {
-                NONFINITE_PENALTY
-            };
+            t = checked_total_violation(t, violation_contribution(gi))?;
             *evals += 1;
         }
         Ok(t)
@@ -159,9 +195,7 @@ pub fn elastic_solve(
         .collect();
     let mut best_v = total(&best_x, &mut evals)?;
     for start in 0..8 {
-        if cx.checkpoint().is_err() {
-            return Err(ConError::Eval(fs_opt::OptError::Cancelled));
-        }
+        checkpoint(cx)?;
         let mut x: Vec<f64> = if start == 0 {
             best_x.clone()
         } else {
@@ -178,6 +212,7 @@ pub fn elastic_solve(
             .map(|&(lo, hi)| hi - lo)
             .fold(0.0, f64::max);
         for step in 0..300 {
+            checkpoint(cx)?;
             if v <= FEAS_TOL {
                 break;
             }
@@ -185,6 +220,9 @@ pub fn elastic_solve(
             let h = 1e-6 * diam.max(1.0);
             let mut g = vec![0.0; n];
             for (k, gk) in g.iter_mut().enumerate() {
+                if k % CANCELLATION_STRIDE == 0 {
+                    checkpoint(cx)?;
+                }
                 let mut xp = x.clone();
                 xp[k] += h;
                 clamp(&mut xp);
@@ -212,15 +250,28 @@ pub fn elastic_solve(
     }
     let mut violations = Vec::with_capacity(specs.len());
     for (i, spec) in specs.iter().enumerate() {
+        if i % CANCELLATION_STRIDE == 0 {
+            checkpoint(cx)?;
+        }
         if skip.contains(&i) {
             violations.push(0.0);
         } else {
-            violations.push(scalar_at(problem, spec.node, &best_x)?.max(0.0));
+            violations.push(violation_contribution(scalar_at(
+                problem, spec.node, &best_x,
+            )?));
+            evals += 1;
         }
     }
+    // The published component vector is the authority source for the published
+    // total. Recompute it in the same canonical order instead of trusting the
+    // optimizer-carried `best_v`, which may be stale if final evidence
+    // evaluation evolves independently of the search loop.
+    let total_violation = violations.iter().try_fold(0.0, |total, &violation| {
+        checked_total_violation(total, violation)
+    })?;
     Ok(ElasticReport {
         x: best_x,
-        total_violation: best_v,
+        total_violation,
         violations,
         evals,
     })
@@ -272,29 +323,132 @@ pub struct Diagnosis {
 }
 
 impl Diagnosis {
+    fn invalid_reason(&self, specs: &[ConstraintSpec]) -> Option<&'static str> {
+        if !self.elastic.total_violation.is_finite() {
+            return Some("nonfinite-total-violation");
+        }
+        if self.elastic.total_violation < 0.0 {
+            return Some("negative-total-violation");
+        }
+        if self.elastic.x.iter().any(|value| !value.is_finite()) {
+            return Some("nonfinite-elastic-point");
+        }
+        if self.elastic.violations.len() != specs.len() {
+            return Some("component-violation-count-mismatch");
+        }
+        if self
+            .elastic
+            .violations
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Some("nonfinite-component-violation");
+        }
+        if self.elastic.violations.iter().any(|&value| value < 0.0) {
+            return Some("negative-component-violation");
+        }
+        let component_total = self.elastic.violations.iter().sum::<f64>();
+        if !component_total.is_finite() {
+            return Some("nonfinite-component-violation-total");
+        }
+        if component_total != self.elastic.total_violation {
+            return Some("total-component-violation-mismatch");
+        }
+        if self.core.iter().any(|&index| index >= specs.len()) {
+            return Some("unknown-core-constraint");
+        }
+        if self.core.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Some("noncanonical-core-order");
+        }
+        if self
+            .witness
+            .as_ref()
+            .is_some_and(|point| point.iter().any(|value| !value.is_finite()))
+        {
+            return Some("nonfinite-witness");
+        }
+        for repair in &self.repairs {
+            if !repair.feasibility_estimate.is_finite()
+                || !(0.0..=1.0).contains(&repair.feasibility_estimate)
+            {
+                return Some("invalid-feasibility-estimate");
+            }
+            match &repair.kind {
+                RepairKind::RelaxBound { index, slack } => {
+                    if *index >= specs.len() {
+                        return Some("unknown-repair-constraint");
+                    }
+                    if !slack.is_finite() || *slack < 0.0 {
+                        return Some("invalid-repair-slack");
+                    }
+                }
+                RepairKind::DropSoft { index } => {
+                    if *index >= specs.len() {
+                        return Some("unknown-repair-constraint");
+                    }
+                }
+            }
+        }
+        if self.feasible {
+            if self.elastic.total_violation > FEAS_TOL {
+                return Some("feasible-claim-has-positive-violation");
+            }
+            if self.witness.is_none() {
+                return Some("feasible-claim-missing-witness");
+            }
+            if self.witness.as_deref() != Some(self.elastic.x.as_slice()) {
+                return Some("witness-does-not-match-elastic-point");
+            }
+            if self
+                .elastic
+                .violations
+                .iter()
+                .any(|&violation| violation > FEAS_TOL)
+            {
+                return Some("feasible-claim-has-component-violation");
+            }
+            if !self.core.is_empty() || !self.repairs.is_empty() {
+                return Some("feasible-claim-has-conflict-evidence");
+            }
+        } else {
+            if self.elastic.total_violation <= FEAS_TOL {
+                return Some("infeasible-claim-lacks-positive-violation");
+            }
+            if self.witness.is_some() {
+                return Some("infeasible-claim-has-witness");
+            }
+            if self.core.is_empty() {
+                return Some("infeasible-claim-missing-core");
+            }
+        }
+        None
+    }
+
     /// Canonical JSON payload for the ledger/session surface. Dynamic text is
-    /// escaped; non-finite public numbers and missing spec references use
-    /// explicit JSON `null` sentinels.
+    /// escaped. A publicly forged inconsistent or non-finite diagnosis emits a
+    /// deterministic invalid/no-claim object; it never retains `feasible:true`
+    /// while silently replacing required evidence with `null`.
     #[must_use]
     pub fn to_json(&self, specs: &[ConstraintSpec]) -> String {
         use std::fmt::Write as _;
 
-        let mut s = format!("{{\"feasible\":{},\"total_violation\":", self.feasible);
-        if self.elastic.total_violation.is_finite() {
-            let _ = write!(s, "{:.3e}", self.elastic.total_violation);
-        } else {
-            s.push_str("null");
+        if let Some(reason) = self.invalid_reason(specs) {
+            let mut invalid = "{\"valid\":false,\"reason\":".to_string();
+            push_json_string(&mut invalid, reason);
+            invalid.push_str(
+                ",\"feasible\":false,\"total_violation\":null,\"core\":[],\"repairs\":[]}",
+            );
+            return invalid;
         }
+
+        let mut s = format!("{{\"feasible\":{},\"total_violation\":", self.feasible);
+        let _ = write!(s, "{:.3e}", self.elastic.total_violation);
         s.push_str(",\"core\":[");
         for (k, &i) in self.core.iter().enumerate() {
             if k > 0 {
                 s.push(',');
             }
-            if let Some(spec) = specs.get(i) {
-                push_json_string(&mut s, &spec.name);
-            } else {
-                s.push_str("null");
-            }
+            push_json_string(&mut s, &specs[i].name);
         }
         s.push_str("],\"repairs\":[");
         for (k, r) in self.repairs.iter().enumerate() {
@@ -304,11 +458,7 @@ impl Diagnosis {
             s.push_str("{\"action\":");
             push_json_string(&mut s, &r.description);
             s.push_str(",\"est_feasible\":");
-            if r.feasibility_estimate.is_finite() {
-                let _ = write!(s, "{:.2}", r.feasibility_estimate);
-            } else {
-                s.push_str("null");
-            }
+            let _ = write!(s, "{:.2}", r.feasibility_estimate);
             s.push('}');
         }
         s.push_str("]}");
@@ -325,10 +475,14 @@ fn feasible_fraction(
     relax: &[(usize, f64)],
     drop: Option<usize>,
     samples: u32,
+    cx: &Cx<'_>,
 ) -> Result<f64, ConError> {
     let mut rng = Lcg(0x1001_2026_0707_0002);
     let mut hits = 0u32;
-    for _ in 0..samples {
+    for sample in 0..samples {
+        if sample % u32::try_from(CANCELLATION_STRIDE).expect("small stride") == 0 {
+            checkpoint(cx)?;
+        }
         let x: Vec<f64> = domain
             .ranges
             .iter()
@@ -336,6 +490,9 @@ fn feasible_fraction(
             .collect();
         let mut ok = true;
         for (i, spec) in specs.iter().enumerate() {
+            if i % CANCELLATION_STRIDE == 0 {
+                checkpoint(cx)?;
+            }
             if Some(i) == drop {
                 continue;
             }
@@ -381,6 +538,7 @@ pub fn diagnose_infeasibility(
     domain: &DomainBox,
     cx: &Cx<'_>,
 ) -> Result<Diagnosis, ConError> {
+    checkpoint(cx)?;
     let elastic = elastic_solve(problem, specs, domain, &[], cx)?;
     if elastic.total_violation <= FEAS_TOL {
         return Ok(Diagnosis {
@@ -413,6 +571,7 @@ pub fn diagnose_infeasibility(
     // jointly infeasible, so that invariant is preserved at every step.
     let mut k = 0;
     while k < core.len() {
+        checkpoint(cx)?;
         let mut without_members = core.clone();
         without_members.remove(k);
         let without = elastic_solve_subset(problem, specs, domain, &without_members, cx)?;
@@ -431,10 +590,17 @@ pub fn diagnose_infeasibility(
     // soft; estimate feasibility by Monte-Carlo volume; rank.
     let mut repairs = Vec::new();
     for &i in &core {
+        checkpoint(cx)?;
         let scale = elastic.violations[i].max(FEAS_TOL);
         for factor in [1.1, 1.5] {
             let slack = scale * factor;
-            let est = feasible_fraction(problem, specs, domain, &[(i, slack)], None, 400)?;
+            if !slack.is_finite() {
+                return Err(ConError::BadParam {
+                    what: "repair slack",
+                    value: slack,
+                });
+            }
+            let est = feasible_fraction(problem, specs, domain, &[(i, slack)], None, 400, cx)?;
             repairs.push(RepairAction {
                 description: format!("relax `{}` by {slack:.3} (g <= {slack:.3})", specs[i].name),
                 kind: RepairKind::RelaxBound { index: i, slack },
@@ -442,7 +608,7 @@ pub fn diagnose_infeasibility(
             });
         }
         if matches!(specs[i].kind, crate::ConstraintKind::Soft(_)) {
-            let est = feasible_fraction(problem, specs, domain, &[], Some(i), 400)?;
+            let est = feasible_fraction(problem, specs, domain, &[], Some(i), 400, cx)?;
             repairs.push(RepairAction {
                 description: format!("drop soft constraint `{}`", specs[i].name),
                 kind: RepairKind::DropSoft { index: i },

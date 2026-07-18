@@ -203,7 +203,7 @@ fn fscon_001_taxonomy_and_roundtrip() {
     let text = serialize_specs(&specs);
     let back = parse_specs(&text).expect("round-trip");
     let roundtrip = back == specs;
-    let garbage = parse_specs("fscon v1\nwat\n");
+    let garbage = parse_specs("fscon v2\nwat\n");
     let teaches = matches!(garbage, Err(ConError::Parse { line: 2, .. }));
     // Ledger row through fs-obs.
     let ev = evaluate(&host.problem, &specs[0], &[0.2, 0.2], None).expect("eval");
@@ -352,7 +352,8 @@ fn fscon_004_certification_and_robust() {
     let (proven, artifact) =
         prove_interval(&host.problem, &cert, &[(0.0, 1.0), (0.0, 1.0)]).expect("proof");
     let proven_ok = proven.status == Status::Proven
-        && matches!(artifact, fs_constraint::ProofArtifact::IntervalBound { hi } if hi <= 0.0);
+        && artifact.interval_bound().hi <= 0.0
+        && artifact.is_bound_to(&host.problem, cert.node, &[(0.0, 1.0), (0.0, 1.0)]);
     // Unprovable domain: [0,2]² has hi = 1 > 0 → honest refusal.
     let refused = prove_interval(&host.problem, &cert, &[(0.0, 2.0), (0.0, 2.0)]);
     let honest = matches!(refused, Err(ConError::NotProvable { ref why }) if why.contains("upper"));
@@ -674,6 +675,10 @@ fn fscon_006_repairs_calibrated() {
         }
         let calibrated = worst_gap < 0.05;
         let payload = diag.to_json(&specs);
+        assert!(
+            !payload.contains("\"valid\":false"),
+            "solver-produced diagnosis must satisfy its own evidence invariants: {payload}"
+        );
         let mut em = fs_obs::Emitter::new("fs-constraint/conformance", "fscon-006/diagnosis");
         let line = em
             .emit(
@@ -839,6 +844,11 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
         let report = elastic_solve(&host.problem, &specs, &fixed, &[], cx)
             .expect("zero-width axes are valid fixed coordinates");
         assert_eq!(report.x, vec![0.0, 1.0]);
+        assert_eq!(
+            report.total_violation,
+            report.violations.iter().sum::<f64>(),
+            "published components are the authority for the published total"
+        );
         assert!(report.total_violation <= 1e-6);
     });
 }
@@ -860,12 +870,35 @@ fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
     assert!(row.contains("\\b"));
     assert!(row.contains("\\f"));
     assert!(row.contains("\\u0001"));
+    assert!(row.contains("\"valid\":false"));
+    assert!(row.contains("\"reason\":\"nonfinite-violation\""));
+    assert!(row.contains("\"status\":\"no-claim\""));
     assert!(row.contains("\"violation\":null,\"penalty\":null"));
     assert!(!row.chars().any(|ch| ch <= '\u{001f}'));
+    assert_eq!(row, evidence.to_ledger_row());
+
+    let mut bad_penalty = evaluate(&host.problem, &spec, &[0.0, 0.0], None).expect("evidence");
+    bad_penalty.penalty = f64::INFINITY;
+    let bad_penalty_row = bad_penalty.to_ledger_row();
+    assert!(bad_penalty_row.contains("\"status\":\"no-claim\""));
+    assert!(bad_penalty_row.contains("\"reason\":\"nonfinite-penalty\""));
+
+    let mut bad_certificate = evaluate(&host.problem, &spec, &[0.0, 0.0], None).expect("evidence");
+    bad_certificate.certificate.lo = f64::NAN;
+    let bad_certificate_row = bad_certificate.to_ledger_row();
+    assert!(bad_certificate_row.contains("\"status\":\"no-claim\""));
+    assert!(bad_certificate_row.contains("\"reason\":\"nonfinite-numerical-certificate\""));
+
+    let mut wrong_certificate_kind =
+        evaluate(&host.problem, &spec, &[0.0, 0.0], None).expect("evidence");
+    wrong_certificate_kind.certificate.kind = fs_evidence::NumericalKind::Estimate;
+    let wrong_certificate_row = wrong_certificate_kind.to_ledger_row();
+    assert!(wrong_certificate_row.contains("\"status\":\"no-claim\""));
+    assert!(wrong_certificate_row.contains("\"reason\":\"numerical-certificate-kind-mismatch\""));
 
     let diagnosis = Diagnosis {
-        feasible: false,
-        witness: None,
+        feasible: true,
+        witness: Some(vec![0.0, 0.0]),
         core: vec![0, usize::MAX],
         repairs: vec![RepairAction {
             description: hostile.to_string(),
@@ -882,13 +915,53 @@ fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
             evals: 0,
         },
     };
-    let payload = diagnosis.to_json(&[spec]);
+    let payload = diagnosis.to_json(std::slice::from_ref(&spec));
+    assert!(payload.contains("\"valid\":false"));
+    assert!(payload.contains("\"reason\":\"nonfinite-total-violation\""));
+    assert!(payload.contains("\"feasible\":false"));
     assert!(payload.contains("\"total_violation\":null"));
-    assert!(payload.contains(",null],\"repairs\""));
-    assert!(payload.contains("\"est_feasible\":null"));
+    assert!(payload.contains("\"core\":[],\"repairs\":[]"));
     assert!(!payload.chars().any(|ch| ch <= '\u{001f}'));
+    assert_eq!(payload, diagnosis.to_json(std::slice::from_ref(&spec)));
 
-    for (name, json) in [("hostile-ledger", row), ("hostile-diagnosis", payload)] {
+    let mut inconsistent_claim = diagnosis.clone();
+    inconsistent_claim.elastic.total_violation = 0.0;
+    inconsistent_claim.elastic.violations = vec![0.0];
+    let inconsistent_payload = inconsistent_claim.to_json(std::slice::from_ref(&spec));
+    assert!(inconsistent_payload.contains("\"valid\":false"));
+    assert!(inconsistent_payload.contains("\"feasible\":false"));
+    assert!(inconsistent_payload.contains("\"reason\":\"unknown-core-constraint\""));
+
+    let valid_hostile = Diagnosis {
+        feasible: false,
+        witness: None,
+        core: vec![0],
+        repairs: vec![RepairAction {
+            description: hostile.to_string(),
+            kind: RepairKind::RelaxBound {
+                index: 0,
+                slack: 1.0,
+            },
+            feasibility_estimate: 0.5,
+        }],
+        elastic: ElasticReport {
+            x: vec![0.0, 0.0],
+            total_violation: 1.0,
+            violations: vec![1.0],
+            evals: 1,
+        },
+    };
+    let valid_payload = valid_hostile.to_json(std::slice::from_ref(&spec));
+    assert!(valid_payload.contains("\\\""));
+    assert!(valid_payload.contains("\\\\"));
+    assert!(valid_payload.contains("\\n"));
+    assert!(!valid_payload.chars().any(|ch| ch <= '\u{001f}'));
+
+    for (name, json) in [
+        ("hostile-ledger", row),
+        ("invalid-diagnosis", payload),
+        ("hostile-diagnosis", valid_payload),
+    ] {
         let mut emitter = fs_obs::Emitter::new("fs-constraint/conformance", name);
         let line = emitter
             .emit(
@@ -902,6 +975,496 @@ fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
             .to_jsonl();
         fs_obs::validate_line(&line).expect("hostile JSON payload remains valid");
     }
+}
+
+#[test]
+fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
+    let host = linear_host(&[(1.0, 0.0, 1.0)]);
+    let x = [0.0, 0.0];
+    let min_subnormal = f64::from_bits(1);
+
+    for active_tol in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -min_subnormal] {
+        let mut spec = hard("tol", host.nodes[0]);
+        spec.active_tol = active_tol;
+        assert!(matches!(
+            evaluate(&host.problem, &spec, &x, None),
+            Err(ConError::BadParam {
+                what: "active-set tolerance",
+                ..
+            })
+        ));
+    }
+    for active_tol in [-0.0, 0.0, min_subnormal] {
+        let mut spec = hard("tol-neighbor", host.nodes[0]);
+        spec.active_tol = active_tol;
+        assert!(evaluate(&host.problem, &spec, &x, None).is_ok());
+    }
+
+    for weight in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -min_subnormal] {
+        let spec = ConstraintSpec {
+            name: "soft".into(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Soft(PenaltyLaw::Hinge { weight }),
+            active_tol: 0.0,
+        };
+        assert!(matches!(
+            evaluate(&host.problem, &spec, &[2.0, 0.0], None),
+            Err(ConError::BadParam {
+                what: "soft-constraint weight",
+                ..
+            })
+        ));
+    }
+    for weight in [-0.0, 0.0, min_subnormal, 1.0] {
+        let spec = ConstraintSpec {
+            name: "soft-neighbor".into(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Soft(PenaltyLaw::Quadratic { weight }),
+            active_tol: 0.0,
+        };
+        let evidence = evaluate(&host.problem, &spec, &[2.0, 0.0], None).expect("valid weight");
+        assert!(evidence.penalty.is_finite() && evidence.penalty >= 0.0);
+    }
+    let overflowing_penalty = ConstraintSpec {
+        name: "overflow".into(),
+        node: host.nodes[0],
+        kind: ConstraintKind::Soft(PenaltyLaw::Quadratic { weight: f64::MAX }),
+        active_tol: 0.0,
+    };
+    assert!(matches!(
+        evaluate(&host.problem, &overflowing_penalty, &[3.0, 0.0], None),
+        Err(ConError::BadParam {
+            what: "soft-constraint penalty result",
+            ..
+        })
+    ));
+
+    for half_widths in [
+        vec![-min_subnormal, 0.0],
+        vec![f64::NAN, 0.0],
+        vec![f64::INFINITY, 0.0],
+        vec![0.0],
+        Vec::new(),
+    ] {
+        let spec = ConstraintSpec {
+            name: "robust".into(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Robust { half_widths },
+            active_tol: 0.0,
+        };
+        assert!(matches!(
+            evaluate(&host.problem, &spec, &x, None),
+            Err(ConError::BadParam { .. })
+        ));
+    }
+    let span_overflow = ConstraintSpec {
+        name: "robust-overflow".into(),
+        node: host.nodes[0],
+        kind: ConstraintKind::Robust {
+            half_widths: vec![f64::MAX, 0.0],
+        },
+        active_tol: 0.0,
+    };
+    assert!(matches!(
+        evaluate(&host.problem, &span_overflow, &x, None),
+        Err(ConError::BadParam {
+            what: "robust interval range",
+            ..
+        })
+    ));
+    for half_width in [-0.0, 0.0, min_subnormal, f64::MAX / 2.0] {
+        let spec = ConstraintSpec {
+            name: "robust-neighbor".into(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Robust {
+                half_widths: vec![half_width, 0.0],
+            },
+            active_tol: 0.0,
+        };
+        assert!(evaluate(&host.problem, &spec, &x, None).is_ok());
+    }
+
+    let confidence_rounding_tie = f64::EPSILON / 4.0;
+    for delta in [min_subnormal, confidence_rounding_tie] {
+        let unrepresentable_delta = ConstraintSpec {
+            name: "unrepresentable-delta".into(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Chance {
+                level: 0.5,
+                estimator: ChanceEstimator::MonteCarlo { samples: 1, delta },
+            },
+            active_tol: 0.0,
+        };
+        assert!(matches!(
+            evaluate(&host.problem, &unrepresentable_delta, &x, None),
+            Err(ConError::BadParam {
+                what: "chance confidence representation",
+                ..
+            })
+        ));
+    }
+    let first_delta_above_tie = f64::from_bits(confidence_rounding_tie.to_bits() + 1);
+    let representable_delta = ConstraintSpec {
+        name: "representable-delta".into(),
+        node: host.nodes[0],
+        kind: ConstraintKind::Chance {
+            level: 0.5,
+            estimator: ChanceEstimator::MonteCarlo {
+                samples: 1,
+                delta: first_delta_above_tie,
+            },
+        },
+        active_tol: 0.0,
+    };
+    let zero_noise = |_sample: u64| vec![0.0, 0.0];
+    let representable_delta_evidence =
+        evaluate(&host.problem, &representable_delta, &x, Some(&zero_noise))
+            .expect("a confidence-distinguishable delta is admitted");
+    assert!(matches!(
+        representable_delta_evidence.statistical,
+        fs_evidence::StatisticalCertificate::HalfWidth { half_width, .. }
+            if half_width.is_finite()
+    ));
+    let mut wrong_statistical_kind = representable_delta_evidence.clone();
+    wrong_statistical_kind.statistical = fs_evidence::StatisticalCertificate::EValue {
+        e: 1.0,
+        alpha: 0.05,
+    };
+    assert!(
+        wrong_statistical_kind
+            .to_ledger_row()
+            .contains("\"reason\":\"chance-statistical-certificate-kind-mismatch\"")
+    );
+    let short_noise = |_sample: u64| vec![0.0];
+    let long_noise = |_sample: u64| vec![0.0, 0.0, 0.0];
+    for bad_noise in [
+        &short_noise as &dyn Fn(u64) -> Vec<f64>,
+        &long_noise as &dyn Fn(u64) -> Vec<f64>,
+    ] {
+        assert!(matches!(
+            evaluate(&host.problem, &representable_delta, &x, Some(bad_noise)),
+            Err(ConError::BadParam {
+                what: "chance noise draw dimension",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn interval_proofs_refuse_bad_boxes_and_wrong_proof_kinds_and_bind_subjects() {
+    let host = linear_host(&[(1.0, 0.0, 1.0), (0.0, 1.0, 1.0)]);
+    let interval_spec = ConstraintSpec {
+        name: "interval".into(),
+        node: host.nodes[0],
+        kind: ConstraintKind::Certification {
+            proof: ProofKind::Interval,
+        },
+        active_tol: 0.0,
+    };
+    for domain in [
+        [(1.0, 0.0), (0.0, 1.0)],
+        [(f64::NAN, 1.0), (0.0, 1.0)],
+        [(0.0, f64::INFINITY), (0.0, 1.0)],
+        [(-f64::MAX, f64::MAX), (0.0, 1.0)],
+    ] {
+        assert!(matches!(
+            interval_eval(&host.problem, interval_spec.node, &domain),
+            Err(fs_constraint::IvalError::BadBindings)
+        ));
+        assert!(matches!(
+            prove_interval(&host.problem, &interval_spec, &domain),
+            Err(ConError::NotProvable { .. })
+        ));
+    }
+    for domain in [[(0.0, 0.0), (1.0, 1.0)], [(-f64::MAX, 0.0), (0.0, 1.0)]] {
+        assert!(interval_eval(&host.problem, interval_spec.node, &domain).is_ok());
+    }
+    for domain in [vec![(0.0, 1.0)], vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]] {
+        assert!(matches!(
+            interval_eval(&host.problem, interval_spec.node, &domain),
+            Err(fs_constraint::IvalError::BadBindings)
+        ));
+        assert!(matches!(
+            prove_interval(&host.problem, &interval_spec, &domain),
+            Err(ConError::NotProvable { .. })
+        ));
+    }
+
+    let mut multi_builder = ProblemBuilder::new();
+    let multi_x = multi_builder
+        .var("x", Manifold::Rn { dim: 1 }, Dims::NONE)
+        .expect("x");
+    multi_builder
+        .var("y", Manifold::Rn { dim: 1 }, Dims::NONE)
+        .expect("y");
+    let multi_ref = multi_builder.var_ref(multi_x).expect("x ref");
+    let multi_node = multi_builder.norm_sq(multi_ref).expect("objective");
+    multi_builder
+        .objective(multi_node, fs_opt::Sense::Minimize, 1.0)
+        .expect("objective");
+    let multi_problem = multi_builder.finish();
+    assert!(matches!(
+        interval_eval(&multi_problem, multi_node, &[(0.0, 1.0)]),
+        Err(fs_constraint::IvalError::BadBindings)
+    ));
+
+    let mut constant_builder = ProblemBuilder::new();
+    let constant_node = constant_builder.konst(-1.0, Dims::NONE).expect("constant");
+    constant_builder
+        .objective(constant_node, fs_opt::Sense::Minimize, 1.0)
+        .expect("objective");
+    let constant_problem = constant_builder.finish();
+    let constant_spec = ConstraintSpec {
+        name: "constant-proof".into(),
+        node: constant_node,
+        kind: ConstraintKind::Certification {
+            proof: ProofKind::Interval,
+        },
+        active_tol: 0.0,
+    };
+    let (constant_evidence, constant_artifact) =
+        prove_interval(&constant_problem, &constant_spec, &[]).expect("constant proof");
+    assert!(constant_artifact.verifies_evidence(&constant_evidence));
+    assert!(constant_artifact.is_bound_to(&constant_problem, constant_node, &[]));
+    assert!(matches!(
+        interval_eval(&constant_problem, constant_node, &[(0.0, 0.0)]),
+        Err(fs_constraint::IvalError::BadBindings)
+    ));
+
+    let mut sphere_builder = ProblemBuilder::new();
+    let sphere = sphere_builder
+        .var("sphere", Manifold::Sphere { ambient: 2 }, Dims::NONE)
+        .expect("sphere");
+    let sphere_ref = sphere_builder.var_ref(sphere).expect("sphere ref");
+    let sphere_node = sphere_builder.norm_sq(sphere_ref).expect("objective");
+    sphere_builder
+        .objective(sphere_node, fs_opt::Sense::Minimize, 1.0)
+        .expect("objective");
+    let sphere_problem = sphere_builder.finish();
+    assert!(matches!(
+        interval_eval(&sphere_problem, sphere_node, &[(0.0, 1.0), (0.0, 1.0)]),
+        Err(fs_constraint::IvalError::BadBindings)
+    ));
+
+    let sos = ConstraintSpec {
+        kind: ConstraintKind::Certification {
+            proof: ProofKind::Sos,
+        },
+        ..interval_spec.clone()
+    };
+    let sos_intent = evaluate(&host.problem, &sos, &[0.0, 0.0], None)
+        .expect("SOS intent remains representable without a forged artifact");
+    assert_eq!(
+        sos_intent.status,
+        Status::NeedsProof {
+            proof: ProofKind::Sos
+        }
+    );
+    assert!(
+        sos_intent
+            .to_ledger_row()
+            .contains("\"status\":\"needs-proof:Sos\"")
+    );
+    assert_eq!(
+        prove_interval(&host.problem, &sos, &[(0.0, 1.0), (0.0, 1.0)]).unwrap_err(),
+        ConError::ProofKindMismatch {
+            requested: Some(ProofKind::Sos),
+            attempted: ProofKind::Interval,
+        }
+    );
+    let hard_spec = hard("not-certification", host.nodes[0]);
+    assert_eq!(
+        prove_interval(&host.problem, &hard_spec, &[(0.0, 1.0), (0.0, 1.0)],).unwrap_err(),
+        ConError::ProofKindMismatch {
+            requested: None,
+            attempted: ProofKind::Interval,
+        }
+    );
+
+    let domain = [(0.0, 0.5), (0.0, 0.5)];
+    let (mut proven_evidence, artifact) =
+        prove_interval(&host.problem, &interval_spec, &domain).expect("admitted proof");
+    assert!(artifact.verifies_evidence(&proven_evidence));
+    assert_eq!(
+        proven_evidence.proof_bound(),
+        Some(artifact.interval_bound())
+    );
+    let proven_row = proven_evidence.to_ledger_row();
+    assert!(proven_row.contains("\"status\":\"proven\""));
+    assert!(proven_row.contains("\"proof_subject\":"));
+    assert!(proven_row.contains("\"proof_bound_bits\":"));
+    assert!(proven_row.contains(&artifact.subject().problem().to_hex()));
+    let neighbor_domain = [(0.0, 0.25), (0.0, 0.5)];
+    let (neighbor_evidence, neighbor_artifact) =
+        prove_interval(&host.problem, &interval_spec, &neighbor_domain).expect("neighbor proof");
+    assert!(neighbor_artifact.verifies_evidence(&neighbor_evidence));
+    assert!(!artifact.verifies_evidence(&neighbor_evidence));
+    assert!(!neighbor_artifact.verifies_evidence(&proven_evidence));
+    proven_evidence.status = Status::Satisfied;
+    let downgraded = proven_evidence.to_ledger_row();
+    assert!(downgraded.contains("\"status\":\"no-claim\""));
+    assert!(downgraded.contains("\"reason\":\"unexpected-proof-evidence\""));
+    assert!(!artifact.verifies_evidence(&proven_evidence));
+    assert!(artifact.is_bound_to(&host.problem, interval_spec.node, &domain));
+    assert!(!artifact.is_bound_to(
+        &host.problem,
+        interval_spec.node,
+        &[(0.0, 0.5), (0.0, 0.75)],
+    ));
+    assert!(!artifact.is_bound_to(&host.problem, host.nodes[1], &domain));
+    let signed_zero_domain = [(-0.0, 0.5), (0.0, 0.5)];
+    assert!(!artifact.is_bound_to(&host.problem, interval_spec.node, &signed_zero_domain,));
+    assert_eq!(artifact.subject().node(), interval_spec.node);
+    assert_eq!(artifact.subject().domain_bits()[0].0, 0.0f64.to_bits());
+}
+
+#[test]
+fn fscon_v2_wire_encoding_is_injective_and_raw_policies_are_admitted() {
+    let host = linear_host(&[(1.0, 0.0, 1.0)]);
+    let min_subnormal = f64::from_bits(1);
+    let confidence_rounding_tie = f64::EPSILON / 4.0;
+    let first_delta_above_tie = f64::from_bits(confidence_rounding_tie.to_bits() + 1);
+    let specs = vec![
+        ConstraintSpec {
+            name: "literal%20 versus space \n tab\t and 🧬".into(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Fabrication {
+                process: "%20 process name".into(),
+            },
+            active_tol: -0.0,
+        },
+        ConstraintSpec {
+            name: String::new(),
+            node: host.nodes[0],
+            kind: ConstraintKind::Code {
+                standard: String::new(),
+            },
+            active_tol: f64::MIN_POSITIVE,
+        },
+    ];
+    let encoded = serialize_specs(&specs);
+    assert!(encoded.starts_with("fscon v2\n"));
+    assert!(encoded.contains("literal%2520%20versus%20space%20%0A%20tab%09"));
+    assert_eq!(parse_specs(&encoded).expect("canonical round trip"), specs);
+    assert_eq!(serialize_specs(&parse_specs(&encoded).unwrap()), encoded);
+
+    let mut literal = hard("%20", host.nodes[0]);
+    literal.active_tol = 0.0;
+    let mut space = literal.clone();
+    space.name = " ".into();
+    assert_ne!(serialize_specs(&[literal]), serialize_specs(&[space]));
+    let empty = hard("", host.nodes[0]);
+    let percent = hard("%", host.nodes[0]);
+    assert_ne!(serialize_specs(&[empty]), serialize_specs(&[percent]));
+
+    let raw = |tol: f64, kind: &str| {
+        format!("fscon v2\nconstraint bad 0 {:016X} {kind}\n", tol.to_bits())
+    };
+    for text in [
+        raw(f64::NAN, "hard"),
+        raw(f64::INFINITY, "hard"),
+        raw(-min_subnormal, "hard"),
+        raw(0.0, &format!("soft hinge {:016X}", f64::NAN.to_bits())),
+        raw(0.0, &format!("soft quadratic {:016X}", (-1.0f64).to_bits())),
+        raw(
+            0.0,
+            &format!("robust {:016X},{:016X}", f64::INFINITY.to_bits(), 0),
+        ),
+        raw(
+            0.0,
+            &format!(
+                "chance {:016X} mc 4 {:016X}",
+                0.9f64.to_bits(),
+                f64::NAN.to_bits()
+            ),
+        ),
+        raw(
+            0.0,
+            &format!(
+                "chance {:016X} mc 4 {:016X}",
+                f64::INFINITY.to_bits(),
+                0.05f64.to_bits()
+            ),
+        ),
+        raw(
+            0.0,
+            &format!(
+                "chance {:016X} mc 1 {:016X}",
+                0.5f64.to_bits(),
+                min_subnormal.to_bits()
+            ),
+        ),
+        raw(
+            0.0,
+            &format!(
+                "chance {:016X} mc 1 {:016X}",
+                0.5f64.to_bits(),
+                confidence_rounding_tie.to_bits()
+            ),
+        ),
+    ] {
+        assert!(matches!(parse_specs(&text), Err(ConError::Parse { .. })));
+    }
+    for text in [
+        raw(-0.0, "hard"),
+        raw(0.0, &format!("soft hinge {:016X}", (-0.0f64).to_bits())),
+        raw(
+            0.0,
+            &format!("robust {:016X},{:016X}", (-0.0f64).to_bits(), 0),
+        ),
+        raw(
+            0.0,
+            &format!(
+                "chance {:016X} mc 1 {:016X}",
+                0.5f64.to_bits(),
+                first_delta_above_tie.to_bits()
+            ),
+        ),
+    ] {
+        assert!(
+            parse_specs(&text).is_ok(),
+            "boundary neighbor must admit: {text}"
+        );
+    }
+    assert!(parse_specs("fscon v2\nconstraint %2f 0 0000000000000000 hard\n").is_err());
+    assert!(parse_specs("fscon v2\nconstraint %41 0 0000000000000000 hard\n").is_err());
+    assert!(parse_specs("fscon v1\n").is_err());
+}
+
+#[test]
+fn a_pre_cancelled_elastic_solve_refuses_before_expression_evaluation() {
+    let host = linear_host(&[(1.0, 0.0, 1.0)]);
+    let forged = [hard("must-not-evaluate", NodeId(u32::MAX))];
+    let gate = CancelGate::new();
+    gate.request();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: EXECUTION_SEED,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        assert!(matches!(
+            elastic_solve(
+                &host.problem,
+                &forged,
+                &DomainBox {
+                    ranges: vec![(0.0, 1.0), (0.0, 1.0)],
+                },
+                &[],
+                &cx,
+            ),
+            Err(ConError::Eval(fs_opt::OptError::Cancelled))
+        ));
+    });
 }
 
 const _: () = {

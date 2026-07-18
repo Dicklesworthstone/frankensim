@@ -31,10 +31,10 @@ pub use diagnose::{
     Diagnosis, DomainBox, ElasticReport, RepairAction, RepairKind, diagnose_infeasibility,
     elastic_solve,
 };
-pub use ival::{Iv, IvalError, interval_eval};
+pub use ival::{Iv, IvalError};
 
-use fs_evidence::{NumericalCertificate, StatisticalCertificate};
-use fs_opt::{Manifold, NodeId, Problem};
+use fs_evidence::{NumericalCertificate, NumericalKind, StatisticalCertificate};
+use fs_opt::{Manifold, NodeId, Problem, ProblemSemanticId};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -59,6 +59,85 @@ pub(crate) fn push_json_string(out: &mut String, value: &str) {
         }
     }
     out.push('"');
+}
+
+fn wire_token_is_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+fn encode_wire_token(value: &str) -> String {
+    use core::fmt::Write as _;
+
+    // A lone percent is the empty-token sentinel. A literal percent is always
+    // `%25`, so the sentinel cannot collide with caller text.
+    if value.is_empty() {
+        return "%".to_string();
+    }
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if wire_token_is_safe(byte) {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn decode_wire_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_wire_token(token: &str, line: usize, field: &'static str) -> Result<String, ConError> {
+    if token == "%" {
+        return Ok(String::new());
+    }
+    let bytes = token.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let Some((&hi, &lo)) = bytes.get(index + 1).zip(bytes.get(index + 2)) else {
+                return Err(ConError::Parse {
+                    line,
+                    what: format!("truncated percent escape in {field}"),
+                });
+            };
+            let value = decode_wire_nibble(hi)
+                .zip(decode_wire_nibble(lo))
+                .map(|(hi, lo)| (hi << 4) | lo)
+                .ok_or_else(|| ConError::Parse {
+                    line,
+                    what: format!("noncanonical percent escape in {field}"),
+                })?;
+            decoded.push(value);
+            index += 3;
+        } else if wire_token_is_safe(byte) {
+            decoded.push(byte);
+            index += 1;
+        } else {
+            return Err(ConError::Parse {
+                line,
+                what: format!("unescaped byte in {field}"),
+            });
+        }
+    }
+    let decoded = String::from_utf8(decoded).map_err(|_| ConError::Parse {
+        line,
+        what: format!("{field} is not valid UTF-8"),
+    })?;
+    if encode_wire_token(&decoded) != token {
+        return Err(ConError::Parse {
+            line,
+            what: format!("noncanonical encoding of {field}"),
+        });
+    }
+    Ok(decoded)
 }
 
 /// How a chance constraint's probability is estimated.
@@ -86,19 +165,101 @@ pub enum ProofKind {
     Sos,
 }
 
-/// A proof artifact attached to a certification constraint.
+/// Exact subject identity for a proof artifact.
+///
+/// The problem component is the admitted, full-width semantic identity from
+/// `fs-opt`; the node and every domain endpoint remain exact rather than being
+/// collapsed into a local short hash. Fields are sealed so callers cannot mint
+/// an apparently admitted subject by struct literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofSubject {
+    problem: ProblemSemanticId,
+    node: NodeId,
+    domain_bits: Vec<(u64, u64)>,
+}
+
+impl ProofSubject {
+    /// Admitted problem semantic identity.
+    #[must_use]
+    pub fn problem(&self) -> ProblemSemanticId {
+        self.problem
+    }
+
+    /// Exact scalar expression node proved.
+    #[must_use]
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// Exact `(lo_bits, hi_bits)` sequence of the proved domain.
+    #[must_use]
+    pub fn domain_bits(&self) -> &[(u64, u64)] {
+        &self.domain_bits
+    }
+
+    fn push_json(&self, out: &mut String) {
+        use core::fmt::Write as _;
+
+        out.push_str("{\"problem\":");
+        push_json_string(out, &self.problem.to_hex());
+        let _ = write!(out, ",\"node\":{},\"domain_bits\":[", self.node.0);
+        for (index, &(lo, hi)) in self.domain_bits.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "[\"{lo:016X}\",\"{hi:016X}\"]");
+        }
+        out.push_str("]}");
+    }
+}
+
+/// A sealed interval-proof artifact attached to a certification constraint.
+///
+/// Only [`prove_interval`] mints this type. It binds both ends of the computed
+/// enclosure to the admitted problem, exact node, and exact domain bytes; an
+/// artifact from another constraint or box therefore cannot be confused with
+/// this subject by a consumer that checks [`Self::is_bound_to`].
 #[derive(Debug, Clone, PartialEq)]
-pub enum ProofArtifact {
-    /// Interval proof: `hi ≤ 0` over the domain box (carried bound).
-    IntervalBound {
-        /// The proven upper bound of `g` over the domain.
-        hi: f64,
-    },
-    /// An external SOS certificate reference (opaque until fs-sos).
-    SosReference {
-        /// Artifact identifier.
-        id: String,
-    },
+pub struct ProofArtifact {
+    subject: ProofSubject,
+    bound: Iv,
+}
+
+impl ProofArtifact {
+    /// The exact proof subject.
+    #[must_use]
+    pub fn subject(&self) -> &ProofSubject {
+        &self.subject
+    }
+
+    /// The carried interval enclosure.
+    #[must_use]
+    pub fn interval_bound(&self) -> Iv {
+        self.bound
+    }
+
+    /// Whether this artifact is bound to this admitted problem, node, and
+    /// exact domain spelling. Invalid domains or inadmissible problems return
+    /// `false`; this check never upgrades a malformed subject.
+    #[must_use]
+    pub fn is_bound_to(&self, problem: &Problem, node: NodeId, domain: &[(f64, f64)]) -> bool {
+        proof_subject(problem, node, domain).is_ok_and(|subject| subject == self.subject)
+    }
+
+    /// Whether this sealed artifact is the exact proof retained by a valid
+    /// `Proven` evidence value. This compares the full subject and both
+    /// interval endpoint bits; a proof for a neighboring box cannot authorize
+    /// the evidence even when its human-readable bounds happen to round alike.
+    #[must_use]
+    pub fn verifies_evidence(&self, evidence: &ConstraintEvidence) -> bool {
+        evidence.invalid_reason().is_none()
+            && matches!(evidence.status, Status::Proven)
+            && evidence.proof_subject.as_ref() == Some(&self.subject)
+            && evidence.proof_bound.is_some_and(|bound| {
+                bound.lo.to_bits() == self.bound.lo.to_bits()
+                    && bound.hi.to_bits() == self.bound.hi.to_bits()
+            })
+    }
 }
 
 /// Soft-constraint penalty laws.
@@ -277,14 +438,201 @@ pub struct ConstraintEvidence {
     pub role: ActiveRole,
     /// Soft-kind penalty contribution (0 otherwise).
     pub penalty: f64,
+    /// Sealed exact proof-subject binding for `Proven` evidence.
+    proof_subject: Option<ProofSubject>,
+    /// Exact interval whose upper endpoint cleared zero for `Proven` evidence.
+    proof_bound: Option<Iv>,
 }
 
 impl ConstraintEvidence {
-    /// Canonical ledger row (Rev S table shape). Dynamic text is escaped and
-    /// non-finite public numeric fields use JSON `null` sentinels.
+    fn invalid_reason(&self) -> Option<&'static str> {
+        if !matches!(
+            self.kind,
+            "hard" | "soft" | "chance" | "robust" | "certification" | "fabrication" | "code"
+        ) {
+            return Some("unknown-constraint-kind");
+        }
+        if !self.violation.is_finite() {
+            return Some("nonfinite-violation");
+        }
+        if self.violation < 0.0 {
+            return Some("negative-violation");
+        }
+        if !self.penalty.is_finite() {
+            return Some("nonfinite-penalty");
+        }
+        if self.penalty < 0.0 {
+            return Some("negative-penalty");
+        }
+        if self.kind != "soft" && self.penalty != 0.0 {
+            return Some("penalty-on-nonsoft-constraint");
+        }
+        if matches!(self.status, Status::Proven) {
+            if self.proof_subject.is_none() {
+                return Some("proven-status-missing-proof-subject");
+            }
+            let Some(proof_bound) = self.proof_bound else {
+                return Some("proven-status-missing-proof-bound");
+            };
+            if !proof_bound.lo.is_finite() || !proof_bound.hi.is_finite() {
+                return Some("nonfinite-proof-bound");
+            }
+            if proof_bound.lo > proof_bound.hi {
+                return Some("reversed-proof-bound");
+            }
+            if proof_bound.hi > 0.0 {
+                return Some("proof-bound-does-not-clear-zero");
+            }
+        } else if self.proof_subject.is_some() || self.proof_bound.is_some() {
+            return Some("unexpected-proof-evidence");
+        }
+        match &self.status {
+            Status::Satisfied => {
+                if self.violation != 0.0 || self.role != ActiveRole::Inactive {
+                    return Some("inconsistent-satisfied-status");
+                }
+            }
+            Status::Active => {
+                if self.role != ActiveRole::Active {
+                    return Some("inconsistent-active-status");
+                }
+            }
+            Status::Violated => {
+                if self.violation <= 0.0 || self.role != ActiveRole::Violating {
+                    return Some("inconsistent-violated-status");
+                }
+            }
+            Status::NeedsProof { .. } => {
+                if self.kind != "certification" || self.role != ActiveRole::Violating {
+                    return Some("inconsistent-needs-proof-status");
+                }
+            }
+            Status::Proven => {
+                if !matches!(self.kind, "robust" | "certification")
+                    || self.violation != 0.0
+                    || self.role != ActiveRole::Inactive
+                {
+                    return Some("inconsistent-proven-status");
+                }
+            }
+            Status::BoundNotCleared { .. } => {
+                if self.kind != "chance"
+                    || self.violation <= 0.0
+                    || self.role != ActiveRole::Violating
+                {
+                    return Some("inconsistent-bound-status");
+                }
+            }
+        }
+        let status_matches_kind = match self.kind {
+            "chance" => matches!(
+                self.status,
+                Status::Satisfied | Status::Violated | Status::BoundNotCleared { .. }
+            ),
+            "robust" => matches!(self.status, Status::Proven | Status::Violated),
+            "certification" => {
+                matches!(self.status, Status::NeedsProof { .. } | Status::Proven)
+            }
+            "hard" | "soft" | "fabrication" | "code" => matches!(
+                self.status,
+                Status::Satisfied | Status::Active | Status::Violated
+            ),
+            _ => false,
+        };
+        if !status_matches_kind {
+            return Some("status-kind-mismatch");
+        }
+        if self.certificate.kind == NumericalKind::NoClaim {
+            return Some("numerical-certificate-no-claim");
+        }
+        let expected_numerical_kind = match (self.kind, &self.status) {
+            ("chance", _) => NumericalKind::Estimate,
+            ("robust", _) | ("certification", Status::Proven) => NumericalKind::Enclosure,
+            _ => NumericalKind::Exact,
+        };
+        if self.certificate.kind != expected_numerical_kind {
+            return Some("numerical-certificate-kind-mismatch");
+        }
+        if !self.certificate.lo.is_finite() || !self.certificate.hi.is_finite() {
+            return Some("nonfinite-numerical-certificate");
+        }
+        if self.certificate.lo > self.certificate.hi {
+            return Some("reversed-numerical-certificate");
+        }
+        if self.certificate.kind == NumericalKind::Exact
+            && self.certificate.lo != self.certificate.hi
+        {
+            return Some("nonpoint-exact-certificate");
+        }
+        if self.violation < self.certificate.lo || self.violation > self.certificate.hi {
+            return Some("violation-outside-numerical-certificate");
+        }
+        match self.statistical {
+            StatisticalCertificate::None => {}
+            StatisticalCertificate::EValue { e, alpha } => {
+                if !e.is_finite() || e < 0.0 {
+                    return Some("invalid-e-value");
+                }
+                if !(alpha.is_finite() && alpha > 0.0 && alpha < 1.0) {
+                    return Some("invalid-e-value-level");
+                }
+            }
+            StatisticalCertificate::HalfWidth {
+                half_width,
+                confidence,
+            } => {
+                if !half_width.is_finite() || half_width < 0.0 {
+                    return Some("invalid-statistical-half-width");
+                }
+                if !(confidence.is_finite() && confidence > 0.0 && confidence < 1.0) {
+                    return Some("invalid-statistical-confidence");
+                }
+            }
+        }
+        if self.kind == "chance"
+            && !matches!(self.statistical, StatisticalCertificate::HalfWidth { .. })
+        {
+            return Some("chance-statistical-certificate-kind-mismatch");
+        }
+        if self.kind != "chance" && !matches!(self.statistical, StatisticalCertificate::None) {
+            return Some("statistical-certificate-on-nonchance-constraint");
+        }
+        if let Status::BoundNotCleared {
+            empirical,
+            lower_bound,
+        } = &self.status
+        {
+            if !(empirical.is_finite() && (0.0..=1.0).contains(empirical)) {
+                return Some("invalid-empirical-rate");
+            }
+            if !lower_bound.is_finite() {
+                return Some("nonfinite-lower-bound");
+            }
+            if lower_bound > empirical {
+                return Some("lower-bound-exceeds-empirical-rate");
+            }
+        }
+        None
+    }
+
+    /// Canonical ledger row (Rev S table shape). Dynamic text is escaped.
+    /// Publicly forged malformed evidence emits a deterministic invalid,
+    /// `no-claim` row rather than retaining a positive status while replacing
+    /// its required numbers with JSON `null`.
     #[must_use]
     pub fn to_ledger_row(&self) -> String {
         use core::fmt::Write as _;
+
+        if let Some(reason) = self.invalid_reason() {
+            let mut row = "{\"valid\":false,\"reason\":".to_string();
+            push_json_string(&mut row, reason);
+            row.push_str(",\"constraint\":");
+            push_json_string(&mut row, &self.name);
+            row.push_str(",\"kind\":");
+            push_json_string(&mut row, self.kind);
+            row.push_str(",\"status\":\"no-claim\",\"violation\":null,\"penalty\":null}");
+            return row;
+        }
 
         let status = match &self.status {
             Status::Satisfied => "satisfied".to_string(),
@@ -301,19 +649,36 @@ impl ConstraintEvidence {
         row.push_str(",\"status\":");
         push_json_string(&mut row, &status);
         row.push_str(",\"violation\":");
-        if self.violation.is_finite() {
-            let _ = write!(row, "{:.6e}", self.violation);
-        } else {
-            row.push_str("null");
-        }
+        let _ = write!(row, "{:.6e}", self.violation);
         row.push_str(",\"penalty\":");
-        if self.penalty.is_finite() {
-            let _ = write!(row, "{:.6e}", self.penalty);
-        } else {
-            row.push_str("null");
+        let _ = write!(row, "{:.6e}", self.penalty);
+        if let Some(subject) = &self.proof_subject {
+            row.push_str(",\"proof_subject\":");
+            subject.push_json(&mut row);
+            let proof_bound = self
+                .proof_bound
+                .expect("validated proven evidence has its proof bound");
+            let _ = write!(
+                row,
+                ",\"proof_bound_bits\":[\"{:016X}\",\"{:016X}\"]",
+                proof_bound.lo.to_bits(),
+                proof_bound.hi.to_bits()
+            );
         }
         row.push('}');
         row
+    }
+
+    /// Exact subject binding for proven evidence, when present.
+    #[must_use]
+    pub fn proof_subject(&self) -> Option<&ProofSubject> {
+        self.proof_subject.as_ref()
+    }
+
+    /// Exact interval whose upper endpoint established the proven claim.
+    #[must_use]
+    pub fn proof_bound(&self) -> Option<Iv> {
+        self.proof_bound
     }
 }
 
@@ -338,6 +703,15 @@ pub enum ConError {
         what: &'static str,
         /// Value.
         value: f64,
+    },
+    /// A proof engine was asked to mint the wrong proof kind, or to prove a
+    /// non-certification constraint.
+    ProofKindMismatch {
+        /// Proof kind declared by the constraint, if it is a certification
+        /// constraint at all.
+        requested: Option<ProofKind>,
+        /// Proof engine the caller invoked.
+        attempted: ProofKind,
     },
     /// The elastic solver's host/domain contract was not admitted.
     InvalidDomain(DomainError),
@@ -366,6 +740,13 @@ impl core::fmt::Display for ConError {
             ConError::BadParam { what, value } => {
                 write!(f, "`{what}` = {value} is outside its valid range")
             }
+            ConError::ProofKindMismatch {
+                requested,
+                attempted,
+            } => write!(
+                f,
+                "cannot satisfy requested proof {requested:?} with the {attempted:?} prover"
+            ),
             ConError::InvalidDomain(error) => write!(f, "invalid elastic domain: {error}"),
             ConError::Parse { line, what } => write!(f, "parse error at line {line}: {what}"),
         }
@@ -470,6 +851,213 @@ impl From<fs_opt::OptError> for ConError {
     }
 }
 
+fn require_finite_nonnegative(value: f64, what: &'static str) -> Result<(), ConError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(ConError::BadParam { what, value })
+    }
+}
+
+fn validate_spec_policy(spec: &ConstraintSpec, point_dim: Option<usize>) -> Result<(), ConError> {
+    require_finite_nonnegative(spec.active_tol, "active-set tolerance")?;
+    match &spec.kind {
+        ConstraintKind::Soft(PenaltyLaw::Quadratic { weight })
+        | ConstraintKind::Soft(PenaltyLaw::Hinge { weight }) => {
+            require_finite_nonnegative(*weight, "soft-constraint weight")?;
+        }
+        ConstraintKind::Chance {
+            level,
+            estimator: ChanceEstimator::MonteCarlo { samples, delta },
+        } => {
+            if !(level.is_finite() && *level > 0.0 && *level < 1.0) {
+                return Err(ConError::BadParam {
+                    what: "chance level",
+                    value: *level,
+                });
+            }
+            if !(delta.is_finite() && *delta > 0.0 && *delta < 1.0) {
+                return Err(ConError::BadParam {
+                    what: "chance failure probability (delta)",
+                    value: *delta,
+                });
+            }
+            let confidence = 1.0 - *delta;
+            if !(confidence > 0.0 && confidence < 1.0) {
+                return Err(ConError::BadParam {
+                    what: "chance confidence representation",
+                    value: confidence,
+                });
+            }
+            if *samples == 0 {
+                return Err(ConError::BadParam {
+                    what: "chance sample count",
+                    value: f64::from(*samples),
+                });
+            }
+        }
+        ConstraintKind::Robust { half_widths } => {
+            if half_widths.is_empty() {
+                return Err(ConError::BadParam {
+                    what: "robust half-width count",
+                    value: 0.0,
+                });
+            }
+            if let Some(point_dim) = point_dim
+                && half_widths.len() != point_dim
+            {
+                return Err(ConError::BadParam {
+                    what: "robust half-width count",
+                    value: half_widths.len() as f64,
+                });
+            }
+            for &half_width in half_widths {
+                require_finite_nonnegative(half_width, "robust half-width")?;
+            }
+        }
+        ConstraintKind::Hard
+        | ConstraintKind::Certification { .. }
+        | ConstraintKind::Fabrication { .. }
+        | ConstraintKind::Code { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_interval_values(boxes: &[(f64, f64)]) -> Result<(), IvalError> {
+    if boxes
+        .iter()
+        .any(|&(lo, hi)| !lo.is_finite() || !hi.is_finite() || lo > hi || !(hi - lo).is_finite())
+    {
+        Err(IvalError::BadBindings)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_interval_bindings(problem: &Problem, boxes: &[(f64, f64)]) -> Result<(), IvalError> {
+    let expected = match problem.vars() {
+        [] => 0,
+        [variable] => {
+            let Manifold::Rn { dim } = variable.manifold else {
+                return Err(IvalError::BadBindings);
+            };
+            usize::try_from(dim).map_err(|_| IvalError::BadBindings)?
+        }
+        _ => return Err(IvalError::BadBindings),
+    };
+    if boxes.len() != expected {
+        return Err(IvalError::BadBindings);
+    }
+    validate_interval_values(boxes)
+}
+
+/// Evaluate a scalar node over a direct interval box after fail-closed domain
+/// admission. A constant zero-variable problem takes an empty box; otherwise
+/// the problem must have exactly one `Rn` host and one box per component.
+/// Every endpoint must be finite and ordered, and every span must be
+/// representable; malformed bindings refuse before the interval evaluator can
+/// inspect the expression graph.
+///
+/// # Errors
+/// [`IvalError::BadBindings`] for malformed boxes, otherwise the interval
+/// engine's typed refusal.
+pub fn interval_eval(
+    problem: &Problem,
+    node: NodeId,
+    boxes: &[(f64, f64)],
+) -> Result<Iv, IvalError> {
+    validate_interval_bindings(problem, boxes)?;
+    let interval = ival::interval_eval(problem, node, boxes)?;
+    if !interval.lo.is_finite() || !interval.hi.is_finite() || interval.lo > interval.hi {
+        return Err(IvalError::BadBindings);
+    }
+    Ok(interval)
+}
+
+fn proof_subject(
+    problem: &Problem,
+    node: NodeId,
+    domain: &[(f64, f64)],
+) -> Result<ProofSubject, ConError> {
+    validate_interval_values(domain).map_err(|error| ConError::NotProvable {
+        why: error.to_string(),
+    })?;
+    let expected = match problem.vars() {
+        [] => 0,
+        [variable] => {
+            let Manifold::Rn { dim } = variable.manifold else {
+                return Err(ConError::NotProvable {
+                    why: format!(
+                        "interval proof subjects require an Rn variable, got {:?}",
+                        variable.manifold
+                    ),
+                });
+            };
+            usize::try_from(dim).map_err(|_| ConError::NotProvable {
+                why: format!("interval proof dimension {dim} is not representable on this target"),
+            })?
+        }
+        variables => {
+            return Err(ConError::NotProvable {
+                why: format!(
+                    "interval proof subjects require a zero-variable constant problem or one Rn \
+                     variable, got {} variables",
+                    variables.len()
+                ),
+            });
+        }
+    };
+    if domain.len() != expected {
+        return Err(ConError::NotProvable {
+            why: format!(
+                "interval proof domain has {} axes but the Rn variable has {expected}",
+                domain.len()
+            ),
+        });
+    }
+    let admission = problem.admit().map_err(|report| ConError::NotProvable {
+        why: format!("proof subject problem did not admit: {report}"),
+    })?;
+    Ok(ProofSubject {
+        problem: admission.semantic_id(),
+        node,
+        domain_bits: domain
+            .iter()
+            .map(|&(lo, hi)| (lo.to_bits(), hi.to_bits()))
+            .collect(),
+    })
+}
+
+fn robust_boxes(x: &[f64], half_widths: &[f64]) -> Result<Vec<(f64, f64)>, ConError> {
+    if half_widths.len() != x.len() {
+        return Err(ConError::BadParam {
+            what: "robust half-width count",
+            value: half_widths.len() as f64,
+        });
+    }
+    for (&center, &half_width) in x.iter().zip(half_widths) {
+        require_finite_nonnegative(half_width, "robust half-width")?;
+        if !center.is_finite() {
+            return Err(ConError::BadParam {
+                what: "robust interval center",
+                value: center,
+            });
+        }
+        let lo = center - half_width;
+        let hi = center + half_width;
+        if !lo.is_finite() || !hi.is_finite() || lo > hi || !(hi - lo).is_finite() {
+            return Err(ConError::BadParam {
+                what: "robust interval range",
+                value: half_width,
+            });
+        }
+    }
+    Ok(x.iter()
+        .zip(half_widths)
+        .map(|(&center, &half_width)| (center - half_width, center + half_width))
+        .collect())
+}
+
 pub(crate) fn scalar_at(problem: &Problem, node: NodeId, x: &[f64]) -> Result<f64, ConError> {
     let v = fs_opt::eval(problem, node, std::slice::from_ref(&x.to_vec()))?;
     v.scalar().ok_or(ConError::NotScalar { node: node.0 })
@@ -488,16 +1076,15 @@ pub fn evaluate(
     x: &[f64],
     noise: Option<&dyn Fn(u64) -> Vec<f64>>,
 ) -> Result<ConstraintEvidence, ConError> {
+    // Policy values are public fields and therefore untrusted. Admit them
+    // before evaluating the expression so NaN tolerances and negative weights
+    // cannot turn a real violation into a satisfied or rewarded result.
+    validate_spec_policy(spec, Some(x.len()))?;
     let g = scalar_at(problem, spec.node, x)?;
-    // A non-finite g means the design point is OUTSIDE the constraint's domain
-    // (ln/sqrt/reciprocal of an out-of-range argument evaluates to NaN/±∞).
-    // Every IEEE comparison with NaN is false, so the ladder below would fall
-    // through to `Satisfied` and `g.max(0.0)` (which DROPS NaN) would report an
-    // EXACT zero violation — certifying an undefined Hard/Soft constraint as
-    // strictly feasible. Fail closed: an undefined constraint is maximally
-    // violated. (The Chance/Robust arms below re-derive their own verdict from
-    // sampling / interval evaluation, both already fail-closed, and overwrite
-    // this base status, so guarding here is safe for every kind.)
+    // fs-opt currently returns a typed EvalNonFinite refusal before this point.
+    // Retain the finite guard as defense in depth for any future evaluator that
+    // carries a non-finite scalar value: IEEE comparisons and `max` must never
+    // turn an undefined constraint into an exact-zero satisfied claim.
     let finite = g.is_finite();
     let violation = if finite { g.max(0.0) } else { f64::INFINITY };
     let base_status = if !finite || g > spec.active_tol {
@@ -521,6 +1108,8 @@ pub fn evaluate(
         statistical: StatisticalCertificate::None,
         role,
         penalty: 0.0,
+        proof_subject: None,
+        proof_bound: None,
     };
     match &spec.kind {
         ConstraintKind::Hard | ConstraintKind::Fabrication { .. } | ConstraintKind::Code { .. } => {
@@ -530,33 +1119,15 @@ pub fn evaluate(
                 PenaltyLaw::Quadratic { weight } => weight * violation * violation,
                 PenaltyLaw::Hinge { weight } => weight * violation,
             };
+            if !ev.penalty.is_finite() || ev.penalty < 0.0 {
+                return Err(ConError::BadParam {
+                    what: "soft-constraint penalty result",
+                    value: ev.penalty,
+                });
+            }
         }
         ConstraintKind::Chance { level, estimator } => {
             let ChanceEstimator::MonteCarlo { samples, delta } = *estimator;
-            if !(*level > 0.0 && *level < 1.0) {
-                return Err(ConError::BadParam {
-                    what: "chance level",
-                    value: *level,
-                });
-            }
-            // The Hoeffding bound `√(ln(1/δ)/(2n))` assumes `0 < δ < 1` and
-            // `n ≥ 1`. Unvalidated, `δ ≥ 1` makes `ln(1/δ) ≤ 0` → a NaN
-            // half-width (negative radicand), and any `δ` outside (0,1) makes
-            // `confidence = 1 − δ` fall outside [0,1] (e.g. δ=1.5 → −0.5);
-            // `n = 0` makes the half-width `+∞` and `empirical = 0/0 = NaN`. All
-            // produce a garbage certificate instead of a teaching refusal.
-            if !(delta > 0.0 && delta < 1.0) {
-                return Err(ConError::BadParam {
-                    what: "chance failure probability (delta)",
-                    value: delta,
-                });
-            }
-            if samples == 0 {
-                return Err(ConError::BadParam {
-                    what: "chance sample count",
-                    value: f64::from(samples),
-                });
-            }
             let noise = noise.ok_or(ConError::BadParam {
                 what: "chance noise model (required)",
                 value: f64::NAN,
@@ -564,6 +1135,12 @@ pub fn evaluate(
             let mut hits = 0u32;
             for s in 0..samples {
                 let draw = noise(u64::from(s));
+                if draw.len() != x.len() {
+                    return Err(ConError::BadParam {
+                        what: "chance noise draw dimension",
+                        value: draw.len() as f64,
+                    });
+                }
                 let shifted: Vec<f64> = x.iter().zip(&draw).map(|(a, b)| a + b).collect();
                 if scalar_at(problem, spec.node, &shifted)? <= 0.0 {
                     hits += 1;
@@ -571,7 +1148,10 @@ pub fn evaluate(
             }
             let empirical = f64::from(hits) / f64::from(samples);
             // Hoeffding lower confidence bound at failure prob delta.
-            let half_width = ((1.0 / delta).ln() / (2.0 * f64::from(samples))).sqrt();
+            // `-ln(delta)` is algebraically `ln(1/delta)` but remains finite
+            // for every positive finite binary64 delta; forming `1/delta`
+            // first would overflow for valid subnormal policy values.
+            let half_width = (-delta.ln() / (2.0 * f64::from(samples))).sqrt();
             let lower = empirical - half_width;
             ev.statistical = StatisticalCertificate::HalfWidth {
                 half_width,
@@ -599,15 +1179,12 @@ pub fn evaluate(
         }
         ConstraintKind::Robust { half_widths } => {
             // Prove sup over the uncertainty box via interval eval.
-            let boxes: Vec<(f64, f64)> = x
-                .iter()
-                .zip(half_widths)
-                .map(|(c, h)| (c - h, c + h))
-                .collect();
+            let boxes = robust_boxes(x, half_widths)?;
             match interval_eval(problem, spec.node, &boxes) {
                 Ok(iv) => {
                     ev.violation = iv.hi.max(0.0);
-                    ev.certificate = NumericalCertificate::enclosure(iv.lo, iv.hi);
+                    ev.certificate =
+                        NumericalCertificate::enclosure(iv.lo.max(0.0), iv.hi.max(0.0));
                     ev.status = if iv.hi <= 0.0 {
                         Status::Proven
                     } else {
@@ -618,6 +1195,10 @@ pub fn evaluate(
                     } else {
                         ActiveRole::Violating
                     };
+                    if matches!(ev.status, Status::Proven) {
+                        ev.proof_subject = Some(proof_subject(problem, spec.node, &boxes)?);
+                        ev.proof_bound = Some(iv);
+                    }
                 }
                 Err(e) => {
                     return Err(ConError::NotProvable { why: e.to_string() });
@@ -646,6 +1227,18 @@ pub fn prove_interval(
     spec: &ConstraintSpec,
     domain: &[(f64, f64)],
 ) -> Result<(ConstraintEvidence, ProofArtifact), ConError> {
+    let requested = match &spec.kind {
+        ConstraintKind::Certification { proof } => Some(*proof),
+        _ => None,
+    };
+    if requested != Some(ProofKind::Interval) {
+        return Err(ConError::ProofKindMismatch {
+            requested,
+            attempted: ProofKind::Interval,
+        });
+    }
+    validate_spec_policy(spec, None)?;
+    let subject = proof_subject(problem, spec.node, domain)?;
     let iv = interval_eval(problem, spec.node, domain)
         .map_err(|e| ConError::NotProvable { why: e.to_string() })?;
     if iv.hi <= 0.0 {
@@ -655,12 +1248,14 @@ pub fn prove_interval(
                 kind: spec.kind.kind_name(),
                 status: Status::Proven,
                 violation: 0.0,
-                certificate: NumericalCertificate::enclosure(iv.lo, iv.hi),
+                certificate: NumericalCertificate::enclosure(0.0, 0.0),
                 statistical: StatisticalCertificate::None,
                 role: ActiveRole::Inactive,
                 penalty: 0.0,
+                proof_subject: Some(subject.clone()),
+                proof_bound: Some(iv),
             },
-            ProofArtifact::IntervalBound { hi: iv.hi },
+            ProofArtifact { subject, bound: iv },
         ))
     } else {
         Err(ConError::NotProvable {
@@ -673,12 +1268,16 @@ pub fn prove_interval(
     }
 }
 
-/// Serialize a constraint set (canonical line form; floats as bits).
+/// Encode a constraint set in canonical line form (floats as bits).
+///
+/// This infallible writer preserves even untrusted public field bits. Use
+/// [`parse_specs`] as the admission boundary before treating those bytes as a
+/// valid policy; writer/parser identity is guaranteed for admitted specs.
 #[must_use]
 pub fn serialize_specs(specs: &[ConstraintSpec]) -> String {
     use std::fmt::Write as _;
     let hex = |v: f64| format!("{:016X}", v.to_bits());
-    let mut s = String::from("fscon v1\n");
+    let mut s = String::from("fscon v2\n");
     for c in specs {
         let kind = match &c.kind {
             ConstraintKind::Hard => "hard".to_string(),
@@ -701,16 +1300,16 @@ pub fn serialize_specs(specs: &[ConstraintSpec]) -> String {
                 ProofKind::Sos => "certification sos".to_string(),
             },
             ConstraintKind::Fabrication { process } => {
-                format!("fabrication {}", process.replace(' ', "%20"))
+                format!("fabrication {}", encode_wire_token(process))
             }
             ConstraintKind::Code { standard } => {
-                format!("code {}", standard.replace(' ', "%20"))
+                format!("code {}", encode_wire_token(standard))
             }
         };
         let _ = writeln!(
             s,
             "constraint {} {} {} {kind}",
-            c.name.replace(' ', "%20"),
+            encode_wire_token(&c.name),
             c.node.0,
             hex(c.active_tol)
         );
@@ -718,7 +1317,7 @@ pub fn serialize_specs(specs: &[ConstraintSpec]) -> String {
     s
 }
 
-/// Parse [`serialize_specs`] output (round-trip identity).
+/// Parse and admit [`serialize_specs`] output (admitted round-trip identity).
 ///
 /// # Errors
 /// [`ConError::Parse`] with line numbers.
@@ -730,20 +1329,26 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
         what: what.to_string(),
     };
     let mut out = Vec::new();
+    let mut saw_header = false;
     for (ln0, line) in text.lines().enumerate() {
         let ln = ln0 + 1;
         let toks: Vec<&str> = line.split(' ').collect();
         match toks.first().copied() {
             Some("fscon") => {
-                if toks.get(1) != Some(&"v1") {
-                    return Err(perr(ln, "unsupported version"));
+                if ln != 1 || saw_header || toks.as_slice() != ["fscon", "v2"] {
+                    return Err(perr(ln, "expected the single canonical `fscon v2` header"));
                 }
+                saw_header = true;
             }
             Some("constraint") => {
-                let name = toks
-                    .get(1)
-                    .ok_or_else(|| perr(ln, "missing name"))?
-                    .replace("%20", " ");
+                if !saw_header {
+                    return Err(perr(ln, "constraint appears before the fscon header"));
+                }
+                let name = decode_wire_token(
+                    toks.get(1).ok_or_else(|| perr(ln, "missing name"))?,
+                    ln,
+                    "constraint name",
+                )?;
                 let node: u32 = toks
                     .get(2)
                     .and_then(|t| t.parse().ok())
@@ -753,8 +1358,16 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                     .and_then(|t| unhex(t))
                     .ok_or_else(|| perr(ln, "bad tol"))?;
                 let kind = match toks.get(4).copied() {
-                    Some("hard") => ConstraintKind::Hard,
+                    Some("hard") => {
+                        if toks.len() != 5 {
+                            return Err(perr(ln, "hard constraint has trailing fields"));
+                        }
+                        ConstraintKind::Hard
+                    }
                     Some("soft") => {
+                        if toks.len() != 7 {
+                            return Err(perr(ln, "soft constraint has the wrong field count"));
+                        }
                         let w = toks
                             .get(6)
                             .and_then(|t| unhex(t))
@@ -768,6 +1381,9 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                         }
                     }
                     Some("chance") => {
+                        if toks.len() != 9 {
+                            return Err(perr(ln, "chance constraint has the wrong field count"));
+                        }
                         let level = toks
                             .get(5)
                             .and_then(|t| unhex(t))
@@ -789,43 +1405,72 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                         }
                     }
                     Some("robust") => {
+                        if toks.len() != 6 {
+                            return Err(perr(ln, "robust constraint has the wrong field count"));
+                        }
                         let ws = toks.get(5).ok_or_else(|| perr(ln, "missing widths"))?;
                         let half_widths: Option<Vec<f64>> = ws.split(',').map(unhex).collect();
                         ConstraintKind::Robust {
                             half_widths: half_widths.ok_or_else(|| perr(ln, "bad widths"))?,
                         }
                     }
-                    Some("certification") => match toks.get(5).copied() {
-                        Some("interval") => ConstraintKind::Certification {
-                            proof: ProofKind::Interval,
-                        },
-                        Some("sos") => ConstraintKind::Certification {
-                            proof: ProofKind::Sos,
-                        },
-                        _ => return Err(perr(ln, "unknown proof kind")),
-                    },
-                    Some("fabrication") => ConstraintKind::Fabrication {
-                        process: toks
-                            .get(5)
-                            .ok_or_else(|| perr(ln, "missing process"))?
-                            .replace("%20", " "),
-                    },
-                    Some("code") => ConstraintKind::Code {
-                        standard: toks
-                            .get(5)
-                            .ok_or_else(|| perr(ln, "missing standard"))?
-                            .replace("%20", " "),
-                    },
+                    Some("certification") => {
+                        if toks.len() != 6 {
+                            return Err(perr(
+                                ln,
+                                "certification constraint has the wrong field count",
+                            ));
+                        }
+                        match toks.get(5).copied() {
+                            Some("interval") => ConstraintKind::Certification {
+                                proof: ProofKind::Interval,
+                            },
+                            Some("sos") => ConstraintKind::Certification {
+                                proof: ProofKind::Sos,
+                            },
+                            _ => return Err(perr(ln, "unknown proof kind")),
+                        }
+                    }
+                    Some("fabrication") => {
+                        if toks.len() != 6 {
+                            return Err(perr(
+                                ln,
+                                "fabrication constraint has the wrong field count",
+                            ));
+                        }
+                        ConstraintKind::Fabrication {
+                            process: decode_wire_token(
+                                toks.get(5).ok_or_else(|| perr(ln, "missing process"))?,
+                                ln,
+                                "fabrication process",
+                            )?,
+                        }
+                    }
+                    Some("code") => {
+                        if toks.len() != 6 {
+                            return Err(perr(ln, "code constraint has the wrong field count"));
+                        }
+                        ConstraintKind::Code {
+                            standard: decode_wire_token(
+                                toks.get(5).ok_or_else(|| perr(ln, "missing standard"))?,
+                                ln,
+                                "code standard",
+                            )?,
+                        }
+                    }
                     _ => return Err(perr(ln, "unknown kind")),
                 };
-                out.push(ConstraintSpec {
+                let spec = ConstraintSpec {
                     name,
                     node: NodeId(node),
                     kind,
                     active_tol,
-                });
+                };
+                validate_spec_policy(&spec, None)
+                    .map_err(|error| perr(ln, &format!("invalid policy: {error}")))?;
+                out.push(spec);
             }
-            Some("") | None => {}
+            Some("") | None => return Err(perr(ln, "blank lines are not canonical")),
             Some(other) => {
                 return Err(ConError::Parse {
                     line: ln,
@@ -833,6 +1478,26 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                 });
             }
         }
+    }
+    if !saw_header {
+        return Err(perr(1, "missing `fscon v2` header"));
+    }
+    let canonical = serialize_specs(&out);
+    if canonical != text {
+        let mismatch = canonical
+            .bytes()
+            .zip(text.bytes())
+            .take_while(|(expected, actual)| expected == actual)
+            .count();
+        let line = text.as_bytes()[..mismatch.min(text.len())]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count()
+            + 1;
+        return Err(perr(
+            line,
+            "input is not the canonical fscon v2 byte spelling",
+        ));
     }
     Ok(out)
 }
@@ -881,5 +1546,53 @@ mod tests {
             .treatment(),
             Treatment::DomainCheck
         );
+    }
+
+    #[test]
+    fn internally_corrupted_proof_bounds_lose_claim_authority() {
+        let mut builder = fs_opt::ProblemBuilder::new();
+        let variable = builder
+            .var("x", Manifold::Rn { dim: 1 }, fs_qty::Dims::NONE)
+            .expect("variable");
+        let variable_ref = builder.var_ref(variable).expect("variable ref");
+        let x = builder.component(variable_ref, 0).expect("component");
+        let one = builder.konst(1.0, fs_qty::Dims::NONE).expect("constant");
+        let constraint = builder.sub(x, one).expect("constraint");
+        let objective = builder.norm_sq(variable_ref).expect("objective");
+        builder
+            .objective(objective, fs_opt::Sense::Minimize, 1.0)
+            .expect("objective entry");
+        let problem = builder.finish();
+        let spec = ConstraintSpec {
+            name: "proof-bound-corruption".into(),
+            node: constraint,
+            kind: ConstraintKind::Certification {
+                proof: ProofKind::Interval,
+            },
+            active_tol: 0.0,
+        };
+        let domain = [(0.0, 0.5)];
+        let (mut evidence, artifact) =
+            prove_interval(&problem, &spec, &domain).expect("valid interval proof");
+        assert!(artifact.verifies_evidence(&evidence));
+
+        evidence.proof_bound = Some(Iv { lo: -1.0, hi: 1.0 });
+        assert!(
+            evidence
+                .to_ledger_row()
+                .contains("\"reason\":\"proof-bound-does-not-clear-zero\"")
+        );
+        assert!(!artifact.verifies_evidence(&evidence));
+
+        evidence.proof_bound = Some(Iv {
+            lo: f64::NAN,
+            hi: -0.5,
+        });
+        assert!(
+            evidence
+                .to_ledger_row()
+                .contains("\"reason\":\"nonfinite-proof-bound\"")
+        );
+        assert!(!artifact.verifies_evidence(&evidence));
     }
 }
