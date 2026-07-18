@@ -8,9 +8,10 @@
 
 use fs_adjoint::dwr_accept::{
     AcceptOutcome, Bracket, BracketError, DWR_EVIDENCE_IDENTITY_VERSION, DWR_POLL_POLICY_VERSION,
-    DWR_POLL_STRIDE_ITEMS, DWR_WORK_PLAN_VERSION, DwrError, DwrOutput, DwrQuery,
-    MAX_BRACKET_MESH_NODES, MAX_DWR_MESH_NODES, MAX_DWR_POLY_COEFFICIENTS, MAX_DWR_QOI_BYTES,
-    MAX_DWR_WORK_UNITS, accept as accept_with_cx, dwr_integral_qoi as dwr_integral_qoi_with_cx,
+    DWR_POLL_STRIDE_ITEMS, DWR_QUERY_SCHEMA_VERSION, DWR_WORK_PLAN_VERSION, DwrError, DwrOutput,
+    DwrQuery, EndpointConvention, MAX_BRACKET_MESH_NODES, MAX_DWR_MESH_NODES,
+    MAX_DWR_POLY_COEFFICIENTS, MAX_DWR_QOI_BYTES, MAX_DWR_WORK_UNITS, QoiSemantics,
+    accept as accept_with_cx, dwr_integral_qoi as dwr_integral_qoi_with_cx,
 };
 use fs_evidence::Color;
 use fs_evidence::falsify::{FalsifierRegistry, FalsifierSpec};
@@ -115,6 +116,10 @@ fn assert_same_dwr_semantics(left: &DwrOutput, right: &DwrOutput) {
     for (left, right) in left.indicators().iter().zip(right.indicators()) {
         assert_eq!(left.to_bits(), right.to_bits());
     }
+    let (left_lo, left_hi) = left.window();
+    let (right_lo, right_hi) = right.window();
+    assert_eq!(left_lo.to_bits(), right_lo.to_bits());
+    assert_eq!(left_hi.to_bits(), right_hi.to_bits());
 }
 
 fn assert_same_accept_semantics(left: &AcceptOutcome, right: &AcceptOutcome) {
@@ -179,6 +184,11 @@ fn dw_001_g1_effectivity_and_estimated_accept() {
     // The DWR-only accept at a discharging tolerance is ESTIMATED.
     let query = DwrQuery {
         qoi: "integral[0.25,0.75]".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: 1e-3,
     };
     let outcome = accept(&query, &out, None);
@@ -193,6 +203,11 @@ fn dw_001_g1_effectivity_and_estimated_accept() {
     let strict = accept(
         &DwrQuery {
             qoi: "integral".to_string(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: 1e-12,
         },
         &out,
@@ -265,6 +280,11 @@ fn dw_002_reverified_energy_product_does_not_promote_without_a_typed_dual_relati
     );
     let query = DwrQuery {
         qoi: "integral[0.25,0.75]".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: bracket.bound() * 1.5,
     };
     let outcome = accept(&query, &out, Some(&bracket));
@@ -304,6 +324,11 @@ fn forged_public_verifier_report_is_not_bracket_authority() {
     let outcome = accept(
         &DwrQuery {
             qoi: "forgery-probe".to_string(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: 1.0,
         },
         &solved_estimate(),
@@ -322,6 +347,11 @@ fn dw_003_laundering_fails_the_type_check() {
     let outcome = accept(
         &DwrQuery {
             qoi: "integral".to_string(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: 1e-3,
         },
         &out,
@@ -437,6 +467,11 @@ fn unrelated_over_tolerance_energy_product_cannot_veto_the_dwr_decision() {
     // concern here is bracket-veto behavior, not the estimate magnitude.
     let query = DwrQuery {
         qoi: "test-qoi".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: estimate.eta().abs().max(1e-12) * 2.0,
     };
     let primal = quartic_problem(4);
@@ -472,6 +507,11 @@ fn malformed_accept_inputs_fail_closed_without_minting_invalid_colors() {
 
     let base = DwrQuery {
         qoi: "hostile display label (not a machine id)".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: 1e-3,
     };
     // Scalar injection (NaN/-inf/-1.0 estimates) is now UNREPRESENTABLE:
@@ -521,6 +561,87 @@ fn malformed_accept_inputs_fail_closed_without_minting_invalid_colors() {
     );
     assert!(independent.refused());
     validate_color_payload(independent.color()).expect("refusal color is valid");
+}
+
+#[test]
+fn typed_functional_binding_rejects_invalid_and_cross_semantic_replay() {
+    let estimate = solved_estimate();
+    let base = DwrQuery {
+        qoi: "typed-functional-binding".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        tolerance: 1.0,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
+    };
+
+    let cases = [
+        (
+            "non-finite window",
+            DwrQuery {
+                window: (f64::NAN, 0.75),
+                ..base.clone()
+            },
+            "functional window must be finite and increasing",
+        ),
+        (
+            "empty window",
+            DwrQuery {
+                window: (0.5, 0.5),
+                ..base.clone()
+            },
+            "functional window must be finite and increasing",
+        ),
+        (
+            "reversed window",
+            DwrQuery {
+                window: (0.8, 0.2),
+                ..base.clone()
+            },
+            "functional window must be finite and increasing",
+        ),
+        (
+            "cross-window replay",
+            DwrQuery {
+                window: (0.2, 0.8),
+                ..base.clone()
+            },
+            "does not match the sealed estimate's retained window",
+        ),
+        (
+            "dimension relabel",
+            DwrQuery {
+                dims: [1, 0, 0, 0, 0, 0],
+                ..base.clone()
+            },
+            "does not match the sealed estimate dimensions",
+        ),
+        (
+            "unknown schema",
+            DwrQuery {
+                schema_version: DWR_QUERY_SCHEMA_VERSION + 1,
+                ..base.clone()
+            },
+            "functional schema version",
+        ),
+    ];
+
+    for (case, query, diagnostic) in cases {
+        let outcome = accept(&query, &estimate, None);
+        assert!(!outcome.accepted(), "{case} must not discharge the query");
+        assert!(outcome.refused(), "{case} must fail closed as malformed");
+        assert!(
+            outcome.audit().contains(diagnostic),
+            "{case} emitted the wrong bounded diagnostic: {}",
+            outcome.audit()
+        );
+    }
+
+    verdict(
+        "typed-functional-binding",
+        "invalid windows plus cross-window, dimensional, and schema relabeling refuse distinctly",
+    );
 }
 
 #[test]
@@ -670,12 +791,22 @@ fn dwr_refuses_invalid_windows_and_resource_counts_at_owner_boundaries() {
 
     let maximum_qoi = DwrQuery {
         qoi: "q".repeat(MAX_DWR_QOI_BYTES),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: 1.0,
     };
     let maximum_qoi_outcome = accept(&maximum_qoi, &solved_estimate(), None);
     assert!(maximum_qoi_outcome.accepted());
     let plus_one_qoi = DwrQuery {
         qoi: "q".repeat(MAX_DWR_QOI_BYTES + 1),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: 1.0,
     };
     let plus_one = with_default_cx(|cx| {
@@ -924,6 +1055,11 @@ fn g4_dwr_and_accept_cancellation_are_bounded_and_retryable() {
 
     let query = DwrQuery {
         qoi: "accept-finalization-".repeat(20),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: 1.0,
     };
     let baseline_accept = accept(&query, &baseline, None);
@@ -1303,6 +1439,11 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     let candidate = solve_p1(&problem).expect("G5 primal fixture must solve");
     let query = DwrQuery {
         qoi: "g5-integral".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        window: (0.25, 0.75),
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::WindowedIntegral,
+        dims: [0; 6],
         tolerance: 1.0,
     };
     let run = |mode: ExecMode, budget: Budget, stream: StreamKey| {
@@ -1452,6 +1593,11 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     let same_length_qoi = accept(
         &DwrQuery {
             qoi: "g5-integrax".to_string(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: query.tolerance,
         },
         &baseline_output,
@@ -1466,6 +1612,11 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     let changed_tolerance = accept(
         &DwrQuery {
             qoi: query.qoi.clone(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: 2.0,
         },
         &baseline_output,
@@ -1477,8 +1628,8 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
         "tolerance is semantic"
     );
     // A shifted scalar is unforgeable under the sealed accept (sj31i.1):
-    // a genuinely different estimate (different window) must move the
-    // acceptance identity instead.
+    // a genuinely different estimate (here, a different retained problem
+    // and mesh) must move the acceptance identity instead.
     let changed_estimate = accept(&query, &solved_estimate(), None);
     assert_ne!(
         baseline_accept.evidence_identity(),
@@ -1489,6 +1640,11 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     let short = accept(
         &DwrQuery {
             qoi: "q".to_string(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: query.tolerance,
         },
         &baseline_output,
@@ -1497,6 +1653,11 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     let long = accept(
         &DwrQuery {
             qoi: "same-science-longer-provenance-label".to_string(),
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            window: (0.25, 0.75),
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
             tolerance: query.tolerance,
         },
         &baseline_output,
@@ -1506,6 +1667,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
     assert_ne!(short.evidence_identity(), long.evidence_identity());
     assert_eq!(DWR_WORK_PLAN_VERSION, 2);
     assert_eq!(DWR_POLL_POLICY_VERSION, 3);
-    assert_eq!(DWR_EVIDENCE_IDENTITY_VERSION, 6);
+    assert_eq!(DWR_EVIDENCE_IDENTITY_VERSION, 7);
+    assert_eq!(DWR_QUERY_SCHEMA_VERSION, 1);
     assert_eq!(DWR_POLL_STRIDE_ITEMS, 256);
 }

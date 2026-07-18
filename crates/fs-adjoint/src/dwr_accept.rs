@@ -48,11 +48,11 @@ const DWR_POLL_STRIDE_IDENTITY: u64 = DWR_POLL_STRIDE_ITEMS as u64;
 /// Galerkin solve of these 1-D P1 systems sits at roundoff, orders below).
 pub const DWR_EQUILIBRIUM_RESIDUAL_TOLERANCE: f64 = 1.0e-9;
 
-pub const DWR_EVIDENCE_IDENTITY_VERSION: u32 = 6;
+pub const DWR_EVIDENCE_IDENTITY_VERSION: u32 = 7;
 const MAX_DWR_REFINED_NODES: usize = MAX_DWR_MESH_NODES * 2 - 1;
 
 /// Exact retained domain string for the DWR output identity root.
-pub const DWR_OUTPUT_IDENTITY_DOMAIN: &str = "fs-adjoint-dwr-output-identity-v6";
+pub const DWR_OUTPUT_IDENTITY_DOMAIN: &str = "fs-adjoint-dwr-output-identity-v7";
 const DWR_OUTPUT_IDENTITY_SCHEMA: &[u8] = DWR_OUTPUT_IDENTITY_DOMAIN.as_bytes();
 
 /// Owner-local output-identity declaration consumed by `xtask check-identities`
@@ -61,24 +61,24 @@ pub const DWR_OUTPUT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-adjoint:dwr-output",
     "version_const=DWR_EVIDENCE_IDENTITY_VERSION",
-    "version=6",
-    "domain=fs-adjoint-dwr-output-identity-v6",
+    "version=7",
+    "domain=fs-adjoint-dwr-output-identity-v7",
     "domain_const=DWR_OUTPUT_IDENTITY_DOMAIN",
     "encoder=hash_execution_header",
-    "encoder_helpers=DwrWorkPlan::identity_fields",
-    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_OUTPUT_IDENTITY_DOMAIN,DWR_OUTPUT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS",
+    "encoder_helpers=DwrWorkPlan::identity_fields,hash_dwr_output_result_fields,hash_dwr_functional_identity_fields",
+    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_OUTPUT_IDENTITY_DOMAIN,DWR_OUTPUT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS,DWR_QUERY_SCHEMA_VERSION",
     "schema_functions=dwr_integral_qoi",
     "schema_dependencies=fs-verify:fem1d-mms-problem",
     "digest=fs-blake3",
     "encoding=typed-binary",
-    "sources=DwrOutput",
-    "source_fields=DwrOutput.j_primal:semantic,DwrOutput.eta:semantic,DwrOutput.indicators:semantic,DwrOutput.equilibrium_residual_max:semantic,DwrOutput.evidence_identity:derived:blake3-root-of-the-retained-preimage",
-    "source_bindings=DwrOutput.j_primal>j-primal-bits,DwrOutput.eta>eta-bits,DwrOutput.indicators>indicator-bits",
-    "external_semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,problem-identity-version,problem-identity-root,problem-canonical-bytes,candidate-digest,window-lo-bits,window-hi-bits",
-    "semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,problem-identity-version,problem-identity-root,problem-canonical-bytes,candidate-digest,window-lo-bits,window-hi-bits,j-primal-bits,eta-bits,equilibrium-residual-max-bits,indicator-bits",
+    "sources=DwrOutput,DwrFunctionalBinding",
+    "source_fields=DwrOutput.j_primal:semantic,DwrOutput.eta:semantic,DwrOutput.indicators:semantic,DwrOutput.equilibrium_residual_max:semantic,DwrOutput.functional_binding:derived:nested-functional-fields-classified-separately,DwrOutput.evidence_identity:derived:blake3-root-of-the-retained-preimage,DwrFunctionalBinding.schema_version:semantic,DwrFunctionalBinding.w_lo:semantic,DwrFunctionalBinding.w_hi:semantic,DwrFunctionalBinding.endpoint_convention:semantic,DwrFunctionalBinding.semantics:semantic,DwrFunctionalBinding.dims:semantic",
+    "source_bindings=DwrOutput.j_primal>j-primal-bits,DwrOutput.eta>eta-bits,DwrOutput.indicators>indicator-bits,DwrOutput.equilibrium_residual_max>equilibrium-residual-max-bits,DwrFunctionalBinding.schema_version>functional-schema-version,DwrFunctionalBinding.w_lo>window-lo-bits,DwrFunctionalBinding.w_hi>window-hi-bits,DwrFunctionalBinding.endpoint_convention>endpoint-convention,DwrFunctionalBinding.semantics>qoi-semantics,DwrFunctionalBinding.dims>dims-bytes",
+    "external_semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,problem-identity-version,problem-identity-root,problem-canonical-bytes,candidate-digest,functional-schema-constant",
+    "semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,problem-identity-version,problem-identity-root,problem-canonical-bytes,candidate-digest,functional-schema-constant,functional-schema-version,window-lo-bits,window-hi-bits,endpoint-convention,qoi-semantics,dims-bytes,j-primal-bits,eta-bits,equilibrium-residual-max-bits,indicator-bits",
     "excluded_fields=none",
     "consumers=dwr_integral_qoi,DwrOutput::evidence_identity",
-    "mutations=artifact-schema-tag:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,evidence-identity-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,exec-mode:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-seed:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-kernel:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-tile:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-iteration:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-deadline:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-poll-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-cost-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-priority:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-fields:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-policy-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-stride-identity:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,problem-identity-version:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,problem-identity-root:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,problem-canonical-bytes:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,candidate-digest:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,window-lo-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,window-hi-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,j-primal-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,eta-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,equilibrium-residual-max-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,indicator-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field",
+    "mutations=artifact-schema-tag:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,evidence-identity-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,exec-mode:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-seed:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-kernel:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-tile:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-iteration:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-deadline:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-poll-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-cost-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-priority:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-fields:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-policy-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-stride-identity:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,problem-identity-version:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,problem-identity-root:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,problem-canonical-bytes:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,candidate-digest:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,functional-schema-constant:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,functional-schema-version:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,window-lo-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,window-hi-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,endpoint-convention:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,qoi-semantics:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,dims-bytes:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,j-primal-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,eta-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,equilibrium-residual-max-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field,indicator-bits:crates/fs-adjoint/src/dwr_accept.rs#output_identity_binds_each_body_field",
     "nonsemantic_mutations=none",
     "field_guard=classify_dwr_output_identity_fields",
     "transport_guard=DwrOutput::evidence_identity",
@@ -92,8 +92,8 @@ pub const DWR_BRACKET_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-adjoint:dwr-bracket",
     "version_const=DWR_EVIDENCE_IDENTITY_VERSION",
-    "version=6",
-    "domain=fs-adjoint-dwr-bracket-identity-v6",
+    "version=7",
+    "domain=fs-adjoint-dwr-bracket-identity-v7",
     "domain_const=DWR_BRACKET_IDENTITY_DOMAIN",
     "encoder=hash_bracket_execution_header",
     "encoder_helpers=hash_execution_header,BracketWorkPlan::identity_fields",
@@ -123,24 +123,24 @@ pub const DWR_ACCEPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-adjoint:dwr-accept",
     "version_const=DWR_EVIDENCE_IDENTITY_VERSION",
-    "version=6",
-    "domain=fs-adjoint-dwr-accept-identity-v6",
+    "version=7",
+    "domain=fs-adjoint-dwr-accept-identity-v7",
     "domain_const=DWR_ACCEPT_IDENTITY_DOMAIN",
     "encoder=hash_execution_header",
-    "encoder_helpers=AcceptWorkPlan::identity_fields",
-    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_ACCEPT_IDENTITY_DOMAIN,DWR_ACCEPT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS",
+    "encoder_helpers=AcceptWorkPlan::identity_fields,hash_dwr_functional_identity_fields,hash_accept_estimate_identity_fields",
+    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_ACCEPT_IDENTITY_DOMAIN,DWR_ACCEPT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS,DWR_QUERY_SCHEMA_VERSION",
     "schema_functions=accept",
-    "schema_dependencies=fs-adjoint:dwr-bracket",
+    "schema_dependencies=fs-adjoint:dwr-bracket,fs-adjoint:dwr-output",
     "digest=fs-blake3",
     "encoding=typed-binary",
     "sources=AcceptOutcome,DwrQuery",
-    "source_fields=AcceptOutcome.accepted:semantic,AcceptOutcome.color:semantic,AcceptOutcome.refused:semantic,AcceptOutcome.audit:semantic,AcceptOutcome.evidence_identity:derived:blake3-root-of-the-retained-preimage,DwrQuery.qoi:semantic,DwrQuery.tolerance:semantic",
-    "source_bindings=AcceptOutcome.accepted>accepted-flag,AcceptOutcome.color>color-canonical-bytes,AcceptOutcome.refused>refused-flag,AcceptOutcome.audit>audit-utf8,DwrQuery.qoi>qoi-utf8,DwrQuery.tolerance>tolerance-bits",
-    "external_semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,bracket-presence,bracket-evidence-identity,dwr-abs-bits,estimate-evidence-identity,estimate-equilibrium-residual-bits",
-    "semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,bracket-presence,bracket-evidence-identity,qoi-utf8,tolerance-bits,dwr-abs-bits,estimate-evidence-identity,estimate-equilibrium-residual-bits,accepted-flag,refused-flag,color-canonical-bytes,audit-utf8",
+    "source_fields=AcceptOutcome.accepted:semantic,AcceptOutcome.color:semantic,AcceptOutcome.refused:semantic,AcceptOutcome.audit:semantic,AcceptOutcome.evidence_identity:derived:blake3-root-of-the-retained-preimage,DwrQuery.qoi:semantic,DwrQuery.schema_version:semantic,DwrQuery.tolerance:semantic,DwrQuery.window:semantic,DwrQuery.endpoint_convention:semantic,DwrQuery.semantics:semantic,DwrQuery.dims:semantic",
+    "source_bindings=AcceptOutcome.accepted>accepted-flag,AcceptOutcome.color>color-canonical-bytes,AcceptOutcome.refused>refused-flag,AcceptOutcome.audit>audit-utf8,DwrQuery.qoi>qoi-utf8,DwrQuery.schema_version>query-schema-version,DwrQuery.tolerance>tolerance-bits,DwrQuery.window>query-window-lo-bits+query-window-hi-bits,DwrQuery.endpoint_convention>endpoint-convention,DwrQuery.semantics>qoi-semantics,DwrQuery.dims>dims-bytes",
+    "external_semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,query-schema-constant,bracket-presence,bracket-evidence-identity,dwr-abs-bits,estimate-evidence-identity,estimate-equilibrium-residual-bits",
+    "semantic_fields=artifact-schema-tag,evidence-identity-version,exec-mode,stream-seed,stream-kernel,stream-tile,stream-iteration,budget-deadline,budget-poll-quota,budget-cost-quota,budget-priority,work-plan-version,work-plan-fields,poll-policy-version,poll-stride-identity,qoi-utf8,tolerance-bits,query-schema-constant,query-schema-version,query-window-lo-bits,query-window-hi-bits,endpoint-convention,qoi-semantics,dims-bytes,dwr-abs-bits,estimate-evidence-identity,estimate-equilibrium-residual-bits,bracket-presence,bracket-evidence-identity,accepted-flag,refused-flag,color-canonical-bytes,audit-utf8",
     "excluded_fields=none",
     "consumers=accept,AcceptOutcome::evidence_identity",
-    "mutations=artifact-schema-tag:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,evidence-identity-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,exec-mode:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-seed:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-kernel:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-tile:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-iteration:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-deadline:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-poll-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-cost-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-priority:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-fields:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-policy-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-stride-identity:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,bracket-presence:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,bracket-evidence-identity:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,qoi-utf8:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,tolerance-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,dwr-abs-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,estimate-evidence-identity:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,estimate-equilibrium-residual-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,accepted-flag:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,refused-flag:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,color-canonical-bytes:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,audit-utf8:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field",
+    "mutations=artifact-schema-tag:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,evidence-identity-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,exec-mode:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-seed:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-kernel:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-tile:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,stream-iteration:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-deadline:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-poll-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-cost-quota:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,budget-priority:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,work-plan-fields:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-policy-version:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,poll-stride-identity:crates/fs-adjoint/src/dwr_accept.rs#execution_header_binds_versions_mode_stream_budget_and_poll_policy,bracket-presence:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,bracket-evidence-identity:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,qoi-utf8:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,tolerance-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,query-schema-constant:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,query-window-lo-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,query-window-hi-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,endpoint-convention:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,qoi-semantics:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,dims-bytes:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,query-schema-version:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,dwr-abs-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,estimate-evidence-identity:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,estimate-equilibrium-residual-bits:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,accepted-flag:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,refused-flag:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,color-canonical-bytes:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field,audit-utf8:crates/fs-adjoint/src/dwr_accept.rs#accept_identity_binds_each_body_field",
     "nonsemantic_mutations=none",
     "field_guard=classify_dwr_accept_identity_fields",
     "transport_guard=AcceptOutcome::evidence_identity",
@@ -159,8 +159,17 @@ fn classify_dwr_output_identity_fields(output: &DwrOutput) {
         eta: _,
         indicators: _,
         equilibrium_residual_max: _,
+        functional_binding,
         evidence_identity: _,
     } = output;
+    let DwrFunctionalBinding {
+        schema_version: _,
+        w_lo: _,
+        w_hi: _,
+        endpoint_convention: _,
+        semantics: _,
+        dims: _,
+    } = functional_binding;
 }
 
 /// Exhaustive field classifier for the retained bracket identity
@@ -187,14 +196,19 @@ fn classify_dwr_accept_identity_fields(outcome: &AcceptOutcome, query: &DwrQuery
     } = outcome;
     let DwrQuery {
         qoi: _,
+        schema_version: _,
         tolerance: _,
+        window: _,
+        endpoint_convention: _,
+        semantics: _,
+        dims: _,
     } = query;
 }
 /// Exact retained domain string for the DWR bracket identity root.
-pub const DWR_BRACKET_IDENTITY_DOMAIN: &str = "fs-adjoint-dwr-bracket-identity-v6";
+pub const DWR_BRACKET_IDENTITY_DOMAIN: &str = "fs-adjoint-dwr-bracket-identity-v7";
 const DWR_BRACKET_IDENTITY_SCHEMA: &[u8] = DWR_BRACKET_IDENTITY_DOMAIN.as_bytes();
 /// Exact retained domain string for the DWR accept identity root.
-pub const DWR_ACCEPT_IDENTITY_DOMAIN: &str = "fs-adjoint-dwr-accept-identity-v6";
+pub const DWR_ACCEPT_IDENTITY_DOMAIN: &str = "fs-adjoint-dwr-accept-identity-v7";
 const DWR_ACCEPT_IDENTITY_SCHEMA: &[u8] = DWR_ACCEPT_IDENTITY_DOMAIN.as_bytes();
 
 const DWR_INITIAL_PHASE: &str = "dwr.initial";
@@ -476,13 +490,167 @@ fn hash_bracket_execution_header(
     hasher.update(&verifier_policy.poll_stride_work_units.to_le_bytes());
 }
 
-/// A QoI query: what the caller actually asked.
+/// Schema version of the typed QoI functional specification carried by
+/// [`DwrQuery`] (bead sj31i.1: the label-only query is replaced by a typed
+/// functional; bump on ANY field addition or semantic change).
+pub const DWR_QUERY_SCHEMA_VERSION: u32 = 1;
+
+/// What kind of quantity of interest the caller is asking about — typed,
+/// never inferred from the human label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QoiSemantics {
+    /// The windowed primal integral `J(u) = ∫_{w_lo}^{w_hi} u dx`.
+    WindowedIntegral,
+}
+
+/// The boundary convention the functional assumes of its candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EndpointConvention {
+    /// Homogeneous Dirichlet: candidate endpoints are canonical `+0.0`.
+    HomogeneousDirichletZero,
+}
+
+/// The exact functional meaning sealed into a DWR estimate.
+///
+/// This reference estimator has only one admitted endpoint convention and QoI
+/// semantics today. Its scalar problem/candidate API carries no physical-unit
+/// input, so the only truthful retained dimensions are dimensionless. Keeping
+/// this binding private prevents callers from relabeling an estimate after it
+/// has been constructed; adding a genuinely dimensional estimator requires a
+/// typed input API and an identity-version bump.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DwrFunctionalBinding {
+    schema_version: u32,
+    w_lo: f64,
+    w_hi: f64,
+    endpoint_convention: EndpointConvention,
+    semantics: QoiSemantics,
+    dims: [i8; 6],
+}
+
+impl DwrFunctionalBinding {
+    const fn dimensionless_windowed_integral(w_lo: f64, w_hi: f64) -> Self {
+        Self {
+            schema_version: DWR_QUERY_SCHEMA_VERSION,
+            w_lo,
+            w_hi,
+            endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+            semantics: QoiSemantics::WindowedIntegral,
+            dims: [0; 6],
+        }
+    }
+
+    fn identity_fields(self) -> DwrFunctionalIdentityFields {
+        DwrFunctionalIdentityFields {
+            schema_constant: DWR_QUERY_SCHEMA_VERSION,
+            schema_version: self.schema_version,
+            w_lo_bits: self.w_lo.to_bits(),
+            w_hi_bits: self.w_hi.to_bits(),
+            endpoint_convention: match self.endpoint_convention {
+                EndpointConvention::HomogeneousDirichletZero => 0,
+            },
+            semantics: match self.semantics {
+                QoiSemantics::WindowedIntegral => 0,
+            },
+            dims: self.dims.map(i8::cast_unsigned),
+        }
+    }
+}
+
+/// Fixed-width identity fields for a typed DWR functional. The explicit
+/// schema constant is separate from the retained binding version so both
+/// changes are independently visible in mutation guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DwrFunctionalIdentityFields {
+    schema_constant: u32,
+    schema_version: u32,
+    w_lo_bits: u64,
+    w_hi_bits: u64,
+    endpoint_convention: u8,
+    semantics: u8,
+    dims: [u8; 6],
+}
+
+fn hash_dwr_functional_identity_fields(
+    hasher: &mut fs_blake3::Blake3,
+    fields: DwrFunctionalIdentityFields,
+) {
+    hasher.update(&fields.schema_constant.to_le_bytes());
+    hasher.update(&fields.schema_version.to_le_bytes());
+    hasher.update(&fields.w_lo_bits.to_le_bytes());
+    hasher.update(&fields.w_hi_bits.to_le_bytes());
+    hasher.update(&[fields.endpoint_convention]);
+    hasher.update(&[fields.semantics]);
+    hasher.update(&fields.dims);
+}
+
+fn hash_dwr_output_result_fields(
+    hasher: &mut fs_blake3::Blake3,
+    functional_fields: DwrFunctionalIdentityFields,
+    j_primal: f64,
+    eta: f64,
+    equilibrium_residual_max: f64,
+) {
+    hash_dwr_functional_identity_fields(hasher, functional_fields);
+    hasher.update(&j_primal.to_bits().to_le_bytes());
+    hasher.update(&eta.to_bits().to_le_bytes());
+    hasher.update(&equilibrium_residual_max.to_bits().to_le_bytes());
+}
+
+fn hash_accept_estimate_identity_fields(
+    hasher: &mut fs_blake3::Blake3,
+    dwr_abs: f64,
+    estimate_identity: DwrEvidenceIdentity,
+    equilibrium_residual_max: f64,
+) {
+    hasher.update(&dwr_abs.to_bits().to_le_bytes());
+    hasher.update(estimate_identity.as_bytes());
+    hasher.update(&equilibrium_residual_max.to_bits().to_le_bytes());
+}
+
+/// A typed QoI query: what the caller actually asked, as a functional
+/// specification — domain window, endpoint convention, QoI semantics, and
+/// units — not a human label (bead sj31i.1). The label survives as
+/// provenance only; every typed field is hashed into the acceptance
+/// identity and every functional field is cross-checked against the sealed
+/// estimate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DwrQuery {
     /// The quantity of interest (provenance label).
     pub qoi: String,
+    /// Version of this exact typed-functional schema. Unknown versions refuse
+    /// instead of being interpreted under the current semantics.
+    pub schema_version: u32,
     /// The tolerance the answer must meet.
     pub tolerance: f64,
+    /// The functional's domain window `[w_lo, w_hi]` — must match the
+    /// sealed estimate's retained window exactly (bitwise).
+    pub window: (f64, f64),
+    /// Boundary convention the functional assumes.
+    pub endpoint_convention: EndpointConvention,
+    /// Typed QoI semantics.
+    pub semantics: QoiSemantics,
+    /// Six-base dimension exponents of the QoI, in the authoritative fs-qty
+    /// base order `[m, kg, s, K, A, mol]`; dimensionless is all zeros. This
+    /// reference estimator currently seals `[0; 6]` because its scalar input
+    /// API carries no unit authority. Carried as raw exponents so L3 needs no
+    /// new dependency.
+    pub dims: [i8; 6],
+}
+
+impl DwrQuery {
+    const fn functional_binding(&self) -> DwrFunctionalBinding {
+        DwrFunctionalBinding {
+            schema_version: self.schema_version,
+            w_lo: self.window.0,
+            w_hi: self.window.1,
+            endpoint_convention: self.endpoint_convention,
+            semantics: self.semantics,
+            dims: self.dims,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1489,6 +1657,77 @@ fn malformed_refusal(estimator: &str, audit: String) -> AcceptDraft {
     }
 }
 
+fn functional_binding_refusal(
+    query: &DwrQuery,
+    sealed: DwrFunctionalBinding,
+) -> Option<AcceptDraft> {
+    if query.schema_version != DWR_QUERY_SCHEMA_VERSION {
+        return Some(malformed_refusal(
+            "dwr-unsupported-query-schema-version",
+            format!(
+                "REFUSED: functional schema version {} is unsupported; this estimator admits exactly version {}",
+                query.schema_version, DWR_QUERY_SCHEMA_VERSION
+            ),
+        ));
+    }
+    if query.schema_version != sealed.schema_version {
+        return Some(malformed_refusal(
+            "dwr-estimate-query-schema-mismatch",
+            format!(
+                "REFUSED: query functional schema version {} does not match the sealed estimate version {}",
+                query.schema_version, sealed.schema_version
+            ),
+        ));
+    }
+    if !query.window.0.is_finite()
+        || !query.window.1.is_finite()
+        || query.window.0 >= query.window.1
+    {
+        return Some(malformed_refusal(
+            "dwr-invalid-window",
+            format!(
+                "REFUSED: functional window must be finite and increasing, got [{:.3e}, {:.3e}]",
+                query.window.0, query.window.1
+            ),
+        ));
+    }
+    if query.window.0.to_bits() != sealed.w_lo.to_bits()
+        || query.window.1.to_bits() != sealed.w_hi.to_bits()
+    {
+        return Some(malformed_refusal(
+            "dwr-estimate-query-window-mismatch",
+            format!(
+                "REFUSED: query window [{:.3e}, {:.3e}] does not match the sealed estimate's retained window [{:.3e}, {:.3e}]; cross-functional replay is rejected",
+                query.window.0, query.window.1, sealed.w_lo, sealed.w_hi
+            ),
+        ));
+    }
+    if query.endpoint_convention != sealed.endpoint_convention {
+        return Some(malformed_refusal(
+            "dwr-estimate-query-endpoint-mismatch",
+            "REFUSED: query endpoint convention does not match the sealed estimate; the current reference estimator supports only homogeneous Dirichlet zero endpoints"
+                .to_string(),
+        ));
+    }
+    if query.semantics != sealed.semantics {
+        return Some(malformed_refusal(
+            "dwr-estimate-query-semantics-mismatch",
+            "REFUSED: query QoI semantics do not match the sealed estimate; the current reference estimator supports only a windowed primal integral"
+                .to_string(),
+        ));
+    }
+    if query.dims != sealed.dims {
+        return Some(malformed_refusal(
+            "dwr-estimate-query-dimensions-mismatch",
+            format!(
+                "REFUSED: query dimensions {:?} do not match the sealed estimate dimensions {:?} in fs-qty order [m, kg, s, K, A, mol]; the scalar reference model is dimensionless",
+                query.dims, sealed.dims
+            ),
+        ));
+    }
+    None
+}
+
 /// The accept test. Color logic (mechanical, auditable):
 /// - no acceptance path → rejected (estimated color on the estimate);
 /// - DWR-only accept (`|η| ≤ tol`, no valid bracket) → ESTIMATED;
@@ -1523,7 +1762,11 @@ pub fn accept(
             }
         })?;
     dwr_checkpoint(ACCEPT_INITIAL_PHASE, &mut progress, cx)?;
-    let draft = if !query.tolerance.is_finite() || query.tolerance <= 0.0 {
+    let draft = if let Some(refusal) =
+        functional_binding_refusal(query, estimate.functional_binding())
+    {
+        refusal
+    } else if !query.tolerance.is_finite() || query.tolerance <= 0.0 {
         malformed_refusal(
             "dwr-invalid-tolerance",
             format!(
@@ -1613,9 +1856,13 @@ pub fn accept(
         progress.advance(u128::try_from(chunk.len()).map_err(|_| DwrError::WorkPlanOverflow)?)?;
     }
     hasher.update(&query.tolerance.to_bits().to_le_bytes());
-    hasher.update(&dwr_abs.to_bits().to_le_bytes());
-    hasher.update(estimate.evidence_identity().as_bytes());
-    hasher.update(&estimate.equilibrium_residual_max().to_bits().to_le_bytes());
+    hash_dwr_functional_identity_fields(&mut hasher, query.functional_binding().identity_fields());
+    hash_accept_estimate_identity_fields(
+        &mut hasher,
+        dwr_abs,
+        estimate.evidence_identity(),
+        estimate.equilibrium_residual_max(),
+    );
     match bracket {
         Some(value) => {
             hasher.update(&[1]);
@@ -1694,6 +1941,12 @@ pub struct DwrOutput {
     /// retained primal-equilibrium receipt the acceptance gate consumes
     /// (bead sj31i.1): roundoff-scale for a genuine solve.
     equilibrium_residual_max: f64,
+    /// Complete typed functional used by the estimator: schema, window,
+    /// endpoint convention, semantics, and dimensions. The reference model's
+    /// dimensions are necessarily `[0; 6]`: its scalar inputs carry no unit
+    /// authority, so this binding makes that no-claim executable rather than
+    /// letting an acceptance query relabel the estimate.
+    functional_binding: DwrFunctionalBinding,
     /// Retained identity of the estimator inputs, outputs, and execution policy.
     evidence_identity: DwrEvidenceIdentity,
 }
@@ -1722,6 +1975,16 @@ impl DwrOutput {
     #[must_use]
     pub const fn equilibrium_residual_max(&self) -> f64 {
         self.equilibrium_residual_max
+    }
+
+    /// Retained functional window `[w_lo, w_hi]` of this estimate.
+    #[must_use]
+    pub const fn window(&self) -> (f64, f64) {
+        (self.functional_binding.w_lo, self.functional_binding.w_hi)
+    }
+
+    const fn functional_binding(&self) -> DwrFunctionalBinding {
+        self.functional_binding
     }
 
     /// Retained execution/evidence identity for this exact DWR estimate.
@@ -2661,6 +2924,7 @@ pub fn dwr_integral_qoi(
     if !j_primal.is_finite() || !eta.is_finite() {
         return Err(non_finite_derived("DWR output", None));
     }
+    let functional_binding = DwrFunctionalBinding::dimensionless_windowed_integral(w_lo, w_hi);
 
     dwr_checkpoint(DWR_OUTPUT_VALIDATE_PHASE, &mut progress, cx)?;
     for (index, indicator) in indicators.iter().enumerate() {
@@ -2691,11 +2955,13 @@ pub fn dwr_integral_qoi(
         progress.advance(u128::try_from(chunk.len()).map_err(|_| DwrError::WorkPlanOverflow)?)?;
     }
     hasher.update(validated.candidate_digest.as_bytes());
-    hasher.update(&w_lo.to_bits().to_le_bytes());
-    hasher.update(&w_hi.to_bits().to_le_bytes());
-    hasher.update(&j_primal.to_bits().to_le_bytes());
-    hasher.update(&eta.to_bits().to_le_bytes());
-    hasher.update(&equilibrium_residual_max.to_bits().to_le_bytes());
+    hash_dwr_output_result_fields(
+        &mut hasher,
+        functional_binding.identity_fields(),
+        j_primal,
+        eta,
+        equilibrium_residual_max,
+    );
     // Reset the documented 256-item cancellation bound between the
     // variable-length canonical problem bytes and the independent indicator
     // stream. Without this boundary, a final problem chunk and the first 256
@@ -2711,6 +2977,7 @@ pub fn dwr_integral_qoi(
         eta,
         indicators,
         equilibrium_residual_max,
+        functional_binding,
         evidence_identity: DwrEvidenceIdentity(hasher.finalize()),
     };
     progress.advance(plan.finalization_work_units)?;
@@ -2826,11 +3093,11 @@ mod execution_tests {
             let baseline = root(&fields, CURRENT_VERIFIER_POLICY_IDENTITY);
             assert_eq!(
                 baseline.to_hex(),
-                // Re-pinned 2026-07-17 twice (bead sj31i.1): first for
-                // 4e405dd8 (fs-verify VERIFIER_WORK_PLAN_VERSION 1 -> 2,
-                // code-first, stale pin unobservable until run), then for the
-                // sj31i.1 sealed-accept bump DWR_EVIDENCE_IDENTITY_VERSION
-                // 5 -> 6, which this header hashes by design.
+                // Intentionally still the last runtime-proven v6-era pin.
+                // The code-first v7 typed-functional wave changes the shared
+                // evidence version this header hashes; central Phase 2 must
+                // derive and attribute the v7 replacement from the production
+                // encoder. Do not fabricate that root during a no-build slice.
                 "f4e634fa3e69ffe5f8246cffce580e59a371839698d7f5cea72fad02d4f85ae1",
                 "fixed bracket work-policy preimage changed"
             );
@@ -2876,10 +3143,10 @@ mod execution_tests {
                 problem_root: u64,
                 problem_canonical: Vec<u8>,
                 candidate_digest: fs_blake3::ContentHash,
-                w_lo: f64,
-                w_hi: f64,
+                functional: DwrFunctionalIdentityFields,
                 j_primal: f64,
                 eta: f64,
+                equilibrium_residual_max: f64,
                 indicators: Vec<f64>,
             }
             let baseline_body = Body {
@@ -2887,10 +3154,11 @@ mod execution_tests {
                 problem_root: 0x00DD_00AA_00CC_00BB,
                 problem_canonical: b"output-canonical-fixture".to_vec(),
                 candidate_digest: fs_blake3::hash_domain("dwr-output-test", b"candidate"),
-                w_lo: 0.25,
-                w_hi: 0.75,
+                functional: DwrFunctionalBinding::dimensionless_windowed_integral(0.25, 0.75)
+                    .identity_fields(),
                 j_primal: 0.5,
                 eta: 1.0e-3,
+                equilibrium_residual_max: 2.0e-13,
                 indicators: vec![0.1, 0.2, 0.3],
             };
             let root = |plan_fields: &[u128; 21], body: &Body| {
@@ -2902,10 +3170,13 @@ mod execution_tests {
                 hasher.update(&len.to_le_bytes());
                 hasher.update(&body.problem_canonical);
                 hasher.update(body.candidate_digest.as_bytes());
-                hasher.update(&body.w_lo.to_bits().to_le_bytes());
-                hasher.update(&body.w_hi.to_bits().to_le_bytes());
-                hasher.update(&body.j_primal.to_bits().to_le_bytes());
-                hasher.update(&body.eta.to_bits().to_le_bytes());
+                hash_dwr_output_result_fields(
+                    &mut hasher,
+                    body.functional,
+                    body.j_primal,
+                    body.eta,
+                    body.equilibrium_residual_max,
+                );
                 for indicator in &body.indicators {
                     hasher.update(&indicator.to_bits().to_le_bytes());
                 }
@@ -2956,14 +3227,39 @@ mod execution_tests {
                         fs_blake3::hash_domain("dwr-output-test", b"other-candidate");
                     body
                 }),
+                ("functional-schema-constant", {
+                    let mut body = baseline_body.clone();
+                    body.functional.schema_constant += 1;
+                    body
+                }),
+                ("functional-schema-version", {
+                    let mut body = baseline_body.clone();
+                    body.functional.schema_version += 1;
+                    body
+                }),
                 ("window-lo-bits", {
                     let mut body = baseline_body.clone();
-                    body.w_lo = 0.250_000_1;
+                    body.functional.w_lo_bits = 0.250_000_1_f64.to_bits();
                     body
                 }),
                 ("window-hi-bits", {
                     let mut body = baseline_body.clone();
-                    body.w_hi = 0.749_999_9;
+                    body.functional.w_hi_bits = 0.749_999_9_f64.to_bits();
+                    body
+                }),
+                ("endpoint-convention", {
+                    let mut body = baseline_body.clone();
+                    body.functional.endpoint_convention ^= 1;
+                    body
+                }),
+                ("qoi-semantics", {
+                    let mut body = baseline_body.clone();
+                    body.functional.semantics ^= 1;
+                    body
+                }),
+                ("dims-bytes", {
+                    let mut body = baseline_body.clone();
+                    body.functional.dims[3] ^= 1;
                     body
                 }),
                 ("j-primal-bits", {
@@ -2974,6 +3270,11 @@ mod execution_tests {
                 ("eta-bits", {
                     let mut body = baseline_body.clone();
                     body.eta = 2.0e-3;
+                    body
+                }),
+                ("equilibrium-residual-max-bits", {
+                    let mut body = baseline_body.clone();
+                    body.equilibrium_residual_max = 3.0e-13;
                     body
                 }),
                 ("indicator-item", {
@@ -3013,7 +3314,10 @@ mod execution_tests {
             struct Body {
                 qoi: Vec<u8>,
                 tolerance: f64,
+                functional: DwrFunctionalIdentityFields,
                 dwr_abs: f64,
+                estimate_identity: DwrEvidenceIdentity,
+                estimate_equilibrium_residual: f64,
                 bracket_identity: Option<fs_blake3::ContentHash>,
                 accepted: bool,
                 refused: bool,
@@ -3023,7 +3327,14 @@ mod execution_tests {
             let baseline_body = Body {
                 qoi: b"accept-qoi-fixture".to_vec(),
                 tolerance: 1.0e-2,
+                functional: DwrFunctionalBinding::dimensionless_windowed_integral(0.25, 0.75)
+                    .identity_fields(),
                 dwr_abs: 5.0e-3,
+                estimate_identity: DwrEvidenceIdentity(fs_blake3::hash_domain(
+                    "dwr-accept-test",
+                    b"estimate",
+                )),
+                estimate_equilibrium_residual: 2.0e-13,
                 bracket_identity: Some(fs_blake3::hash_domain("dwr-accept-test", b"bracket")),
                 accepted: true,
                 refused: false,
@@ -3035,7 +3346,13 @@ mod execution_tests {
                 hash_execution_header(&mut hasher, DWR_ACCEPT_IDENTITY_SCHEMA, &plan_fields, cx);
                 hasher.update(&body.qoi);
                 hasher.update(&body.tolerance.to_bits().to_le_bytes());
-                hasher.update(&body.dwr_abs.to_bits().to_le_bytes());
+                hash_dwr_functional_identity_fields(&mut hasher, body.functional);
+                hash_accept_estimate_identity_fields(
+                    &mut hasher,
+                    body.dwr_abs,
+                    body.estimate_identity,
+                    body.estimate_equilibrium_residual,
+                );
                 match &body.bracket_identity {
                     Some(identity) => {
                         hasher.update(&[1]);
@@ -3065,9 +3382,57 @@ mod execution_tests {
                     body.tolerance = 1.1e-2;
                     body
                 }),
+                ("query-schema-constant", {
+                    let mut body = baseline_body.clone();
+                    body.functional.schema_constant += 1;
+                    body
+                }),
+                ("query-schema-version", {
+                    let mut body = baseline_body.clone();
+                    body.functional.schema_version += 1;
+                    body
+                }),
+                ("query-window-lo-bits", {
+                    let mut body = baseline_body.clone();
+                    body.functional.w_lo_bits = 0.250_000_1_f64.to_bits();
+                    body
+                }),
+                ("query-window-hi-bits", {
+                    let mut body = baseline_body.clone();
+                    body.functional.w_hi_bits = 0.749_999_9_f64.to_bits();
+                    body
+                }),
+                ("endpoint-convention", {
+                    let mut body = baseline_body.clone();
+                    body.functional.endpoint_convention ^= 1;
+                    body
+                }),
+                ("qoi-semantics", {
+                    let mut body = baseline_body.clone();
+                    body.functional.semantics ^= 1;
+                    body
+                }),
+                ("dims-bytes", {
+                    let mut body = baseline_body.clone();
+                    body.functional.dims[4] ^= 1;
+                    body
+                }),
                 ("dwr-abs-bits", {
                     let mut body = baseline_body.clone();
                     body.dwr_abs = 6.0e-3;
+                    body
+                }),
+                ("estimate-evidence-identity", {
+                    let mut body = baseline_body.clone();
+                    body.estimate_identity = DwrEvidenceIdentity(fs_blake3::hash_domain(
+                        "dwr-accept-test",
+                        b"other-estimate",
+                    ));
+                    body
+                }),
+                ("estimate-equilibrium-residual-bits", {
+                    let mut body = baseline_body.clone();
+                    body.estimate_equilibrium_residual = 3.0e-13;
                     body
                 }),
                 ("bracket-presence", {
