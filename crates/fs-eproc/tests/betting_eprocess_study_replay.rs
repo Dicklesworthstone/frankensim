@@ -383,7 +383,7 @@ fn config_identity(coordinates: MutationCoordinates) -> ReplayIdentity {
         .u64("mutation-seed", MUTATION_SEED)
         .u64("mutation-kernel", u64::from(MUTATION_KERNEL))
         .u64("mutation-tile", u64::from(MUTATION_TILE))
-        .u64("mutation-draws", MUTATION_DRAWS)
+        .u64("mutation-draws", coordinates.draws)
         .u64("mutation-selector-word", coordinates.selector_word)
         .u64("mutation-bit-selector-word", coordinates.bit_selector_word)
         .u64("mutation-checkpoint-index", usize_u64(coordinates.checkpoint))
@@ -1194,6 +1194,13 @@ fn betting_eprocess_full_trajectory_replays_and_seeded_failure_is_refused() {
     let config = config_identity(coordinates);
     let replayed_config = config_identity(mutation_coordinates());
     assert_eq!(config, replayed_config, "fixture identity must replay");
+    let mut draw_count_mutant = coordinates;
+    draw_count_mutant.draws ^= 1;
+    assert_ne!(
+        config_identity(draw_count_mutant),
+        config,
+        "fixture identity must bind the supplied mutation selector draw count",
+    );
 
     let original = run_study(&config);
     let replay = run_study(&replayed_config);
