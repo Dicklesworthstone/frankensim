@@ -42,9 +42,11 @@
 //! leaving all unknown historical meanings unbound.
 //! Schema v17 adds the same explicit receipt boundary for exact retained
 //! evidence JSON bytes and makes a bound evidence body immutable.
+//! Schema v18 gives every operation's frozen session/IR/Five-Explicits fields
+//! separate typed raw-content identities without assigning semantic meaning.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -54,7 +56,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
 pub(crate) const MIGRATIONS: &[&[&str]] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
 ];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
@@ -1244,7 +1246,45 @@ pub const V17: &[&str] = &[
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 through v17 additions); the
+/// v18: exact typed raw-content identities for every frozen operation field.
+///
+/// Operation row IDs, branch/mode, clocks, outcome, diagnostics, lineage, and
+/// authority are deliberately absent. Rust backfills and independently
+/// verifies the BLAKE3 `ContentId` columns inside the migration transaction;
+/// new binaries write the operation and sidecar in one transaction. This SQL
+/// batch never guesses an IR schema or semantic identity.
+pub const V18: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS op_content_identities(
+        op INTEGER NOT NULL PRIMARY KEY REFERENCES ops(id) ON DELETE CASCADE,
+        session_content_id BLOB CHECK(
+            session_content_id IS NULL OR length(session_content_id) = 32
+        ),
+        ir_content_id BLOB NOT NULL CHECK(length(ir_content_id) = 32),
+        seed_content_id BLOB NOT NULL CHECK(length(seed_content_id) = 32),
+        versions_content_id BLOB NOT NULL CHECK(length(versions_content_id) = 32),
+        budget_content_id BLOB NOT NULL CHECK(length(budget_content_id) = 32),
+        capability_content_id BLOB NOT NULL CHECK(length(capability_content_id) = 32),
+        row_schema_version INTEGER NOT NULL CHECK(row_schema_version = 1)
+    ) STRICT",
+    "CREATE INDEX IF NOT EXISTS idx_op_content_identity_session
+     ON op_content_identities(session_content_id, op)
+     WHERE session_content_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_op_content_identity_ir
+     ON op_content_identities(ir_content_id, op)",
+    "CREATE TRIGGER IF NOT EXISTS trg_op_content_identity_immutable_update
+     BEFORE UPDATE ON op_content_identities
+     BEGIN
+       SELECT RAISE(ABORT, 'operation content identity is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_op_content_identity_guard_delete
+     BEFORE DELETE ON op_content_identities
+     WHEN EXISTS(SELECT 1 FROM ops WHERE id = OLD.op)
+     BEGIN
+       SELECT RAISE(ABORT, 'operation content identity is retained with its operation');
+     END",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 through v18 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -1281,4 +1321,5 @@ pub const ALL_TABLES: &[&str] = &[
     "edge_content_identities",
     "artifact_semantic_bindings",
     "evidence_semantic_bindings",
+    "op_content_identities",
 ];

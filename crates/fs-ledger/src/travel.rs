@@ -445,25 +445,49 @@ impl Ledger {
                 what: format!("branch {branch}"),
             });
         }
-        self.conn
-            .prepare(
-                "INSERT INTO ops(session, ir, seed, versions, budget, capability, t_start, \
-                 branch, exec_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .map_err(|e| sql_err("op insert prepare", &e))?
-            .execute_with_params(&[
-                opt_blob_param(session),
-                text_param(ir),
-                blob_param(explicits.seed),
-                text_param(explicits.versions),
-                text_param(explicits.budget),
-                text_param(explicits.capability),
-                SqliteValue::Integer(t_start_ns),
-                SqliteValue::Integer(branch),
-                text_param(mode.as_str()),
-            ])
-            .map_err(|e| sql_err("op insert", &e))?;
-        Ok(self.conn.last_insert_rowid())
+        let owns_transaction = !self.in_transaction();
+        if owns_transaction {
+            self.begin()?;
+        }
+        let inserted = (|| {
+            self.conn
+                .prepare(
+                    "INSERT INTO ops(session, ir, seed, versions, budget, capability, t_start, \
+                     branch, exec_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(|e| sql_err("op insert prepare", &e))?
+                .execute_with_params(&[
+                    opt_blob_param(session),
+                    text_param(ir),
+                    blob_param(explicits.seed),
+                    text_param(explicits.versions),
+                    text_param(explicits.budget),
+                    text_param(explicits.capability),
+                    SqliteValue::Integer(t_start_ns),
+                    SqliteValue::Integer(branch),
+                    text_param(mode.as_str()),
+                ])
+                .map_err(|e| sql_err("op insert", &e))?;
+            let op = self.conn.last_insert_rowid();
+            self.insert_op_content_identity(op, session, ir, explicits)?;
+            Ok(op)
+        })();
+        match inserted {
+            Ok(op) if owns_transaction => match self.commit() {
+                Ok(()) => Ok(op),
+                Err(error) => {
+                    let _ = self.rollback();
+                    Err(error)
+                }
+            },
+            Ok(op) => Ok(op),
+            Err(error) => {
+                if owns_transaction {
+                    let _ = self.rollback();
+                }
+                Err(error)
+            }
+        }
     }
 
     // -- visibility ---------------------------------------------------------

@@ -9,6 +9,7 @@ use fs_ledger::{
     ExtensionTable, FiveExplicits, IDENTITY_MIGRATION_RECEIPT_WIRE_VERSION, IdentityMigrationClaim,
     IdentityMigrationReceipt, IdentityMigrationWireError, Ledger, LedgerError,
     MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES, MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES,
+    OP_CONTENT_IDENTITY_ROW_VERSION,
 };
 
 const LIMITS: CanonicalLimits = CanonicalLimits::new(64 * 1024, 16 * 1024, 8, 16, 4096);
@@ -381,6 +382,76 @@ fn lineage_edges_dual_write_the_linked_artifact_content_identity() {
         None,
         "role remains a separate part of edge identity"
     );
+}
+
+#[test]
+fn operation_fields_receive_separate_exact_typed_content_identities() {
+    let ledger = Ledger::open(":memory:").expect("fresh v18 ledger");
+    let session = b"operation-session";
+    let ir = r#"{"op":"identity-fixture","units":"m"}"#;
+    let explicits = FiveExplicits {
+        seed: b"operation-seed",
+        versions: r#"{"fs-ledger":"0.1.0"}"#,
+        budget: r#"{"memory_bytes":4096}"#,
+        capability: r#"{"cores":2}"#,
+    };
+    let op = ledger
+        .begin_op(Some(session), ir, &explicits, 1)
+        .expect("atomically record operation and typed content sidecar");
+
+    let identity = ledger
+        .op_content_identity(op)
+        .expect("independently re-hash operation fields")
+        .expect("operation identity sidecar exists");
+    assert_eq!(identity.op(), op);
+    assert_eq!(
+        identity.session_content_id(),
+        Some(ContentId::of_bytes(session))
+    );
+    assert_eq!(identity.ir_content_id(), ContentId::of_bytes(ir.as_bytes()));
+    assert_eq!(
+        identity.seed_content_id(),
+        ContentId::of_bytes(explicits.seed)
+    );
+    assert_eq!(
+        identity.versions_content_id(),
+        ContentId::of_bytes(explicits.versions.as_bytes())
+    );
+    assert_eq!(
+        identity.budget_content_id(),
+        ContentId::of_bytes(explicits.budget.as_bytes())
+    );
+    assert_eq!(
+        identity.capability_content_id(),
+        ContentId::of_bytes(explicits.capability.as_bytes())
+    );
+    assert_eq!(
+        identity.row_schema_version(),
+        OP_CONTENT_IDENTITY_ROW_VERSION
+    );
+
+    ledger
+        .finish_op(op, fs_ledger::OpOutcome::Ok, None, 2)
+        .expect("terminal envelope remains outside frozen-field identities");
+    assert_eq!(ledger.op_content_identity(op).unwrap(), Some(identity));
+    assert_eq!(ledger.table_count("op_content_identities").unwrap(), 1);
+
+    ledger.begin().expect("open caller-owned transaction");
+    let rolled_back = ledger
+        .begin_op(None, r#"{"op":"rollback-fixture"}"#, &explicits, 3)
+        .expect("record operation and sidecar inside caller transaction");
+    assert_eq!(
+        ledger
+            .op_content_identity(rolled_back)
+            .unwrap()
+            .expect("uncommitted sidecar is visible to its transaction")
+            .session_content_id(),
+        None
+    );
+    ledger.rollback().expect("roll back caller transaction");
+    assert_eq!(ledger.op(rolled_back).unwrap(), None);
+    assert_eq!(ledger.op_content_identity(rolled_back).unwrap(), None);
+    assert_eq!(ledger.table_count("op_content_identities").unwrap(), 1);
 }
 
 #[test]

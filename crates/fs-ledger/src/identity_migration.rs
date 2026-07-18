@@ -22,12 +22,16 @@ use fs_blake3::identity::{
 };
 use fsqlite::SqliteValue;
 
-use crate::{ContentHash, EdgeRole, Ledger, LedgerError, blob_param, now_wall_ns, sql_err};
+use crate::{
+    ContentHash, EdgeRole, FiveExplicits, Ledger, LedgerError, blob_param, now_wall_ns, sql_err,
+};
 
 /// Schema version of one artifact compatibility-hash to typed-content-ID row.
 pub const ARTIFACT_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
 /// Schema version of one lineage-edge typed-content-ID companion row.
 pub const EDGE_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
+/// Schema version of one frozen-operation-field typed-content-ID sidecar.
+pub const OP_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
 /// Maximum receipt IDs exposed by one artifact-semantic candidate lookup.
 pub const MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES: usize = 256;
 /// Maximum UTF-8 bytes in an evidence name admitted to a semantic binding.
@@ -609,6 +613,74 @@ pub struct EdgeContentIdentity {
     row_schema_version: u32,
 }
 
+/// Independently verified typed raw-content identities for one operation's
+/// frozen input fields.
+///
+/// The ledger-local row ID, branch/mode, clocks, terminal outcome, diagnostic,
+/// lineage, semantic meaning, and authority are intentionally not identities
+/// in this sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpContentIdentity {
+    op: i64,
+    session_content_id: Option<ContentId>,
+    ir_content_id: ContentId,
+    seed_content_id: ContentId,
+    versions_content_id: ContentId,
+    budget_content_id: ContentId,
+    capability_content_id: ContentId,
+    row_schema_version: u32,
+}
+
+impl OpContentIdentity {
+    /// Ledger-local operation row owning these exact content identities.
+    #[must_use]
+    pub const fn op(self) -> i64 {
+        self.op
+    }
+
+    /// Typed raw-content identity of the optional exact session bytes.
+    #[must_use]
+    pub const fn session_content_id(self) -> Option<ContentId> {
+        self.session_content_id
+    }
+
+    /// Typed raw-content identity of the exact frozen IR JSON bytes.
+    #[must_use]
+    pub const fn ir_content_id(self) -> ContentId {
+        self.ir_content_id
+    }
+
+    /// Typed raw-content identity of the exact frozen RNG seed bytes.
+    #[must_use]
+    pub const fn seed_content_id(self) -> ContentId {
+        self.seed_content_id
+    }
+
+    /// Typed raw-content identity of the exact versions JSON bytes.
+    #[must_use]
+    pub const fn versions_content_id(self) -> ContentId {
+        self.versions_content_id
+    }
+
+    /// Typed raw-content identity of the exact budget JSON bytes.
+    #[must_use]
+    pub const fn budget_content_id(self) -> ContentId {
+        self.budget_content_id
+    }
+
+    /// Typed raw-content identity of the exact capability JSON bytes.
+    #[must_use]
+    pub const fn capability_content_id(self) -> ContentId {
+        self.capability_content_id
+    }
+
+    /// Exact sidecar row schema version.
+    #[must_use]
+    pub const fn row_schema_version(self) -> u32 {
+        self.row_schema_version
+    }
+}
+
 impl EdgeContentIdentity {
     /// Operation owning this role-qualified lineage edge.
     #[must_use]
@@ -858,6 +930,59 @@ fn edge_identity_corrupt(op: i64, detail: impl Into<String>) -> LedgerError {
     LedgerError::OpCorrupt {
         op,
         detail: detail.into(),
+    }
+}
+
+fn op_identity_corrupt(op: i64, detail: impl Into<String>) -> LedgerError {
+    LedgerError::OpCorrupt {
+        op,
+        detail: detail.into(),
+    }
+}
+
+fn op_content_id(
+    value: Option<&SqliteValue>,
+    op: i64,
+    field: &'static str,
+) -> Result<ContentId, LedgerError> {
+    match value {
+        Some(SqliteValue::Blob(bytes)) => ContentId::parse_slice(bytes),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        op_identity_corrupt(
+            op,
+            format!("operation {field} is not an exact 32-byte typed content identity"),
+        )
+    })
+}
+
+fn optional_op_content_id(
+    value: Option<&SqliteValue>,
+    op: i64,
+    field: &'static str,
+) -> Result<Option<ContentId>, LedgerError> {
+    match value {
+        Some(SqliteValue::Null) => Ok(None),
+        other => op_content_id(other, op, field).map(Some),
+    }
+}
+
+fn derive_op_content_identity(
+    op: i64,
+    session: Option<&[u8]>,
+    ir: &str,
+    explicits: &FiveExplicits<'_>,
+) -> OpContentIdentity {
+    OpContentIdentity {
+        op,
+        session_content_id: session.map(ContentId::of_bytes),
+        ir_content_id: ContentId::of_bytes(ir.as_bytes()),
+        seed_content_id: ContentId::of_bytes(explicits.seed),
+        versions_content_id: ContentId::of_bytes(explicits.versions.as_bytes()),
+        budget_content_id: ContentId::of_bytes(explicits.budget.as_bytes()),
+        capability_content_id: ContentId::of_bytes(explicits.capability.as_bytes()),
+        row_schema_version: OP_CONTENT_IDENTITY_ROW_VERSION,
     }
 }
 
@@ -2097,6 +2222,268 @@ impl Ledger {
             return Err(edge_identity_corrupt(
                 op,
                 "v15 edge content-identity sidecar has no compatibility edge",
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_op_content_identity(
+        &self,
+        op: i64,
+        session: Option<&[u8]>,
+        ir: &str,
+        explicits: &FiveExplicits<'_>,
+        if_absent: bool,
+    ) -> Result<OpContentIdentity, LedgerError> {
+        let identity = derive_op_content_identity(op, session, ir, explicits);
+        let sql = if if_absent {
+            "INSERT OR IGNORE INTO op_content_identities(
+                 op, session_content_id, ir_content_id, seed_content_id,
+                 versions_content_id, budget_content_id, capability_content_id,
+                 row_schema_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        } else {
+            "INSERT INTO op_content_identities(
+                 op, session_content_id, ir_content_id, seed_content_id,
+                 versions_content_id, budget_content_id, capability_content_id,
+                 row_schema_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        };
+        let affected = self
+            .conn
+            .prepare(sql)
+            .map_err(|error| sql_err("operation content identity prepare", &error))?
+            .execute_with_params(&[
+                SqliteValue::Integer(op),
+                optional_content_param(identity.session_content_id),
+                blob_param(identity.ir_content_id.as_bytes()),
+                blob_param(identity.seed_content_id.as_bytes()),
+                blob_param(identity.versions_content_id.as_bytes()),
+                blob_param(identity.budget_content_id.as_bytes()),
+                blob_param(identity.capability_content_id.as_bytes()),
+                SqliteValue::Integer(i64::from(identity.row_schema_version)),
+            ])
+            .map_err(|error| sql_err("operation content identity write", &error))?;
+        if affected == 1 || (if_absent && affected == 0) {
+            Ok(identity)
+        } else {
+            Err(op_identity_corrupt(
+                op,
+                format!("one operation identity write changed {affected} rows"),
+            ))
+        }
+    }
+
+    /// Persist exact typed content IDs for the operation fields admitted by
+    /// [`Ledger::begin_op_on`](crate::Ledger::begin_op_on). The caller keeps
+    /// this insert in the same transaction as the compatibility operation row.
+    pub(crate) fn insert_op_content_identity(
+        &self,
+        op: i64,
+        session: Option<&[u8]>,
+        ir: &str,
+        explicits: &FiveExplicits<'_>,
+    ) -> Result<(), LedgerError> {
+        self.write_op_content_identity(op, session, ir, explicits, false)
+            .map(|_| ())
+    }
+
+    /// Return independently re-hashed typed identities for one operation's
+    /// exact frozen session, IR, seed, versions, budget, and capability bytes.
+    ///
+    /// Row IDs, branches, execution mode, clocks, outcomes, diagnostics,
+    /// lineage, semantic meaning, and authority remain separate. Absence means
+    /// the compatibility operation itself does not exist.
+    ///
+    /// # Errors
+    /// [`LedgerError::OpCorrupt`] when the operation envelope or its v18
+    /// sidecar is missing, malformed, future-versioned, or content-divergent;
+    /// storage failures otherwise.
+    pub fn op_content_identity(&self, op: i64) -> Result<Option<OpContentIdentity>, LedgerError> {
+        let Some(source) = self.op(op)? else {
+            return Ok(None);
+        };
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT op, session_content_id, ir_content_id, seed_content_id,
+                        versions_content_id, budget_content_id, capability_content_id,
+                        row_schema_version
+                 FROM op_content_identities WHERE op = ?1 LIMIT 2",
+                &[SqliteValue::Integer(op)],
+            )
+            .map_err(|error| sql_err("operation content identity read", &error))?;
+        if rows.len() != 1 {
+            return Err(op_identity_corrupt(
+                op,
+                if rows.is_empty() {
+                    "retained operation has no typed content-identity sidecar"
+                } else {
+                    "one operation row selected multiple typed content-identity sidecars"
+                },
+            ));
+        }
+        let row = rows
+            .first()
+            .expect("single operation identity row checked above");
+        if !matches!(row.first(), Some(SqliteValue::Integer(stored)) if *stored == op) {
+            return Err(op_identity_corrupt(
+                op,
+                "operation identity sidecar has a missing or divergent row ID",
+            ));
+        }
+        let stored = OpContentIdentity {
+            op,
+            session_content_id: optional_op_content_id(row.get(1), op, "session_content_id")?,
+            ir_content_id: op_content_id(row.get(2), op, "ir_content_id")?,
+            seed_content_id: op_content_id(row.get(3), op, "seed_content_id")?,
+            versions_content_id: op_content_id(row.get(4), op, "versions_content_id")?,
+            budget_content_id: op_content_id(row.get(5), op, "budget_content_id")?,
+            capability_content_id: op_content_id(row.get(6), op, "capability_content_id")?,
+            row_schema_version: match row.get(7) {
+                Some(SqliteValue::Integer(value)) => u32::try_from(*value).map_err(|_| {
+                    op_identity_corrupt(
+                        op,
+                        "operation content-identity row version is outside the u32 domain",
+                    )
+                })?,
+                _ => {
+                    return Err(op_identity_corrupt(
+                        op,
+                        "operation content-identity row version is not an INTEGER",
+                    ));
+                }
+            },
+        };
+        if stored.row_schema_version != OP_CONTENT_IDENTITY_ROW_VERSION {
+            return Err(op_identity_corrupt(
+                op,
+                format!(
+                    "operation content-identity row version {} differs from supported {}",
+                    stored.row_schema_version, OP_CONTENT_IDENTITY_ROW_VERSION
+                ),
+            ));
+        }
+        let explicits = FiveExplicits {
+            seed: &source.seed,
+            versions: &source.versions,
+            budget: &source.budget,
+            capability: &source.capability,
+        };
+        let expected =
+            derive_op_content_identity(op, source.session.as_deref(), &source.ir, &explicits);
+        for (field, found, required) in [
+            (
+                "ir_content_id",
+                stored.ir_content_id,
+                expected.ir_content_id,
+            ),
+            (
+                "seed_content_id",
+                stored.seed_content_id,
+                expected.seed_content_id,
+            ),
+            (
+                "versions_content_id",
+                stored.versions_content_id,
+                expected.versions_content_id,
+            ),
+            (
+                "budget_content_id",
+                stored.budget_content_id,
+                expected.budget_content_id,
+            ),
+            (
+                "capability_content_id",
+                stored.capability_content_id,
+                expected.capability_content_id,
+            ),
+        ] {
+            if found != required {
+                return Err(op_identity_corrupt(
+                    op,
+                    format!("{field} differs from the independently re-hashed source bytes"),
+                ));
+            }
+        }
+        if stored.session_content_id != expected.session_content_id {
+            return Err(op_identity_corrupt(
+                op,
+                "session_content_id differs from the optional exact session bytes",
+            ));
+        }
+        Ok(Some(stored))
+    }
+
+    /// Backfill and authenticate v18 operation content identities before the
+    /// schema marker commits. Work is paged by 64 fixed-size row IDs and only
+    /// one bounded operation payload is retained at a time.
+    pub(crate) fn backfill_and_verify_op_content_identities(&self) -> Result<(), LedgerError> {
+        let mut after = None;
+        loop {
+            let rows = match after {
+                Some(last) => self.conn.query_with_params(
+                    "SELECT id FROM ops WHERE id > ?1 ORDER BY id LIMIT 64",
+                    &[SqliteValue::Integer(last)],
+                ),
+                None => self.conn.query("SELECT id FROM ops ORDER BY id LIMIT 64"),
+            }
+            .map_err(|error| sql_err("operation identity backfill page", &error))?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in &rows {
+                let op = match row.first() {
+                    Some(SqliteValue::Integer(op)) => *op,
+                    _ => {
+                        return Err(op_identity_corrupt(
+                            -1,
+                            "operation backfill selected a non-integer row ID",
+                        ));
+                    }
+                };
+                let source = self.op(op)?.ok_or_else(|| {
+                    op_identity_corrupt(op, "operation disappeared during v18 backfill")
+                })?;
+                let explicits = FiveExplicits {
+                    seed: &source.seed,
+                    versions: &source.versions,
+                    budget: &source.budget,
+                    capability: &source.capability,
+                };
+                self.write_op_content_identity(
+                    op,
+                    source.session.as_deref(),
+                    &source.ir,
+                    &explicits,
+                    true,
+                )?;
+                let _ = self.op_content_identity(op)?.ok_or_else(|| {
+                    op_identity_corrupt(op, "v18 backfill lost its compatibility operation")
+                })?;
+                after = Some(op);
+            }
+            if rows.len() < 64 {
+                break;
+            }
+        }
+
+        let orphans = self
+            .conn
+            .query(
+                "SELECT i.op FROM op_content_identities AS i
+                 LEFT JOIN ops AS o ON o.id = i.op
+                 WHERE o.id IS NULL LIMIT 1",
+            )
+            .map_err(|error| sql_err("verify operation identity orphan", &error))?;
+        if let Some(row) = orphans.first() {
+            let op = match row.first() {
+                Some(SqliteValue::Integer(op)) => *op,
+                _ => -1,
+            };
+            return Err(op_identity_corrupt(
+                op,
+                "v18 operation content-identity sidecar has no compatibility operation",
             ));
         }
         Ok(())
@@ -3368,6 +3755,18 @@ mod tests {
         }
     }
 
+    fn drop_v18_objects(ledger: &Ledger) {
+        for ddl in [
+            "DROP TRIGGER IF EXISTS trg_op_content_identity_guard_delete",
+            "DROP TRIGGER IF EXISTS trg_op_content_identity_immutable_update",
+            "DROP INDEX IF EXISTS idx_op_content_identity_ir",
+            "DROP INDEX IF EXISTS idx_op_content_identity_session",
+            "DROP TABLE IF EXISTS op_content_identities",
+        ] {
+            ledger.conn.execute(ddl).expect("remove v18 fixture object");
+        }
+    }
+
     fn v14_edge_fixture(ledger: &Ledger) -> (i64, ContentHash) {
         let artifact = ledger
             .put_artifact("v14-edge-artifact", b"exact v14 edge bytes", None)
@@ -3388,8 +3787,8 @@ mod tests {
     }
 
     #[test]
-    fn genuine_v12_and_stale_v13_markers_migrate_through_v17() {
-        let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
+    fn genuine_v12_and_stale_v13_markers_migrate_through_v18() {
+        let ledger = Ledger::open(":memory:").expect("fresh v18 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -3638,7 +4037,101 @@ mod tests {
     }
 
     #[test]
-    fn migration_ladder_ends_with_v17() {
+    fn v18_backfills_frozen_operation_fields_and_replays_a_stale_marker() {
+        for preapply_v18 in [false, true] {
+            let ledger = Ledger::open(":memory:").expect("fresh v18 ledger");
+            let explicits = crate::FiveExplicits {
+                seed: b"v17-operation-seed",
+                versions: r#"{"version":17}"#,
+                budget: r#"{"memory":2048}"#,
+                capability: r#"{"cores":1}"#,
+            };
+            let op = ledger
+                .begin_op(
+                    Some(b"v17-operation-session"),
+                    r#"{"op":"v17-fixture"}"#,
+                    &explicits,
+                    1,
+                )
+                .expect("record operation before recreating v17 fixture");
+            drop_v18_objects(&ledger);
+            ledger
+                .conn
+                .execute("PRAGMA user_version = 17")
+                .expect("mark genuine v17 fixture");
+            if preapply_v18 {
+                for ddl in schema::V18 {
+                    ledger
+                        .conn
+                        .execute(ddl)
+                        .expect("preapply exact v18 migration batch");
+                }
+            }
+
+            ledger
+                .migrate_from_observed_version(17)
+                .expect("backfill and authenticate exact v17 operation fields");
+            assert_eq!(ledger.schema_version().unwrap(), SCHEMA_VERSION);
+            let identity = ledger
+                .op_content_identity(op)
+                .unwrap()
+                .expect("backfilled operation identity exists");
+            assert_eq!(
+                identity.session_content_id(),
+                Some(ContentId::of_bytes(b"v17-operation-session"))
+            );
+            assert_eq!(
+                identity.seed_content_id(),
+                ContentId::of_bytes(explicits.seed)
+            );
+            assert_eq!(ledger.table_count("op_content_identities").unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn v18_malformed_source_rolls_back_objects_rows_and_marker() {
+        let ledger = Ledger::open(":memory:").expect("fresh v18 ledger");
+        let explicits = crate::FiveExplicits {
+            seed: b"bounded-seed",
+            versions: "{}",
+            budget: "{}",
+            capability: "{}",
+        };
+        let op = ledger
+            .begin_op(None, "{}", &explicits, 1)
+            .expect("record operation before recreating v17 fixture");
+        drop_v18_objects(&ledger);
+        ledger
+            .conn
+            .execute("PRAGMA user_version = 17")
+            .expect("mark genuine v17 fixture");
+        ledger
+            .conn
+            .prepare("UPDATE ops SET seed = ?1 WHERE id = ?2")
+            .expect("prepare oversized frozen-field corruption")
+            .execute_with_params(&[
+                SqliteValue::Blob(vec![0xA5; crate::MAX_OP_SEED_BYTES + 1].into()),
+                SqliteValue::Integer(op),
+            ])
+            .expect("inject oversized frozen-field corruption");
+
+        assert!(matches!(
+            ledger.migrate_from_observed_version(17),
+            Err(LedgerError::OpCorrupt { op: rejected, .. }) if rejected == op
+        ));
+        assert_eq!(ledger.schema_version().unwrap(), 17);
+        let objects = ledger
+            .conn
+            .query(
+                "SELECT name FROM sqlite_master
+                 WHERE name = 'op_content_identities' LIMIT 1",
+            )
+            .expect("inspect rolled-back v18 schema");
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn migration_ladder_ends_with_v18() {
         assert_eq!(
             schema::MIGRATIONS.len(),
             usize::try_from(SCHEMA_VERSION).unwrap()
@@ -3647,6 +4140,7 @@ mod tests {
         assert_eq!(schema::MIGRATIONS.get(13), Some(&schema::V14));
         assert_eq!(schema::MIGRATIONS.get(14), Some(&schema::V15));
         assert_eq!(schema::MIGRATIONS.get(15), Some(&schema::V16));
-        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V17));
+        assert_eq!(schema::MIGRATIONS.get(16), Some(&schema::V17));
+        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V18));
     }
 }

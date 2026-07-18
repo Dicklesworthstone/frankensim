@@ -87,8 +87,10 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   `finish_op` (exactly once; `ok|error|cancelled`; optional diagnostic JSON is
   bounded at 1 MiB before validation), `op` (metadata-only
   type/length/CASE-gated JSON preflight followed by the same guarded payload
-  query), `op_execution_context` (fixed-size typed branch/mode read after the
-  same op-envelope preflight), `link` (FK-checked `in|out` edges accepted only
+  query), `op_content_identity` (independently re-hashes the optional session,
+  IR, seed, versions, budget, and capability bytes into six distinct typed
+  raw-content fields), `op_execution_context` (fixed-size typed branch/mode
+  read after the same op-envelope preflight), `link` (FK-checked `in|out` edges accepted only
   while the target op is bounded, branch-valid, and unfinished),
   `edge_exists` (exact role-qualified verifier query), plus
   `artifact_producer_ops_bounded` and `op_artifact_edges_bounded`. The bounded
@@ -313,6 +315,21 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   candidates. A successful binding makes that exact evidence name/body pair
   immutable; an exact source or binding retry remains idempotent. Migration
   creates no rows and infers nothing from evidence names or JSON structure.
+- Operation typed-content sidecars (`identity_migration`, schema v18): every
+  bounded operation receives a one-to-one `op_content_identities` row with
+  separate plain `ContentId` values for the optional session and the exact IR,
+  seed, versions, budget, and capability bytes. Rust performs the historical
+  backfill in pages of at most 64 fixed-size row IDs, materializes one bounded
+  operation at a time, independently re-hashes every field, and verifies the
+  complete source/sidecar mapping inside the migration transaction before the
+  marker advances. New binaries insert the compatibility operation and its
+  immutable sidecar in the same transaction, including inside a caller-owned
+  transaction. Operation row ID, branch/mode, clocks, terminal state,
+  diagnostic, lineage, semantic identity, and authority remain separate. No
+  IR schema or meaning is inferred. An already-open pre-v18 writer cannot
+  compute BLAKE3 in a SQLite trigger; its post-migration insert is therefore
+  outside the declared compatibility proof and fails closed at typed reads
+  until an explicit authenticated backfill is provided.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -638,7 +655,12 @@ refusal, or verifier panic).
     receipt. JSON
     equivalence, record names, and row presence cannot mint meaning; competing
     receipts remain explicit, and a bound source cannot be reinterpreted.
-20. The nightly writer publishes op + metric + benchmark event + terminal
+20. An operation content-identity sidecar is valid only when its row schema is
+    supported and each optional/session or required frozen-field `ContentId`
+    independently re-hashes from the exact bounded operation bytes. The local
+    row ID and every execution/provenance envelope field remain non-semantic;
+    sidecar presence cannot assign IR meaning or authority.
+21. The nightly writer publishes op + metric + benchmark event + terminal
     outcome in one explicit transaction. A write or commit failure is primary;
     rollback is always attempted, and a rollback failure is retained after the
     primary failure in a deterministic combined diagnostic. Cleanup failure
@@ -1030,13 +1052,15 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   artifact-to-receipt binding but never invents one, chooses among competing
   receipts, or strengthens the receipt's authority state. Schema v17 does the
   same only for explicitly bound exact evidence JSON bytes; it neither
-  canonicalizes historical JSON nor infers semantics from it. Historical
-  op/cache rows remain untouched. The v1 migration-receipt wire transport now
+  canonicalizes historical JSON nor infers semantics from it. Schema v18 adds
+  only exact raw-content identities for frozen operation bytes; it does not
+  identify their semantic schema or authority. Historical cache rows remain
+  untouched. The v1 migration-receipt wire transport now
   preserves every receipt field and fails closed on truncation, extension,
   unknown versions, forged IDs, malformed lengths, and content divergence, but
   package integration and end-to-end database-wire-package parity remain open;
-  resumable fleet backfill, a
-  declared multi-version compatibility window beyond already-open trigger
+  resumable fleet backfill, a declared multi-version compatibility window
+  covering pre-v18 operation writers beyond the artifact/edge triggers,
   coverage, cancellation/crash fault injection, and rollback views remain
   required before the parent persistence bead can close.
 - Safe std-only identity generation is implemented through `/dev/urandom` on
