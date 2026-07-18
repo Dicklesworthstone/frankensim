@@ -28,6 +28,8 @@ use crate::{ContentHash, EdgeRole, Ledger, LedgerError, blob_param, now_wall_ns,
 pub const ARTIFACT_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
 /// Schema version of one lineage-edge typed-content-ID companion row.
 pub const EDGE_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
+/// Maximum receipt IDs exposed by one artifact-semantic candidate lookup.
+pub const MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES: usize = 256;
 
 /// Identity schema version for immutable migration receipts.
 pub const IDENTITY_MIGRATION_RECEIPT_VERSION: u32 = 1;
@@ -516,6 +518,88 @@ impl EdgeContentIdentity {
     }
 }
 
+/// One immutable, independently reverified artifact-to-semantic binding.
+///
+/// The embedded receipt retains the exact nominal schema and authority state;
+/// callers still choose the expected Rust type through
+/// [`IdentityMigrationReceipt::typed_semantic_id`]. Row presence alone is
+/// non-authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactSemanticBinding {
+    artifact_hash: ContentHash,
+    receipt: IdentityMigrationReceipt,
+}
+
+impl ArtifactSemanticBinding {
+    /// Exact retained artifact named by this binding.
+    #[must_use]
+    pub const fn artifact_hash(&self) -> ContentHash {
+        self.artifact_hash
+    }
+
+    /// Complete independently reverified migration receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &IdentityMigrationReceipt {
+        &self.receipt
+    }
+
+    /// Project the semantic digest only for the caller's exact nominal type.
+    #[must_use]
+    pub fn typed_semantic_id<I: StrongIdentity>(&self) -> Option<I> {
+        self.receipt.typed_semantic_id::<I>()
+    }
+}
+
+/// Result of one idempotent artifact-semantic binding write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactSemanticBindingWrite {
+    artifact_hash: ContentHash,
+    receipt_id: IdentityMigrationReceiptId,
+    deduped: bool,
+}
+
+impl ArtifactSemanticBindingWrite {
+    /// Exact retained artifact named by the binding.
+    #[must_use]
+    pub const fn artifact_hash(self) -> ContentHash {
+        self.artifact_hash
+    }
+
+    /// Exact immutable migration receipt authorizing the semantic tuple.
+    #[must_use]
+    pub const fn receipt_id(self) -> IdentityMigrationReceiptId {
+        self.receipt_id
+    }
+
+    /// Whether an identical independently verified binding already existed.
+    #[must_use]
+    pub const fn deduped(self) -> bool {
+        self.deduped
+    }
+}
+
+/// Bounded, deterministic, non-authoritative receipt candidates for one
+/// artifact. Multiple candidates are preserved and never ranked implicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactSemanticBindingCandidates {
+    receipt_ids: Vec<IdentityMigrationReceiptId>,
+    truncated: bool,
+}
+
+impl ArtifactSemanticBindingCandidates {
+    /// Deterministic receipt-ID prefix in bytewise order.
+    #[must_use]
+    pub fn receipt_ids(&self) -> &[IdentityMigrationReceiptId] {
+        &self.receipt_ids
+    }
+
+    /// Whether at least one additional candidate exists beyond the caller cap.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
 impl IdentityMigrationCandidates {
     /// Deterministic receipt-ID prefix in bytewise order.
     #[must_use]
@@ -551,6 +635,17 @@ fn edge_identity_corrupt(op: i64, detail: impl Into<String>) -> LedgerError {
     LedgerError::OpCorrupt {
         op,
         detail: detail.into(),
+    }
+}
+
+fn artifact_semantic_binding_corrupt(
+    artifact_hash: &ContentHash,
+    receipt_id: IdentityMigrationReceiptId,
+    detail: impl Into<String>,
+) -> LedgerError {
+    LedgerError::Corrupt {
+        hash_hex: artifact_hash.to_hex(),
+        detail: format!("artifact semantic binding {receipt_id}: {}", detail.into()),
     }
 }
 
@@ -1334,6 +1429,331 @@ impl Ledger {
         Ok(())
     }
 
+    fn stored_artifact_semantic_binding(
+        &self,
+        artifact_hash: &ContentHash,
+        receipt_id: IdentityMigrationReceiptId,
+    ) -> Result<Option<ArtifactSemanticBinding>, LedgerError> {
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT artifact_hash, receipt_id, semantic_id, identity_role, \
+                        identity_schema_id, identity_schema_version, trust_state, no_claim_state \
+                 FROM artifact_semantic_bindings \
+                 WHERE artifact_hash = ?1 AND receipt_id = ?2 LIMIT 2",
+                &[
+                    blob_param(artifact_hash.as_bytes()),
+                    blob_param(receipt_id.as_bytes()),
+                ],
+            )
+            .map_err(|error| sql_err("artifact semantic binding read", &error))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != 1 {
+            return Err(artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "one artifact/receipt key selected multiple rows",
+            ));
+        }
+        let row = rows.first().expect("non-empty row set checked above");
+        let stored_artifact = match row.first() {
+            Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "artifact_hash is not an exact 32-byte compatibility hash",
+            )
+        })?;
+        if stored_artifact != *artifact_hash {
+            return Err(artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "stored artifact hash differs from the requested key",
+            ));
+        }
+        let stored_receipt_bytes = fixed_bytes::<32>(row.get(1), receipt_id, "receipt_id")?;
+        let stored_receipt = IdentityMigrationReceiptId::parse_slice(&stored_receipt_bytes)
+            .ok_or_else(|| {
+                artifact_semantic_binding_corrupt(
+                    artifact_hash,
+                    receipt_id,
+                    "receipt_id is not a typed 32-byte identity",
+                )
+            })?;
+        if stored_receipt != receipt_id {
+            return Err(artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "stored receipt ID differs from the requested key",
+            ));
+        }
+
+        let receipt = self.stored_identity_migration(receipt_id)?.ok_or_else(|| {
+            artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "referenced migration receipt is missing",
+            )
+        })?;
+        let semantic_id = fixed_bytes::<32>(row.get(2), receipt_id, "semantic_id")?;
+        let role_tag = integer(row.get(3), receipt_id, "identity_role")?;
+        let schema_id = fixed_bytes::<32>(row.get(4), receipt_id, "identity_schema_id")?;
+        let schema_version = u32_integer(row.get(5), receipt_id, "identity_schema_version")?;
+        let trust_tag = integer(row.get(6), receipt_id, "trust_state")?;
+        let no_claim_tag = integer(row.get(7), receipt_id, "no_claim_state")?;
+        if semantic_id != receipt.semantic_id_bytes()
+            || role_tag != i64::from(receipt.identity_role().tag())
+            || schema_id != receipt.identity_schema_id()
+            || schema_version != receipt.identity_schema_version()
+            || trust_tag != i64::from(trust_state_tag(receipt.trust_state()))
+            || no_claim_tag != i64::from(no_claim_state_tag(receipt.no_claim_state()))
+        {
+            return Err(artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "stored semantic/schema/authority projection differs from the exact receipt",
+            ));
+        }
+        if receipt.canonical_content_id().as_bytes() != artifact_hash.as_bytes() {
+            return Err(artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "receipt canonical content ID does not name the bound artifact",
+            ));
+        }
+        let artifact_identity =
+            self.artifact_content_identity(artifact_hash)?
+                .ok_or_else(|| {
+                    artifact_semantic_binding_corrupt(
+                        artifact_hash,
+                        receipt_id,
+                        "bound artifact is not retained",
+                    )
+                })?;
+        if artifact_identity.content_id() != receipt.canonical_content_id() {
+            return Err(artifact_semantic_binding_corrupt(
+                artifact_hash,
+                receipt_id,
+                "artifact typed content identity differs from the receipt canonical content ID",
+            ));
+        }
+        Ok(Some(ArtifactSemanticBinding {
+            artifact_hash: stored_artifact,
+            receipt,
+        }))
+    }
+
+    /// Bind one exact retained artifact to one independently verified semantic
+    /// migration receipt. Exact retries dedupe; multiple distinct receipts are
+    /// retained without ranking or replacement.
+    ///
+    /// # Errors
+    /// Refuses caller-owned transactions, missing receipts or artifacts,
+    /// canonical-content disagreement, malformed stored rows, and database
+    /// failures.
+    pub fn bind_artifact_semantic_identity(
+        &self,
+        receipt_id: IdentityMigrationReceiptId,
+    ) -> Result<ArtifactSemanticBindingWrite, LedgerError> {
+        if self.in_transaction() {
+            return Err(invalid(
+                "artifact_semantic_binding.transaction",
+                "artifact semantic binding must own its transaction",
+            ));
+        }
+        self.begin()?;
+        let result = (|| {
+            let receipt = self.stored_identity_migration(receipt_id)?.ok_or_else(|| {
+                LedgerError::NotFound {
+                    what: format!("identity migration receipt {receipt_id}"),
+                }
+            })?;
+            let artifact_hash = ContentHash(*receipt.canonical_content_id().as_bytes());
+            let artifact_identity = self.artifact_content_identity(&artifact_hash)?.ok_or_else(
+                || LedgerError::NotFound {
+                    what: format!(
+                        "canonical artifact {} required by identity migration receipt {receipt_id}",
+                        artifact_hash.to_hex()
+                    ),
+                },
+            )?;
+            if artifact_identity.content_id() != receipt.canonical_content_id() {
+                return Err(artifact_semantic_binding_corrupt(
+                    &artifact_hash,
+                    receipt_id,
+                    "retained artifact content ID differs from receipt canonical content ID",
+                ));
+            }
+            if self
+                .stored_artifact_semantic_binding(&artifact_hash, receipt_id)?
+                .is_some()
+            {
+                return Ok(ArtifactSemanticBindingWrite {
+                    artifact_hash,
+                    receipt_id,
+                    deduped: true,
+                });
+            }
+            self.conn
+                .prepare(
+                    "INSERT INTO artifact_semantic_bindings(\
+                        artifact_hash, receipt_id, semantic_id, identity_role, \
+                        identity_schema_id, identity_schema_version, trust_state, \
+                        no_claim_state, created_at\
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(|error| sql_err("artifact semantic binding insert prepare", &error))?
+                .execute_with_params(&[
+                    blob_param(artifact_hash.as_bytes()),
+                    blob_param(receipt_id.as_bytes()),
+                    blob_param(&receipt.semantic_id_bytes()),
+                    SqliteValue::Integer(i64::from(receipt.identity_role().tag())),
+                    blob_param(&receipt.identity_schema_id()),
+                    SqliteValue::Integer(i64::from(receipt.identity_schema_version())),
+                    SqliteValue::Integer(i64::from(trust_state_tag(receipt.trust_state()))),
+                    SqliteValue::Integer(i64::from(no_claim_state_tag(receipt.no_claim_state()))),
+                    SqliteValue::Integer(now_wall_ns()),
+                ])
+                .map_err(|error| sql_err("artifact semantic binding insert", &error))?;
+            Ok(ArtifactSemanticBindingWrite {
+                artifact_hash,
+                receipt_id,
+                deduped: false,
+            })
+        })();
+        match result {
+            Ok(write) => {
+                if let Err(error) = self.commit() {
+                    let _ = self.rollback();
+                    return Err(error);
+                }
+                Ok(write)
+            }
+            Err(error) => {
+                let _ = self.rollback();
+                Err(error)
+            }
+        }
+    }
+
+    /// Read and independently reverify one exact artifact-semantic binding.
+    pub fn artifact_semantic_binding(
+        &self,
+        artifact_hash: &ContentHash,
+        receipt_id: IdentityMigrationReceiptId,
+    ) -> Result<Option<ArtifactSemanticBinding>, LedgerError> {
+        self.stored_artifact_semantic_binding(artifact_hash, receipt_id)
+    }
+
+    /// Return a bounded deterministic receipt-ID prefix for one artifact.
+    /// This lookup never chooses or promotes a semantic interpretation.
+    pub fn artifact_semantic_binding_candidates(
+        &self,
+        artifact_hash: &ContentHash,
+        cap: usize,
+    ) -> Result<ArtifactSemanticBindingCandidates, LedgerError> {
+        if cap > MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES {
+            return Err(invalid(
+                "artifact_semantic_binding.cap",
+                format!("candidate cap {cap} exceeds {MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES}"),
+            ));
+        }
+        let probe = cap.checked_add(1).ok_or_else(|| {
+            invalid(
+                "artifact_semantic_binding.cap",
+                "candidate cap overflows the bounded probe",
+            )
+        })?;
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT CASE \
+                            WHEN typeof(receipt_id) = 'blob' AND length(receipt_id) = 32 \
+                            THEN receipt_id ELSE NULL \
+                        END \
+                 FROM artifact_semantic_bindings \
+                 WHERE artifact_hash = ?1 \
+                 ORDER BY receipt_id LIMIT ?2",
+                &[
+                    blob_param(artifact_hash.as_bytes()),
+                    SqliteValue::Integer(i64::try_from(probe).unwrap_or(i64::MAX)),
+                ],
+            )
+            .map_err(|error| sql_err("artifact semantic candidate scan", &error))?;
+        let truncated = rows.len() > cap;
+        let mut receipt_ids = Vec::with_capacity(rows.len().min(cap));
+        for row in rows.iter().take(cap) {
+            let Some(SqliteValue::Blob(bytes)) = row.first() else {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: artifact_hash.to_hex(),
+                    detail: "artifact semantic candidate has malformed receipt ID".to_string(),
+                });
+            };
+            let receipt_id = IdentityMigrationReceiptId::parse_slice(bytes).ok_or_else(|| {
+                LedgerError::Corrupt {
+                    hash_hex: artifact_hash.to_hex(),
+                    detail: "artifact semantic candidate is not a typed 32-byte receipt ID"
+                        .to_string(),
+                }
+            })?;
+            receipt_ids.push(receipt_id);
+        }
+        Ok(ArtifactSemanticBindingCandidates {
+            receipt_ids,
+            truncated,
+        })
+    }
+
+    /// Authenticate every pre-marker v16 binding plus all prior identity
+    /// layers before initialization or migration commits.
+    pub(crate) fn verify_artifact_semantic_bindings(&self) -> Result<(), LedgerError> {
+        self.verify_edge_content_identity_backfill()?;
+        let rows = self
+            .conn
+            .query(
+                "SELECT artifact_hash, receipt_id \
+                 FROM artifact_semantic_bindings ORDER BY artifact_hash, receipt_id",
+            )
+            .map_err(|error| sql_err("verify artifact semantic bindings", &error))?;
+        for row in &rows {
+            let artifact_hash = match row.first() {
+                Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes),
+                _ => None,
+            }
+            .ok_or_else(|| LedgerError::Corrupt {
+                hash_hex: "<malformed>".to_string(),
+                detail: "artifact semantic binding has a malformed artifact hash".to_string(),
+            })?;
+            let receipt_bytes = match row.get(1) {
+                Some(SqliteValue::Blob(bytes)) => bytes.as_slice(),
+                _ => &[],
+            };
+            let receipt_id =
+                IdentityMigrationReceiptId::parse_slice(receipt_bytes).ok_or_else(|| {
+                    LedgerError::Corrupt {
+                        hash_hex: artifact_hash.to_hex(),
+                        detail: "artifact semantic binding has a malformed receipt ID".to_string(),
+                    }
+                })?;
+            if self
+                .stored_artifact_semantic_binding(&artifact_hash, receipt_id)?
+                .is_none()
+            {
+                return Err(artifact_semantic_binding_corrupt(
+                    &artifact_hash,
+                    receipt_id,
+                    "binding disappeared during migration verification",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn stored_identity_migration(
         &self,
         receipt_id: IdentityMigrationReceiptId,
@@ -1781,6 +2201,19 @@ mod tests {
         }
     }
 
+    fn drop_v16_objects(ledger: &Ledger) {
+        for ddl in [
+            "DROP TRIGGER IF EXISTS trg_artifact_semantic_binding_immutable_reinsert",
+            "DROP TRIGGER IF EXISTS trg_artifact_semantic_binding_immutable_delete",
+            "DROP TRIGGER IF EXISTS trg_artifact_semantic_binding_immutable_update",
+            "DROP INDEX IF EXISTS idx_artifact_semantic_binding_semantic",
+            "DROP INDEX IF EXISTS idx_artifact_semantic_binding_receipt",
+            "DROP TABLE IF EXISTS artifact_semantic_bindings",
+        ] {
+            ledger.conn.execute(ddl).expect("remove v16 fixture object");
+        }
+    }
+
     fn v14_edge_fixture(ledger: &Ledger) -> (i64, ContentHash) {
         let artifact = ledger
             .put_artifact("v14-edge-artifact", b"exact v14 edge bytes", None)
@@ -1801,8 +2234,8 @@ mod tests {
     }
 
     #[test]
-    fn genuine_v12_and_stale_v13_markers_migrate_through_v15() {
-        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    fn genuine_v12_and_stale_v13_markers_migrate_through_v16() {
+        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -1833,7 +2266,7 @@ mod tests {
 
     #[test]
     fn divergent_early_v13_object_refuses_before_marker_advances() {
-        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -1856,7 +2289,7 @@ mod tests {
     #[test]
     fn v14_backfills_v13_artifacts_and_replays_a_stale_marker() {
         for preapply_v14 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
             drop_v14_objects(&ledger);
             ledger
                 .conn
@@ -1896,7 +2329,7 @@ mod tests {
 
     #[test]
     fn v14_corrupt_source_rolls_back_rows_objects_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
         drop_v14_objects(&ledger);
         ledger
             .conn
@@ -1927,7 +2360,7 @@ mod tests {
     #[test]
     fn v15_backfills_v14_edges_and_replays_a_stale_marker() {
         for preapply_v15 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
             drop_v15_objects(&ledger);
             ledger
                 .conn
@@ -1963,7 +2396,7 @@ mod tests {
 
     #[test]
     fn v15_missing_artifact_sidecar_rolls_back_objects_rows_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
         drop_v15_objects(&ledger);
         ledger
             .conn
@@ -2001,13 +2434,39 @@ mod tests {
     }
 
     #[test]
-    fn migration_ladder_ends_with_v15() {
+    fn v16_empty_migration_and_exact_stale_marker_replay_infer_no_meaning() {
+        for preapply_v16 in [false, true] {
+            let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+            drop_v16_objects(&ledger);
+            ledger
+                .conn
+                .execute("PRAGMA user_version = 15")
+                .expect("mark genuine v15 fixture");
+            if preapply_v16 {
+                for ddl in schema::V16 {
+                    ledger
+                        .conn
+                        .execute(ddl)
+                        .expect("preapply exact v16 migration batch");
+                }
+            }
+            ledger
+                .migrate_from_observed_version(15)
+                .expect("migrate v15 without inferring semantic bindings");
+            assert_eq!(ledger.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(ledger.table_count("artifact_semantic_bindings").unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn migration_ladder_ends_with_v16() {
         assert_eq!(
             schema::MIGRATIONS.len(),
             usize::try_from(SCHEMA_VERSION).unwrap()
         );
         assert_eq!(schema::MIGRATIONS.get(12), Some(&schema::V13));
         assert_eq!(schema::MIGRATIONS.get(13), Some(&schema::V14));
-        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V15));
+        assert_eq!(schema::MIGRATIONS.get(14), Some(&schema::V15));
+        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V16));
     }
 }

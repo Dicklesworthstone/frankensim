@@ -61,7 +61,7 @@ fn claim<'a>(
 
 #[test]
 fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
-    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
     let legacy = br#"{"legacy":"shape-a","provenance":1}"#;
     let canonical = br#"{"schema":1,"shape":"a"}"#;
     let semantic = semantic_receipt(b"shape-a");
@@ -136,7 +136,7 @@ fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
 
 #[test]
 fn typed_projection_refuses_a_different_schema() {
-    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
     let semantic = semantic_receipt(b"typed-subject");
     let write = ledger
         .record_identity_migration(claim(semantic, b"legacy", b"canonical", "demo-v0-to-v1"))
@@ -154,7 +154,7 @@ fn typed_projection_refuses_a_different_schema() {
 
 #[test]
 fn ambiguous_legacy_candidates_are_bounded_and_never_selected() {
-    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
     let legacy = b"same-legacy-source";
     let semantic = semantic_receipt(b"same-subject");
     let first = ledger
@@ -186,7 +186,7 @@ fn ambiguous_legacy_candidates_are_bounded_and_never_selected() {
 
 #[test]
 fn payload_limit_refuses_before_any_row_is_published() {
-    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
     let oversized = vec![0xA5; MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES + 1];
     let semantic = semantic_receipt(b"bounded-subject");
     assert!(matches!(
@@ -206,7 +206,7 @@ fn payload_limit_refuses_before_any_row_is_published() {
 
 #[test]
 fn artifact_writes_dual_write_an_exact_typed_content_identity() {
-    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
     let bytes = b"artifact identity dual-write fixture";
     let write = ledger
         .put_artifact("identity-fixture", bytes, None)
@@ -240,7 +240,7 @@ fn artifact_writes_dual_write_an_exact_typed_content_identity() {
 
 #[test]
 fn lineage_edges_dual_write_the_linked_artifact_content_identity() {
-    let ledger = Ledger::open(":memory:").expect("fresh v15 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
     let artifact = ledger
         .put_artifact("edge-identity-fixture", b"lineage payload", None)
         .expect("store linked artifact");
@@ -280,4 +280,101 @@ fn lineage_edges_dual_write_the_linked_artifact_content_identity() {
         None,
         "role remains a separate part of edge identity"
     );
+}
+
+#[test]
+fn explicit_receipt_binding_projects_only_the_exact_nominal_schema_and_roots_gc() {
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let bytes = b"semantic artifact bytes";
+    let artifact = ledger
+        .put_artifact("semantic-fixture", bytes, None)
+        .expect("store canonical artifact");
+    let semantic = semantic_receipt(b"semantic-artifact");
+    let migration = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"legacy semantic artifact",
+            bytes,
+            "semantic-artifact-v0-to-v1",
+        ))
+        .expect("record exact semantic receipt");
+
+    let first = ledger
+        .bind_artifact_semantic_identity(migration.receipt_id())
+        .expect("bind retained canonical artifact");
+    assert!(!first.deduped());
+    assert_eq!(first.artifact_hash(), artifact.hash);
+    let retry = ledger
+        .bind_artifact_semantic_identity(migration.receipt_id())
+        .expect("dedupe exact artifact semantic binding");
+    assert!(retry.deduped());
+
+    let stored = ledger
+        .artifact_semantic_binding(&artifact.hash, migration.receipt_id())
+        .expect("reverify artifact semantic binding")
+        .expect("binding exists");
+    assert_eq!(stored.artifact_hash(), artifact.hash);
+    assert_eq!(
+        stored.typed_semantic_id::<DemoSemanticId>(),
+        Some(semantic.id())
+    );
+    assert_eq!(stored.typed_semantic_id::<OtherSemanticId>(), None);
+
+    let gc = ledger
+        .gc_unreferenced_artifacts(false)
+        .expect("semantic binding is a GC root");
+    assert!(!gc.candidates.contains(&artifact.hash.to_hex()));
+    assert!(ledger.get_artifact(&artifact.hash).unwrap().is_some());
+}
+
+#[test]
+fn artifact_semantic_candidates_preserve_ambiguity_and_missing_artifacts_refuse() {
+    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let bytes = b"shared semantic artifact";
+    let artifact = ledger
+        .put_artifact("semantic-fixture", bytes, None)
+        .expect("store shared artifact");
+    let semantic = semantic_receipt(b"shared-meaning");
+    let first = ledger
+        .record_identity_migration(claim(semantic, b"legacy-a", bytes, "shared-rule-a"))
+        .unwrap();
+    let second = ledger
+        .record_identity_migration(claim(semantic, b"legacy-b", bytes, "shared-rule-b"))
+        .unwrap();
+    ledger
+        .bind_artifact_semantic_identity(first.receipt_id())
+        .unwrap();
+    ledger
+        .bind_artifact_semantic_identity(second.receipt_id())
+        .unwrap();
+
+    let existence = ledger
+        .artifact_semantic_binding_candidates(&artifact.hash, 0)
+        .unwrap();
+    assert!(existence.receipt_ids().is_empty());
+    assert!(existence.truncated());
+    let one = ledger
+        .artifact_semantic_binding_candidates(&artifact.hash, 1)
+        .unwrap();
+    assert_eq!(one.receipt_ids().len(), 1);
+    assert!(one.truncated());
+    let both = ledger
+        .artifact_semantic_binding_candidates(&artifact.hash, 2)
+        .unwrap();
+    assert_eq!(both.receipt_ids().len(), 2);
+    assert!(!both.truncated());
+
+    let absent = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"legacy-missing",
+            b"canonical bytes not retained as an artifact",
+            "missing-artifact-rule",
+        ))
+        .unwrap();
+    assert!(matches!(
+        ledger.bind_artifact_semantic_identity(absent.receipt_id()),
+        Err(LedgerError::NotFound { .. })
+    ));
+    assert_eq!(ledger.table_count("artifact_semantic_bindings").unwrap(), 2);
 }

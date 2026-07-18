@@ -40,14 +40,16 @@ pub use colors::{
 pub use crosswalk::{MAX_QTY_CROSSWALK_JSON_BYTES, QtyDimensionCrosswalkWrite};
 pub use hash::{Blake3, ContentHash, hash_bytes};
 pub use identity_migration::{
-    ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, ArtifactContentIdentity,
+    ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, ArtifactContentIdentity, ArtifactSemanticBinding,
+    ArtifactSemanticBindingCandidates, ArtifactSemanticBindingWrite,
     EDGE_CONTENT_IDENTITY_ROW_VERSION, EdgeContentIdentity, IDENTITY_MIGRATION_RECEIPT_DOMAIN,
     IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION, IDENTITY_MIGRATION_RECEIPT_VERSION,
     IdentityMigrationCandidates, IdentityMigrationClaim, IdentityMigrationReceipt,
     IdentityMigrationReceiptId, IdentityMigrationReceiptSchemaV1, IdentityMigrationWrite,
-    MAX_IDENTITY_MIGRATION_CANDIDATES, MAX_IDENTITY_MIGRATION_CONTEXT_BYTES,
-    MAX_IDENTITY_MIGRATION_DOMAIN_BYTES, MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
-    MAX_IDENTITY_MIGRATION_RULE_BYTES, MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
+    MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES, MAX_IDENTITY_MIGRATION_CANDIDATES,
+    MAX_IDENTITY_MIGRATION_CONTEXT_BYTES, MAX_IDENTITY_MIGRATION_DOMAIN_BYTES,
+    MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES, MAX_IDENTITY_MIGRATION_RULE_BYTES,
+    MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
 };
 pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
 pub use state_checkpoint::{
@@ -1248,8 +1250,8 @@ pub const ARTIFACT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "domain_const=ARTIFACT_CONTENT_IDENTITY_DOMAIN",
     "encoder=ledger_artifact_content_identity",
     "encoder_helpers=none",
-    "schema_constants=ARTIFACT_CONTENT_IDENTITY_VERSION,ARTIFACT_CONTENT_IDENTITY_DOMAIN,crates/fs-ledger/src/identity_migration.rs#ARTIFACT_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#EDGE_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/schema.rs#V14,crates/fs-ledger/src/schema.rs#V15,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
-    "schema_functions=crates/fs-blake3/src/lib.rs#hash_bytes,crates/fs-blake3/src/lib.rs#Blake3::new,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize,Ledger::put_artifact,Ledger::artifact_writer,ArtifactWriter::finish,ArtifactWriter::finish_inner,Ledger::insert_inline_artifact,Ledger::read_artifact_chunks_with_info,Ledger::artifact_content_identity,Ledger::verify_artifact_content_identity_backfill,Ledger::edge_content_identity,Ledger::verify_edge_content_identity_backfill,identity_schema_is_current",
+    "schema_constants=ARTIFACT_CONTENT_IDENTITY_VERSION,ARTIFACT_CONTENT_IDENTITY_DOMAIN,crates/fs-ledger/src/identity_migration.rs#ARTIFACT_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#EDGE_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/schema.rs#V14,crates/fs-ledger/src/schema.rs#V15,crates/fs-ledger/src/schema.rs#V16,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=crates/fs-blake3/src/lib.rs#hash_bytes,crates/fs-blake3/src/lib.rs#Blake3::new,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize,Ledger::put_artifact,Ledger::artifact_writer,ArtifactWriter::finish,ArtifactWriter::finish_inner,Ledger::insert_inline_artifact,Ledger::read_artifact_chunks_with_info,Ledger::artifact_content_identity,Ledger::verify_artifact_content_identity_backfill,Ledger::edge_content_identity,Ledger::verify_edge_content_identity_backfill,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,Ledger::verify_artifact_semantic_bindings,identity_schema_is_current",
     "schema_dependencies=none",
     "digest=blake3-256-plain-hash",
     "encoding=typed-binary",
@@ -1259,7 +1261,7 @@ pub const ARTIFACT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=none",
     "semantic_fields=content-bytes",
     "excluded_fields=kind:typed-envelope-not-content,metadata:provenance-envelope-not-content,created-at:wall-clock-envelope,chunk-boundaries:storage-layout-only",
-    "consumers=Ledger::put_artifact,ArtifactWriter::finish,Ledger::get_artifact,Ledger::read_artifact_chunks,Ledger::verify_artifact_integrity,Ledger::artifact_content_identity,Ledger::edge_content_identity,fs-ledger:vcs-commit-leaf",
+    "consumers=Ledger::put_artifact,ArtifactWriter::finish,Ledger::get_artifact,Ledger::read_artifact_chunks,Ledger::verify_artifact_integrity,Ledger::artifact_content_identity,Ledger::edge_content_identity,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,fs-ledger:vcs-commit-leaf",
     "mutations=content-bytes:crates/fs-ledger/src/lib.rs#artifact_content_identity_fields_move_independently",
     "nonsemantic_mutations=kind:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity,metadata:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity,created-at:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity,chunk-boundaries:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity",
     "field_guard=classify_artifact_content_identity_fields",
@@ -3430,7 +3432,7 @@ impl Ledger {
                 }
                 self.seed_instance_id_if_missing()?;
                 let _ = self.read_current_instance_id()?;
-                self.verify_edge_content_identity_backfill()?;
+                self.verify_artifact_semantic_bindings()?;
                 self.conn
                     .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
                     .map_err(|error| sql_err("init: set user_version", &error))?;
@@ -3503,6 +3505,12 @@ impl Ledger {
                     // through every role-qualified lineage edge. Audit both
                     // layers before the marker commits.
                     self.verify_edge_content_identity_backfill()?;
+                }
+                if target == 16 {
+                    // V16 infers no bindings. Authenticate any exact rows
+                    // present ahead of a stale marker and every prerequisite
+                    // identity layer before committing the marker.
+                    self.verify_artifact_semantic_bindings()?;
                 }
                 self.conn
                     .execute(&format!("PRAGMA user_version = {target}"))

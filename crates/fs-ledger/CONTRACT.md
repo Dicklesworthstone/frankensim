@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v15). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v16). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -280,6 +280,17 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   in/out role, content identity, semantic identity, and authority remain
   distinct; an edge proves lineage membership only, never semantic meaning or
   producer trust.
+- Explicit artifact semantic bindings (`identity_migration`, schema v16):
+  `bind_artifact_semantic_identity` accepts only a fully reverified v13 receipt
+  whose canonical `ContentId` exactly names a retained, independently re-hashed
+  v14 artifact. The immutable row copies the receipt's semantic digest, role,
+  exact nominal schema descriptor/version, and authority/no-claim state; every
+  read compares that projection back to the complete receipt before returning
+  it. Callers recover a typed semantic ID only through exact static-schema
+  projection. Multiple receipts for one artifact remain visible as bounded,
+  deterministic candidates and are never ranked or selected. Migration creates
+  no rows and infers no meaning from kind, metadata, lineage, legacy FNV, or
+  extension payloads. A binding is a retained-evidence GC root.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -305,9 +316,9 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   reproduce output hashes exactly; fast hash divergences are reported without
   failing; row/branch/session/time envelopes are excluded),
   `gc_unreferenced_artifacts` (artifacts with neither a lineage edge, a
-  solver-checkpoint receipt, either side of a quantity dimension crosswalk,
-  nor a semantic state-checkpoint receipt; every supported root makes an
-  artifact immortal).
+  solver-checkpoint receipt, either side of a quantity dimension crosswalk, a
+  semantic state-checkpoint receipt, nor an explicit artifact semantic
+  binding; every supported root makes an artifact immortal).
 
 Schema divergences from plan Appendix D, all deliberate: `JSON` columns are
 STRICT-legal `TEXT` with `json_valid()` CHECKs (Appendix D as written is not
@@ -360,6 +371,13 @@ compatibility hash and reference the v14 typed-content row. Idempotent backfill,
 insert-trigger dual-write, cascade-aligned retention, and a pre-marker
 artifact/edge mapping audit preserve old-handle compatibility without semantic
 or authority inference.
+Schema v16 adds immutable `artifact_semantic_bindings`, keyed by exact artifact
+compatibility hash and v13 migration-receipt ID. The row preserves a queryable
+copy of the receipt's semantic/schema/authority projection, but reads reverify
+the complete receipt, exact canonical content ID, v14 sidecar, and retained
+artifact bytes before returning it. Multiple bindings remain non-unique by
+design. Migration creates an empty table, authenticates any exactly preapplied
+rows before advancing a stale marker, and never infers semantic meaning.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -577,7 +595,13 @@ refusal, or verifier panic).
     compatibility hash, typed `ContentId`, and row schema agree with one exact
     retained edge and its independently verified artifact. Edge presence does
     not confer semantic meaning or producer authority.
-18. The nightly writer publishes op + metric + benchmark event + terminal
+18. An artifact semantic binding is valid only when its immutable semantic,
+    role, exact nominal schema, trust, and no-claim projection equals one fully
+    reverified migration receipt whose canonical `ContentId` names the same
+    retained, independently re-hashed artifact. Binding lookup never chooses
+    among multiple receipts, upgrades trust, or projects into a different
+    nominal schema; migration infers no bindings.
+19. The nightly writer publishes op + metric + benchmark event + terminal
     outcome in one explicit transaction. A write or commit failure is primary;
     rollback is always attempted, and a rollback failure is retained after the
     primary failure in a deterministic combined diagnostic. Cleanup failure
@@ -745,6 +769,10 @@ stale-marker replay, independent source re-hash, and transactional rollback of
 objects, rows, and marker on corrupt input. V15 coverage repeats those proofs
 for role-qualified lineage edges, including exact role separation, genuine-v14
 backfill, preapplied stale-marker replay, and missing-artifact-sidecar rollback.
+V16 coverage proves empty no-inference migration, exact stale-marker replay,
+explicit retained-artifact binding and response-loss dedupe, wrong-schema
+projection refusal, bounded ambiguity preservation, missing-artifact refusal,
+and semantic-binding GC rooting.
 These code-first tests require the central batch-proof pass before their results
 may be cited as green evidence.
 `tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
@@ -957,8 +985,10 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   correct, that legacy FNV named the supplied bytes, or that an admitted
   authority is promotion authority. Schema v14 migrates and dual-writes only
   the exact raw content identity of artifact rows and v15 carries that same
-  typed content ID through lineage edges; neither supplies artifact semantics.
-  Historical evidence/op/cache/package rows remain untouched;
+  typed content ID through lineage edges. Schema v16 can preserve an explicit
+  artifact-to-receipt binding but never invents one, chooses among competing
+  receipts, or strengthens the receipt's authority state. Historical
+  evidence/op/cache/package rows remain untouched;
   cross-surface database-wire-package parity, resumable fleet backfill, a
   declared multi-version compatibility window beyond already-open trigger
   coverage, cancellation/crash fault injection, and rollback views remain

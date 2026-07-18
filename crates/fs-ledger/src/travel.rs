@@ -930,8 +930,9 @@ impl Ledger {
 
     /// Artifacts with neither a lineage edge on ANY branch, an immutable
     /// solver-checkpoint receipt, either side of an immutable quantity
-    /// dimension crosswalk, nor an immutable semantic state-checkpoint receipt
-    /// are unreachable from every supported root and safe to reclaim.
+    /// dimension crosswalk, an immutable semantic state-checkpoint receipt,
+    /// nor an explicit artifact-semantic binding are unreachable from every
+    /// supported root and safe to reclaim.
     /// Referenced artifacts are immortal (Decalogue P9). Dry runs only report.
     ///
     /// # Errors
@@ -950,11 +951,14 @@ impl Ledger {
                     ON a.hash = q_new.new_hash \
                  LEFT JOIN semantic_state_checkpoint_receipts s \
                     ON a.hash = s.runtime_state_artifact \
+                 LEFT JOIN artifact_semantic_bindings identity_binding \
+                    ON a.hash = identity_binding.artifact_hash \
                  WHERE e.artifact IS NULL \
                    AND c.solver_state_artifact IS NULL \
                    AND q_old.old_hash IS NULL \
                    AND q_new.new_hash IS NULL \
                    AND s.runtime_state_artifact IS NULL \
+                   AND identity_binding.artifact_hash IS NULL \
                  ORDER BY a.hash",
             )
             .map_err(|e| sql_err("gc scan", &e))?;

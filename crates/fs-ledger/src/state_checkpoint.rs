@@ -1361,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_ladder_preserves_v12_through_v14_before_the_v15_batch() {
+    fn migration_ladder_preserves_v12_through_v15_before_the_v16_batch() {
         assert_eq!(
             schema::MIGRATIONS.len(),
             usize::try_from(SCHEMA_VERSION).unwrap()
@@ -1369,6 +1369,7 @@ mod tests {
         assert_eq!(schema::MIGRATIONS.get(11), Some(&schema::V12));
         assert_eq!(schema::MIGRATIONS.get(12), Some(&schema::V13));
         assert_eq!(schema::MIGRATIONS.get(13), Some(&schema::V14));
-        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V15));
+        assert_eq!(schema::MIGRATIONS.get(14), Some(&schema::V15));
+        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V16));
     }
 }
