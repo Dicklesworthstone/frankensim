@@ -345,6 +345,22 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
         0.0
     ));
 
+    let smallest = f64::from_bits(1);
+    let rounded_product_adjoint = Mtx::with_adjoint(
+        "rounded-product-adjoint",
+        vec![vec![smallest]],
+        vec![vec![0.0]],
+        0.0,
+    );
+    assert!(
+        !check_adjoint(
+            &rounded_product_adjoint,
+            &[(vec![1.0], vec![1.25])],
+            smallest
+        ),
+        "1.25 * min-subnormal exceeds the tolerance even when its FMA residual rounds to zero"
+    );
+
     let tiny_output = ConstantOutput { value: tiny };
     assert!(!check_identity(&tiny_output, &[vec![0.0]], 0.0));
     let manufactured = [ManufacturedCase {
@@ -352,7 +368,29 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
         exact_output: vec![0.0],
     }];
     let (honest, measured) = check_tolerance_honesty(&tiny_output, &manufactured, 0.0);
-    assert!(!honest && measured.is_infinite());
+    assert!(!honest);
+    assert_eq!(measured.to_bits(), tiny.to_bits());
+
+    let rounded_difference = [ManufacturedCase {
+        input: vec![1.0],
+        exact_output: vec![-f64::from_bits(1)],
+    }];
+    let one_output = Mtx::honest("rounded-difference", vec![vec![1.0]], 1.0);
+    let (honest, measured) = check_tolerance_honesty(&one_output, &rounded_difference, 0.0);
+    assert!(
+        !honest,
+        "DD evidence must retain the exact difference 1 + min-subnormal"
+    );
+    assert_eq!(measured.to_bits(), 1.0_f64.next_up().to_bits());
+    let admitted_one_output = Mtx::honest(
+        "admitted-rounded-difference",
+        vec![vec![1.0]],
+        1.0_f64.next_up(),
+    );
+    assert!(
+        check_tolerance_honesty(&admitted_one_output, &rounded_difference, 0.0).0,
+        "the next f64 bound must contain the retained subnormal residual"
+    );
 
     let report = certify(
         &tiny_output,
@@ -367,9 +405,8 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
     assert_eq!(report.tier, Tier::Rejected);
     assert!(!report.functoriality);
     assert!(!report.tolerance_honest);
-    assert!(report.measured_error.is_infinite());
+    assert_eq!(report.measured_error.to_bits(), tiny.to_bits());
 
-    let smallest = f64::from_bits(1);
     let absorbed_adjoint = Mtx::with_adjoint(
         "absorbed-adjoint",
         vec![vec![1.0], vec![smallest], vec![-1.0]],
@@ -392,6 +429,40 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
         &[(vec![1.0], vec![1.0, 1.0, 1.0])],
         0.0
     ));
+    let honest_scale_disparate = Mtx::honest(
+        "honest-scale-disparate",
+        vec![vec![1.0], vec![smallest], vec![-1.0]],
+        0.0,
+    );
+    assert!(
+        check_adjoint(
+            &honest_scale_disparate,
+            &[(vec![1.0], vec![1.0, 1.0, 1.0])],
+            smallest
+        ),
+        "representable roundoff belongs to the declared tolerance, not a structural refusal"
+    );
+    let ordinary_inexact = Mtx::honest("ordinary-inexact", vec![vec![1.1]], 0.0);
+    assert!(
+        check_adjoint(&ordinary_inexact, &[(vec![1.1], vec![1.1])], 0.0),
+        "an exactly represented TwoProd residual inside the DD rung must not be refused"
+    );
+    let a = f64::from_bits(963_u64 << 52); // 2^-60
+    let b = f64::from_bits((911_u64 << 52) | (1_u64 << 50)); // 5*2^-114
+    let partial_low_rounding = Mtx::with_adjoint(
+        "partial-low-rounding",
+        vec![vec![1.0], vec![a], vec![b], vec![-1.0], vec![-a]],
+        vec![vec![0.0; 5]],
+        0.0,
+    );
+    assert!(
+        !check_adjoint(
+            &partial_low_rounding,
+            &[(vec![1.0], vec![1.0; 5])],
+            f64::from_bits(911_u64 << 52)
+        ),
+        "exact residual 5*2^-114 exceeds 2^-112 even if a DD low-component add rounds it down"
+    );
 
     let small = f64::from_bits(523_u64 << 52); // 2^-500; its square is finite.
     let absorbed_distance = Mtx::honest("absorbed-distance", vec![vec![1.0], vec![small]], 1.0);
@@ -400,7 +471,8 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
         exact_output: vec![0.0, 0.0],
     }];
     let (honest, measured) = check_tolerance_honesty(&absorbed_distance, &manufactured, 0.0);
-    assert!(!honest && measured.is_infinite());
+    assert!(!honest);
+    assert_eq!(measured.to_bits(), 1.0_f64.next_up().to_bits());
     let reverse_absorbed_distance = Mtx::honest(
         "reverse-absorbed-distance",
         vec![vec![small], vec![1.0]],
@@ -408,7 +480,41 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
     );
     let (honest, measured) =
         check_tolerance_honesty(&reverse_absorbed_distance, &manufactured, 0.0);
-    assert!(!honest && measured.is_infinite());
+    assert!(!honest);
+    assert_eq!(measured.to_bits(), 1.0_f64.next_up().to_bits());
+    let absorbed_tolerance = small * small * 0.5;
+    let (honest, measured) =
+        check_tolerance_honesty(&absorbed_distance, &manufactured, absorbed_tolerance);
+    assert!(
+        honest,
+        "the exact squared-domain decision must retain a bound that ordinary f64 addition absorbs"
+    );
+    assert_eq!(measured.to_bits(), 1.0_f64.next_up().to_bits());
+
+    let square_residual_underflow = f64::from_bits((486_u64 << 52) | (1_u64 << 51));
+    let rounded_square = Mtx::honest(
+        "rounded-square",
+        vec![vec![1.0], vec![square_residual_underflow]],
+        1.0,
+    );
+    let (honest, measured) =
+        check_tolerance_honesty(&rounded_square, &manufactured, f64::from_bits(1));
+    assert!(
+        !honest && measured.is_infinite(),
+        "(3*2^-538)^2 is 2.25 min-subnormals, not its inward-rounded 2-min-subnormal f64 product"
+    );
+
+    let admitted_rounding = Mtx::honest(
+        "admitted-rounding",
+        vec![vec![1.0], vec![small]],
+        1.0_f64.next_up(),
+    );
+    let (honest, measured) = check_tolerance_honesty(&admitted_rounding, &manufactured, 0.0);
+    assert!(
+        honest,
+        "the next representable declared bound contains the DD norm"
+    );
+    assert_eq!(measured.to_bits(), 1.0_f64.next_up().to_bits());
     let report = certify(
         &absorbed_distance,
         &ConformanceSuite {
@@ -421,7 +527,26 @@ fn floating_point_underflow_cannot_erase_failed_evidence() {
     );
     assert_eq!(report.tier, Tier::Rejected);
     assert!(!report.tolerance_honest);
-    assert!(report.measured_error.is_infinite());
+    assert_eq!(report.measured_error.to_bits(), 1.0_f64.next_up().to_bits());
+
+    let outside_dd_rung = Mtx::honest(
+        "outside-dd-rung",
+        vec![
+            vec![1.0],
+            vec![f64::from_bits(993_u64 << 52)], // 2^-30
+            vec![f64::from_bits(923_u64 << 52)], // 2^-100
+        ],
+        f64::MAX,
+    );
+    let (honest, measured) = check_tolerance_honesty(
+        &outside_dd_rung,
+        &[ManufacturedCase {
+            input: vec![1.0],
+            exact_output: vec![0.0, 0.0, 0.0],
+        }],
+        0.0,
+    );
+    assert!(!honest && measured.is_infinite());
 }
 
 #[test]
@@ -617,8 +742,9 @@ fn a_failing_functoriality_witness_rejects_the_converter() {
 }
 
 #[test]
-fn tiers_track_the_declared_error_and_r6_severity_is_uniform() {
-    // tier by declared error (all otherwise conformant).
+fn tiers_track_the_admitted_bound_and_r6_severity_is_uniform() {
+    // Tier by the admitted bound (declared error + suite tolerance), with the
+    // default suite tolerance far below the three declarations here.
     let mk = |err: f64| Mtx::honest("c", vec![vec![2.0, 0.0], vec![0.0, 3.0]], err);
     assert_eq!(certify(&mk(1e-9), &full_suite()).tier, Tier::Gold);
     assert_eq!(certify(&mk(1e-4), &full_suite()).tier, Tier::Silver);
@@ -630,6 +756,53 @@ fn tiers_track_the_declared_error_and_r6_severity_is_uniform() {
         certify(&first_party_liar, &full_suite()).tier,
         Tier::Rejected
     );
+}
+
+#[test]
+fn suite_tolerance_is_charged_to_the_tier_and_cannot_launder_gold() {
+    let exact = Mtx::honest("exact", vec![vec![2.0, 0.0], vec![0.0, 3.0]], 0.0);
+
+    let mut suite = full_suite();
+    suite.tolerance = 1e-2;
+    let bronze = certify(&exact, &suite);
+    assert!(bronze.certified() && bronze.tolerance_honest);
+    assert_eq!(bronze.measured_error, 0.0);
+    assert_eq!(bronze.tier, Tier::Bronze);
+
+    suite.tolerance = 1e-4;
+    assert_eq!(certify(&exact, &suite).tier, Tier::Silver);
+
+    suite.tolerance = 1e-6;
+    assert_eq!(certify(&exact, &suite).tier, Tier::Gold);
+
+    suite.tolerance = 1e-6_f64.next_up();
+    assert_eq!(
+        certify(&exact, &suite).tier,
+        Tier::Silver,
+        "one representable step beyond the Gold bound must not round back into Gold"
+    );
+
+    // Direct laundering witness: the zero map is one full unit away from the
+    // manufactured truth, but a suite tolerance of one explicitly admits that
+    // error. It may receive only the corresponding coarse tier, never Gold from
+    // its misleading zero declaration.
+    let poor = Mtx::honest("poor-but-admitted", vec![vec![0.0]], 0.0);
+    let poor_report = certify(
+        &poor,
+        &ConformanceSuite {
+            adjoint_pairs: vec![(vec![1.0], vec![1.0])],
+            manufactured: vec![ManufacturedCase {
+                input: vec![1.0],
+                exact_output: vec![1.0],
+            }],
+            composition: None,
+            identity: None,
+            tolerance: 1.0,
+        },
+    );
+    assert!(poor_report.certified() && poor_report.tolerance_honest);
+    assert_eq!(poor_report.measured_error, 1.0);
+    assert_eq!(poor_report.tier, Tier::Bronze);
 }
 
 // ---------------------------------------------------------------------------

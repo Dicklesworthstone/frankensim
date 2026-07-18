@@ -11,6 +11,7 @@ description = "Restriction-map plugin conformance SDK (addendum Proposal 7): thi
 layer = "L2"
 
 [dependencies]
+fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
 fs-propcheck = { path = "../fs-propcheck" }
