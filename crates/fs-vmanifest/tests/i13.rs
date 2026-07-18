@@ -4767,7 +4767,8 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
     assert_eq!(403 + 2 * 32, 467);
     assert_eq!(261_447_712u64 + 6_987_744, 268_435_456);
     assert_eq!(35 + 32 + 2 * 8 + 2 + 9 * (8 + 265), 2_542);
-    assert_eq!(43 + 32 + 2 * 8 + 3 * 8 + 10 * 32, 435);
+    assert_eq!(43 + 32 + 2 * 8 + 3 * 8 + 11 * 32, 467);
+    assert_eq!(43 + 32 + 2 * 8 + 3 * 8 + 13 * 32, 531);
     assert_eq!(357 + 32, 389);
     assert_eq!(502 + 32, 534);
     assert_eq!(193 + 32, 225);
@@ -4819,14 +4820,13 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
     assert_eq!(4 * 8 + 2 * (8 + 289) + 256 * 32, 8_818);
     assert_eq!(42 + 2 * 8 + 1 + 1 + 8, 68);
     assert_eq!(68 + (8 + 8_248) + (8 + 8_818), 17_150);
-    assert_eq!(37 + 2 * 8 + 1 + 11 * 32 + 1 + 2 * 8, 423);
+    assert_eq!(37 + 2 * 8 + 1 + 12 * 32 + 1 + 2 * 8, 455);
     assert_eq!(34 + 2 * 8 + 1 + 2 * 32 + 8 + 8, 131);
     assert_eq!(33 + 32 + 3 * 8 + 32, 121);
-    assert_eq!(39 + 2 * 8 + 4 * 32 + 2 * 8 + 3 * 32 + 1 + 2 * 8, 312);
-    assert_eq!(35 + 32 + 4 * 8 + 32, 131);
+    assert_eq!(39 + 2 * 8 + 3 * 32 + 8 + 3 * 32 + 2 * 8, 271);
     assert_eq!(30 + 2 * 8 + 1, 47);
-    assert_eq!(1 + 32 + 8 + 3 * 32, 137);
-    assert_eq!(47 + 2 * (8 + 137), 337);
+    assert_eq!(1 + 8 + 5 * 32, 169);
+    assert_eq!(47 + 2 * (8 + 169), 401);
     assert_eq!(37 + 2 * 8 + 1 + 2, 56);
     assert_eq!(56 + 13 * 57, 797);
     assert_eq!(
@@ -5044,8 +5044,8 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "ControlPlaneSettlementLedgerV3",
         "FINAL_CONDITIONAL_BREACH_SLOT_CLOSURE_V3",
         "phase2 bundle is a prerequisite of Finalization only when Present",
-        "zero, one or two distinct lane-neutral breach artifact digests",
-        "zero, two or four lane-specific persistence receipts",
+        "exactly 0,1 or 2 distinct lane-neutral logical breach-artifact digests",
+        "0,2 or 4 lane-specific persistence-receipt preimages",
         "I13_FRESH_V2_PRECEDENCE_ADDENDUM",
         "546-byte admission-core",
     ] {
@@ -5119,8 +5119,29 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         .split_once("FINAL_V3_EXACT_ROUTE_RETENTION_STORE_AND_SETTLEMENT_SCHEMA_CLOSURE:")
         .expect("final V3 route/retention/store/settlement clause")
         .1
-        .split_once("I13_FRESH_V2_AUTHORITY_PRECEDENCE:")
+        .split_once("FINAL_V3_PHYSICAL_INFRASTRUCTURE_CAPACITY_CLOSURE:")
         .expect("final V3 schema clause boundary")
+        .0;
+    let final_physical_capacity_clause = policy
+        .split_once("FINAL_V3_PHYSICAL_INFRASTRUCTURE_CAPACITY_CLOSURE:")
+        .expect("final V3 physical-capacity clause")
+        .1
+        .split_once("FINAL_V3_DURABILITY_PUBLICATION_AND_EVIDENCE_CLOSURE:")
+        .expect("final V3 physical-capacity clause boundary")
+        .0;
+    let final_control_ledger_clause = policy
+        .split_once("FINAL_V3_CONTROL_LEDGER_RELEASE_ORDER_CLOSURE:")
+        .expect("final V3 control-ledger clause")
+        .1
+        .split_once("FINAL_V3_AUTHENTICATED_CAPACITY_GLOBAL_AND_STORE_ROOT_CLOSURE:")
+        .expect("final V3 control-ledger clause boundary")
+        .0;
+    let final_capacity_transaction_clause = policy
+        .split_once("FINAL_V3_CAPACITY_TRANSACTION_AND_TERMINAL_SINK_CLOSURE:")
+        .expect("terminal V3 capacity-transaction clause")
+        .1
+        .split_once("FINAL_V4_FINITE_CAPACITY_WAL_AND_CLOSED_EVIDENCE_AUTHORITY:")
+        .expect("terminal V3 capacity-transaction clause boundary")
         .0;
 
     let durable_capacity_clause = policy
@@ -5136,7 +5157,7 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "at most 11849894 bytes",
         "at most 20373600 bytes",
         "261447712 bytes",
-        "exactly 6987744 bytes",
+        "exactly 6987744 nonborrowable safety-slack bytes",
         "exactly 546 bytes",
         "InfrastructureCapacityReservationSetBytesV3 is the 34 exact ASCII bytes I13_INFRASTRUCTURE_CAPACITY_SET_V3 followed by one byte 0x00, raw32(predecessor_manifest_digest), U64LE(attempt_id), U64LE(epoch), U16LE(member_count=9), and nine FRAME_BYTES(one byte service_kind||raw32(service_identity)||raw32(owner_identity)||raw32(implementation_identity)||raw32(durable_medium_identity)||raw32(failure_domain_identity)||U64LE(reserved_bytes)||raw32(capacity_reservation_receipt_digest)||raw32(retention_policy_digest_or_zero)||raw32(destination_roster_digest_or_zero)) rows in service-kind order, exactly 2542 bytes",
         "run_reserve_i=2046521648+8388608*p_i",
@@ -5170,11 +5191,11 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "AppendPhaseHeadBytesV3 uses header I13_APPEND_PHASE_HEAD_V3 plus NUL, the exact 163-byte four-state projection already specified",
         "AppendPhaseTransitionReceiptBytesV3 uses header I13_APPEND_PHASE_LEASE_RECEIPT_V3 plus NUL",
         "exactly 317 bytes under 'org.frankensim.i13.append-phase-transition-receipt.v3'",
-        "AppendPhaseReceiptArtifactBytesV3 uses header I13_APPEND_PHASE_RECEIPT_ARTIFACT_V3 and its 102-byte fixed projection plus at most 16384 FRAME_BYTES(the exact 317-byte receipts), at most 5324902 bytes",
-        "AppendPhaseHeadArtifactBytesV3 uses the 33 exact ASCII bytes I13_APPEND_PHASE_HEAD_ARTIFACT_V3 followed by NUL",
-        "U16LE(head_byte_count=163),one byte completeness=Closed=1",
+        "AppendPhaseReceiptArtifactBytesV3 uses header I13_APPEND_PHASE_RECEIPT_ARTIFACT_V3 and its 102-byte fixed projection plus at most 16384 FRAME_BYTES(the exact 317-byte transition records), at most 5324902 bytes",
+        "AppendPhaseHeadArtifactBytesV3 uses the 33 exact ASCII bytes I13_APPEND_PHASE_HEAD_ARTIFACT_V3 plus NUL",
+        "U16LE(head_byte_count=163),and one byte completeness Closed=1",
         "exactly checked_add(102,checked_mul(head_count,171)) and at most 2801937 bytes",
-        "head_count=receipt_count+1",
+        "head_count=transition_receipt_count+1",
         "AppendSlotLedgerBytesV3 uses header I13_APPEND_SLOT_LEDGER_V3 plus NUL",
         "the exact 512-byte 4096-slot bitmap",
         "exactly 633 bytes",
@@ -5189,14 +5210,14 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "at most 1572964 bytes",
         "AppendComponentPlanArtifactBytesV3 uses the 33-ASCII-plus-NUL header I13_APPEND_BYTE_PLANS_ARTIFACT_V3",
         "at most 659555 bytes",
-        "A successful append has exactly Acquire,SealPrepared,CommitRelease",
+        "a successful append has exactly Acquire,SealPrepared,CommitRelease",
         "any burned slot has at most four non-replay transitions",
         "LaneControlClosureArtifactBytesV3 uses header I13_LANE_CONTROL_CLOSURE_ARTIFACT_V3 plus NUL",
         "at most 126402 bytes",
         "AppendPhaseAuthoritySetBytesV3 is header I13_APPEND_PHASE_AUTHORITY_SET_V3 plus NUL",
         "exactly 178 bytes",
         "5324902+2801937+1572964+659555+126402=10485760 bytes",
-        "none is charged to the separate 268435456-byte durability bundle",
+        "none is charged to the separate durability bundle",
     ] {
         assert!(
             final_typed_append_clause.contains(exact),
@@ -5206,8 +5227,8 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
 
     for exact in [
         "TerminalCapacityProfileExtensionBytesV3 uses the 42 exact ASCII bytes I13_TERMINAL_CAPACITY_PROFILE_EXTENSION_V3 plus NUL",
-        "exactly 435 bytes",
-        "It is a pre-intent proposal containing no committed receipt, infrastructure-set root or final plan digest",
+        "raw32(bootstrap_cleanup_capacity_index_allocation_receipt_pair_digest), exactly 467 bytes under 'org.frankensim.i13.terminal-capacity-profile-extension.v3'",
+        "It is a pre-intent proposal containing only the already committed pre-effect cleanup index allocation-receipt pair and no capacity receipt,infrastructure-set root,per-attempt producer inventory or final plan digest",
         "TerminalCapacityReservationIntentBytesV3 appends raw32(TerminalCapacityProfileExtensionRootV3) to the final 357-byte V2 form",
         "exactly 389 bytes",
         "TerminalCapacityReservationReceiptBytesV3 appends that same root to the final 502-byte V2 form",
@@ -5219,12 +5240,15 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "at most 67108864 bytes",
         "LaneReservationPlanIdentityDigestV3 uses domain 'org.frankensim.i13.lane-reservation-plan-identity.v3' over the exact 121-byte projection",
         "U64LE(lane_control_bytes=10485760)",
+        "BreachSlotAuthorityMemberBytesV3 uses the 35 exact ASCII bytes I13_BREACH_SLOT_AUTHORITY_MEMBER_V3 plus NUL",
+        "raw32(LaneReservationReceiptDigestV3),raw32(LaneReservationPlanIdentityDigestV3),raw32(genesis_BreachPersistenceHeadDigestV2),U64LE(max_artifact_bytes),and raw32(breach_capacity_policy_digest), exactly 190 bytes under 'org.frankensim.i13.breach-slot-authority-member.v3'",
+        "It is deterministically derived from the committed lane receipt and is not an opaque service assertion",
         "LaneBreachSlotReservationBytesV3 uses the 35 exact ASCII bytes I13_LANE_BREACH_SLOT_RESERVATION_V3 plus NUL",
-        "two phase-ordered FRAME_BYTES(one byte phase||raw32(slot_reservation_receipt)||raw32(genesis_BreachPersistenceHeadDigestV2)||U64LE(max_artifact_bytes)) rows, exactly 217 bytes",
+        "two phase-ordered FRAME_BYTES(one byte phase||raw32(BreachSlotAuthorityMemberDigestV3)||raw32(genesis_BreachPersistenceHeadDigestV2)||U64LE(max_artifact_bytes)) rows, exactly 217 bytes",
         "LaneActiveCapacityMemberBytesV3 is raw32(plan identity)||raw32(LaneReservationReceiptDigestV3)||raw32(LaneBreachSlotReservationRootV3)||the seven U64 component values||U64LE(total_reserved_bytes), exactly 160 bytes",
         "total_reserved_bytes=951957656+4194304*p_i",
         "LaneActiveCapacityMapRootV3 is a 256-level authenticated sparse map keyed by plan identity and valued by the complete member",
-        "LaneActiveCapacityUpdateProofBytesV3 binds old/new counts, old/new reserved totals, FRAME_BYTES(the 160-byte member) and 256 siblings, exactly 8392 bytes",
+        "LaneActiveCapacityUpdateProofBytesV3 binds old/new counts,old/new reserved totals,FRAME_BYTES(the 160-byte member) and 256 siblings, exactly 8392 bytes",
         "QuarantinedCapacityMemberBytesV3 is raw32(LaneActiveCapacityMemberDigestV3)||U64LE(total_reserved_bytes)||raw32(PreActivationServiceCatastropheDigestV2), exactly 72 bytes",
         "its proof remains 8304 bytes",
         "LaneServiceCapacityUpdateReceiptBytesV3 is exactly 447 bytes with the seven raw32 fields",
@@ -5233,8 +5257,7 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "exactly 356 bytes",
         "ActiveRelease operation-evidence is the pre-CAS LaneReleaseAuthorizationDigestV3",
         "The 218-byte LaneServiceCapacityHeadBytesV3 is an admission-control-plane replicated authority",
-        "LaneBreachSlotSettlementMemberBytesV3 is one byte phase PreSelection=1 or PostSelection=2",
-        "exactly 138 bytes",
+        "LaneBreachSlotSettlementMemberBytesV3 is one byte phase PreSelection=1 or PostSelection=2, raw32(BreachSlotAuthorityMemberDigestV3), raw32(current_BreachPersistenceHeadDigestV2), one byte disposition UnusedGenesis=0 or Consumed=1, raw32(logical_lane_neutral_breach_artifact_digest_or_zero), raw32(lane_specific_persistence_receipt_digest_or_zero), and U64LE(artifact_byte_count), exactly 138 bytes",
         "LaneBreachSlotSettlementBytesV3 uses the 34 exact ASCII bytes I13_LANE_BREACH_SLOT_SETTLEMENT_V3 plus NUL",
         "exactly 378 bytes",
         "LaneReservationReleaseReceiptBytesV3 uses header I13_LANE_RESERVATION_RELEASE_RECEIPT_V3 and appends raw32(LaneBreachSlotSettlementRootV3)||raw32(LaneServiceCapacityUpdateReceiptDigestV3) to the V2-form fields, exactly 467 bytes",
@@ -5242,6 +5265,41 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         assert!(
             final_typed_append_clause.contains(exact),
             "service-capacity closure lost exact schema '{exact}'"
+        );
+    }
+
+    for exact in [
+        "CapacityIndexReservationSubjectBytesV3 uses the 41 exact ASCII bytes I13_CAPACITY_INDEX_RESERVATION_SUBJECT_V3 plus NUL,predecessor manifest,attempt,epoch,raw32(logical capacity authority),raw32(policy),U64LE(slot quota=32768),raw32(response protocol schema),raw32(closed operation/disposition matrix),and idempotency, exactly 258 bytes",
+        "CapacityIndexHeadBytesV3 uses the 26 exact ASCII bytes I13_CAPACITY_INDEX_HEAD_V3 plus NUL,logical authority,physical copy identity,one byte copy role A=1 or B=2,generation,U64LE(capacity entries=4096),U64LE(slot bytes=32768),allocated count,subject-map root,and used bytes, exactly 164 bytes",
+        "CapacityIndexAllocationProofBytesV3 is old/new counts,old/new used bytes,FRAME_BYTES(the exact 66-byte subject||ordinal||journal member),and 256 root-to-leaf raw32 siblings, exactly 8298 bytes",
+        "CapacityIndexAllocationRequestBytesV3 adds raw32(physical copy identity) to the earlier request and is exactly 362 bytes",
+        "CapacityIndexAllocationReceiptBytesV3 likewise binds copy identity and an explicitly U16LE slot ordinal and is exactly 572 bytes",
+        "CapacityIndexAllocationEvidenceBundleBytesV3 uses the 48 exact ASCII bytes I13_CAPACITY_INDEX_ALLOCATION_EVIDENCE_BUNDLE_V3 plus NUL,attempt,epoch,U16LE(copy_count=2),U64LE(total framed evidence bytes=19466),FRAME_BYTES(the exact 258-byte subject),two role-ordered FRAME_BYTES(the exact 362-byte requests),two role-ordered FRAME_BYTES(the exact 572-byte receipts),four role-and-generation-ordered FRAME_BYTES(the exact 164-byte old/new heads),and two role-ordered FRAME_BYTES(the exact 8298-byte proofs), exactly 19541 bytes",
+        "CapacityIndexAllocationReceiptPairBytesV3 uses its 45-byte header plus NUL,attempt,epoch,subject digest,FRAME_BYTES(the exact evidence bundle),independence-matrix root,evaluator,signature,Reserved verdict,and interval, exactly 19756 bytes",
+        "CapacityIndexAllocationAuthoritySetBytesV3 uses the 46 exact ASCII bytes I13_CAPACITY_INDEX_ALLOCATION_AUTHORITY_SET_V3 plus NUL,attempt,epoch,subject digest,FRAME_BYTES(the exact pair),two role-ordered FRAME_BYTES(the exact deterministic 441-byte pair-write receipts),and completeness=1, exactly 20758 bytes",
+        "Only this two-copy authority-set digest may enter a profile,lease or intent",
+        "TerminalCapacityProfileExtensionBytesV3 binds three distinct authority-set digests in fixed order Cleanup ReplayMetadata,Cleanup Store,Global lifecycle response and is exactly 531 bytes",
+        "CapacityReceiptJournalHeadBytesV3 uses the 36 exact ASCII bytes I13_CAPACITY_RECEIPT_JOURNAL_HEAD_V3 plus NUL,journal identity,generation,capacity entries=4096,slot bytes=32768,active slot count,slot-map root,total payload bytes,and transition-chain root, exactly 173 bytes",
+        "CapacityReceiptSlotRecordBytesV3 uses its 35-byte header plus NUL,subject,U16LE(physical slot ordinal),U16LE(receipt count),used bytes,response-protocol schema,closed operation/disposition matrix,chain root,and latest payload digest, exactly 208 bytes",
+        "CapacityReceiptJournalWriteReceiptBytesV3 uses the 37 exact ASCII bytes I13_CAPACITY_RECEIPT_JOURNAL_WRITE_V3 plus NUL,attempt,epoch,subject,allocation-pair digest,transition-body digest,payload digest,payload bytes,U16LE append ordinal,physical offset,expected/committed journal-head digests,old/new generations,old/new active counts,old/new total payload bytes,old/new map roots,old/new slot-record digests,and result Committed=1, exactly 441 bytes",
+        "GlobalActiveReservationMemberBytesV3 is raw32(intent)||state AttemptRunHeld=1,ClosureJournalHeld=2 or ClosureJournalRetained=3||original run reserve||current reserved bytes||raw32(global closure-journal head)||journal actual bytes||raw32(expiry ticket)||policy||idempotency||raw32(global response allocation authority set), exactly 217 bytes",
+        "GlobalGovernorCapacityHeadBytesV3 uses its 36-byte header plus NUL,global authority,generation,reserved bytes,active count/root,and closed count/root, exactly 165 bytes",
+        "GlobalGovernorUpdateProofBytesV3 is old/new selected-map counts,old/new reserved totals,FRAME_BYTES(old active member or empty),FRAME_BYTES(new active member or empty),and 256 siblings, at most 8674 bytes",
+        "TerminalCapacitySettlementReceiptBytesV3 appends both H2/marker and the exact global H2 proof digest to the 518-byte V2 form and is exactly 614 bytes; its authority set is 3403 bytes",
+        "GlobalControlClosureDurabilityMemberBytesV3 is role A/B||journal identity||FRAME_BYTES(the exact 441-byte post-CAS transaction-write receipt)||U64LE(global closure authority-set bytes=3430)||owner||implementation||durable medium||failure domain, exactly 618 bytes",
+        "GlobalControlClosureDurabilityBundleBytesV3 uses its 47-byte header plus NUL,attempt,epoch,entry kind,global response allocation-authority-set digest,global closure durability-authority-set digest,U16LE(member count=2),U64LE(total authority bytes=3430),two role-ordered FRAME_BYTES(the exact members),and completeness=1, exactly 1392 bytes",
+        "BootstrapEvidenceBundleBytesV3 uses its 32-byte header plus NUL,attempt,epoch,reason,U16LE(item count<=384),U64LE(total referenced bytes),the ordered FRAME_BYTES(exact 75-byte items),and completeness=1, exactly checked_add(61,checked_mul(item_count,83)) and at most 31933 bytes",
+        "BootstrapReservationFailurePayloadBytesV3 appends the nonzero governed expiry ticket to the earlier fields and is exactly checked_add(423,bootstrap_bundle_bytes),at most 32356 bytes",
+        "GlobalControlClosureEntryBytesV3 is therefore at most 32489 bytes for Bootstrap",
+        "RetentionSourceInventoryHeadBytesV3 uses its 38-byte header plus NUL,raw32(central source-inventory authority),attempt,epoch,arm,TransferSet root,generation,U16LE(assigned shard count<=9),total assigned bytes,assigned root,closed flag,and policy, exactly 203 bytes",
+        "ControlEvidenceCutoffReceiptBytesV3 replaces its undefined latest-staging root with the exact Closed head digest,appends the staging-artifact root,and is exactly 313 bytes",
+        "TerminalCapacitySettlementReceiptBytesV3's 614 bytes make ControlPlanePostSettlementBundleBytesV3 exactly 1266 bytes,its entry 1397 bytes,and the H1/marker/H2/postreceipt/H3/footer tail exactly 2457 bytes,leaving 63079 reserve bytes",
+        "For ControlOnly,RetainedStoreArtifactSet.total_physical_unique_bytes=ControlArchiveSet.control_archive_bytes",
+        "In both arms RetentionWriteReceiptSet.total_actual_bytes,Store Retained actual_used_bytes,and every destination/cleanup closure member's corresponding actual-used field byte-equal that same total and are <=Held.max_reserved_bytes",
+    ] {
+        assert!(
+            final_capacity_transaction_clause.contains(exact),
+            "terminal V3 capacity transaction/sink closure lost '{exact}'"
         );
     }
 
@@ -5360,15 +5418,16 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
 
     for exact in [
         "RetainedArtifactMemberBytesV3 keeps the exact 43-byte lane/role/digest/byte-count projection but uses RetentionArtifactRoleV3",
-        "RetainedArtifactSetBytesV3 uses header I13_RETAINED_ARTIFACT_SET_V3, set_kind PreEvidenceSurvivors=1,TransferSet=2,RequirementSource=3 or SourceShard=4",
+        "RetainedArtifactSetBytesV3 uses header I13_RETAINED_ARTIFACT_SET_V3, set_kind PreEvidenceSurvivors=1,TransferSet=2,RequirementSource=3,SourceShard=4 or ControlEvidence=5",
         "exactly checked_add(62,checked_mul(artifact_count,51))",
+        "A ControlEvidence set contains each physical-unique owned pre-cutoff extent exactly once as role13",
         "ArmRetentionRequirementSetBytesV3 uses header I13_ARM_RETENTION_REQUIREMENT_SET_V3",
         "every required_source_artifact_set_root fetches a RequirementSource set",
         "role5 is present iff either logical breach union is Present",
         "role6 is present iff any route outcome is Exhausted or Succeeded or any Failover/Recovery lease was acquired",
         "Role10's source set is the canonical singleton containing CanonicalFinalizationEvidenceBytesV3",
-        "RetentionConformanceReceiptBytesV3 uses header I13_RETENTION_CONFORMANCE_RECEIPT_V3",
-        "U16LE(requirement_count),U64LE(artifact_count)",
+        "RetentionConformanceReceiptBytesV3 uses header I13_RETENTION_CONFORMANCE_RECEIPT_V3 plus NUL",
+        "attempt,epoch,arm,requirement root,TransferSet root,retention policy,destination roster,requirement count,artifact count,evaluator,idempotency,signature,verdict AllAndOnly=1 and interval",
         "exactly 305 bytes",
         "RetentionSourceShardReceiptBytesV3 uses the 37 exact ASCII bytes I13_RETENTION_SOURCE_SHARD_RECEIPT_V3 plus NUL",
         "raw32(source_store_identity),raw32(TransferSetRootV3),raw32(SourceShardSetRootV3),raw32(expected_source_inventory_head),raw32(committed_source_inventory_head),raw32(source_capability),raw32(idempotency),raw32(signature_set)",
@@ -5376,41 +5435,54 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "RetentionSourceShardReceiptSetBytesV3 uses the 41 exact ASCII bytes I13_RETENTION_SOURCE_SHARD_RECEIPT_SET_V3 plus NUL",
         "exactly checked_add(109,checked_mul(receipt_count,40))",
         "Its SourceShard sets form an exact duplicate-free partition",
-        "StoreCapacityReservationMemberBytesV3 has two exact tagged arms",
-        "Held=1 is exactly 225 bytes with used_bytes=0",
-        "Retained=2 appends raw32(RetainedArtifactSetRootV3)||raw32(RetentionStoreReceiptDigestV3), exactly 289 bytes",
-        "StoreCapacityHeadBytesV3 uses header I13_STORE_CAPACITY_HEAD_V3 plus NUL",
-        "exactly 211 bytes",
-        "StoreCapacityUpdateProofBundleBytesV3 uses the 41 exact ASCII bytes I13_STORE_CAPACITY_UPDATE_PROOF_BUNDLE_V3 plus NUL",
-        "at most 17150 bytes",
-        "ClosedIntentProofBytesV3 is exactly 8248 bytes",
-        "ActiveCapacityProofBytesV3 binds old/new counts and reserved totals plus framed old/new Held-or-Retained members and one 256-sibling path, at most 8818 bytes",
-        "QuarantineProofBytesV3 is exactly 8304 bytes",
-        "StoreCapacityUpdateReceiptBytesV3 uses header I13_STORE_CAPACITY_UPDATE_RECEIPT_V3 plus NUL",
-        "eleven raw32 fields store,member-or-zero,expected head,committed head,proof-bundle,evidence-or-zero,policy,roster,capability,idempotency,signature",
-        "exactly 423 bytes",
-        "RetentionStoreReceiptBytesV3 appends only raw32(ReserveCommittedUpdateReceiptDigestV3) to the prior 345-byte write receipt, exactly 377 bytes",
-        "The acyclic order is ReserveCommitted -> exact storage CAS/write receipt -> CommitRetained",
-        "ControlPlaneLedgerEntryBytesV3 uses header I13_CONTROL_PLANE_LEDGER_ENTRY_V3 plus NUL",
-        "exactly checked_add(131,payload_byte_count)",
-        "ControlPlaneLedgerHeadBytesV3 uses header I13_CONTROL_PLANE_LEDGER_HEAD_V3 plus NUL",
-        "exactly 121 bytes",
-        "TerminalCapacitySettlementReceiptBytesV3 uses header I13_TERMINAL_CAPACITY_SETTLEMENT_RECEIPT_V3",
-        "exactly 582 bytes",
-        "ControlPlaneSettlementMarkerBytesV3 uses header I13_CONTROL_PLANE_SETTLEMENT_MARKER_V3 plus NUL",
-        "exactly 312 bytes",
-        "The only order is append complete pre-settlement evidence E, commit the global settlement receipt binding E and its successor head, then append the marker binding that receipt",
-        "A replicated cross-attempt ControlPlaneCapacityHeadBytesV3",
-        "exactly 131 bytes",
-        "pre-reserves the full 67108864-byte cleanup slice before activation",
         "BreachEvidenceBundleBytesV3 uses header I13_BREACH_EVIDENCE_BUNDLE_V3 plus NUL",
-        "exactly checked_add(47,checked_mul(phase_count,145))",
-        "exactly 0,1 or 2 distinct lane-neutral logical breach-artifact digests, 0,2 or 4 lane-specific persistence-receipt preimages and 0,1 or 2 mirror certificates",
-        "Any 0/2/4-artifact interpretation",
+        "exactly checked_add(47,checked_mul(phase_count,177))",
+        "exactly 0,1 or 2 distinct lane-neutral logical breach-artifact digests, 0,2 or 4 lane-specific persistence-receipt preimages, 0,1 or 2 exact V2 durability-bundle preimages and 0,1 or 2 mirror certificates",
+        "Any 0/2/4-artifact interpretation, receipt/digest alias, missing durability bundle or mirror",
     ] {
         assert!(
             final_exact_schema_clause.contains(exact),
-            "retention/control closure lost exact schema '{exact}'"
+            "final route/retention schema closure lost '{exact}'"
+        );
+    }
+
+    for exact in [
+        "StoreCapacityReservationMemberBytesV3 is raw32(intent)||attempt||epoch||one byte state Held=1 or Retained=2",
+        "with Held exactly 225 bytes and used_bytes=0",
+        "Retained appends raw32(governed RetainedStoreArtifactSetRootV3)||raw32(RetentionWriteReceiptSetDigestV3), exactly 289 bytes",
+        "StoreCapacityHeadBytesV3 uses the 26 exact ASCII bytes I13_STORE_CAPACITY_HEAD_V3 plus NUL",
+        "exactly 211 bytes under 'org.frankensim.i13.store-capacity-head.v3'",
+        "StoreActiveCapacityProofBytesV3 binds old/new counts and reserved totals plus FRAME_BYTES(old member or empty),FRAME_BYTES(new member or empty),and one 256-sibling path, at most 8818 bytes",
+        "StoreQuarantineProofBytesV3 is exactly 8304 bytes",
+        "The shared CapacityStateUpdateProofBundleBytesV3 framing makes Closed+Active at most 17150 bytes and Active+Quarantine reconcile at most 17206 bytes",
+        "ClosedIntentProofBytesV3 remains exactly 8248 digest-and-sibling bytes",
+        "StoreCapacityUpdateReceiptBytesV3 uses header I13_STORE_CAPACITY_UPDATE_RECEIPT_V3 plus NUL",
+        "then twelve raw32 fields intent,store,member-or-zero,expected head,committed head,proof bundle,evidence-or-zero,policy,roster,capability,idempotency,signature",
+        "exactly 455 bytes under 'org.frankensim.i13.store-capacity-update-receipt.v3'",
+        "RetentionStoreReceiptBytesV3 appends raw32(ReserveCommittedStoreCapacityUpdateReceiptDigestV3) to the exact prior 345-byte storage-CAS/write form, exactly 377 bytes",
+        "the acyclic order is ReserveCommitted -> one or two exact writes -> CommitRetained",
+    ] {
+        assert!(
+            final_physical_capacity_clause.contains(exact),
+            "final physical-capacity closure lost '{exact}'"
+        );
+    }
+
+    for exact in [
+        "ControlPlaneLedgerEntryBytesV3 uses the 33 exact ASCII bytes I13_CONTROL_PLANE_LEDGER_ENTRY_V3 plus NUL",
+        "exactly checked_add(131,payload_byte_count)",
+        "ControlPlaneLedgerHeadBytesV3 remains the exact 121-byte H0/H1/H2/H3 append head",
+        "TerminalCapacitySettlementReceiptBytesV3 appends raw32(H2)||raw32(marker digest) to the final 518-byte V2 form, exactly 582 bytes",
+        "ControlPlaneSettlementMarkerBytesV3 is the 38 exact ASCII bytes I13_CONTROL_PLANE_SETTLEMENT_MARKER_V3 plus NUL",
+        "exactly 271 bytes under 'org.frankensim.i13.control-plane-settlement-marker.v3'",
+        "It is a pre-CAS payload and contains no H2,successor generation or CAS result",
+        "The sole normal order is H0 -> append E -> H1/receipt -> append pre-CAS marker -> H2/receipt -> commit the branch global-governor body settlement binding H2 and marker while retaining the separate closure-journal member -> append post-settlement bundle -> H3/receipt",
+        "The 67108864-byte run control allocation is exactly a nonborrowable 65536-byte global control-closure journal reservation plus a 67043328-byte Cleanup Store reservation",
+        "Cleanup capacity authority is the exact 211-byte StoreCapacityHeadBytesV3,not a 131/228-byte shadow",
+    ] {
+        assert!(
+            final_control_ledger_clause.contains(exact),
+            "final control-ledger closure lost '{exact}'"
         );
     }
     assert!(policy.contains(
@@ -5917,9 +5989,22 @@ fn i13_v4_finite_capacity_wal_and_closed_evidence_authority_is_exact() {
     let (coordinator_correction, wire_and_after) = corrected_coordinator_and_after
         .split_once("FINAL_V4_WIRE_AND_ACCOUNTING_DISAMBIGUATION:")
         .expect("terminal V4 wire correction");
-    let (wire_correction, gauntlet_obligations) = wire_and_after
+    let (wire_correction, orphan_and_after) = wire_and_after
+        .split_once("FINAL_V4_ORPHAN_PAGING_AND_PRECEDENCE_DISAMBIGUATION:")
+        .expect("terminal V4 orphan/paging correction");
+    let (orphan_correction, recurrence_and_after) = orphan_and_after
+        .split_once("FINAL_V4_COORDINATOR_RECURRENCE_AND_ACYCLIC_PAGE_CORRECTION:")
+        .expect("terminal V4 coordinator-recurrence correction");
+    let (recurrence_correction, gauntlet_obligations) = recurrence_and_after
         .split_once("The V4 decision journals,response logs,WALs")
         .expect("terminal V4 Gauntlet boundary");
+    let precedence_corrections = policy
+        .split_once("I13_FRESH_V2_PRECEDENCE_FINAL_V4_CORRECTIONS:")
+        .expect("terminal V4 five-correction precedence marker")
+        .1
+        .split_once("FINAL_V4_HELD_ORDINAL_RECOVERY_MATRIX_AND_EVIDENCE_CORRECTION:")
+        .expect("terminal V4 five-correction precedence boundary")
+        .0;
 
     for header in [
         "I13_CAPACITY_AUTHORITY_BINDING_MATRIX_V4",
@@ -6058,15 +6143,39 @@ fn i13_v4_finite_capacity_wal_and_closed_evidence_authority_is_exact() {
 
     for exact in [
         "their checked cardinality sum equals DecisionHead.reserved_subject_count",
-        "RefusedNoEffect therefore burns its ordinal",
-        "exact length is checked_add(106,checked_add(L,checked_mul(member_count,21261)))",
-        "L=byte_len(FRAME_BYTES(the exact page table))",
+        "RefusedNoEffect therefore burns its reserved ordinal",
+        "exact length is checked_add(106,checked_add(L,checked_sum_i(row_length_i)))",
+        "only upper-bounded by checked_add(106,checked_add(L,checked_mul(member_count,21261)))",
         "double-framing or omitting the table frame is invalid",
         "mutually biject under the generated cross-product",
     ] {
         assert!(
             wire_correction.contains(exact),
             "terminal wire/accounting correction lost proof obligation '{exact}'"
+        );
+    }
+
+    for exact in [
+        "L=byte_len(FRAME_BYTES(page_table))=checked_add(18,checked_sum_i(checked_add(167,A_i)))",
+        "Page ordinals are exactly zero-based and contiguous",
+        "checked_add(R_old,page_count)<=4096",
+        "the canonical insertion page is the longest nonempty consecutive prefix satisfying both byte and count caps",
+    ] {
+        assert!(
+            orphan_correction.contains(exact),
+            "terminal orphan/paging correction lost proof obligation '{exact}'"
+        );
+    }
+
+    for exact in [
+        "new_copy_coordinator_generation=checked_add(old_copy_coordinator_generation,1)",
+        "Prepare and aggregate phases preserve the embedded IndexHead and OrphanHead byte-for-byte",
+        "new_component_generation=checked_add(old_component_generation,1)",
+        "root change under unchanged generation",
+    ] {
+        assert!(
+            recurrence_correction.contains(exact),
+            "terminal coordinator-recurrence correction lost proof obligation '{exact}'"
         );
     }
 
@@ -6390,9 +6499,15 @@ fn i13_v4_finite_capacity_wal_and_closed_evidence_authority_is_exact() {
     assert!(policy.contains(
         "FINAL_V4_FINITE_CAPACITY_WAL_AND_CLOSED_EVIDENCE_AUTHORITY are part of the final fresh authority set"
     ));
-    assert!(policy.contains(
-        "FINAL_V4_DURABLE_ALLOCATION_JOURNAL_CORRECTION,FINAL_V4_COORDINATOR_AND_STAGING_CAPACITY_CORRECTION and FINAL_V4_WIRE_AND_ACCOUNTING_DISAMBIGUATION are terminal coequal members of the fresh authority set"
-    ));
+    for exact in [
+        "FINAL_V4_DURABLE_ALLOCATION_JOURNAL_CORRECTION,FINAL_V4_COORDINATOR_AND_STAGING_CAPACITY_CORRECTION,FINAL_V4_WIRE_AND_ACCOUNTING_DISAMBIGUATION,FINAL_V4_ORPHAN_PAGING_AND_PRECEDENCE_DISAMBIGUATION and FINAL_V4_COORDINATOR_RECURRENCE_AND_ACYCLIC_PAGE_CORRECTION are terminal coequal members of the fresh authority set",
+        "Normatively,the identifier I13_FRESH_V2_PRECEDENCE_ADDENDUM means its enumerated clauses union these five final corrections",
+    ] {
+        assert!(
+            precedence_corrections.contains(exact),
+            "terminal five-correction precedence lost '{exact}'"
+        );
+    }
 }
 
 fn sha256_for_i13_source_lock(input: &[u8]) -> [u8; 32] {
@@ -6585,6 +6700,107 @@ fn i13_terminal_source_snapshot_and_authority_clauses_are_exact() {
     );
 
     let source = std::str::from_utf8(SOURCE).expect("I13 source is canonical UTF-8");
+    let held_ordinal = source_clause(
+        source,
+        "FINAL_V4_HELD_ORDINAL_RECOVERY_MATRIX_AND_EVIDENCE_CORRECTION:",
+        "FINAL_V4_RECOVERY_FRESH_EYES_CORRECTION:",
+    );
+    for lock in [
+        "held_subject_count: the cardinality of the union of replay-derived reservation subjects and immutable PreEffectAbsent-map keys",
+        "A PreEffectAbsent hold therefore reserves the physical ordinal, all six nonborrowable decision positions and its exception-evidence slot",
+        "the superseded held_subject_count<=record_count inequality is invalid because a zero-phase absence hold is legal",
+    ] {
+        assert!(
+            held_ordinal.contains(lock),
+            "held-ordinal correction lost semantic lock '{lock}'"
+        );
+    }
+
+    let recovery_fresh_eyes = source_clause(
+        source,
+        "FINAL_V4_RECOVERY_FRESH_EYES_CORRECTION:",
+        "FINAL_V4_DAG_HISTORY_CORRELATION_CORRECTION:",
+    );
+    for lock in [
+        "the sorted ordinals are exactly0..held_subject_count-1 with no hole",
+        "the two unlike roots are not required to equal",
+        "append-payload digest,not record-only digest",
+        "the PreEffect proof bytes are covered without the proof hashing its own receipt",
+    ] {
+        assert!(
+            recovery_fresh_eyes.contains(lock),
+            "recovery fresh-eyes correction lost semantic lock '{lock}'"
+        );
+    }
+
+    let dag_history = source_clause(
+        source,
+        "FINAL_V4_DAG_HISTORY_CORRELATION_CORRECTION:",
+        "FINAL_V4_REPLAYABLE_EXCEPTION_AND_OUTCOME_PRESERVATION_CORRECTION:",
+    );
+    for lock in [
+        "the exact outer CapacityIndexDecisionEntry digest,not an inner LocalDecision digest",
+        "A derived affected-copy discriminator selects exactly one tuple",
+        "The selected history arm remains in the state-specific bundle after repair",
+    ] {
+        assert!(
+            dag_history.contains(lock),
+            "DAG/history correction lost semantic lock '{lock}'"
+        );
+    }
+
+    let replayable_exception = source_clause(
+        source,
+        "FINAL_V4_REPLAYABLE_EXCEPTION_AND_OUTCOME_PRESERVATION_CORRECTION:",
+        "FINAL_V4_TRANSITION_RECOVERY_AND_PHASE6_CLOSURE:",
+    );
+    for lock in [
+        "Availability evidence is independently replayable rather than a signed root assertion",
+        "AwaitAppendRepair",
+        "outcome-preserving append route",
+        "all-then-local phase6 receipt",
+    ] {
+        assert!(
+            replayable_exception.contains(lock),
+            "replayable exception/outcome correction lost semantic lock '{lock}'"
+        );
+    }
+
+    let transition_recovery = source_clause(
+        source,
+        "FINAL_V4_TRANSITION_RECOVERY_AND_PHASE6_CLOSURE:",
+        "FINAL_V4_CAPABILITY_SIGNATURE_AND_STORAGE_CLOSURE:",
+    );
+    for lock in [
+        "exactly raw32(CanonicalSignatureSetRootV4),never raw64 bytes",
+        "The exact272-byte copy-coordinator head is the sole mutable CopyAtomicHead CAS authority",
+        "Append repair preserves semantic intent",
+        "required_local_mask is ALocalBAbsent=1,AAbsentBLocal=2 or BothLocal=3",
+        "every direct then-local bit carries an explicit no-exception proof",
+    ] {
+        assert!(
+            transition_recovery.contains(lock),
+            "transition/recovery correction lost semantic lock '{lock}'"
+        );
+    }
+
+    let ordered_overlay = source_clause(
+        source,
+        "I13_FRESH_V2_PRECEDENCE_FINAL_V4_CORRECTIONS_V2",
+        "FINAL_V4_CAPABILITY_SIGNATURE_AND_STORAGE_CLOSURE:",
+    );
+    for lock in [
+        "one ordered overlay,not coequal prose",
+        "(10) FINAL_V4_TRANSITION_RECOVERY_AND_PHASE6_CLOSURE",
+        "Greater index wins only a direct conflict; otherwise clauses union",
+        "I13_FRESH_V2_PRECEDENCE_ADDENDUM means its frozen base set plus exactly this overlay",
+    ] {
+        assert!(
+            ordered_overlay.contains(lock),
+            "ten-correction precedence overlay lost '{lock}'"
+        );
+    }
+
     for terminal_clause in [
         "FINAL_V4_CAPABILITY_SIGNATURE_AND_STORAGE_CLOSURE",
         "FINAL_V4_EXCEPTION_ATOMIC_REPLAY_AND_CAPACITY_CLOSURE",
@@ -6648,6 +6864,8 @@ fn i13_terminal_source_snapshot_and_authority_clauses_are_exact() {
         "Phase3/6 preserve that vector",
         "the final core uses the receipt-vector/global-chain successors and only then derives the sole CopyAtomicHead successor",
         "one other-copy phase3 exception is Empty and both later phase6 exceptions are Present",
+        "A genuine nonterminal phase3 aggregate with an unavailable append uses the distinct AwaitNonterminalAppendRepair arm",
+        "append incompleteness never invents semantic uncertainty",
         "Every Direct phase3 and phase6 history arm consumes the corresponding artifact",
         "exception arms consume their append artifact",
         "At most one copy can be recovered in a Reserved attempt",

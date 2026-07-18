@@ -667,6 +667,15 @@ atomic authority-head advancement grant that separately governed authority.
   435 bytes and is a pure pre-intent proposal: it contains no committed receipt,
   infrastructure-set root, or final lane-plan digest. The global intent and
   receipt are exactly 389/534 bytes, and each lane receipt is exactly 225 bytes.
+  That 435-byte form is historical replay-only authority. In the succeeding V3
+  chronology, the typed append/capacity closure first extends the same profile
+  projection to 467 bytes by appending the already committed bootstrap Cleanup
+  capacity-index allocation-receipt-pair digest. The terminal V3 capacity-
+  transaction closure then supersedes that intermediate form with an exact
+  531-byte projection binding three distinct two-copy allocation-authority-set
+  digests in fixed `Cleanup ReplayMetadata`, `Cleanup Store`, and `Global
+  lifecycle response` order. These 435/467/531 stages are precedence-ordered,
+  not interchangeable encodings under one selectable authority claim.
   Only the committed global receipt authorizes deriving the two plan identities
   and obtaining the physical reservation receipts; the 2542-byte infrastructure
   set then binds those receipts, so no reservation object hashes a successor
@@ -788,9 +797,13 @@ atomic authority-head advancement grant that separately governed authority.
   side-root quarantine are replay-only; the distinct 125-byte global-governor
   head remains authoritative.
 
-  The exact 217-byte lane breach-slot reservation binds both phase-ordered slot
-  receipts, genesis persistence heads, and maximum artifact bytes before lane
-  issuance. Active release additionally requires an exact 356-byte authorization
+  The exact 217-byte lane breach-slot reservation binds both phase-ordered
+  `BreachSlotAuthorityMemberDigestV3` values, genesis persistence heads, and
+  maximum artifact bytes before lane issuance. Each exact 190-byte authority-
+  member preimage binds the committed lane receipt, lane-plan identity, phase,
+  genesis head, maximum bytes, and breach-capacity policy; it is deterministically
+  derived rather than accepted as an opaque service receipt. Active release
+  additionally requires an exact 356-byte authorization
   binding settlement arm, branch evidence, quiescence, retention-conformance/
   destination quorum or canonical zero for preactivation, breach-slot
   settlement, expected service head, active member, capability, idempotency,
@@ -805,14 +818,17 @@ atomic authority-head advancement grant that separately governed authority.
   evidence in the control ledger. Canonical final and catastrophe each use
   their own activation-aware revocation set, quiescence receipt, retention
   requirement set, shard partition, two-store transfer, service/store/global
-  releases, successor active set and governor head, and exact 582-byte
-  settlement receipt. Catastrophe additionally requires the exact all-four-
+  releases, successor active set and governor head, and exact terminal 614-byte
+  settlement receipt with its 3403-byte two-copy durability authority set.
+  Catastrophe additionally requires the exact all-four-
   route ledger and exact 633-byte V3 catastrophe evidence; any Pending or
   Succeeded route forbids catastrophe. Every arm is copied into the separately
   pre-reserved control-plane settlement ledger. The exact order is H0 -> append
-  branch evidence E -> H1 -> append the signed 280-byte marker -> H2 -> commit
-  the 582-byte global settlement receipt binding H2 and the marker -> append
-  that receipt as the post-settlement payload -> H3. The global run reserve is
+  branch evidence E -> H1 and its append receipt -> append the signed 271-byte
+  pre-CAS marker -> H2 and its append receipt -> commit the 614-byte global
+  settlement receipt binding H2 and the marker -> append the post-settlement
+  bundle containing that receipt plus the H1/H2 append receipts -> H3 and its
+  append receipt. The global run reserve is
   not released before H2; physical cleanup capacity is released only after H3,
   whose durable chain retains the receipt without a self-hash cycle. Early
   release, leaked service/global/store
@@ -1601,8 +1617,9 @@ atomic authority-head advancement grant that separately governed authority.
   or its canonical generation-zero unconsumed head. Catastrophe retains the
   surviving copies and receipts named by its failure/survivor inventory.
 
-  Each exact 138-byte lane breach-slot settlement member binds phase, slot
-  reservation receipt, current persistence head, disposition
+  Each exact 138-byte lane breach-slot settlement member binds phase, the
+  deterministic `BreachSlotAuthorityMemberDigestV3`, current persistence head,
+  disposition
   `UnusedGenesis|Consumed`, logical artifact or zero, lane persistence receipt
   or zero, and byte count. The exact 378-byte lane settlement contains both
   phase-ordered rows and the active-capacity-member digest. Unused requires the
@@ -1709,21 +1726,31 @@ atomic authority-head advancement grant that separately governed authority.
   total bytes, and latest entry digest. The complete pre-settlement payload E
   retains attempt/issuance, service/quarantine, capability/revocation/
   quiescence, requirement/source-set, shard/store/conformance, lane/store-
-  release, and branch evidence. Exactly 4096 bytes remain reserved for the
-  marker, settlement receipt, H1/H2/H3 head preimages, generic cleanup-capacity
-  receipts/proofs, and closure, so E is at most 67104768 bytes.
+  release, and branch evidence. The control-evidence plan reserves a
+  nonborrowable 65536-byte post-E tail. After terminal capacity-transaction
+  ratcheting, the post-settlement bundle is 1266 bytes, its framed entry is
+  1397 bytes, and the exact H1/marker/H2/postreceipt/H3/footer tail is 2457
+  bytes, leaving 63079 bytes of that reserve. Append receipts and Store proofs
+  live in their separately reserved replay journals rather than being double-
+  charged to this tail.
 
-  The exact 280-byte marker binds E, expected/committed control heads, old/new
-  generations, capability, idempotency, signature, committed CAS, and interval;
-  it does not bind the not-yet-created settlement receipt. Relative to the exact
-  518-byte V2 settlement form, the exact 582-byte V3 receipt appends the H2
-  control-ledger-head digest and marker digest. The only acyclic order is H0 ->
-  append E as `PreSettlementEvidence` -> H1 -> append the marker(E) as
-  `SettlementMarker` -> H2 -> commit global governor settlement(H2, marker) ->
-  append the exact receipt bytes as `PostSettlementReceipt` -> H3. No record
+  The exact 271-byte pre-CAS marker binds E, expected H1, the H1 append receipt,
+  old generation, capability, idempotency, signature, and interval. It contains
+  no H2, successor generation, CAS result, or not-yet-created settlement
+  receipt. The control-ledger closure's intermediate 582-byte receipt appends H2
+  and marker to the exact 518-byte V2 form. The terminal V3 capacity-transaction
+  closure additionally binds the exact global H2 update-proof digest, producing
+  the authoritative 614-byte settlement receipt and its 3403-byte durability
+  authority set. Its 1266-byte post-settlement bundle, 1397-byte entry,
+  2457-byte tail, and 63079-byte tail slack supersede the intermediate
+  1234/1365/2425/63111 values. The only acyclic order is H0 -> append E as
+  `PreSettlementEvidence` -> H1/receipt -> append the pre-CAS marker(E) as
+  `SettlementMarker` -> H2/receipt -> commit global governor settlement(H2,
+  marker) -> append the exact post-settlement bundle containing the settlement
+  and H1/H2 append receipts as `PostSettlementReceipt` -> H3/receipt. No record
   hashes its own successor. The global run reserve cannot release before H2.
-  The cleanup capacity head is not a 131-byte shadow: it is the exact 228-byte
-  generic infrastructure-service head for `CleanupAuthorityStore`, and its
+  The Cleanup capacity head is not a 131/228-byte shadow: it is the exact
+  211-byte `StoreCapacityHeadBytesV3` for `CleanupAuthorityStore`, and its
   physical hold cannot release before H3. H3 plus the governor service's durable
   receipt journal preserve the settlement preimage even if cleanup return later
   fails. Preactivation uses the same ledger despite zero scientific transfer.
@@ -1731,13 +1758,19 @@ atomic authority-head advancement grant that separately governed authority.
   after a valid reserve is retained infrastructure catastrophe and the reserve
   remains held.
 
-  **Final V4 finite-capacity, WAL, and closed-evidence authority.** The final
-  durable-allocation, coordinator/staging-capacity, and wire/accounting
-  corrections in the authored I13 policy are the terminal fresh authority for
-  I13 capacity. They supersede every conflicting V3 description and every
-  earlier V4 draft value, including the 16384-slot decision journal, 394/604
-  request/receipt pair, unpublished aggregate outcome, cyclic orphan member,
-  330-byte transaction-chain step, and unpaged staging log. The V3 append-slot,
+  **Final V4 finite-capacity, WAL, and closed-evidence authority.** I13 capacity
+  uses one ordered ten-item V4 overlay: durable allocation; coordinator/staging;
+  wire/accounting; orphan paging; coordinator recurrence; held-ordinal recovery;
+  recovery fresh-eyes; DAG/history correlation; replayable exception/outcome
+  preservation; and transition/recovery/phase-6 closure. A greater item wins
+  only a direct conflict and otherwise the clauses union. The terminal
+  capability/signature/storage, exception-atomic-replay, resolver/maximum, and
+  digest-domain subclauses complete item ten. This entire overlay—not merely its
+  first three corrections—is terminal fresh authority for I13 capacity and
+  supersedes every conflicting V3 description and earlier V4 draft value,
+  including the 16384-slot decision journal, 394/604 request/receipt pair,
+  unpublished aggregate outcome, cyclic orphan member, 330-byte transaction-
+  chain step, and unpaged staging log. The V3 append-slot,
   lane-content, scientific-retention, and terminal-persistence clauses remain
   authoritative only where they do not conflict with this corrected V4 closure.
 
@@ -2303,8 +2336,10 @@ atomic authority-head advancement grant that separately governed authority.
   `167 + allocation_authority_set_bytes`, at most 199071 bytes. The raw page table
   is `10 + sum(framed_page_rows)` and its enclosing frame has
   `L = 18 + sum(framed_page_rows)` bytes. That exact frame immediately precedes
-  generation rows in the artifact, whose size is `106 + L + 21261*N`. Let
-  `Lmax` be the inventory-derived maximum of `L`.
+  generation rows in the artifact. Its exact size is
+  `106 + L + sum_i(row_length_i)`, where each row length is derived from its
+  actual member and durability-projection lengths; `106 + L + 21261*N` is only
+  the checked upper bound. Let `Lmax` be the inventory-derived maximum of `L`.
 
   The generated inventory/protocol cross-product partitions the `Nmax` inserts
   into nonempty insertion pages and allocates exactly one distinct final
@@ -2933,7 +2968,9 @@ manifests; `75+141n` bindings; the derived `A<=30`, `M<=29`, item-count<=63,
 63047 slack; 176-byte/65536-slot/131072-byte closed-evidence map, 114822-byte
 member and 131669-byte expiry-proof bundle; `77+163n` staging inventory;
 116/100-byte member arms, 215-byte staging head, 16716-byte proof bundle,
-`106+L+21261n` artifact, 460/354-byte PreparedOnly operations, 20653/20547-byte
+`106+L+sum_i(row_length_i)` exact artifact with
+`106+L+21261n` only its upper bound, 460/354-byte PreparedOnly operations,
+20653/20547-byte
 durability maxima, 225-byte cutoff, at-most-199071-byte framed page rows, exact page
 table/cross-product/index/decision-prefix gates, and
 `Smax+21319*Nmax+Lmax+20547+66505<=67042864`. The generated protocol matrix must
