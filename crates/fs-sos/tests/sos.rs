@@ -91,6 +91,17 @@ fn there_are_zero_false_certificates() {
 }
 
 #[test]
+fn maximum_finite_residual_degrades_to_an_unbounded_claim() {
+    let p = Poly::constant(f64::MAX);
+    let cert = SosCertificate {
+        squares: Vec::new(),
+        lower_bound: 0.0,
+    };
+    assert_eq!(cert.certified_bound_global(&p), Some(f64::NEG_INFINITY));
+    assert_eq!(cert.certified_bound_on(&p, 1.0), Some(f64::NEG_INFINITY));
+}
+
+#[test]
 fn certify_quadratic_rejects_unbounded_forms() {
     assert!(certify_quadratic(-1.0, 0.0, 0.0).is_none()); // opens downward
     assert!(certify_quadratic(0.0, 1.0, 0.0).is_none()); // linear

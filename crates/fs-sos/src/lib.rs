@@ -117,6 +117,18 @@ pub fn square(q: &Poly) -> Poly {
     q.mul(q)
 }
 
+/// Advance a non-negative residual magnitude four ULPs toward +∞ without
+/// crossing `f64::MAX` into a NaN bit pattern.
+fn outward_nudge_magnitude(mut magnitude: f64) -> f64 {
+    if magnitude.is_nan() {
+        return f64::INFINITY;
+    }
+    for _ in 0..4 {
+        magnitude = fs_math::next_up(magnitude);
+    }
+    magnitude
+}
+
 /// A sum-of-squares certificate: the claim `p(x) − lower_bound = Σ squaresᵢ(x)²`,
 /// which (if it holds as a polynomial identity) PROVES `p(x) ≥ lower_bound`.
 #[derive(Debug, Clone, PartialEq)]
@@ -221,7 +233,7 @@ impl SosCertificate {
         let r0 = res.first().map_or(0.0, |e| {
             let approx = estimate(e).abs();
             // A few-ulp outward nudge covers the summation rounding.
-            f64::from_bits(approx.to_bits() + 4)
+            outward_nudge_magnitude(approx)
         });
         Some(self.lower_bound - r0)
     }
@@ -250,8 +262,8 @@ impl SosCertificate {
                 pow = pow * r_iv;
             }
             let mag = estimate(e).abs();
-            // One-ulp outward nudge on the exact-expansion magnitude.
-            let mag_up = f64::from_bits(mag.to_bits() + 4);
+            // A few-ulp outward nudge on the exact-expansion magnitude.
+            let mag_up = outward_nudge_magnitude(mag);
             envelope = envelope + Interval::new(mag_up, mag_up) * pow;
         }
         Some(self.lower_bound - envelope.hi())
