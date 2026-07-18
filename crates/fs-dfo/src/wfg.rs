@@ -4,9 +4,10 @@
 //! compositions for arbitrary valid objective, position-parameter, and
 //! distance-parameter counts.  Its transformations and shapes follow the
 //! corrected WFG toolkit as represented by jMetal revision
-//! `ea7e882f6b8f94b99535921674e62cda7986f20e`.  Inputs are already normalized
-//! to `[0, 1]`; accepting the heterogeneous canonical bounds
-//! `z_i in [0, 2(i + 1)]` is deliberately left to a later adapter.
+//! `ea7e882f6b8f94b99535921674e62cda7986f20e`. Callers may evaluate either
+//! normalized coordinates in `[0, 1]` or canonical heterogeneous coordinates
+//! `z_i in [0, 2(i + 1)]`; both paths enter the same normalized kernel after
+//! structured admission.
 //!
 //! Determinism is structural within the evaluator: reductions have a fixed
 //! left-to-right order and transcendental calls use [`fs_math::det`].  This
@@ -30,7 +31,7 @@ const B_PARAM_A: f64 = 0.98 / 49.98;
 const B_PARAM_B: f64 = 0.02;
 const B_PARAM_C: f64 = 50.0;
 
-/// Structured refusal from a typed normalized WFG evaluator.
+/// Structured refusal from a typed WFG evaluator.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WfgError {
@@ -67,7 +68,7 @@ pub enum WfgError {
         /// Supplied distance-parameter count.
         distance_parameters: usize,
     },
-    /// The normalized decision vector has the wrong dimension.
+    /// The decision vector has the wrong dimension.
     WrongInputLength {
         /// Dimension admitted by the problem specification.
         expected: usize,
@@ -87,6 +88,22 @@ pub enum WfgError {
         component: usize,
         /// Exact IEEE-754 payload.
         bits: u64,
+    },
+    /// A canonical-domain coordinate is NaN or infinite.
+    NonFiniteCanonicalInput {
+        /// Zero-based coordinate index.
+        component: usize,
+        /// Exact IEEE-754 payload.
+        bits: u64,
+    },
+    /// A finite canonical coordinate lies outside `[0, 2(i + 1)]`.
+    CanonicalInputOutOfRange {
+        /// Zero-based coordinate index.
+        component: usize,
+        /// Exact IEEE-754 payload of the rejected coordinate.
+        bits: u64,
+        /// Exact IEEE-754 payload of the coordinate's inclusive upper bound.
+        upper_bound_bits: u64,
     },
     /// Storage for a validated evaluation could not be reserved.
     AllocationFailed {
@@ -137,7 +154,7 @@ impl core::fmt::Display for WfgError {
             ),
             Self::WrongInputLength { expected, actual } => write!(
                 formatter,
-                "WFG expected {expected} normalized coordinates, received {actual}"
+                "WFG expected {expected} decision coordinates, received {actual}"
             ),
             Self::NonFiniteInput { component, bits } => write!(
                 formatter,
@@ -146,6 +163,18 @@ impl core::fmt::Display for WfgError {
             Self::InputOutOfRange { component, bits } => write!(
                 formatter,
                 "WFG normalized coordinate {component} lies outside [0, 1] (bits 0x{bits:016x})"
+            ),
+            Self::NonFiniteCanonicalInput { component, bits } => write!(
+                formatter,
+                "WFG canonical coordinate {component} is non-finite (bits 0x{bits:016x})"
+            ),
+            Self::CanonicalInputOutOfRange {
+                component,
+                bits,
+                upper_bound_bits,
+            } => write!(
+                formatter,
+                "WFG canonical coordinate {component} lies outside its inclusive bound (value bits 0x{bits:016x}, upper-bound bits 0x{upper_bound_bits:016x})"
             ),
             Self::AllocationFailed { what, elements } => write!(
                 formatter,
@@ -207,13 +236,18 @@ impl WfgSpec {
         })
     }
 
-    fn validate_input(self, input: &[f64]) -> Result<(), WfgError> {
+    fn validate_length(self, input: &[f64]) -> Result<(), WfgError> {
         if input.len() != self.dimension {
             return Err(WfgError::WrongInputLength {
                 expected: self.dimension,
                 actual: input.len(),
             });
         }
+        Ok(())
+    }
+
+    fn validate_input(self, input: &[f64]) -> Result<(), WfgError> {
+        self.validate_length(input)?;
         for (component, &value) in input.iter().enumerate() {
             if !value.is_finite() {
                 return Err(WfgError::NonFiniteInput {
@@ -229,6 +263,44 @@ impl WfgSpec {
             }
         }
         Ok(())
+    }
+
+    fn validate_canonical_input(self, input: &[f64]) -> Result<(), WfgError> {
+        self.validate_length(input)?;
+        for (component, &value) in input.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(WfgError::NonFiniteCanonicalInput {
+                    component,
+                    bits: value.to_bits(),
+                });
+            }
+            let upper_bound = canonical_upper_bound(component);
+            if !(0.0..=upper_bound).contains(&value) {
+                return Err(WfgError::CanonicalInputOutOfRange {
+                    component,
+                    bits: value.to_bits(),
+                    upper_bound_bits: upper_bound.to_bits(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_canonical(self, input: &[f64]) -> Result<Vec<f64>, WfgError> {
+        self.normalize_canonical_with(input, reserved_vec)
+    }
+
+    fn normalize_canonical_with(
+        self,
+        input: &[f64],
+        reserve: impl FnOnce(&'static str, usize) -> Result<Vec<f64>, WfgError>,
+    ) -> Result<Vec<f64>, WfgError> {
+        self.validate_canonical_input(input)?;
+        let mut normalized = reserve("canonical normalized coordinates", self.dimension)?;
+        for (component, &value) in input.iter().enumerate() {
+            normalized.push(value / canonical_upper_bound(component));
+        }
+        Ok(normalized)
     }
 }
 
@@ -252,22 +324,37 @@ macro_rules! wfg_accessors {
             self.spec.distance_parameters
         }
 
-        /// Total normalized decision dimension, `k + l`.
+        /// Total decision dimension, `k + l`.
         #[must_use]
         pub const fn dimension(self) -> usize {
             self.spec.dimension
         }
+
+        /// Evaluate one decision vector in the canonical heterogeneous WFG
+        /// domain, where coordinate `i` is bounded by `[0, 2(i + 1)]`.
+        ///
+        /// # Errors
+        ///
+        /// Returns a structured refusal for a wrong dimension, a non-finite
+        /// coordinate, a coordinate outside its indexed canonical bound, or
+        /// failed normalization/intermediate storage admission. No WFG
+        /// transformation runs before the complete canonical vector is
+        /// admitted and normalized.
+        pub fn evaluate_canonical(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+            let normalized = self.spec.normalize_canonical(input)?;
+            self.evaluate_normalized(&normalized)
+        }
     };
 }
 
-/// A validated normalized WFG1 problem definition.
+/// A validated WFG1 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg1 {
     spec: WfgSpec,
 }
 
 impl Wfg1 {
-    /// Validate a normalized WFG1 problem definition.
+    /// Validate a WFG1 problem definition.
     ///
     /// # Errors
     ///
@@ -301,14 +388,14 @@ impl Wfg1 {
     }
 }
 
-/// A validated normalized WFG2 problem definition.
+/// A validated WFG2 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg2 {
     spec: WfgSpec,
 }
 
 impl Wfg2 {
-    /// Validate a normalized WFG2 problem definition.
+    /// Validate a WFG2 problem definition.
     ///
     /// # Errors
     ///
@@ -342,14 +429,14 @@ impl Wfg2 {
     }
 }
 
-/// A validated normalized WFG3 problem definition.
+/// A validated WFG3 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg3 {
     spec: WfgSpec,
 }
 
 impl Wfg3 {
-    /// Validate a normalized WFG3 problem definition.
+    /// Validate a WFG3 problem definition.
     ///
     /// # Errors
     ///
@@ -383,14 +470,14 @@ impl Wfg3 {
     }
 }
 
-/// A validated normalized WFG4 problem definition.
+/// A validated WFG4 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg4 {
     spec: WfgSpec,
 }
 
 impl Wfg4 {
-    /// Validate a normalized WFG4 problem definition.
+    /// Validate a WFG4 problem definition.
     ///
     /// # Errors
     ///
@@ -427,14 +514,14 @@ impl Wfg4 {
     }
 }
 
-/// A validated normalized WFG5 problem definition.
+/// A validated WFG5 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg5 {
     spec: WfgSpec,
 }
 
 impl Wfg5 {
-    /// Validate a normalized WFG5 problem definition.
+    /// Validate a WFG5 problem definition.
     ///
     /// # Errors
     ///
@@ -468,14 +555,14 @@ impl Wfg5 {
     }
 }
 
-/// A validated normalized WFG6 problem definition.
+/// A validated WFG6 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg6 {
     spec: WfgSpec,
 }
 
 impl Wfg6 {
-    /// Validate a normalized WFG6 problem definition.
+    /// Validate a WFG6 problem definition.
     ///
     /// # Errors
     ///
@@ -510,14 +597,14 @@ impl Wfg6 {
     }
 }
 
-/// A validated normalized WFG7 problem definition.
+/// A validated WFG7 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg7 {
     spec: WfgSpec,
 }
 
 impl Wfg7 {
-    /// Validate a normalized WFG7 problem definition.
+    /// Validate a WFG7 problem definition.
     ///
     /// # Errors
     ///
@@ -551,14 +638,14 @@ impl Wfg7 {
     }
 }
 
-/// A validated normalized WFG8 problem definition.
+/// A validated WFG8 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg8 {
     spec: WfgSpec,
 }
 
 impl Wfg8 {
-    /// Validate a normalized WFG8 problem definition.
+    /// Validate a WFG8 problem definition.
     ///
     /// # Errors
     ///
@@ -592,14 +679,14 @@ impl Wfg8 {
     }
 }
 
-/// A validated normalized WFG9 problem definition.
+/// A validated WFG9 problem definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wfg9 {
     spec: WfgSpec,
 }
 
 impl Wfg9 {
-    /// Validate a normalized WFG9 problem definition.
+    /// Validate a WFG9 problem definition.
     ///
     /// # Errors
     ///
@@ -634,7 +721,7 @@ impl Wfg9 {
     }
 }
 
-/// One normalized WFG evaluation with replay-relevant intermediates.
+/// One WFG evaluation with replay-relevant normalized intermediates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WfgEvaluation {
     transformed: Vec<f64>,
@@ -688,6 +775,10 @@ fn reserved_vec(what: &'static str, elements: usize) -> Result<Vec<f64>, WfgErro
         .try_reserve_exact(elements)
         .map_err(|_| WfgError::AllocationFailed { what, elements })?;
     Ok(values)
+}
+
+fn canonical_upper_bound(component: usize) -> f64 {
+    2.0 * (component as f64 + 1.0)
 }
 
 fn even_distance_spec(
@@ -1119,6 +1210,7 @@ fn concave_shape(reduced: &[f64]) -> Result<Vec<f64>, WfgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::Cell;
 
     const TOLERANCE: f64 = 1.0e-11;
 
@@ -1165,6 +1257,75 @@ mod tests {
         assert_slice_bits_eq(actual.positioned(), expected.positioned());
         assert_slice_bits_eq(actual.shape(), expected.shape());
         assert_slice_bits_eq(actual.objectives(), expected.objectives());
+    }
+
+    fn assert_canonical_refusal_precedes_reservation(
+        spec: WfgSpec,
+        input: &[f64],
+        expected: WfgError,
+    ) {
+        let reservation_calls = Cell::new(0);
+        let actual = spec
+            .normalize_canonical_with(input, |_, _| {
+                reservation_calls.set(reservation_calls.get() + 1);
+                Ok(Vec::new())
+            })
+            .unwrap_err();
+        assert_eq!(actual, expected);
+        assert_eq!(reservation_calls.get(), 0);
+    }
+
+    #[test]
+    fn canonical_normalization_preserves_allocation_failure_and_admission_order() {
+        let spec = WfgSpec::new(4, 6, 6).unwrap();
+        let reservation_calls = Cell::new(0);
+        let actual = spec
+            .normalize_canonical_with(&[0.0; 12], |what, elements| {
+                reservation_calls.set(reservation_calls.get() + 1);
+                Err(WfgError::AllocationFailed { what, elements })
+            })
+            .unwrap_err();
+        assert_eq!(
+            actual,
+            WfgError::AllocationFailed {
+                what: "canonical normalized coordinates",
+                elements: 12,
+            }
+        );
+        assert_eq!(reservation_calls.get(), 1);
+
+        assert_canonical_refusal_precedes_reservation(
+            spec,
+            &[f64::NAN; 11],
+            WfgError::WrongInputLength {
+                expected: 12,
+                actual: 11,
+            },
+        );
+
+        let mut nonfinite = [0.0; 12];
+        nonfinite[3] = f64::from_bits(0x7ff8_1234_5678_9abc);
+        assert_canonical_refusal_precedes_reservation(
+            spec,
+            &nonfinite,
+            WfgError::NonFiniteCanonicalInput {
+                component: 3,
+                bits: nonfinite[3].to_bits(),
+            },
+        );
+
+        let mut out_of_range = [0.0; 12];
+        let upper_bound = canonical_upper_bound(7);
+        out_of_range[7] = f64::from_bits(upper_bound.to_bits() + 1);
+        assert_canonical_refusal_precedes_reservation(
+            spec,
+            &out_of_range,
+            WfgError::CanonicalInputOutOfRange {
+                component: 7,
+                bits: out_of_range[7].to_bits(),
+                upper_bound_bits: upper_bound.to_bits(),
+            },
+        );
     }
 
     fn assert_common_input_refusals(evaluate: impl Fn(&[f64]) -> Result<WfgEvaluation, WfgError>) {
