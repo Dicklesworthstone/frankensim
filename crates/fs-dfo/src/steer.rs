@@ -13,6 +13,16 @@
 //! dependency cycle the first draft hit is the layer diagram talking).
 
 use crate::moo::Individual;
+use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
+
+/// Artifact domain for the complete steered-study replay identity.
+///
+/// Version 2 repairs the original state-only fingerprint by binding the
+/// causal seed and the complete ordered steering lineage as well.
+pub const STEERED_STUDY_IDENTITY_DOMAIN: &str = "dfo-steered-study-v2";
+
+/// Producer-local schema version for [`SteeredStudy::replay_identity`].
+pub const STEERED_STUDY_IDENTITY_SCHEMA_VERSION: u32 = 2;
 
 /// The forkable study state — plain data, resumable by construction.
 #[derive(Debug, Clone)]
@@ -192,15 +202,23 @@ impl SteeredStudy {
             .fold(f64::INFINITY, f64::min)
     }
 
-    /// A deterministic fingerprint of the state (replay witness).
-    /// Canonical replay identity encoding (gp3.14): the former bare
-    /// concatenation of variable-length x/f/weight streams was
-    /// non-injective — a value could migrate across a section boundary
-    /// (ind.x tail vs ind.f head) without moving the hash. Sections
-    /// now carry typed length prefixes.
+    /// The complete canonical replay identity for this branch.
+    ///
+    /// Every variable-length section is length-prefixed. Field order is
+    /// semantic, including population order and steering-event order. The
+    /// causal seed value and every lineage event are bound alongside the
+    /// resumable state, so retained fork provenance cannot change without
+    /// moving the witness. A change to stream-generation or selection semantics
+    /// requires an explicit domain/schema bump; seed binding alone cannot infer
+    /// an algorithm change.
     #[must_use]
-    pub fn fingerprint(&self) -> u64 {
-        let mut b = fs_obs::ident::IdentityBuilder::new("dfo-steered-study")
+    pub fn replay_identity(&self) -> ReplayIdentity {
+        let mut b = IdentityBuilder::new(STEERED_STUDY_IDENTITY_DOMAIN)
+            .u64(
+                "study-identity-schema-version",
+                u64::from(STEERED_STUDY_IDENTITY_SCHEMA_VERSION),
+            )
+            .u64("seed", self.seed)
             .u64("stream_index", self.state.stream_index)
             .u64("population", self.state.population.len() as u64);
         for ind in &self.state.population {
@@ -217,6 +235,30 @@ impl SteeredStudy {
         for &v in &self.state.weights {
             b = b.f64_bits("w", v);
         }
-        b.finish().root()
+        b = b.u64("lineage_len", self.lineage.len() as u64);
+        for (index, event) in self.lineage.iter().enumerate() {
+            b = b
+                .u64("lineage_index", index as u64)
+                .u64("lineage_at_generation", event.at_generation)
+                .u64("lineage_from_len", event.from.len() as u64);
+            for &weight in &event.from {
+                b = b.f64_bits("lineage_from_weight", weight);
+            }
+            b = b.u64("lineage_to_len", event.to.len() as u64);
+            for &weight in &event.to {
+                b = b.f64_bits("lineage_to_weight", weight);
+            }
+        }
+        b.finish()
+    }
+
+    /// Compatibility projection of [`Self::replay_identity`].
+    ///
+    /// The return type remains the original 64-bit fingerprint, while its
+    /// semantics now cover the complete causal study identity rather than only
+    /// the current population, cursor, and weights.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.replay_identity().root()
     }
 }
