@@ -46,9 +46,12 @@
 //! separate typed raw-content identities without assigning semantic meaning.
 //! Schema v19 gives every mutable autotuner-cache key/value field a separate
 //! typed raw-content identity without inventing cache-key semantics.
+//! Schema v20 adds a monotone source-generation witness for resumable
+//! operation/cache reconciliation. Exact source mutations advance it through
+//! triggers; sidecar-only reconciliation does not.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -58,7 +61,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
 pub(crate) const MIGRATIONS: &[&[&str]] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20,
 ];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
@@ -1334,10 +1337,115 @@ pub const V19: &[&str] = &[
      )
      BEGIN
        SELECT RAISE(ABORT, 'tune content identity is retained with its cache row');
+    END",
+];
+
+/// v20: monotone immutable-cohort witness for bounded sidecar reconciliation.
+///
+/// Every source mutation that can change an operation/cache content sidecar
+/// advances the singleton generation. A reconciliation cursor captures that
+/// value and every page refuses if it moved, so row deletion/reuse, insertion,
+/// or old-writer updates cannot be mistaken for the original cohort.
+pub const V20: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS identity_reconcile_source_generation(
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        generation INTEGER NOT NULL CHECK(generation >= 0)
+    ) STRICT",
+    "INSERT OR IGNORE INTO identity_reconcile_source_generation(singleton, generation)
+     VALUES(1, 0)",
+    "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_ops_insert
+     AFTER INSERT ON ops
+     BEGIN
+       SELECT CASE
+         WHEN NOT EXISTS(
+           SELECT 1 FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) THEN RAISE(ABORT, 'identity reconciliation source generation is missing')
+         WHEN (
+           SELECT generation FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) >= 9223372036854775807
+           THEN RAISE(ABORT, 'identity reconciliation source generation exhausted')
+       END;
+       UPDATE identity_reconcile_source_generation
+       SET generation = generation + 1 WHERE singleton = 1;
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_ops_update
+     AFTER UPDATE OF id, session, ir, seed, versions, budget, capability ON ops
+     BEGIN
+       SELECT CASE
+         WHEN NOT EXISTS(
+           SELECT 1 FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) THEN RAISE(ABORT, 'identity reconciliation source generation is missing')
+         WHEN (
+           SELECT generation FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) >= 9223372036854775807
+           THEN RAISE(ABORT, 'identity reconciliation source generation exhausted')
+       END;
+       UPDATE identity_reconcile_source_generation
+       SET generation = generation + 1 WHERE singleton = 1;
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_ops_delete
+     AFTER DELETE ON ops
+     BEGIN
+       SELECT CASE
+         WHEN NOT EXISTS(
+           SELECT 1 FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) THEN RAISE(ABORT, 'identity reconciliation source generation is missing')
+         WHEN (
+           SELECT generation FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) >= 9223372036854775807
+           THEN RAISE(ABORT, 'identity reconciliation source generation exhausted')
+       END;
+       UPDATE identity_reconcile_source_generation
+       SET generation = generation + 1 WHERE singleton = 1;
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_tune_insert
+     AFTER INSERT ON tune
+     BEGIN
+       SELECT CASE
+         WHEN NOT EXISTS(
+           SELECT 1 FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) THEN RAISE(ABORT, 'identity reconciliation source generation is missing')
+         WHEN (
+           SELECT generation FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) >= 9223372036854775807
+           THEN RAISE(ABORT, 'identity reconciliation source generation exhausted')
+       END;
+       UPDATE identity_reconcile_source_generation
+       SET generation = generation + 1 WHERE singleton = 1;
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_tune_update
+     AFTER UPDATE ON tune
+     BEGIN
+       SELECT CASE
+         WHEN NOT EXISTS(
+           SELECT 1 FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) THEN RAISE(ABORT, 'identity reconciliation source generation is missing')
+         WHEN (
+           SELECT generation FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) >= 9223372036854775807
+           THEN RAISE(ABORT, 'identity reconciliation source generation exhausted')
+       END;
+       UPDATE identity_reconcile_source_generation
+       SET generation = generation + 1 WHERE singleton = 1;
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_identity_reconcile_tune_delete
+     AFTER DELETE ON tune
+     BEGIN
+       SELECT CASE
+         WHEN NOT EXISTS(
+           SELECT 1 FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) THEN RAISE(ABORT, 'identity reconciliation source generation is missing')
+         WHEN (
+           SELECT generation FROM identity_reconcile_source_generation WHERE singleton = 1
+         ) >= 9223372036854775807
+           THEN RAISE(ABORT, 'identity reconciliation source generation exhausted')
+       END;
+       UPDATE identity_reconcile_source_generation
+       SET generation = generation + 1 WHERE singleton = 1;
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 through v19 additions); the
+/// Every table the CURRENT schema owns (v1 set + v2 through v20 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -1376,4 +1484,5 @@ pub const ALL_TABLES: &[&str] = &[
     "evidence_semantic_bindings",
     "op_content_identities",
     "tune_content_identities",
+    "identity_reconcile_source_generation",
 ];

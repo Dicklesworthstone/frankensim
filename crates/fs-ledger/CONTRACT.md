@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v19). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v20). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -349,26 +349,35 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   `tune_content_identity` until `reconcile_tune_content_identity` re-reads the
   bounded source row and transactionally inserts or refreshes only the raw
   value IDs. Immutable key IDs and the row schema must still verify exactly.
-- Resumable operation/cache reconciliation (`identity_migration`, schema v19):
-  `begin_identity_reconciliation` captures the physical ledger instance,
-  current schema, and inclusive operation/tune row-ID high-water marks in one
-  owned transaction. Its fixed 64-byte `FSIDRC01` cursor v1 carries those
-  fields, one closed phase tag, canonical zero reserved bytes, and the last
-  durably visited row; truncation, extension, unknown version/phase, nonzero
-  reserve bytes, negative bounds, and progress beyond a bound fail closed.
-  `reconcile_identity_sidecars_page` accepts only a cursor for the same
-  physical ledger and schema, visits at most 64 rows in deterministic row-ID
-  order, and owns one transaction. It polls the explicit `fs_exec::Cx` before
-  the transaction, before every row, and before commit. Cancellation rolls the
-  whole page back and returns the byte-identical input cursor; if rollback
-  itself fails, both primary and cleanup diagnostics remain visible instead.
-  Response-loss replay is idempotent. A committed page reports its input/output cursor
-  content IDs and separate operation/tune counts. High-water marks bound a
-  run; automatically assigned rows above them require another run. The cursor
-  and page value report bounded storage progress only, never owner semantics,
-  cache validity, or authority. The cursor content ID is a plain byte digest,
-  not a signature: decoded caller-supplied progress requires an external
-  admission policy when its transport is untrusted.
+- Resumable operation/cache reconciliation (`identity_migration`, schema v20):
+  `begin_identity_reconciliation_with_page_rows` captures the physical ledger
+  instance, current schema, exact page size, monotone source generation, and
+  inclusive operation/tune row-ID ceilings in one owned transaction. Its fixed
+  72-byte `FSIDRC02` cursor v2 carries those fields, one closed phase tag,
+  canonical zero reserved bytes, and the last durably visited row; truncation,
+  extension, unknown version/phase, nonzero reserve bytes, an invalid page
+  size, negative bounds/generation, and progress beyond a bound fail closed.
+  Schema triggers advance the generation for every operation insert/delete,
+  operation-ID/frozen-field update, and every tune insert/delete/update,
+  including physical row-ID movement.
+  Thus insertion, deletion, update, and row-ID reuse make an earlier cursor
+  stale instead of hiding beneath a numeric ceiling. The convenience
+  `begin_identity_reconciliation` binds the shipped maximum of 64 rows.
+  `reconcile_identity_sidecars_page` requires the request size to equal the
+  cursor-bound size, accepts only the same physical ledger/schema/generation,
+  visits rows in deterministic row-ID order, and owns one transaction. It
+  polls the explicit `fs_exec::Cx` before the transaction, before every row,
+  and before commit, then rechecks the generation before publishing the page.
+  Cancellation rolls the whole page back and returns the byte-identical input
+  cursor; if rollback itself fails, both primary and cleanup diagnostics remain
+  visible. Response-loss replay is idempotent while the captured cohort remains
+  current. A committed page reports input/output cursor content IDs and separate
+  operation/tune counts. The cursor and page value report bounded storage
+  progress only, never owner semantics, cache validity, or authority. The
+  cursor content ID is a plain byte digest, not a signature: decoded
+  caller-supplied progress requires an external admission policy when its
+  transport is untrusted. Continuous compatible-writer mutation can repeatedly
+  stale cursors, so this mechanism makes no liveness claim under writer churn.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -705,13 +714,15 @@ refusal, or verifier panic).
     change atomically with the source values. Raw equality cannot establish a
     cache-key schema, measurement validity, freshness, or authority.
 22. A reconciliation cursor is valid only for its exact physical ledger,
-    current schema, closed phase, non-negative progress, and captured
-    high-water interval. One page either commits every visited raw-content
-    sidecar or rolls back all of them before returning an advanced cursor. A
-    cancellation result returns the unchanged input cursor after successful
-    cleanup; a rollback failure retains both errors, and page progress is never
-    inferred from provisional rows. Decoded cursor bytes alone do not certify
-    that an earlier page committed.
+    current schema, source generation, bound page size, closed phase,
+    non-negative progress, and captured row-ID intervals. Any relevant source
+    insertion, update, deletion, or row-ID reuse invalidates the complete run.
+    One page either commits every visited raw-content sidecar or rolls back all
+    of them before returning an advanced cursor. A cancellation result returns
+    the unchanged input cursor after successful cleanup; a rollback failure
+    retains both errors, and page progress is never inferred from provisional
+    rows. Decoded cursor bytes alone do not certify that an earlier page
+    committed.
 23. The nightly writer publishes op + metric + benchmark event + terminal
     outcome in one explicit transaction. A write or commit failure is primary;
     rollback is always attempted, and a rollback failure is retained after the
@@ -754,10 +765,11 @@ conflicts, and transport identity mismatch as fail-closed `Invalid`,
 treated as a negative lookup or completion.
 Resumable identity reconciliation uses the separate
 `IdentityReconcileCursorError` and `IdentityReconcileError` boundaries.
-Malformed cursor transport, a physical-ledger/schema mismatch, cancellation,
-an underlying `LedgerError`, and a primary-plus-rollback cleanup failure remain
-distinguishable; cancellation carries the exact replay cursor rather than
-masquerading as success or partial progress.
+Malformed cursor transport, a page-size mismatch, a physical-ledger/schema or
+source-generation mismatch, cancellation, an underlying `LedgerError`, and a
+primary-plus-rollback cleanup failure remain distinguishable; cancellation
+carries the exact replay cursor rather than masquerading as success or partial
+progress.
 Never panics across the crate boundary. Signed database metadata that
 represents a length or count is converted with an explicit non-negative check;
 physical corruption cannot reinterpret `-1` as `u64::MAX`.
@@ -774,9 +786,9 @@ and are excluded from identity. Deterministic replays should pass logical
 times to `begin_op`/`append_event` (caller-controlled `t`). Tune scans use the
 total order `(shape_class, machine)` and refuse rather than truncate.
 Identity reconciliation orders operation IDs and tune row IDs ascending under
-captured inclusive ceilings; the same retained source state and input cursor
-produce the same output cursor and counts. Physical row IDs remain storage
-envelopes, not semantic identities.
+captured inclusive ceilings; the same retained source generation and input
+cursor produce the same output cursor and counts. Physical row IDs remain
+storage envelopes, not semantic identities.
 Nightly admission and diagnostic ordering are deterministic:
 `argv -> db-path -> outcome -> suite -> value -> GITHUB_SHA -> RUNNER_OS ->
 constructed envelopes`. Environment values are used exactly as supplied after
@@ -909,13 +921,19 @@ simulate pre-v18 operation inserts and pre-v19 cache inserts/value updates
 after the schema is current, prove typed reads fail closed before
 reconciliation, and prove exact reconciliation is idempotent and rolls back
 with its source write.
-The resumable-page regressions freeze the 64-byte cursor transport and refuse
-truncation, extension, changed magic/version/phase, nonzero reserved bytes,
-zero schema, negative bounds, out-of-range progress, and a foreign physical
-ledger. They also prove one-row page ordering across both source families,
-response-loss replay, high-water exclusion of later automatically assigned
-rows, max-page bounds, and cancellation after one provisional write with zero
-published sidecars and the unchanged resume cursor.
+The resumable-page regressions freeze the complete 72-byte v2 cursor transport
+and refuse truncation, extension, changed magic/version/phase, nonzero reserved
+bytes, invalid page sizes, zero schema, negative bounds/generation,
+out-of-range progress, and a foreign physical ledger. They also cover exact
+one-row request binding and ordering across both source families, response-loss
+replay, stale-on-source-mutation including row-ID reuse, the exact 64/65 row
+boundary, and cancellation after one provisional write with zero published
+sidecars and the unchanged resume cursor.
+The cancellation regression uses the private injectable checkpoint seam and
+proves transaction mechanics only. Runtime exercise through the public `Cx`
+adapter, independent-connection writer contention, rollback-failure injection,
+and durable structured fleet logging remain open proof obligations; none is
+claimed by that fixture.
 These code-first tests require the central batch-proof pass before their results
 may be cited as green evidence.
 `tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
@@ -1141,11 +1159,14 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   cache inserts/value updates without rewriting immutable operation IDs or
   cache-key IDs. It does not continuously mirror an old writer, choose an
   owner schema, or make an authority claim; another old-writer mutation makes
-  the next typed read fail closed until reconciliation runs again. The bounded
-  cursor makes operation/cache repair resumable and cancellation-correct per
-  page, but it is not a global writer fence: source mutation inside a captured
-  row-ID interval is read when its page runs, and rows above the captured
-  ceilings require a later cursor. The v1
+  the next typed read fail closed until reconciliation runs again. Schema v20
+  adds only a monotone source-generation witness and exact mutation triggers;
+  it assigns no meaning to the source bytes. The bounded cursor makes
+  operation/cache repair resumable and cancellation-correct per page, but it
+  is not a global writer fence: any relevant mutation stales the captured
+  cohort and requires a fresh cursor. Continuous writer churn can therefore
+  prevent completion, and no liveness or fleet-coordination claim is made.
+  The v1
   migration-receipt wire transport now
   preserves every receipt field and fails closed on truncation, extension,
   unknown versions, forged IDs, malformed lengths, and content divergence, but

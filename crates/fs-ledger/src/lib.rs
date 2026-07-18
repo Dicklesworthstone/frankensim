@@ -1258,8 +1258,8 @@ pub const ARTIFACT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "domain_const=ARTIFACT_CONTENT_IDENTITY_DOMAIN",
     "encoder=ledger_artifact_content_identity",
     "encoder_helpers=none",
-    "schema_constants=ARTIFACT_CONTENT_IDENTITY_VERSION,ARTIFACT_CONTENT_IDENTITY_DOMAIN,crates/fs-ledger/src/identity_migration.rs#ARTIFACT_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#EDGE_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#OP_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#TUNE_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#IDENTITY_RECONCILE_CURSOR_WIRE_VERSION,crates/fs-ledger/src/identity_migration.rs#IDENTITY_RECONCILE_CURSOR_WIRE_BYTES,crates/fs-ledger/src/identity_migration.rs#MAX_IDENTITY_RECONCILE_PAGE_ROWS,crates/fs-ledger/src/schema.rs#V14,crates/fs-ledger/src/schema.rs#V15,crates/fs-ledger/src/schema.rs#V16,crates/fs-ledger/src/schema.rs#V18,crates/fs-ledger/src/schema.rs#V19,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
-    "schema_functions=crates/fs-blake3/src/lib.rs#hash_bytes,crates/fs-blake3/src/lib.rs#Blake3::new,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize,crates/fs-blake3/src/identity.rs#ContentId::of_bytes,Ledger::put_artifact,Ledger::artifact_writer,ArtifactWriter::finish,ArtifactWriter::finish_inner,Ledger::insert_inline_artifact,Ledger::read_artifact_chunks_with_info,Ledger::tune_put,Ledger::tune_put_if_absent,Ledger::tune_get_inner,crates/fs-ledger/src/identity_migration.rs#derive_op_content_identity,crates/fs-ledger/src/identity_migration.rs#derive_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#IdentityReconcileCursor::to_wire_bytes,crates/fs-ledger/src/identity_migration.rs#IdentityReconcileCursor::from_wire_bytes,crates/fs-ledger/src/identity_migration.rs#IdentityReconcileCursor::content_id,crates/fs-ledger/src/identity_migration.rs#Ledger::artifact_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_artifact_content_identity_backfill,crates/fs-ledger/src/identity_migration.rs#Ledger::edge_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_edge_content_identity_backfill,crates/fs-ledger/src/identity_migration.rs#Ledger::write_op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::insert_op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::reconcile_op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::backfill_and_verify_op_content_identities,crates/fs-ledger/src/identity_migration.rs#Ledger::write_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::upsert_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::reconcile_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::backfill_and_verify_tune_content_identities,crates/fs-ledger/src/identity_migration.rs#Ledger::begin_identity_reconciliation,crates/fs-ledger/src/identity_migration.rs#Ledger::reconcile_identity_sidecars_page,crates/fs-ledger/src/identity_migration.rs#Ledger::bind_artifact_semantic_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::artifact_semantic_binding,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_artifact_semantic_bindings,identity_schema_is_current",
+    "schema_constants=ARTIFACT_CONTENT_IDENTITY_VERSION,ARTIFACT_CONTENT_IDENTITY_DOMAIN,crates/fs-ledger/src/identity_migration.rs#ARTIFACT_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#EDGE_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#OP_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/identity_migration.rs#TUNE_CONTENT_IDENTITY_ROW_VERSION,crates/fs-ledger/src/schema.rs#V14,crates/fs-ledger/src/schema.rs#V15,crates/fs-ledger/src/schema.rs#V16,crates/fs-ledger/src/schema.rs#V18,crates/fs-ledger/src/schema.rs#V19,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=crates/fs-blake3/src/lib.rs#hash_bytes,crates/fs-blake3/src/lib.rs#Blake3::new,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize,crates/fs-blake3/src/identity.rs#ContentId::of_bytes,Ledger::put_artifact,Ledger::artifact_writer,ArtifactWriter::finish,ArtifactWriter::finish_inner,Ledger::insert_inline_artifact,Ledger::read_artifact_chunks_with_info,Ledger::tune_put,Ledger::tune_put_if_absent,Ledger::tune_get_inner,crates/fs-ledger/src/identity_migration.rs#derive_op_content_identity,crates/fs-ledger/src/identity_migration.rs#derive_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::artifact_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_artifact_content_identity_backfill,crates/fs-ledger/src/identity_migration.rs#Ledger::edge_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_edge_content_identity_backfill,crates/fs-ledger/src/identity_migration.rs#Ledger::write_op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::insert_op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::reconcile_op_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::backfill_and_verify_op_content_identities,crates/fs-ledger/src/identity_migration.rs#Ledger::write_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::upsert_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::reconcile_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_tune_content_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::backfill_and_verify_tune_content_identities,crates/fs-ledger/src/identity_migration.rs#Ledger::bind_artifact_semantic_identity,crates/fs-ledger/src/identity_migration.rs#Ledger::artifact_semantic_binding,crates/fs-ledger/src/identity_migration.rs#Ledger::verify_artifact_semantic_bindings,identity_schema_is_current",
     "schema_dependencies=none",
     "digest=blake3-256-plain-hash",
     "encoding=typed-binary",
@@ -1269,7 +1269,7 @@ pub const ARTIFACT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=none",
     "semantic_fields=content-bytes",
     "excluded_fields=kind:typed-envelope-not-content,metadata:provenance-envelope-not-content,created-at:wall-clock-envelope,chunk-boundaries:storage-layout-only",
-    "consumers=Ledger::put_artifact,ArtifactWriter::finish,Ledger::get_artifact,Ledger::read_artifact_chunks,Ledger::verify_artifact_integrity,Ledger::artifact_content_identity,Ledger::edge_content_identity,Ledger::op_content_identity,Ledger::reconcile_op_content_identity,Ledger::tune_content_identity,Ledger::reconcile_tune_content_identity,IdentityReconcileCursor::content_id,Ledger::begin_identity_reconciliation,Ledger::reconcile_identity_sidecars_page,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,fs-ledger:vcs-commit-leaf",
+    "consumers=Ledger::put_artifact,ArtifactWriter::finish,Ledger::get_artifact,Ledger::read_artifact_chunks,Ledger::verify_artifact_integrity,Ledger::artifact_content_identity,Ledger::edge_content_identity,Ledger::op_content_identity,Ledger::reconcile_op_content_identity,Ledger::tune_content_identity,Ledger::reconcile_tune_content_identity,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,fs-ledger:vcs-commit-leaf",
     "mutations=content-bytes:crates/fs-ledger/src/lib.rs#artifact_content_identity_fields_move_independently",
     "nonsemantic_mutations=kind:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity,metadata:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity,created-at:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity,chunk-boundaries:crates/fs-ledger/src/lib.rs#artifact_content_excluded_fields_do_not_move_identity",
     "field_guard=classify_artifact_content_identity_fields",
@@ -3443,6 +3443,11 @@ impl Ledger {
                 self.verify_evidence_semantic_bindings()?;
                 self.backfill_and_verify_op_content_identities()?;
                 self.backfill_and_verify_tune_content_identities()?;
+                let _ = self.identity_reconcile_source_generation()?;
+                // IF NOT EXISTS must not bless a divergent partial-v0 object.
+                // Attest every table/index/trigger before publishing the
+                // current marker, including all six v20 source guards.
+                self.attest_schema(SCHEMA_VERSION)?;
                 self.conn
                     .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
                     .map_err(|error| sql_err("init: set user_version", &error))?;
@@ -3540,6 +3545,16 @@ impl Ledger {
                     // Re-hash every field independently and refuse a partial
                     // or semantically guessed cache migration.
                     self.backfill_and_verify_tune_content_identities()?;
+                }
+                if target == 20 {
+                    // V20 infers no source cohort. It installs one monotone
+                    // generation row plus six exact mutation triggers. Require
+                    // the singleton to be structurally valid and attest the
+                    // complete installed schema before advancing the marker;
+                    // CREATE TRIGGER IF NOT EXISTS must never preserve a wrong
+                    // same-named trigger under a current version marker.
+                    let _ = self.identity_reconcile_source_generation()?;
+                    self.attest_schema(20)?;
                 }
                 self.conn
                     .execute(&format!("PRAGMA user_version = {target}"))
@@ -7853,8 +7868,11 @@ mod tests {
         assert_eq!(l.schema_version().unwrap(), SCHEMA_VERSION);
         for table in ALL_TABLES {
             // A fresh ledger is empty except the seeded main branch and
-            // immutable physical-instance identity rows.
-            let expected = u64::from(matches!(*table, "branches" | "ledger_identity"));
+            // physical-instance/source-generation singleton rows.
+            let expected = u64::from(matches!(
+                *table,
+                "branches" | "ledger_identity" | "identity_reconcile_source_generation"
+            ));
             assert_eq!(
                 l.table_count(table).unwrap(),
                 expected,

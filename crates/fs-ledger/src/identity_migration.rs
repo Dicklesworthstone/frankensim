@@ -47,9 +47,9 @@ pub const MAX_EVIDENCE_SEMANTIC_BINDING_CANDIDATES: usize = 256;
 /// Maximum source rows reconciled by one durable identity-backfill page.
 pub const MAX_IDENTITY_RECONCILE_PAGE_ROWS: usize = 64;
 /// Version of the fixed-width durable identity-reconciliation cursor.
-pub const IDENTITY_RECONCILE_CURSOR_WIRE_VERSION: u32 = 1;
+pub const IDENTITY_RECONCILE_CURSOR_WIRE_VERSION: u32 = 2;
 /// Exact byte length of the fixed-width durable reconciliation cursor.
-pub const IDENTITY_RECONCILE_CURSOR_WIRE_BYTES: usize = 64;
+pub const IDENTITY_RECONCILE_CURSOR_WIRE_BYTES: usize = 72;
 
 /// Identity schema version for immutable migration receipts.
 pub const IDENTITY_MIGRATION_RECEIPT_VERSION: u32 = 1;
@@ -82,7 +82,7 @@ pub const MAX_IDENTITY_MIGRATION_RECEIPT_WIRE_BYTES: usize =
 
 const IDENTITY_MIGRATION_RECEIPT_WIRE_MAGIC: &[u8; 8] = b"FSMIGR01";
 const IDENTITY_MIGRATION_RECEIPT_WIRE_BASE_BYTES: usize = 290;
-const IDENTITY_RECONCILE_CURSOR_WIRE_MAGIC: &[u8; 8] = b"FSIDRC01";
+const IDENTITY_RECONCILE_CURSOR_WIRE_MAGIC: &[u8; 8] = b"FSIDRC02";
 
 const RECEIPT_ID_LIMITS: CanonicalLimits = CanonicalLimits::new(64 * 1024, 8 * 1024, 64, 64, 4096);
 
@@ -802,14 +802,14 @@ impl TuneContentIdentity {
     }
 }
 
-/// Closed stage of one high-water-bounded identity reconciliation run.
+/// Closed stage of one immutable-cohort identity reconciliation run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityReconcilePhase {
     /// Reconcile frozen operation-field sidecars through the captured op ID.
     Operations,
     /// Reconcile autotuner sidecars through the captured tune row ID.
     Tune,
-    /// Every source row inside both captured high-water marks was visited.
+    /// Every source row inside both captured ceilings was visited.
     Complete,
 }
 
@@ -833,22 +833,26 @@ impl IdentityReconcilePhase {
 }
 
 /// Persistable, fixed-width resume token for bounded operation/cache sidecar
-/// reconciliation.
+/// reconciliation over one immutable source cohort.
 ///
 /// The cursor names one physical ledger instance, the exact current schema,
-/// and operation/tune high-water marks captured before the run. New rows
-/// beyond those marks intentionally belong to a later run. The fixed transport
-/// and its plain content ID detect accidental byte changes only: decoded cursor
-/// bytes are caller-supplied progress, not an authenticated receipt or a source
-/// of semantic or migration authority.
+/// exact page size, monotone source generation, and operation/tune ceilings
+/// captured before the run. Any source insertion, relevant update, deletion,
+/// or row-ID reuse advances that generation and makes the whole cursor stale;
+/// changed rows therefore cannot hide below a numeric ceiling. The fixed
+/// transport and its plain content ID detect accidental byte changes only:
+/// decoded cursor bytes are caller-supplied progress, not an authenticated
+/// receipt or a source of semantic or migration authority.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IdentityReconcileCursor {
     ledger_instance_id: LedgerInstanceId,
     schema_version: u32,
     phase: IdentityReconcilePhase,
+    page_rows: u8,
     after_rowid: i64,
     op_high_water: i64,
     tune_high_water: i64,
+    source_generation: i64,
 }
 
 impl fmt::Debug for IdentityReconcileCursor {
@@ -858,9 +862,11 @@ impl fmt::Debug for IdentityReconcileCursor {
             .field("ledger_instance_id", &self.ledger_instance_id.to_string())
             .field("schema_version", &self.schema_version)
             .field("phase", &self.phase)
+            .field("page_rows", &self.page_rows)
             .field("after_rowid", &self.after_rowid)
             .field("op_high_water", &self.op_high_water)
             .field("tune_high_water", &self.tune_high_water)
+            .field("source_generation", &self.source_generation)
             .finish()
     }
 }
@@ -872,7 +878,7 @@ impl IdentityReconcileCursor {
         self.ledger_instance_id
     }
 
-    /// Exact ledger schema observed when the high-water snapshot was minted.
+    /// Exact ledger schema observed when the immutable cohort was minted.
     #[must_use]
     pub const fn schema_version(self) -> u32 {
         self.schema_version
@@ -882,6 +888,12 @@ impl IdentityReconcileCursor {
     #[must_use]
     pub const fn phase(self) -> IdentityReconcilePhase {
         self.phase
+    }
+
+    /// Exact maximum row count bound into every request in this run.
+    #[must_use]
+    pub const fn page_rows(self) -> u8 {
+        self.page_rows
     }
 
     /// Last source row durably reconciled inside the current phase.
@@ -902,13 +914,19 @@ impl IdentityReconcileCursor {
         self.tune_high_water
     }
 
+    /// Monotone source generation captured with both numeric ceilings.
+    #[must_use]
+    pub const fn source_generation(self) -> i64 {
+        self.source_generation
+    }
+
     /// Whether both captured source families have been completely visited.
     #[must_use]
     pub const fn is_complete(self) -> bool {
         matches!(self.phase, IdentityReconcilePhase::Complete)
     }
 
-    /// Canonical fixed-width v1 transport.
+    /// Canonical fixed-width v2 transport.
     #[must_use]
     pub fn to_wire_bytes(self) -> [u8; IDENTITY_RECONCILE_CURSOR_WIRE_BYTES] {
         let mut bytes = [0_u8; IDENTITY_RECONCILE_CURSOR_WIRE_BYTES];
@@ -917,9 +935,11 @@ impl IdentityReconcileCursor {
         bytes[12..28].copy_from_slice(&self.ledger_instance_id.as_bytes());
         bytes[28..32].copy_from_slice(&self.schema_version.to_le_bytes());
         bytes[32] = self.phase.tag();
+        bytes[33] = self.page_rows;
         bytes[40..48].copy_from_slice(&self.after_rowid.to_le_bytes());
         bytes[48..56].copy_from_slice(&self.op_high_water.to_le_bytes());
         bytes[56..64].copy_from_slice(&self.tune_high_water.to_le_bytes());
+        bytes[64..72].copy_from_slice(&self.source_generation.to_le_bytes());
         bytes
     }
 
@@ -929,7 +949,7 @@ impl IdentityReconcileCursor {
         ContentId::of_bytes(&self.to_wire_bytes())
     }
 
-    /// Decode and structurally validate one exact fixed-width v1 cursor.
+    /// Decode and structurally validate one exact fixed-width v2 cursor.
     ///
     /// This proves only canonical transport shape. Presenting the result to
     /// [`Ledger::reconcile_identity_sidecars_page`] additionally verifies that
@@ -953,7 +973,7 @@ impl IdentityReconcileCursor {
                 found: wire_version,
             });
         }
-        if bytes[33..40].iter().any(|byte| *byte != 0) {
+        if bytes[34..40].iter().any(|byte| *byte != 0) {
             return Err(IdentityReconcileCursorError::ReservedBytes);
         }
         let mut instance_bytes = [0_u8; 16];
@@ -966,13 +986,17 @@ impl IdentityReconcileCursor {
         op_high_water_bytes.copy_from_slice(&bytes[48..56]);
         let mut tune_high_water_bytes = [0_u8; 8];
         tune_high_water_bytes.copy_from_slice(&bytes[56..64]);
+        let mut source_generation_bytes = [0_u8; 8];
+        source_generation_bytes.copy_from_slice(&bytes[64..72]);
         let cursor = Self {
             ledger_instance_id: LedgerInstanceId(instance_bytes),
             schema_version: u32::from_le_bytes(schema_version_bytes),
             phase: IdentityReconcilePhase::from_tag(bytes[32])?,
+            page_rows: bytes[33],
             after_rowid: i64::from_le_bytes(after_rowid_bytes),
             op_high_water: i64::from_le_bytes(op_high_water_bytes),
             tune_high_water: i64::from_le_bytes(tune_high_water_bytes),
+            source_generation: i64::from_le_bytes(source_generation_bytes),
         };
         cursor.validate_structure()?;
         Ok(cursor)
@@ -983,6 +1007,12 @@ impl IdentityReconcileCursor {
             return Err(IdentityReconcileCursorError::InvalidField {
                 field: "schema_version",
                 detail: "zero has no shipped ledger schema meaning",
+            });
+        }
+        if self.page_rows == 0 || usize::from(self.page_rows) > MAX_IDENTITY_RECONCILE_PAGE_ROWS {
+            return Err(IdentityReconcileCursorError::InvalidField {
+                field: "page_rows",
+                detail: "page rows must be inside the shipped bounded envelope",
             });
         }
         if self.after_rowid < 0 {
@@ -1001,6 +1031,12 @@ impl IdentityReconcileCursor {
             return Err(IdentityReconcileCursorError::InvalidField {
                 field: "tune_high_water",
                 detail: "tune high-water mark must be non-negative",
+            });
+        }
+        if self.source_generation < 0 {
+            return Err(IdentityReconcileCursorError::InvalidField {
+                field: "source_generation",
+                detail: "source generation must be non-negative",
             });
         }
         match self.phase {
@@ -2246,7 +2282,7 @@ fn fixed_bytes<const N: usize>(
     let Some(SqliteValue::Blob(bytes)) = value else {
         return Err(stored_corrupt(receipt_id, format!("{field} is not a BLOB")));
     };
-    bytes.as_slice().try_into().map_err(|_| {
+    bytes.as_ref().try_into().map_err(|_| {
         stored_corrupt(
             receipt_id,
             format!(
@@ -2272,7 +2308,7 @@ fn bounded_bytes(
             format!("{field} exceeds its {max}-byte storage envelope"),
         ));
     }
-    Ok(bytes.clone().into_boxed_slice())
+    Ok(bytes.to_vec().into_boxed_slice())
 }
 
 fn bounded_utf8(
@@ -2400,7 +2436,7 @@ impl Ledger {
             ));
         }
         let row = rows.first().expect("non-empty row set checked above");
-        let stored_hash = match row.first() {
+        let stored_hash = match row.get(0) {
             Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes),
             _ => None,
         }
@@ -2500,7 +2536,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify artifact identity backfill", &error))?;
         if let Some(row) = invalid_rows.first() {
-            let hash_hex = match row.first() {
+            let hash_hex = match row.get(0) {
                 Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes)
                     .map_or_else(|| "<malformed>".to_string(), |hash| hash.to_hex()),
                 _ => "<malformed>".to_string(),
@@ -2522,7 +2558,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify artifact identity orphan", &error))?;
         if let Some(row) = orphan_rows.first() {
-            let hash_hex = match row.first() {
+            let hash_hex = match row.get(0) {
                 Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes)
                     .map_or_else(|| "<malformed>".to_string(), |hash| hash.to_hex()),
                 _ => "<malformed>".to_string(),
@@ -2582,7 +2618,7 @@ impl Ledger {
             ));
         }
         let row = rows.first().expect("non-empty row set checked above");
-        if !matches!(row.first(), Some(SqliteValue::Integer(stored)) if *stored == op) {
+        if !matches!(row.get(0), Some(SqliteValue::Integer(stored)) if *stored == op) {
             return Err(edge_identity_corrupt(
                 op,
                 "edge identity sidecar has a missing or divergent operation identity",
@@ -2689,7 +2725,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify edge identity backfill", &error))?;
         if let Some(row) = invalid_rows.first() {
-            let op = match row.first() {
+            let op = match row.get(0) {
                 Some(SqliteValue::Integer(op)) => *op,
                 _ => -1,
             };
@@ -2710,7 +2746,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify edge identity orphan", &error))?;
         if let Some(row) = orphan_rows.first() {
-            let op = match row.first() {
+            let op = match row.get(0) {
                 Some(SqliteValue::Integer(op)) => *op,
                 _ => -1,
             };
@@ -2821,7 +2857,7 @@ impl Ledger {
         let row = rows
             .first()
             .expect("single operation identity row checked above");
-        if !matches!(row.first(), Some(SqliteValue::Integer(stored)) if *stored == op) {
+        if !matches!(row.get(0), Some(SqliteValue::Integer(stored)) if *stored == op) {
             return Err(op_identity_corrupt(
                 op,
                 "operation identity sidecar has a missing or divergent row ID",
@@ -2987,7 +3023,7 @@ impl Ledger {
                 break;
             }
             for row in &rows {
-                let op = match row.first() {
+                let op = match row.get(0) {
                     Some(SqliteValue::Integer(op)) => *op,
                     _ => {
                         return Err(op_identity_corrupt(
@@ -3031,7 +3067,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify operation identity orphan", &error))?;
         if let Some(row) = orphans.first() {
-            let op = match row.first() {
+            let op = match row.get(0) {
                 Some(SqliteValue::Integer(op)) => *op,
                 _ => -1,
             };
@@ -3297,7 +3333,7 @@ impl Ledger {
             .first()
             .expect("single tune content identity row checked above");
         let stored = TuneContentIdentity {
-            kernel_content_id: tune_content_id(row.first(), kernel, "kernel_content_id")?,
+            kernel_content_id: tune_content_id(row.get(0), kernel, "kernel_content_id")?,
             shape_class_content_id: tune_content_id(row.get(1), kernel, "shape_class_content_id")?,
             machine_content_id: tune_content_id(row.get(2), kernel, "machine_content_id")?,
             params_content_id: tune_content_id(row.get(3), kernel, "params_content_id")?,
@@ -3401,7 +3437,7 @@ impl Ledger {
                 break;
             }
             for row in &rows {
-                let rowid = match row.first() {
+                let rowid = match row.get(0) {
                     Some(SqliteValue::Integer(rowid)) => *rowid,
                     _ => {
                         return Err(tune_corrupt(
@@ -3443,7 +3479,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify tune identity orphan", &error))?;
         if let Some(row) = orphans.first() {
-            let kernel = match row.first() {
+            let kernel = match row.get(0) {
                 Some(SqliteValue::Blob(bytes)) => ContentId::parse_slice(bytes)
                     .map(|id| format!("<content:{}>", id.to_hex()))
                     .unwrap_or_else(|| "<malformed-content-id>".to_string()),
@@ -3457,22 +3493,89 @@ impl Ledger {
         Ok(())
     }
 
-    /// Capture a persistable high-water cursor for bounded operation/cache
-    /// content-identity reconciliation.
+    pub(crate) fn identity_reconcile_source_generation(&self) -> Result<i64, LedgerError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT singleton, generation
+                 FROM identity_reconcile_source_generation
+                 ORDER BY singleton LIMIT 2",
+            )
+            .map_err(|error| sql_err("identity reconciliation source generation", &error))?;
+        if rows.len() != 1 {
+            return Err(LedgerError::Invalid {
+                field: "identity_reconciliation.source_generation".to_string(),
+                problem: format!(
+                    "expected exactly one source-generation row, found {}",
+                    rows.len()
+                ),
+            });
+        }
+        let singleton = row_i64(&rows[0], 0, "identity reconciliation generation singleton")?;
+        let generation = row_i64(&rows[0], 1, "identity reconciliation generation value")?;
+        if singleton != 1 || generation < 0 {
+            return Err(LedgerError::Invalid {
+                field: "identity_reconciliation.source_generation".to_string(),
+                problem: format!(
+                    "expected singleton 1 with non-negative generation, found ({singleton}, {generation})"
+                ),
+            });
+        }
+        Ok(generation)
+    }
+
+    fn lock_identity_reconcile_source_generation(&self) -> Result<(), LedgerError> {
+        self.conn
+            .execute(
+                "UPDATE identity_reconcile_source_generation
+                 SET generation = generation WHERE singleton = 1",
+            )
+            .map_err(|error| sql_err("identity reconciliation source-generation lock", &error))
+    }
+
+    /// Capture a persistable immutable-cohort cursor using the maximum shipped
+    /// page size.
     ///
-    /// The two ceilings and the physical ledger/schema binding are observed in
-    /// one owned read transaction. Automatically assigned rows above either
-    /// ceiling require a later cursor; retained rows inside the interval are
-    /// read when their page runs. The method refuses a caller-owned transaction
-    /// so the returned token cannot name uncommitted source rows.
+    /// # Errors
+    /// See [`Ledger::begin_identity_reconciliation_with_page_rows`].
     pub fn begin_identity_reconciliation(
         &self,
     ) -> Result<IdentityReconcileCursor, IdentityReconcileError> {
+        self.begin_identity_reconciliation_with_page_rows(MAX_IDENTITY_RECONCILE_PAGE_ROWS)
+    }
+
+    /// Capture a persistable immutable-cohort cursor for bounded
+    /// operation/cache content-identity reconciliation.
+    ///
+    /// The page size, monotone source generation, two numeric ceilings, and
+    /// physical ledger/schema binding are observed in one owned read
+    /// transaction. Every relevant source mutation advances the generation;
+    /// all later pages therefore refuse rather than accepting a deleted,
+    /// reused, inserted, or updated row under an old ceiling. The method
+    /// refuses a caller-owned transaction so the returned token cannot name
+    /// uncommitted source rows.
+    pub fn begin_identity_reconciliation_with_page_rows(
+        &self,
+        page_rows: usize,
+    ) -> Result<IdentityReconcileCursor, IdentityReconcileError> {
+        if page_rows == 0 || page_rows > MAX_IDENTITY_RECONCILE_PAGE_ROWS {
+            return Err(LedgerError::Invalid {
+                field: "identity_reconciliation.page_rows".to_string(),
+                problem: format!(
+                    "must be between 1 and {MAX_IDENTITY_RECONCILE_PAGE_ROWS}, got {page_rows}"
+                ),
+            }
+            .into());
+        }
+        let page_rows = u8::try_from(page_rows).map_err(|_| LedgerError::Invalid {
+            field: "identity_reconciliation.page_rows".to_string(),
+            problem: "page size is outside the cursor u8 domain".to_string(),
+        })?;
         if self.in_transaction() {
             return Err(LedgerError::Invalid {
                 field: "identity_reconciliation.transaction".to_string(),
                 problem:
-                    "cannot mint a persistable high-water cursor inside a caller-owned transaction"
+                    "cannot mint a persistable cohort cursor inside a caller-owned transaction"
                         .to_string(),
             }
             .into());
@@ -3496,6 +3599,7 @@ impl Ledger {
                     ),
                 })?;
             let ledger_instance_id = self.checked_instance_id()?;
+            let source_generation = self.identity_reconcile_source_generation()?;
             let op_bounds = self
                 .conn
                 .query_row("SELECT COALESCE(MIN(id), 1), COALESCE(MAX(id), 0) FROM ops")
@@ -3530,9 +3634,11 @@ impl Ledger {
                 ledger_instance_id,
                 schema_version,
                 phase: IdentityReconcilePhase::Operations,
+                page_rows,
                 after_rowid: 0,
                 op_high_water,
                 tune_high_water,
+                source_generation,
             })
         })();
         match captured {
@@ -3547,17 +3653,21 @@ impl Ledger {
     /// Reconcile at most one bounded page under an explicit cancellation
     /// context, then return the next persistable cursor after commit.
     ///
-    /// Each page owns one transaction. Cancellation is polled before opening
-    /// it, before every source row, and before commit. If observed, every write
-    /// in the page rolls back and the error returns the byte-identical input
-    /// cursor. Replaying a page after response loss is idempotent. A cursor from
-    /// another physical ledger or schema fails closed. Cursor transport is not
-    /// an authenticated progress receipt; callers that accept untrusted cursor
+    /// Each page owns one transaction. `max_rows` must equal the page size
+    /// committed into the cursor. Cancellation is polled before opening it,
+    /// before every source row, and before commit. If observed, every write in
+    /// the page rolls back and the error returns the byte-identical input
+    /// cursor. Replaying a page after response loss is byte-identical only while
+    /// its exact source generation remains current; a source insertion, update,
+    /// deletion, or row-ID reuse fails stale. A cursor from another physical
+    /// ledger or schema likewise fails closed. Cursor transport is not an
+    /// authenticated progress receipt; callers that accept untrusted cursor
     /// bytes must apply their own admission policy.
     ///
     /// # Errors
     /// [`IdentityReconcileError::Cancelled`] for cooperative cancellation;
-    /// [`IdentityReconcileError::StaleCursor`] for a ledger/schema mismatch;
+    /// [`IdentityReconcileError::StaleCursor`] for a ledger, schema, or source
+    /// generation mismatch;
     /// cursor, storage, or typed-sidecar refusals otherwise.
     pub fn reconcile_identity_sidecars_page(
         &self,
@@ -3587,6 +3697,16 @@ impl Ledger {
             }
             .into());
         }
+        if max_rows != usize::from(cursor.page_rows) {
+            return Err(LedgerError::Invalid {
+                field: "identity_reconciliation.max_rows".to_string(),
+                problem: format!(
+                    "request uses {max_rows} rows but cursor binds {}",
+                    cursor.page_rows
+                ),
+            }
+            .into());
+        }
         if self.in_transaction() {
             return Err(LedgerError::Invalid {
                 field: "identity_reconciliation.transaction".to_string(),
@@ -3599,6 +3719,11 @@ impl Ledger {
         }
         self.begin()?;
         let attempted = (|| {
+            // A no-op write acquires transaction write ownership before the
+            // cohort is validated. Compatible writers therefore either land
+            // before this point (and make the cursor stale) or wait until the
+            // page commits; even a zero-row page cannot race a source change.
+            self.lock_identity_reconcile_source_generation()?;
             self.validate_identity_reconcile_cursor(cursor)?;
             let input_cursor_id = cursor.content_id();
             let mut next = cursor;
@@ -3716,6 +3841,16 @@ impl Ledger {
             if cancellation_requested() {
                 return Err(IdentityReconcileError::Cancelled { resume: cursor });
             }
+            let current_generation = self.identity_reconcile_source_generation()?;
+            if current_generation != cursor.source_generation {
+                return Err(IdentityReconcileError::StaleCursor {
+                    field: "source_generation",
+                    detail: format!(
+                        "cursor names generation {}, ledger reports {current_generation}",
+                        cursor.source_generation
+                    ),
+                });
+            }
             Ok(IdentityReconcilePage {
                 input_cursor_id,
                 next_cursor: next,
@@ -3778,6 +3913,16 @@ impl Ledger {
                 ),
             });
         }
+        let current_generation = self.identity_reconcile_source_generation()?;
+        if cursor.source_generation != current_generation {
+            return Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                detail: format!(
+                    "cursor names generation {}, ledger reports {current_generation}",
+                    cursor.source_generation
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -3810,7 +3955,7 @@ impl Ledger {
             ));
         }
         let row = rows.first().expect("non-empty row set checked above");
-        let stored_artifact = match row.first() {
+        let stored_artifact = match row.get(0) {
             Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes),
             _ => None,
         }
@@ -4048,7 +4193,7 @@ impl Ledger {
         let truncated = rows.len() > cap;
         let mut receipt_ids = Vec::with_capacity(rows.len().min(cap));
         for row in rows.iter().take(cap) {
-            let Some(SqliteValue::Blob(bytes)) = row.first() else {
+            let Some(SqliteValue::Blob(bytes)) = row.get(0) else {
                 return Err(LedgerError::Corrupt {
                     hash_hex: artifact_hash.to_hex(),
                     detail: "artifact semantic candidate has malformed receipt ID".to_string(),
@@ -4081,7 +4226,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify artifact semantic bindings", &error))?;
         for row in &rows {
-            let artifact_hash = match row.first() {
+            let artifact_hash = match row.get(0) {
                 Some(SqliteValue::Blob(bytes)) => ContentHash::from_slice(bytes),
                 _ => None,
             }
@@ -4090,7 +4235,7 @@ impl Ledger {
                 detail: "artifact semantic binding has a malformed artifact hash".to_string(),
             })?;
             let receipt_bytes = match row.get(1) {
-                Some(SqliteValue::Blob(bytes)) => bytes.as_slice(),
+                Some(SqliteValue::Blob(bytes)) => bytes.as_ref(),
                 _ => &[],
             };
             let receipt_id =
@@ -4161,7 +4306,7 @@ impl Ledger {
         let row = metadata
             .first()
             .ok_or_else(|| refuse("evidence metadata row disappeared".to_string()))?;
-        if !matches!(row.first(), Some(SqliteValue::Text(kind)) if kind.as_str() == "text") {
+        if !matches!(row.get(0), Some(SqliteValue::Text(kind)) if kind.as_str() == "text") {
             return Err(refuse("evidence body is not stored as TEXT".to_string()));
         }
         let body_len = match row.get(1) {
@@ -4201,7 +4346,7 @@ impl Ledger {
                 detail: "evidence row changed after bounded metadata preflight".to_string(),
             });
         }
-        match guarded.first().and_then(|row| row.first()) {
+        match guarded.first().and_then(|row| row.get(0)) {
             Some(SqliteValue::Text(body)) => Ok(Some(body.as_str().to_string())),
             _ => Err(refuse(
                 "guarded evidence body is not stored as TEXT".to_string(),
@@ -4245,7 +4390,7 @@ impl Ledger {
                 "binding row disappeared after selection",
             )
         })?;
-        let stored_name = match row.first() {
+        let stored_name = match row.get(0) {
             Some(SqliteValue::Text(name)) => name.as_str(),
             _ => {
                 return Err(evidence_semantic_binding_corrupt(
@@ -4503,7 +4648,7 @@ impl Ledger {
         let truncated = rows.len() > cap;
         let mut receipt_ids = Vec::with_capacity(rows.len().min(cap));
         for row in rows.iter().take(cap) {
-            let Some(SqliteValue::Blob(bytes)) = row.first() else {
+            let Some(SqliteValue::Blob(bytes)) = row.get(0) else {
                 return Err(LedgerError::Corrupt {
                     hash_hex: ContentId::of_bytes(evidence_name.as_bytes()).to_hex(),
                     detail: "evidence semantic candidate has malformed receipt ID".to_string(),
@@ -4536,7 +4681,7 @@ impl Ledger {
             )
             .map_err(|error| sql_err("verify evidence semantic bindings", &error))?;
         for row in &rows {
-            let evidence_name = match row.first() {
+            let evidence_name = match row.get(0) {
                 Some(SqliteValue::Text(name)) => name.as_str(),
                 _ => {
                     return Err(LedgerError::Corrupt {
@@ -4547,7 +4692,7 @@ impl Ledger {
                 }
             };
             let receipt_bytes = match row.get(1) {
-                Some(SqliteValue::Blob(bytes)) => bytes.as_slice(),
+                Some(SqliteValue::Blob(bytes)) => bytes.as_ref(),
                 _ => &[],
             };
             let receipt_id =
@@ -4657,7 +4802,7 @@ impl Ledger {
                 "row disappeared after guarded selection",
             ));
         };
-        let stored_id_bytes = fixed_bytes::<32>(row.first(), receipt_id, "receipt_id")?;
+        let stored_id_bytes = fixed_bytes::<32>(row.get(0), receipt_id, "receipt_id")?;
         let stored_id = IdentityMigrationReceiptId::parse_slice(&stored_id_bytes)
             .ok_or_else(|| stored_corrupt(receipt_id, "receipt_id is not a typed digest"))?;
         if stored_id != receipt_id {
@@ -4953,7 +5098,7 @@ impl Ledger {
         let truncated = rows.len() > cap;
         let mut receipt_ids = Vec::with_capacity(rows.len().min(cap));
         for row in rows.iter().take(cap) {
-            let Some(SqliteValue::Blob(bytes)) = row.first() else {
+            let Some(SqliteValue::Blob(bytes)) = row.get(0) else {
                 return Err(LedgerError::Corrupt {
                     hash_hex: legacy_content_id.to_hex(),
                     detail: "identity migration candidate has malformed receipt ID".to_string(),
@@ -5048,6 +5193,7 @@ mod tests {
     }
 
     fn drop_v18_objects(ledger: &Ledger) {
+        drop_v20_objects(ledger);
         for ddl in [
             "DROP TRIGGER IF EXISTS trg_op_content_identity_guard_delete",
             "DROP TRIGGER IF EXISTS trg_op_content_identity_immutable_update",
@@ -5060,6 +5206,7 @@ mod tests {
     }
 
     fn drop_v19_objects(ledger: &Ledger) {
+        drop_v20_objects(ledger);
         for ddl in [
             "DROP TRIGGER IF EXISTS trg_tune_content_identity_guard_delete",
             "DROP TRIGGER IF EXISTS trg_tune_content_identity_key_immutable",
@@ -5069,6 +5216,20 @@ mod tests {
             "DROP TABLE IF EXISTS tune_content_identities",
         ] {
             ledger.conn.execute(ddl).expect("remove v19 fixture object");
+        }
+    }
+
+    fn drop_v20_objects(ledger: &Ledger) {
+        for ddl in [
+            "DROP TRIGGER IF EXISTS trg_identity_reconcile_ops_insert",
+            "DROP TRIGGER IF EXISTS trg_identity_reconcile_ops_update",
+            "DROP TRIGGER IF EXISTS trg_identity_reconcile_ops_delete",
+            "DROP TRIGGER IF EXISTS trg_identity_reconcile_tune_insert",
+            "DROP TRIGGER IF EXISTS trg_identity_reconcile_tune_update",
+            "DROP TRIGGER IF EXISTS trg_identity_reconcile_tune_delete",
+            "DROP TABLE IF EXISTS identity_reconcile_source_generation",
+        ] {
+            ledger.conn.execute(ddl).expect("remove v20 fixture object");
         }
     }
 
@@ -5092,8 +5253,8 @@ mod tests {
     }
 
     #[test]
-    fn genuine_v12_and_stale_v13_markers_migrate_through_v19() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+    fn genuine_v12_and_stale_v13_markers_migrate_through_v20() {
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -5343,7 +5504,7 @@ mod tests {
 
     #[test]
     fn pre_v18_operation_writer_can_be_reconciled_without_rewriting_existing_identity() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         ledger
             .conn
             .prepare(
@@ -5419,7 +5580,7 @@ mod tests {
 
     #[test]
     fn pre_v19_tune_writer_insert_and_value_update_reconcile_atomically() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         let kernel = "old-writer-kernel";
         let shape = "old-writer-shape";
         let machine = b"old-writer-machine";
@@ -5530,21 +5691,55 @@ mod tests {
 
     #[test]
     fn reconciliation_cursor_wire_is_exact_bounded_and_ledger_scoped() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let golden = IdentityReconcileCursor {
+            ledger_instance_id: LedgerInstanceId([
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            ]),
+            schema_version: 20,
+            phase: IdentityReconcilePhase::Tune,
+            page_rows: 17,
+            after_rowid: 7,
+            op_high_water: 11,
+            tune_high_water: 13,
+            source_generation: 17,
+        };
+        let golden_wire: [u8; 72] = [
+            b'F', b'S', b'I', b'D', b'R', b'C', b'0', b'2', 2, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+            9, 10, 11, 12, 13, 14, 15, 20, 0, 0, 0, 2, 17, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0,
+            0, 11, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(golden.to_wire_bytes(), golden_wire);
+        assert_eq!(
+            IdentityReconcileCursor::from_wire_bytes(&golden_wire).unwrap(),
+            golden
+        );
+
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         let cursor = ledger
             .begin_identity_reconciliation()
-            .expect("mint current high-water cursor");
+            .expect("mint current immutable-cohort cursor");
         assert_eq!(cursor.ledger_instance_id(), ledger.instance_id());
         assert_eq!(
             cursor.schema_version(),
             u32::try_from(SCHEMA_VERSION).unwrap()
         );
         assert_eq!(cursor.phase(), IdentityReconcilePhase::Operations);
+        assert_eq!(cursor.page_rows(), 64);
         assert_eq!(cursor.after_rowid(), 0);
         assert_eq!(cursor.op_high_water(), 0);
         assert_eq!(cursor.tune_high_water(), 0);
+        assert_eq!(cursor.source_generation(), 0);
         let wire = cursor.to_wire_bytes();
         assert_eq!(wire.len(), IDENTITY_RECONCILE_CURSOR_WIRE_BYTES);
+        let mut expected_wire = [0_u8; IDENTITY_RECONCILE_CURSOR_WIRE_BYTES];
+        expected_wire[..8].copy_from_slice(b"FSIDRC02");
+        expected_wire[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        expected_wire[12..28].copy_from_slice(&ledger.instance_id().as_bytes());
+        expected_wire[28..32]
+            .copy_from_slice(&u32::try_from(SCHEMA_VERSION).unwrap().to_le_bytes());
+        expected_wire[32] = IdentityReconcilePhase::Operations.tag();
+        expected_wire[33] = 64;
+        assert_eq!(wire, expected_wire, "freeze the complete v2 byte layout");
         assert_eq!(
             IdentityReconcileCursor::from_wire_bytes(&wire).unwrap(),
             cursor
@@ -5580,10 +5775,28 @@ mod tests {
             Err(IdentityReconcileCursorError::InvalidPhase { found: 0xff })
         ));
         changed = wire;
-        changed[33] = 1;
+        changed[34] = 1;
         assert!(matches!(
             IdentityReconcileCursor::from_wire_bytes(&changed),
             Err(IdentityReconcileCursorError::ReservedBytes)
+        ));
+        changed = wire;
+        changed[33] = 0;
+        assert!(matches!(
+            IdentityReconcileCursor::from_wire_bytes(&changed),
+            Err(IdentityReconcileCursorError::InvalidField {
+                field: "page_rows",
+                ..
+            })
+        ));
+        changed = wire;
+        changed[33] = 65;
+        assert!(matches!(
+            IdentityReconcileCursor::from_wire_bytes(&changed),
+            Err(IdentityReconcileCursorError::InvalidField {
+                field: "page_rows",
+                ..
+            })
         ));
         changed = wire;
         changed[28..32].copy_from_slice(&0_u32.to_le_bytes());
@@ -5612,10 +5825,19 @@ mod tests {
                 ..
             })
         ));
+        changed = wire;
+        changed[64..72].copy_from_slice(&(-1_i64).to_le_bytes());
+        assert!(matches!(
+            IdentityReconcileCursor::from_wire_bytes(&changed),
+            Err(IdentityReconcileCursorError::InvalidField {
+                field: "source_generation",
+                ..
+            })
+        ));
 
         let other = Ledger::open(":memory:").expect("independent physical ledger");
         assert!(matches!(
-            other.reconcile_identity_sidecars_page_with_checkpoint(cursor, 1, || false),
+            other.reconcile_identity_sidecars_page_with_checkpoint(cursor, 64, || false),
             Err(IdentityReconcileError::StaleCursor {
                 field: "ledger_instance_id",
                 ..
@@ -5632,9 +5854,9 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One fixture proves rollback, replay, ordering, and high-water exclusion end to end.
+    #[allow(clippy::too_many_lines)] // One fixture proves rollback, replay, ordering, and source-cohort refusal end to end.
     fn bounded_reconciliation_pages_resume_replay_and_cancel_without_partial_publish() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         let insert_old_op = |seed: &'static [u8], t_start: i64| {
             ledger
                 .conn
@@ -5666,17 +5888,15 @@ mod tests {
         insert_old_tune("old-kernel-a");
         insert_old_tune("old-kernel-b");
         let initial = ledger
-            .begin_identity_reconciliation()
-            .expect("capture four-row high-water snapshot");
+            .begin_identity_reconciliation_with_page_rows(1)
+            .expect("capture four-row immutable cohort");
         assert_eq!(initial.op_high_water(), second_op);
         assert_eq!(initial.tune_high_water(), 2);
-
-        let late_op = insert_old_op(b"late-seed", 3);
-        insert_old_tune("late-kernel");
-        assert!(late_op > initial.op_high_water());
+        assert_eq!(initial.page_rows(), 1);
+        assert_eq!(initial.source_generation(), 4);
 
         let cancelled = ledger
-            .reconcile_identity_sidecars_page_with_checkpoint(initial, 4, || {
+            .reconcile_identity_sidecars_page_with_checkpoint(initial, 1, || {
                 ledger.table_count("op_content_identities").unwrap() == 1
             })
             .expect_err("cancel after one provisional operation sidecar");
@@ -5734,12 +5954,8 @@ mod tests {
         assert!(cursor.is_complete());
 
         assert!(matches!(
-            ledger.op_content_identity(late_op),
-            Err(LedgerError::OpCorrupt { op, .. }) if op == late_op
-        ));
-        assert!(matches!(
-            ledger.tune_content_identity("late-kernel", "shape", &[1, 2]),
-            Err(LedgerError::TuneCorrupt { .. })
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(initial, 2, || false),
+            Err(IdentityReconcileError::Ledger(LedgerError::Invalid { .. }))
         ));
         assert!(matches!(
             ledger.reconcile_identity_sidecars_page_with_checkpoint(initial, 0, || false),
@@ -5753,12 +5969,179 @@ mod tests {
             ),
             Err(IdentityReconcileError::Ledger(LedgerError::Invalid { .. }))
         ));
+
+        let late_op = insert_old_op(b"late-seed", 3);
+        insert_old_tune("late-kernel");
+        assert!(late_op > initial.op_high_water());
+        assert_eq!(ledger.identity_reconcile_source_generation().unwrap(), 6);
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(initial, 1, || false),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+        assert_eq!(ledger.table_count("op_content_identities").unwrap(), 2);
+        assert_eq!(ledger.table_count("tune_content_identities").unwrap(), 2);
+        assert!(matches!(
+            ledger.op_content_identity(late_op),
+            Err(LedgerError::OpCorrupt { op, .. }) if op == late_op
+        ));
+        assert!(matches!(
+            ledger.tune_content_identity("late-kernel", "shape", &[1, 2]),
+            Err(LedgerError::TuneCorrupt { .. })
+        ));
+
+        let refreshed = ledger
+            .begin_identity_reconciliation()
+            .expect("capture the expanded immutable cohort");
+        let refreshed_page = ledger
+            .reconcile_identity_sidecars_page_with_checkpoint(refreshed, 64, || false)
+            .expect("reconcile the expanded cohort in one bounded page");
+        assert!(refreshed_page.next_cursor().is_complete());
+        assert_eq!(refreshed_page.operation_rows(), 3);
+        assert_eq!(refreshed_page.tune_rows(), 3);
+        assert!(ledger.op_content_identity(late_op).unwrap().is_some());
+        assert!(
+            ledger
+                .tune_content_identity("late-kernel", "shape", &[1, 2])
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn source_generation_refuses_updates_deletes_and_rowid_reuse() {
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
+        let insert_reused_op = |seed: &'static [u8]| {
+            ledger
+                .conn
+                .prepare(
+                    "INSERT INTO ops(
+                         id, session, ir, seed, versions, budget, capability,
+                         t_start, branch, exec_mode
+                     ) VALUES (1, NULL, '{}', ?1, '{}', '{}', '{}', 1, 1, 'deterministic')",
+                )
+                .expect("prepare explicit operation ID")
+                .execute_with_params(&[blob_param(seed)])
+                .expect("insert explicit operation ID");
+        };
+
+        insert_reused_op(b"generation-a");
+        let before_update = ledger.begin_identity_reconciliation().unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE ops SET seed = ?1 WHERE id = 1")
+            .unwrap()
+            .execute_with_params(&[blob_param(b"generation-b")])
+            .unwrap();
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(before_update, 64, || false),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+
+        let before_delete = ledger.begin_identity_reconciliation().unwrap();
+        ledger.conn.execute("DELETE FROM ops WHERE id = 1").unwrap();
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(before_delete, 64, || false),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+
+        let before_reuse = ledger.begin_identity_reconciliation().unwrap();
+        insert_reused_op(b"generation-c");
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(before_reuse, 64, || false),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+
+        let before_id_update = ledger.begin_identity_reconciliation().unwrap();
+        ledger
+            .conn
+            .execute("UPDATE ops SET id = 2 WHERE id = 1")
+            .unwrap();
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(before_id_update, 64, || false),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+
+        ledger
+            .conn
+            .execute(
+                "INSERT INTO tune(kernel, shape_class, machine, params, measured)
+                 VALUES ('generation-kernel', 'shape', X'01', '{}', '{}')",
+            )
+            .unwrap();
+        let before_tune_rowid_update = ledger.begin_identity_reconciliation().unwrap();
+        ledger
+            .conn
+            .execute("UPDATE tune SET rowid = rowid + 10")
+            .unwrap();
+        assert!(matches!(
+            ledger.reconcile_identity_sidecars_page_with_checkpoint(
+                before_tune_rowid_update,
+                64,
+                || false
+            ),
+            Err(IdentityReconcileError::StaleCursor {
+                field: "source_generation",
+                ..
+            })
+        ));
+        assert_eq!(ledger.identity_reconcile_source_generation().unwrap(), 7);
+    }
+
+    #[test]
+    fn reconciliation_page_bound_is_exact_at_sixty_four_rows() {
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
+        let statement = ledger
+            .conn
+            .prepare(
+                "INSERT INTO ops(
+                     session, ir, seed, versions, budget, capability,
+                     t_start, branch, exec_mode
+                 ) VALUES (NULL, '{}', ?1, '{}', '{}', '{}', ?2, 1, 'deterministic')",
+            )
+            .expect("prepare bounded old operation insert");
+        for ordinal in 1_i64..=65 {
+            statement
+                .execute_with_params(&[
+                    blob_param(&ordinal.to_le_bytes()),
+                    SqliteValue::Integer(ordinal),
+                ])
+                .expect("insert one bounded old operation");
+        }
+        let initial = ledger.begin_identity_reconciliation().unwrap();
+        let first = ledger
+            .reconcile_identity_sidecars_page_with_checkpoint(initial, 64, || false)
+            .unwrap();
+        assert_eq!(first.operation_rows(), 64);
+        assert_eq!(first.tune_rows(), 0);
+        assert!(!first.next_cursor().is_complete());
+        let second = ledger
+            .reconcile_identity_sidecars_page_with_checkpoint(first.next_cursor(), 64, || false)
+            .unwrap();
+        assert_eq!(second.operation_rows(), 1);
+        assert_eq!(second.tune_rows(), 0);
+        assert!(second.next_cursor().is_complete());
+        assert_eq!(ledger.table_count("op_content_identities").unwrap(), 65);
     }
 
     #[test]
     fn v18_backfills_frozen_operation_fields_and_replays_a_stale_marker() {
         for preapply_v18 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
             let explicits = crate::FiveExplicits {
                 seed: b"v17-operation-seed",
                 versions: r#"{"version":17}"#,
@@ -5809,7 +6192,7 @@ mod tests {
 
     #[test]
     fn v18_malformed_source_rolls_back_objects_rows_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         let explicits = crate::FiveExplicits {
             seed: b"bounded-seed",
             versions: "{}",
@@ -5852,7 +6235,7 @@ mod tests {
     #[test]
     fn v19_backfills_tune_fields_and_replays_a_stale_marker() {
         for preapply_v19 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
             ledger
                 .tune_put(
                     "v18-kernel",
@@ -5898,7 +6281,7 @@ mod tests {
 
     #[test]
     fn v19_malformed_tune_source_rolls_back_objects_rows_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
         ledger
             .tune_put("v18-kernel", "v18-shape", b"v18-machine", "{}", "{}")
             .expect("record tune row before recreating v18 fixture");
@@ -5939,7 +6322,93 @@ mod tests {
     }
 
     #[test]
-    fn migration_ladder_ends_with_v19() {
+    fn v20_installs_monotone_source_generation_and_replays_a_stale_marker() {
+        for preapply_v20 in [false, true] {
+            let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
+            drop_v20_objects(&ledger);
+            ledger
+                .conn
+                .execute("PRAGMA user_version = 19")
+                .expect("mark genuine v19 fixture");
+            if preapply_v20 {
+                for ddl in schema::V20 {
+                    ledger
+                        .conn
+                        .execute(ddl)
+                        .expect("preapply exact v20 migration batch");
+                }
+            }
+
+            ledger
+                .migrate_from_observed_version(19)
+                .expect("install and attest exact source-generation witness");
+            assert_eq!(ledger.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(ledger.identity_reconcile_source_generation().unwrap(), 0);
+            assert_eq!(
+                ledger
+                    .table_count("identity_reconcile_source_generation")
+                    .unwrap(),
+                1
+            );
+
+            let cursor = ledger.begin_identity_reconciliation().unwrap();
+            ledger
+                .conn
+                .execute(
+                    "INSERT INTO tune(kernel, shape_class, machine, params, measured)
+                     VALUES ('v20-kernel', 'shape', X'01', '{}', '{}')",
+                )
+                .expect("exercise installed tune source trigger");
+            assert_eq!(ledger.identity_reconcile_source_generation().unwrap(), 1);
+            assert!(matches!(
+                ledger.reconcile_identity_sidecars_page_with_checkpoint(cursor, 64, || false),
+                Err(IdentityReconcileError::StaleCursor {
+                    field: "source_generation",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn v20_refuses_a_wrong_same_named_source_trigger() {
+        let ledger = Ledger::open(":memory:").expect("fresh v20 ledger");
+        drop_v20_objects(&ledger);
+        ledger
+            .conn
+            .execute("PRAGMA user_version = 19")
+            .expect("mark genuine v19 fixture");
+        for ddl in &schema::V20[..2] {
+            ledger
+                .conn
+                .execute(ddl)
+                .expect("preapply exact v20 generation storage");
+        }
+        ledger
+            .conn
+            .execute(
+                "CREATE TRIGGER trg_identity_reconcile_ops_insert
+                 AFTER INSERT ON ops BEGIN SELECT 1; END",
+            )
+            .expect("install wrong same-named source trigger");
+
+        let error = ledger
+            .migrate_from_observed_version(19)
+            .expect_err("wrong same-named trigger must block v20 marker advancement");
+        match error {
+            LedgerError::SchemaMismatch { violations, .. } => assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.contains("trg_identity_reconcile_ops_insert")),
+                "schema mismatch must name the divergent source trigger: {violations:?}"
+            ),
+            other => panic!("expected exact schema refusal, got {other:?}"),
+        }
+        assert_eq!(ledger.schema_version().unwrap(), 19);
+    }
+
+    #[test]
+    fn migration_ladder_ends_with_v20() {
         assert_eq!(
             schema::MIGRATIONS.len(),
             usize::try_from(SCHEMA_VERSION).unwrap()
@@ -5950,6 +6419,7 @@ mod tests {
         assert_eq!(schema::MIGRATIONS.get(15), Some(&schema::V16));
         assert_eq!(schema::MIGRATIONS.get(16), Some(&schema::V17));
         assert_eq!(schema::MIGRATIONS.get(17), Some(&schema::V18));
-        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V19));
+        assert_eq!(schema::MIGRATIONS.get(18), Some(&schema::V19));
+        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V20));
     }
 }
