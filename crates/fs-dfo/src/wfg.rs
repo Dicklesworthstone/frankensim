@@ -19,6 +19,8 @@
 
 #![deny(unsafe_code)]
 
+use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
+
 const CORRECTION_EPSILON: f64 = 1.0e-10;
 const S_MULTI_A: f64 = 30.0;
 const S_MULTI_B: f64 = 10.0;
@@ -30,6 +32,20 @@ const S_DECEPT_FLOOR: f64 = 0.05;
 const B_PARAM_A: f64 = 0.98 / 49.98;
 const B_PARAM_B: f64 = 0.02;
 const B_PARAM_C: f64 = 50.0;
+
+/// Domain-separated artifact kind for [`WfgProblem::replay_identity`].
+pub const WFG_PROBLEM_IDENTITY_KIND: &str = "fs-dfo-wfg-problem-v1";
+/// Producer-local semantic schema version for [`WfgProblem::replay_identity`].
+pub const WFG_PROBLEM_IDENTITY_SCHEMA_VERSION: u32 = 1;
+/// Corrected public equation source bound into every WFG problem identity.
+pub const WFG_EQUATION_REFERENCE: &str = "jmetal-wfg-ea7e882f6b8f94b99535921674e62cda7986f20e";
+/// Accepted coordinate-domain policy bound into every WFG problem identity.
+pub const WFG_INPUT_DOMAIN_POLICY: &str = "normalized-[0,1]-or-canonical-z_i-[0,2(i+1)]-v1";
+/// Deterministic arithmetic policy bound into every WFG problem identity.
+pub const WFG_ARITHMETIC_POLICY: &str = "fixed-left-to-right-reductions-fs-math-det-v1";
+/// Replay-visible evaluation trace schema bound into every WFG problem identity.
+pub const WFG_TRACE_SCHEMA: &str =
+    "transformed/reduced/positioned/shape/objectives-normalized-equation-space-v1";
 
 /// Structured refusal from a typed WFG evaluator.
 #[non_exhaustive]
@@ -951,6 +967,46 @@ impl WfgProblem {
             Self::Wfg8(problem) => problem.dimension(),
             Self::Wfg9(problem) => problem.dimension(),
         }
+    }
+
+    /// Canonical identity of this problem's complete evaluation semantics.
+    ///
+    /// The identity binds the selected family member, validated dimensions,
+    /// corrected equation source, both accepted input domains, deterministic
+    /// arithmetic policy, and replay-visible trace schema. Per-evaluation
+    /// decision vectors and traces belong to enclosing call/result identities
+    /// and are documented exclusions here.
+    #[must_use]
+    pub fn replay_identity(self) -> ReplayIdentity {
+        let objectives =
+            u64::try_from(self.objectives()).expect("WFG objective count must fit u64");
+        let position_parameters = u64::try_from(self.position_parameters())
+            .expect("WFG position-parameter count must fit u64");
+        let distance_parameters = u64::try_from(self.distance_parameters())
+            .expect("WFG distance-parameter count must fit u64");
+
+        IdentityBuilder::new(WFG_PROBLEM_IDENTITY_KIND)
+            .u64(
+                "problem-schema-version",
+                u64::from(WFG_PROBLEM_IDENTITY_SCHEMA_VERSION),
+            )
+            .str("variant", self.variant().name())
+            .u64("objectives", objectives)
+            .u64("position-parameters", position_parameters)
+            .u64("distance-parameters", distance_parameters)
+            .str("equation-reference", WFG_EQUATION_REFERENCE)
+            .str("input-domain-policy", WFG_INPUT_DOMAIN_POLICY)
+            .str("arithmetic-policy", WFG_ARITHMETIC_POLICY)
+            .str("trace-schema", WFG_TRACE_SCHEMA)
+            .exclude(
+                "decision-vector",
+                "per-evaluation input belongs to the enclosing call identity",
+            )
+            .exclude(
+                "evaluation-trace",
+                "per-evaluation output belongs to the enclosing result identity",
+            )
+            .finish()
     }
 
     /// Evaluate one normalized decision vector.
