@@ -156,14 +156,18 @@ admitted derived-geometry boundary.
   preimage, but they also do not collapse composition to a child digest alone.
 - Causal structure, graph-artifact, normalized-outcome, conditional-outcome,
   matching-set, and complete-receipt identity collections use the
-  transactional `fs-blake3` ordered-row stream. A row is declared, retained as
-  the sole pending row, written through the encoder-owned exact-length sink,
-  and dropped before the next row is produced. The former collection-wide
+  transactional `fs-blake3` ordered-row stream. Each actual row family has an
+  independent exact-length planner that does not serialize or retain payload.
+  The encoder admits that declaration before the indexed producer may allocate
+  and serialize the one active row through its exact-length sink; oversized
+  rows therefore refuse before payload allocation. The former collection-wide
   `Vec<Vec<u8>>` batches no longer multiply retained canonical payload by row
-  cardinality; a length/row-order/cancellation/encoder refusal consumes the
-  encoder and publishes no partial identity. G3 pins the streamed receipt,
-  semantic root, independent canonical-preimage root, canonical byte count,
-  and collection count to the eager canonical reference.
+  cardinality. Canonical and length/row-producer failures remain distinct, and
+  graph/receipt refusals retain the ordered field, phase, row, completed prefix,
+  byte progress, and no-publication disposition instead of flattening that
+  evidence to a bare canonical error. G3 pins the streamed receipt, semantic
+  root, independent canonical-preimage root, canonical byte count, and
+  collection count to the eager canonical reference.
 - This streaming step is not yet a peak-memory certificate. One canonical row
   is still materialized in an infallible `Vec`, and deterministic map/set/sort
   workspaces are neither fallibly reserved nor charged to the active
@@ -1101,13 +1105,18 @@ comparison before payload publication. Graph/receipt refusal assertions
 print the typed deterministic finding set so a batch-verification log retains
 exact rule and subject context rather than only a Boolean test result;
 constructor-boundary assertions retain their exact typed error variants.
-Private G0 laws also prove receipt-adjudication Eq/Ord/Hash consistency and
-admission revalidation when encoder limits differ only as evidence, while the
-inclusive graph/receipt finding-budget boundaries collapse one-over inputs to
-a single `ResourceLimit` row. A private G3 law compares eager and transactional
-ordered-row encoding over empty, binary, and multi-kilobyte rows and requires
-identical typed receipts, semantic roots, canonical-preimage roots, canonical
-byte counts, and collection counts.
+  Private G0 laws also prove receipt-adjudication Eq/Ord/Hash consistency and
+  admission revalidation when encoder limits differ only as evidence, while the
+  inclusive graph/receipt finding-budget boundaries collapse one-over inputs to
+  a single `ResourceLimit` row. A private G3 law compares eager and transactional
+  ordered-row encoding over empty, binary, and multi-kilobyte rows and requires
+  identical typed receipts, semantic roots, canonical-preimage roots, canonical
+  byte counts, and collection counts. Actual equation, variable, condition,
+  lineage, incidence, matching, derivative-variable, and unknown-axis fixtures
+  also pin independent declared lengths to their payload serializers. G0/G4
+  adapter laws prove field and row admission precede length planning/payload
+  allocation and retain canonical-versus-producer origin, phase, row, completed
+  prefix, and canonical-byte progress on refusal.
 
 `tests/machine_semantics.rs` (Machine-IR E0 PR-3, G0/G3): fully populated
 behavior-overlay admission; complete state/initial/boundary/body-motion closure;

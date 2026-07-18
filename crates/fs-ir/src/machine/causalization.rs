@@ -18,17 +18,17 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::num::NonZeroU64;
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use fs_blake3::identity::{
     CancellationProbe, CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema,
     ChildSpec, EntityId, EvidenceNodeId, Field, FieldSpec, IdentityReceipt, LimitKind, NeverCancel,
-    OrderedBytesStreamError, ProblemSemanticId, StrongIdentity, WireType,
+    OrderedBytesStreamDiagnostic, OrderedBytesStreamError, ProblemSemanticId, StrongIdentity,
+    WireType,
 };
 use fs_exec::Cx;
-use fs_qty::Dims;
+use fs_qty::{DIMENSION_COUNT, Dims};
 
 use super::semantics::{AdmittedMachineBehavior, MachineBehaviorIdV1, StateSlotContract};
 use super::{
@@ -120,6 +120,7 @@ const NODE_IDENTITY_LIMITS: CanonicalLimits = CanonicalLimits::new(16_384, 8_192
 const INCIDENCE_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(128 * 1_024 * 1_024, 112 * 1_024 * 1_024, 1, 1, 256);
 const IDENTITY_RECEIPT_ADJUDICATION_BYTES: usize = 3 * 32 + 8 + 4 + 8;
+const CAUSAL_OWNER_CANONICAL_BYTES: usize = 1 + 32;
 // A max-key audited bridge contributes a complete incidence adjudication tuple
 // plus two canonical references to the provenance-only artifact row. Including
 // row-length frames, all 1,048,576 publicly admitted incidences require just
@@ -153,6 +154,125 @@ const CAUSAL_GRAPH_IDENTITY_LIMITS: CanonicalLimits = CanonicalLimits::new(
 const CAUSAL_RECEIPT_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(64 * 1_024 * 1_024, 32 * 1_024 * 1_024, 24, 300_000, 4_096);
 const TIME_DERIVATIVE_AXIS: usize = 2;
+
+/// Origin of one failure inside fallible ordered-row identity publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CausalIdentityStreamOrigin {
+    /// The canonical encoder refused framing, limits, accounting, or
+    /// cancellation.
+    Canonical,
+    /// The independent length planner or the admitted row producer refused.
+    Producer,
+}
+
+/// Exact ordered-row progress retained by a causal identity refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CausalIdentityStreamRefusal {
+    origin: CausalIdentityStreamOrigin,
+    diagnostic: OrderedBytesStreamDiagnostic,
+}
+
+impl CausalIdentityStreamRefusal {
+    /// Whether the canonical encoder or caller-owned producer originated the
+    /// refusal.
+    #[must_use]
+    pub const fn origin(self) -> CausalIdentityStreamOrigin {
+        self.origin
+    }
+
+    /// Schema, field, phase, row, completed-row, and byte progress at refusal.
+    #[must_use]
+    pub const fn diagnostic(self) -> OrderedBytesStreamDiagnostic {
+        self.diagnostic
+    }
+}
+
+/// Canonical identity failure with optional ordered-row progress evidence.
+///
+/// `canonical_error` preserves the existing stable refusal source. When the
+/// failure occurred in an ordered byte collection, `stream_refusal` additionally
+/// proves its origin, exact phase, row, completed prefix, byte progress, and
+/// no-publication disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CausalIdentityError {
+    canonical_error: CanonicalError,
+    stream_refusal: Option<CausalIdentityStreamRefusal>,
+}
+
+impl CausalIdentityError {
+    /// Stable canonical source.
+    #[must_use]
+    pub const fn canonical_error(self) -> CanonicalError {
+        self.canonical_error
+    }
+
+    /// Ordered-row progress evidence, when the refusal came from that adapter.
+    #[must_use]
+    pub const fn stream_refusal(self) -> Option<CausalIdentityStreamRefusal> {
+        self.stream_refusal
+    }
+
+    const fn is_cancelled(self) -> bool {
+        matches!(self.canonical_error, CanonicalError::Cancelled { .. })
+    }
+}
+
+impl From<CanonicalError> for CausalIdentityError {
+    fn from(canonical_error: CanonicalError) -> Self {
+        Self {
+            canonical_error,
+            stream_refusal: None,
+        }
+    }
+}
+
+impl From<OrderedBytesStreamError<CanonicalError>> for CausalIdentityError {
+    fn from(error: OrderedBytesStreamError<CanonicalError>) -> Self {
+        match error {
+            OrderedBytesStreamError::Canonical { source, diagnostic } => Self {
+                canonical_error: source,
+                stream_refusal: Some(CausalIdentityStreamRefusal {
+                    origin: CausalIdentityStreamOrigin::Canonical,
+                    diagnostic,
+                }),
+            },
+            OrderedBytesStreamError::Producer { source, diagnostic } => Self {
+                canonical_error: source,
+                stream_refusal: Some(CausalIdentityStreamRefusal {
+                    origin: CausalIdentityStreamOrigin::Producer,
+                    diagnostic,
+                }),
+            },
+        }
+    }
+}
+
+impl fmt::Display for CausalIdentityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(stream) = self.stream_refusal {
+            let diagnostic = stream.diagnostic();
+            write!(
+                f,
+                "{} (ordered field `{}`, {:?} origin, phase {:?}, row {:?}, {}/{} rows complete)",
+                self.canonical_error,
+                diagnostic.field_name(),
+                stream.origin(),
+                diagnostic.phase(),
+                diagnostic.row_index(),
+                diagnostic.completed_rows(),
+                diagnostic.declared_rows(),
+            )
+        } else {
+            self.canonical_error.fmt(f)
+        }
+    }
+}
+
+impl std::error::Error for CausalIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.canonical_error)
+    }
+}
 const CAUSAL_CANCELLATION_POLL_STRIDE: usize = 256;
 // Invalid drafts receive bounded, deterministic diagnostics rather than an
 // attacker-controlled multi-million-row finding allocation. Crossing this
@@ -625,13 +745,23 @@ impl NodeLineage {
 
     fn canonical_row_cancellable(&self, cx: &Cx<'_>) -> Result<Vec<u8>, CanonicalError> {
         let origin_bytes = node_origin_canonical_len_cancellable(&self.origin, cx)?;
-        let mut out = Vec::with_capacity(512usize.saturating_add(origin_bytes));
+        let canonical_bytes = origin_bytes
+            .saturating_add(CAUSAL_OWNER_CANONICAL_BYTES)
+            .saturating_add(causal_ref_canonical_len(self.semantic.namespace()));
+        let mut out = Vec::with_capacity(canonical_bytes);
         push_node_origin_cancellable(&mut out, &self.origin, cx)?;
         debug_assert_eq!(out.len(), origin_bytes);
         push_owner(&mut out, &self.instance);
         self.semantic.append_canonical(&mut out);
+        debug_assert_eq!(out.len(), canonical_bytes);
         identity_materialization_checkpoint(cx, out.len())?;
         Ok(out)
+    }
+
+    fn canonical_row_len_cancellable(&self, cx: &Cx<'_>) -> Result<usize, CanonicalError> {
+        Ok(node_origin_canonical_len_cancellable(&self.origin, cx)?
+            .saturating_add(CAUSAL_OWNER_CANONICAL_BYTES)
+            .saturating_add(causal_ref_canonical_len(self.semantic.namespace())))
     }
 
     fn normalized_row(&self) -> Vec<u8> {
@@ -1465,6 +1595,7 @@ impl CausalGraphFinding {
 pub struct CausalGraphRefusal {
     findings: Vec<CausalGraphFinding>,
     identity_error: Option<CanonicalError>,
+    identity_stream_refusal: Option<CausalIdentityStreamRefusal>,
 }
 
 impl CausalGraphRefusal {
@@ -1478,6 +1609,13 @@ impl CausalGraphRefusal {
     #[must_use]
     pub const fn identity_error(&self) -> Option<&CanonicalError> {
         self.identity_error.as_ref()
+    }
+
+    /// Exact ordered-row progress when identity publication refused inside a
+    /// streamed collection.
+    #[must_use]
+    pub const fn identity_stream_refusal(&self) -> Option<CausalIdentityStreamRefusal> {
+        self.identity_stream_refusal
     }
 }
 
@@ -1930,6 +2068,7 @@ fn graph_refusal(
     CausalGraphRefusal {
         findings,
         identity_error,
+        identity_stream_refusal: None,
     }
 }
 
@@ -1943,6 +2082,7 @@ fn graph_refusal_cancellable(
     Ok(CausalGraphRefusal {
         findings,
         identity_error: None,
+        identity_stream_refusal: None,
     })
 }
 
@@ -1974,16 +2114,18 @@ fn enforce_graph_finding_budget(findings: &[CausalGraphFinding]) -> Result<(), C
     }
 }
 
-fn identity_graph_refusal(error: CanonicalError) -> CausalGraphRefusal {
-    let rule = if matches!(error, CanonicalError::Cancelled { .. }) {
+fn identity_graph_refusal(error: CausalIdentityError) -> CausalGraphRefusal {
+    let rule = if error.is_cancelled() {
         CausalGraphRule::Cancelled
     } else {
         CausalGraphRule::Identity
     };
-    graph_refusal(
+    let mut refusal = graph_refusal(
         vec![CausalGraphFinding::new(rule, CausalGraphSubject::Graph)],
-        Some(error),
-    )
+        Some(error.canonical_error()),
+    );
+    refusal.identity_stream_refusal = error.stream_refusal();
+    refusal
 }
 
 fn graph_checkpoint(cx: &Cx<'_>) -> Result<(), CausalGraphRefusal> {
@@ -4141,7 +4283,7 @@ fn causal_structure_identity(
     draft: &CausalGraphDraft,
     machine: &AdmittedMachineGraph,
     cx: &Cx<'_>,
-) -> Result<IdentityReceipt<CausalStructureIdV1>, CanonicalError> {
+) -> Result<IdentityReceipt<CausalStructureIdV1>, CausalIdentityError> {
     let mut machine_receipt_row = Vec::with_capacity(IDENTITY_RECEIPT_ADJUDICATION_BYTES);
     push_identity_receipt_adjudication(&mut machine_receipt_row, machine.identity_receipt());
     // Typed children retain recursive role/schema binding; their sibling
@@ -4175,6 +4317,7 @@ fn causal_structure_identity(
         Field::new(5, "equations"),
         &draft.equations,
         cx,
+        equation_structure_row_len_cancellable,
         equation_structure_row,
     )?;
     let encoder = stream_identity_rows(
@@ -4182,6 +4325,7 @@ fn causal_structure_identity(
         Field::new(6, "variables"),
         &draft.variables,
         cx,
+        variable_structure_row_len_cancellable,
         variable_structure_row,
     )?;
     let encoder = stream_identity_rows(
@@ -4189,6 +4333,7 @@ fn causal_structure_identity(
         Field::new(7, "activation-conditions"),
         &draft.conditions,
         cx,
+        condition_canonical_len_cancellable,
         condition_row,
     )?;
     let encoder = encoder.ordered_children(
@@ -4204,6 +4349,7 @@ fn causal_structure_identity(
         Field::new(9, "incidence-receipt-adjudications"),
         &draft.incidences,
         cx,
+        |_, _| Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES),
         |incidence, _| {
             let mut row = Vec::with_capacity(IDENTITY_RECEIPT_ADJUDICATION_BYTES);
             push_identity_receipt_adjudication(&mut row, incidence.id.identity_receipt());
@@ -4211,6 +4357,7 @@ fn causal_structure_identity(
         },
     )?
     .finish()
+    .map_err(Into::into)
 }
 
 fn causal_artifact_identity(
@@ -4218,7 +4365,7 @@ fn causal_artifact_identity(
     structure: IdentityReceipt<CausalStructureIdV1>,
     behavior: Option<IdentityReceipt<MachineBehaviorIdV1>>,
     cx: &Cx<'_>,
-) -> Result<IdentityReceipt<CausalGraphArtifactIdV1>, CanonicalError> {
+) -> Result<IdentityReceipt<CausalGraphArtifactIdV1>, CausalIdentityError> {
     let extraction = extraction_context_row(&draft.extraction);
     let behavior_row = behavior.map(machine_behavior_identity_row);
     let mut structure_row = Vec::with_capacity(IDENTITY_RECEIPT_ADJUDICATION_BYTES);
@@ -4246,6 +4393,7 @@ fn causal_artifact_identity(
         Field::new(5, "equation-lineage"),
         &draft.equations,
         cx,
+        |equation, cx| node_artifact_row_equation_len_cancellable(&equation.lineage, cx),
         |equation, cx| node_artifact_row_equation(&equation.id, &equation.lineage, cx),
     )?;
     let encoder = stream_identity_rows(
@@ -4253,6 +4401,7 @@ fn causal_artifact_identity(
         Field::new(6, "variable-lineage"),
         &draft.variables,
         cx,
+        node_artifact_row_variable_len_cancellable,
         node_artifact_row_variable,
     )?;
     let encoder = stream_identity_rows(
@@ -4260,6 +4409,7 @@ fn causal_artifact_identity(
         Field::new(7, "activation-condition-provenance"),
         &draft.conditions,
         cx,
+        |condition, _| Ok(condition_artifact_row_len(condition)),
         |condition, _| Ok(condition_artifact_row(condition)),
     )?;
     stream_identity_rows(
@@ -4267,9 +4417,11 @@ fn causal_artifact_identity(
         Field::new(8, "incidence-provenance"),
         &draft.incidences,
         cx,
+        |incidence, _| Ok(incidence_artifact_row_len(incidence)),
         |incidence, _| Ok(incidence_artifact_row(incidence)),
     )?
     .finish()
+    .map_err(Into::into)
 }
 
 fn identity_materialization_checkpoint(
@@ -4297,48 +4449,118 @@ fn stream_identity_rows<I, C, T>(
     field: Field,
     values: &[T],
     cx: &Cx<'_>,
+    mut row_len: impl FnMut(&T, &Cx<'_>) -> Result<usize, CanonicalError>,
     mut row: impl FnMut(&T, &Cx<'_>) -> Result<Vec<u8>, CanonicalError>,
-) -> Result<CanonicalEncoder<I, C>, CanonicalError>
+) -> Result<CanonicalEncoder<I, C>, CausalIdentityError>
 where
     C: CancellationProbe,
 {
     let declared_count = u64::try_from(values.len()).map_err(|_| CanonicalError::LengthOverflow)?;
-    let pending = RefCell::new(None::<(u64, Vec<u8>)>);
-    let row_lengths = values.iter().enumerate().map(|(index, value)| {
-        if pending.borrow().is_some() {
-            return Err(CanonicalError::InvalidSchemaDescriptor(
-                "ordered row adapter retained an unconsumed row",
-            ));
-        }
-        identity_materialization_poll(cx, index, 0)?;
-        let bytes = row(value, cx)?;
-        let length = u64::try_from(bytes.len()).map_err(|_| CanonicalError::LengthOverflow)?;
-        let index = u64::try_from(index).map_err(|_| CanonicalError::LengthOverflow)?;
-        *pending.borrow_mut() = Some((index, bytes));
-        Ok(length)
+    // Length planning is deliberately independent from row production. The
+    // encoder admits each exact declaration before the producer is allowed to
+    // allocate or serialize that row.
+    let row_lengths = values.iter().map(|value| {
+        row_len(value, cx)
+            .and_then(|bytes| u64::try_from(bytes).map_err(|_| CanonicalError::LengthOverflow))
     });
     encoder
         .ordered_bytes_stream(field, declared_count, row_lengths, |row_index, mut sink| {
-            let Some((pending_index, bytes)) = pending.borrow_mut().take() else {
-                return Err(CanonicalError::InvalidSchemaDescriptor(
-                    "ordered row adapter lost its declared row",
-                ));
-            };
-            if pending_index != row_index {
-                return Err(CanonicalError::InvalidSchemaDescriptor(
-                    "ordered row adapter changed row order",
-                ));
-            }
+            let index = usize::try_from(row_index).map_err(|_| CanonicalError::LengthOverflow)?;
+            let value = values
+                .get(index)
+                .ok_or(CanonicalError::InvalidSchemaDescriptor(
+                    "ordered row adapter received an out-of-range row index",
+                ))?;
+            let bytes = row(value, cx)?;
             sink.write(&bytes)
         })
-        .map_err(ordered_stream_source)
+        .map_err(Into::into)
 }
 
-fn ordered_stream_source(error: OrderedBytesStreamError<CanonicalError>) -> CanonicalError {
-    match error {
-        OrderedBytesStreamError::Canonical { source, .. }
-        | OrderedBytesStreamError::Producer { source, .. } => source,
+fn terminal_quantity_canonical_len(quantity: TerminalQuantitySpec) -> usize {
+    match quantity {
+        TerminalQuantitySpec::Dimensional(_) => 1 + DIMENSION_COUNT,
+        TerminalQuantitySpec::Semantic(semantic) => {
+            let kind_bytes = match semantic.kind() {
+                super::QuantityKind::Angle(_)
+                | super::QuantityKind::AngularVelocity(_)
+                | super::QuantityKind::Composition(_) => 2,
+                super::QuantityKind::Strain { .. } => 3,
+                super::QuantityKind::AbsoluteTemperature
+                | super::QuantityKind::TemperatureDifference
+                | super::QuantityKind::Torque
+                | super::QuantityKind::Energy
+                | super::QuantityKind::Pressure
+                | super::QuantityKind::Stress
+                | super::QuantityKind::Mass
+                | super::QuantityKind::Amount
+                | super::QuantityKind::MolarMass
+                | super::QuantityKind::MassConcentration
+                | super::QuantityKind::AmountConcentration
+                | super::QuantityKind::Entropy
+                | super::QuantityKind::HeatCapacity
+                | super::QuantityKind::AcousticPressure
+                | super::QuantityKind::AcousticPower => 1,
+            };
+            1 + kind_bytes + 1 + DIMENSION_COUNT
+        }
     }
+}
+
+const fn terminal_shape_canonical_len(shape: TerminalShape) -> usize {
+    match shape {
+        TerminalShape::Scalar => 1,
+        TerminalShape::Vector { .. } | TerminalShape::FieldTrace { .. } => 1 + 8,
+        TerminalShape::Tensor { .. } => 1 + 16,
+    }
+}
+
+fn signal_canonical_len(signal: &SignalContract) -> usize {
+    terminal_quantity_canonical_len(signal.quantity)
+        .saturating_add(terminal_shape_canonical_len(signal.shape))
+        .saturating_add(32)
+        .saturating_add(8usize.saturating_add(signal.frame.canonical_key().len()))
+        .saturating_add(1)
+}
+
+fn optional_causal_ref_canonical_len(namespace: Option<&str>) -> usize {
+    1usize.saturating_add(namespace.map_or(0, causal_ref_canonical_len))
+}
+
+fn equation_structure_row_len_cancellable(
+    equation: &EquationSpec,
+    cx: &Cx<'_>,
+) -> Result<usize, CanonicalError> {
+    Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES
+        .saturating_add(CAUSAL_OWNER_CANONICAL_BYTES)
+        .saturating_add(supports_canonical_len_cancellable(&equation.supports, cx)?)
+        .saturating_add(signal_canonical_len(&equation.residual))
+        .saturating_add(2)
+        .saturating_add(activation_canonical_len_cancellable(
+            &equation.activation,
+            cx,
+        )?))
+}
+
+fn variable_structure_row_len_cancellable(
+    variable: &VariableSpec,
+    cx: &Cx<'_>,
+) -> Result<usize, CanonicalError> {
+    Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES
+        .saturating_add(CAUSAL_OWNER_CANONICAL_BYTES)
+        .saturating_add(supports_canonical_len_cancellable(&variable.supports, cx)?)
+        .saturating_add(signal_canonical_len(&variable.value))
+        .saturating_add(2)
+        .saturating_add(optional_causal_ref_canonical_len(
+            variable
+                .port_schema_crosswalk
+                .as_ref()
+                .map(|binding| binding.projection.namespace()),
+        ))
+        .saturating_add(activation_canonical_len_cancellable(
+            &variable.activation,
+            cx,
+        )?))
 }
 
 fn machine_behavior_identity_row(receipt: IdentityReceipt<MachineBehaviorIdV1>) -> Vec<u8> {
@@ -4384,11 +4606,13 @@ fn extraction_context_row(context: &CausalExtractionContext) -> Vec<u8> {
 fn equation_structure_row(equation: &EquationSpec, cx: &Cx<'_>) -> Result<Vec<u8>, CanonicalError> {
     let support_bytes = supports_canonical_len_cancellable(&equation.supports, cx)?;
     let activation_bytes = activation_canonical_len_cancellable(&equation.activation, cx)?;
-    let mut out = Vec::with_capacity(
-        NODE_FIXED_CANONICAL_CAPACITY
-            .saturating_add(support_bytes)
-            .saturating_add(activation_bytes),
-    );
+    let canonical_bytes = IDENTITY_RECEIPT_ADJUDICATION_BYTES
+        .saturating_add(CAUSAL_OWNER_CANONICAL_BYTES)
+        .saturating_add(support_bytes)
+        .saturating_add(signal_canonical_len(&equation.residual))
+        .saturating_add(2)
+        .saturating_add(activation_bytes);
+    let mut out = Vec::with_capacity(canonical_bytes);
     push_identity_receipt_adjudication(&mut out, equation.id.identity_receipt());
     push_owner(&mut out, &equation.owner);
     push_supports_cancellable(&mut out, &equation.supports, cx)?;
@@ -4398,6 +4622,7 @@ fn equation_structure_row(equation: &EquationSpec, cx: &Cx<'_>) -> Result<Vec<u8
     debug_assert!(out.len() <= NODE_FIXED_CANONICAL_CAPACITY + support_bytes);
     identity_materialization_checkpoint(cx, out.len())?;
     push_activation_cancellable(&mut out, &equation.activation, cx)?;
+    debug_assert_eq!(out.len(), canonical_bytes);
     identity_materialization_checkpoint(cx, out.len())?;
     Ok(out)
 }
@@ -4405,11 +4630,19 @@ fn equation_structure_row(equation: &EquationSpec, cx: &Cx<'_>) -> Result<Vec<u8
 fn variable_structure_row(variable: &VariableSpec, cx: &Cx<'_>) -> Result<Vec<u8>, CanonicalError> {
     let support_bytes = supports_canonical_len_cancellable(&variable.supports, cx)?;
     let activation_bytes = activation_canonical_len_cancellable(&variable.activation, cx)?;
-    let mut out = Vec::with_capacity(
-        NODE_FIXED_CANONICAL_CAPACITY
-            .saturating_add(support_bytes)
-            .saturating_add(activation_bytes),
-    );
+    let canonical_bytes = IDENTITY_RECEIPT_ADJUDICATION_BYTES
+        .saturating_add(CAUSAL_OWNER_CANONICAL_BYTES)
+        .saturating_add(support_bytes)
+        .saturating_add(signal_canonical_len(&variable.value))
+        .saturating_add(2)
+        .saturating_add(optional_causal_ref_canonical_len(
+            variable
+                .port_schema_crosswalk
+                .as_ref()
+                .map(|binding| binding.projection.namespace()),
+        ))
+        .saturating_add(activation_bytes);
+    let mut out = Vec::with_capacity(canonical_bytes);
     push_identity_receipt_adjudication(&mut out, variable.id.identity_receipt());
     push_owner(&mut out, &variable.owner);
     push_supports_cancellable(&mut out, &variable.supports, cx)?;
@@ -4426,6 +4659,7 @@ fn variable_structure_row(variable: &VariableSpec, cx: &Cx<'_>) -> Result<Vec<u8
     debug_assert!(out.len() <= NODE_FIXED_CANONICAL_CAPACITY + support_bytes);
     identity_materialization_checkpoint(cx, out.len())?;
     push_activation_cancellable(&mut out, &variable.activation, cx)?;
+    debug_assert_eq!(out.len(), canonical_bytes);
     identity_materialization_checkpoint(cx, out.len())?;
     Ok(out)
 }
@@ -4468,16 +4702,7 @@ fn condition_row(
 }
 
 fn condition_artifact_row(condition: &ActivationConditionSpec) -> Vec<u8> {
-    let source_bytes = match &condition.source {
-        ActivationConditionSource::GuardEquation { .. } => 0,
-        ActivationConditionSource::AuditedPredicate(escape) => {
-            causal_ref_canonical_len(escape.audit.namespace())
-                .saturating_add(causal_ref_canonical_len(escape.audited_source.namespace()))
-        }
-    };
-    let canonical_bytes = causal_ref_canonical_len(condition.condition.namespace())
-        .saturating_add(1)
-        .saturating_add(source_bytes);
+    let canonical_bytes = condition_artifact_row_len(condition);
     let mut out = Vec::with_capacity(canonical_bytes);
     condition.condition.append_canonical(&mut out);
     match &condition.source {
@@ -4490,6 +4715,19 @@ fn condition_artifact_row(condition: &ActivationConditionSpec) -> Vec<u8> {
     }
     debug_assert_eq!(out.len(), canonical_bytes);
     out
+}
+
+fn condition_artifact_row_len(condition: &ActivationConditionSpec) -> usize {
+    let source_bytes = match &condition.source {
+        ActivationConditionSource::GuardEquation { .. } => 0,
+        ActivationConditionSource::AuditedPredicate(escape) => {
+            causal_ref_canonical_len(escape.audit.namespace())
+                .saturating_add(causal_ref_canonical_len(escape.audited_source.namespace()))
+        }
+    };
+    causal_ref_canonical_len(condition.condition.namespace())
+        .saturating_add(1)
+        .saturating_add(source_bytes)
 }
 
 fn incidence_meaning_row_cancellable(
@@ -4624,6 +4862,15 @@ fn node_artifact_row_equation(
     Ok(out)
 }
 
+fn node_artifact_row_equation_len_cancellable(
+    lineage: &NodeLineage,
+    cx: &Cx<'_>,
+) -> Result<usize, CanonicalError> {
+    Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES
+        .saturating_add(8)
+        .saturating_add(lineage.canonical_row_len_cancellable(cx)?))
+}
+
 fn node_artifact_row_variable(
     variable: &VariableSpec,
     cx: &Cx<'_>,
@@ -4656,12 +4903,24 @@ fn node_artifact_row_variable(
     Ok(out)
 }
 
+fn node_artifact_row_variable_len_cancellable(
+    variable: &VariableSpec,
+    cx: &Cx<'_>,
+) -> Result<usize, CanonicalError> {
+    Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES
+        .saturating_add(8)
+        .saturating_add(variable.lineage.canonical_row_len_cancellable(cx)?)
+        .saturating_add(optional_causal_ref_canonical_len(
+            variable
+                .port_schema_crosswalk
+                .as_ref()
+                .map(|binding| binding.audit.namespace()),
+        )))
+}
+
 fn incidence_artifact_row(incidence: &IncidenceSpec) -> Vec<u8> {
-    let capacity = match &incidence.clock_relation {
-        IncidenceClockRelation::SameClock => IDENTITY_RECEIPT_ADJUDICATION_BYTES + 1,
-        IncidenceClockRelation::AuditedBridge { .. } => MAX_CAUSAL_INCIDENCE_ARTIFACT_ROW_BYTES,
-    };
-    let mut out = Vec::with_capacity(capacity);
+    let canonical_bytes = incidence_artifact_row_len(incidence);
+    let mut out = Vec::with_capacity(canonical_bytes);
     push_identity_receipt_adjudication(&mut out, incidence.id.identity_receipt());
     match &incidence.clock_relation {
         IncidenceClockRelation::SameClock => out.push(1),
@@ -4675,8 +4934,21 @@ fn incidence_artifact_row(incidence: &IncidenceSpec) -> Vec<u8> {
             audited_bridge.append_canonical(&mut out);
         }
     }
-    debug_assert!(out.len() <= capacity);
+    debug_assert_eq!(out.len(), canonical_bytes);
     out
+}
+
+fn incidence_artifact_row_len(incidence: &IncidenceSpec) -> usize {
+    IDENTITY_RECEIPT_ADJUDICATION_BYTES.saturating_add(match &incidence.clock_relation {
+        IncidenceClockRelation::SameClock => 1,
+        IncidenceClockRelation::AuditedBridge {
+            audit,
+            audited_bridge,
+            ..
+        } => 1usize
+            .saturating_add(causal_ref_canonical_len(audit.namespace()))
+            .saturating_add(causal_ref_canonical_len(audited_bridge.namespace())),
+    })
 }
 
 fn node_origin_canonical_len_cancellable(
@@ -5474,6 +5746,8 @@ pub enum MaximumMatchingBindingError {
     HybridSummaryDomain,
     /// Canonical matching-set identity publication refused.
     Identity(CanonicalError),
+    /// Ordered matching-row identity publication refused with exact progress.
+    IdentityStream(CausalIdentityError),
 }
 
 impl fmt::Display for MaximumMatchingBindingError {
@@ -5489,6 +5763,9 @@ impl fmt::Display for MaximumMatchingBindingError {
                 f.write_str("hybrid summaries cannot bind a union-graph maximum matching")
             }
             Self::Identity(error) => write!(f, "matching-set identity refused: {error}"),
+            Self::IdentityStream(error) => {
+                write!(f, "matching-set streamed identity refused: {error}")
+            }
         }
     }
 }
@@ -5499,8 +5776,17 @@ impl std::error::Error for MaximumMatchingBindingError {
             Self::InvalidMatchingSet(problem) => Some(problem),
             Self::InvalidDomain(problem) => Some(problem),
             Self::Identity(error) => Some(error),
+            Self::IdentityStream(error) => Some(error),
             Self::HybridSummaryDomain => None,
         }
+    }
+}
+
+fn maximum_matching_identity_error(error: CausalIdentityError) -> MaximumMatchingBindingError {
+    if error.stream_refusal().is_some() {
+        MaximumMatchingBindingError::IdentityStream(error)
+    } else {
+        MaximumMatchingBindingError::Identity(error.canonical_error())
     }
 }
 
@@ -5526,7 +5812,7 @@ impl MaximumMatchingBinding {
         let canonical_matching =
             canonicalize_maximum_matching_witness(graph, &domain, matching, cx)?;
         let matching_set = causal_matching_set_identity_cancellable(&canonical_matching, cx)
-            .map_err(MaximumMatchingBindingError::Identity)?;
+            .map_err(maximum_matching_identity_error)?;
         Ok(Self {
             structure: graph.structure_identity_receipt(),
             artifact: graph.artifact_identity_receipt(),
@@ -5922,6 +6208,8 @@ pub enum ConditionalCoverageBindingError {
     IncompatibleUniformClaim,
     /// Canonical child-set identity publication refused.
     Identity(CanonicalError),
+    /// Ordered child-row identity publication refused with exact progress.
+    IdentityStream(CausalIdentityError),
 }
 
 impl fmt::Display for ConditionalCoverageBindingError {
@@ -5991,11 +6279,27 @@ impl fmt::Display for ConditionalCoverageBindingError {
                 f.write_str("uniform determination and structural-rank axes are incompatible")
             }
             Self::Identity(error) => write!(f, "conditional outcome-set identity refused: {error}"),
+            Self::IdentityStream(error) => {
+                write!(
+                    f,
+                    "conditional outcome-set streamed identity refused: {error}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for ConditionalCoverageBindingError {}
+
+fn conditional_coverage_identity_error(
+    error: CausalIdentityError,
+) -> ConditionalCoverageBindingError {
+    if error.stream_refusal().is_some() {
+        ConditionalCoverageBindingError::IdentityStream(error)
+    } else {
+        ConditionalCoverageBindingError::Identity(error.canonical_error())
+    }
+}
 
 impl ConditionalCoverageBinding {
     /// Bind a coverage certificate to an exact graph and exact canonical set
@@ -6033,7 +6337,7 @@ impl ConditionalCoverageBinding {
         let canonical_outcomes = canonicalize_coverage_outcomes(graph, outcomes, cx)?;
         validate_cartesian_mode_cover(graph, &canonical_outcomes, &strides, expected_outcomes, cx)?;
         let outcome_set = conditional_outcome_set_identity_cancellable(&canonical_outcomes, cx)
-            .map_err(ConditionalCoverageBindingError::Identity)?;
+            .map_err(conditional_coverage_identity_error)?;
         Ok(Self {
             structure: graph.structure_identity_receipt(),
             artifact: graph.artifact_identity_receipt(),
@@ -6596,6 +6900,7 @@ impl CausalReceiptFinding {
 pub struct CausalReceiptRefusal {
     findings: Vec<CausalReceiptFinding>,
     identity_error: Option<CanonicalError>,
+    identity_stream_refusal: Option<CausalIdentityStreamRefusal>,
 }
 
 impl CausalReceiptRefusal {
@@ -6609,6 +6914,13 @@ impl CausalReceiptRefusal {
     #[must_use]
     pub const fn identity_error(&self) -> Option<&CanonicalError> {
         self.identity_error.as_ref()
+    }
+
+    /// Exact ordered-row progress when identity publication refused inside a
+    /// streamed collection.
+    #[must_use]
+    pub const fn identity_stream_refusal(&self) -> Option<CausalIdentityStreamRefusal> {
+        self.identity_stream_refusal
     }
 }
 
@@ -7108,7 +7420,25 @@ fn receipt_refusal(
     CausalReceiptRefusal {
         findings,
         identity_error,
+        identity_stream_refusal: None,
     }
+}
+
+fn identity_receipt_refusal(error: CausalIdentityError) -> CausalReceiptRefusal {
+    let rule = if error.is_cancelled() {
+        CausalReceiptRule::Cancelled
+    } else {
+        CausalReceiptRule::Identity
+    };
+    let mut refusal = receipt_refusal(
+        vec![CausalReceiptFinding::new(
+            rule,
+            CausalReceiptSubject::Receipt,
+        )],
+        Some(error.canonical_error()),
+    );
+    refusal.identity_stream_refusal = error.stream_refusal();
+    refusal
 }
 
 fn receipt_refusal_cancellable(
@@ -7121,6 +7451,7 @@ fn receipt_refusal_cancellable(
     Ok(CausalReceiptRefusal {
         findings,
         identity_error: None,
+        identity_stream_refusal: None,
     })
 }
 
@@ -7420,10 +7751,7 @@ fn admit_causalization_receipt(
     let actual_matching_set = if draft.maximum_matching_certificate.is_some() {
         match causal_matching_set_identity_cancellable(&draft.matching, cx) {
             Ok(identity) => Some(identity),
-            Err(CanonicalError::Cancelled { .. }) => {
-                return Err(cancelled_receipt_refusal());
-            }
-            Err(_) => None,
+            Err(error) => return Err(identity_receipt_refusal(error)),
         }
     } else {
         None
@@ -7592,10 +7920,7 @@ fn admit_causalization_receipt(
         Some(ConditionalCoverageClaim::ModeCells(_)) => {
             match conditional_outcome_set_identity_cancellable(&draft.conditional_outcomes, cx) {
                 Ok(identity) => Some(identity),
-                Err(CanonicalError::Cancelled { .. }) => {
-                    return Err(cancelled_receipt_refusal());
-                }
-                Err(_) => None,
+                Err(error) => return Err(identity_receipt_refusal(error)),
             }
         }
         Some(ConditionalCoverageClaim::UniformTheorem { .. }) | None => None,
@@ -7709,20 +8034,7 @@ fn admit_causalization_receipt(
     let artifact_receipt = graph.artifact_identity_receipt();
     let outcome_receipt = match causal_outcome_identity(&draft, structure_receipt, cx) {
         Ok(receipt) => receipt,
-        Err(error) => {
-            let rule = if matches!(error, CanonicalError::Cancelled { .. }) {
-                CausalReceiptRule::Cancelled
-            } else {
-                CausalReceiptRule::Identity
-            };
-            return Err(receipt_refusal(
-                vec![CausalReceiptFinding::new(
-                    rule,
-                    CausalReceiptSubject::Receipt,
-                )],
-                Some(error),
-            ));
-        }
+        Err(error) => return Err(identity_receipt_refusal(error)),
     };
     let receipt = match causalization_receipt_identity(
         &draft,
@@ -7732,20 +8044,7 @@ fn admit_causalization_receipt(
         cx,
     ) {
         Ok(receipt) => receipt,
-        Err(error) => {
-            let rule = if matches!(error, CanonicalError::Cancelled { .. }) {
-                CausalReceiptRule::Cancelled
-            } else {
-                CausalReceiptRule::Identity
-            };
-            return Err(receipt_refusal(
-                vec![CausalReceiptFinding::new(
-                    rule,
-                    CausalReceiptSubject::Receipt,
-                )],
-                Some(error),
-            ));
-        }
+        Err(error) => return Err(identity_receipt_refusal(error)),
     };
     receipt_checkpoint(cx)?;
     Ok(AdmittedCausalizationReceipt {
@@ -7773,7 +8072,7 @@ fn causal_outcome_identity(
     draft: &CausalizationReceiptDraft,
     structure: IdentityReceipt<CausalStructureIdV1>,
     cx: &Cx<'_>,
-) -> Result<IdentityReceipt<CausalOutcomeIdV1>, CanonicalError> {
+) -> Result<IdentityReceipt<CausalOutcomeIdV1>, CausalIdentityError> {
     let domain = receipt_domain_row_cancellable(&draft.domain, cx)?;
     let axes = [
         determination_tag(draft.determination),
@@ -7802,6 +8101,7 @@ fn causal_outcome_identity(
         Field::new(5, "matching"),
         &draft.matching,
         cx,
+        |_, _| Ok(3 * IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2),
         |pair, _| Ok(matching_row(pair)),
     )?;
     let encoder = stream_identity_rows(
@@ -7809,6 +8109,7 @@ fn causal_outcome_identity(
         Field::new(6, "unmatched-equations"),
         &draft.unmatched_equations,
         cx,
+        |_, _| Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES),
         |equation, _| {
             let mut row = Vec::with_capacity(116);
             push_identity_receipt_adjudication(&mut row, equation.identity_receipt());
@@ -7820,6 +8121,7 @@ fn causal_outcome_identity(
         Field::new(7, "unmatched-variables"),
         &draft.unmatched_variables,
         cx,
+        |_, _| Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2),
         |variable, _| Ok(derivative_variable_row(variable)),
     )?;
     stream_identity_rows(
@@ -7827,9 +8129,11 @@ fn causal_outcome_identity(
         Field::new(8, "conditional-outcome-semantics"),
         &draft.conditional_outcomes,
         cx,
+        normalized_conditional_outcome_row_len_cancellable,
         normalized_conditional_outcome_row_cancellable,
     )?
     .finish()
+    .map_err(Into::into)
 }
 
 fn causalization_receipt_identity(
@@ -7838,7 +8142,7 @@ fn causalization_receipt_identity(
     artifact: IdentityReceipt<CausalGraphArtifactIdV1>,
     outcome: IdentityReceipt<CausalOutcomeIdV1>,
     cx: &Cx<'_>,
-) -> Result<IdentityReceipt<CausalizationReceiptIdV1>, CanonicalError> {
+) -> Result<IdentityReceipt<CausalizationReceiptIdV1>, CausalIdentityError> {
     let axes = [
         determination_tag(draft.determination),
         structural_rank_tag(draft.structural_rank),
@@ -7895,6 +8199,7 @@ fn causalization_receipt_identity(
         Field::new(8, "matching"),
         &draft.matching,
         cx,
+        |_, _| Ok(3 * IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2),
         |pair, _| Ok(matching_row(pair)),
     )?;
     let encoder = stream_identity_rows(
@@ -7902,6 +8207,7 @@ fn causalization_receipt_identity(
         Field::new(9, "unmatched-equations"),
         &draft.unmatched_equations,
         cx,
+        |_, _| Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES),
         |equation, _| {
             let mut row = Vec::with_capacity(116);
             push_identity_receipt_adjudication(&mut row, equation.identity_receipt());
@@ -7913,6 +8219,7 @@ fn causalization_receipt_identity(
         Field::new(10, "unmatched-variables"),
         &draft.unmatched_variables,
         cx,
+        |_, _| Ok(IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2),
         |variable, _| Ok(derivative_variable_row(variable)),
     )?;
     let encoder = stream_identity_rows(
@@ -7920,6 +8227,7 @@ fn causalization_receipt_identity(
         Field::new(11, "conditional-outcomes"),
         &draft.conditional_outcomes,
         cx,
+        conditional_outcome_row_len_cancellable,
         conditional_outcome_row_cancellable,
     )?;
     let encoder = encoder
@@ -7936,6 +8244,7 @@ fn causalization_receipt_identity(
         Field::new(14, "unknown-axes"),
         &draft.unknown_axes,
         cx,
+        |state, _| Ok(unknown_axis_row_len(state)),
         |state, _| Ok(unknown_axis_row(state)),
     )?;
     encoder
@@ -7950,6 +8259,7 @@ fn causalization_receipt_identity(
             &outcome_row,
         )?
         .finish()
+        .map_err(Into::into)
 }
 
 fn receipt_domain_row_cancellable(
@@ -7994,6 +8304,15 @@ fn unknown_axis_row(state: &CausalUnknownAxisState) -> Vec<u8> {
     out.push(unknown_reason_tag(state.reason));
     push_optional_ref(&mut out, state.resume_checkpoint.as_ref());
     out
+}
+
+fn unknown_axis_row_len(state: &CausalUnknownAxisState) -> usize {
+    2usize.saturating_add(optional_causal_ref_canonical_len(
+        state
+            .resume_checkpoint
+            .as_ref()
+            .map(CausalCheckpointRef::namespace),
+    ))
 }
 
 fn analysis_context_row(context: &CausalAnalysisContext) -> Vec<u8> {
@@ -8046,7 +8365,7 @@ fn compare_causal_matching_pairs_nominal(
 fn causal_matching_set_identity_cancellable(
     canonical_matching: &[CausalMatchingPair],
     cx: &Cx<'_>,
-) -> Result<IdentityReceipt<CausalMatchingSetIdV1>, CanonicalError> {
+) -> Result<IdentityReceipt<CausalMatchingSetIdV1>, CausalIdentityError> {
     let encoder =
         CanonicalEncoder::<CausalMatchingSetIdV1, _>::new(CAUSAL_RECEIPT_IDENTITY_LIMITS, || {
             cx.checkpoint().is_err()
@@ -8056,9 +8375,11 @@ fn causal_matching_set_identity_cancellable(
         Field::new(0, "matching-pairs"),
         canonical_matching,
         cx,
+        |_, _| Ok(3 * IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2),
         |pair, _| Ok(matching_row(pair)),
     )?
     .finish()
+    .map_err(Into::into)
 }
 
 fn maximum_matching_binding_row_cancellable(
@@ -8117,6 +8438,17 @@ fn conditional_outcome_row_cancellable(
     Ok(out)
 }
 
+fn conditional_outcome_row_len_cancellable(
+    outcome: &ConditionalCausalOutcome,
+    cx: &Cx<'_>,
+) -> Result<usize, CanonicalError> {
+    Ok(
+        assignment_canonical_len_cancellable(&outcome.assignment, cx)?
+            .saturating_add(2)
+            .saturating_add(2 * IDENTITY_RECEIPT_ADJUDICATION_BYTES),
+    )
+}
+
 fn normalized_conditional_outcome_row_cancellable(
     outcome: &ConditionalCausalOutcome,
     cx: &Cx<'_>,
@@ -8140,10 +8472,21 @@ fn normalized_conditional_outcome_row_cancellable(
     Ok(out)
 }
 
+fn normalized_conditional_outcome_row_len_cancellable(
+    outcome: &ConditionalCausalOutcome,
+    cx: &Cx<'_>,
+) -> Result<usize, CanonicalError> {
+    Ok(
+        assignment_canonical_len_cancellable(&outcome.assignment, cx)?
+            .saturating_add(2)
+            .saturating_add(IDENTITY_RECEIPT_ADJUDICATION_BYTES),
+    )
+}
+
 fn conditional_outcome_set_identity_cancellable(
     canonical_outcomes: &[ConditionalCausalOutcome],
     cx: &Cx<'_>,
-) -> Result<IdentityReceipt<ConditionalOutcomeSetIdV1>, CanonicalError> {
+) -> Result<IdentityReceipt<ConditionalOutcomeSetIdV1>, CausalIdentityError> {
     let encoder = CanonicalEncoder::<ConditionalOutcomeSetIdV1, _>::new(
         CAUSAL_RECEIPT_IDENTITY_LIMITS,
         || cx.checkpoint().is_err(),
@@ -8153,9 +8496,11 @@ fn conditional_outcome_set_identity_cancellable(
         Field::new(0, "mode-cell-outcomes"),
         canonical_outcomes,
         cx,
+        conditional_outcome_row_len_cancellable,
         conditional_outcome_row_cancellable,
     )?
     .finish()
+    .map_err(Into::into)
 }
 
 fn conditional_coverage_row(binding: &ConditionalCoverageBinding) -> Vec<u8> {
@@ -8793,6 +9138,7 @@ const fn migration_artifact_kind_tag(kind: CausalMigrationArtifactKind) -> u8 {
 #[cfg(test)]
 mod internal_tests {
     use super::*;
+    use fs_blake3::identity::OrderedBytesStreamPhase;
     use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
     enum StreamParitySchemaV1 {}
@@ -8854,9 +9200,14 @@ mod internal_tests {
                 NeverCancel,
             )
             .expect("valid streamed encoder");
-            stream_identity_rows(encoder, Field::new(0, "rows"), &rows, cx, |row, _| {
-                Ok(row.clone())
-            })
+            stream_identity_rows(
+                encoder,
+                Field::new(0, "rows"),
+                &rows,
+                cx,
+                |row, _| Ok(row.len()),
+                |row, _| Ok(row.clone()),
+            )
             .expect("streamed rows admit")
             .finish()
             .expect("streamed identity publishes")
@@ -8870,6 +9221,189 @@ mod internal_tests {
     }
 
     #[test]
+    fn g3_actual_causal_row_length_plans_match_payload_families() {
+        let version = NonZeroU64::new(1).expect("fixture version is nonzero");
+        let owner = SubsystemId::new("subsystem/i02-stream-plan").expect("valid owner");
+        let clock = ClockId::new("clock/i02-stream-plan").expect("valid clock");
+        let condition_ref = ActivationConditionRef::new("i02/condition", version, [1; 32])
+            .expect("valid condition");
+        let branch =
+            ActivationBranchRef::new("i02/branch/on", version, [2; 32]).expect("valid branch");
+        let activation = ActivationDomain::Conditional {
+            cubes: vec![ActivationCube {
+                selections: vec![ConditionBranchSelection {
+                    condition: condition_ref.clone(),
+                    branch: branch.clone(),
+                }],
+            }],
+        };
+        let equation_lineage = NodeLineage::new(
+            NodeOrigin::Machine(MachineNodeOrigin::Subsystem(owner.clone())),
+            CausalOwner::Subsystem(owner.clone()),
+            NormalizedNodeSemanticRef::new("i02/equation", version, [3; 32])
+                .expect("valid equation meaning"),
+        );
+        let equation_id = EquationId::derive(&equation_lineage).expect("equation identity");
+        let variable_lineage = NodeLineage::new(
+            NodeOrigin::Machine(MachineNodeOrigin::Subsystem(owner.clone())),
+            CausalOwner::Subsystem(owner.clone()),
+            NormalizedNodeSemanticRef::new("i02/variable", version, [4; 32])
+                .expect("valid variable meaning"),
+        );
+        let variable_id = VariableId::derive(&variable_lineage).expect("variable identity");
+        let signal = SignalContract {
+            quantity: TerminalQuantitySpec::Semantic(fs_qty::semantic::SemanticType::new(
+                fs_qty::semantic::QuantityKind::Strain {
+                    basis: fs_qty::semantic::StrainBasis::Tensor,
+                    component: fs_qty::semantic::StrainComponent::Shear,
+                },
+                fs_qty::semantic::ValueForm::Static,
+            )),
+            shape: TerminalShape::Tensor {
+                rows: NonZeroU64::new(2).expect("fixture row count is nonzero"),
+                columns: NonZeroU64::new(3).expect("fixture column count is nonzero"),
+            },
+            clock,
+            frame: FrameBinding::new(
+                "frame/i02-stream-plan",
+                crate::machine::OrientationParity::Preserving,
+            )
+            .expect("valid frame"),
+        };
+        let mut signal_row = Vec::new();
+        push_signal(&mut signal_row, &signal);
+        assert_eq!(signal_canonical_len(&signal), signal_row.len());
+        let equation = EquationSpec {
+            id: equation_id.clone(),
+            diagnostic_label: "equation".into(),
+            lineage: equation_lineage,
+            owner: CausalOwner::Subsystem(owner.clone()),
+            supports: vec![
+                CausalSupport::Lumped,
+                CausalSupport::External(
+                    ExternalSupportRef::new("i02/support", version, [5; 32])
+                        .expect("valid support"),
+                ),
+            ],
+            residual: signal.clone(),
+            role: EquationRole::Constraint,
+            solve_participation: EquationParticipation::Matching,
+            activation: activation.clone(),
+        };
+        let projection = PortSchemaCrosswalkRef::new("i02/projection", version, [6; 32])
+            .expect("valid projection");
+        let variable = VariableSpec {
+            id: variable_id.clone(),
+            diagnostic_label: "variable".into(),
+            lineage: variable_lineage,
+            owner: CausalOwner::Subsystem(owner),
+            supports: vec![CausalSupport::Lumped],
+            value: signal.clone(),
+            role: VariableRole::Algebraic,
+            solve_participation: SolveParticipation::Unknown,
+            port_schema_crosswalk: Some(PortSchemaCrosswalkBinding {
+                projection: projection.clone(),
+                audit: PortSchemaCrosswalkAuditRef::new("i02/projection-audit", version, [7; 32])
+                    .expect("valid projection audit"),
+                audited_projection: projection,
+            }),
+            activation: activation.clone(),
+        };
+        let condition = ActivationConditionSpec {
+            condition: condition_ref,
+            source: ActivationConditionSource::GuardEquation {
+                equation: equation_id.clone(),
+                obligation: GuardSolveObligationRef::new("i02/guard-obligation", version, [8; 32])
+                    .expect("valid guard obligation"),
+            },
+            branches: vec![branch],
+            dependencies: vec![variable_id.clone()],
+        };
+
+        with_internal_cx(|cx| {
+            let equation_row = equation_structure_row(&equation, cx).expect("equation row");
+            assert_eq!(
+                equation_structure_row_len_cancellable(&equation, cx).expect("equation length"),
+                equation_row.len()
+            );
+            let variable_row = variable_structure_row(&variable, cx).expect("variable row");
+            assert_eq!(
+                variable_structure_row_len_cancellable(&variable, cx).expect("variable length"),
+                variable_row.len()
+            );
+            let condition_row = condition_row(&condition, cx).expect("condition row");
+            assert_eq!(
+                condition_canonical_len_cancellable(&condition, cx).expect("condition length"),
+                condition_row.len()
+            );
+            assert_eq!(
+                condition_artifact_row_len(&condition),
+                condition_artifact_row(&condition).len()
+            );
+            assert_eq!(
+                node_artifact_row_equation_len_cancellable(&equation.lineage, cx)
+                    .expect("equation lineage length"),
+                node_artifact_row_equation(&equation.id, &equation.lineage, cx)
+                    .expect("equation lineage row")
+                    .len()
+            );
+            assert_eq!(
+                node_artifact_row_variable_len_cancellable(&variable, cx)
+                    .expect("variable lineage length"),
+                node_artifact_row_variable(&variable, cx)
+                    .expect("variable lineage row")
+                    .len()
+            );
+
+            let incidence = IncidenceSpec::new(
+                equation_id.clone(),
+                variable_id.clone(),
+                0,
+                SolveParticipation::Unknown,
+                Dims::NONE,
+                signal,
+                None,
+                IncidenceClockRelation::SameClock,
+                activation,
+                cx,
+            )
+            .expect("incidence identity");
+            assert_eq!(
+                incidence_artifact_row_len(&incidence),
+                incidence_artifact_row(&incidence).len()
+            );
+            let matching = CausalMatchingPair {
+                incidence: incidence.id,
+                equation: equation_id,
+                variable: DerivativeVariableKey {
+                    variable: variable_id,
+                    derivative_order: 0,
+                },
+            };
+            assert_eq!(
+                3 * IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2,
+                matching_row(&matching).len()
+            );
+            assert_eq!(
+                IDENTITY_RECEIPT_ADJUDICATION_BYTES + 2,
+                derivative_variable_row(&matching.variable).len()
+            );
+            let unknown = CausalUnknownAxisState {
+                axis: CausalOutcomeAxis::Determination,
+                reason: CausalUnknownReason::Cancelled,
+                resume_checkpoint: Some(
+                    CausalCheckpointRef::new("i02/checkpoint", version, [9; 32])
+                        .expect("valid checkpoint"),
+                ),
+            };
+            assert_eq!(
+                unknown_axis_row_len(&unknown),
+                unknown_axis_row(&unknown).len()
+            );
+        });
+    }
+
+    #[test]
     fn g0_streamed_identity_rows_refuse_one_over_before_row_production() {
         let rows = [
             b"zero".to_vec(),
@@ -8878,6 +9412,7 @@ mod internal_tests {
             b"three".to_vec(),
         ];
         let limits = CanonicalLimits::new(4 * 1_024, 1_024, 1, 3, 16);
+        let planned = core::cell::Cell::new(0usize);
         let produced = core::cell::Cell::new(0usize);
 
         let refusal = with_internal_cx(|cx| {
@@ -8886,22 +9421,144 @@ mod internal_tests {
                 NeverCancel,
             )
             .expect("valid bounded encoder");
-            stream_identity_rows(encoder, Field::new(0, "rows"), &rows, cx, |row, _| {
-                produced.set(produced.get() + 1);
-                Ok(row.clone())
-            })
+            stream_identity_rows(
+                encoder,
+                Field::new(0, "rows"),
+                &rows,
+                cx,
+                |row, _| {
+                    planned.set(planned.get() + 1);
+                    Ok(row.len())
+                },
+                |row, _| {
+                    produced.set(produced.get() + 1);
+                    Ok(row.clone())
+                },
+            )
             .expect_err("four rows must refuse a three-row envelope")
         });
 
         assert_eq!(
-            refusal,
+            refusal.canonical_error(),
             CanonicalError::LimitExceeded {
                 kind: LimitKind::CollectionItems,
                 requested: 4,
                 limit: 3,
             }
         );
+        let stream = refusal
+            .stream_refusal()
+            .expect("field refusal retains stream context");
+        assert_eq!(stream.origin(), CausalIdentityStreamOrigin::Canonical);
+        assert_eq!(
+            stream.diagnostic().phase(),
+            OrderedBytesStreamPhase::FieldAdmission
+        );
+        assert_eq!(stream.diagnostic().row_index(), None);
+        assert_eq!(stream.diagnostic().completed_rows(), 0);
+        assert_eq!(planned.get(), 0, "field admission precedes length planning");
         assert_eq!(produced.get(), 0, "field admission precedes row allocation");
+    }
+
+    #[test]
+    fn g0_oversized_stream_row_refuses_before_payload_allocation() {
+        let rows = [()];
+        let limits = CanonicalLimits::new(4 * 1_024, 8, 1, 1, 16);
+        let produced = core::cell::Cell::new(0usize);
+
+        let refusal = with_internal_cx(|cx| {
+            let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
+                limits,
+                NeverCancel,
+            )
+            .expect("valid bounded encoder");
+            stream_identity_rows(
+                encoder,
+                Field::new(0, "rows"),
+                &rows,
+                cx,
+                |(), _| Ok(9),
+                |(), _| {
+                    produced.set(produced.get() + 1);
+                    Ok(vec![0; 9])
+                },
+            )
+            .expect_err("one-over row must refuse before its producer")
+        });
+
+        assert_eq!(
+            refusal.canonical_error(),
+            CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: 9,
+                limit: 8,
+            }
+        );
+        let stream = refusal
+            .stream_refusal()
+            .expect("row admission refusal retains stream context");
+        assert_eq!(stream.origin(), CausalIdentityStreamOrigin::Canonical);
+        assert_eq!(
+            stream.diagnostic().phase(),
+            OrderedBytesStreamPhase::RowAdmission
+        );
+        assert_eq!(stream.diagnostic().row_index(), Some(0));
+        assert_eq!(stream.diagnostic().declared_row_bytes(), Some(9));
+        assert_eq!(stream.diagnostic().completed_rows(), 0);
+        assert_eq!(
+            produced.get(),
+            0,
+            "row admission precedes payload allocation"
+        );
+    }
+
+    #[test]
+    fn g4_stream_row_producer_cancellation_retains_completed_prefix() {
+        let rows = [b"first".as_slice(), b"second".as_slice()];
+        let limits = CanonicalLimits::new(4 * 1_024, 1_024, 1, 2, 16);
+        let produced = core::cell::Cell::new(0usize);
+
+        let refusal = with_internal_cx(|cx| {
+            let encoder = CanonicalEncoder::<EvidenceNodeId<StreamParitySchemaV1>, _>::new(
+                limits,
+                NeverCancel,
+            )
+            .expect("valid bounded encoder");
+            stream_identity_rows(
+                encoder,
+                Field::new(0, "rows"),
+                &rows,
+                cx,
+                |row, _| Ok(row.len()),
+                |row, _| {
+                    let index = produced.get();
+                    produced.set(index + 1);
+                    if index == 1 {
+                        Err(CanonicalError::Cancelled { absorbed_bytes: 0 })
+                    } else {
+                        Ok(row.to_vec())
+                    }
+                },
+            )
+            .expect_err("second producer cancellation must consume without publication")
+        });
+
+        assert_eq!(
+            refusal.canonical_error(),
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        );
+        let stream = refusal
+            .stream_refusal()
+            .expect("producer cancellation retains stream context");
+        assert_eq!(stream.origin(), CausalIdentityStreamOrigin::Producer);
+        assert_eq!(
+            stream.diagnostic().phase(),
+            OrderedBytesStreamPhase::RowProducer
+        );
+        assert_eq!(stream.diagnostic().row_index(), Some(1));
+        assert_eq!(stream.diagnostic().completed_rows(), 1);
+        assert!(stream.diagnostic().canonical_bytes() > 0);
+        assert_eq!(produced.get(), 2);
     }
 
     #[test]
