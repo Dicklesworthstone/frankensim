@@ -21,6 +21,7 @@
 //! converter scope).
 
 use core::fmt::{self, Write as _};
+use std::collections::BTreeSet;
 
 /// Version stamped into every emitted record.
 pub const CASEBOOK_RECORD_VERSION: u32 = 1;
@@ -79,6 +80,27 @@ fn hex_decode(encoded: &str) -> Result<Vec<u8>, ReplayError> {
 /// A replay companion record failed canonical-frame verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayError {
+    /// The replay record uses a schema this reader does not understand.
+    UnsupportedVersion {
+        /// Version carried by the replay record.
+        declared: u32,
+        /// Version understood by this reader.
+        supported: u32,
+    },
+    /// A field required to replay or identify the case was empty.
+    EmptyField {
+        /// Stable field name used in diagnostics.
+        field: &'static str,
+    },
+    /// The record did not belong to the suite/case the caller expected.
+    IdentityMismatch {
+        /// Stable identity-field name used in diagnostics.
+        field: &'static str,
+        /// Identity carried by the replay record.
+        declared: String,
+        /// Identity required by the caller.
+        expected: String,
+    },
     /// Hex text must contain exactly two characters per byte.
     OddHexLength {
         /// Observed character count.
@@ -117,6 +139,24 @@ pub enum ReplayError {
 impl fmt::Display for ReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedVersion {
+                declared,
+                supported,
+            } => write!(
+                f,
+                "unsupported replay-record version {declared}; supported version is {supported}"
+            ),
+            Self::EmptyField { field } => {
+                write!(f, "replay record has empty required field {field}")
+            }
+            Self::IdentityMismatch {
+                field,
+                declared,
+                expected,
+            } => write!(
+                f,
+                "replay record {field} mismatch: declared {declared:?}, expected {expected:?}"
+            ),
             Self::OddHexLength { length } => {
                 write!(f, "canonical input hex has odd length {length}")
             }
@@ -216,7 +256,7 @@ impl ReplaySpec {
         fnv1a64(&self.canonical_inputs)
     }
 
-    fn record(&self, suite: &str, case: &str) -> ReplayRecord {
+    fn record(&self, suite: &str, case: &str, owner_index: usize) -> ReplayRecord {
         ReplayRecord {
             version: CASEBOOK_REPLAY_RECORD_VERSION,
             suite: suite.to_owned(),
@@ -225,6 +265,7 @@ impl ReplaySpec {
             inputs_digest: format!("{:016x}", self.inputs_digest()),
             inputs_len: self.canonical_inputs.len(),
             canonical_inputs_hex: self.canonical_inputs_hex(),
+            owner_index,
         }
     }
 }
@@ -246,6 +287,10 @@ pub struct ReplayRecord {
     pub inputs_len: usize,
     /// Complete canonical input frame as lowercase hex.
     pub canonical_inputs_hex: String,
+    // Report-local registration ordinal. This is intentionally absent from
+    // the stable JSON schema; it prevents duplicate case ids from associating
+    // one registration's replay row with another registration's failure.
+    owner_index: usize,
 }
 
 impl ReplayRecord {
@@ -255,6 +300,21 @@ impl ReplayRecord {
     /// [`ReplayError`] if the hex is malformed or either declaration differs
     /// from the reconstructed bytes.
     pub fn verify_and_decode(&self) -> Result<Vec<u8>, ReplayError> {
+        if self.version != CASEBOOK_REPLAY_RECORD_VERSION {
+            return Err(ReplayError::UnsupportedVersion {
+                declared: self.version,
+                supported: CASEBOOK_REPLAY_RECORD_VERSION,
+            });
+        }
+        for (field, value) in [
+            ("suite", self.suite.as_str()),
+            ("case", self.case.as_str()),
+            ("command", self.command.as_str()),
+        ] {
+            if value.is_empty() {
+                return Err(ReplayError::EmptyField { field });
+            }
+        }
         let decoded = hex_decode(&self.canonical_inputs_hex)?;
         let canonical = hex_encode(&decoded);
         if canonical != self.canonical_inputs_hex {
@@ -278,6 +338,37 @@ impl ReplayRecord {
         }
         Ok(decoded)
     }
+
+    /// Decode and verify the retained frame, schema, and owning identity.
+    ///
+    /// This is the fail-closed entry point when a replay row is being matched
+    /// to an independently selected case record. [`Self::verify_and_decode`]
+    /// checks the row's self-contained declarations; this method additionally
+    /// refuses a valid frame carried under the wrong suite or case identity.
+    ///
+    /// # Errors
+    /// [`ReplayError`] if the row is malformed, internally inconsistent, or
+    /// does not belong to `expected_suite` and `expected_case`.
+    pub fn verify_and_decode_for(
+        &self,
+        expected_suite: &str,
+        expected_case: &str,
+    ) -> Result<Vec<u8>, ReplayError> {
+        let decoded = self.verify_and_decode()?;
+        for (field, declared, expected) in [
+            ("suite", self.suite.as_str(), expected_suite),
+            ("case", self.case.as_str(), expected_case),
+        ] {
+            if declared != expected {
+                return Err(ReplayError::IdentityMismatch {
+                    field,
+                    declared: declared.to_owned(),
+                    expected: expected.to_owned(),
+                });
+            }
+        }
+        Ok(decoded)
+    }
 }
 
 /// The first exact-byte disagreement between an implementation and reference.
@@ -288,29 +379,34 @@ impl ReplayRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisagreementRecord {
     /// Disagreement-record schema version.
-    pub version: u32,
+    version: u32,
     /// Owning suite.
-    pub suite: String,
+    suite: String,
     /// Stable case id.
-    pub case: String,
+    case: String,
     /// Implementation under test.
-    pub implementation: String,
+    implementation: String,
     /// Comparison reference or oracle.
-    pub reference: String,
+    reference: String,
     /// Complete implementation-frame length.
-    pub implementation_len: usize,
+    implementation_len: usize,
     /// Complete reference-frame length.
-    pub reference_len: usize,
+    reference_len: usize,
     /// FNV-1a digest of the implementation frame.
-    pub implementation_digest: String,
+    implementation_digest: String,
     /// FNV-1a digest of the reference frame.
-    pub reference_digest: String,
+    reference_digest: String,
     /// First byte offset where the frames differ.
-    pub first_offset: usize,
+    first_offset: usize,
     /// Implementation byte at `first_offset`, or `None` at its length boundary.
-    pub implementation_byte: Option<u8>,
+    implementation_byte: Option<u8>,
     /// Reference byte at `first_offset`, or `None` at its length boundary.
-    pub reference_byte: Option<u8>,
+    reference_byte: Option<u8>,
+    // Report-local ordinals are deliberately not rendered. Keeping them with
+    // the typed record makes failure-to-companion association exact even when
+    // an invalid suite registers duplicate case ids.
+    owner_index: Option<usize>,
+    discovery_index: Option<usize>,
 }
 
 impl DisagreementRecord {
@@ -346,7 +442,89 @@ impl DisagreementRecord {
             first_offset,
             implementation_byte: implementation_frame.get(first_offset).copied(),
             reference_byte: reference_frame.get(first_offset).copied(),
+            owner_index: None,
+            discovery_index: None,
         })
+    }
+
+    /// Disagreement-record schema version.
+    #[must_use]
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Owning suite identity.
+    #[must_use]
+    pub fn suite(&self) -> &str {
+        &self.suite
+    }
+
+    /// Owning case identity.
+    #[must_use]
+    pub fn case(&self) -> &str {
+        &self.case
+    }
+
+    /// Implementation-under-test label.
+    #[must_use]
+    pub fn implementation(&self) -> &str {
+        &self.implementation
+    }
+
+    /// Comparison-reference label.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    /// Complete implementation-frame length.
+    #[must_use]
+    pub fn implementation_len(&self) -> usize {
+        self.implementation_len
+    }
+
+    /// Complete reference-frame length.
+    #[must_use]
+    pub fn reference_len(&self) -> usize {
+        self.reference_len
+    }
+
+    /// FNV-1a digest of the complete implementation frame.
+    #[must_use]
+    pub fn implementation_digest(&self) -> &str {
+        &self.implementation_digest
+    }
+
+    /// FNV-1a digest of the complete reference frame.
+    #[must_use]
+    pub fn reference_digest(&self) -> &str {
+        &self.reference_digest
+    }
+
+    /// First byte offset where the exact frames differ.
+    #[must_use]
+    pub fn first_offset(&self) -> usize {
+        self.first_offset
+    }
+
+    /// Implementation byte at the first disagreement, if present.
+    #[must_use]
+    pub fn implementation_byte(&self) -> Option<u8> {
+        self.implementation_byte
+    }
+
+    /// Reference byte at the first disagreement, if present.
+    #[must_use]
+    pub fn reference_byte(&self) -> Option<u8> {
+        self.reference_byte
+    }
+
+    fn bind_owner(mut self, suite: &str, case: &str, owner: usize, discovery: usize) -> Self {
+        self.suite = suite.to_owned();
+        self.case = case.to_owned();
+        self.owner_index = Some(owner);
+        self.discovery_index = Some(discovery);
+        self
     }
 
     /// Stable mismatch classification used in the JSON record.
@@ -673,11 +851,11 @@ impl Suite {
     /// closed), never silently accepted.
     #[must_use]
     pub fn run(self) -> SuiteReport {
-        let mut seen: Vec<&'static str> = Vec::new();
+        let mut seen: BTreeSet<&'static str> = BTreeSet::new();
         let mut records = Vec::with_capacity(self.cases.len());
         let mut replay_records = Vec::new();
         let mut disagreements = Vec::new();
-        for case in self.cases {
+        for (owner_index, case) in self.cases.into_iter().enumerate() {
             let Case {
                 id,
                 inputs_digest,
@@ -687,10 +865,9 @@ impl Suite {
             } = case;
             let structural_defect = if id.is_empty() {
                 Some("empty case id".to_owned())
-            } else if seen.contains(&id) {
+            } else if !seen.insert(id) {
                 Some(format!("duplicate case id {id:?}"))
             } else {
-                seen.push(id);
                 None
             };
             let outcome = match structural_defect {
@@ -704,10 +881,13 @@ impl Suite {
                 disagreements: mut case_disagreements,
             } = outcome;
             let pass = pass && case_disagreements.is_empty();
-            for disagreement in &mut case_disagreements {
-                disagreement.suite = self.name.to_owned();
-                disagreement.case = id.to_owned();
-            }
+            case_disagreements = case_disagreements
+                .into_iter()
+                .enumerate()
+                .map(|(discovery_index, disagreement)| {
+                    disagreement.bind_owner(self.name, id, owner_index, discovery_index)
+                })
+                .collect();
             let record = CaseRecord {
                 version: CASEBOOK_RECORD_VERSION,
                 suite: self.name.to_owned(),
@@ -720,7 +900,7 @@ impl Suite {
             };
             println!("{}", record.json_line());
             if let Some(replay) = replay {
-                let replay_record = replay.record(self.name, id);
+                let replay_record = replay.record(self.name, id, owner_index);
                 println!("{}", replay_record.json_line());
                 replay_records.push(replay_record);
             }
@@ -754,7 +934,10 @@ impl SuiteReport {
     /// that ran nothing proved nothing).
     #[must_use]
     pub fn all_passed(&self) -> bool {
-        !self.records.is_empty() && self.records.iter().all(|r| r.pass)
+        !self.records.is_empty()
+            && self.records.iter().all(|r| r.pass)
+            && self.disagreements.is_empty()
+            && self.integrity_error().is_none()
     }
 
     /// The failing records.
@@ -763,21 +946,128 @@ impl SuiteReport {
         self.records.iter().filter(|r| !r.pass).collect()
     }
 
-    /// Replay companion for one case, if it registered one.
+    /// Replay companion for one unambiguous case id, if it registered one.
+    ///
+    /// Returns `None` when the id is absent or duplicated. Duplicate ids are
+    /// structural failures, and returning either registration's companion
+    /// would silently misassociate evidence. [`Self::assert_green`] uses the
+    /// owning registration ordinal directly and therefore still reports the
+    /// exact companion for each duplicate failure.
     #[must_use]
     pub fn replay_for(&self, case: &str) -> Option<&ReplayRecord> {
-        self.replay_records
-            .iter()
-            .find(|record| record.case == case)
+        let owner_index = self.unique_owner_index(case)?;
+        self.replay_for_owner(owner_index)
     }
 
-    /// Structured disagreements attached to one case.
+    /// Structured disagreements attached to one unambiguous case id.
+    ///
+    /// Returns an empty vector for an absent or duplicated id rather than
+    /// merging disagreement rows from distinct registrations.
     #[must_use]
     pub fn disagreements_for(&self, case: &str) -> Vec<&DisagreementRecord> {
+        let Some(owner_index) = self.unique_owner_index(case) else {
+            return Vec::new();
+        };
+        self.disagreements_for_owner(owner_index)
+    }
+
+    fn unique_owner_index(&self, case: &str) -> Option<usize> {
+        let mut owners = self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.case == case)
+            .map(|(index, _)| index);
+        let owner = owners.next()?;
+        owners.next().is_none().then_some(owner)
+    }
+
+    fn replay_for_owner(&self, owner_index: usize) -> Option<&ReplayRecord> {
+        self.replay_records
+            .iter()
+            .find(|record| record.owner_index == owner_index)
+    }
+
+    fn disagreements_for_owner(&self, owner_index: usize) -> Vec<&DisagreementRecord> {
         self.disagreements
             .iter()
-            .filter(|record| record.case == case)
+            .filter(|record| record.owner_index == Some(owner_index))
             .collect()
+    }
+
+    fn integrity_error(&self) -> Option<String> {
+        let mut previous_replay_owner = None;
+        for replay in &self.replay_records {
+            let owner = replay.owner_index;
+            let Some(record) = self.records.get(owner) else {
+                return Some(format!(
+                    "replay row references missing registration ordinal {owner}"
+                ));
+            };
+            if previous_replay_owner.is_some_and(|previous| owner <= previous) {
+                return Some(format!(
+                    "replay rows are not in unique registration order at ordinal {owner}"
+                ));
+            }
+            previous_replay_owner = Some(owner);
+            if let Err(error) = replay.verify_and_decode_for(&record.suite, &record.case) {
+                return Some(format!(
+                    "replay row for registration ordinal {owner} failed verification: {error}"
+                ));
+            }
+            if replay.inputs_digest != record.inputs_digest {
+                return Some(format!(
+                    "replay/case digest mismatch at registration ordinal {owner}: replay {}, case {}",
+                    replay.inputs_digest, record.inputs_digest
+                ));
+            }
+        }
+
+        let mut previous_disagreement = None;
+        for disagreement in &self.disagreements {
+            let Some(owner) = disagreement.owner_index else {
+                return Some("disagreement row is not bound to a registration ordinal".to_owned());
+            };
+            let Some(discovery) = disagreement.discovery_index else {
+                return Some("disagreement row is not bound to a discovery ordinal".to_owned());
+            };
+            let Some(record) = self.records.get(owner) else {
+                return Some(format!(
+                    "disagreement row references missing registration ordinal {owner}"
+                ));
+            };
+            let expected_discovery = match previous_disagreement {
+                None => 0,
+                Some((previous_owner, previous_discovery)) if owner == previous_owner => {
+                    previous_discovery + 1
+                }
+                Some((previous_owner, _)) if owner > previous_owner => 0,
+                Some(_) => {
+                    return Some(format!(
+                        "disagreement rows are not in registration order at ordinal {owner}"
+                    ));
+                }
+            };
+            previous_disagreement = Some((owner, discovery));
+            if discovery != expected_discovery {
+                return Some(format!(
+                    "disagreement discovery-order mismatch at registration ordinal {owner}: declared {discovery}, expected {expected_discovery}"
+                ));
+            }
+            if disagreement.suite() != record.suite.as_str()
+                || disagreement.case() != record.case.as_str()
+            {
+                return Some(format!(
+                    "disagreement/case identity mismatch at registration ordinal {owner}"
+                ));
+            }
+            if record.pass {
+                return Some(format!(
+                    "registration ordinal {owner} is green despite retaining a disagreement"
+                ));
+            }
+        }
+        None
     }
 
     /// Assert the suite is green, panicking with every failing record's
@@ -793,20 +1083,30 @@ impl SuiteReport {
         if self.records.is_empty() {
             msg.push_str("  (zero cases executed)\n");
         }
-        for failure in self.failures() {
+        for (owner_index, failure) in self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| !record.pass)
+        {
             msg.push_str("  ");
             msg.push_str(&failure.json_line());
             msg.push('\n');
-            if let Some(replay) = self.replay_for(&failure.case) {
+            if let Some(replay) = self.replay_for_owner(owner_index) {
                 msg.push_str("  ");
                 msg.push_str(&replay.json_line());
                 msg.push('\n');
             }
-            for disagreement in self.disagreements_for(&failure.case) {
+            for disagreement in self.disagreements_for_owner(owner_index) {
                 msg.push_str("  ");
                 msg.push_str(&disagreement.json_line());
                 msg.push('\n');
             }
+        }
+        if let Some(error) = self.integrity_error() {
+            msg.push_str("  report-integrity failure: ");
+            msg.push_str(&error);
+            msg.push('\n');
         }
         panic!("{msg}");
     }

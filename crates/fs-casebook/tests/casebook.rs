@@ -143,6 +143,58 @@ fn empty_suites_and_duplicate_ids_fail_closed() {
 }
 
 #[test]
+fn duplicate_ids_cannot_cross_associate_replays_or_disagreements() {
+    let first_disagreement = DisagreementRecord::first(
+        "foreign-suite",
+        "foreign-case",
+        "implementation",
+        "reference",
+        b"first-implementation",
+        b"first-reference",
+    )
+    .expect("first registration has a disagreement");
+    let report = Suite::new("casebook-duplicate-owner")
+        .case_replayable(
+            "cb-duplicate-owner",
+            ReplaySpec::new("run-first-registration", b"first-input".to_vec()),
+            ToleranceSpec::Exact,
+            move || {
+                CaseOutcome::pass("first registration is red").with_disagreement(first_disagreement)
+            },
+        )
+        .case_replayable(
+            "cb-duplicate-owner",
+            ReplaySpec::new("run-duplicate-registration", b"duplicate-input".to_vec()),
+            ToleranceSpec::Exact,
+            || panic!("a duplicate registration must not execute its case closure"),
+        )
+        .run();
+
+    assert_eq!(report.failures().len(), 2);
+    assert_eq!(report.replay_records.len(), 2);
+    assert_eq!(report.disagreements.len(), 1);
+    assert!(
+        report.replay_for("cb-duplicate-owner").is_none(),
+        "a string-only lookup must refuse an ambiguous duplicate id"
+    );
+    assert!(
+        report.disagreements_for("cb-duplicate-owner").is_empty(),
+        "a string-only lookup must not merge distinct registrations"
+    );
+
+    let panic = std::panic::catch_unwind(|| report.assert_green())
+        .expect_err("both owning registrations are red");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("Casebook refusal carries text");
+    assert_eq!(message.matches("run-first-registration").count(), 1);
+    assert_eq!(message.matches("run-duplicate-registration").count(), 1);
+    assert_eq!(message.matches("\"casebook_disagreement\":1").count(), 1);
+}
+
+#[test]
 fn json_escaping_keeps_records_one_line_and_parseable_shape() {
     let record = CaseRecord {
         version: 1,
@@ -160,6 +212,10 @@ fn json_escaping_keeps_records_one_line_and_parseable_shape() {
     assert!(line.contains("line\\nbreak\\tand\\\\slash"));
     assert!(line.contains("\\u0001"));
     assert!(line.contains("ulps<=3"));
+    assert_eq!(
+        line,
+        "{\"casebook\":1,\"suite\":\"quote\\\"suite\",\"case\":\"line\\nbreak\\tand\\\\slash\",\"inputs_digest\":\"00000000deadbeef\",\"tolerance\":\"ulps<=3\",\"pass\":false,\"details\":\"control\\u0001char\",\"evidence\":[\"path\\\\with\\\"quotes\"]}"
+    );
 }
 
 #[test]
@@ -227,6 +283,24 @@ fn replay_spec_round_trips_and_records_verify_frame_integrity() {
         wrong_digest.verify_and_decode(),
         Err(ReplayError::DigestMismatch { .. })
     ));
+    let mut wrong_version = first_record.clone();
+    wrong_version.version += 1;
+    assert!(matches!(
+        wrong_version.verify_and_decode(),
+        Err(ReplayError::UnsupportedVersion { .. })
+    ));
+    let mut wrong_case = first_record.clone();
+    wrong_case.case = "cb-replay-foreign".to_owned();
+    assert!(matches!(
+        wrong_case.verify_and_decode_for("casebook-replay-selftest", "cb-replay-001"),
+        Err(ReplayError::IdentityMismatch { field: "case", .. })
+    ));
+    let mut empty_command = first_record.clone();
+    empty_command.command.clear();
+    assert!(matches!(
+        empty_command.verify_and_decode(),
+        Err(ReplayError::EmptyField { field: "command" })
+    ));
     let mut uppercase_frame = first_record.clone();
     uppercase_frame.canonical_inputs_hex = uppercase_frame.canonical_inputs_hex.to_uppercase();
     assert!(matches!(
@@ -244,6 +318,34 @@ fn replay_spec_round_trips_and_records_verify_frame_integrity() {
             byte: b'g'
         })
     ));
+}
+
+#[test]
+fn a_tampered_replay_companion_cannot_leave_its_report_green() {
+    let mut report = Suite::new("casebook-report-integrity")
+        .case_replayable(
+            "cb-report-integrity",
+            ReplaySpec::new("run-report-integrity", b"bound-input".to_vec()),
+            ToleranceSpec::Exact,
+            || CaseOutcome::pass("case execution passed"),
+        )
+        .run();
+    assert!(report.all_passed());
+
+    report.replay_records[0].case = "foreign-case".to_owned();
+    assert!(
+        !report.all_passed(),
+        "a valid case row with a foreign replay identity is not green"
+    );
+    let panic = std::panic::catch_unwind(|| report.assert_green())
+        .expect_err("report integrity failure must trip the merge gate");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("Casebook refusal carries text");
+    assert!(message.contains("report-integrity failure"));
+    assert!(message.contains("replay record case mismatch"));
 }
 
 #[test]
@@ -290,12 +392,12 @@ fn seeded_byte_corruption_emits_stable_bug_report_and_fails_closed() {
     )
     .expect("replayed corruption disagrees");
     assert_eq!(first, replay);
-    assert_eq!(first.version, CASEBOOK_DISAGREEMENT_RECORD_VERSION);
+    assert_eq!(first.version(), CASEBOOK_DISAGREEMENT_RECORD_VERSION);
     assert_eq!(first.mismatch_kind(), "byte");
-    assert_eq!(first.first_offset, offset);
-    assert_eq!(first.implementation_byte, Some(implementation[offset]));
-    assert_eq!(first.reference_byte, Some(reference[offset]));
-    assert_ne!(first.implementation_digest, first.reference_digest);
+    assert_eq!(first.first_offset(), offset);
+    assert_eq!(first.implementation_byte(), Some(implementation[offset]));
+    assert_eq!(first.reference_byte(), Some(reference[offset]));
+    assert_ne!(first.implementation_digest(), first.reference_digest());
     let line = first.json_line();
     assert_eq!(line, replay.json_line());
     assert!(!line.contains('\n'));
@@ -358,9 +460,9 @@ fn length_boundary_disagreement_localizes_the_first_absent_byte() {
     )
     .expect("different lengths disagree");
     assert_eq!(disagreement.mismatch_kind(), "length-boundary");
-    assert_eq!(disagreement.first_offset, 3);
-    assert_eq!(disagreement.implementation_byte, None);
-    assert_eq!(disagreement.reference_byte, Some(0x40));
+    assert_eq!(disagreement.first_offset(), 3);
+    assert_eq!(disagreement.implementation_byte(), None);
+    assert_eq!(disagreement.reference_byte(), Some(0x40));
     let line = disagreement.json_line();
     assert!(line.contains("\"mismatch_kind\":\"length-boundary\""));
     assert!(line.contains("\"implementation_byte\":null"));
@@ -390,8 +492,8 @@ fn disagreement_identity_is_bound_to_its_owning_case() {
         .into_iter()
         .next()
         .expect("bound disagreement remains discoverable");
-    assert_eq!(retained.suite, "owning-suite");
-    assert_eq!(retained.case, "owning-case");
+    assert_eq!(retained.suite(), "owning-suite");
+    assert_eq!(retained.case(), "owning-case");
     assert!(report.disagreements_for("foreign-case").is_empty());
 
     let panic = std::panic::catch_unwind(|| report.assert_green())
