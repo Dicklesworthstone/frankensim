@@ -1,7 +1,8 @@
 //! Typed, canonical identities for evidence semantics.
 //!
-//! This module covers exact color-evidence graph replay and normalized validity
-//! domains through separate schemas. It does not reinterpret
+//! This module covers exact color-evidence graph replay, normalized validity
+//! domains, and an opaque strong-identity projection of locally certified
+//! scalar evidence through separate schemas. It does not reinterpret
 //! [`crate::ProvenanceHash`], and it publishes only unanchored
 //! [`IdentityReceipt`] values. Origin verification, policy admission,
 //! structural [`crate::Certified`] consistency, and scientific color rank
@@ -20,8 +21,8 @@ use fs_blake3::identity::{
 };
 
 use crate::{
-    COLOR_ALGEBRA_VERSION, Color, ColorPayloadError, IntervalOp, ValidityDomain, compose,
-    validate_color_payload,
+    COLOR_ALGEBRA_VERSION, Certified, Color, ColorPayloadError, IntervalOp, NumericalKind,
+    StatisticalCertificate, ValidityDomain, compose, validate_color_payload,
 };
 
 /// Identity schema version for exact retained color-evidence sources.
@@ -30,12 +31,18 @@ pub const COLOR_EVIDENCE_SOURCE_IDENTITY_VERSION_V1: u32 = 1;
 pub const COLOR_EVIDENCE_NODE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for normalized evidence-validity domains.
 pub const VALIDITY_DOMAIN_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one locally certified scalar-evidence projection.
+pub const CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Hard allocation ceiling for one canonical output-color payload.
 pub const MAX_COLOR_EVIDENCE_NODE_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for the ordered axes field of one validity domain.
 pub const MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Hard payload ceiling for each variable certified-evidence field.
+pub const MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Non-semantic scatter/gather writes emitted for each streamed axis row.
 const VALIDITY_DOMAIN_STREAM_CHUNKS_PER_AXIS_V1: u64 = 4;
+/// Non-semantic scatter/gather writes emitted for each sensitivity row.
+const CERTIFIED_F64_SENSITIVITY_STREAM_CHUNKS_PER_ROW_V1: u64 = 3;
 
 /// Canonical identity schema for one retained source that may root a color
 /// evidence graph. The resulting identity is content-bound but untrusted.
@@ -123,6 +130,103 @@ impl IdentifiedValidityDomainV1 {
     #[must_use]
     pub fn into_domain(self) -> ValidityDomain {
         self.domain
+    }
+}
+
+static CERTIFIED_F64_VALIDITY_CHILD_V1: ChildSpec = ChildSpec::for_identity::<ValidityDomainIdV1>();
+
+/// Canonical identity schema for the strong semantic projection of one locally
+/// certified scalar. This schema is intentionally unqualified by units or
+/// quantity kind because those concepts are absent from `Evidence<f64>` today.
+pub enum CertifiedF64EvidenceIdentitySchemaV1 {}
+
+impl CanonicalSchema for CertifiedF64EvidenceIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.certified-f64-evidence.v1";
+    const NAME: &'static str = "certified-f64-evidence";
+    const VERSION: u32 = CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "locally certified unqualified scalar evidence semantics with typed validity and adjoint-claim presence; legacy FNV values excluded; no units, quantity kind, origin, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("value", WireType::FiniteF64),
+        FieldSpec::required("qoi", WireType::FiniteF64),
+        FieldSpec::required("numerical-kind", WireType::Variant),
+        FieldSpec::required("numerical-lo", WireType::FiniteF64),
+        FieldSpec::required("numerical-hi", WireType::FiniteF64),
+        FieldSpec::required("statistical", WireType::Variant),
+        FieldSpec::required("model-cards", WireType::CanonicalSet),
+        FieldSpec::required("model-assumptions", WireType::CanonicalSet),
+        FieldSpec::child_of("model-validity", &CERTIFIED_F64_VALIDITY_CHILD_V1),
+        FieldSpec::required("model-discrepancy-ieee754-bits", WireType::U64),
+        FieldSpec::required("model-in-domain", WireType::Bool),
+        FieldSpec::required("sensitivity", WireType::OrderedBytes),
+        FieldSpec::required("legacy-adjoint-correlation-present", WireType::Bool),
+    ];
+}
+
+/// Low-level schema-shaped identity for one certified-f64 semantic frame.
+///
+/// Only [`IdentifiedCertifiedF64EvidenceV1`] proves that the frame was built
+/// from an opaque [`Certified<f64>`] and helper-validated validity child.
+pub type CertifiedF64EvidenceIdV1 = SemanticId<CertifiedF64EvidenceIdentitySchemaV1>;
+
+/// Low-level producer receipt for a certified-f64 semantic frame.
+pub type CertifiedF64EvidenceReceiptV1 = IdentityReceipt<CertifiedF64EvidenceIdV1>;
+
+/// A locally certified scalar record kept attached to its unanchored semantic
+/// identity and helper-built validity child.
+#[derive(Debug, Clone)]
+pub struct IdentifiedCertifiedF64EvidenceV1 {
+    certified: Certified<f64>,
+    validity_receipt: ValidityDomainReceiptV1,
+    receipt: CertifiedF64EvidenceReceiptV1,
+}
+
+impl IdentifiedCertifiedF64EvidenceV1 {
+    /// Read-only certified scalar evidence committed by this projection.
+    #[must_use]
+    pub const fn certified(&self) -> &Certified<f64> {
+        &self.certified
+    }
+
+    /// Typed semantic-projection identity.
+    #[must_use]
+    pub const fn id(&self) -> CertifiedF64EvidenceIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored semantic receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> CertifiedF64EvidenceReceiptV1 {
+        self.receipt
+    }
+
+    /// Typed normalized validity identity bound as the semantic child.
+    #[must_use]
+    pub const fn validity_id(&self) -> ValidityDomainIdV1 {
+        self.validity_receipt.id()
+    }
+
+    /// Complete helper-built validity receipt.
+    #[must_use]
+    pub const fn validity_receipt(&self) -> ValidityDomainReceiptV1 {
+        self.validity_receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment and recover the certified record.
+    #[must_use]
+    pub fn into_certified(self) -> Certified<f64> {
+        self.certified
     }
 }
 
@@ -398,6 +502,53 @@ pub enum ValidityDomainIdentityError {
     Canonical(CanonicalError),
 }
 
+/// Fail-closed refusal from certified-f64 semantic-identity construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertifiedF64EvidenceIdentityError {
+    /// The typed validity child refused normalization, limits, or cancellation.
+    Validity(ValidityDomainIdentityError),
+    /// Outer semantic framing, set admission, resources, or cancellation
+    /// refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for CertifiedF64EvidenceIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validity(error) => {
+                write!(
+                    formatter,
+                    "certified-f64 identity refused validity: {error}"
+                )
+            }
+            Self::Canonical(error) => {
+                write!(formatter, "certified-f64 identity refused: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CertifiedF64EvidenceIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validity(error) => Some(error),
+            Self::Canonical(error) => Some(error),
+        }
+    }
+}
+
+impl From<ValidityDomainIdentityError> for CertifiedF64EvidenceIdentityError {
+    fn from(error: ValidityDomainIdentityError) -> Self {
+        Self::Validity(error)
+    }
+}
+
+impl From<CanonicalError> for CertifiedF64EvidenceIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
 impl fmt::Display for ValidityDomainIdentityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -592,12 +743,24 @@ pub fn identify_validity_domain_v1<C>(
 where
     C: EvidenceIdentityCancellationProbe,
 {
+    let receipt = identify_validity_domain_receipt_v1(&domain, limits, &mut cancellation)?;
+    Ok(IdentifiedValidityDomainV1 { domain, receipt })
+}
+
+fn identify_validity_domain_receipt_v1<C>(
+    domain: &ValidityDomain,
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<ValidityDomainReceiptV1, ValidityDomainIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
     if limits.cancellation_poll_bytes() == 0 {
         return Err(ValidityDomainIdentityError::Canonical(
             CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive"),
         ));
     }
-    poll_identity_cancellation(&mut cancellation)?;
+    poll_identity_cancellation(cancellation)?;
     let axis_count = bounded_len(domain.bounds().len())?;
     if axis_count > limits.max_collection_items() {
         return Err(ValidityDomainIdentityError::Canonical(
@@ -623,7 +786,7 @@ where
         ));
     }
     for (axis_index, (axis, (lo, hi))) in domain.bounds().iter().enumerate() {
-        poll_identity_cancellation(&mut cancellation)?;
+        poll_identity_cancellation(cancellation)?;
         let axis_index = bounded_len(axis_index)?;
         if !lo.is_finite() || !hi.is_finite() {
             return Err(ValidityDomainIdentityError::InvalidBounds {
@@ -678,7 +841,7 @@ where
             })
         });
         let mut rows = domain.bounds().iter();
-        CanonicalEncoder::<ValidityDomainIdV1, _>::new(limits, cancellation)?
+        CanonicalEncoder::<ValidityDomainIdV1, _>::new(limits, || cancellation.is_cancelled())?
             .ordered_bytes_stream(
                 Field::new(0, "axes"),
                 axis_count,
@@ -705,7 +868,273 @@ where
             })?
             .finish()?
     };
-    Ok(IdentifiedValidityDomainV1 { domain, receipt })
+    Ok(receipt)
+}
+
+const fn certified_f64_numerical_kind_tag_v1(kind: NumericalKind) -> u32 {
+    match kind {
+        NumericalKind::Exact => 1,
+        NumericalKind::Enclosure => 2,
+        NumericalKind::Estimate => 3,
+        NumericalKind::NoClaim => 4,
+    }
+}
+
+fn preflight_certified_f64_string_set_v1<C>(
+    values: &[String],
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<u64, CanonicalError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    let count = bounded_len(values.len())?;
+    if count > limits.max_collection_items() {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::CollectionItems,
+            requested: count,
+            limit: limits.max_collection_items(),
+        });
+    }
+    let field_limit = limits
+        .max_field_bytes()
+        .min(MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1);
+    let mut field_payload_bytes = u64::from(u64::BITS / 8);
+    if field_payload_bytes > field_limit {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested: field_payload_bytes,
+            limit: field_limit,
+        });
+    }
+    for value in values {
+        poll_identity_cancellation(cancellation)?;
+        let framed_bytes = u64::from(u64::BITS / 8)
+            .checked_add(bounded_len(value.len())?)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        field_payload_bytes = field_payload_bytes
+            .checked_add(framed_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        if field_payload_bytes > field_limit {
+            return Err(CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: field_payload_bytes,
+                limit: field_limit,
+            });
+        }
+    }
+    Ok(count)
+}
+
+fn preflight_certified_f64_sensitivity_v1<C>(
+    certified: &Certified<f64>,
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<u64, CanonicalError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    let sensitivity = &certified.evidence().sensitivity.d_qoi;
+    let count = bounded_len(sensitivity.len())?;
+    if count > limits.max_collection_items() {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::CollectionItems,
+            requested: count,
+            limit: limits.max_collection_items(),
+        });
+    }
+    let field_limit = limits
+        .max_field_bytes()
+        .min(MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1);
+    let mut field_payload_bytes = u64::from(u64::BITS / 8);
+    if field_payload_bytes > field_limit {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested: field_payload_bytes,
+            limit: field_limit,
+        });
+    }
+    for parameter in sensitivity.keys() {
+        poll_identity_cancellation(cancellation)?;
+        let row_bytes = 16_u64
+            .checked_add(bounded_len(parameter.len())?)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        let framed_row_bytes = u64::from(u64::BITS / 8)
+            .checked_add(row_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        field_payload_bytes = field_payload_bytes
+            .checked_add(framed_row_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        if field_payload_bytes > field_limit {
+            return Err(CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: field_payload_bytes,
+                limit: field_limit,
+            });
+        }
+    }
+    let required_stream_chunks = count
+        .checked_mul(CERTIFIED_F64_SENSITIVITY_STREAM_CHUNKS_PER_ROW_V1)
+        .ok_or(CanonicalError::LengthOverflow)?;
+    if required_stream_chunks > limits.max_collection_items() {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::StreamChunks,
+            requested: required_stream_chunks,
+            limit: limits.max_collection_items(),
+        });
+    }
+    Ok(count)
+}
+
+/// Identify the strong semantic projection carried by one locally certified
+/// scalar value.
+///
+/// The projection binds the carried scalar, QoI, numerical and statistical
+/// certificates, canonical model-card and assumption sets, a typed validity
+/// child, discrepancy and in-domain state, every sensitivity row, and exact
+/// adjoint-hook presence. The existing `Certified<f64>` is consumed and
+/// retained without changing its layout or trust state.
+///
+/// Cards and assumptions must already satisfy their documented sorted,
+/// duplicate-free set representation. Legacy FNV provenance and adjoint values
+/// are deliberately excluded from the strong root rather than rehashed into
+/// apparent authority; `None` versus `Some` adjoint remains semantic claim
+/// state, while the original correlation tokens remain inspectable through the
+/// attached certified record.
+///
+/// # Errors
+/// Refuses a non-canonical set, validity-child refusal, invalid limits,
+/// resource overflow, or cancellation. No partial identity is published.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear canonical frame keeps all field-order and ownership invariants visible"
+)]
+pub fn identify_certified_f64_evidence_v1<C>(
+    certified: Certified<f64>,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedCertifiedF64EvidenceV1, CertifiedF64EvidenceIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    let (receipt, validity_receipt) = {
+        let evidence = certified.evidence();
+        let validity_receipt = identify_validity_domain_receipt_v1(
+            &evidence.model.validity,
+            limits,
+            &mut cancellation,
+        )?;
+        let card_count = preflight_certified_f64_string_set_v1(
+            &evidence.model.cards,
+            limits,
+            &mut cancellation,
+        )?;
+        let assumption_count = preflight_certified_f64_string_set_v1(
+            &evidence.model.assumptions,
+            limits,
+            &mut cancellation,
+        )?;
+        let sensitivity_count =
+            preflight_certified_f64_sensitivity_v1(&certified, limits, &mut cancellation)?;
+
+        let mut statistical_payload = [0_u8; 16];
+        let (statistical_tag, statistical_payload_len) = match evidence.statistical {
+            StatisticalCertificate::None => (1, 0),
+            StatisticalCertificate::EValue { e, alpha } => {
+                statistical_payload[..8].copy_from_slice(&e.to_bits().to_le_bytes());
+                statistical_payload[8..].copy_from_slice(&alpha.to_bits().to_le_bytes());
+                (2, statistical_payload.len())
+            }
+            StatisticalCertificate::HalfWidth {
+                half_width,
+                confidence,
+            } => {
+                statistical_payload[..8].copy_from_slice(&half_width.to_bits().to_le_bytes());
+                statistical_payload[8..].copy_from_slice(&confidence.to_bits().to_le_bytes());
+                (3, statistical_payload.len())
+            }
+        };
+        let encoder = CanonicalEncoder::<CertifiedF64EvidenceIdV1, _>::new(limits, cancellation)?
+            .finite_f64(Field::new(0, "value"), evidence.value)?
+            .finite_f64(Field::new(1, "qoi"), evidence.qoi)?
+            .variant(
+                Field::new(2, "numerical-kind"),
+                certified_f64_numerical_kind_tag_v1(evidence.numerical.kind),
+                &[],
+            )?
+            .finite_f64(Field::new(3, "numerical-lo"), evidence.numerical.lo)?
+            .finite_f64(Field::new(4, "numerical-hi"), evidence.numerical.hi)?
+            .variant(
+                Field::new(5, "statistical"),
+                statistical_tag,
+                &statistical_payload[..statistical_payload_len],
+            )?
+            .canonical_set(
+                Field::new(6, "model-cards"),
+                card_count,
+                evidence.model.cards.iter().map(|card| card.as_bytes()),
+            )?
+            .canonical_set(
+                Field::new(7, "model-assumptions"),
+                assumption_count,
+                evidence
+                    .model
+                    .assumptions
+                    .iter()
+                    .map(|assumption| assumption.as_bytes()),
+            )?
+            .child(Field::new(8, "model-validity"), validity_receipt.id())?
+            .u64(
+                Field::new(9, "model-discrepancy-ieee754-bits"),
+                evidence.model.discrepancy_rel.to_bits(),
+            )?
+            .flag(Field::new(10, "model-in-domain"), evidence.model.in_domain)?;
+
+        let sensitivity = &evidence.sensitivity.d_qoi;
+        let row_lengths = sensitivity.keys().map(|parameter| {
+            bounded_len(parameter.len()).and_then(|parameter_bytes| {
+                16_u64
+                    .checked_add(parameter_bytes)
+                    .ok_or(CanonicalError::LengthOverflow)
+            })
+        });
+        let mut rows = sensitivity.iter();
+        let encoder = encoder
+            .ordered_bytes_stream(
+                Field::new(11, "sensitivity"),
+                sensitivity_count,
+                row_lengths,
+                |row_index, mut sink| -> Result<(), CanonicalError> {
+                    let Some((parameter, derivative)) = rows.next() else {
+                        return Err(CanonicalError::DeclaredLengthMismatch {
+                            declared: sensitivity_count,
+                            observed: row_index,
+                        });
+                    };
+                    sink.write(&bounded_len(parameter.len())?.to_le_bytes())?;
+                    sink.write(parameter.as_bytes())?;
+                    sink.write(&derivative.to_bits().to_le_bytes())?;
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                OrderedBytesStreamError::Canonical { source, .. }
+                | OrderedBytesStreamError::Producer { source, .. } => {
+                    CertifiedF64EvidenceIdentityError::Canonical(source)
+                }
+            })?
+            .flag(
+                Field::new(12, "legacy-adjoint-correlation-present"),
+                evidence.adjoint_ref.is_some(),
+            )?
+            .finish()?;
+        (encoder, validity_receipt)
+    };
+    Ok(IdentifiedCertifiedF64EvidenceV1 {
+        certified,
+        validity_receipt,
+        receipt,
+    })
 }
 
 /// Reproduce `Color::canonical_bytes` under a hard allocation ceiling, a

@@ -87,6 +87,22 @@ telemetry/legacy correlation.
   The current scatter/gather producer preflights exactly four non-semantic
   stream chunks per axis against the caller's shared collection/chunk budget.
   Raw frame aliases remain low-level framing, not a semantic-admission bypass.
+- `identity` module (sj31i.52.2 tranche 3) —
+  `CertifiedF64EvidenceIdV1` is a strong `SemanticId` for the helper-defined
+  semantic projection of one opaque `Certified<f64>`. The helper consumes and
+  retains that certified record and binds its carried scalar and QoI,
+  numerical kind and finite bounds, statistical variant payload, canonical
+  model-card-name and assumption sets, the typed validity child, exact raw
+  discrepancy bits, in-domain state, ordered sensitivity-name/derivative-bit
+  rows, and whether an adjoint correlation is present. Card and assumption
+  vectors must already be strictly byte-sorted and duplicate-free; malformed
+  public vectors refuse rather than being silently reordered. The raw legacy
+  FNV provenance and adjoint-correlation values are deliberately excluded so a
+  weak collision cannot be laundered into apparent strong equality. Adjoint
+  `None` versus `Some` remains semantic claim state, while the original token
+  remains inspectable only through the attached certified record. Low-level
+  identity/receipt aliases remain schema-shaped framing and do not prove the
+  opaque helper relationship.
 
 - `color` module (bead qmao.1): the THREE-COLOR epistemic schema —
   `Color::{Verified{lo,hi}, Validated{regime: ValidityDomain, dataset},
@@ -251,6 +267,17 @@ telemetry/legacy correlation.
     row-count/field/chunk/frame resource overflow, and entry or mid-stream
     cancellation refuse without publishing an identity. Helper output agrees
     with independently framed canonical rows.
+15. Opaque helper-built certified-f64 semantics (sj31i.52.2, G0/G3/G4) retain
+    the exact `Certified<f64>` while agreeing with an independently framed
+    strong projection. Every governed scalar, certificate, model, validity,
+    sensitivity, or adjoint-presence mutation moves the root; signed-zero and
+    sensitivity NaN payload bits remain distinct where their wire types permit
+    them. Raw legacy provenance changes and raw `Some` adjoint-token changes do
+    not move the root, while `None` versus `Some` does. Non-canonical string
+    sets, validity refusal, exact field/row/chunk/frame resource overflow, and
+    entry or late cancellation refuse without publishing an identity. The raw
+    semantic-ID/receipt aliases do not assert helper-level consistency with an
+    attached certified record.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
@@ -266,10 +293,12 @@ Bit-stable across runs and platforms up to fs-math-class scalar-arithmetic
 divergence.
 
 ## Cancellation behavior
-Core certificate/color algebra is bounded small synchronous work. Typed color
-and validity-domain identity helpers accept an explicit cancellation probe;
-color payload copies poll at the configured byte stride, validity rows poll at
-stream chunks, and both consume their encoder on refusal. Falsifier allocation
+Core certificate/color algebra is bounded small synchronous work. Typed color,
+validity-domain, and certified-f64 identity helpers accept an explicit
+cancellation probe. Color payload copies poll at the configured byte stride;
+validity and sensitivity rows poll at stream boundaries; certified-f64 set and
+row preflights also poll while traversing caller data. Every refusal consumes
+the in-flight encoder and publishes no partial identity. Falsifier allocation
 and history review iterate caller data without a `Cx`; allocation length and
 distinct history rows are defensively capped, but these diagnostic APIs are not
 P7 hot-kernel or cancellation-authoritative paths. Callers must not place large
@@ -625,6 +654,21 @@ physical validation, process-standard conformance, or decision fitness.
   framing. Neither proves that observations occupy the box, that a model is
   valid there, or that any source/calibration authority admitted the
   declaration.
+- `IdentifiedCertifiedF64EvidenceV1` proves only the helper-defined strong
+  semantic projection of an already-local `Certified<f64>` and keeps that
+  record attached. It does not add units, a quantity kind, source or model-card
+  content identity, model-card version/calibration/known-failure binding,
+  gradient authority, seeds, budgets, versions, capabilities, or external
+  trust. The statistical fields bind only the numeric local variant payload;
+  `Evidence` currently carries no null/hypothesis/estimand, method, sample or
+  dataset, or dependence-context identity, so none is implied or bound here.
+  Model-card names are identifiers only. The projection is not a scientific
+  certificate, an origin signature, a ledger admission, or a commutativity
+  claim. Raw legacy FNV provenance and adjoint values remain inspectable
+  correlation metadata but are intentionally outside the strong root; only
+  adjoint presence is bound. A raw
+  `CertifiedF64EvidenceIdV1`/receipt is merely schema-shaped framing and can
+  encode a frame that disagrees with any purported attached record.
 - A successful opaque helper build proves canonical source framing or exact
   replay of the named Add/Mul/Hull color operation. It proves
   nothing about source origin, experimental membership, model correctness, or

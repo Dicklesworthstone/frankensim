@@ -2,16 +2,21 @@
 //!
 //! A retained cross-ISA known-answer vector is still required for G5.
 
+use std::collections::BTreeMap;
+
 use fs_blake3::identity::{
     CancellationProbe, CanonicalEncoder, CanonicalError, CanonicalLimits, CanonicalSchema, Field,
     FieldSpec, NoClaimState, SchemaId, SourceId, StrongIdentity, TrustState, WireType,
 };
 use fs_evidence::{
-    COLOR_ALGEBRA_VERSION, Color, ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError,
+    COLOR_ALGEBRA_VERSION, Certified, CertifiedF64EvidenceIdV1, CertifiedF64EvidenceIdentityError,
+    CertifiedF64EvidenceReceiptV1, Color, ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError,
     ColorEvidenceNodeIdV1, ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1,
     ColorEvidenceNodeV1, ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1,
-    ColorEvidenceSourceIdV1, ColorEvidenceSourceV1, IdentifiedValidityDomainV1, ValidityDomain,
-    ValidityDomainIdV1, ValidityDomainIdentityError, compose_color_evidence_nodes_v1,
+    ColorEvidenceSourceIdV1, ColorEvidenceSourceV1, Evidence, IdentifiedCertifiedF64EvidenceV1,
+    IdentifiedValidityDomainV1, ModelEvidence, NumericalKind, ProvenanceHash, SensitivitySummary,
+    StatisticalCertificate, ValidityDomain, ValidityDomainIdV1, ValidityDomainIdentityError,
+    compose_color_evidence_nodes_v1, identify_certified_f64_evidence_v1,
     identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
     identify_validity_domain_v1,
 };
@@ -67,6 +72,145 @@ fn parent_reference_bytes(parent: ColorEvidenceNodeIdV1) -> [u8; 65] {
 
 fn identified_domain(domain: ValidityDomain) -> IdentifiedValidityDomainV1 {
     identify_validity_domain_v1(domain, LIMITS, || false).expect("valid normalized domain")
+}
+
+fn certified_fixture() -> Certified<f64> {
+    let model = ModelEvidence {
+        cards: vec!["card-a".to_string(), "card-b".to_string()],
+        assumptions: vec!["assumption-a".to_string(), "assumption-b".to_string()],
+        validity: ValidityDomain::unconstrained()
+            .with("Mach number", 0.2, 0.8)
+            .with("α", -1.0, 1.0),
+        discrepancy_rel: 0.125,
+        in_domain: true,
+    };
+    let sensitivity = SensitivitySummary {
+        d_qoi: BTreeMap::from([("Mach number".to_string(), -0.0), ("α".to_string(), 2.5)]),
+    };
+    Evidence::enclosed(2.0, 1.0, 3.0, ProvenanceHash(0x1111_2222_3333_4444))
+        .with_statistical(StatisticalCertificate::EValue {
+            e: 8.0,
+            alpha: 0.05,
+        })
+        .with_model(model)
+        .with_sensitivity(sensitivity)
+        .with_adjoint(ProvenanceHash(0xaaaa_bbbb_cccc_dddd))
+        .certified()
+        .expect("valid certified scalar fixture")
+}
+
+fn identified_certified(certified: Certified<f64>) -> IdentifiedCertifiedF64EvidenceV1 {
+    identify_certified_f64_evidence_v1(certified, LIMITS, || false)
+        .expect("valid certified-f64 identity")
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "independent full-schema framing is the replay oracle for the helper"
+)]
+fn manual_certified_receipt(
+    certified: &Certified<f64>,
+    value: f64,
+    in_domain: bool,
+) -> CertifiedF64EvidenceReceiptV1 {
+    let evidence = certified.evidence();
+    let validity = identified_domain(evidence.model.validity.clone());
+    let numerical_tag = match evidence.numerical.kind {
+        NumericalKind::Exact => 1,
+        NumericalKind::Enclosure => 2,
+        NumericalKind::Estimate => 3,
+        NumericalKind::NoClaim => 4,
+    };
+    let mut statistical_payload = [0_u8; 16];
+    let (statistical_tag, statistical_len) = match evidence.statistical {
+        StatisticalCertificate::None => (1, 0),
+        StatisticalCertificate::EValue { e, alpha } => {
+            statistical_payload[..8].copy_from_slice(&e.to_bits().to_le_bytes());
+            statistical_payload[8..].copy_from_slice(&alpha.to_bits().to_le_bytes());
+            (2, 16)
+        }
+        StatisticalCertificate::HalfWidth {
+            half_width,
+            confidence,
+        } => {
+            statistical_payload[..8].copy_from_slice(&half_width.to_bits().to_le_bytes());
+            statistical_payload[8..].copy_from_slice(&confidence.to_bits().to_le_bytes());
+            (3, 16)
+        }
+    };
+    let sensitivity_rows: Vec<Vec<u8>> = evidence
+        .sensitivity
+        .d_qoi
+        .iter()
+        .map(|(parameter, derivative)| {
+            let mut row = Vec::new();
+            row.extend_from_slice(
+                &u64::try_from(parameter.len())
+                    .expect("parameter length")
+                    .to_le_bytes(),
+            );
+            row.extend_from_slice(parameter.as_bytes());
+            row.extend_from_slice(&derivative.to_bits().to_le_bytes());
+            row
+        })
+        .collect();
+
+    CanonicalEncoder::<CertifiedF64EvidenceIdV1, _>::new(LIMITS, || false)
+        .expect("certified-f64 schema")
+        .finite_f64(Field::new(0, "value"), value)
+        .expect("value")
+        .finite_f64(Field::new(1, "qoi"), evidence.qoi)
+        .expect("qoi")
+        .variant(Field::new(2, "numerical-kind"), numerical_tag, &[])
+        .expect("numerical kind")
+        .finite_f64(Field::new(3, "numerical-lo"), evidence.numerical.lo)
+        .expect("numerical lo")
+        .finite_f64(Field::new(4, "numerical-hi"), evidence.numerical.hi)
+        .expect("numerical hi")
+        .variant(
+            Field::new(5, "statistical"),
+            statistical_tag,
+            &statistical_payload[..statistical_len],
+        )
+        .expect("statistical")
+        .canonical_set(
+            Field::new(6, "model-cards"),
+            u64::try_from(evidence.model.cards.len()).expect("card count"),
+            evidence.model.cards.iter().map(|card| card.as_bytes()),
+        )
+        .expect("model cards")
+        .canonical_set(
+            Field::new(7, "model-assumptions"),
+            u64::try_from(evidence.model.assumptions.len()).expect("assumption count"),
+            evidence
+                .model
+                .assumptions
+                .iter()
+                .map(|assumption| assumption.as_bytes()),
+        )
+        .expect("model assumptions")
+        .child(Field::new(8, "model-validity"), validity.id())
+        .expect("typed validity")
+        .u64(
+            Field::new(9, "model-discrepancy-ieee754-bits"),
+            evidence.model.discrepancy_rel.to_bits(),
+        )
+        .expect("model discrepancy")
+        .flag(Field::new(10, "model-in-domain"), in_domain)
+        .expect("model in-domain")
+        .ordered_bytes(
+            Field::new(11, "sensitivity"),
+            u64::try_from(sensitivity_rows.len()).expect("sensitivity count"),
+            sensitivity_rows.iter().map(|row| row.as_slice()),
+        )
+        .expect("sensitivity")
+        .flag(
+            Field::new(12, "legacy-adjoint-correlation-present"),
+            evidence.adjoint_ref.is_some(),
+        )
+        .expect("adjoint presence")
+        .finish()
+        .expect("manual certified-f64 identity")
 }
 
 #[test]
@@ -361,6 +505,450 @@ fn raw_validity_domain_receipt_is_only_schema_shaped() {
         malformed.audit_record().no_claim(),
         NoClaimState::ExternalTrustRequired
     );
+}
+
+#[test]
+fn certified_f64_identity_replays_and_excludes_legacy_correlation_values() {
+    let certified = certified_fixture();
+    let first = identified_certified(certified.clone());
+    let replay = identified_certified(certified.clone());
+    let manual = manual_certified_receipt(&certified, certified.value, certified.model.in_domain);
+
+    assert_eq!(first.id(), replay.id());
+    assert_eq!(first.id(), manual.id());
+    assert_eq!(
+        first.receipt().canonical_preimage(),
+        manual.canonical_preimage()
+    );
+    assert_eq!(first.id_bytes(), first.receipt().audit_record().id());
+    assert_eq!(first.trust_state(), TrustState::Unanchored);
+    assert_eq!(
+        first.receipt().audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
+    assert_eq!(
+        first.validity_id(),
+        identified_domain(certified.model.validity.clone()).id()
+    );
+
+    let none = Evidence::exact(4.0, ProvenanceHash(7))
+        .certified()
+        .expect("valid no-statistical fixture");
+    let mut half_width = certified.clone().into_evidence();
+    half_width.statistical = StatisticalCertificate::HalfWidth {
+        half_width: 0.25,
+        confidence: 0.95,
+    };
+    let half_width = half_width.certified().expect("valid half-width fixture");
+    for variant in [none, half_width] {
+        let manual = manual_certified_receipt(&variant, variant.value, variant.model.in_domain);
+        let helper = identified_certified(variant);
+        assert_eq!(helper.id(), manual.id());
+        assert_eq!(
+            helper.receipt().canonical_preimage(),
+            manual.canonical_preimage()
+        );
+    }
+
+    let mut provenance_a = certified.clone().into_evidence();
+    provenance_a.provenance = ProvenanceHash(1);
+    let provenance_a = provenance_a
+        .certified()
+        .expect("provenance a remains certified");
+    let mut provenance_b = certified.clone().into_evidence();
+    provenance_b.provenance = ProvenanceHash(2);
+    let provenance_b = provenance_b
+        .certified()
+        .expect("provenance b remains certified");
+    let provenance_a_id = identified_certified(provenance_a).id();
+    let provenance_b_id = identified_certified(provenance_b).id();
+    assert_eq!(provenance_a_id, provenance_b_id);
+
+    let mut adjoint_a = certified.clone().into_evidence();
+    adjoint_a.adjoint_ref = Some(ProvenanceHash(1));
+    let adjoint_a = adjoint_a.certified().expect("adjoint a remains certified");
+    let mut adjoint_b = certified.clone().into_evidence();
+    adjoint_b.adjoint_ref = Some(ProvenanceHash(2));
+    let adjoint_b = adjoint_b.certified().expect("adjoint b remains certified");
+    let mut no_adjoint = certified.clone().into_evidence();
+    no_adjoint.adjoint_ref = None;
+    let no_adjoint = no_adjoint
+        .certified()
+        .expect("no adjoint remains certified");
+    assert_eq!(
+        identified_certified(adjoint_a).id(),
+        identified_certified(adjoint_b).id()
+    );
+    assert_ne!(first.id(), identified_certified(no_adjoint).id());
+
+    let recovered = first.into_certified();
+    assert_eq!(recovered.provenance, ProvenanceHash(0x1111_2222_3333_4444));
+    assert_eq!(
+        recovered.adjoint_ref,
+        Some(ProvenanceHash(0xaaaa_bbbb_cccc_dddd))
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one mutation matrix compares every semantic field to a shared baseline"
+)]
+fn certified_f64_identity_binds_every_strong_semantic_field() {
+    let certified = certified_fixture();
+    let base_id = identified_certified(certified.clone()).id();
+
+    let identify_mutation = |evidence: Evidence<f64>| {
+        identified_certified(evidence.certified().expect("mutation remains certified")).id()
+    };
+
+    let mut scalar = certified.clone().into_evidence();
+    scalar.value = 2.0_f64.next_up();
+    scalar.qoi = scalar.value;
+    let scalar_id = identify_mutation(scalar);
+
+    let mut numerical_kind = certified.clone().into_evidence();
+    numerical_kind.numerical.kind = NumericalKind::Exact;
+    numerical_kind.numerical.lo = numerical_kind.qoi;
+    numerical_kind.numerical.hi = numerical_kind.qoi;
+    let numerical_kind_id = identify_mutation(numerical_kind);
+
+    let mut numerical_lo = certified.clone().into_evidence();
+    numerical_lo.numerical.lo = 1.0_f64.next_up();
+    let numerical_lo_id = identify_mutation(numerical_lo);
+
+    let mut numerical_hi = certified.clone().into_evidence();
+    numerical_hi.numerical.hi = 3.0_f64.next_down();
+    let numerical_hi_id = identify_mutation(numerical_hi);
+
+    let mut half_width_base = certified.clone().into_evidence();
+    half_width_base.statistical = StatisticalCertificate::HalfWidth {
+        half_width: 0.25,
+        confidence: 0.95,
+    };
+    let half_width_base_id = identify_mutation(half_width_base);
+
+    let mut e_value_e = certified.clone().into_evidence();
+    e_value_e.statistical = StatisticalCertificate::EValue {
+        e: 8.0_f64.next_up(),
+        alpha: 0.05,
+    };
+    let e_value_e_id = identify_mutation(e_value_e);
+
+    let mut e_value_alpha = certified.clone().into_evidence();
+    e_value_alpha.statistical = StatisticalCertificate::EValue {
+        e: 8.0,
+        alpha: 0.05_f64.next_up(),
+    };
+    let e_value_alpha_id = identify_mutation(e_value_alpha);
+
+    let mut half_width_value = certified.clone().into_evidence();
+    half_width_value.statistical = StatisticalCertificate::HalfWidth {
+        half_width: 0.25_f64.next_up(),
+        confidence: 0.95,
+    };
+    let half_width_value_id = identify_mutation(half_width_value);
+
+    let mut half_width_confidence = certified.clone().into_evidence();
+    half_width_confidence.statistical = StatisticalCertificate::HalfWidth {
+        half_width: 0.25,
+        confidence: 0.95_f64.next_down(),
+    };
+    let half_width_confidence_id = identify_mutation(half_width_confidence);
+
+    let mut card = certified.clone().into_evidence();
+    card.model.cards.push("card-c".to_string());
+    let card_id = identify_mutation(card);
+
+    let mut assumption = certified.clone().into_evidence();
+    assumption
+        .model
+        .assumptions
+        .push("assumption-c".to_string());
+    let assumption_id = identify_mutation(assumption);
+
+    let mut validity = certified.clone().into_evidence();
+    validity.model.validity = validity.model.validity.with("β", -2.0, 2.0);
+    let validity_id = identify_mutation(validity);
+
+    let mut discrepancy = certified.clone().into_evidence();
+    discrepancy.model.discrepancy_rel = 0.125_f64.next_up();
+    let discrepancy_id = identify_mutation(discrepancy);
+
+    let mut sensitivity = certified.clone().into_evidence();
+    sensitivity
+        .sensitivity
+        .d_qoi
+        .insert("α".to_string(), 2.5_f64.next_up());
+    let sensitivity_id = identify_mutation(sensitivity);
+
+    let mut sensitivity_name = certified.clone().into_evidence();
+    let derivative = sensitivity_name
+        .sensitivity
+        .d_qoi
+        .remove("α")
+        .expect("fixture sensitivity key");
+    sensitivity_name
+        .sensitivity
+        .d_qoi
+        .insert("β".to_string(), derivative);
+    let sensitivity_name_id = identify_mutation(sensitivity_name);
+
+    for (field, mutated_id) in [
+        ("value-and-qoi", scalar_id),
+        ("numerical-kind-and-exact-bounds", numerical_kind_id),
+        ("numerical-lo", numerical_lo_id),
+        ("numerical-hi", numerical_hi_id),
+        ("statistical-variant", half_width_base_id),
+        ("e-value-e", e_value_e_id),
+        ("e-value-alpha", e_value_alpha_id),
+        ("model-card", card_id),
+        ("model-assumption", assumption_id),
+        ("model-validity", validity_id),
+        ("model-discrepancy", discrepancy_id),
+        ("sensitivity-value", sensitivity_id),
+        ("sensitivity-name", sensitivity_name_id),
+    ] {
+        assert_ne!(base_id, mutated_id, "{field} must move the root");
+    }
+    assert_ne!(half_width_base_id, half_width_value_id);
+    assert_ne!(half_width_base_id, half_width_confidence_id);
+
+    let positive_zero = identified_certified(
+        Evidence::exact(0.0, ProvenanceHash(1))
+            .certified()
+            .expect("positive zero exact"),
+    );
+    let negative_zero = identified_certified(
+        Evidence::exact(-0.0, ProvenanceHash(2))
+            .certified()
+            .expect("negative zero exact"),
+    );
+    assert_ne!(positive_zero.id(), negative_zero.id());
+
+    let mut positive_discrepancy = certified.clone().into_evidence();
+    positive_discrepancy.model.discrepancy_rel = 0.0;
+    let mut negative_discrepancy = certified.clone().into_evidence();
+    negative_discrepancy.model.discrepancy_rel = -0.0;
+    assert_ne!(
+        identify_mutation(positive_discrepancy),
+        identify_mutation(negative_discrepancy)
+    );
+
+    let mut first_nan = certified.clone().into_evidence();
+    first_nan.sensitivity.d_qoi.insert(
+        "nan-sensitivity".to_string(),
+        f64::from_bits(0x7ff8_0000_0000_0001),
+    );
+    let first_nan = identify_mutation(first_nan);
+    let mut second_nan = certified.clone().into_evidence();
+    second_nan.sensitivity.d_qoi.insert(
+        "nan-sensitivity".to_string(),
+        f64::from_bits(0x7ff8_0000_0000_0002),
+    );
+    let second_nan = identify_mutation(second_nan);
+    assert_ne!(first_nan, second_nan);
+
+    let mut unbounded_discrepancy = certified.into_evidence();
+    unbounded_discrepancy.model.discrepancy_rel = f64::INFINITY;
+    assert_ne!(base_id, identify_mutation(unbounded_discrepancy));
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one refusal matrix shares exact limits and cancellation accounting"
+)]
+fn certified_f64_identity_refuses_noncanonical_sets_resources_and_cancellation() {
+    let mut unsorted = certified_fixture().into_evidence();
+    unsorted.model.cards = vec!["z-card".to_string(), "a-card".to_string()];
+    let unsorted = unsorted
+        .certified()
+        .expect("set order is not certification");
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(unsorted, LIMITS, || false),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::NonCanonicalSetOrder { index: 1 }
+        ))
+    ));
+
+    let mut duplicate = certified_fixture().into_evidence();
+    duplicate.model.assumptions = vec!["same".to_string(), "same".to_string()];
+    let duplicate = duplicate
+        .certified()
+        .expect("duplicates are not certification");
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(duplicate, LIMITS, || false),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::DuplicateSetItem { index: 1 }
+        ))
+    ));
+
+    let certified = certified_fixture();
+    let helper = identified_certified(certified.clone());
+    let raw_false_in_domain = manual_certified_receipt(&certified, certified.value, false);
+    let raw_value_mismatch = manual_certified_receipt(&certified, certified.value.next_up(), true);
+    assert_ne!(helper.id(), raw_false_in_domain.id());
+    assert_ne!(helper.id(), raw_value_mismatch.id());
+    assert_eq!(
+        raw_false_in_domain.audit_record().trust(),
+        TrustState::Unanchored
+    );
+
+    let frame_limit = helper
+        .receipt()
+        .canonical_bytes()
+        .checked_sub(1)
+        .expect("non-empty certified-f64 frame");
+    let frame_limits = CanonicalLimits::new(frame_limit, 8_192, 32, 64, 64);
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(certified.clone(), frame_limits, || false),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == frame_limit
+    ));
+
+    let mut oversized_card = certified.clone().into_evidence();
+    oversized_card.model.cards = vec!["c".repeat(250)];
+    let oversized_card = oversized_card
+        .certified()
+        .expect("card bytes are not certification");
+    let field_limits = CanonicalLimits::new(16_384, 256, 32, 64, 64);
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(oversized_card, field_limits, || false),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 266,
+                limit: 256,
+            }
+        ))
+    ));
+
+    let sensitivity_field_limits = CanonicalLimits::new(16_384, 512, 32, 64, 64);
+    let mut exact_sensitivity_field = certified.clone().into_evidence();
+    exact_sensitivity_field.sensitivity.d_qoi = BTreeMap::from([("s".repeat(480), 1.0)]);
+    let exact_sensitivity_field = exact_sensitivity_field
+        .certified()
+        .expect("exact-limit sensitivity remains certified");
+    identify_certified_f64_evidence_v1(exact_sensitivity_field, sensitivity_field_limits, || false)
+        .expect("exact 512-byte sensitivity field is admitted");
+
+    let mut oversized_sensitivity_field = certified.clone().into_evidence();
+    oversized_sensitivity_field.sensitivity.d_qoi = BTreeMap::from([("s".repeat(481), 1.0)]);
+    let oversized_sensitivity_field = oversized_sensitivity_field
+        .certified()
+        .expect("over-limit sensitivity remains certified");
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(
+            oversized_sensitivity_field,
+            sensitivity_field_limits,
+            || false,
+        ),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 513,
+                limit: 512,
+            }
+        ))
+    ));
+
+    let mut collection_bounded = Evidence::exact(1.0, ProvenanceHash(9));
+    collection_bounded.sensitivity.d_qoi =
+        BTreeMap::from([("a".to_string(), 1.0), ("b".to_string(), 2.0)]);
+    let collection_bounded = collection_bounded
+        .certified()
+        .expect("collection-bounded fixture remains certified");
+    let collection_limits = CanonicalLimits::new(16_384, 8_192, 32, 1, 64);
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(collection_bounded, collection_limits, || false),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 2,
+                limit: 1,
+            }
+        ))
+    ));
+
+    let mut chunk_bounded = certified.clone().into_evidence();
+    chunk_bounded.sensitivity.d_qoi = BTreeMap::from([
+        ("a".to_string(), 1.0),
+        ("b".to_string(), 2.0),
+        ("c".to_string(), 3.0),
+    ]);
+    let chunk_bounded = chunk_bounded
+        .certified()
+        .expect("sensitivity is not certification");
+    let chunk_limits = CanonicalLimits::new(16_384, 8_192, 32, 8, 64);
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(chunk_bounded, chunk_limits, || false),
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::StreamChunks,
+                requested: 9,
+                limit: 8,
+            }
+        ))
+    ));
+
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(certified.clone(), LIMITS, || true),
+        Err(CertifiedF64EvidenceIdentityError::Validity(
+            ValidityDomainIdentityError::Canonical(CanonicalError::Cancelled { .. })
+        ))
+    ));
+    assert!(matches!(
+        identify_certified_f64_evidence_v1(
+            certified.clone(),
+            CanonicalLimits::new(4096, 512, 32, 64, 0),
+            || false,
+        ),
+        Err(CertifiedF64EvidenceIdentityError::Validity(
+            ValidityDomainIdentityError::Canonical(CanonicalError::InvalidLimits(
+                "cancellation_poll_bytes must be positive"
+            ))
+        ))
+    ));
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+    let poll_count = std::cell::Cell::new(0_usize);
+    identify_certified_f64_evidence_v1(certified.clone(), LIMITS, || {
+        poll_count.set(poll_count.get() + 1);
+        false
+    })
+    .expect("baseline certified poll count");
+    let late_cancelled = identify_certified_f64_evidence_v1(
+        certified,
+        LIMITS,
+        CancelAfter {
+            successful_polls: poll_count.get() - 1,
+        },
+    );
+    assert!(matches!(
+        late_cancelled,
+        Err(CertifiedF64EvidenceIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
 }
 
 #[test]
