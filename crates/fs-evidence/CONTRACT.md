@@ -10,7 +10,8 @@ evidence the system can produce beautifully certified WRONG answers (mesh
 error 0.7%, closure discrepancy 10%) — being able to SAY that is the
 product. Layer: UTIL (usable by every layer; the bead label said L6, but
 the bead scope explicitly demands a low-layer home — this is it). Depends
-on fs-obs only.
+on fs-blake3 for typed canonical identities and fs-obs for deterministic
+telemetry/legacy correlation.
 
 ## Public types and semantics
 - `Evidence<T> { value, qoi, numerical, statistical, model, sensitivity,
@@ -54,6 +55,23 @@ on fs-obs only.
   mitigation).
 - `to_ledger_row_json` on evidence and cards — the `evidence` /
   `model_cards` table rows (canonical order, no clocks, no addresses).
+- `identity` module (sj31i.52.2 tranche 1) —
+  `ColorEvidenceSourceIdV1` and `ColorEvidenceNodeIdV1` are nominal
+  `SourceId` / `EvidenceNodeId` roles over static v1 framing schemas. Direct use
+  of those low-level aliases with `CanonicalEncoder` proves only schema-shaped
+  framing; it is not semantic admission. The opaque `ColorEvidenceSourceV1`
+  helper result additionally enforces an explicit source-schema domain,
+  nonzero source-schema version, and exact retained source bytes. The opaque
+  `ColorEvidenceNodeV1` keeps a color attached to its receipt and is the type
+  that carries the helper invariants: its source uses a complete child
+  role/schema descriptor, while recursive parent rows bind the evidence-node
+  role, complete node `SchemaId`, and full typed root. Add/Mul/Hull composition
+  sorts parent IDs, preserves duplicates, recomputes the output with the current
+  `IntervalOp` algebra, and then binds kind, operation, parent law,
+  `COLOR_ALGEBRA_VERSION`, source/parents, and exact canonical output. Color
+  encoding is cancellation-polled and hard-capped at 1 MiB before allocation.
+  Construction returns only unanchored receipts: it neither authenticates
+  origin nor changes `Color`, `Certified<T>`, or `AdmittedColor` trust state.
 
 - `color` module (bead qmao.1): the THREE-COLOR epistemic schema —
   `Color::{Verified{lo,hi}, Validated{regime: ValidityDomain, dataset},
@@ -199,6 +217,16 @@ on fs-obs only.
     each entry's validation reason in a v2 domain-separated streaming hash;
     distinct residual cards cannot alias merely because the first invalid card
     is the same.
+13. Opaque helper-built color-evidence nodes (sj31i.52.2, G0/G3/G4) are
+    same-schema replay-stable and publish no partial root on malformed color,
+    resource, or cancellation refusal. Source nodes require exactly one
+    schema-bound typed source and zero parents. Composition nodes carry no
+    source and exactly two descriptor-bound parent rows. Add/Mul/Hull normalize
+    parent order before recomputing both the color and identity, without
+    deduplicating multiplicity. Helper output agrees with an independent
+    canonical construction for every color variant. Raw frame-ID/receipt
+    aliases do not assert these helper-level semantic invariants. Legacy
+    `ProvenanceHash` has no conversion or rehash bridge into either typed role.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
@@ -562,7 +590,19 @@ physical validation, process-standard conformance, or decision fitness.
   `model_cards` tables land with fs-ledger (rows are shaped for that
   migration).
 - `ProvenanceHash` is FNV-1a until the BLAKE3-class ledger hash supersedes
-  it (same upgrade path as fs-obs).
+  it (same upgrade path as fs-obs). It remains legacy deterministic
+  correlation only and cannot construct `ColorEvidenceSourceIdV1` or
+  `ColorEvidenceNodeIdV1`.
+- A successful opaque helper build proves canonical source framing or exact
+  replay of the named Add/Mul/Hull color operation. It proves
+  nothing about source origin, experimental membership, model correctness, or
+  admission. External trust must travel via an independent `AuthorityRef`;
+  scientific rank remains in `Color`, numeric structural consistency remains in
+  `Certified<T>`, and color admission remains in `AdmittedColor`. These axes do
+  not promote one another.
+- G5 promotion is intentionally pending a retained known-answer vector replayed
+  across the reference ISAs and thread counts. Same-process recomputation and
+  independent G3 construction are not reported as that stronger proof.
 
 ## No-claim boundaries (falsifiers)
 

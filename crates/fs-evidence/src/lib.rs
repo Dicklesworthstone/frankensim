@@ -42,6 +42,7 @@ mod cards;
 pub mod color;
 mod discrepancy;
 pub mod falsify;
+pub mod identity;
 pub mod vv;
 
 pub use admitted::{
@@ -62,6 +63,16 @@ pub use falsify::{
     AttemptRecord, ClaimContext, EstimatorBugCandidate, FalsifierAttempt, FalsifierHistory,
     FalsifierOutcome, FalsifierRegistry, FalsifierSpec, FalsifyError, TombstoneCandidate,
     allocate_budget,
+};
+pub use identity::{
+    COLOR_EVIDENCE_NODE_IDENTITY_VERSION_V1, COLOR_EVIDENCE_SOURCE_IDENTITY_VERSION_V1,
+    ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError, ColorEvidenceNodeIdV1,
+    ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1, ColorEvidenceNodeReceiptV1,
+    ColorEvidenceNodeV1, ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1,
+    ColorEvidenceSourceIdV1, ColorEvidenceSourceIdentitySchemaV1, ColorEvidenceSourceReceiptV1,
+    ColorEvidenceSourceV1, EvidenceIdentityCancellationProbe, EvidenceIdentityLimits,
+    EvidenceIdentityTrustState, MAX_COLOR_EVIDENCE_NODE_BYTES_V1, compose_color_evidence_nodes_v1,
+    identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
 };
 
 /// Crate version, re-exported for provenance stamping.
