@@ -99,9 +99,13 @@ fn so3_antipodal_problem() -> Problem {
 }
 
 fn euclidean_problem(dim: u32) -> Problem {
+    named_euclidean_problem("euclidean", dim, D0)
+}
+
+fn named_euclidean_problem(name: &str, dim: u32, dims: Dims) -> Problem {
     let mut builder = ProblemBuilder::new();
     let variable = builder
-        .var("euclidean", Manifold::Rn { dim }, D0)
+        .var(name, Manifold::Rn { dim }, dims)
         .expect("Euclidean variable");
     let variable_ref = builder.var_ref(variable).expect("Euclidean reference");
     let objective = builder
@@ -340,4 +344,32 @@ fn g0_constraint_adapters_fail_closed_for_non_euclidean_packing() {
         let _ = Study::constraint_adapters(&problem, &unrelated_euclidean_packing, 1.0e-6);
     }));
     assert!(mismatch_refusal.is_err());
+
+    // Reach the packing-schema guard with two all-Rn problems whose storage
+    // layouts are identical. Comparing manifolds alone would accept this
+    // reinterpretation even though a variable name or physical dimension
+    // assigns a different meaning to every packed coordinate. Move the two
+    // schema axes independently so one partially strengthened guard cannot
+    // satisfy the regression.
+    let source_problem = euclidean_problem(3);
+    let source_packing = Packing::new(&source_problem);
+    let foreign_schemas = [
+        (
+            "variable-name",
+            named_euclidean_problem("temperature-vector", 3, D0),
+        ),
+        (
+            "physical-dimensions",
+            named_euclidean_problem("euclidean", 3, Dims([0, 0, 0, 1, 0, 0])),
+        ),
+    ];
+    for (mutated_field, foreign_schema) in foreign_schemas {
+        let same_layout_refusal = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Study::constraint_adapters(&foreign_schema, &source_packing, 1.0e-6);
+        }));
+        assert!(
+            same_layout_refusal.is_err(),
+            "same manifold layout must not authorize changed {mutated_field}"
+        );
+    }
 }

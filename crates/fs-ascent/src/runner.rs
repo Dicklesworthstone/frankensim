@@ -54,6 +54,11 @@ struct Block {
 #[derive(Debug, Clone)]
 pub struct Packing {
     blocks: Vec<Block>,
+    /// Exact variable schema whose point and parameter offsets these blocks
+    /// interpret. Manifold layout alone is insufficient: two problems may
+    /// share storage shapes while assigning different names or physical
+    /// dimensions to those coordinates.
+    variables: Vec<Variable>,
     /// Total packed point-storage length.
     pub dim: usize,
     /// Total packed optimizer-parameter length.
@@ -102,6 +107,7 @@ impl Packing {
         }
         Packing {
             blocks,
+            variables: problem.vars().to_vec(),
             dim: point_start,
             param_dim: parameter_start,
         }
@@ -206,12 +212,7 @@ impl Packing {
     }
 
     fn matches_problem_schema(&self, problem: &Problem) -> bool {
-        self.blocks.len() == problem.vars().len()
-            && self
-                .blocks
-                .iter()
-                .zip(problem.vars())
-                .all(|(block, variable)| block.manifold == variable.manifold)
+        self.variables.as_slice() == problem.vars()
     }
 }
 
