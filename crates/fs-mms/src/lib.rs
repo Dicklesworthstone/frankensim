@@ -22,11 +22,48 @@
 //! until fs-opdsl lands), and does not ledger results (fingerprint-bound
 //! persistence is fs-obs/fs-ledger scope; records here are JSON lines).
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
 /// The bead's gate half-width: observed order may deviate from the
 /// theoretical order by at most this much.
 pub const ORDER_GATE_TOLERANCE: f64 = 0.2;
+
+fn escape_json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{0000}'..='\u{001f}' => {
+                write!(&mut escaped, "\\u{:04x}", u32::from(ch))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn json_fixed_number(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn json_scientific_number(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.3e}")
+    } else {
+        "null".to_string()
+    }
+}
 
 /// One refinement ladder: mesh parameters and matching error norms.
 #[derive(Debug, Clone, PartialEq)]
@@ -202,19 +239,27 @@ pub struct OrderVerdict {
 }
 
 impl OrderVerdict {
+    fn numeric_fields_are_finite(&self) -> bool {
+        self.fit.observed.is_finite()
+            && self.fit.intercept.is_finite()
+            && self.fit.rms_residual.is_finite()
+            && self.theoretical.is_finite()
+            && self.deviation.is_finite()
+    }
+
     /// The verdict as one JSON line.
     #[must_use]
     pub fn json_line(&self, pass: bool) -> String {
+        let pass = pass && self.numeric_fields_are_finite();
         format!(
-            "{{\"mms\":\"order\",\"case\":\"{}\",\"side\":\"{}\",\"observed\":{:.6},\
-             \"theoretical\":{:.6},\"deviation\":{:.6},\"rms_residual\":{:.3e},\"pass\":{}}}",
-            self.case,
+            "{{\"mms\":\"order\",\"case\":\"{}\",\"side\":\"{}\",\"observed\":{},\
+             \"theoretical\":{},\"deviation\":{},\"rms_residual\":{},\"pass\":{pass}}}",
+            escape_json_string(&self.case),
             self.side.name(),
-            self.fit.observed,
-            self.theoretical,
-            self.deviation,
-            self.fit.rms_residual,
-            pass
+            json_fixed_number(self.fit.observed),
+            json_fixed_number(self.theoretical),
+            json_fixed_number(self.deviation),
+            json_scientific_number(self.fit.rms_residual)
         )
     }
 }
@@ -245,6 +290,9 @@ impl OrderGate {
             theoretical: self.theoretical,
             deviation,
         };
+        if !verdict.numeric_fields_are_finite() {
+            return Err(MmsError::new("mms-gate-domain", verdict.json_line(false)));
+        }
         if deviation > ORDER_GATE_TOLERANCE {
             return Err(MmsError::new("mms-order-gate", verdict.json_line(false)));
         }
@@ -306,13 +354,16 @@ impl MmsMatrix {
             .iter()
             .map(|r| {
                 let (status, detail) = match &r.coverage {
-                    Coverage::Covered { test } => ("covered", test.clone()),
-                    Coverage::Gap { reason } => ("gap", reason.clone()),
+                    Coverage::Covered { test } => ("covered", test.as_str()),
+                    Coverage::Gap { reason } => ("gap", reason.as_str()),
                 };
                 format!(
                     "{{\"mms\":\"matrix\",\"frontend\":\"{}\",\"family\":\"{}\",\"bc\":\"{}\",\
-                     \"status\":\"{status}\",\"detail\":\"{detail}\"}}",
-                    r.frontend, r.family, r.bc
+                     \"status\":\"{status}\",\"detail\":\"{}\"}}",
+                    escape_json_string(&r.frontend),
+                    escape_json_string(&r.family),
+                    escape_json_string(&r.bc),
+                    escape_json_string(detail)
                 )
             })
             .collect()

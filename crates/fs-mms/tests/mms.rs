@@ -4,8 +4,8 @@
 //! declared battery matrix with lintable gaps.
 
 use fs_mms::{
-    Coverage, LadderSide, MmsMatrix, MmsMatrixRow, ORDER_GATE_TOLERANCE, OrderGate,
-    RefinementLadder, fit_order,
+    Coverage, LadderSide, MmsMatrix, MmsMatrixRow, ORDER_GATE_TOLERANCE, OrderFit, OrderGate,
+    OrderVerdict, RefinementLadder, fit_order,
 };
 
 fn ladder(hs: &[f64], errors: &[f64]) -> RefinementLadder {
@@ -60,6 +60,64 @@ fn the_gate_passes_within_0_2_and_build_fails_beyond_it() {
         .is_err(),
         "too-good orders fail too: superconvergence claims need their own theory"
     );
+}
+
+#[test]
+fn json_lines_escape_every_caller_controlled_string() {
+    let verdict = OrderGate { theoretical: 2.0 }
+        .check(
+            "quote\"\\slash\nsecond\u{0001}",
+            LadderSide::Primal,
+            &ladder(&[1.0, 0.5, 0.25], &[1.0, 0.25, 0.0625]),
+        )
+        .expect("exact second-order ladder");
+    let order_line = verdict.json_line(true);
+    assert_eq!(order_line.lines().count(), 1);
+    assert!(!order_line.chars().any(|ch| ch < ' '));
+    assert!(
+        order_line.contains("\"case\":\"quote\\\"\\\\slash\\nsecond\\u0001\""),
+        "{order_line}"
+    );
+
+    let matrix_line = MmsMatrix {
+        rows: vec![MmsMatrixRow {
+            frontend: "front\"end".into(),
+            family: "fam\\ily".into(),
+            bc: "bc\nline".into(),
+            coverage: Coverage::Gap {
+                reason: "gap\u{0008}\u{000c}\r\t\u{0002}".into(),
+            },
+        }],
+    }
+    .json_lines()
+    .pop()
+    .expect("one matrix row");
+    assert_eq!(matrix_line.lines().count(), 1);
+    assert!(!matrix_line.chars().any(|ch| ch < ' '));
+    assert!(matrix_line.contains("\"frontend\":\"front\\\"end\""));
+    assert!(matrix_line.contains("\"family\":\"fam\\\\ily\""));
+    assert!(matrix_line.contains("\"bc\":\"bc\\nline\""));
+    assert!(matrix_line.contains("\"detail\":\"gap\\b\\f\\r\\t\\u0002\""));
+
+    let invalid_numeric_line = OrderVerdict {
+        case: "invalid-numerics".into(),
+        side: LadderSide::Adjoint,
+        fit: OrderFit {
+            observed: f64::NAN,
+            intercept: f64::INFINITY,
+            rms_residual: f64::NEG_INFINITY,
+        },
+        theoretical: f64::INFINITY,
+        deviation: f64::NAN,
+    }
+    .json_line(true);
+    assert!(invalid_numeric_line.contains("\"observed\":null"));
+    assert!(invalid_numeric_line.contains("\"theoretical\":null"));
+    assert!(invalid_numeric_line.contains("\"deviation\":null"));
+    assert!(invalid_numeric_line.contains("\"rms_residual\":null"));
+    assert!(invalid_numeric_line.contains("\"pass\":false"));
+    assert!(!invalid_numeric_line.contains("NaN"));
+    assert!(!invalid_numeric_line.contains("inf"));
 }
 
 #[test]
