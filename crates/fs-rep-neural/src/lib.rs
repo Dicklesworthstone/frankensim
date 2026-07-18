@@ -16,9 +16,11 @@
 //!
 //! Neural charts PROPOSE geometry; certification (watertightness, Hausdorff
 //! agreement, topology) comes from the certificate machinery, NEVER the loss
-//! curve — so [`TopologyHint`] is honestly `Unknown` here. Deterministic; no
-//! dependencies (in-house power iteration for diagnostics and scaled
-//! Frobenius/induced-norm upper bounds for certificates).
+//! curve — so [`TopologyHint`] is honestly `Unknown` here. Deterministic;
+//! outward-rounded arithmetic and elementary-function budgets come from
+//! [`fs_ivl`], while spectral diagnostics and upper bounds remain in-house.
+
+use fs_ivl::Interval;
 
 /// A dense affine layer (`out × in` weights + bias).
 #[derive(Debug, Clone, PartialEq)]
@@ -295,36 +297,50 @@ impl MlpSdf {
     }
 
     /// A GUARANTEED output enclosure of `f` over the input box `[lo, hi]`, by
-    /// interval bound propagation (IBP) — sound for sphere-tracing sub-boxes.
+    /// outward-rounded interval bound propagation (IBP). Structural dimension
+    /// mismatches panic; a non-finite or inverted input box fails closed to the
+    /// whole extended real line.
     #[must_use]
     pub fn eval_interval(&self, lo: &[f64], hi: &[f64]) -> (f64, f64) {
-        let (mut lo, mut hi) = (lo.to_vec(), hi.to_vec());
+        assert_eq!(lo.len(), hi.len(), "interval endpoint length mismatch");
+        assert_eq!(
+            lo.len(),
+            self.layers[0].in_dim(),
+            "interval input dimension mismatch"
+        );
+        if lo
+            .iter()
+            .zip(hi)
+            .any(|(&lo, &hi)| !lo.is_finite() || !hi.is_finite() || lo > hi)
+        {
+            return (f64::NEG_INFINITY, f64::INFINITY);
+        }
+
+        let mut activations = lo
+            .iter()
+            .zip(hi)
+            .map(|(&lo, &hi)| Interval::new(lo, hi))
+            .collect::<Vec<_>>();
         let last = self.layers.len() - 1;
         for (li, layer) in self.layers.iter().enumerate() {
-            let mut nlo = layer.bias.clone();
-            let mut nhi = layer.bias.clone();
+            let mut next = layer
+                .bias
+                .iter()
+                .map(|&bias| Interval::point(bias))
+                .collect::<Vec<_>>();
             for (j, row) in layer.weights.iter().enumerate() {
                 for (i, &w) in row.iter().enumerate() {
-                    if w >= 0.0 {
-                        nlo[j] += w * lo[i];
-                        nhi[j] += w * hi[i];
-                    } else {
-                        nlo[j] += w * hi[i];
-                        nhi[j] += w * lo[i];
-                    }
+                    next[j] = next[j] + Interval::point(w) * activations[i];
                 }
             }
             if li < last {
-                for k in 0..nlo.len() {
-                    // tanh is monotone increasing.
-                    nlo[k] = nlo[k].tanh();
-                    nhi[k] = nhi[k].tanh();
+                for value in &mut next {
+                    *value = value.tanh();
                 }
             }
-            lo = nlo;
-            hi = nhi;
+            activations = next;
         }
-        (lo[0], hi[0])
+        (activations[0].lo(), activations[0].hi())
     }
 }
 

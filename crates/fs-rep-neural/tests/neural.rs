@@ -210,15 +210,51 @@ fn interval_bound_propagation_is_sound() {
     for p in points(400, 0xBEEF) {
         let x = [p[0] * 0.5, p[1] * 0.5]; // remap into the box
         let v = net.eval(&x);
-        assert!(
-            v >= blo - 1e-12 && v <= bhi + 1e-12,
-            "f={v} escaped [{blo}, {bhi}]"
-        );
+        assert!(v >= blo && v <= bhi, "f={v} escaped [{blo}, {bhi}]");
     }
-    // a degenerate box collapses to the point value.
+    // A degenerate input box still accumulates outward-rounding slack. It need
+    // not equal the separately grouped point evaluator, but it must contain it
+    // without an arbitrary comparison epsilon.
     let x = [0.2, -0.1];
     let (dlo, dhi) = net.eval_interval(&x, &x);
-    assert!((dlo - net.eval(&x)).abs() < 1e-12 && (dhi - net.eval(&x)).abs() < 1e-12);
+    let point = net.eval(&x);
+    assert!(
+        dlo <= point && point <= dhi,
+        "f={point} escaped [{dlo}, {dhi}]"
+    );
+}
+
+#[test]
+fn interval_bound_propagation_refuses_malformed_boxes() {
+    let net = sample_mlp();
+
+    for (lo, hi) in [
+        ([f64::NAN, 0.0], [1.0, 1.0]),
+        ([f64::NEG_INFINITY, 0.0], [1.0, 1.0]),
+        ([0.0, 0.0], [f64::INFINITY, 1.0]),
+        ([1.0, 0.0], [0.0, 1.0]),
+    ] {
+        assert_eq!(
+            net.eval_interval(&lo, &hi),
+            (f64::NEG_INFINITY, f64::INFINITY)
+        );
+    }
+
+    assert!(std::panic::catch_unwind(|| net.eval_interval(&[0.0], &[0.0])).is_err());
+    assert!(std::panic::catch_unwind(|| net.eval_interval(&[0.0, 0.0], &[0.0])).is_err());
+}
+
+#[test]
+fn interval_bound_propagation_is_bit_deterministic() {
+    let net = sample_mlp();
+    let lo = [-0.375, -0.625];
+    let hi = [0.875, 0.125];
+    let first = net.eval_interval(&lo, &hi);
+    for _ in 0..32 {
+        let replay = net.eval_interval(&lo, &hi);
+        assert_eq!(replay.0.to_bits(), first.0.to_bits());
+        assert_eq!(replay.1.to_bits(), first.1.to_bits());
+    }
 }
 
 #[test]

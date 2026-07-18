@@ -5,8 +5,9 @@ so certified bounds remain available.
 
 ## Purpose and layer
 
-Layer L2 (MORPH / representation). No dependencies — pure Rust (in-house power
-iteration for the spectral norm, interval bound propagation).
+Layer L2 (MORPH / representation). Pure Rust; depends on L1 `fs-ivl` for
+outward-rounded interval arithmetic and deterministic elementary-function ULP
+budgets. Spectral diagnostics and upper bounds remain in-house.
 
 ## Public types and semantics
 
@@ -27,8 +28,11 @@ iteration for the spectral norm, interval bound propagation).
 
 - The certified Lipschitz constant is a valid UPPER bound: no sampled pair
   violates `|f(x) − f(y)| ≤ L·‖x − y‖`.
-- IBP is SOUND: `eval_interval(lo, hi)` encloses `f(x)` for every `x` in the box
-  (and collapses to the point value on a degenerate box).
+- IBP is SOUND: `eval_interval(lo, hi)` encloses `f(x)` for every `x` in the box.
+  Every affine product/sum is outward-rounded and every hidden `tanh` uses
+  `fs-ivl`'s deterministic five-ULP enclosure. A degenerate input box may widen
+  by the accumulated rounding budget but must contain the separately evaluated
+  point.
 - `‖∇f(x)‖ ≤ L` everywhere.
 - A sphere-trace step of `safe_step_radius(f(x), L)` never tunnels: `f` cannot
   change sign within that radius.
@@ -36,8 +40,9 @@ iteration for the spectral norm, interval bound propagation).
 
 ## Error model
 
-Total functions; the only panics are structural (ragged/mismatched layer
-weights, non-chaining dims, non-scalar output).
+Layer construction and interval endpoint-length/input-dimension mismatches panic
+as structural misuse. A non-finite or inverted interval box returns
+`(-infinity, +infinity)` as the fail-closed enclosure.
 
 ## Determinism class
 
@@ -58,10 +63,11 @@ None.
 
 ## Conformance tests
 
-`tests/neural.rs` (8 cases): spectral norm vs known values; spectral
+`tests/neural.rs`: spectral norm vs known values; spectral
 normalization to a bound; the Lipschitz certificate is never violated; IBP
-soundness (+ degenerate box); the gradient is bounded by L; a certified
-sphere-trace step never tunnels; topology honestly unknown; determinism.
+soundness, degenerate-point enclosure, malformed-box refusal, and deterministic
+endpoint replay; the gradient is bounded by L; a certified sphere-trace step
+never tunnels; topology honestly unknown; determinism.
 
 ## No-claim boundaries
 
