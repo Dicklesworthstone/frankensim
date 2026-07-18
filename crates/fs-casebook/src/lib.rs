@@ -898,14 +898,14 @@ impl Suite {
                 details,
                 evidence,
             };
-            println!("{}", record.json_line());
+            ::std::println!("{}", record.json_line());
             if let Some(replay) = replay {
                 let replay_record = replay.record(self.name, id, owner_index);
-                println!("{}", replay_record.json_line());
+                ::std::println!("{}", replay_record.json_line());
                 replay_records.push(replay_record);
             }
             for disagreement in case_disagreements {
-                println!("{}", disagreement.json_line());
+                ::std::println!("{}", disagreement.json_line());
                 disagreements.push(disagreement);
             }
             records.push(record);

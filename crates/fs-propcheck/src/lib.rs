@@ -731,7 +731,7 @@ pub(crate) fn check_structured<T: Shrink + core::fmt::Debug>(
             final_outcome.failure_kind(),
         );
         let artifact_result = append_replay_artifact(&replay_path, &failure_row);
-        println!("{failure_row}");
+        ::std::println!("{failure_row}");
         let counterexample_label = if report.converged {
             "local-minimum counterexample"
         } else {

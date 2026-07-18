@@ -261,5 +261,5 @@ fn render_report(
 
 fn emit(em: &mut Emitter, sev: Severity, kind: EventKind) {
     let e: Event = em.emit(sev, kind, None);
-    eprintln!("{}", e.to_jsonl());
+    ::std::eprintln!("{}", e.to_jsonl());
 }
