@@ -706,11 +706,14 @@ use fs_geom::{Chart, TraceStepClaim};
 /// vertex-set refusals; motion refusals pass through typed;
 /// [`ContactError::Query`] wrapping an unusable chart enclosure;
 /// [`ContactError::Cancelled`] per vertex and window.
+#[allow(clippy::too_many_lines)] // One conservative bisection transaction, mirroring certified_ccd.
 pub fn refine_windows_against_sdf(
     vertices: &[fs_geom::Point3],
     tube: &CertifiedMotorTube,
     obstacle: &dyn Chart,
     windows: &[Interval],
+    time_tolerance: f64,
+    max_windows: usize,
     cx: &Cx<'_>,
 ) -> Result<CcdRefinement, ContactError> {
     if obstacle.trace_step_claim() != TraceStepClaim::ExactDistance {
@@ -729,12 +732,41 @@ pub fn refine_windows_against_sdf(
             max: MAX_CCD_VERTICES,
         });
     }
-    let mut out = Vec::with_capacity(windows.len());
+    if !(time_tolerance.is_finite() && time_tolerance > 0.0) {
+        return Err(ContactError::InvalidWindow {
+            lo: time_tolerance,
+            hi: time_tolerance,
+        });
+    }
+    // The ball around a long sweep is hopelessly loose (the input windows
+    // arrive MERGED from certified_ccd), so the route bisects internally:
+    // LIFO with the later half pushed first keeps emission time-ordered.
+    let mut stack: Vec<Interval> = windows.iter().rev().copied().collect();
+    let mut out = Vec::new();
+    let mut examined = 0usize;
     let mut max_defect = 0.0f64;
-    for &window in windows {
+    while let Some(window) = stack.pop() {
         if cx.checkpoint().is_err() {
             return Err(ContactError::Cancelled);
         }
+        if examined >= max_windows {
+            stack.push(window);
+            stack.reverse();
+            let possible = out
+                .iter()
+                .filter_map(|w| match w {
+                    RefinedWindow::Retained { window } => Some(*window),
+                    RefinedWindow::Pruned { .. } => None,
+                })
+                .collect();
+            return Err(ContactError::CcdBudgetExhausted {
+                max_windows,
+                examined,
+                pending: stack,
+                possible,
+            });
+        }
+        examined += 1;
         let (hull, defect) = swept_vertex_hull(vertices, tube, window, cx)?;
         max_defect = max_defect.max(defect);
         // Center: component-wise corner mean. Any finite center is sound;
@@ -778,9 +810,15 @@ pub fn refine_windows_against_sdf(
         let gap = (enclosure.lo.next_down() - radius).next_down();
         if gap > 0.0 {
             out.push(RefinedWindow::Pruned { window, gap });
-        } else {
-            out.push(RefinedWindow::Retained { window });
+            continue;
         }
+        let mid = window.midpoint();
+        if window.width() <= time_tolerance || !(mid > window.lo() && mid < window.hi()) {
+            out.push(RefinedWindow::Retained { window });
+            continue;
+        }
+        stack.push(Interval::new(mid, window.hi()));
+        stack.push(Interval::new(window.lo(), mid));
     }
     Ok(CcdRefinement {
         windows: out,

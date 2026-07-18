@@ -584,3 +584,159 @@ fn ct_010_refinement_never_drops_a_true_crossing() {
         );
     });
 }
+
+// ── SDF-obstacle route (ct-011, ct-012) ─────────────────────────────────────
+
+use fs_contact::refine_windows_against_sdf;
+use fs_geom::Chart as _;
+use fs_geom::fixtures::{LyingSphereChart, SphereChart};
+
+/// ct-011 G1: a bullet passing the sphere's AABB-corner region — the box
+/// route retains (AABBs overlap) but the ball-Lipschitz bound prunes
+/// fine windows against the actual curved surface with a certified gap;
+/// and a weaker-claim chart refuses at entry.
+#[test]
+fn ct_011_sdf_route_prunes_near_miss_and_gates_the_claim() {
+    with_cx(|cx| {
+        let domain = Interval::new(0.0, 1.0);
+        // Sphere radius 1 at origin. Bullet flies parallel to x at
+        // y = z = 0.9: it cuts through the sphere's AABB corner region
+        // (|y|,|z| < 1) while staying sqrt(0.81+0.81) ≈ 1.273 > 1 from
+        // the center — a real miss the AABB test cannot see.
+        let sphere = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let sphere_aabb = sphere.support();
+        let static_tube = translation_tube([1.0, 0.0, 0.0], 0.0, domain);
+        let bullet_tube = translation_tube([1.0, 0.0, 0.0], 8.0, domain);
+        let bullet_verts: Vec<Point3> = (0..8)
+            .map(|i| {
+                Point3::new(
+                    -4.0 + if i & 1 == 0 { -0.01 } else { 0.01 },
+                    0.9 + if i & 2 == 0 { -0.01 } else { 0.01 },
+                    0.9 + if i & 4 == 0 { -0.01 } else { 0.01 },
+                )
+            })
+            .collect();
+        let mut bullet_support = bullet();
+        for p in [&mut bullet_support.min, &mut bullet_support.max] {
+            p.x -= 4.0;
+            p.y += 0.9;
+            p.z += 0.9;
+        }
+        let obstacle_body = SpacetimeBody::new(sphere_aabb, &static_tube).expect("obstacle");
+        let shot = SpacetimeBody::new(bullet_support, &bullet_tube).expect("bullet");
+        let report = certified_ccd(&obstacle_body, &shot, domain, 1e-3, 1 << 14, cx).expect("ccd");
+        let CcdVerdict::PossibleContact { windows } = &report.verdict else {
+            verdict(
+                "ct-011-trap",
+                false,
+                "the corner pass must be retained by the AABB route",
+            );
+            unreachable!()
+        };
+        let refined = refine_windows_against_sdf(
+            &bullet_verts,
+            &bullet_tube,
+            &sphere,
+            windows,
+            1e-3,
+            1 << 14,
+            cx,
+        )
+        .expect("sdf refinement");
+        let all_pruned = refined
+            .windows
+            .iter()
+            .all(|w| matches!(w, RefinedWindow::Pruned { gap, .. } if *gap > 0.0));
+        verdict(
+            "ct-011",
+            all_pruned,
+            "sub-tolerance windows must prune against the curved surface",
+        );
+
+        // Claim gating: a chart with a weaker trace claim refuses at entry.
+        let lying = LyingSphereChart {
+            sphere: SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            bias: 0.5,
+        };
+        verdict(
+            "ct-011-gate",
+            matches!(
+                refine_windows_against_sdf(
+                    &bullet_verts,
+                    &bullet_tube,
+                    &lying,
+                    windows,
+                    1e-3,
+                    1 << 14,
+                    cx
+                ),
+                Err(ContactError::MissingCapability {
+                    capability: "exact-distance-chart",
+                    ..
+                })
+            ),
+            "a weaker-claim chart must refuse by capability name at entry",
+        );
+    });
+}
+
+/// ct-012 G0 (soundness arm): a bullet aimed THROUGH the sphere keeps
+/// its crossing windows Retained — the ball-Lipschitz prune can never
+/// clear real contact.
+#[test]
+fn ct_012_sdf_route_never_prunes_a_real_hit() {
+    with_cx(|cx| {
+        let domain = Interval::new(0.0, 1.0);
+        let sphere = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let static_tube = translation_tube([1.0, 0.0, 0.0], 0.0, domain);
+        let bullet_tube = translation_tube([1.0, 0.0, 0.0], 8.0, domain);
+        let bullet_verts: Vec<Point3> = (0..8)
+            .map(|i| {
+                Point3::new(
+                    -4.0 + if i & 1 == 0 { -0.01 } else { 0.01 },
+                    if i & 2 == 0 { -0.01 } else { 0.01 },
+                    if i & 4 == 0 { -0.01 } else { 0.01 },
+                )
+            })
+            .collect();
+        let mut bullet_support = bullet();
+        bullet_support.min.x -= 4.0;
+        bullet_support.max.x -= 4.0;
+        let obstacle_body = SpacetimeBody::new(sphere.support(), &static_tube).expect("obstacle");
+        let shot = SpacetimeBody::new(bullet_support, &bullet_tube).expect("bullet");
+        let report = certified_ccd(&obstacle_body, &shot, domain, 1e-3, 1 << 14, cx).expect("ccd");
+        let CcdVerdict::PossibleContact { windows } = &report.verdict else {
+            unreachable!("a through-shot must be retained by the AABB route");
+        };
+        let refined = refine_windows_against_sdf(
+            &bullet_verts,
+            &bullet_tube,
+            &sphere,
+            windows,
+            1e-3,
+            1 << 14,
+            cx,
+        )
+        .expect("sdf refinement");
+        // Entry time of the bullet center into the sphere: x(t) = -4 + 8t
+        // reaches -1 at t = 0.375.
+        let entry_retained = refined.windows.iter().any(|w| {
+            matches!(w, RefinedWindow::Retained { window }
+                if window.lo() <= 0.375 && 0.375 <= window.hi())
+        });
+        verdict(
+            "ct-012",
+            entry_retained,
+            "the true sphere-entry window must survive SDF refinement as Retained",
+        );
+    });
+}
