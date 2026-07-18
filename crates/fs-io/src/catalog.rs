@@ -997,6 +997,18 @@ impl<'a> CsvLines<'a> {
         for (scanned, byte) in bytes[start..].iter().enumerate() {
             let absolute = start + scanned;
             catalog_poll(cancellation, "catalog-csv-line-scan", scanned, absolute)?;
+            if *byte == b'\r'
+                && absolute
+                    .checked_add(1)
+                    .and_then(|next| bytes.get(next).copied())
+                    != Some(b'\n')
+            {
+                return Err(IoError::Malformed {
+                    at: absolute,
+                    what: "bare carriage return is not an admitted CSV record separator"
+                        .to_string(),
+                });
+            }
             if *byte == b'\n' {
                 end = absolute;
                 self.next_byte = absolute + 1;
@@ -2994,6 +3006,11 @@ mod tests {
             ("id\n\"A\" \n", 6, "closing CSV quote"),
             ("id\n\"A", 5, "unterminated quoted CSV field"),
             ("id\n\"A\nB\"\n", 5, "embedded record separators"),
+            ("id\rA\n", 2, "bare carriage return"),
+            ("id\nA\rB\n", 4, "bare carriage return"),
+            ("id\n\"A\rB\"\n", 5, "bare carriage return"),
+            ("id\n\"A\"\rB\n", 6, "bare carriage return"),
+            ("id\nA\r\r\n", 4, "bare carriage return"),
         ];
         for (input, expected_at, expected_what) in malformed {
             match schema.parse_csv_with_receipt(input, CatalogInputIdentity::Unavailable) {

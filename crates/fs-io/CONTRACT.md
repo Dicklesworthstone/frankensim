@@ -65,9 +65,11 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   quote states: a quote may open only an empty field, only comma or record end
   may follow a closing quote, and every physical record (including empty or
   whitespace-only records) is retained for schema validation rather than
-  silently skipped. LF and CRLF delimiters are equivalent. A line break before
-  a closing quote refuses as outside this bounded subset; this is not a full
-  RFC 4180 claim. `CatalogProjectionLimits` supplies a shared validation-visit,
+  silently skipped. LF and CRLF delimiters are equivalent; a bare carriage
+  return is rejected at its absolute byte offset in every field state rather
+  than retained as an ambiguous control character. A line break before a
+  closing quote refuses as outside this bounded subset; this is not a full RFC
+  4180 claim. `CatalogProjectionLimits` supplies a shared validation-visit,
   numeric-entry/key-byte, and logical-output envelope. `CatalogCsvLimits`
   composes it with input, row, per-record/aggregate-field, per-field, raw-header,
   and aggregate-decoded caps; `CatalogJsonLimits` composes the same projection
