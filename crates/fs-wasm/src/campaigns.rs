@@ -37,6 +37,7 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_fab::min_feature_size;
 use fs_grammar_e2e::{SimplificationSummary, assess_simplification};
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
+use fs_neuroshape_e2e::ComponentCountEvidence;
 use fs_rep_neural::{Layer, MlpSdf};
 use fs_schedule_e2e::{ScheduleDisposition, Study};
 use fs_shapeprog::max_sdf_discrepancy;
@@ -1103,6 +1104,10 @@ pub fn sensorforge_with_cx(
 /*  7 · NeuroShapeCert — fs-neuroshape-e2e (fs-rep-neural × fs-viz)          */
 /* ======================================================================= */
 
+const COMPONENT_COUNT_UNKNOWN: f64 = -1.0;
+const COMPONENT_EVIDENCE_UNKNOWN: f64 = 0.0;
+const COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND: f64 = 1.0;
+
 /// Build the tunable blob SDF network. `MlpSdf::new` spectral-normalizes every
 /// layer to `√18`, so `L = 18`; the output bias `lift` raises the field
 /// (default 6.5 reproduces `blob_sdf_net()`).
@@ -1120,15 +1125,19 @@ fn neuro_net(lift: f64) -> MlpSdf {
     MlpSdf::new(vec![l1, l2], (18.0_f64).sqrt())
 }
 
-/// **NeuroShapeCert**: a PROVEN neural implicit shape. A small spectral-
+/// **NeuroShapeCert**: certified facts about a neural implicit shape. A small spectral-
 /// normalized `tanh`-MLP SDF ([`fs_rep_neural`]) with certified Lipschitz
 /// constant `L = 18` gives a no-tunnel sphere-trace step `|f|/L`; sound
 /// Interval Bound Propagation proves a central box strictly inside (`hi < 0`)
 /// and the four boundary strips of a bounding box each strictly outside
 /// (`lo > 0`); tiled together (corners overlap) they wall off the interior into
-/// a CLOSED frame `{f<0}` provably cannot cross — a single bounded component,
-/// a proof not a mesh, strictly stronger than spot-checking discrete ring
-/// boxes. A Morse cross-check ([`fs_viz`]) confirms a single interior minimum.
+/// a CLOSED frame `{f<0}` provably cannot cross. This certifies that at least
+/// one enclosed component exists, not that it is the only component. The
+/// positive-definite finite-difference Hessian at the origin is curvature
+/// corroboration only: without a zero-gradient certificate it does not prove a
+/// critical point or minimum and never upgrades that lower bound into an exact
+/// count. The frame is a proof, not a mesh, and is strictly stronger than
+/// spot-checking discrete ring boxes.
 /// Runs the real `fs_neuroshape_e2e::run_campaign` for the certificate, then
 /// renders a 64×64 SDF field for the viz.
 ///
@@ -1151,14 +1160,20 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// - `[10]` — `certified_inside` (0/1 — `hi < 0`).
 /// - `[11]` — `boundary_certified` (boundary strips proven strictly outside).
 /// - `[12]` — `boundary_segments` (total strips forming the closed frame, 4).
-/// - `[13]` — `bounded` (0/1 — closed barrier: every boundary strip certified
-///   strictly outside, so the interior cannot escape).
-/// - `[14]` — `single_minimum` (0/1 — Morse).
+/// - `[13]` — `boundary_frame_certified` (0/1 — every boundary strip is
+///   certified strictly outside; only typed status `[20]` establishes that the
+///   negative central witness is validly enclosed by this frame).
+/// - `[14]` — `origin_hessian_positive_definite` (0/1 — finite-difference
+///   curvature check only; criticality is not certified).
 /// - `[15]` — `surface_crossings`.
-/// - `[16]` — `topology_verified` (0/1).
-/// - `[17]` — `component_count` (1 iff `certified_inside && bounded`, else 0).
+/// - `[16]` — `enclosed_component_verified` (0/1).
+/// - `[17]` — `exact_component_count` (`-1` = unknown; this tranche never
+///   serializes an exact count).
 /// - `[18]`,`[19]` — `ring_r`, `inner`.
-/// - `[20..24]` — reserved (0).
+/// - `[20]` — `component_evidence_status` (`0` = unknown, `1` = certified
+///   enclosed-component lower bound).
+/// - `[21]` — `component_count_lower_bound` (0 or 1).
+/// - `[22..24]` — reserved (0).
 /// - then `64·64` SDF field row-major (`j` outer / y, `i` inner / x) over the
 ///   render window.
 pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
@@ -1169,11 +1184,15 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
 
     let net = neuro_net(lift);
     let report = fs_neuroshape_e2e::run_campaign(&net, ring_r, inner);
-    let component_count = if report.certified_inside && report.bounded {
-        1.0
-    } else {
-        0.0
-    };
+    let (component_evidence_status, component_count_lower_bound, enclosed_component_verified) =
+        match &report.component_count_evidence {
+            ComponentCountEvidence::LowerBound(_) => (
+                COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND,
+                report.component_count_evidence.lower_bound() as f64,
+                1.0,
+            ),
+            _ => (COMPONENT_EVIDENCE_UNKNOWN, 0.0, 0.0),
+        };
 
     let win_lo = -(ring_r + 0.5);
     let win_hi = ring_r + 0.5;
@@ -1202,18 +1221,27 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
     out.push(if report.certified_inside { 1.0 } else { 0.0 });
     out.push(report.boundary_certified as f64);
     out.push(report.boundary_segments as f64);
-    out.push(if report.bounded { 1.0 } else { 0.0 });
-    out.push(if report.single_minimum { 1.0 } else { 0.0 });
-    out.push(report.surface_crossings as f64);
-    out.push(if matches!(report.topology_color, Color::Verified { .. }) {
+    out.push(if report.boundary_frame_certified {
         1.0
     } else {
         0.0
     });
-    out.push(component_count);
+    out.push(if report.origin_hessian_positive_definite {
+        1.0
+    } else {
+        0.0
+    });
+    out.push(report.surface_crossings as f64);
+    out.push(enclosed_component_verified);
+    out.push(COMPONENT_COUNT_UNKNOWN);
     out.push(ring_r);
     out.push(inner);
-    out.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+    out.extend_from_slice(&[
+        component_evidence_status,
+        component_count_lower_bound,
+        0.0,
+        0.0,
+    ]);
     for j in 0..grid_n {
         for i in 0..grid_n {
             out.push(fon(field.at(i, j)));
@@ -1884,9 +1912,23 @@ mod tests {
         let v = neuroshape(6.5, 2.5, 0.3);
         assert_eq!(v[0], 64.0, "grid_n");
         assert!((v[3] - 18.0).abs() < 1e-6, "L {}", v[3]);
-        assert_eq!(v[16], 1.0, "topology_verified");
-        assert_eq!(v[17], 1.0, "component_count");
+        assert_eq!(v[13], 1.0, "boundary_frame_certified");
+        assert_eq!(v[14], 1.0, "positive-definite origin Hessian cross-check");
+        assert_eq!(v[16], 1.0, "enclosed_component_verified");
+        assert_eq!(v[17], -1.0, "exact component count remains unknown");
+        assert_eq!(v[20], 1.0, "certified lower-bound evidence");
+        assert_eq!(v[21], 1.0, "component-count lower bound");
         assert_eq!(v.len(), 24 + 64 * 64, "total length");
+    }
+
+    #[test]
+    fn neuroshape_unenclosed_case_does_not_claim_exact_zero_components() {
+        let v = neuroshape(12.0, 2.5, 0.3);
+        assert_eq!(v[16], 0.0, "no enclosed-component certificate");
+        assert_eq!(v[17], -1.0, "exact component count remains unknown");
+        assert_eq!(v[20], 0.0, "component evidence is unknown");
+        assert_eq!(v[21], 0.0, "only the trivial lower bound is available");
+        assert_eq!(v.len(), 24 + 64 * 64, "wire length remains stable");
     }
 
     #[test]

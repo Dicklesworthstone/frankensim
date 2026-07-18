@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "NeuroShapeCert: PROVE properties of a learned neural implicit shape that neural SDFs normally only hope for — a certified Lipschitz bound, provably-sound sphere tracing (no tunneling), and an interval-arithmetic topology certificate (a non-empty interior trapped inside a certified-positive ring ⇒ a single bounded component), cross-checked by Morse theory. Composes fs-rep-neural (Lipschitz + IBP) x fs-viz (isocontour + Morse critical points) x fs-evidence (Verified). Groundbreaking: guarantees about a neural field, not vibes about a fit."
+description = "NeuroShapeCert: certified facts about a learned neural implicit shape — a Lipschitz bound, sound sphere tracing, and interval evidence that at least one negative component exists and is enclosed by a positive closed frame. The frame yields only a component-count lower bound, never an exact global count; sampled contours and a local finite-difference Hessian remain non-authoritative cross-checks. Composes fs-rep-neural, fs-viz, and fs-evidence."
 
 [package.metadata.frankensim]
 layer = "L5"

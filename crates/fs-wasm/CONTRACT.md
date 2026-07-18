@@ -66,6 +66,16 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    conservative-check-exceedance/threshold-mismatch counts `[25..=31]`. The
    `0.02` offset admitted at local threshold `0.03` serializes the sound global
    certificate `0.04`; status remains independently explicit.
+9. NeuroShape preserves its 24-value header and field offsets while separating
+   enclosed-component existence from exact component counting. Its closed
+   interval boundary frame can certify only a component-count lower bound of
+   one. Header slot `[17]` is therefore always the JSON-safe `-1` exact-count
+   unknown sentinel in this tranche; `[20]` is `0` for unknown evidence or `1`
+   for a certified enclosed-component lower bound, and `[21]` carries that
+   lower bound. The positive-definite finite-difference Hessian at the origin
+   is curvature corroboration only; without a zero-gradient certificate it is
+   not a critical-point or minimum theorem. It and the sampled contour
+   crossings cannot promote these fields to an exact count.
 
 ## Error model
 
@@ -122,6 +132,10 @@ wire length, finite unit normals, exact replay, and non-finite sentinel.
 GrammarForge tests compare every native/WASM simplification-summary value and
 status bit, assert the exact `0.02/0.03 -> 0.04` envelope, and verify that a NaN
 threshold serializes typed refusals and cannot promote the headline.
+NeuroShape tests assert that the default closed-frame certificate serializes a
+lower bound of one but an unknown exact count, while an unenclosed case retains
+the same wire shape and claims neither an exact zero nor a positive lower
+bound.
 Current verification is native cargo test/clippy of the nested workspace plus
 any wasm32 build lane provided by DSR or site automation. The wasm32 browser
 surface itself remains a build/smoke lane rather than a browser-E2E test suite.
@@ -139,6 +153,13 @@ surface itself remains a build/smoke lane rather than a browser-E2E test suite.
   conservative outward finite-grid admission check, not a continuum proof or a
   downward-rounded lower bound; the compositional ShapeProg certificate carries
   the declared global algebraic authority.
+- NeuroShape's certified-inside witness plus closed positive boundary frame
+  proves that at least one enclosed component exists. It does not prove there
+  are no additional components inside or outside the frame. The finite-
+  difference origin-Hessian check and sampled contour crossings are
+  corroborating evidence only. No zero-gradient certificate is present, so the
+  Hessian check does not establish a critical point or minimum, and the browser
+  surface makes no exact component-count or full homeomorphism claim.
 - The shared promotion gate gives native and browser code the same claim-strength
   rules, but cross-target endpoint bit identity remains unclaimed until a retained
   browser runner or WASM golden exists.
