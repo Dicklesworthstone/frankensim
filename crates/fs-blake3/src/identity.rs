@@ -91,7 +91,7 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
-use crate::{Blake3, ContentHash, derive_key_hasher, hash_bytes};
+use crate::{Blake3, ContentHash, DomainHasher, derive_key_hasher, hash_bytes};
 
 /// Version of the canonical binary frame defined by this module.
 pub const CANONICAL_FRAME_VERSION: u32 = 1;
@@ -930,6 +930,25 @@ fn classify_schema_descriptor_fields(source: &SchemaDescriptorSource<'_>) {
 /// in the schema-id preimage (still deterministic and well-defined);
 /// the encoder separately refuses to construct under such bindings.
 const MAX_SCHEMA_CHILD_DEPTH: u32 = 16;
+
+/// Whether every child binding is within the complete-descriptor portion of
+/// [`SchemaId`]. Deeper schemas receive an intentional poison tag from
+/// [`SchemaId::for_schema`] and therefore cannot back exact promotion
+/// authority.
+const fn promotion_charter_schema_depth_is_admissible(fields: &[FieldSpec], depth: u32) -> bool {
+    let mut index = 0usize;
+    while index < fields.len() {
+        if let Some(child) = fields[index].child_spec() {
+            if depth >= MAX_SCHEMA_CHILD_DEPTH
+                || !promotion_charter_schema_depth_is_admissible(child.fields(), depth + 1)
+            {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    true
+}
 
 fn write_schema_descriptor<E>(
     source: &SchemaDescriptorSource<'_>,
@@ -3486,6 +3505,15 @@ where
 pub enum PromotionRefusal {
     /// The trust root was configured with an empty context.
     EmptyContext,
+    /// A verifier/key-policy schema reaches beyond the depth where
+    /// [`SchemaId`] remains a complete descriptor rather than a poison-tagged
+    /// over-depth name.
+    SchemaNestingExceedsCharter {
+        /// Identity role whose schema refused configuration.
+        role: IdentityRole,
+        /// Maximum admitted child-binding depth.
+        maximum_depth: u32,
+    },
     /// The presented verifier identity is not the independently
     /// configured trust-root verifier.
     ForeignVerifier,
@@ -3514,6 +3542,13 @@ impl fmt::Display for PromotionRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyContext => f.write_str("promotion trust root context is empty"),
+            Self::SchemaNestingExceedsCharter {
+                role,
+                maximum_depth,
+            } => write!(
+                f,
+                "promotion trust root {role:?} schema exceeds the maximum exact charter child-binding depth of {maximum_depth}"
+            ),
             Self::ForeignVerifier => {
                 f.write_str("presented verifier is not the configured trust-root verifier")
             }
@@ -3534,17 +3569,63 @@ impl fmt::Display for PromotionRefusal {
 
 impl core::error::Error for PromotionRefusal {}
 
-/// Hash domain for [`PromotionRootCharter`] preimages.
+/// Current semantic version of [`PromotionRootCharter`] identity.
+pub const PROMOTION_ROOT_CHARTER_IDENTITY_VERSION: u32 = 2;
+/// Hash domain for current [`PromotionRootCharter`] preimages.
 pub const PROMOTION_ROOT_CHARTER_DOMAIN: &str =
+    "org.frankensim.fs-blake3.promotion-root-charter.v2";
+/// Historical v1 charter domain, retained for typed replay only.
+///
+/// V1 omitted complete verifier and key-policy schema identities. Nothing in
+/// the current promotion API accepts a v1 root as [`PromotionRootCharter`].
+pub const LEGACY_PROMOTION_ROOT_CHARTER_V1_DOMAIN: &str =
     "org.frankensim.fs-blake3.promotion-root-charter.v1";
+
+// Charter frames are u64-sized. Refuse unsupported wider-pointer targets at
+// compile time so every runtime usize-to-u64 conversion below is total.
+const _: () = assert!(usize::BITS <= u64::BITS);
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+pub const PROMOTION_ROOT_CHARTER_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-blake3:promotion-root-charter",
+    "version_const=PROMOTION_ROOT_CHARTER_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-blake3.promotion-root-charter.v2",
+    "domain_const=PROMOTION_ROOT_CHARTER_DOMAIN",
+    "encoder=derive_promotion_root_charter",
+    "encoder_helpers=update_charter_field",
+    "schema_constants=PROMOTION_ROOT_CHARTER_IDENTITY_VERSION,PROMOTION_ROOT_CHARTER_DOMAIN,MAX_SCHEMA_CHILD_DEPTH",
+    "schema_functions=derive_promotion_root_charter,promotion_root_charter_identity_source,update_charter_field,promotion_charter_schema_depth_is_admissible,PromotionTrustRoot::configure,PromotionTrustRoot::charter,SchemaId::for_schema,SchemaId::as_bytes,IdentityRole::tag,FieldSpec::child_spec,ChildSpec::fields,ObservedIdentity::id,ObservedIdentity::bytes,ByteObservation::content_id,ByteObservation::length,ContentId::as_bytes,as_bytes,crates/fs-blake3/src/lib.rs#ContentHash::as_bytes,crates/fs-blake3/src/lib.rs#DomainHasher::new,crates/fs-blake3/src/lib.rs#DomainHasher::update,crates/fs-blake3/src/lib.rs#DomainHasher::finalize",
+    "schema_dependencies=fs-blake3:schema-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=PromotionRootCharterIdentitySource",
+    "source_fields=PromotionRootCharterIdentitySource.verifier_role:semantic,PromotionRootCharterIdentitySource.verifier_domain:semantic,PromotionRootCharterIdentitySource.verifier_schema:semantic,PromotionRootCharterIdentitySource.verifier:semantic,PromotionRootCharterIdentitySource.key_policy_role:semantic,PromotionRootCharterIdentitySource.key_policy_domain:semantic,PromotionRootCharterIdentitySource.key_policy_schema:semantic,PromotionRootCharterIdentitySource.key_policy:semantic,PromotionRootCharterIdentitySource.context:semantic",
+    "source_bindings=PromotionRootCharterIdentitySource.verifier_role>verifier-role,PromotionRootCharterIdentitySource.verifier_domain>verifier-domain,PromotionRootCharterIdentitySource.verifier_schema>verifier-schema-id,PromotionRootCharterIdentitySource.verifier>verifier-id+verifier-observation-root+verifier-observation-length,PromotionRootCharterIdentitySource.key_policy_role>key-policy-role,PromotionRootCharterIdentitySource.key_policy_domain>key-policy-domain,PromotionRootCharterIdentitySource.key_policy_schema>key-policy-schema-id,PromotionRootCharterIdentitySource.key_policy>key-policy-id+key-policy-observation-root+key-policy-observation-length,PromotionRootCharterIdentitySource.context>context",
+    "external_semantic_fields=identity-version,digest-domain,length-frame",
+    "semantic_fields=identity-version,digest-domain,length-frame,verifier-role,verifier-domain,verifier-schema-id,verifier-id,verifier-observation-root,verifier-observation-length,key-policy-role,key-policy-domain,key-policy-schema-id,key-policy-id,key-policy-observation-root,key-policy-observation-length,context",
+    "excluded_fields=none",
+    "consumers=PromotionTrustRoot::charter,PromotionTrustRoot::admit_for_promotion,PromotionWitness::root_charter",
+    "mutations=identity-version:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,digest-domain:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,length-frame:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,verifier-role:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,verifier-domain:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,verifier-schema-id:crates/fs-blake3/tests/authority_promotion.rs#schema_descriptor_axes_move_current_charter_under_reused_domains,verifier-id:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,verifier-observation-root:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,verifier-observation-length:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,key-policy-role:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,key-policy-domain:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,key-policy-schema-id:crates/fs-blake3/tests/authority_promotion.rs#schema_descriptor_axes_move_current_charter_under_reused_domains,key-policy-id:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,key-policy-observation-root:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,key-policy-observation-length:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move,context:crates/fs-blake3/tests/authority_promotion.rs#charter_v2_matches_independent_reference_and_existing_axes_move",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_promotion_root_charter_identity_fields",
+    "transport_guard=PromotionTrustRoot::charter",
+    "version_guard=crates/fs-blake3/tests/authority_promotion.rs#legacy_v1_replay_is_exact_and_nominally_quarantined",
+    "coupling_surface=fs-blake3:promotion-root-charter",
+];
 
 /// The exact-configuration fingerprint of a [`PromotionTrustRoot`]
 /// (bead sj31i.52.9, root-provenance closure).
 ///
 /// The charter is a domain-separated digest over EVERY axis that shapes
-/// the root's promotion decisions: both schema domains, the verifier and
-/// key-policy identity digests, their canonical-byte observations (root
-/// digest AND exact length), and the context string — all length-framed.
+/// the root's promotion decisions: the explicit verifier/key-policy roles,
+/// both complete recursive [`SchemaId`] values, both schema domains, the
+/// verifier and key-policy identity digests, their canonical-byte observations
+/// (root digest AND exact length), and the context string — all length-framed.
+/// [`PromotionTrustRoot::configure`] rejects over-depth schemas before a root
+/// exists, so every charter-bearing schema ID is a complete descriptor rather
+/// than the deliberate over-depth poison name.
 /// Every [`PromotionWitness`] carries the charter of the root that minted
 /// it, so a consumption boundary that PINS its domain owner's charter
 /// rejects witnesses minted by any differently-configured root: a foreign
@@ -3559,6 +3640,18 @@ pub const PROMOTION_ROOT_CHARTER_DOMAIN: &str =
 /// are the same policy. The no-claim boundary: fs-blake3 cannot vouch WHO
 /// holds a charter; it guarantees that a witness's charter equals the
 /// exact configuration of the root that minted it.
+///
+/// Historical v1 roots are nominally quarantined and cannot be passed where a
+/// current charter is required:
+///
+/// ```compile_fail
+/// use fs_blake3::identity::{PromotionRootCharter, legacy::PromotionRootCharterV1};
+///
+/// fn consume_current(_: PromotionRootCharter) {}
+/// fn cannot_promote_legacy(old: PromotionRootCharterV1) {
+///     consume_current(old);
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PromotionRootCharter(ContentHash);
 
@@ -3582,10 +3675,191 @@ impl fmt::Display for PromotionRootCharter {
     }
 }
 
-/// Length-framed charter preimage field (u64 LE length, then bytes).
-fn push_charter_field(preimage: &mut Vec<u8>, bytes: &[u8]) {
-    preimage.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    preimage.extend_from_slice(bytes);
+/// Stream one length-framed charter field (u64 LE length, then bytes).
+fn update_charter_field(hasher: &mut DomainHasher, _field: &'static str, bytes: &[u8]) {
+    let length = u64::try_from(bytes.len())
+        .expect("compile-time target guard proves every usize fits u64 charter framing");
+    hasher.update(&length.to_le_bytes());
+    hasher.update(bytes);
+}
+
+struct PromotionRootCharterIdentitySource<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    verifier_role: IdentityRole,
+    verifier_domain: &'static str,
+    verifier_schema: SchemaId<V>,
+    verifier: ObservedIdentity<VerifierId<V>>,
+    key_policy_role: IdentityRole,
+    key_policy_domain: &'static str,
+    key_policy_schema: SchemaId<P>,
+    key_policy: ObservedIdentity<KeyPolicyId<P>>,
+    context: &'static str,
+}
+
+fn promotion_root_charter_identity_source<V, P>(
+    verifier: ObservedIdentity<VerifierId<V>>,
+    key_policy: ObservedIdentity<KeyPolicyId<P>>,
+    context: &'static str,
+) -> PromotionRootCharterIdentitySource<V, P>
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    PromotionRootCharterIdentitySource {
+        verifier_role: <VerifierId<V> as StrongIdentity>::ROLE,
+        verifier_domain: V::DOMAIN,
+        verifier_schema: SchemaId::<V>::for_schema(),
+        verifier,
+        key_policy_role: <KeyPolicyId<P> as StrongIdentity>::ROLE,
+        key_policy_domain: P::DOMAIN,
+        key_policy_schema: SchemaId::<P>::for_schema(),
+        key_policy,
+        context,
+    }
+}
+
+#[allow(dead_code)]
+fn classify_promotion_root_charter_identity_fields<V, P>(
+    source: &PromotionRootCharterIdentitySource<V, P>,
+) where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    let PromotionRootCharterIdentitySource {
+        verifier_role: _,
+        verifier_domain: _,
+        verifier_schema: _,
+        verifier: _,
+        key_policy_role: _,
+        key_policy_domain: _,
+        key_policy_schema: _,
+        key_policy: _,
+        context: _,
+    } = source;
+}
+
+fn derive_promotion_root_charter<V, P>(
+    source: &PromotionRootCharterIdentitySource<V, P>,
+) -> PromotionRootCharter
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    let mut hasher = DomainHasher::new(PROMOTION_ROOT_CHARTER_DOMAIN);
+    update_charter_field(
+        &mut hasher,
+        "identity-version",
+        &PROMOTION_ROOT_CHARTER_IDENTITY_VERSION.to_le_bytes(),
+    );
+    update_charter_field(&mut hasher, "verifier-role", &[source.verifier_role.tag()]);
+    update_charter_field(
+        &mut hasher,
+        "verifier-domain",
+        source.verifier_domain.as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "verifier-schema-id",
+        source.verifier_schema.as_bytes(),
+    );
+    update_charter_field(&mut hasher, "verifier-id", source.verifier.id().as_bytes());
+    update_charter_field(
+        &mut hasher,
+        "verifier-observation-root",
+        source.verifier.bytes().content_id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "verifier-observation-length",
+        &source.verifier.bytes().length().to_le_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "key-policy-role",
+        &[source.key_policy_role.tag()],
+    );
+    update_charter_field(
+        &mut hasher,
+        "key-policy-domain",
+        source.key_policy_domain.as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "key-policy-schema-id",
+        source.key_policy_schema.as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "key-policy-id",
+        source.key_policy.id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "key-policy-observation-root",
+        source.key_policy.bytes().content_id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "key-policy-observation-length",
+        &source.key_policy.bytes().length().to_le_bytes(),
+    );
+    update_charter_field(&mut hasher, "context", source.context.as_bytes());
+    PromotionRootCharter(hasher.finalize())
+}
+
+fn derive_legacy_promotion_root_charter_v1<V, P>(
+    source: &PromotionRootCharterIdentitySource<V, P>,
+) -> legacy::PromotionRootCharterV1
+where
+    V: CanonicalSchema,
+    P: CanonicalSchema,
+{
+    let mut hasher = DomainHasher::new(LEGACY_PROMOTION_ROOT_CHARTER_V1_DOMAIN);
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-verifier-domain",
+        source.verifier_domain.as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-key-policy-domain",
+        source.key_policy_domain.as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-verifier-id",
+        source.verifier.id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-verifier-observation-root",
+        source.verifier.bytes().content_id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-verifier-observation-length",
+        &source.verifier.bytes().length().to_le_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-key-policy-id",
+        source.key_policy.id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-key-policy-observation-root",
+        source.key_policy.bytes().content_id().as_bytes(),
+    );
+    update_charter_field(
+        &mut hasher,
+        "legacy-v1-key-policy-observation-length",
+        &source.key_policy.bytes().length().to_le_bytes(),
+    );
+    update_charter_field(&mut hasher, "legacy-v1-context", source.context.as_bytes());
+    legacy::PromotionRootCharterV1::from_digest(hasher.finalize())
 }
 
 /// The domain owner's independently configured promotion trust root
@@ -3661,7 +3935,8 @@ where
     /// key-policy observations.
     ///
     /// # Errors
-    /// Refuses an empty context string.
+    /// Refuses an empty context string or either schema when a child binding
+    /// exceeds the depth at which [`SchemaId`] remains a complete descriptor.
     pub const fn configure(
         verifier: ObservedIdentity<VerifierId<V>>,
         key_policy: ObservedIdentity<KeyPolicyId<P>>,
@@ -3669,6 +3944,18 @@ where
     ) -> Result<Self, PromotionRefusal> {
         if context.is_empty() {
             return Err(PromotionRefusal::EmptyContext);
+        }
+        if !promotion_charter_schema_depth_is_admissible(V::FIELDS, 0) {
+            return Err(PromotionRefusal::SchemaNestingExceedsCharter {
+                role: <VerifierId<V> as StrongIdentity>::ROLE,
+                maximum_depth: MAX_SCHEMA_CHILD_DEPTH,
+            });
+        }
+        if !promotion_charter_schema_depth_is_admissible(P::FIELDS, 0) {
+            return Err(PromotionRefusal::SchemaNestingExceedsCharter {
+                role: <KeyPolicyId<P> as StrongIdentity>::ROLE,
+                maximum_depth: MAX_SCHEMA_CHILD_DEPTH,
+            });
         }
         Ok(Self {
             verifier,
@@ -3679,32 +3966,31 @@ where
 
     /// This root's exact-configuration fingerprint (bead sj31i.52.9).
     ///
-    /// A pure function of the configuration: both schema domains, the
+    /// Derived without allocation after binding both explicit roles, both
+    /// complete recursive schema identities, both schema domains, the
     /// verifier and key-policy identity digests, their canonical-byte
-    /// observations (content root and exact length), and the context
-    /// string, length-framed under
-    /// [`PROMOTION_ROOT_CHARTER_DOMAIN`]. Domain owners publish/pin
-    /// this value; consumers compare it against
+    /// observations (content root and exact length), and the context string,
+    /// all length-framed under [`PROMOTION_ROOT_CHARTER_DOMAIN`]. Domain
+    /// owners publish/pin this value; consumers compare it against
     /// [`PromotionWitness::root_charter`].
     #[must_use]
     pub fn charter(&self) -> PromotionRootCharter {
-        let mut preimage = Vec::with_capacity(256);
-        push_charter_field(&mut preimage, V::DOMAIN.as_bytes());
-        push_charter_field(&mut preimage, P::DOMAIN.as_bytes());
-        push_charter_field(&mut preimage, self.verifier.id().as_bytes());
-        push_charter_field(&mut preimage, self.verifier.bytes().content_id().as_bytes());
-        push_charter_field(&mut preimage, &self.verifier.bytes().length().to_le_bytes());
-        push_charter_field(&mut preimage, self.key_policy.id().as_bytes());
-        push_charter_field(
-            &mut preimage,
-            self.key_policy.bytes().content_id().as_bytes(),
-        );
-        push_charter_field(
-            &mut preimage,
-            &self.key_policy.bytes().length().to_le_bytes(),
-        );
-        push_charter_field(&mut preimage, self.context.as_bytes());
-        PromotionRootCharter(crate::hash_domain(PROMOTION_ROOT_CHARTER_DOMAIN, &preimage))
+        derive_promotion_root_charter(&self.charter_identity_source())
+    }
+
+    /// Reconstruct the historical v1 charter for typed replay/crosswalk use.
+    ///
+    /// The result is nominally quarantined as
+    /// [`legacy::PromotionRootCharterV1`]; no current promotion or witness API
+    /// accepts it. This deliberately preserves the old incomplete grammar so
+    /// historical pins remain explainable without regaining authority.
+    #[must_use]
+    pub fn legacy_v1_charter_for_replay(&self) -> legacy::PromotionRootCharterV1 {
+        derive_legacy_promotion_root_charter_v1(&self.charter_identity_source())
+    }
+
+    fn charter_identity_source(&self) -> PromotionRootCharterIdentitySource<V, P> {
+        promotion_root_charter_identity_source(self.verifier, self.key_policy, self.context)
     }
 
     /// The opaque domain-owner decision: admit a policy-relative
@@ -3938,6 +4224,68 @@ pub struct PromotionAuditRecord {
 /// Quarantined legacy identity types. They deliberately have no conversion,
 /// widening, equality bridge, or child-identity implementation.
 pub mod legacy {
+    use super::ContentHash;
+
+    /// Reconstruct an exact historical promotion-root charter v1 without
+    /// granting it current authority.
+    ///
+    /// This replay path intentionally does not apply the current v2 schema
+    /// depth admission rule: historical v1 never bound schema descriptors, so
+    /// even an over-depth historical configuration must remain reproducible.
+    /// The nominal result has no conversion or acceptance path into current
+    /// promotion APIs.
+    ///
+    /// # Errors
+    /// Refuses the empty context rejected by historical root configuration.
+    pub fn promotion_root_charter_v1_for_replay<V, P>(
+        verifier: super::ObservedIdentity<super::VerifierId<V>>,
+        key_policy: super::ObservedIdentity<super::KeyPolicyId<P>>,
+        context: &'static str,
+    ) -> Result<PromotionRootCharterV1, super::PromotionRefusal>
+    where
+        V: super::CanonicalSchema,
+        P: super::CanonicalSchema,
+    {
+        if context.is_empty() {
+            return Err(super::PromotionRefusal::EmptyContext);
+        }
+        let source = super::promotion_root_charter_identity_source(verifier, key_policy, context);
+        Ok(super::derive_legacy_promotion_root_charter_v1(&source))
+    }
+
+    /// Historical promotion-root charter v1 retained for replay only.
+    ///
+    /// V1 did not bind complete verifier/key-policy schema identities. This
+    /// wrapper has no parser, current-authority conversion, equality bridge,
+    /// or identity implementation; it is produced only by the explicit replay
+    /// function above or a configured root's `legacy_v1_charter_for_replay`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    pub struct PromotionRootCharterV1(ContentHash);
+
+    impl PromotionRootCharterV1 {
+        pub(super) fn from_digest(digest: ContentHash) -> Self {
+            Self(digest)
+        }
+
+        /// Exact historical digest bytes for replay/crosswalk lookup only.
+        #[must_use]
+        pub fn as_bytes(&self) -> &[u8; 32] {
+            self.0.as_bytes()
+        }
+
+        /// Lowercase historical hexadecimal rendering.
+        #[must_use]
+        pub fn to_hex(self) -> String {
+            self.0.to_hex()
+        }
+    }
+
+    impl core::fmt::Display for PromotionRootCharterV1 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            core::fmt::Display::fmt(&self.0, f)
+        }
+    }
+
     /// Exact historical FNV-1a `u64` provenance value.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
     pub struct LegacyProvenanceV1(u64);

@@ -165,10 +165,29 @@ without gaining solver, geometry, FFI, or license surface.
   constructor, sealed typestates (`compile_fail`-proven), so a foreign
   permit-everything capability can never fabricate one. The witness binds the
   exact subject receipt/preimage, anchor, verifier/policy observations, and
-  root context; `audit()` yields bounded namespace + observation-root/length
+  root context. `PromotionTrustRoot::charter` derives the current v2 charter
+  without allocation: explicit verifier/key-policy role tags, both schema
+  domains, both COMPLETE recursively child-bound `SchemaId` values, both
+  retained IDs, both observation roots and exact lengths, and the context are
+  uniformly u64-length-framed and streamed through `DomainHasher`. A
+  compile-time target-width guard plus checked conversion prevents host-length
+  truncation while preserving the existing const `configure` API. Configure
+  refuses verifier or key-policy schemas beyond the complete-descriptor depth
+  before a root exists, so a poison-tagged over-depth `SchemaId` can never back
+  charter authority or mint a witness. Every witness carries this current
+  charter. Historical v1 charters can be
+  reconstructed only as nominal `legacy::PromotionRootCharterV1` replay
+  evidence. The dedicated legacy reconstruction function bypasses only the
+  current schema-depth admission guard, preserving historical over-depth v1
+  configurations without minting a current root. The replay type has no parser,
+  conversion/equality bridge, strong-identity implementation, or acceptance
+  path into current promotion authority. V1's same-domain/different-schema
+  collapse is retained for faithful replay, never migration. `audit()` yields
+  bounded namespace + observation-root/length
   metadata only. No-claim: the root's guarantees are relative to its
   configuration authority — fs-blake3 cannot vouch that the configured
-  verifier is meaningful.
+  verifier is meaningful. The owner-local v2 identity declaration is present;
+  registry/golden regeneration and union proof remain central batch work.
 - Same typed ID plus differing caller-supplied byte-root or length observations
   yields a refusal preserving both observations; it is not itself proof of a
   cryptographic collision.
