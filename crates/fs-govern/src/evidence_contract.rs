@@ -176,6 +176,10 @@ pub enum AuthorityError {
         observed: u32,
         supported: u32,
     },
+    CatalogSchemaVersionRefused {
+        observed: u32,
+        supported: u32,
+    },
     MigrationUnavailable {
         observed: u32,
         target: u32,
@@ -230,6 +234,9 @@ impl AuthorityError {
             Self::InvalidValue { .. } => "repair-invalid-value",
             Self::MissingIdentity { .. } => "supply-content-identity",
             Self::SchemaVersionRefused { .. } => "use-supported-schema-or-explicit-migration",
+            Self::CatalogSchemaVersionRefused { .. } => {
+                "regenerate-authority-catalog-under-supported-schema"
+            }
             Self::MigrationUnavailable { .. } => "regenerate-under-current-authority-algebra",
             Self::IdentityMismatch { .. } => "bind-exact-source-identity",
             Self::IncompatibleAxes { .. } | Self::CompositionConflict { .. } => {
@@ -268,6 +275,13 @@ impl core::fmt::Display for AuthorityError {
             } => write!(
                 f,
                 "authority schema v{observed} refused; this algebra supports v{supported}"
+            ),
+            Self::CatalogSchemaVersionRefused {
+                observed,
+                supported,
+            } => write!(
+                f,
+                "authority-catalog serialization v{observed} refused; this reader supports v{supported}"
             ),
             Self::MigrationUnavailable { observed, target } => write!(
                 f,
@@ -3163,13 +3177,37 @@ pub struct AuthorityCatalogRow {
 
 /// Serialization schema for the catalog artifact itself. Catalog format,
 /// authority algebra, and per-object identity schema are separate dimensions.
-pub const AUTHORITY_CATALOG_SCHEMA_VERSION: u32 = 2;
+///
+/// V3 is an intentional pre-freeze source-format correction. The row-level
+/// identity-schema field was added while the outer marker was accidentally
+/// left at v2, so that label can denote incompatible historical row shapes.
+/// V2 must never be silently interpreted as v3 even though the authority
+/// algebra itself remains v2.
+pub const AUTHORITY_CATALOG_SCHEMA_VERSION: u32 = 3;
+pub const RETIRED_AUTHORITY_CATALOG_SCHEMA_VERSION: u32 = 2;
 pub const AUTHORITY_IDENTITY_SCHEMA_VERSION: u32 = 2;
 pub const PROOF_LANE_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
-/// Closed v2 catalog. It is generated from this code table, never hand-built
-/// by a dashboard. Contract tests compare every row and every descriptive
-/// column against the generated Markdown embedded in `fs-govern/CONTRACT.md`.
+/// Fail-closed catalog-format admission gate for future wire readers.
+///
+/// This validates only the outer catalog serialization. It deliberately does
+/// not compare or rewrite the independent authority-algebra and per-row
+/// identity-schema axes.
+pub fn validate_authority_catalog_schema_version(observed: u32) -> Result<(), AuthorityError> {
+    if observed == AUTHORITY_CATALOG_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(AuthorityError::CatalogSchemaVersionRefused {
+            observed,
+            supported: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        })
+    }
+}
+
+/// Closed v3 serialization of the authority-algebra-v2 catalog. It is generated
+/// from this code table, never hand-built by a dashboard. Contract tests compare
+/// every row and every descriptive column against the generated Markdown
+/// embedded in `fs-govern/CONTRACT.md`.
 pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     AuthorityCatalogRow {
         object_kind: "claim-statement",

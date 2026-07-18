@@ -41,9 +41,15 @@ The code-owned `AUTHORITY_CATALOG_ROWS` table is the source of
 `authority_catalog_json()`. The contract drift suite requires every row below
 and its domain to remain represented here. The catalog serialization schema,
 the authority algebra used to interpret a row, and the row's own identity
-schema are independent version axes. In particular, the validated proof-lane
-identity remains v1 while it participates in the v2 authority algebra; neither
-the table nor its JSON/Markdown renderers may mislabel that identity as v2.
+schema are independent version axes. Catalog serialization v3 is an intentional
+pre-freeze source-format correction: the row-level identity-schema field was
+added while the outer marker accidentally remained v2, leaving that label
+ambiguous across incompatible row shapes. The
+`validate_authority_catalog_schema_version` gate accepts exactly v3; it refuses
+retired catalog v2 and unknown/future versions instead of silently
+reinterpreting them. In particular, the validated proof-lane identity remains
+v1 while it participates in the v2 authority algebra; neither the table nor its
+JSON/Markdown renderers may mislabel that identity as v2.
 
 | Object kind | Authority algebra version | Identity schema version | Identity domain | Identity sources | Binding | No claim |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -239,14 +245,19 @@ refutation.
 
 `EVIDENCE_GRAPH_VERSION = 2` is an identity-schema boundary. Every graph-node
 preimage begins with tagged graph version field `0`, tagged authority-algebra
-version field `250`, then the node-kind tag and its exact payload; snapshot
-preimages begin with the same two version fields followed by canonically sorted
-node, support-edge, and attack-edge identities. The production domains are
+version field `250`, then the node-kind tag and its exact payload. The literal
+node-kind tags are `Claim=1`, `AuthorityState=2`, `AssumptionSet=3`,
+`Evidence=4`, `Checker=5`, `Falsifier=6`, `Consumer=7`, and
+`Counterexample=8`; each preimage binds the exact payload fields documented by
+its public variant. Snapshot preimages begin with the same two version fields,
+then canonically sorted node identities under repeated field tag `1`, support
+edge identities under tag `2`, and attack edge identities under tag `3`. The
+production domains are
 `frankensim.fs-govern.evidence-graph-node.v2` and
 `frankensim.fs-govern.evidence-graph-snapshot.v2`. The separate test-fixture
 namespace is `frankensim.fs-govern.test-evidence-graph.v2`; it creates fixture
-inputs only and is never a production identity domain. The v2 authority-state
-node-kind tag is `2`; changing it requires a new graph identity schema.
+inputs only and is never a production identity domain. Changing any node or
+snapshot tag/payload contract requires a new graph identity schema.
 
 Support reachability is evaluated only over the validated support DAG.
 Consequence is the checked sum of explicitly declared downstream authority and

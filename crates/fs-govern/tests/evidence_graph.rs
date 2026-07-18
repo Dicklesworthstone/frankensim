@@ -410,60 +410,158 @@ fn g0_graph_v2_domains_and_node_snapshot_preimages_are_schema_locked() {
     );
 
     let claim = claim("graph v2 preimage lock", "graph-v2-preimage/class");
-    let claim_node = GraphNode::claim(&claim);
-    let mut claim_preimage = Vec::new();
-    push_graph_identity_field(&mut claim_preimage, 0, &2_u32.to_le_bytes());
-    push_graph_identity_field(&mut claim_preimage, 250, &2_u32.to_le_bytes());
-    push_graph_identity_field(&mut claim_preimage, 1, &[1]);
-    push_graph_identity_field(
-        &mut claim_preimage,
-        2,
-        claim.identity().as_hash().as_bytes(),
-    );
-    push_graph_identity_field(
-        &mut claim_preimage,
-        3,
-        claim.proof_lane().as_hash().as_bytes(),
-    );
-    assert_eq!(
-        claim_node.identity().as_hash(),
-        &fs_blake3::hash_domain(
-            "frankensim.fs-govern.evidence-graph-node.v2",
-            &claim_preimage,
-        )
-    );
-
     let state = unknown_state(&claim);
-    let authority_node =
-        GraphNode::authority_with_consequence(&state, 7).expect("nonzero authority consequence");
-    let claim_node_identity = claim_node.identity();
-    let authority_node_identity = authority_node.identity();
-    let mut authority_preimage = Vec::new();
-    push_graph_identity_field(&mut authority_preimage, 0, &2_u32.to_le_bytes());
-    push_graph_identity_field(&mut authority_preimage, 250, &2_u32.to_le_bytes());
-    push_graph_identity_field(&mut authority_preimage, 1, &[2]);
-    push_graph_identity_field(
-        &mut authority_preimage,
-        2,
-        claim.identity().as_hash().as_bytes(),
+    let counterexample_evidence = evidence(
+        &claim,
+        EvidenceKind::Counterexample,
+        "graph-v2-preimage/counterexample",
     );
-    push_graph_identity_field(
-        &mut authority_preimage,
-        3,
-        state.identity().as_hash().as_bytes(),
-    );
-    push_graph_identity_field(&mut authority_preimage, 4, &7_u64.to_le_bytes());
+    let counterexample = CounterexampleCandidate::new(&claim, counterexample_evidence)
+        .expect("counterexample candidate");
+    let checker = hash("graph-v2-preimage/checker");
+    let falsifier = hash("graph-v2-preimage/falsifier");
+    let consumer = hash("graph-v2-preimage/consumer");
+    let nodes = [
+        GraphNode::claim(&claim),
+        GraphNode::authority_with_consequence(&state, 7).expect("nonzero authority consequence"),
+        GraphNode::assumptions(&claim),
+        GraphNode::evidence(counterexample_evidence),
+        GraphNode::checker(&claim, checker).expect("checker node"),
+        GraphNode::falsifier(&claim, falsifier).expect("falsifier node"),
+        GraphNode::consumer(&claim, consumer, 11).expect("consumer node"),
+        GraphNode::counterexample(&counterexample),
+    ];
+
+    // Claim: tag 1, exact claim and lane payload.
+    let mut preimage = Vec::new();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[1]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(&mut preimage, 3, claim.proof_lane().as_hash().as_bytes());
     assert_eq!(
-        authority_node.identity().as_hash(),
-        &fs_blake3::hash_domain(
-            "frankensim.fs-govern.evidence-graph-node.v2",
-            &authority_preimage,
-        )
+        nodes[0].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
     );
 
-    let snapshot = GraphSnapshot::new(vec![authority_node, claim_node], vec![], vec![])
-        .expect("edge-free schema-lock snapshot");
-    let mut canonical_node_identities = [claim_node_identity, authority_node_identity];
+    // AuthorityState: tag 2, state and consequence payload (not a duplicate Claim fixture).
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[2]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(&mut preimage, 3, state.identity().as_hash().as_bytes());
+    push_graph_identity_field(&mut preimage, 4, &7_u64.to_le_bytes());
+    assert_eq!(
+        nodes[1].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    // AssumptionSet: tag 3 and exact assumption-set root.
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[3]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(
+        &mut preimage,
+        3,
+        claim.assumptions().identity().as_hash().as_bytes(),
+    );
+    assert_eq!(
+        nodes[2].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    // Evidence: tag 4 and every retained EvidenceRef field.
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[4]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(
+        &mut preimage,
+        3,
+        counterexample_evidence.identity().as_hash().as_bytes(),
+    );
+    push_graph_identity_field(&mut preimage, 4, b"counterexample");
+    push_graph_identity_field(
+        &mut preimage,
+        5,
+        counterexample_evidence.artifact().as_bytes(),
+    );
+    push_graph_identity_field(
+        &mut preimage,
+        6,
+        counterexample_evidence.checker().as_bytes(),
+    );
+    push_graph_identity_field(&mut preimage, 7, &2_u32.to_le_bytes());
+    assert_eq!(
+        nodes[3].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    // Checker: tag 5.
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[5]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(&mut preimage, 3, checker.as_bytes());
+    assert_eq!(
+        nodes[4].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    // Falsifier: tag 6.
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[6]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(&mut preimage, 3, falsifier.as_bytes());
+    assert_eq!(
+        nodes[5].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    // Consumer: tag 7, semantic consumer identity and consequence.
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[7]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(&mut preimage, 3, consumer.as_bytes());
+    push_graph_identity_field(&mut preimage, 4, &11_u64.to_le_bytes());
+    assert_eq!(
+        nodes[6].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    // Counterexample: tag 8, candidate and exact counterexample-evidence roots.
+    preimage.clear();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 1, &[8]);
+    push_graph_identity_field(&mut preimage, 2, claim.identity().as_hash().as_bytes());
+    push_graph_identity_field(
+        &mut preimage,
+        3,
+        counterexample.identity().as_hash().as_bytes(),
+    );
+    push_graph_identity_field(
+        &mut preimage,
+        4,
+        counterexample_evidence.identity().as_hash().as_bytes(),
+    );
+    assert_eq!(
+        nodes[7].identity().as_hash(),
+        &fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-node.v2", &preimage)
+    );
+
+    let snapshot = GraphSnapshot::new(nodes.into_iter().rev().collect(), vec![], vec![])
+        .expect("all-node-kinds schema-lock snapshot");
+    let mut canonical_node_identities = nodes.map(|node| node.identity());
     canonical_node_identities.sort_unstable();
     assert_eq!(
         snapshot
@@ -489,6 +587,90 @@ fn g0_graph_v2_domains_and_node_snapshot_preimages_are_schema_locked() {
             "frankensim.fs-govern.evidence-graph-snapshot.v2",
             &snapshot_preimage,
         )
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Edge-bearing snapshot preimage pins three sorted collection tags.
+fn g0_edge_bearing_snapshot_literal_preimage_pins_node_support_and_attack_order() {
+    let upstream_a = claim("snapshot upstream A", "snapshot-edge/a");
+    let upstream_b = claim("snapshot upstream B", "snapshot-edge/b");
+    let downstream = claim("snapshot downstream", "snapshot-edge/downstream");
+    let state_a = unknown_state(&upstream_a);
+    let state_b = unknown_state(&upstream_b);
+    let support_a = support(&state_a, &downstream, "snapshot-edge/support-a");
+    let support_b = support(&state_b, &downstream, "snapshot-edge/support-b");
+    let (counterexample_a, attack_a) = attack(&upstream_a, "snapshot-edge/attack-a");
+    let (counterexample_b, attack_b) = attack(&upstream_b, "snapshot-edge/attack-b");
+
+    let nodes = vec![
+        GraphNode::claim(&upstream_a),
+        GraphNode::authority(&state_a),
+        GraphNode::claim(&upstream_b),
+        GraphNode::authority(&state_b),
+        GraphNode::claim(&downstream),
+        GraphNode::counterexample(&counterexample_a),
+        GraphNode::counterexample(&counterexample_b),
+        support_evidence_node(&downstream, "snapshot-edge/support-a"),
+        support_evidence_node(&downstream, "snapshot-edge/support-b"),
+        attack_evidence_nodes(&upstream_a, "snapshot-edge/attack-a")[0],
+        attack_evidence_nodes(&upstream_a, "snapshot-edge/attack-a")[1],
+        attack_evidence_nodes(&upstream_b, "snapshot-edge/attack-b")[0],
+        attack_evidence_nodes(&upstream_b, "snapshot-edge/attack-b")[1],
+    ];
+    let snapshot = GraphSnapshot::new(
+        nodes.iter().copied().rev().collect(),
+        vec![support_b, support_a],
+        vec![attack_b, attack_a],
+    )
+    .expect("edge-bearing schema-lock snapshot");
+
+    let mut expected_nodes = nodes.iter().map(GraphNode::identity).collect::<Vec<_>>();
+    expected_nodes.sort_unstable();
+    let mut expected_support = [support_a.identity(), support_b.identity()];
+    expected_support.sort_unstable();
+    let mut expected_attacks = [attack_a.identity(), attack_b.identity()];
+    expected_attacks.sort_unstable();
+    assert_eq!(
+        snapshot
+            .nodes()
+            .iter()
+            .map(GraphNode::identity)
+            .collect::<Vec<_>>(),
+        expected_nodes
+    );
+    assert_eq!(
+        snapshot
+            .support_edges()
+            .iter()
+            .map(SupportEdge::identity)
+            .collect::<Vec<_>>(),
+        expected_support.to_vec()
+    );
+    assert_eq!(
+        snapshot
+            .attack_edges()
+            .iter()
+            .map(AttackEdge::identity)
+            .collect::<Vec<_>>(),
+        expected_attacks.to_vec()
+    );
+
+    let mut preimage = Vec::new();
+    push_graph_identity_field(&mut preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut preimage, 250, &2_u32.to_le_bytes());
+    for node in &expected_nodes {
+        push_graph_identity_field(&mut preimage, 1, node.as_hash().as_bytes());
+    }
+    for edge in expected_support {
+        push_graph_identity_field(&mut preimage, 2, edge.as_hash().as_bytes());
+    }
+    for edge in expected_attacks {
+        push_graph_identity_field(&mut preimage, 3, edge.as_hash().as_bytes());
+    }
+    assert_eq!(
+        snapshot.identity(),
+        fs_blake3::hash_domain("frankensim.fs-govern.evidence-graph-snapshot.v2", &preimage,)
     );
 }
 
