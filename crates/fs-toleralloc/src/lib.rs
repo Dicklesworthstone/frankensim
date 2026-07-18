@@ -38,6 +38,21 @@ use std::{collections::BTreeMap, num::NonZeroU64};
 use fs_math::det;
 
 pub use fs_evidence::ColorRank;
+pub use structured_propagation::{
+    ClampDisposition, InteriorKnotOwner, MAX_EXACT_STRUCTURED_WEIGHT_V1, MAX_STRUCTURED_DEPTH_V1,
+    MAX_STRUCTURED_KEY_BYTES_V1, MAX_STRUCTURED_LAWS_V1, MAX_STRUCTURED_LEAVES_V1,
+    MAX_STRUCTURED_NAMESPACE_BYTES_V1, MAX_STRUCTURED_NODES_V1, MAX_STRUCTURED_PIECES_PER_LAW_V1,
+    PiecewiseQuadraticLaw, QuadraticResponsePiece, STRUCTURED_PROPAGATION_SCHEMA_V1,
+    StructuredCoefficient, StructuredEvaluationStage, StructuredKeyRole, StructuredLawId,
+    StructuredLawIssue, StructuredLeafReceipt, StructuredModeMomentReceipt,
+    StructuredModelIdentity, StructuredMomentQuantity, StructuredMomentScope, StructuredNodeId,
+    StructuredNodeMomentReceipt, StructuredNodeSpec, StructuredNumericIssue,
+    StructuredPopulationModel, StructuredPropagationError, StructuredPropagationReceipt,
+    StructuredResource, StructuredScalarLocation, StructuredTopologyIssue,
+    propagate_structured_population,
+};
+
+mod structured_propagation;
 
 /// Maximum axis count admitted by the version-one correlated-stack lane.
 pub const MAX_CORRELATED_STACK_TERMS_V1: usize = 128;

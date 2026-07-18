@@ -153,6 +153,71 @@ The stricter robustness/admission policy is evidence-semantic. The consuming
 silently reinterpreted under the sealed-sensitivity, typed-event, sampled-only
 policy.
 
+## Structured finite-population propagation v1
+
+`propagate_structured_population(&StructuredPopulationModel)` is the bounded
+nonlinear, hierarchical, and mode-switching complement to the analytic
+correlated-stack lane. It atomically admits and evaluates one externally
+identified finite population with these semantics:
+
+- The model is a parent-before-child tree of at most 8,192 globally keyed
+  nodes, 4,096 weighted terminal leaves, and depth 16. Ordinal zero is the one
+  root; every other node names an earlier branch parent; leaves cannot own
+  children; empty branches are refused. Leaf `NonZeroU64` weights are exact
+  finite-population multiplicities. Their checked sum may not exceed `2^53`,
+  so every weight is exact when converted to binary64 for moments.
+- Each leaf supplies one finite raw clearance and selects one of at most 64
+  stable response laws. A law clamps to finite ordered bounds and contains at
+  most 64 quadratic pieces over strictly increasing knots. Every interior knot
+  explicitly names its lower or upper piece as the equality owner. This makes
+  branch selection total and disjoint without callbacks or predicate-order
+  ambiguity.
+- The selected piece is evaluated in fixed Horner order as
+  `(a * x + b) * x + c`, with two explicit multiplies and two explicit adds.
+  Nonzero-input products that round to zero and any non-finite intermediate are
+  typed refusals; the deadband result is canonical `+0.0`.
+- Every receipt retains the caller-supplied identity alongside the complete
+  hierarchy, leaf multiplicities, raw and clamped clearances, clamp
+  dispositions, response laws, selected mode ordinals, and evaluated outputs.
+  Per-node receipts publish weighted mean, immediate-child within variance,
+  immediate-child between variance, total population variance, standard
+  deviation, and the binary64 decomposition residual. Per-mode receipts publish
+  the same observed population partition; unobserved declared modes remain
+  explicit with zero weight and absent moments.
+- Moment accumulation is deterministic and population-weighted (denominator
+  `W`, never `W - 1`). Outputs are normalized by one global maximum magnitude;
+  child and mode contributions are accumulated in stable ordinal order with
+  compensated sums, then rescaled with checked arithmetic. The root also
+  retains an independently accumulated two-pass mean/variance and residuals
+  against the hierarchical and mode decompositions.
+
+`tests/structured_propagation.rs` supplies G0/G3/G5 evidence. Its exhaustive
+64-occurrence process -> lot -> part gear-backlash population has the exact
+oracle `sum(w*y)=14`, `sum(w*y^2)=76`, mean `7/32`, and variance `1167/1024`.
+It exercises inclusive deadband boundaries, saturated negative/positive drive
+modes, quadratic response, process/lot and mode laws of total variance,
+integer-weight replication, affine-response metamorphism, bitwise replay,
+topology/key/law admission, and overflow/underflow refusal. The fixture also
+shows why an exact zero nominal deadband derivative cannot claim zero variance
+for a finite population that switches contact modes.
+
+This lane is descriptive evidence for the supplied finite population. Integer
+weights are multiplicities, not calibrated probabilities. The hierarchy does
+not imply random-effects independence or causality. Supplied clearances and
+quadratic laws are not certified distributions, geometry, contact mechanics,
+fits, monotonicity, convexity, continuity, or physical validity. Domain
+clamping is a response rule, not proof of interference freedom. There is no
+hysteresis, time-dependent switching, arbitrary nonlinear callback,
+confidence interval, tail/reliability claim, dependency-aware allocation, or
+automatic inference of a correlation model. Correlation must already be
+embodied by the finite population or propagated explicitly upstream; it is
+never silently inferred or double-counted here. Binary64 residuals are
+diagnostics, not exact-real equality certificates. The semantic digest is
+caller-supplied and retained but is not computed from, verified against, or
+authenticated for the hierarchy/law bytes. Raw clearances and response scalars
+carry no typed units; dimensional compatibility and coefficient units remain a
+caller admission responsibility.
+
 ## No-claim boundaries
 
 - Sensitivities are SUPPLIED (from Proposal 1 adjoint `∂QoI/∂geometry` fields);
