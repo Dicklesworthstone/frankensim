@@ -51,9 +51,31 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   their `Cx`), and the committed prefix never contains a half-chosen
   component. Product/score limbs are reserved at exact admitted capacity
   (in-envelope arithmetic never reallocates). NO-CLAIM: no serialized
-  cross-process pause/migrate/fork state, no minimality certificate, no
-  parallel candidate scoring yet (later 6ys.20 tranches); `Lattice::cbc`
-  itself remains the synchronous convenience authority.
+  cross-process pause/migrate/fork state, no parallel candidate scoring
+  yet (later 6ys.20 tranches); `Lattice::cbc` itself remains the
+  synchronous convenience authority.
+- `cbc_cert::{CbcPrefixCertificate, CbcCertError, verify_consistency,
+  audit_minimality}` — schema-v1 per-prefix selection evidence produced by
+  the executor when `enable_certificates` is called before any work: each
+  scanned component binds the exact reduction root (the committed prefix
+  itself — products are a pure function of `(n, prefix)`, no hash
+  indirection), the exact winning numerator limbs, the winning equality
+  class (mirror symmetry `c ↔ n−c` makes real ties structural; the chosen
+  candidate is always the class minimum), the exact runner-up or its
+  absence, the `(6n²)^e` denominator derivation, and the tie/admissible
+  rule tokens. The INDEPENDENT checker recomputes from declared inputs
+  only, with two honestly named modes: `verify_consistency` (cheap
+  `O(n·|claims|)`: the declared candidates score as claimed) and
+  `audit_minimality` (full `O(n²)` rescan: minimality by exhaustion);
+  tampering with any bound field refuses in a named error class.
+  NO-CLAIM: certificate storage and bookkeeping sit OUTSIDE the v3
+  admission receipt (the estimate models the uncertified construction,
+  whose debits stay receipt-exact; the certified-mode estimator is the
+  admission-schema-v4 follow-on); no compact sub-quadratic minimality
+  proof (the [M] ratchet); the theorem-fixed first component carries no
+  certificate (the [F] unit-residue ratchet); certificates mint no
+  fs-blake3 identity — durable-store identity governance belongs to
+  consumers.
 
 ### Extended distributions (bead 6ys.19, module `dist`)
 - `Stream::{next_gamma, next_beta, next_dirichlet, next_truncated_normal,

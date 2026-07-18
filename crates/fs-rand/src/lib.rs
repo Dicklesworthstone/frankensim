@@ -17,6 +17,7 @@
 //! bits (counter words 0–1). 2⁶⁴ draws per (seed, kernel, tile) stream.
 
 pub mod cbc;
+pub mod cbc_cert;
 pub mod cbc_exec;
 pub mod dist;
 pub mod philox;

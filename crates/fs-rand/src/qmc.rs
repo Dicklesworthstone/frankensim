@@ -285,6 +285,33 @@ impl ExactNat {
         }
     }
 
+    /// Add under an admission-owned requested-capacity ceiling.
+    ///
+    /// Returns the required limb count before touching the accumulator when
+    /// the shared storage schema is too small.
+    pub(crate) fn add_mul_factor_with_capacity(
+        &mut self,
+        multiplicand: &Self,
+        factor: u128,
+        capacity_limbs: usize,
+    ) -> Result<(), usize> {
+        if factor == 0 || multiplicand.limbs.is_empty() {
+            return Ok(());
+        }
+        let required = multiplicand
+            .limbs
+            .len()
+            .checked_add(factor_limb_count(factor))
+            .and_then(|length| length.checked_add(1))
+            .expect("exact CBC required limb count overflow");
+        if required > capacity_limbs {
+            return Err(required);
+        }
+        self.add_mul_factor(multiplicand, factor);
+        debug_assert!(self.limbs.len() <= capacity_limbs);
+        Ok(())
+    }
+
     pub(crate) fn mul_assign_factor(&mut self, factor: u128) {
         let multiplicand = Self {
             limbs: core::mem::take(&mut self.limbs),
@@ -293,12 +320,48 @@ impl ExactNat {
         self.normalize();
     }
 
+    /// Multiply while requesting exactly the admission-owned replacement
+    /// capacity and retaining the moved old allocation until completion.
+    pub(crate) fn mul_assign_factor_with_capacity(
+        &mut self,
+        factor: u128,
+        capacity_limbs: usize,
+    ) -> Result<(), usize> {
+        if factor == 0 || self.limbs.is_empty() {
+            self.limbs.clear();
+            return Ok(());
+        }
+        let required = self
+            .limbs
+            .len()
+            .checked_add(factor_limb_count(factor))
+            .and_then(|length| length.checked_add(1))
+            .expect("exact CBC required limb count overflow");
+        if required > capacity_limbs {
+            return Err(required);
+        }
+        let multiplicand = Self {
+            limbs: core::mem::take(&mut self.limbs),
+        };
+        self.limbs = Vec::with_capacity(capacity_limbs);
+        self.add_mul_factor(&multiplicand, factor);
+        self.normalize();
+        debug_assert!(self.limbs.len() <= capacity_limbs);
+        Ok(())
+    }
+
     /// Reserve exact limb capacity so subsequent in-envelope arithmetic never
     /// reallocates (the admission contract's exact-capacity storage
     /// requirement for the execution tranche).
     pub(crate) fn reserve_exact_limbs(&mut self, capacity_limbs: usize) {
         let additional = capacity_limbs.saturating_sub(self.limbs.len());
         self.limbs.reserve_exact(additional);
+    }
+
+    /// The normalized little-endian limbs (certificate serialization and
+    /// independent checking; callers must normalize first).
+    pub(crate) fn limbs(&self) -> &[u32] {
+        &self.limbs
     }
 
     #[cfg(test)]
@@ -324,6 +387,15 @@ impl ExactNat {
             (value << Self::LIMB_BITS) | u128::from(limb)
         })
     }
+}
+
+fn factor_limb_count(mut factor: u128) -> usize {
+    let mut limbs = 0_usize;
+    while factor != 0 {
+        limbs += 1;
+        factor >>= ExactNat::LIMB_BITS;
+    }
+    limbs
 }
 
 /// Integer numerator of `1 + B₂(residue/n)` over the candidate-independent

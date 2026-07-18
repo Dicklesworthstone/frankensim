@@ -29,22 +29,13 @@
 //! candidate scoring. Those remain later 6ys.20 tranches. `korobov_error_sq`
 //! stays a diagnostic f64 owned by [`crate::qmc::Lattice`].
 
-use crate::cbc::{CbcAdmission, CbcProblem};
+use crate::cbc::{CbcAdmission, CbcExecutionSchedule, CbcProblem};
+use crate::cbc_cert::{ADMISSIBLE_RULE_UNITS, CbcPrefixCertificate, TIE_RULE_LOWEST_CANDIDATE};
 use crate::qmc::{ExactNat, Lattice, exact_kernel_numerator, gcd, lattice_residue};
 
 /// Version of the executor semantics (tile classes, boundary names, debit
 /// schedule binding, and cancellation protocol).
 pub const CBC_EXECUTOR_SCHEMA_VERSION: u32 = 1;
-
-// The scalar per-primitive constants of the admission schedule (v3). These
-// mirror `crate::cbc` and are asserted against the estimate in the battery:
-// an executor claiming an admission receipt must debit the same schedule.
-const SCALAR_UNITS_PER_LATTICE_VISIT: u128 = 20;
-const SCALAR_UNITS_PER_FACTOR: u128 = 1;
-const SCALAR_UNITS_PER_FACTOR_LIMB: u128 = 8;
-const SCALAR_UNITS_PER_GCD_STEP: u128 = 3;
-const SCALAR_UNITS_PER_CANDIDATE: u128 = 16;
-const SCALAR_UNITS_PER_DIMENSION: u128 = 8;
 
 /// Cancellation verdict returned by a poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,8 +143,20 @@ pub enum CbcExecError {
         /// Units the admission covered.
         admitted: u128,
     },
+    /// Exact arithmetic requested more limbs than the admission-owned storage
+    /// schema permits. Refused before the overflowing arithmetic mutates
+    /// executor state.
+    StorageScheduleOverrun {
+        /// Limbs required by the next exact operation.
+        required_limbs: usize,
+        /// Limbs admitted for this storage class.
+        admitted_limbs: usize,
+    },
     /// `run` was called after completion.
     AlreadyComplete,
+    /// `enable_certificates` was called after work had already been debited
+    /// (certificates must cover every scanned component or none).
+    CertificatesAfterStart,
 }
 
 /// One in-flight candidate accumulation (points ascending).
@@ -173,6 +176,8 @@ enum Phase {
         candidate: u32,
         accum: Option<ScanAccum>,
         best: Option<(ExactNat, u32)>,
+        runner_up: Option<(ExactNat, u32)>,
+        tie_class: Vec<u32>,
     },
     /// Folding the chosen candidate into the prefix products.
     Update { chosen: u32, next_point: u32 },
@@ -186,17 +191,15 @@ enum Phase {
 pub struct CbcExecutor {
     problem: CbcProblem,
     admitted_work_units: u128,
-    // Debit-schedule widths snapshotted from the admission estimate.
-    kernel_factor_limbs: u128,
-    max_source_product_limbs: u128,
-    score_capacity_limbs: u128,
-    product_capacity_limbs: u128,
-    max_score_limbs: u128,
-    gcd_step_upper_bound: u128,
+    schedule: CbcExecutionSchedule,
+    score_capacity_limbs: usize,
+    product_capacity_limbs: usize,
     products: Vec<ExactNat>,
     z: Vec<u32>,
     phase: Phase,
     work_spent: u128,
+    certifying: bool,
+    certificates: Vec<CbcPrefixCertificate>,
 }
 
 impl CbcExecutor {
@@ -208,29 +211,56 @@ impl CbcExecutor {
     pub fn new(admission: CbcAdmission) -> Self {
         let problem = admission.problem();
         let estimate = admission.estimate();
+        let schedule = admission.execution_schedule();
         let point_count = usize::try_from(problem.point_count())
             .expect("admission target bounds proved the point count fits usize");
         let product_capacity = usize::try_from(estimate.product_capacity_limbs())
             .expect("admission target bounds proved the product capacity fits usize");
+        let score_capacity = usize::try_from(estimate.score_capacity_limbs())
+            .expect("admission target bounds proved the score capacity fits usize");
         let mut products = vec![ExactNat::one(); point_count];
         for product in &mut products {
             product.reserve_exact_limbs(product_capacity);
         }
-        let gcd_step_upper_bound = u128::from(ceil_log2(problem.point_count())) * 2 + 1;
         Self {
             problem,
             admitted_work_units: estimate.work_units(),
-            kernel_factor_limbs: estimate.kernel_factor_limbs(),
-            max_source_product_limbs: estimate.max_source_product_limbs(),
-            score_capacity_limbs: estimate.score_capacity_limbs(),
-            product_capacity_limbs: estimate.product_capacity_limbs(),
-            max_score_limbs: estimate.max_score_limbs(),
-            gcd_step_upper_bound,
+            schedule,
+            score_capacity_limbs: score_capacity,
+            product_capacity_limbs: product_capacity,
             products,
             z: Vec::with_capacity(problem.dimension()),
             phase: Phase::Init { next_point: 0 },
             work_spent: 0,
+            certifying: false,
+            certificates: Vec::new(),
         }
+    }
+
+    /// Enable per-prefix certificate production for every SCANNED component
+    /// (the theorem-fixed first component is the [F] ratchet's business).
+    /// NO-CLAIM: certificate storage AND certificate bookkeeping (runner-up
+    /// retention, tie-class growth) sit OUTSIDE the admission receipt this
+    /// schema — the v3 estimate models the uncertified construction only,
+    /// whose debits remain receipt-exact and fail-closed. Extending the
+    /// estimator with certified-mode charges is the follow-on tranche
+    /// (admission schema v4, the bead's item-5 certificate-size clause).
+    ///
+    /// # Errors
+    /// [`CbcExecError::CertificatesAfterStart`] once any work was debited.
+    pub fn enable_certificates(&mut self) -> Result<(), CbcExecError> {
+        if self.work_spent != 0 {
+            return Err(CbcExecError::CertificatesAfterStart);
+        }
+        self.certifying = true;
+        Ok(())
+    }
+
+    /// Certificates emitted so far (one per committed scanned component,
+    /// in commit order; empty unless enabled).
+    #[must_use]
+    pub fn certificates(&self) -> &[CbcPrefixCertificate] {
+        &self.certificates
     }
 
     /// The admitted problem.
@@ -316,26 +346,13 @@ impl CbcExecutor {
     ) -> Result<CbcBoundary, CbcExecError> {
         let n = self.problem.point_count();
         let dimension = self.problem.dimension();
-        // Charges at admitted widths (the estimate's schedule, distributed).
-        let visit_limb_units = self
-            .max_source_product_limbs
-            .checked_mul(self.kernel_factor_limbs)
-            .and_then(|units| {
-                self.max_source_product_limbs
-                    .checked_mul(self.score_capacity_limbs)
-                    .and_then(|carry| units.checked_add(carry))
-            })
-            .expect("admission proved per-visit limb charges fit u128");
-        let visit_scalar_units = SCALAR_UNITS_PER_LATTICE_VISIT
-            + SCALAR_UNITS_PER_FACTOR
-            + self.kernel_factor_limbs * SCALAR_UNITS_PER_FACTOR_LIMB;
-        let visit_units = visit_limb_units + visit_scalar_units;
-        let candidate_control_units = SCALAR_UNITS_PER_CANDIDATE
-            + self.gcd_step_upper_bound * SCALAR_UNITS_PER_GCD_STEP
-            + 2 * self.score_capacity_limbs // score zero-fill + normalization
-            + self.max_score_limbs; // comparison
-        let update_visit_units = visit_units + 2 * self.product_capacity_limbs;
-        let prefix_control_units = SCALAR_UNITS_PER_DIMENSION + 1; // + z push
+        // Every charge comes from the sealed admission authority; this module
+        // owns no mirrored limb-width or scalar-debit constants.
+        let visit_units = self.schedule.candidate_visit_units();
+        let candidate_control_units = self.schedule.candidate_control_units();
+        let update_visit_units = self.schedule.product_update_visit_units();
+        let initialization_visit_units = self.schedule.initialization_visit_units();
+        let prefix_control_units = self.schedule.prefix_control_units();
 
         match &mut self.phase {
             Phase::Init { next_point } => {
@@ -353,7 +370,7 @@ impl CbcExecutor {
                         &mut self.work_spent,
                         self.admitted_work_units,
                         remaining,
-                        update_visit_units + 1,
+                        initialization_visit_units,
                     )?;
                 }
                 *next_point = end;
@@ -372,6 +389,8 @@ impl CbcExecutor {
                             candidate: 1,
                             accum: None,
                             best: None,
+                            runner_up: None,
+                            tie_class: Vec::new(),
                         }
                     };
                     Ok(CbcBoundary::Prefix)
@@ -383,13 +402,33 @@ impl CbcExecutor {
                 candidate,
                 accum,
                 best,
+                runner_up,
+                tie_class,
             } => {
                 let mut candidates_in_tile = 0_u32;
                 loop {
                     if *candidate == n {
-                        let (_, chosen) = best
+                        let (winning_score, chosen) = best
                             .take()
                             .expect("candidate 1 is coprime to every admitted n");
+                        if self.certifying {
+                            let mut prefix = self.z.clone();
+                            prefix.push(chosen);
+                            let denominator_exponent = u32::try_from(prefix.len())
+                                .expect("admitted dimensions fit u32 exponents");
+                            self.certificates.push(CbcPrefixCertificate {
+                                point_count: n,
+                                prefix,
+                                winning_score_limbs: winning_score.limbs().to_vec(),
+                                tie_class: core::mem::take(tie_class),
+                                runner_up: runner_up
+                                    .take()
+                                    .map(|(score, who)| (score.limbs().to_vec(), who)),
+                                denominator_exponent,
+                                tie_rule: TIE_RULE_LOWEST_CANDIDATE,
+                                admissible_rule: ADMISSIBLE_RULE_UNITS,
+                            });
+                        }
                         self.phase = Phase::Update {
                             chosen,
                             next_point: 0,
@@ -445,18 +484,50 @@ impl CbcExecutor {
                     let finished = accum.take().expect("accumulator finished this candidate");
                     let mut score = finished.score;
                     score.normalize();
-                    let replace = match &*best {
-                        None => true,
-                        Some((best_score, best_candidate)) => {
-                            match score.magnitude_cmp(best_score) {
-                                core::cmp::Ordering::Less => true,
-                                core::cmp::Ordering::Equal => *candidate < *best_candidate,
-                                core::cmp::Ordering::Greater => false,
+                    enum Verdict {
+                        NewBest,
+                        Tie,
+                        Above,
+                    }
+                    let verdict = match &*best {
+                        None => Verdict::NewBest,
+                        Some((best_score, _)) => match score.magnitude_cmp(best_score) {
+                            core::cmp::Ordering::Less => Verdict::NewBest,
+                            core::cmp::Ordering::Equal => Verdict::Tie,
+                            core::cmp::Ordering::Greater => Verdict::Above,
+                        },
+                    };
+                    match verdict {
+                        Verdict::NewBest => {
+                            // Candidates ascend, so a displaced best is the
+                            // smallest score strictly above the new winner.
+                            let displaced = best.replace((score, *candidate));
+                            if self.certifying {
+                                *runner_up = displaced;
+                                *tie_class = vec![*candidate];
                             }
                         }
-                    };
-                    if replace {
-                        *best = Some((score, *candidate));
+                        Verdict::Tie => {
+                            // Ascending order keeps the committed winner the
+                            // class minimum without re-comparison.
+                            if self.certifying {
+                                tie_class.push(*candidate);
+                            }
+                        }
+                        Verdict::Above => {
+                            if self.certifying {
+                                let replace_runner = match &*runner_up {
+                                    None => true,
+                                    Some((runner_score, _)) => {
+                                        score.magnitude_cmp(runner_score)
+                                            == core::cmp::Ordering::Less
+                                    }
+                                };
+                                if replace_runner {
+                                    *runner_up = Some((score, *candidate));
+                                }
+                            }
+                        }
                     }
                     *candidate += 1;
                     if *remaining == 0 {
@@ -496,6 +567,8 @@ impl CbcExecutor {
                             candidate: 1,
                             accum: None,
                             best: None,
+                            runner_up: None,
+                            tie_class: Vec::new(),
                         }
                     };
                     Ok(CbcBoundary::Prefix)
