@@ -2202,12 +2202,31 @@ mod tests {
         )
     }
 
+    const CANCEL_HANDSHAKE_WORKERS: usize = 4;
+
     /// A kernel that cancels the CALLING asupersync task from inside a tile
-    /// — the G4 mid-run cancellation storm's trigger.
+    /// — the G4 mid-run cancellation storm's trigger. The two barrier
+    /// generations make the trigger schedule-independent: every worker has
+    /// entered exactly one tile before `at` requests cancellation, and no
+    /// first-wave tile can return until that request is visible. The workers'
+    /// next REAL tile boundary must therefore bridge the task request into the
+    /// pool gate and drain.
     struct CancelTaskAt {
         tiles: u64,
         at: u64,
         task: asupersync::Cx,
+        rendezvous: std::sync::Barrier,
+    }
+
+    impl CancelTaskAt {
+        fn synchronized(tiles: u64, at: u64, task: asupersync::Cx) -> Self {
+            Self {
+                tiles,
+                at,
+                task,
+                rendezvous: std::sync::Barrier::new(CANCEL_HANDSHAKE_WORKERS),
+            }
+        }
     }
 
     impl TileKernel for CancelTaskAt {
@@ -2218,9 +2237,11 @@ mod tests {
         }
 
         fn run(&self, tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            self.rendezvous.wait();
             if tile == self.at {
                 self.task.set_cancel_requested(true);
             }
+            self.rendezvous.wait();
             ControlFlow::Continue(1)
         }
     }
@@ -2308,29 +2329,25 @@ mod tests {
     #[test]
     fn scoped_lane_drains_on_mid_run_task_cancel_and_fails_closed() {
         in_task(|cx| {
-            let p = pool(4);
-            let kernel = CancelTaskAt {
-                tiles: 16_384,
-                at: 0,
-                task: cx.clone(),
-            };
+            let p = pool(CANCEL_HANDSHAKE_WORKERS);
+            let kernel = CancelTaskAt::synchronized(16_384, 0, cx.clone());
             let (out, report) = run_scoped_simple(&p, &cx, &kernel);
             match out {
                 Err(RunError::Cancelled {
                     completed, total, ..
                 }) => {
                     assert_eq!(total, 16_384);
-                    assert!(
-                        completed < total,
-                        "a tile-0 task cancel must drain before completion \
-                         (completed {completed})"
+                    assert_eq!(
+                        completed, CANCEL_HANDSHAKE_WORKERS as u64,
+                        "only the synchronized first wave may complete before the next \
+                         boundary drains (completed {completed})"
                     );
                 }
                 other => panic!("task cancel must fail closed as Cancelled: {other:?}"),
             }
-            assert!(
-                report.completed < 16_384,
-                "report agrees the drain preempted completion"
+            assert_eq!(
+                report.completed, CANCEL_HANDSHAKE_WORKERS as u64,
+                "report agrees that the first post-request boundaries drained"
             );
             assert!(
                 p.arena_pool().stats().quiescent(),
@@ -3151,36 +3168,49 @@ mod tests {
     /// a spawned run, and the crew serves the next run.
     #[test]
     fn parked_lane_drains_on_gate_request_and_reuses_the_crew() {
-        struct SelfCancel {
+        struct RequestGateAfterFirstWave<'a> {
             tiles: u64,
+            gate: &'a CancelGate,
+            rendezvous: std::sync::Barrier,
         }
-        impl TileKernel for SelfCancel {
+        impl TileKernel for RequestGateAfterFirstWave<'_> {
             type Out = u64;
 
             fn tiles(&self) -> TilePlan {
-                TilePlan::new("test/self-cancel", self.tiles)
+                TilePlan::new("test/request-gate-after-first-wave", self.tiles)
             }
 
             fn run(&self, tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+                self.rendezvous.wait();
                 if tile == 0 {
-                    return ControlFlow::Break(crate::Cancelled);
+                    self.gate.request();
                 }
+                self.rendezvous.wait();
                 ControlFlow::Continue(1)
             }
         }
-        let p = pool(4);
+        let p = pool(CANCEL_HANDSHAKE_WORKERS);
         p.with_parked_crew_local(|parked| {
-            let (out, _report) =
-                parked.run_with_gate(&SelfCancel { tiles: 16_384 }, &CancelGate::new());
+            let gate = CancelGate::new();
+            let kernel = RequestGateAfterFirstWave {
+                tiles: 16_384,
+                gate: &gate,
+                rendezvous: std::sync::Barrier::new(CANCEL_HANDSHAKE_WORKERS),
+            };
+            let (out, report) = parked.run_with_gate(&kernel, &gate);
             match out {
                 Err(RunError::Cancelled {
                     completed, total, ..
                 }) => {
                     assert_eq!(total, 16_384);
-                    assert!(completed < total, "drain preempted completion");
+                    assert_eq!(
+                        completed, CANCEL_HANDSHAKE_WORKERS as u64,
+                        "the gate drains the parked run after its first wave"
+                    );
                 }
                 other => panic!("expected Cancelled, got {other:?}"),
             }
+            assert_eq!(report.completed, CANCEL_HANDSHAKE_WORKERS as u64);
             parked
                 .run(&SumKernel { tiles: 64 })
                 .expect("crew serves runs after a drained cancellation");
@@ -3207,18 +3237,17 @@ mod tests {
                     // Mid-run task cancel: drains at tile boundaries via the
                     // park-time CpuCx bridge, then the task is revived and
                     // the SAME crew serves the next run.
-                    let kernel = CancelTaskAt {
-                        tiles: 16_384,
-                        at: 0,
-                        task: cx.clone(),
-                    };
+                    let kernel = CancelTaskAt::synchronized(16_384, 0, cx.clone());
                     let (out, _) = parked.run_with_gate(&kernel, &CancelGate::new());
                     match out {
                         Err(RunError::Cancelled {
                             completed, total, ..
                         }) => {
                             assert_eq!(total, 16_384);
-                            assert!(completed < total, "task cancel drained the parked run");
+                            assert_eq!(
+                                completed, CANCEL_HANDSHAKE_WORKERS as u64,
+                                "task cancel drains the parked run after its first wave"
+                            );
                         }
                         other => panic!("expected Cancelled, got {other:?}"),
                     }
