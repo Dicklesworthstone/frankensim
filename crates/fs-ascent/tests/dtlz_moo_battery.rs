@@ -19,8 +19,31 @@
 
 use fs_ascent::pareto::epsilon_constraint_sweep3;
 
+const SUITE: &str = "fs-ascent/dtlz-moo";
+
 fn verdict(name: &str, pass: bool, details: &str) {
-    println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
+    // Canonical fs-obs verdict (51bbx suite adoption): linted, wire-validated,
+    // emitted BEFORE the assertion so failures reproduce from the log alone.
+    let mut emitter = fs_obs::Emitter::new(SUITE, name);
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SUITE.to_string(),
+            case: name.to_string(),
+            pass,
+            detail: details.to_string(),
+            seed: 0, // deterministic fixed-input batteries; embedded seeds live in detail
+        },
+        None,
+    );
+    fs_obs::lint_failure_record(&event).expect("verdict must satisfy the failure-record lint");
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line).expect("verdict must use the fs-obs wire schema");
+    println!("{line}");
     assert!(pass, "{name}: {details}");
 }
 
