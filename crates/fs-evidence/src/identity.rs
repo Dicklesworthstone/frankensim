@@ -1,8 +1,9 @@
 //! Typed, canonical identities for evidence semantics.
 //!
 //! This module covers exact color-evidence graph replay, normalized validity
-//! domains, and an opaque strong-identity projection of locally certified
-//! scalar evidence through separate schemas. It does not reinterpret
+//! domains, model-card declarations with exact calibration sources, and an
+//! opaque strong-identity projection of locally certified scalar evidence
+//! through separate schemas. It does not reinterpret
 //! [`crate::ProvenanceHash`], and it publishes only unanchored
 //! [`IdentityReceipt`] values. Origin verification, policy admission,
 //! structural [`crate::Certified`] consistency, and scientific color rank
@@ -16,13 +17,15 @@ pub use fs_blake3::identity::{
 };
 use fs_blake3::identity::{
     CanonicalEncoder, CanonicalError, CanonicalSchema, ChildSpec, EvidenceNodeId, Field, FieldSpec,
-    IdentityAdjudication, IdentityReceipt, LimitKind, ObservedIdentity, OrderedBytesStreamError,
-    SchemaId, SemanticId, SourceId, StrongIdentity, WireType, adjudicate,
+    IdentityAdjudication, IdentityReceipt, LimitKind, ModelId, ObservedIdentity,
+    OrderedBytesStreamError, SchemaId, SemanticId, SourceByteId, SourceId, StrongIdentity,
+    WireType, adjudicate,
 };
 
 use crate::{
-    COLOR_ALGEBRA_VERSION, Certified, Color, ColorPayloadError, IntervalOp, NumericalKind,
-    StatisticalCertificate, ValidityDomain, compose, validate_color_payload,
+    Ambition, COLOR_ALGEBRA_VERSION, Certified, Color, ColorPayloadError, IntervalOp, ModelCard,
+    NumericalKind, ProvenanceHash, StatisticalCertificate, ValidityDomain, compose,
+    validate_color_payload,
 };
 
 /// Identity schema version for exact retained color-evidence sources.
@@ -33,12 +36,20 @@ pub const COLOR_EVIDENCE_NODE_IDENTITY_VERSION_V1: u32 = 1;
 pub const VALIDITY_DOMAIN_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one locally certified scalar-evidence projection.
 pub const CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for exact model-card calibration source bytes.
+pub const MODEL_CARD_CALIBRATION_SOURCE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one helper-validated model-card declaration.
+pub const MODEL_CARD_IDENTITY_VERSION_V1: u32 = 1;
 /// Hard allocation ceiling for one canonical output-color payload.
 pub const MAX_COLOR_EVIDENCE_NODE_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for the ordered axes field of one validity domain.
 pub const MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard payload ceiling for each variable certified-evidence field.
 pub const MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Hard payload ceiling for each variable model-card declaration field.
+pub const MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Hard retained-byte ceiling for one model-card calibration source.
+pub const MAX_MODEL_CARD_CALIBRATION_SOURCE_BYTES_V1: u64 = 1 << 20;
 /// Non-semantic scatter/gather writes emitted for each streamed axis row.
 const VALIDITY_DOMAIN_STREAM_CHUNKS_PER_AXIS_V1: u64 = 4;
 /// Non-semantic scatter/gather writes emitted for each sensitivity row.
@@ -130,6 +141,156 @@ impl IdentifiedValidityDomainV1 {
     #[must_use]
     pub fn into_domain(self) -> ValidityDomain {
         self.domain
+    }
+}
+
+/// Canonical source schema for exact calibration artifact bytes supplied while
+/// migrating a model card away from its legacy FNV correlation token.
+pub enum ModelCardCalibrationSourceIdentitySchemaV1 {}
+
+impl CanonicalSchema for ModelCardCalibrationSourceIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.model-card-calibration-source.v1";
+    const NAME: &'static str = "model-card-calibration-source";
+    const VERSION: u32 = MODEL_CARD_CALIBRATION_SOURCE_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "exact caller-retained calibration artifact bytes supplied for legacy crosswalk; no format, origin, custody, currentness, efficacy, or authority";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required(
+        "canonical-calibration-artifact",
+        WireType::Bytes,
+    )];
+}
+
+/// Low-level schema-shaped source-byte identity for exact calibration bytes.
+///
+/// Only [`IdentifiedModelCardV1`] proves that a present source was cross-checked
+/// against the attached card's legacy correlation token. For an uncalibrated
+/// card, the helper binds this schema's empty-byte root as an absence sentinel.
+pub type ModelCardCalibrationSourceIdV1 = SourceByteId<ModelCardCalibrationSourceIdentitySchemaV1>;
+
+/// Low-level receipt for one calibration source-byte frame.
+pub type ModelCardCalibrationSourceReceiptV1 = IdentityReceipt<ModelCardCalibrationSourceIdV1>;
+
+static MODEL_CARD_VALIDITY_CHILD_V1: ChildSpec = ChildSpec::for_identity::<ValidityDomainIdV1>();
+static MODEL_CARD_CALIBRATION_SOURCE_CHILD_V1: ChildSpec =
+    ChildSpec::for_identity::<ModelCardCalibrationSourceIdV1>();
+
+/// Canonical model identity for one declaration plus its exact calibration
+/// source binding. The legacy FNV value is checked but never framed.
+pub enum ModelCardIdentitySchemaV1 {}
+
+impl CanonicalSchema for ModelCardIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.model-card.v1";
+    const NAME: &'static str = "model-card";
+    const VERSION: u32 = MODEL_CARD_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "model declaration frame with exact names, ambition, canonical assumptions and failures, typed validity, discrepancy bits, and exact calibration source bytes; legacy FNV excluded; no model correctness, registry admission, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("name", WireType::Utf8),
+        FieldSpec::required("version", WireType::Utf8),
+        FieldSpec::required("ambition", WireType::Variant),
+        FieldSpec::required("assumptions", WireType::CanonicalSet),
+        FieldSpec::child_of("validity", &MODEL_CARD_VALIDITY_CHILD_V1),
+        FieldSpec::required("known-failures", WireType::CanonicalSet),
+        FieldSpec::required("calibration-present", WireType::Bool),
+        FieldSpec::child_of(
+            "calibration-source",
+            &MODEL_CARD_CALIBRATION_SOURCE_CHILD_V1,
+        ),
+        FieldSpec::required("discrepancy-rel-ieee754-bits", WireType::U64),
+    ];
+}
+
+/// Low-level schema-shaped model-card identity.
+///
+/// Direct encoder output does not prove consistency with a retained
+/// [`ModelCard`], normalized validity, or exact calibration bytes.
+pub type ModelCardIdV1 = ModelId<ModelCardIdentitySchemaV1>;
+
+/// Low-level producer receipt for one model-card frame.
+pub type ModelCardReceiptV1 = IdentityReceipt<ModelCardIdV1>;
+
+/// A model declaration kept attached to its unanchored model identity, exact
+/// optional calibration bytes, and helper-built child receipts.
+#[derive(Debug, Clone)]
+pub struct IdentifiedModelCardV1 {
+    card: ModelCard,
+    calibration_bytes: Option<Vec<u8>>,
+    validity_receipt: ValidityDomainReceiptV1,
+    calibration_source_receipt: ModelCardCalibrationSourceReceiptV1,
+    receipt: ModelCardReceiptV1,
+}
+
+impl IdentifiedModelCardV1 {
+    /// Read-only model card committed by this identity.
+    #[must_use]
+    pub const fn card(&self) -> &ModelCard {
+        &self.card
+    }
+
+    /// Exact supplied calibration bytes, if the card declares calibration.
+    #[must_use]
+    pub fn calibration_bytes(&self) -> Option<&[u8]> {
+        self.calibration_bytes.as_deref()
+    }
+
+    /// Typed model identity.
+    #[must_use]
+    pub const fn id(&self) -> ModelCardIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored model receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> ModelCardReceiptV1 {
+        self.receipt
+    }
+
+    /// Typed normalized validity identity bound as a child.
+    #[must_use]
+    pub const fn validity_id(&self) -> ValidityDomainIdV1 {
+        self.validity_receipt.id()
+    }
+
+    /// Complete helper-built validity receipt.
+    #[must_use]
+    pub const fn validity_receipt(&self) -> ValidityDomainReceiptV1 {
+        self.validity_receipt
+    }
+
+    /// Exact calibration source-byte identity for a calibrated card.
+    ///
+    /// Returns `None` for an uncalibrated card so the internal empty-byte
+    /// absence sentinel cannot be mistaken for a declared artifact.
+    #[must_use]
+    pub fn calibration_source_id(&self) -> Option<ModelCardCalibrationSourceIdV1> {
+        self.calibration_bytes
+            .as_ref()
+            .map(|_| self.calibration_source_receipt.id())
+    }
+
+    /// Complete calibration source-byte receipt for a calibrated card.
+    #[must_use]
+    pub fn calibration_source_receipt(&self) -> Option<ModelCardCalibrationSourceReceiptV1> {
+        self.calibration_bytes
+            .as_ref()
+            .map(|_| self.calibration_source_receipt)
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment without discarding retained source
+    /// bytes.
+    #[must_use]
+    pub fn into_parts(self) -> (ModelCard, Option<Vec<u8>>) {
+        (self.card, self.calibration_bytes)
     }
 }
 
@@ -500,6 +661,94 @@ pub enum ValidityDomainIdentityError {
     },
     /// Canonical framing, resource admission, or cancellation refused.
     Canonical(CanonicalError),
+}
+
+/// Fail-closed refusal from model-card identity construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelCardIdentityError {
+    /// The headline discrepancy is NaN or negative.
+    InvalidDiscrepancy {
+        /// Exact refused IEEE-754 bits.
+        bits: u64,
+        /// Structural requirement that was violated.
+        reason: &'static str,
+    },
+    /// The legacy card and supplied exact-byte source disagree on whether a
+    /// calibration artifact exists.
+    CalibrationPresenceMismatch {
+        /// Whether the legacy card carries a calibration correlation token.
+        declared: bool,
+        /// Whether exact calibration bytes were supplied.
+        supplied: bool,
+    },
+    /// Exact supplied bytes do not reproduce the retained legacy correlation.
+    CalibrationCorrelationMismatch {
+        /// Legacy FNV value retained by the card.
+        declared: u64,
+        /// Incrementally recomputed FNV value over the supplied bytes.
+        computed: u64,
+    },
+    /// Cancellation was observed during the incremental legacy crosswalk.
+    CalibrationCrosswalkCancelled {
+        /// Exact calibration-source bytes processed before observation.
+        processed_bytes: u64,
+    },
+    /// The typed validity child refused normalization, limits, or cancellation.
+    Validity(ValidityDomainIdentityError),
+    /// Canonical framing, set admission, resources, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for ModelCardIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDiscrepancy { bits, reason } => write!(
+                formatter,
+                "model-card identity refused discrepancy bits 0x{bits:016x}: {reason}"
+            ),
+            Self::CalibrationPresenceMismatch { declared, supplied } => write!(
+                formatter,
+                "model-card identity refused calibration shape: legacy card presence is {declared}, exact-byte source presence is {supplied}"
+            ),
+            Self::CalibrationCorrelationMismatch { declared, computed } => write!(
+                formatter,
+                "model-card identity refused calibration crosswalk: legacy FNV 0x{declared:016x} does not match exact-byte FNV 0x{computed:016x}"
+            ),
+            Self::CalibrationCrosswalkCancelled { processed_bytes } => write!(
+                formatter,
+                "model-card identity cancelled during calibration crosswalk after {processed_bytes} source bytes"
+            ),
+            Self::Validity(error) => {
+                write!(formatter, "model-card identity refused validity: {error}")
+            }
+            Self::Canonical(error) => write!(formatter, "model-card identity refused: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ModelCardIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validity(error) => Some(error),
+            Self::Canonical(error) => Some(error),
+            Self::InvalidDiscrepancy { .. }
+            | Self::CalibrationPresenceMismatch { .. }
+            | Self::CalibrationCorrelationMismatch { .. }
+            | Self::CalibrationCrosswalkCancelled { .. } => None,
+        }
+    }
+}
+
+impl From<ValidityDomainIdentityError> for ModelCardIdentityError {
+    fn from(error: ValidityDomainIdentityError) -> Self {
+        Self::Validity(error)
+    }
+}
+
+impl From<CanonicalError> for ModelCardIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
 }
 
 /// Fail-closed refusal from certified-f64 semantic-identity construction.
@@ -880,9 +1129,27 @@ const fn certified_f64_numerical_kind_tag_v1(kind: NumericalKind) -> u32 {
     }
 }
 
-fn preflight_certified_f64_string_set_v1<C>(
+fn preflight_bounded_field_bytes_v1(
+    length: usize,
+    limits: EvidenceIdentityLimits,
+    hard_limit: u64,
+) -> Result<u64, CanonicalError> {
+    let requested = bounded_len(length)?;
+    let limit = limits.max_field_bytes().min(hard_limit);
+    if requested > limit {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested,
+            limit,
+        });
+    }
+    Ok(requested)
+}
+
+fn preflight_canonical_string_set_v1<C>(
     values: &[String],
     limits: EvidenceIdentityLimits,
+    hard_limit: u64,
     cancellation: &mut C,
 ) -> Result<u64, CanonicalError>
 where
@@ -896,9 +1163,7 @@ where
             limit: limits.max_collection_items(),
         });
     }
-    let field_limit = limits
-        .max_field_bytes()
-        .min(MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1);
+    let field_limit = limits.max_field_bytes().min(hard_limit);
     let mut field_payload_bytes = u64::from(u64::BITS / 8);
     if field_payload_bytes > field_limit {
         return Err(CanonicalError::LimitExceeded {
@@ -924,6 +1189,206 @@ where
         }
     }
     Ok(count)
+}
+
+const MODEL_CARD_LEGACY_FNV_OFFSET_BASIS_V1: u64 = 0xcbf2_9ce4_8422_2325;
+const MODEL_CARD_LEGACY_FNV_PRIME_V1: u64 = 0x0000_0100_0000_01b3;
+
+fn model_card_legacy_provenance_v1<C>(
+    bytes: &[u8],
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<ProvenanceHash, ModelCardIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    let stride = usize::try_from(limits.cancellation_poll_bytes())
+        .map_err(|_| CanonicalError::LengthOverflow)?;
+    let mut processed_bytes = 0_u64;
+    let mut hash = MODEL_CARD_LEGACY_FNV_OFFSET_BASIS_V1;
+    if cancellation.is_cancelled() {
+        return Err(ModelCardIdentityError::CalibrationCrosswalkCancelled { processed_bytes });
+    }
+    for chunk in bytes.chunks(stride) {
+        if processed_bytes != 0 && cancellation.is_cancelled() {
+            return Err(ModelCardIdentityError::CalibrationCrosswalkCancelled { processed_bytes });
+        }
+        for byte in chunk {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(MODEL_CARD_LEGACY_FNV_PRIME_V1);
+        }
+        processed_bytes = processed_bytes
+            .checked_add(bounded_len(chunk.len())?)
+            .ok_or(CanonicalError::LengthOverflow)?;
+    }
+    if cancellation.is_cancelled() {
+        return Err(ModelCardIdentityError::CalibrationCrosswalkCancelled { processed_bytes });
+    }
+    Ok(ProvenanceHash(hash))
+}
+
+const fn model_card_ambition_tag_v1(ambition: Ambition) -> u32 {
+    match ambition {
+        Ambition::Solid => 1,
+        Ambition::Frontier => 2,
+        Ambition::Moonshot => 3,
+    }
+}
+
+/// Identify one model-card declaration together with exact calibration bytes.
+///
+/// The helper consumes and retains the public/mutable card plus its optional
+/// calibration bytes. A calibrated card must supply exact bytes whose
+/// incrementally recomputed FNV matches the legacy correlation token; the weak
+/// token is then excluded from the strong parent frame. An uncalibrated card
+/// binds a false presence bit plus the calibration schema's empty-byte child as
+/// an internal absence sentinel.
+///
+/// Assumptions and known failures must already be strictly byte-sorted and
+/// duplicate-free. Names and versions bind exact UTF-8 without normalization
+/// or semantic-version parsing. Discrepancy refuses NaN and negative values,
+/// accepts positive infinity as explicit unbounded state, and preserves exact
+/// signed-zero bits.
+///
+/// # Errors
+/// Refuses calibration shape/crosswalk mismatch, malformed discrepancy or
+/// validity, non-canonical sets, invalid limits, resource overflow, or
+/// cancellation. No partial identity is published.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear helper keeps the legacy crosswalk and both typed child bindings auditable"
+)]
+pub fn identify_model_card_v1<C>(
+    card: ModelCard,
+    calibration_bytes: Option<Vec<u8>>,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedModelCardV1, ModelCardIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+    let (receipt, validity_receipt, calibration_source_receipt) = {
+        let declared_calibration = card.calibration;
+        let supplied_calibration = calibration_bytes.is_some();
+        if declared_calibration.is_some() != supplied_calibration {
+            return Err(ModelCardIdentityError::CalibrationPresenceMismatch {
+                declared: declared_calibration.is_some(),
+                supplied: supplied_calibration,
+            });
+        }
+
+        preflight_bounded_field_bytes_v1(
+            card.name.len(),
+            limits,
+            MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1,
+        )?;
+        preflight_bounded_field_bytes_v1(
+            card.version.len(),
+            limits,
+            MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1,
+        )?;
+        let assumption_count = preflight_canonical_string_set_v1(
+            &card.assumptions,
+            limits,
+            MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1,
+            &mut cancellation,
+        )?;
+        let known_failure_count = preflight_canonical_string_set_v1(
+            &card.known_failures,
+            limits,
+            MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1,
+            &mut cancellation,
+        )?;
+        let calibration_slice = calibration_bytes.as_deref().unwrap_or(&[]);
+        preflight_bounded_field_bytes_v1(
+            calibration_slice.len(),
+            limits,
+            MAX_MODEL_CARD_CALIBRATION_SOURCE_BYTES_V1,
+        )?;
+        if card.discrepancy_rel.is_nan() {
+            return Err(ModelCardIdentityError::InvalidDiscrepancy {
+                bits: card.discrepancy_rel.to_bits(),
+                reason: "discrepancy must not be NaN",
+            });
+        }
+        if card.discrepancy_rel < 0.0 {
+            return Err(ModelCardIdentityError::InvalidDiscrepancy {
+                bits: card.discrepancy_rel.to_bits(),
+                reason: "discrepancy must be non-negative; positive infinity is explicit unbounded state",
+            });
+        }
+        if let Some(declared) = declared_calibration {
+            let computed =
+                model_card_legacy_provenance_v1(calibration_slice, limits, &mut cancellation)?;
+            if computed != declared {
+                return Err(ModelCardIdentityError::CalibrationCorrelationMismatch {
+                    declared: declared.0,
+                    computed: computed.0,
+                });
+            }
+        }
+
+        let validity_receipt =
+            identify_validity_domain_receipt_v1(&card.validity, limits, &mut cancellation)?;
+        let calibration_source_receipt =
+            CanonicalEncoder::<ModelCardCalibrationSourceIdV1, _>::new(limits, || {
+                cancellation.is_cancelled()
+            })?
+            .bytes(
+                Field::new(0, "canonical-calibration-artifact"),
+                calibration_slice,
+            )?
+            .finish()?;
+
+        let receipt = CanonicalEncoder::<ModelCardIdV1, _>::new(limits, cancellation)?
+            .utf8(Field::new(0, "name"), &card.name)?
+            .utf8(Field::new(1, "version"), &card.version)?
+            .variant(
+                Field::new(2, "ambition"),
+                model_card_ambition_tag_v1(card.ambition),
+                &[],
+            )?
+            .canonical_set(
+                Field::new(3, "assumptions"),
+                assumption_count,
+                card.assumptions.iter().map(|value| value.as_bytes()),
+            )?
+            .child(Field::new(4, "validity"), validity_receipt.id())?
+            .canonical_set(
+                Field::new(5, "known-failures"),
+                known_failure_count,
+                card.known_failures.iter().map(|value| value.as_bytes()),
+            )?
+            .flag(Field::new(6, "calibration-present"), supplied_calibration)?
+            .child(
+                Field::new(7, "calibration-source"),
+                calibration_source_receipt.id(),
+            )?
+            .u64(
+                Field::new(8, "discrepancy-rel-ieee754-bits"),
+                card.discrepancy_rel.to_bits(),
+            )?
+            .finish()?;
+        (receipt, validity_receipt, calibration_source_receipt)
+    };
+    Ok(IdentifiedModelCardV1 {
+        card,
+        calibration_bytes,
+        validity_receipt,
+        calibration_source_receipt,
+        receipt,
+    })
 }
 
 fn preflight_certified_f64_sensitivity_v1<C>(
@@ -1024,14 +1489,16 @@ where
             limits,
             &mut cancellation,
         )?;
-        let card_count = preflight_certified_f64_string_set_v1(
+        let card_count = preflight_canonical_string_set_v1(
             &evidence.model.cards,
             limits,
+            MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1,
             &mut cancellation,
         )?;
-        let assumption_count = preflight_certified_f64_string_set_v1(
+        let assumption_count = preflight_canonical_string_set_v1(
             &evidence.model.assumptions,
             limits,
+            MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1,
             &mut cancellation,
         )?;
         let sensitivity_count =
@@ -1502,6 +1969,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+
+    impl EvidenceIdentityCancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn model_card_legacy_crosswalk_matches_public_fnv_and_cancels_by_stride() {
+        let limits = EvidenceIdentityLimits::new(4096, 1024, 32, 64, 4);
+        for bytes in [
+            Vec::new(),
+            vec![0x01, 0x02, 0x03],
+            vec![0x01, 0x02, 0x03, 0x04],
+            vec![0x01, 0x02, 0x03, 0x04, 0x05],
+            vec![0x00, 0xff, 0x80, 0x7f, 0x42, 0x24, 0x11, 0xee, 0x99],
+        ] {
+            let mut never_cancel = || false;
+            assert_eq!(
+                model_card_legacy_provenance_v1(&bytes, limits, &mut never_cancel),
+                Ok(ProvenanceHash::of_bytes(&bytes))
+            );
+        }
+
+        let bytes = vec![0x5a; 12];
+        let mut cancel = CancelAfter {
+            successful_polls: 2,
+        };
+        assert_eq!(
+            model_card_legacy_provenance_v1(&bytes, limits, &mut cancel),
+            Err(ModelCardIdentityError::CalibrationCrosswalkCancelled { processed_bytes: 8 })
+        );
+    }
 
     #[test]
     fn color_buffer_allocation_refusal_is_typed() {

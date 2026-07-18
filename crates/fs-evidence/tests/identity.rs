@@ -9,16 +9,19 @@ use fs_blake3::identity::{
     FieldSpec, NoClaimState, SchemaId, SourceId, StrongIdentity, TrustState, WireType,
 };
 use fs_evidence::{
-    COLOR_ALGEBRA_VERSION, Certified, CertifiedF64EvidenceIdV1, CertifiedF64EvidenceIdentityError,
-    CertifiedF64EvidenceReceiptV1, Color, ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError,
-    ColorEvidenceNodeIdV1, ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1,
-    ColorEvidenceNodeV1, ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1,
-    ColorEvidenceSourceIdV1, ColorEvidenceSourceV1, Evidence, IdentifiedCertifiedF64EvidenceV1,
-    IdentifiedValidityDomainV1, ModelEvidence, NumericalKind, ProvenanceHash, SensitivitySummary,
-    StatisticalCertificate, ValidityDomain, ValidityDomainIdV1, ValidityDomainIdentityError,
+    Ambition, COLOR_ALGEBRA_VERSION, Certified, CertifiedF64EvidenceIdV1,
+    CertifiedF64EvidenceIdentityError, CertifiedF64EvidenceReceiptV1, Color,
+    ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError, ColorEvidenceNodeIdV1,
+    ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1, ColorEvidenceNodeV1,
+    ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1, ColorEvidenceSourceIdV1,
+    ColorEvidenceSourceV1, Evidence, IdentifiedCertifiedF64EvidenceV1, IdentifiedModelCardV1,
+    IdentifiedValidityDomainV1, ModelCard, ModelCardCalibrationSourceIdV1,
+    ModelCardCalibrationSourceReceiptV1, ModelCardIdV1, ModelCardIdentityError, ModelCardReceiptV1,
+    ModelEvidence, NumericalKind, ProvenanceHash, SensitivitySummary, StatisticalCertificate,
+    ValidityDomain, ValidityDomainIdV1, ValidityDomainIdentityError,
     compose_color_evidence_nodes_v1, identify_certified_f64_evidence_v1,
     identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
-    identify_validity_domain_v1,
+    identify_model_card_v1, identify_validity_domain_v1,
 };
 
 const LIMITS: CanonicalLimits = CanonicalLimits::new(16_384, 8_192, 32, 64, 256);
@@ -211,6 +214,104 @@ fn manual_certified_receipt(
         .expect("adjoint presence")
         .finish()
         .expect("manual certified-f64 identity")
+}
+
+const CALIBRATION_BYTES: &[u8] = b"calibration-artifact-v1\0binary";
+const FNV1A64_ZERO_PREIMAGE: &[u8] = &[
+    0x25, 0xe4, 0xe6, 0x90, 0x73, 0xfa, 0x7c, 0x26, 0x96, 0x1d, 0xcd, 0x31, 0x29, 0x0d, 0xe9, 0x72,
+    0x17,
+];
+const FNV1A64_ZERO_EXTENSION_COLLISION: &[u8] = &[
+    0x25, 0xe4, 0xe6, 0x90, 0x73, 0xfa, 0x7c, 0x26, 0x96, 0x1d, 0xcd, 0x31, 0x29, 0x0d, 0xe9, 0x72,
+    0x17, 0x00,
+];
+
+fn model_card_fixture(calibration: Option<&[u8]>) -> ModelCard {
+    let card = ModelCard::new(
+        "les-α",
+        "1.2.3+gpu",
+        Ambition::Frontier,
+        vec![
+            "axis units declared elsewhere".to_string(),
+            "continuum regime".to_string(),
+        ],
+        ValidityDomain::unconstrained()
+            .with("Mach number", 0.2, 0.8)
+            .with("α", -1.0, 1.0),
+        vec![
+            "high-angle separation".to_string(),
+            "wall transition".to_string(),
+        ],
+        0.1,
+    );
+    match calibration {
+        Some(bytes) => card.with_calibration(ProvenanceHash::of_bytes(bytes)),
+        None => card,
+    }
+}
+
+fn identified_model_card(
+    card: ModelCard,
+    calibration_bytes: Option<Vec<u8>>,
+) -> IdentifiedModelCardV1 {
+    identify_model_card_v1(card, calibration_bytes, LIMITS, || false)
+        .expect("valid model-card identity")
+}
+
+fn manual_model_card_receipts(
+    card: &ModelCard,
+    calibration_present: bool,
+    calibration_bytes: &[u8],
+) -> (ModelCardCalibrationSourceReceiptV1, ModelCardReceiptV1) {
+    let validity = identified_domain(card.validity.clone());
+    let ambition_tag = match card.ambition {
+        Ambition::Solid => 1,
+        Ambition::Frontier => 2,
+        Ambition::Moonshot => 3,
+    };
+    let calibration = CanonicalEncoder::<ModelCardCalibrationSourceIdV1, _>::new(LIMITS, || false)
+        .expect("calibration source schema")
+        .bytes(
+            Field::new(0, "canonical-calibration-artifact"),
+            calibration_bytes,
+        )
+        .expect("calibration bytes")
+        .finish()
+        .expect("calibration source receipt");
+    let card_receipt = CanonicalEncoder::<ModelCardIdV1, _>::new(LIMITS, || false)
+        .expect("model-card schema")
+        .utf8(Field::new(0, "name"), &card.name)
+        .expect("name")
+        .utf8(Field::new(1, "version"), &card.version)
+        .expect("version")
+        .variant(Field::new(2, "ambition"), ambition_tag, &[])
+        .expect("ambition")
+        .canonical_set(
+            Field::new(3, "assumptions"),
+            u64::try_from(card.assumptions.len()).expect("assumption count"),
+            card.assumptions.iter().map(|value| value.as_bytes()),
+        )
+        .expect("assumptions")
+        .child(Field::new(4, "validity"), validity.id())
+        .expect("validity")
+        .canonical_set(
+            Field::new(5, "known-failures"),
+            u64::try_from(card.known_failures.len()).expect("known-failure count"),
+            card.known_failures.iter().map(|value| value.as_bytes()),
+        )
+        .expect("known failures")
+        .flag(Field::new(6, "calibration-present"), calibration_present)
+        .expect("calibration presence")
+        .child(Field::new(7, "calibration-source"), calibration.id())
+        .expect("calibration source")
+        .u64(
+            Field::new(8, "discrepancy-rel-ieee754-bits"),
+            card.discrepancy_rel.to_bits(),
+        )
+        .expect("discrepancy")
+        .finish()
+        .expect("manual model-card identity");
+    (calibration, card_receipt)
 }
 
 #[test]
@@ -505,6 +606,422 @@ fn raw_validity_domain_receipt_is_only_schema_shaped() {
         malformed.audit_record().no_claim(),
         NoClaimState::ExternalTrustRequired
     );
+}
+
+#[test]
+fn model_card_identity_replays_exact_children_and_retains_inputs() {
+    let card = model_card_fixture(Some(CALIBRATION_BYTES));
+    let first = identified_model_card(card.clone(), Some(CALIBRATION_BYTES.to_vec()));
+    let replay = identified_model_card(card.clone(), Some(CALIBRATION_BYTES.to_vec()));
+    let (manual_calibration, manual) = manual_model_card_receipts(&card, true, CALIBRATION_BYTES);
+
+    assert_eq!(first.id(), replay.id());
+    assert_eq!(first.id(), manual.id());
+    assert_eq!(
+        first.receipt().canonical_preimage(),
+        manual.canonical_preimage()
+    );
+    assert_eq!(first.calibration_source_id(), Some(manual_calibration.id()));
+    assert_eq!(
+        first
+            .calibration_source_receipt()
+            .expect("calibrated receipt")
+            .canonical_preimage(),
+        manual_calibration.canonical_preimage()
+    );
+    assert_eq!(
+        first.validity_id(),
+        identified_domain(card.validity.clone()).id()
+    );
+    assert_eq!(first.trust_state(), TrustState::Unanchored);
+    assert_eq!(
+        first.receipt().audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
+    assert_eq!(first.card(), &card);
+    assert_eq!(first.calibration_bytes(), Some(CALIBRATION_BYTES));
+
+    let (_, raw_wrong_presence) = manual_model_card_receipts(&card, false, CALIBRATION_BYTES);
+    assert_ne!(first.id(), raw_wrong_presence.id());
+    assert_eq!(
+        raw_wrong_presence.audit_record().trust(),
+        TrustState::Unanchored
+    );
+
+    let no_calibration_card = model_card_fixture(None);
+    let no_calibration = identified_model_card(no_calibration_card.clone(), None);
+    let (no_calibration_child, no_calibration_manual) =
+        manual_model_card_receipts(&no_calibration_card, false, &[]);
+    assert_eq!(no_calibration.id(), no_calibration_manual.id());
+    assert_eq!(no_calibration.calibration_source_id(), None);
+
+    let empty_calibration_card = model_card_fixture(Some(&[]));
+    let empty_calibration = identified_model_card(empty_calibration_card.clone(), Some(Vec::new()));
+    let (empty_calibration_child, empty_calibration_manual) =
+        manual_model_card_receipts(&empty_calibration_card, true, &[]);
+    assert_eq!(empty_calibration.id(), empty_calibration_manual.id());
+    assert_eq!(no_calibration_child.id(), empty_calibration_child.id());
+    assert_ne!(no_calibration.id(), empty_calibration.id());
+    assert_eq!(
+        empty_calibration.calibration_source_id(),
+        Some(empty_calibration_child.id())
+    );
+
+    let (recovered_card, recovered_calibration) = first.into_parts();
+    assert_eq!(recovered_card, card);
+    assert_eq!(recovered_calibration.as_deref(), Some(CALIBRATION_BYTES));
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one mutation and refusal matrix shares the exact card/calibration baseline"
+)]
+fn model_card_identity_binds_every_field_and_refuses_legacy_laundering() {
+    let card = model_card_fixture(Some(CALIBRATION_BYTES));
+    let base = identified_model_card(card.clone(), Some(CALIBRATION_BYTES.to_vec()));
+    let identify = |card: ModelCard, bytes: Option<Vec<u8>>| {
+        identify_model_card_v1(card, bytes, LIMITS, || false).expect("valid card mutation")
+    };
+
+    let mut name = card.clone();
+    name.name.push('!');
+    let name_id = identify(name, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let mut version = card.clone();
+    version.version.push_str(".1");
+    let version_id = identify(version, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let mut solid = card.clone();
+    solid.ambition = Ambition::Solid;
+    let solid_id = identify(solid, Some(CALIBRATION_BYTES.to_vec())).id();
+    let mut moonshot = card.clone();
+    moonshot.ambition = Ambition::Moonshot;
+    let moonshot_id = identify(moonshot, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let mut assumption = card.clone();
+    assumption.assumptions.push("z-last assumption".to_string());
+    let assumption_id = identify(assumption, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let mut validity = card.clone();
+    validity.validity = validity.validity.with("β", -2.0, 2.0);
+    let validity_id = identify(validity, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let mut failure = card.clone();
+    failure.known_failures.push("z-last failure".to_string());
+    let failure_id = identify(failure, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let mut discrepancy = card.clone();
+    discrepancy.discrepancy_rel = 0.1_f64.next_up();
+    let discrepancy_id = identify(discrepancy, Some(CALIBRATION_BYTES.to_vec())).id();
+
+    let changed_calibration_bytes = b"calibration-artifact-v2\0binary".to_vec();
+    let mut changed_calibration = card.clone();
+    changed_calibration.calibration = Some(ProvenanceHash::of_bytes(&changed_calibration_bytes));
+    let changed_calibration =
+        identify(changed_calibration, Some(changed_calibration_bytes.clone()));
+
+    for (field, mutated_id) in [
+        ("name", name_id),
+        ("version", version_id),
+        ("ambition-solid", solid_id),
+        ("ambition-moonshot", moonshot_id),
+        ("assumption", assumption_id),
+        ("validity", validity_id),
+        ("known-failure", failure_id),
+        ("discrepancy", discrepancy_id),
+        ("calibration-source", changed_calibration.id()),
+    ] {
+        assert_ne!(base.id(), mutated_id, "{field} must move the model root");
+    }
+    assert_ne!(solid_id, moonshot_id);
+    assert_ne!(
+        base.calibration_source_id(),
+        changed_calibration.calibration_source_id()
+    );
+
+    let collision_hash = ProvenanceHash::of_bytes(FNV1A64_ZERO_PREIMAGE);
+    assert_eq!(collision_hash, ProvenanceHash(0));
+    assert_eq!(
+        collision_hash,
+        ProvenanceHash::of_bytes(FNV1A64_ZERO_EXTENSION_COLLISION),
+        "fixed fixture must remain a real legacy FNV-1a-64 collision"
+    );
+    let collision_a = identified_model_card(
+        model_card_fixture(Some(FNV1A64_ZERO_PREIMAGE)),
+        Some(FNV1A64_ZERO_PREIMAGE.to_vec()),
+    );
+    let collision_b = identified_model_card(
+        model_card_fixture(Some(FNV1A64_ZERO_EXTENSION_COLLISION)),
+        Some(FNV1A64_ZERO_EXTENSION_COLLISION.to_vec()),
+    );
+    assert_eq!(
+        collision_a.card().calibration,
+        collision_b.card().calibration
+    );
+    assert_ne!(
+        collision_a.calibration_source_id(),
+        collision_b.calibration_source_id(),
+        "exact source-byte identity must not inherit a legacy FNV collision"
+    );
+    assert_ne!(
+        collision_a.id(),
+        collision_b.id(),
+        "the typed model root must preserve the exact calibration distinction"
+    );
+
+    let mut unsorted = model_card_fixture(None);
+    unsorted.assumptions = vec!["z".to_string(), "a".to_string()];
+    assert!(matches!(
+        identify_model_card_v1(unsorted, None, LIMITS, || false),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::NonCanonicalSetOrder { index: 1 }
+        ))
+    ));
+
+    let mut duplicate = model_card_fixture(None);
+    duplicate.known_failures = vec!["same".to_string(), "same".to_string()];
+    assert!(matches!(
+        identify_model_card_v1(duplicate, None, LIMITS, || false),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::DuplicateSetItem { index: 1 }
+        ))
+    ));
+
+    let mut invalid_validity = model_card_fixture(None);
+    invalid_validity.validity = invalid_validity.validity.with("bad", f64::NAN, 1.0);
+    assert!(matches!(
+        identify_model_card_v1(invalid_validity, None, LIMITS, || false),
+        Err(ModelCardIdentityError::Validity(
+            ValidityDomainIdentityError::InvalidBounds { .. }
+        ))
+    ));
+
+    for discrepancy in [f64::NAN, -0.1, f64::NEG_INFINITY] {
+        let mut invalid = model_card_fixture(None);
+        invalid.discrepancy_rel = discrepancy;
+        assert!(matches!(
+            identify_model_card_v1(invalid, None, LIMITS, || false),
+            Err(ModelCardIdentityError::InvalidDiscrepancy { bits, .. })
+                if bits == discrepancy.to_bits()
+        ));
+    }
+
+    let missing_bytes = model_card_fixture(Some(CALIBRATION_BYTES));
+    assert!(matches!(
+        identify_model_card_v1(missing_bytes, None, LIMITS, || false),
+        Err(ModelCardIdentityError::CalibrationPresenceMismatch {
+            declared: true,
+            supplied: false,
+        })
+    ));
+    let unexpected_bytes = model_card_fixture(None);
+    assert!(matches!(
+        identify_model_card_v1(
+            unexpected_bytes,
+            Some(CALIBRATION_BYTES.to_vec()),
+            LIMITS,
+            || false,
+        ),
+        Err(ModelCardIdentityError::CalibrationPresenceMismatch {
+            declared: false,
+            supplied: true,
+        })
+    ));
+    let mismatch = model_card_fixture(Some(CALIBRATION_BYTES));
+    assert!(matches!(
+        identify_model_card_v1(mismatch, Some(b"wrong".to_vec()), LIMITS, || false),
+        Err(ModelCardIdentityError::CalibrationCorrelationMismatch { .. })
+    ));
+
+    let mut positive_zero = model_card_fixture(None);
+    positive_zero.discrepancy_rel = 0.0;
+    let mut negative_zero = model_card_fixture(None);
+    negative_zero.discrepancy_rel = -0.0;
+    assert_ne!(
+        identify(positive_zero, None).id(),
+        identify(negative_zero, None).id()
+    );
+    let mut unbounded = model_card_fixture(None);
+    unbounded.discrepancy_rel = f64::INFINITY;
+    let _unbounded = identify(unbounded, None);
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exact-limit matrix shares the same model-card child schemas and poll ledger"
+)]
+fn model_card_identity_enforces_exact_resources_and_cancellation() {
+    let field_limits = CanonicalLimits::new(65_536, 1_024, 32, 64, 64);
+    let mut exact_name = model_card_fixture(None);
+    exact_name.name = "n".repeat(1_024);
+    identify_model_card_v1(exact_name, None, field_limits, || false)
+        .expect("exact 1024-byte name is admitted");
+    let mut oversized_name = model_card_fixture(None);
+    oversized_name.name = "n".repeat(1_025);
+    assert!(matches!(
+        identify_model_card_v1(oversized_name, None, field_limits, || false),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 1_025,
+                limit: 1_024,
+            }
+        ))
+    ));
+
+    let exact_calibration_bytes = vec![0x5a; 1_024];
+    let exact_calibration = model_card_fixture(None)
+        .with_calibration(ProvenanceHash::of_bytes(&exact_calibration_bytes));
+    identify_model_card_v1(
+        exact_calibration,
+        Some(exact_calibration_bytes),
+        field_limits,
+        || false,
+    )
+    .expect("exact 1024-byte calibration source is admitted");
+    let oversized_calibration_bytes = vec![0x5a; 1_025];
+    let oversized_calibration = model_card_fixture(None)
+        .with_calibration(ProvenanceHash::of_bytes(&oversized_calibration_bytes));
+    assert!(matches!(
+        identify_model_card_v1(
+            oversized_calibration,
+            Some(oversized_calibration_bytes),
+            field_limits,
+            || false,
+        ),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 1_025,
+                limit: 1_024,
+            }
+        ))
+    ));
+
+    let collection_limits = CanonicalLimits::new(16_384, 8_192, 32, 1, 64);
+    assert!(matches!(
+        identify_model_card_v1(model_card_fixture(None), None, collection_limits, || false),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 2,
+                limit: 1,
+            }
+        ))
+    ));
+
+    let one_byte = [0x42];
+    let minimal_calibrated = ModelCard::new(
+        "m",
+        "v",
+        Ambition::Solid,
+        Vec::new(),
+        ValidityDomain::unconstrained(),
+        Vec::new(),
+        0.0,
+    )
+    .with_calibration(ProvenanceHash::of_bytes(&one_byte));
+    let no_chunks = CanonicalLimits::new(16_384, 8_192, 32, 0, 64);
+    assert!(matches!(
+        identify_model_card_v1(
+            minimal_calibrated,
+            Some(one_byte.to_vec()),
+            no_chunks,
+            || false,
+        ),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::StreamChunks,
+                requested: 1,
+                limit: 0,
+            }
+        ))
+    ));
+
+    let card = model_card_fixture(Some(CALIBRATION_BYTES));
+    let baseline = identified_model_card(card.clone(), Some(CALIBRATION_BYTES.to_vec()));
+    let frame_limit = baseline
+        .receipt()
+        .canonical_bytes()
+        .checked_sub(1)
+        .expect("non-empty model-card frame");
+    let frame_limits = CanonicalLimits::new(frame_limit, 8_192, 32, 64, 64);
+    assert!(matches!(
+        identify_model_card_v1(
+            card.clone(),
+            Some(CALIBRATION_BYTES.to_vec()),
+            frame_limits,
+            || false,
+        ),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == frame_limit
+    ));
+
+    assert!(matches!(
+        identify_model_card_v1(
+            card.clone(),
+            Some(CALIBRATION_BYTES.to_vec()),
+            CanonicalLimits::new(16_384, 8_192, 32, 64, 0),
+            || false,
+        ),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    ));
+    assert!(matches!(
+        identify_model_card_v1(
+            card.clone(),
+            Some(CALIBRATION_BYTES.to_vec()),
+            LIMITS,
+            || true,
+        ),
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+    let uncalibrated = model_card_fixture(None);
+    let poll_count = std::cell::Cell::new(0_usize);
+    identify_model_card_v1(uncalibrated.clone(), None, LIMITS, || {
+        poll_count.set(poll_count.get() + 1);
+        false
+    })
+    .expect("baseline model-card poll count");
+    let late = identify_model_card_v1(
+        uncalibrated,
+        None,
+        LIMITS,
+        CancelAfter {
+            successful_polls: poll_count.get() - 1,
+        },
+    );
+    assert!(matches!(
+        late,
+        Err(ModelCardIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
 }
 
 #[test]

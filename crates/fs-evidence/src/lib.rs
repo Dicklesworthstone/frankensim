@@ -74,12 +74,17 @@ pub use identity::{
     ColorEvidenceParentSemanticsV1, ColorEvidenceSourceIdV1, ColorEvidenceSourceIdentitySchemaV1,
     ColorEvidenceSourceReceiptV1, ColorEvidenceSourceV1, EvidenceIdentityCancellationProbe,
     EvidenceIdentityLimits, EvidenceIdentityTrustState, IdentifiedCertifiedF64EvidenceV1,
-    IdentifiedValidityDomainV1, MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1,
-    MAX_COLOR_EVIDENCE_NODE_BYTES_V1, MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1,
-    VALIDITY_DOMAIN_IDENTITY_VERSION_V1, ValidityDomainIdV1, ValidityDomainIdentityError,
-    ValidityDomainIdentitySchemaV1, ValidityDomainReceiptV1, compose_color_evidence_nodes_v1,
-    identify_certified_f64_evidence_v1, identify_color_evidence_source_node_v1,
-    identify_color_evidence_source_v1, identify_validity_domain_v1,
+    IdentifiedModelCardV1, IdentifiedValidityDomainV1, MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1,
+    MAX_COLOR_EVIDENCE_NODE_BYTES_V1, MAX_MODEL_CARD_CALIBRATION_SOURCE_BYTES_V1,
+    MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1, MAX_VALIDITY_DOMAIN_FIELD_BYTES_V1,
+    MODEL_CARD_CALIBRATION_SOURCE_IDENTITY_VERSION_V1, MODEL_CARD_IDENTITY_VERSION_V1,
+    ModelCardCalibrationSourceIdV1, ModelCardCalibrationSourceIdentitySchemaV1,
+    ModelCardCalibrationSourceReceiptV1, ModelCardIdV1, ModelCardIdentityError,
+    ModelCardIdentitySchemaV1, ModelCardReceiptV1, VALIDITY_DOMAIN_IDENTITY_VERSION_V1,
+    ValidityDomainIdV1, ValidityDomainIdentityError, ValidityDomainIdentitySchemaV1,
+    ValidityDomainReceiptV1, compose_color_evidence_nodes_v1, identify_certified_f64_evidence_v1,
+    identify_color_evidence_source_node_v1, identify_color_evidence_source_v1,
+    identify_model_card_v1, identify_validity_domain_v1,
 };
 
 /// Crate version, re-exported for provenance stamping.

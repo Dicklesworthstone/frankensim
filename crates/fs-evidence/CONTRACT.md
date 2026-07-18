@@ -103,6 +103,22 @@ telemetry/legacy correlation.
   remains inspectable only through the attached certified record. Low-level
   identity/receipt aliases remain schema-shaped framing and do not prove the
   opaque helper relationship.
+- `identity` module (sj31i.52.2 model-card tranche) —
+  `ModelCardIdV1` is a typed `ModelId` for one exact model declaration plus a
+  required, dedicated `ModelCardCalibrationSourceIdV1` child. The opaque
+  `IdentifiedModelCardV1` consumes and retains the public/mutable `ModelCard`
+  and optional exact calibration bytes while binding exact name and version
+  UTF-8, ambition variant, canonical assumption and known-failure sets, the
+  typed validity child, calibration presence, the typed exact-byte source, and
+  raw discrepancy bits after structural validation. A calibrated card must
+  supply bytes whose incrementally recomputed FNV-1a value matches its legacy
+  token. That weak token is compatibility correlation only and never enters
+  the strong parent frame. An uncalibrated card binds `false` plus the source
+  schema's empty-byte identity as an internal absence sentinel; `Some(empty)`
+  binds `true` plus the same child and therefore has a distinct parent. Both
+  child and parent receipts remain unanchored. Raw ID/receipt aliases prove
+  only schema-shaped framing, not correspondence with retained card/source
+  inputs.
 
 - `color` module (bead qmao.1): the THREE-COLOR epistemic schema —
   `Color::{Verified{lo,hi}, Validated{regime: ValidityDomain, dataset},
@@ -278,12 +294,27 @@ telemetry/legacy correlation.
     entry or late cancellation refuse without publishing an identity. The raw
     semantic-ID/receipt aliases do not assert helper-level consistency with an
     attached certified record.
+16. Opaque helper-built model-card identities (sj31i.52.2, G0/G3/G4) retain
+    the exact card and optional calibration bytes while agreeing with
+    independently framed validity, calibration-source, and parent receipts.
+    Every governed declaration or exact calibration-byte mutation moves the
+    typed model root. Assumptions and known failures must already be strictly
+    byte-sorted and duplicate-free; public-field mutation cannot silently
+    reorder them. Calibration presence mismatch, incremental legacy-FNV
+    mismatch, NaN/negative discrepancy, invalid validity, exact
+    field/set/source/chunk/frame overflow, and entry, mid-crosswalk, or late
+    cancellation refuse without publishing an opaque result. Positive-infinity
+    discrepancy is explicit unbounded state; signed zero remains bit-distinct.
+    The raw legacy FNV value is absent from the parent frame, so it cannot be
+    rehashed into strong authority. Distinct exact bytes remain distinct typed
+    children even if a legacy collision exists.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
-`OutOfDomain`, `FitError`, `FalsifyError` — all `core::error::Error` with actionable
-Display text. Constructors are total (enclosure bounds normalize by
-swapping); no panics cross the boundary.
+`OutOfDomain`, `FitError`, `FalsifyError`, and typed identity refusals including
+`ModelCardIdentityError` — all `core::error::Error` with actionable Display
+text. Constructors are total (enclosure bounds normalize by swapping); no
+panics cross the boundary.
 
 ## Determinism class
 Deterministic: pure values and mutable diagnostic state machines produce the
@@ -294,11 +325,14 @@ divergence.
 
 ## Cancellation behavior
 Core certificate/color algebra is bounded small synchronous work. Typed color,
-validity-domain, and certified-f64 identity helpers accept an explicit
-cancellation probe. Color payload copies poll at the configured byte stride;
-validity and sensitivity rows poll at stream boundaries; certified-f64 set and
-row preflights also poll while traversing caller data. Every refusal consumes
-the in-flight encoder and publishes no partial identity. Falsifier allocation
+validity-domain, certified-f64, and model-card identity helpers accept an
+explicit cancellation probe. Color payload copies poll at the configured byte
+stride; validity and sensitivity rows poll at stream boundaries; set/row
+preflights poll while traversing caller data. Model-card calibration crosswalks
+recompute legacy FNV incrementally with entry, exact byte-stride, and final
+polls before a second bounded encoder pass binds the strong source child. Every
+refusal consumes any in-flight encoder and publishes no partial opaque result.
+Falsifier allocation
 and history review iterate caller data without a `Cx`; allocation length and
 distinct history rows are defensively capped, but these diagnostic APIs are not
 P7 hot-kernel or cancellation-authoritative paths. Callers must not place large
@@ -669,6 +703,25 @@ physical validation, process-standard conformance, or decision fitness.
   adjoint presence is bound. A raw
   `CertifiedF64EvidenceIdV1`/receipt is merely schema-shaped framing and can
   encode a frame that disagrees with any purported attached record.
+- `IdentifiedModelCardV1` proves exact local declaration/source framing and the
+  legacy-FNV consistency crosswalk only. It does not prove model source,
+  binary, algorithm, or behavioral equivalence; model-name uniqueness;
+  semantic-version syntax or monotonicity; registry membership or solver
+  binding; ambition truth, feature-gate state, Gauntlet evidence, or promotion.
+  It does not prove assumption truth/completeness, known-failure
+  truth/completeness/severity/falsifier coverage, validity
+  occupancy/applicability, or any
+  axis units, dimensions, quantity kinds, coordinate frames, or parameter
+  ontology. Discrepancy framing adds no QoI/reference denominator, metric,
+  aggregation, confidence, derivation, or rigor. Calibration bytes gain no
+  format, decodability, origin, custody, currentness, applicability, efficacy,
+  or authority; matching FNV is compatibility consistency only, and the
+  false-plus-empty child is an absence sentinel rather than an empty artifact
+  claim. Existing `ModelEvidence::from_card` copies only a subset of card
+  fields, while certified-f64 identity still binds card names only; neither is
+  transitively bound to `ModelCardIdV1` by this additive tranche. Seeds,
+  budgets, capabilities, hardware/build/dependency versions, signatures,
+  external trust, and ledger admission remain outside the root.
 - A successful opaque helper build proves canonical source framing or exact
   replay of the named Add/Mul/Hull color operation. It proves
   nothing about source origin, experimental membership, model correctness, or
