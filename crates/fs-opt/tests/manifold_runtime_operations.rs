@@ -55,6 +55,19 @@ fn norm(values: &[f64]) -> f64 {
     dot(values, values).sqrt()
 }
 
+fn accepted_near_unit_scale() -> f64 {
+    // 32,768 ulps above one gives a nonzero norm defect comfortably inside the
+    // public 1e-10 manifold-membership envelope.
+    f64::from_bits(1.0_f64.to_bits() + 32_768)
+}
+
+fn xorshift64(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
 fn max_error(left: &[f64], right: &[f64]) -> f64 {
     assert_eq!(left.len(), right.len());
     left.iter()
@@ -288,6 +301,153 @@ fn g0_parameter_gradients_are_dual_to_zero_parameter_curve_velocities() {
 }
 
 #[test]
+fn g0_projection_is_total_and_idempotent_on_accepted_near_manifold_points() {
+    let scale = accepted_near_unit_scale();
+    let sphere = Manifold::Sphere { ambient: 3 };
+    let sphere_point = [scale, 0.0, 0.0];
+    let sphere_norm_defect = dot(&sphere_point, &sphere_point) - 1.0;
+    assert!(
+        sphere_norm_defect != 0.0 && sphere_norm_defect.abs() <= 1.0e-10,
+        "fixture must be accepted but not bit-perfect: scale={scale:.17e}; norm_defect={sphere_norm_defect:.17e}"
+    );
+    let sphere_radial = sphere
+        .parameter_gradient(&sphere_point, &sphere_point)
+        .expect("near-unit Sphere radial gradient must project without refusal");
+    assert!(
+        sphere_radial.iter().all(|value| *value == 0.0),
+        "purely radial Sphere gradient must project to exact zero: point={sphere_point:?}; projected={sphere_radial:?}"
+    );
+
+    let sphere_landed = sphere
+        .retract(&[1.0, 0.0, 0.0], &[0.125, 0.75, -0.25])
+        .expect("non-axis Sphere retraction");
+    let sphere_first = sphere
+        .parameter_gradient(&sphere_landed, &[0.75, -1.25, 0.5])
+        .expect("Sphere projection at retraction-produced point");
+    let sphere_second = sphere
+        .parameter_gradient(&sphere_landed, &sphere_first)
+        .expect("Sphere projection idempotence");
+    let sphere_idempotence_error = max_error(&sphere_first, &sphere_second);
+    assert!(
+        sphere_idempotence_error <= 2.0e-14 * (1.0 + norm(&sphere_first)),
+        "Sphere projection must be idempotent at a retraction-produced point: point={sphere_landed:?}; first={sphere_first:?}; second={sphere_second:?}; error={sphere_idempotence_error:.17e}"
+    );
+    sphere
+        .validate_parameter_tangent(&sphere_landed, &sphere_first)
+        .expect("Sphere projection postcondition");
+
+    let stiefel_line = Manifold::Stiefel { n: 3, p: 1 };
+    let stiefel_near = [scale, 0.0, 0.0];
+    let stiefel_radial = stiefel_line
+        .parameter_gradient(&stiefel_near, &stiefel_near)
+        .expect("near-orthonormal Stiefel normal gradient must project without refusal");
+    assert!(
+        stiefel_radial.iter().all(|value| *value == 0.0),
+        "purely normal Stiefel(n,1) gradient must project to exact zero: point={stiefel_near:?}; projected={stiefel_radial:?}"
+    );
+
+    let cross_gram = 1.0 / (1_u64 << 35) as f64;
+    let mut stiefel_crossed = STIEFEL_BASE;
+    for row in 0..N {
+        stiefel_crossed[N + row] += cross_gram * STIEFEL_BASE[row];
+    }
+    let observed_cross_gram = dot(column(&stiefel_crossed, 0), column(&stiefel_crossed, 1));
+    assert!(
+        observed_cross_gram != 0.0 && observed_cross_gram.abs() <= 1.0e-10,
+        "fixture must exercise an admitted nonzero off-diagonal Gram entry: requested={cross_gram:.17e}; observed={observed_cross_gram:.17e}; point={stiefel_crossed:?}"
+    );
+    let crossed_normal = STIEFEL
+        .parameter_gradient(&stiefel_crossed, &stiefel_crossed)
+        .expect("generalized projection of a frame-normal gradient");
+    assert!(
+        crossed_normal.iter().all(|value| *value == 0.0),
+        "generalized projection must remove a normal gradient at an accepted nonorthonormal frame: point={stiefel_crossed:?}; projected={crossed_normal:?}"
+    );
+    let crossed_first = STIEFEL
+        .parameter_gradient(&stiefel_crossed, &STIEFEL_AMBIENT_GRADIENT)
+        .expect("generalized projection at an accepted nonorthonormal frame");
+    let crossed_second = STIEFEL
+        .parameter_gradient(&stiefel_crossed, &crossed_first)
+        .expect("generalized near-frame projection idempotence");
+    let crossed_idempotence_error = max_error(&crossed_first, &crossed_second);
+    let crossed_tangency_residual = stiefel_tangent_residual(&stiefel_crossed, &crossed_first);
+    assert!(
+        crossed_idempotence_error <= 2.0e-12 * (1.0 + norm(&crossed_first)),
+        "generalized projection must be idempotent at an accepted nonorthonormal frame: first={crossed_first:?}; second={crossed_second:?}; error={crossed_idempotence_error:.17e}"
+    );
+    assert!(
+        crossed_tangency_residual <= 6.4e-9 * norm(&crossed_first),
+        "generalized projection must satisfy the near-frame tangent equation: point={stiefel_crossed:?}; projected={crossed_first:?}; residual={crossed_tangency_residual:.17e}"
+    );
+
+    let stiefel_landed = STIEFEL
+        .retract(&STIEFEL_BASE, &scaled(&STIEFEL_STEP, 0.17))
+        .expect("nontrivial Stiefel retraction");
+    let stiefel_normal = STIEFEL
+        .parameter_gradient(&stiefel_landed, &stiefel_landed)
+        .expect("Stiefel normal projection at retraction-produced point");
+    let normal_scale = stiefel_normal
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        normal_scale <= 1.0e-14,
+        "frame-normal Stiefel gradient must collapse within the declared numerical envelope: point={stiefel_landed:?}; projected={stiefel_normal:?}; max={normal_scale:.17e}"
+    );
+
+    let stiefel_first = STIEFEL
+        .parameter_gradient(&stiefel_landed, &STIEFEL_AMBIENT_GRADIENT)
+        .expect("generalized Stiefel projection");
+    let stiefel_second = STIEFEL
+        .parameter_gradient(&stiefel_landed, &stiefel_first)
+        .expect("generalized Stiefel projection idempotence");
+    let stiefel_idempotence_error = max_error(&stiefel_first, &stiefel_second);
+    assert!(
+        stiefel_idempotence_error <= 2.0e-12 * (1.0 + norm(&stiefel_first)),
+        "Stiefel projection must be idempotent at a retraction-produced frame: first={stiefel_first:?}; second={stiefel_second:?}; error={stiefel_idempotence_error:.17e}"
+    );
+    assert!(
+        stiefel_tangent_residual(&stiefel_landed, &stiefel_first) <= 6.4e-9,
+        "generalized projection must land tangent: point={stiefel_landed:?}; projected={stiefel_first:?}; residual={:.17e}",
+        stiefel_tangent_residual(&stiefel_landed, &stiefel_first)
+    );
+}
+
+#[test]
+fn g3_so3_parameter_gradient_matches_an_independent_scalar_objective_difference() {
+    let expected = Manifold::So3
+        .parameter_gradient(&SO3_BASE, &SO3_AMBIENT_GRADIENT)
+        .expect("SO(3) parameter gradient");
+    let mut coarse_error = 0.0_f64;
+    let mut fine_error = 0.0_f64;
+
+    for parameter in 0..3 {
+        let directional_difference = |h: f64| {
+            let mut plus_step = [0.0; 3];
+            let mut minus_step = [0.0; 3];
+            plus_step[parameter] = h;
+            minus_step[parameter] = -h;
+            let plus = Manifold::So3
+                .retract(&SO3_BASE, &plus_step)
+                .expect("positive SO(3) scalar-objective sample");
+            let minus = Manifold::So3
+                .retract(&SO3_BASE, &minus_step)
+                .expect("negative SO(3) scalar-objective sample");
+            (dot(&SO3_AMBIENT_GRADIENT, &plus) - dot(&SO3_AMBIENT_GRADIENT, &minus)) / (2.0 * h)
+        };
+        let coarse = directional_difference(1.0 / 1024.0);
+        let fine = directional_difference(1.0 / 2048.0);
+        coarse_error = coarse_error.max((coarse - expected[parameter]).abs());
+        fine_error = fine_error.max((fine - expected[parameter]).abs());
+    }
+
+    assert!(
+        fine_error < 0.27 * coarse_error && fine_error <= 2.0e-7,
+        "independent scalar-objective differences must converge to the declared right/body pullback: expected={expected:?}; coarse_error={coarse_error:.17e}; fine_error={fine_error:.17e}"
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn g3_curve_outputs_match_public_retractions_and_independent_velocities() {
     let rn = Manifold::Rn { dim: 2 };
@@ -503,6 +663,55 @@ fn g3_transport_is_tangent_replayable_and_matches_declared_geometry() {
 }
 
 #[test]
+fn g3_sphere_transport_normalizes_accepted_bases_and_fails_closed_near_antipodes() {
+    let sphere = Manifold::Sphere { ambient: 3 };
+    let scale = accepted_near_unit_scale();
+    let from = [scale, 0.0, 0.0];
+    let tangent = [0.0, 1.0, 0.0];
+
+    let admitted_gap = 0.02_f64;
+    let admitted_target = [-admitted_gap.cos(), admitted_gap.sin(), 0.0];
+    let admitted_step: [f64; 3] =
+        core::array::from_fn(|index| admitted_target[index] - from[index]);
+    let admitted_to = sphere
+        .retract(&from, &admitted_step)
+        .expect("conditioned near-antipodal destination");
+    let transported = sphere
+        .transport_parameter(&from, &admitted_step, &admitted_to, &tangent)
+        .expect("normalized-base Sphere transport above conditioning floor");
+    let norm_error = (norm(&transported) - norm(&tangent)).abs();
+    assert!(
+        norm_error <= 2.0e-8,
+        "accepted near-antipodal transport must preserve norm: from={from:?}; to={admitted_to:?}; input={tangent:?}; output={transported:?}; error={norm_error:.17e}"
+    );
+    assert!(
+        dot(&admitted_to, &transported).abs() <= 6.4e-9 * norm(&transported),
+        "accepted near-antipodal transport must land tangent: to={admitted_to:?}; output={transported:?}; residual={:.17e}",
+        dot(&admitted_to, &transported).abs()
+    );
+
+    let refused_gap = 1.0e-4_f64;
+    let refused_target = [-refused_gap.cos(), refused_gap.sin(), 0.0];
+    let refused_step: [f64; 3] = core::array::from_fn(|index| refused_target[index] - from[index]);
+    let refused_to = sphere
+        .retract(&from, &refused_step)
+        .expect("ill-conditioned near-antipodal destination remains a valid point");
+    let refusal = sphere.transport_parameter(&from, &refused_step, &refused_to, &tangent);
+    assert!(
+        matches!(
+            refusal,
+            Err(OptError::RetractionDomain {
+                manifold: "Sphere",
+                what: "Sphere transport is undefined or ill-conditioned near antipodal points",
+                location: None,
+                ..
+            })
+        ),
+        "ill-conditioned near-antipodal transport must fail closed: from={from:?}; to={refused_to:?}; result={refusal:?}"
+    );
+}
+
+#[test]
 fn g0_malformed_operation_shapes_and_nonfinite_inputs_fail_through_typed_errors() {
     assert!(matches!(
         Manifold::So3.parameter_gradient(&SO3_BASE[..3], &SO3_AMBIENT_GRADIENT),
@@ -609,4 +818,99 @@ fn g0_malformed_operation_domains_fail_through_typed_errors() {
             ..
         })
     ));
+}
+
+#[test]
+fn g0_invalid_descriptors_and_expanded_transport_payloads_fail_with_attribution() {
+    assert!(matches!(
+        (Manifold::Sphere { ambient: 1 }).parameter_gradient(&[1.0], &[1.0]),
+        Err(OptError::ManifoldInvalid { .. })
+    ));
+    assert!(matches!(
+        (Manifold::Stiefel { n: 2, p: 3 }).parameter_gradient(&[1.0; 6], &[0.0; 6]),
+        Err(OptError::ManifoldInvalid { .. })
+    ));
+
+    let sphere = Manifold::Sphere { ambient: 3 };
+    let from = [1.0, 0.0, 0.0];
+    let step = [0.0, 0.25, 0.0];
+    let to = sphere.retract(&from, &step).expect("valid destination");
+    assert!(matches!(
+        sphere.transport_parameter(&from, &step[..2], &to, &[0.0, 1.0, 0.0]),
+        Err(OptError::RetractionLen {
+            input: "transport retraction step",
+            expected: 3,
+            got: 2,
+        })
+    ));
+    assert!(matches!(
+        sphere.transport_parameter(&from, &step, &to, &[0.0, 1.0]),
+        Err(OptError::RetractionLen {
+            input: "manifold tangent parameter",
+            expected: 3,
+            got: 2,
+        })
+    ));
+    let nonfinite_vector = [0.0, f64::NEG_INFINITY, 0.0];
+    assert!(matches!(
+        sphere.transport_parameter(&from, &step, &to, &nonfinite_vector),
+        Err(OptError::RetractionNonFinite {
+            input: "manifold tangent parameter",
+            component: 1,
+            bits,
+        }) if bits == f64::NEG_INFINITY.to_bits()
+    ));
+    assert!(matches!(
+        sphere.transport_parameter(&from, &step, &to[..2], &[0.0, 1.0, 0.0]),
+        Err(OptError::RetractionLen {
+            input: "manifold operation point",
+            expected: 3,
+            got: 2,
+        })
+    ));
+}
+
+#[test]
+fn g0_seeded_malformed_payloads_reject_deterministically_with_exact_locations() {
+    const SEED: u64 = 0x7A22_0711_5EED_0001;
+    let mut state = SEED;
+    let sphere = Manifold::Sphere { ambient: 3 };
+    let point = [1.0, 0.0, 0.0];
+
+    for case in 0..64_u32 {
+        let sample = xorshift64(&mut state);
+        let lane = (sample as usize) % 3;
+        let payload_bits = 0x7ff8_0000_0000_0000_u64 | (sample & 0x0007_ffff_ffff_ffff);
+        let payload = f64::from_bits(payload_bits);
+        let mut direction = [0.25, -0.5, 0.75];
+        direction[lane] = payload;
+        let result = sphere.retract_curve(&point, &direction, 0.5);
+        assert!(
+            matches!(
+                result,
+                Err(OptError::RetractionNonFinite {
+                    input: "retraction curve direction",
+                    component,
+                    bits,
+                }) if component as usize == lane && bits == payload_bits
+            ),
+            "seeded nonfinite case must retain exact location and payload: seed={SEED:#018x}; case={case}; lane={lane}; bits={payload_bits:#018x}; result={result:?}"
+        );
+
+        let excess = 1.0e-4 * (1.0 + ((sample >> 32) & 0xff) as f64);
+        let off_manifold = [1.0 + excess, 0.0, 0.0];
+        let domain_result = sphere.parameter_gradient(&off_manifold, &[0.0, 1.0, 0.0]);
+        assert!(
+            matches!(
+                domain_result,
+                Err(OptError::RetractionDomain {
+                    manifold: "Sphere",
+                    what: "point must have unit norm before retraction",
+                    location: None,
+                    ..
+                })
+            ),
+            "seeded off-manifold case must fail through the point-domain rule: seed={SEED:#018x}; case={case}; excess={excess:.17e}; result={domain_result:?}"
+        );
+    }
 }

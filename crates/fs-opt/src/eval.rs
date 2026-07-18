@@ -18,6 +18,9 @@ use fs_exec::Cx;
 const MANIFOLD_MEMBERSHIP_TOL: f64 = 1e-10;
 /// Scale-free tolerance for validating a parameter vector as tangent.
 const MANIFOLD_TANGENCY_TOL: f64 = 64.0 * MANIFOLD_MEMBERSHIP_TOL;
+/// Bounded Richardson refinements for the near-identity Stiefel Sylvester
+/// equation used by the embedded-metric tangent projection.
+const STIEFEL_PROJECTION_REFINEMENT_LIMIT: usize = 4;
 /// Candidates below this squared norm are numerically rank-deficient;
 /// normalizing them would fabricate a direction.
 const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
@@ -1239,6 +1242,94 @@ impl Manifold {
         }
     }
 
+    fn refine_stiefel_projection(
+        &self,
+        point: &[f64],
+        ambient_gradient: &[f64],
+        projected: &mut [f64],
+    ) -> Result<(), OptError> {
+        let Manifold::Stiefel { n, p } = *self else {
+            unreachable!("Stiefel projection refinement is Stiefel-only");
+        };
+        let (n, p) = (n as usize, p as usize);
+        let ambient_scale = ambient_gradient
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let mut residual =
+            try_vec_capacity("manifold-ops/stiefel-gradient-sylvester", None, None, p * p)?;
+
+        // For an admitted frame M = X^T X differs from I by at most the
+        // membership tolerance entrywise. Starting from the usual
+        // X-orthonormal formula, each update V <- V - X R/2 applies a
+        // deterministic Richardson correction to the Sylvester equation
+        // M S + S M = X^T G + G^T X. The fixed bound keeps the work and
+        // operation order explicit; the checked residual below is the actual
+        // authority, not the iteration count.
+        for _ in 0..STIEFEL_PROJECTION_REFINEMENT_LIMIT {
+            let tangency_residual = self.parameter_tangency_residual(point, projected);
+            if tangency_residual == 0.0 {
+                return Ok(());
+            }
+
+            residual.clear();
+            for left in 0..p {
+                for right in 0..p {
+                    let symmetric = (0..n)
+                        .map(|row| {
+                            point[left * n + row] * projected[right * n + row]
+                                + projected[left * n + row] * point[right * n + row]
+                        })
+                        .sum::<f64>();
+                    if !symmetric.is_finite() {
+                        return Err(self.domain_error(
+                            "Stiefel projection Sylvester residual must be finite",
+                            Some((left as u32, right as u32)),
+                            symmetric,
+                        ));
+                    }
+                    residual.push(symmetric);
+                }
+            }
+
+            for column in 0..p {
+                for row in 0..n {
+                    let correction = 0.5
+                        * (0..p)
+                            .map(|basis| point[basis * n + row] * residual[basis * p + column])
+                            .sum::<f64>();
+                    projected[column * n + row] -= correction;
+                }
+            }
+            Self::validate_retraction_finite_with_checkpoint(
+                "Stiefel projection refinement",
+                projected,
+                &mut || Ok(()),
+            )?;
+
+            let projected_scale = projected
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            if projected_scale <= MANIFOLD_TANGENCY_TOL * ambient_scale
+                && self.parameter_tangency_residual(point, projected) > MANIFOLD_TANGENCY_TOL
+            {
+                projected.fill(0.0);
+                return Ok(());
+            }
+        }
+
+        let tangency_residual = self.parameter_tangency_residual(point, projected);
+        if !tangency_residual.is_finite() || tangency_residual > MANIFOLD_TANGENCY_TOL {
+            return Err(self.domain_error(
+                "Stiefel projection Sylvester refinement did not reach the tangent space",
+                None,
+                tangency_residual,
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate a vector in the current retraction-parameter representation as
     /// tangent at `point`.
     ///
@@ -1298,13 +1389,47 @@ impl Manifold {
         match *self {
             Manifold::Rn { .. } => output.extend_from_slice(ambient_gradient),
             Manifold::Sphere { .. } => {
+                let norm_sq: f64 = point.iter().map(|coordinate| coordinate * coordinate).sum();
                 let normal: f64 = point
                     .iter()
                     .zip(ambient_gradient)
                     .map(|(coordinate, gradient)| coordinate * gradient)
-                    .sum();
+                    .sum::<f64>()
+                    / norm_sq;
                 for (coordinate, gradient) in point.iter().zip(ambient_gradient) {
                     output.push((-normal).mul_add(*coordinate, *gradient));
+                }
+
+                // Membership deliberately admits tiny norm error. Remove the
+                // resulting roundoff-normal component using the same x.x
+                // geometry, rather than rejecting an otherwise valid radial
+                // gradient after scale-free tangency validation.
+                for _ in 0..2 {
+                    let residual = point
+                        .iter()
+                        .zip(&output)
+                        .map(|(coordinate, gradient)| coordinate * gradient)
+                        .sum::<f64>()
+                        / norm_sq;
+                    if residual == 0.0 {
+                        break;
+                    }
+                    for (coordinate, gradient) in point.iter().zip(&mut output) {
+                        *gradient = (-residual).mul_add(*coordinate, *gradient);
+                    }
+                }
+                let output_scale = output
+                    .iter()
+                    .map(|value| value.abs())
+                    .fold(0.0_f64, f64::max);
+                let ambient_scale = ambient_gradient
+                    .iter()
+                    .map(|value| value.abs())
+                    .fold(0.0_f64, f64::max);
+                if output_scale <= MANIFOLD_TANGENCY_TOL * ambient_scale
+                    && self.parameter_tangency_residual(point, &output) > MANIFOLD_TANGENCY_TOL
+                {
+                    output.fill(0.0);
                 }
             }
             Manifold::So3 => {
@@ -1348,6 +1473,7 @@ impl Manifold {
                         output.push(ambient_gradient[column * n + row] - correction);
                     }
                 }
+                self.refine_stiefel_projection(point, ambient_gradient, &mut output)?;
             }
         }
         Self::validate_retraction_finite_with_checkpoint(
@@ -1470,6 +1596,13 @@ impl Manifold {
         reconstructed: &[f64],
         rule: &'static str,
     ) -> Result<(), OptError> {
+        if declared.len() != reconstructed.len() {
+            return Err(OptError::RetractionLen {
+                input: rule,
+                expected: u32::try_from(reconstructed.len()).unwrap_or(u32::MAX),
+                got: declared.len() as u64,
+            });
+        }
         if declared
             .iter()
             .zip(reconstructed)
@@ -1584,6 +1717,14 @@ impl Manifold {
             &velocity,
             &mut || Ok(()),
         )?;
+        let tangency_residual = self.parameter_tangency_residual(&landed, &velocity);
+        if !tangency_residual.is_finite() || tangency_residual > MANIFOLD_TANGENCY_TOL {
+            return Err(self.domain_error(
+                "retraction curve velocity must be tangent at the landed point",
+                None,
+                tangency_residual,
+            ));
+        }
         Ok(RetractionCurve {
             point: landed,
             velocity,
@@ -1637,29 +1778,83 @@ impl Manifold {
                 })?
             }
             Manifold::Sphere { .. } => {
+                let from_norm = from.iter().map(|value| value * value).sum::<f64>().sqrt();
+                let to_norm = to.iter().map(|value| value * value).sum::<f64>().sqrt();
+                let vector_scale = vector
+                    .iter()
+                    .map(|value| value.abs())
+                    .fold(0.0_f64, f64::max);
                 let denominator = 1.0
                     + from
                         .iter()
                         .zip(to)
-                        .map(|(left, right)| left * right)
+                        .map(|(left, right)| (left / from_norm) * (right / to_norm))
                         .sum::<f64>();
-                if !denominator.is_finite() || denominator <= 64.0 * f64::EPSILON {
+                let dimension_roundoff = 64.0 * f64::EPSILON * from.len() as f64;
+                let denominator_floor = (MANIFOLD_MEMBERSHIP_TOL + dimension_roundoff).sqrt();
+                if !denominator.is_finite() || denominator <= denominator_floor {
                     return Err(self.domain_error(
-                        "Sphere transport is undefined at antipodal points",
+                        "Sphere transport is undefined or ill-conditioned near antipodal points",
                         None,
                         denominator,
                     ));
                 }
-                let coefficient = vector
-                    .iter()
-                    .zip(to)
-                    .map(|(tangent, coordinate)| tangent * coordinate)
-                    .sum::<f64>()
-                    / denominator;
+                let scaled_coefficient = if vector_scale == 0.0 {
+                    0.0
+                } else {
+                    vector
+                        .iter()
+                        .zip(to)
+                        .map(|(tangent, coordinate)| {
+                            (tangent / vector_scale) * (coordinate / to_norm)
+                        })
+                        .sum::<f64>()
+                        / denominator
+                };
                 let mut transported =
                     try_vec_capacity("manifold-ops/sphere-transport", None, None, vector.len())?;
                 for (value, (old, new)) in vector.iter().zip(from.iter().zip(to)) {
-                    transported.push((-coefficient).mul_add(old + new, *value));
+                    let unit_sum = old / from_norm + new / to_norm;
+                    let scaled_value = if vector_scale == 0.0 {
+                        0.0
+                    } else {
+                        value / vector_scale
+                    };
+                    transported
+                        .push(vector_scale * (-scaled_coefficient).mul_add(unit_sum, scaled_value));
+                }
+
+                let comparison_scale = vector
+                    .iter()
+                    .chain(&transported)
+                    .map(|value| value.abs())
+                    .fold(0.0_f64, f64::max);
+                let isometry_residual = if comparison_scale == 0.0 {
+                    0.0
+                } else {
+                    let before = vector
+                        .iter()
+                        .map(|value| {
+                            let scaled = value / comparison_scale;
+                            scaled * scaled
+                        })
+                        .sum::<f64>();
+                    let after = transported
+                        .iter()
+                        .map(|value| {
+                            let scaled = value / comparison_scale;
+                            scaled * scaled
+                        })
+                        .sum::<f64>();
+                    (before - after).abs() / before.max(after)
+                };
+                let isometry_tolerance = 8.0 * MANIFOLD_TANGENCY_TOL + dimension_roundoff;
+                if !isometry_residual.is_finite() || isometry_residual > isometry_tolerance {
+                    return Err(self.domain_error(
+                        "Sphere transport must preserve tangent norm within conditioning tolerance",
+                        None,
+                        isometry_residual,
+                    ));
                 }
                 transported
             }

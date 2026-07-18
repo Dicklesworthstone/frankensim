@@ -88,7 +88,30 @@ structure; FLUX/UQ execute it.
   must remain finite. Sphere/SO(3) bases must have unit squared norm and
   Stiefel bases must have an identity Gram matrix within `1e-10`; candidate
   squared norms at or below `1e-24` refuse as singular instead of being
-  clamped and normalized into fabricated points. `descend_fn`/`descend_ir`
+  clamped and normalized into fabricated points. The normative runtime
+  operation surface also includes `validate_parameter_tangent`,
+  `parameter_gradient`, `retract_curve`, and `transport_parameter`. These
+  operations validate raw descriptors, exact point/parameter storage lengths,
+  finite payloads, point membership, and tangent postconditions before
+  returning. Sphere gradient projection uses the admitted point's actual
+  `x.x`, so points inside the membership envelope need not be bit-perfect unit
+  vectors. Stiefel gradient projection solves the corresponding near-identity
+  Sylvester tangent equation through a fixed, deterministic sequence of at
+  most four residual corrections; the measured tangent residual, rather than
+  iteration count alone, is authoritative. SO(3) gradients are the pullback of
+  the declared right-composed quaternion exponential into three body-frame
+  coordinates. Retraction curves return the exact public-retraction landing
+  plus its optimizer-parameter velocity; the Stiefel branch differentiates
+  the same modified-Gram-Schmidt QR operation order as `retract`.
+  `transport_parameter` requires its destination to match the authoritative
+  retraction bit for bit. Rn transport is identity, SO(3) transport preserves
+  right/body coordinates (not a Levi-Civita claim), and Stiefel transport is
+  the differentiated production QR map (not an isometry claim). Sphere
+  transport normalizes both admitted endpoint bases, refuses a deterministic
+  membership-and-roundoff-derived neighborhood of the antipode, and refuses
+  any result whose scale-safe squared-norm residual exceeds its conditioning
+  tolerance. All owned operation outputs and scratch storage use fallible
+  allocation paths. `descend_fn`/`descend_ir`
   are the TOY consumers proving iterates stay ON their manifolds. Both
   descent entry points are LEAF-GATED before the first objective
   evaluation or any descent arithmetic (bead j3vb5 / review High #6):
@@ -548,6 +571,20 @@ discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
   intern entries, owned-string capacity, and accounting totals. It does
   not claim that Rust's process-global allocator performs no temporary
   bookkeeping inside error formatting.
+- The public manifold-operation helpers are synchronous numerical primitives:
+  they do not yet accept an asupersync `Cx`, expose caller-selected work or
+  workspace caps, issue cancellation checkpoints, or retain operation-level
+  receipts. In particular, the Stiefel projection/QR paths have deterministic
+  but dimension-dependent polynomial work under the default manifold
+  admission cap. Admitting points whose norm or Gram matrix is within `1e-10`
+  is a deliberate numerical extension around the exact manifold, not a proof
+  that those stored points satisfy the defining equations exactly. Bounded
+  Sylvester refinement may refuse unresolved conditioning, and numerically
+  unresolved frame-normal remnants below the declared tangent resolution may
+  be represented by exact zero. Sphere transport refuses the antipodal and
+  membership/roundoff-conditioned near-antipodal region; Stiefel transport
+  makes no metric-isometry or superlinear quasi-Newton claim; SO(3) makes no
+  sign-seam or global-chart-smoothness claim.
 - Gradients here are FD-through-retraction toys; exact adjoints and
   reverse-mode graph gradients are the gradient-stack bead (the
   parked draft's `graph.rs` already prototypes reverse-mode — harvest
