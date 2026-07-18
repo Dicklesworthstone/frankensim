@@ -71,6 +71,57 @@ claim. The runner is a callable lane rather than an additional unconditional
 invocation inside the workspace-wide quality script, avoiding duplicate Cargo
 work when the full DSR gate already owns package execution.
 
+### Casebook conformance profiles
+
+The structured Casebook surface has a separate repo-local profile runner. It
+is intentionally callable rather than activated in DSR or the archived GitHub
+workflow specs by this tranche:
+
+```bash
+bash scripts/ci/casebook_conformance_profile.sh --check
+bash scripts/ci/casebook_conformance_profile.sh --self-test
+bash scripts/ci/casebook_conformance_profile.sh --list pr
+bash scripts/ci/casebook_conformance_profile.sh pr
+bash scripts/ci/casebook_conformance_profile.sh --list nightly-full
+bash scripts/ci/casebook_conformance_profile.sh nightly-full
+```
+
+The `pr` profile is an explicit reviewed set of cheap, family-representative
+Casebook targets. `nightly-full` is the complete source-discovered inventory of
+ordinary Cargo integration targets whose source contains an `fs_casebook`
+import or qualified token. Discovery starts from
+`cargo metadata --locked --no-deps` and then inspects each reported test
+target's actual source path; target filenames are not a classification
+mechanism, so `conformance.rs` and replay targets are not silently missed. Full
+coverage auto-adopts every additional discovered target, while a reviewed
+minimum inventory prevents accidental target removal or scanner regression
+from silently shrinking the lane. The PR set must remain inside that reviewed
+baseline and live discovery; duplicate, missing, stale, malformed, empty, or
+source-escaping entries fail closed. A Casebook target containing an
+`#[ignore]` marker also refuses discovery: hardware/performance, weekly,
+diagnostic, and deep-cap ignored lanes retain their separately declared
+cadence and are never swept into `nightly-full` by a blanket `--ignored`.
+
+`--check` and `--list` perform locked metadata and source inspection only; they
+do not build or execute tests. `--self-test` invokes no Cargo command and feeds
+synthetic inventories through the production validator to prove missing,
+stale, and duplicate classification failures, then proves that an expired
+aggregate deadline refuses launch with a structured `budget_exceeded` receipt.
+The default aggregate wall budgets are 900 seconds for `pr` and 7200 seconds
+for `nightly-full`; overrides are retained through
+`FS_CASEBOOK_PR_BUDGET_SECONDS` and `FS_CASEBOOK_FULL_BUDGET_SECONDS`.
+
+Profile execution runs each selector separately with `--locked`, continues
+after ordinary target failures, and stops before launching more work once the
+shared deadline is exhausted. A live target receives only its runner-owned
+process group: TERM, a bounded grace period, KILL if needed, and a bounded
+drain. Per-target JSON receipts distinguish ordinary failure from
+`budget_exceeded`, name whether launch occurred, and report `not_needed`,
+`complete`, `incomplete`, or `not_applicable` drain state. This is a scheduling
+and discovery contract, not benchmark, cross-ISA, retained-proof, or CI-wiring
+evidence. Until external DSR configuration explicitly selects these commands,
+their existence does not claim that DSR is already using the PR/full split.
+
 ## Runner honesty
 
 - `macos-14` = Apple Silicon (aarch64, NEON): a true reference-family runner.
