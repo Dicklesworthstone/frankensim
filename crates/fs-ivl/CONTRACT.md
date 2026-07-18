@@ -11,6 +11,9 @@ implementation shared with fs-la — recorded relocation, beads
 6ys.8/6ys.12).
 
 ## Public types and semantics
+- `INTERVAL_SEMANTICS_VERSION = 1` — package-version-independent identity for
+  the outward-operation/refusal policy. Certificate consumers additionally
+  bind fs-math's strict-core semantic version and retained golden fingerprint.
 - `Interval` — closed [lo, hi], ±∞ endpoints allowed, NaN rejected at
   construction, INVARIANT lo ≤ hi. Std operator traits (+, −, ×, ÷, unary −)
   plus `sqrt/exp/ln/tanh/sin/cos`, `abs`, set ops (`hull`, `intersect`,
@@ -19,8 +22,9 @@ implementation shared with fs-la — recorded relocation, beads
 - Directed rounding: computed endpoints are nudged outward via
   fs-math `next_up`/`next_down` — basic ops 1 ULP (rigorous: IEEE
   correctly-rounded ops err ≤ ½ ULP), elementary functions by fs-math's
-  DECLARED budgets (exp/expm1/ln/sin/cos 3, tanh 5, sqrt 1 after the exact
-  hardware sqrt). NO global rounding-mode state anywhere (thread-safe,
+  DECLARED constants directly (exp/expm1/ln/sin/cos 3, tanh 5, sqrt 1 after
+  the exact hardware sqrt), with no mirrored budget literals in the interval
+  implementation. NO global rounding-mode state anywhere (thread-safe,
   SIMD-mixing-safe, grep-lintable). When a basic operation on two finite
   endpoints overflows, the rounded infinity is not treated as an exact
   singleton: positive overflow becomes `[f64::MAX,+∞]`, negative overflow

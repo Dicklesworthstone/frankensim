@@ -43,11 +43,19 @@ pub use taylor::{MAX_TAYLOR_ORDER, TaylorModel1, TaylorModelError};
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Semantic version of the outward interval operation and refusal policy.
+///
+/// This version covers basic-operation finite-overflow handling, elementary
+/// endpoint nudging from fs-math's declared budgets, and extended-real
+/// indeterminate-operation fallbacks. Certificate identities must also bind
+/// fs-math's strict-core semantic version and golden fingerprint.
+pub const INTERVAL_SEMANTICS_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn version_is_stamped() {
         assert!(!super::VERSION.is_empty());
+        assert_eq!(super::INTERVAL_SEMANTICS_VERSION, 1);
     }
 }

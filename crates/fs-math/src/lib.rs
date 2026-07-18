@@ -32,6 +32,17 @@ pub mod payne;
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Semantic version of the strict-core elementary-function operation tree.
+///
+/// This is independent of the package version. Certificate consumers must
+/// bind both this value and [`STRICT_CORE_GOLDEN_HASH`], and must refuse stale
+/// versions after any deliberate strict-arithmetic change.
+pub const STRICT_CORE_SEMANTICS_VERSION: u32 = 1;
+/// Retained cross-ISA fingerprint of the strict-core operation tree.
+///
+/// Recorded on aarch64-apple M4 Pro and x86-64 Threadripper PRO 5995WX over the
+/// canonical 25,000-point frame in `cross_isa_golden_hash`.
+pub const STRICT_CORE_GOLDEN_HASH: u64 = 0xeb79_cab7_a016_43e5;
 
 /// The canonical quiet NaN for interchange (positive, standard payload).
 #[must_use]
@@ -325,13 +336,9 @@ mod tests {
             "{{\"suite\":\"fs-math\",\"case\":\"golden-hash\",\"verdict\":\"info\",\"detail\":\"{acc:#018x}\"}}"
         );
         assert_eq!(
-            acc, GOLDEN_HASH,
-            "strict-mode outputs changed: {acc:#018x} vs recorded {GOLDEN_HASH:#018x} — \
+            acc, STRICT_CORE_GOLDEN_HASH,
+            "strict-mode outputs changed: {acc:#018x} vs recorded {STRICT_CORE_GOLDEN_HASH:#018x} — \
              if intentional, bump the golden WITH justification (golden-evidence policy)"
         );
     }
-
-    /// Recorded on aarch64-apple (M4 Pro); verified identical on x86-64
-    /// (Threadripper PRO 5995WX). Bump ONLY with a semantic justification.
-    const GOLDEN_HASH: u64 = 0xeb79_cab7_a016_43e5;
 }

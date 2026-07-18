@@ -6,6 +6,11 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
 (patch Rev O; plan §5.4/§6.4). Layer: L0.
 
 ## Public types and semantics
+- `STRICT_CORE_SEMANTICS_VERSION = 1` and
+  `STRICT_CORE_GOLDEN_HASH = 0xeb79cab7a01643e5` — package-version-independent
+  certificate identity for the strict core. Downstream interval, neural, and
+  wire artifacts bind both and fail closed after an intentional arithmetic
+  change until their own semantic schemas are advanced.
 - `det::{exp, expm1, ln, sin, cos, tanh, sqrt}` — strict-mode functions
   built EXCLUSIVELY from IEEE arithmetic (+,−,×,÷, mul_add, sqrt): bit-
   identical cross-ISA BY CONSTRUCTION, empirically PROVEN (golden hash
@@ -91,6 +96,9 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
 - exp(0)=1, ln(1)=+0, sin(0)=0, cos(0)=1 exactly; NaN in → NaN out;
   subnormals never flushed.
 - Golden hash changes require a schema-bump-style justification.
+- The strict-core semantic version and golden fingerprint are public protocol
+  inputs, not test-local constants; changing either invalidates downstream
+  certificates that bind the prior arithmetic.
 
 ## Error model
 Total functions; domain violations return NaN/±inf per IEEE conventions.

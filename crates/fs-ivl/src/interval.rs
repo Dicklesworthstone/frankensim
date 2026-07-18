@@ -14,14 +14,6 @@
 
 use fs_math::det;
 
-/// Declared ULP budgets from fs-math's CONTRACT (single source: that
-/// contract; these constants mirror it and are cross-checked by test).
-const ULP_EXP: u32 = 3;
-const ULP_LN: u32 = 3;
-const ULP_SIN: u32 = 3;
-const ULP_COS: u32 = 3;
-const ULP_TANH: u32 = 5;
-
 /// A closed interval [lo, hi] of f64 (±∞ allowed as endpoints; NaN never —
 /// constructors reject it). INVARIANT: lo ≤ hi.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,7 +24,7 @@ pub struct Interval {
 
 /// Nudge a FINITE value k ULP steps down; ±∞ passes through (an infinite
 /// bound is already maximally pessimistic).
-fn down_k(mut x: f64, k: u32) -> f64 {
+fn down_k(mut x: f64, k: u64) -> f64 {
     if x.is_finite() {
         for _ in 0..k {
             x = fs_math::next_down(x);
@@ -42,7 +34,7 @@ fn down_k(mut x: f64, k: u32) -> f64 {
 }
 
 /// Nudge k steps up; ±∞ passes through.
-fn up_k(mut x: f64, k: u32) -> f64 {
+fn up_k(mut x: f64, k: u64) -> f64 {
     if x.is_finite() {
         for _ in 0..k {
             x = fs_math::next_up(x);
@@ -223,11 +215,11 @@ impl Interval {
         let lo = if elo.is_infinite() && self.lo.is_finite() {
             f64::MAX
         } else {
-            down_k(elo, ULP_EXP).max(0.0)
+            down_k(elo, det::EXP_ULP_BUDGET).max(0.0)
         };
         Interval {
             lo,
-            hi: up_k(det::exp(self.hi), ULP_EXP),
+            hi: up_k(det::exp(self.hi), det::EXP_ULP_BUDGET),
         }
     }
 
@@ -245,11 +237,11 @@ impl Interval {
         let lo = if self.lo <= 0.0 {
             f64::NEG_INFINITY
         } else {
-            down_k(det::ln(self.lo), ULP_LN)
+            down_k(det::ln(self.lo), det::LN_ULP_BUDGET)
         };
         Interval {
             lo,
-            hi: up_k(det::ln(self.hi), ULP_LN),
+            hi: up_k(det::ln(self.hi), det::LN_ULP_BUDGET),
         }
     }
 
@@ -257,8 +249,8 @@ impl Interval {
     #[must_use]
     pub fn tanh(self) -> Interval {
         Interval {
-            lo: down_k(det::tanh(self.lo), ULP_TANH).max(-1.0),
-            hi: up_k(det::tanh(self.hi), ULP_TANH).min(1.0),
+            lo: down_k(det::tanh(self.lo), det::TANH_ULP_BUDGET).max(-1.0),
+            hi: up_k(det::tanh(self.hi), det::TANH_ULP_BUDGET).min(1.0),
         }
     }
 
@@ -266,13 +258,13 @@ impl Interval {
     /// (valid within |x| ≤ TRIG_DOMAIN; wider inputs → [-1, 1]).
     #[must_use]
     pub fn sin(self) -> Interval {
-        trig_enclosure(self, det::sin, ULP_SIN, 0.5)
+        trig_enclosure(self, det::sin, det::SIN_ULP_BUDGET, 0.5)
     }
 
     /// cos over the interval (critical points at kπ).
     #[must_use]
     pub fn cos(self) -> Interval {
-        trig_enclosure(self, det::cos, ULP_COS, 0.0)
+        trig_enclosure(self, det::cos, det::COS_ULP_BUDGET, 0.0)
     }
 }
 
@@ -388,7 +380,7 @@ impl core::ops::Div for Interval {
 /// (machine π is correctly rounded, so real π ∈ [next_down(π), next_up(π)]);
 /// possible containment counts as containment — over-approximation is
 /// rigorous, under-approximation would be a lie.
-fn trig_enclosure(x: Interval, f: fn(f64) -> f64, budget: u32, offset: f64) -> Interval {
+fn trig_enclosure(x: Interval, f: fn(f64) -> f64, budget: u64, offset: f64) -> Interval {
     const UNIT: Interval = Interval { lo: -1.0, hi: 1.0 };
     let (a, b) = (x.lo(), x.hi());
     // Outside the declared trig domain (or unbounded): the honest answer.
