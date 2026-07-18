@@ -80,7 +80,7 @@ None.
 
 ## Conformance tests
 
-`tests/soa_battery.rs` (10 cases, JSON logging): 128-byte alignment
+`tests/soa_battery.rs` (12 cases, RFC 8259 JSON-line logging): 128-byte alignment
 asserted for every leaf view on a 4-field fixture ([f64;3]/f64/u32);
 AoS↔SoA round-trip bitwise over 500 random elements + iterator
 equivalence vs a `Vec` reference; scatter/column-mutation/clear-reuse;
@@ -89,8 +89,10 @@ containers (dotted view paths `inner.a`, drill-down accessors);
 generic struct with bounds + const param (`GenericSoa<f32, 4>`);
 Qty-typed columns stay dimensionally typed; chunked access with masked
 tail (128×8 + 6, mutable pass scales the tail too, quantum groups);
-exact address-free layout/view descriptions; 20k-op random property
-battery mirrored against `Vec` (fs-rand keyed streams).
+exact address-free layout/view descriptions; RFC 8259 escaping of hostile
+descriptor strings and of the battery envelope's dynamic case/verdict/detail
+fields (including a descriptor nested as JSON-string detail); 20k-op random
+property battery mirrored against `Vec` (fs-rand keyed streams).
 `tests/compile_fail.rs`: 8-case diagnostics battery via the in-house
 offline harness (scratch cargo project, path deps, no trybuild) —
 tuple/unit/enum/lifetime/generic-default/zero-field/reserved-name/

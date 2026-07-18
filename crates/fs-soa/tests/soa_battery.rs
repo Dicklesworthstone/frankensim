@@ -5,16 +5,46 @@
 //! descriptors (logged for auditability), and a property battery of
 //! random op sequences mirrored against a `Vec` reference.
 
+use std::fmt::Write as _;
+
 use fs_qty::{Length, Time};
 use fs_rand::StreamKey;
 use fs_soa::{
     RawView, SOA_ALIGN, Soa, chunk_count, chunks_with_tail, chunks_with_tail_mut, leaf_layout,
 };
 
+fn escape_json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                write!(&mut escaped, "\\u{:04x}", u32::from(character))
+                    .expect("writing a JSON escape to String cannot fail");
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn log_line(case: &str, verdict: &str, detail: &str) -> String {
+    format!(
+        "{{\"suite\":\"fs-soa\",\"case\":\"{}\",\"verdict\":\"{}\",\"detail\":\"{}\"}}",
+        escape_json_string(case),
+        escape_json_string(verdict),
+        escape_json_string(detail),
+    )
+}
+
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!(
-        "{{\"suite\":\"fs-soa\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
-    );
+    println!("{}", log_line(case, verdict, detail));
 }
 
 #[derive(Soa, Clone, Copy, Debug, PartialEq)]
@@ -374,6 +404,42 @@ fn descriptor_json_escapes_every_dynamic_string() {
     );
     assert_eq!(layout.lines().count(), 1, "{layout}");
     assert!(!layout.chars().any(|ch| ch < ' '), "{layout}");
+}
+
+#[test]
+fn battery_log_line_escapes_hostile_nested_descriptor() {
+    assert_eq!(
+        log_line("roundtrip", "pass", "n=500 bitwise"),
+        r#"{"suite":"fs-soa","case":"roundtrip","verdict":"pass","detail":"n=500 bitwise"}"#,
+        "ordinary battery output must remain byte-for-byte stable"
+    );
+
+    const HOSTILE: &str = "field\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}";
+    let nested_descriptor = RawView {
+        name: HOSTILE.to_owned(),
+        addr: 0,
+        len: 3,
+        elem_bytes: 4,
+        stride_bytes: 4,
+        achieved_align: SOA_ALIGN,
+        dtype: HOSTILE,
+    }
+    .descr();
+    let line = log_line(HOSTILE, HOSTILE, &nested_descriptor);
+
+    assert_eq!(
+        line,
+        r#"{"suite":"fs-soa","case":"field\"\\\b\f\n\r\t\u0000\u001f","verdict":"field\"\\\b\f\n\r\t\u0000\u001f","detail":"{\"field\":\"field\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001f\",\"len\":3,\"elem_bytes\":4,\"stride_bytes\":4,\"dtype\":\"field\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001f\"}"}"#
+    );
+    assert_eq!(
+        line.lines().count(),
+        1,
+        "one JSON record must occupy one physical line"
+    );
+    assert!(
+        !line.chars().any(char::is_control),
+        "the physical JSON line must contain no raw control characters: {line:?}"
+    );
 }
 
 #[test]
