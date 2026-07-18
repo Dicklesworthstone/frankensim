@@ -70,6 +70,21 @@ fn hessian_classification_recovers_the_morse_type() {
         classify_hessian([[2.0, 0.0], [0.0, 0.0]], t).kind,
         CriticalKind::Degenerate
     );
+    // Positive scaling preserves inertia even when directly squaring the
+    // finite off-diagonal entry would overflow.
+    let normalized = classify_hessian([[1.0, 1e-108], [1e-108, 1.0]], t);
+    let large = classify_hessian([[1e308, 1e200], [1e200, 1e308]], t);
+    assert_eq!(large.kind, CriticalKind::Minimum);
+    assert_eq!(large.morse_index, 0);
+    assert_eq!(large, normalized);
+    // Invalid numerics cannot manufacture a confident Morse type.
+    let invalid = classify_hessian([[1.0, f64::INFINITY], [f64::INFINITY, 1.0]], t);
+    assert_eq!(invalid.kind, CriticalKind::Degenerate);
+    assert_eq!(invalid.morse_index, 0);
+    assert_eq!(
+        classify_hessian([[1.0, 0.0], [0.0, 1.0]], f64::NAN).kind,
+        CriticalKind::Degenerate
+    );
 }
 
 #[test]

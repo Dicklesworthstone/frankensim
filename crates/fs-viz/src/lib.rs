@@ -63,7 +63,8 @@ pub enum CriticalKind {
     Saddle,
     /// A local maximum (Morse index 2 in 2-D).
     Maximum,
-    /// Degenerate (a zero Hessian eigenvalue) — not a Morse critical point.
+    /// Degenerate or unclassifiable (a zero eigenvalue or invalid numeric
+    /// input) — not a Morse critical point.
     Degenerate,
 }
 
@@ -78,11 +79,27 @@ pub struct CriticalPoint {
 
 /// Classify a critical point from its (symmetric) `2×2` Hessian: the Morse index
 /// is the number of negative eigenvalues; a near-zero eigenvalue is degenerate.
+/// Non-finite entries and non-finite or negative tolerances fail closed as
+/// degenerate with no claimed negative eigenvalues.
 #[must_use]
 pub fn classify_hessian(hessian: [[f64; 2]; 2], tol: f64) -> CriticalPoint {
+    if !tol.is_finite() || tol < 0.0 || hessian.iter().flatten().any(|value| !value.is_finite()) {
+        return CriticalPoint {
+            kind: CriticalKind::Degenerate,
+            morse_index: 0,
+        };
+    }
     let (a, b, c) = (hessian[0][0], hessian[0][1], hessian[1][1]);
     let mean = f64::midpoint(a, c);
-    let disc = (((a - c) / 2.0).powi(2) + b * b).sqrt();
+    let half_diff = f64::midpoint(a, -c);
+    let scale = half_diff.abs().max(b.abs());
+    let disc = if scale == 0.0 {
+        0.0
+    } else {
+        let x = half_diff / scale;
+        let y = b / scale;
+        scale * (x * x + y * y).sqrt()
+    };
     let (l1, l2) = (mean - disc, mean + disc);
     if l1.abs() <= tol || l2.abs() <= tol {
         return CriticalPoint {
