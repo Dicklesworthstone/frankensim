@@ -19,16 +19,24 @@ Rust; `fs-propcheck` is test-only.
   one; `None` for non-identity converters).
 - Axiom checks: `check_functoriality` (`after∘self == direct`), `check_identity`
   (`id(x) == x`), `check_adjoint` (`⟨Ax,y⟩ == ⟨x,Aᵀy⟩`),
-  `check_tolerance_honesty` (measured ≤ declared) → `(honest, measured)`.
+  `check_tolerance_honesty` (measured ≤ declared) → `(honest, measured)`. Each
+  check requires a nonempty witness collection and rejects malformed dimensions,
+  non-finite evidence, and non-finite or underflow-erased arithmetic.
 - `certify(&converter, &suite) -> ConformanceReport` — awards a `Tier`
   (`Rejected` / `Bronze` / `Silver` / `Gold`); reaches a tier above `Rejected`
-  ONLY by passing every supplied axiom, with the level set by the (honestly met)
-  declared error. `ConformanceReport::certified()`.
+  ONLY with nonempty adjoint and manufactured evidence and by passing every
+  supplied axiom, with the level set by the (honestly met) declared error.
+  Optional composition and identity witnesses may be absent, but a supplied
+  witness must contain at least one probe. `ConformanceReport::certified()`.
 
 ## Invariants
 
 - A converter that fails ANY axiom (functoriality witness, adjoint, tolerance
   honesty) is `Rejected` — never certified.
+- Tolerances and declared errors are finite and non-negative. Every witness and
+  converter result has exactly its declared dimension and contains only finite
+  values. Invalid evidence fails closed; malformed manufactured evidence reports
+  positive infinity rather than a misleading finite error.
 - A converter that understates its error model FAILS tolerance honesty against
   manufactured solutions (a dishonest converter cannot buy a tier).
 - Tier is monotone in declared-error tightness among conformant converters.
@@ -58,12 +66,15 @@ None.
 
 ## Conformance tests
 
-`tests/conform.rs`: nine fixed Proposal 7 regression tests, two generated G0
+`tests/conform.rs`: fifteen fixed Proposal 7 regression tests, two generated G0
 laws, and one generated G3 conversion-path relation (512 cases each,
 deterministic seeds and integrated shrinking). The fixed tests cover adjoint
 consistency, tolerance honesty, correct and incorrect functoriality witnesses,
 identity recognition and false-identity rejection, tiering, and uniform
-first-party/third-party R6 severity. The generated G0 laws exercise exact
+first-party/third-party R6 severity. They also reject empty or dimensionally
+malformed witnesses, non-finite policy/evidence, overflowing arithmetic, and
+floating underflow that could otherwise erase a nonzero failure. The generated
+G0 laws exercise exact
 functor composition and identity action between the fixed pins. The G3 SDK
 harness declares `restriction-map-direct-vs-composed` with
 `conversion_path_independence` and applies it to the test-local `Mtx`

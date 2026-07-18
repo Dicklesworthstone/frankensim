@@ -75,7 +75,8 @@ pub struct ConformanceSuite<'a> {
 }
 
 impl ConformanceSuite<'_> {
-    /// An empty suite with the given numerical tolerance.
+    /// An incomplete empty suite with the given numerical tolerance. Populate
+    /// adjoint and manufactured evidence before calling [`certify`].
     #[must_use]
     pub fn new(tolerance: f64) -> ConformanceSuite<'static> {
         ConformanceSuite {
@@ -128,26 +129,116 @@ impl ConformanceReport {
     }
 }
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+fn valid_tolerance(tol: f64) -> bool {
+    tol.is_finite() && tol >= 0.0
 }
 
-fn dist(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y) * (x - y))
-        .sum::<f64>()
-        .sqrt()
+fn finite_vector(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn dot(a: &[f64], b: &[f64]) -> Option<f64> {
+    if a.len() != b.len() || !finite_vector(a) || !finite_vector(b) {
+        return None;
+    }
+    let mut total = 0.0;
+    for (&x, &y) in a.iter().zip(b) {
+        let product = x * y;
+        if !product.is_finite() || (x != 0.0 && y != 0.0 && product == 0.0) {
+            return None;
+        }
+        let next = total + product;
+        if !next.is_finite()
+            || (product != 0.0 && next == total)
+            || (total != 0.0 && next == product)
+        {
+            return None;
+        }
+        total = next;
+    }
+    Some(total)
+}
+
+fn dist(a: &[f64], b: &[f64]) -> Option<f64> {
+    if a.len() != b.len() || !finite_vector(a) || !finite_vector(b) {
+        return None;
+    }
+    let mut squared = 0.0;
+    for (&x, &y) in a.iter().zip(b) {
+        let delta = x - y;
+        let term = delta * delta;
+        if !delta.is_finite() || !term.is_finite() || (delta != 0.0 && term == 0.0) {
+            return None;
+        }
+        let next = squared + term;
+        if !next.is_finite() || (term != 0.0 && next == squared) || (squared != 0.0 && next == term)
+        {
+            return None;
+        }
+        squared = next;
+    }
+    let distance = squared.sqrt();
+    distance.is_finite().then_some(distance)
 }
 
 /// Check adjoint consistency `⟨A x, y⟩ == ⟨x, Aᵀ y⟩` over the pairs.
 #[must_use]
 pub fn check_adjoint(c: &dyn Converter, pairs: &[(Vec<f64>, Vec<f64>)], tol: f64) -> bool {
+    if pairs.is_empty() || !valid_tolerance(tol) {
+        return false;
+    }
+    let (source_dim, target_dim) = (c.source_dim(), c.target_dim());
     pairs.iter().all(|(x, y)| {
-        let lhs = dot(&c.apply(x), y);
-        let rhs = dot(x, &c.adjoint(y));
-        (lhs - rhs).abs() <= tol
+        if x.len() != source_dim || y.len() != target_dim || !finite_vector(x) || !finite_vector(y)
+        {
+            return false;
+        }
+        let applied = c.apply(x);
+        let adjoint = c.adjoint(y);
+        if applied.len() != target_dim || adjoint.len() != source_dim {
+            return false;
+        }
+        let (Some(lhs), Some(rhs)) = (dot(&applied, y), dot(x, &adjoint)) else {
+            return false;
+        };
+        let delta = lhs - rhs;
+        delta.is_finite() && delta.abs() <= tol
     })
+}
+
+fn check_tolerance_honesty_with_declared(
+    c: &dyn Converter,
+    cases: &[ManufacturedCase],
+    tol: f64,
+    declared: f64,
+) -> (bool, f64) {
+    if cases.is_empty() || !valid_tolerance(tol) || !declared.is_finite() || declared < 0.0 {
+        return (false, f64::INFINITY);
+    }
+    let admitted_bound = declared + tol;
+    if !admitted_bound.is_finite() {
+        return (false, f64::INFINITY);
+    }
+    let (source_dim, target_dim) = (c.source_dim(), c.target_dim());
+    let mut measured = 0.0_f64;
+    for case in cases {
+        if case.input.len() != source_dim
+            || case.exact_output.len() != target_dim
+            || !finite_vector(&case.input)
+            || !finite_vector(&case.exact_output)
+        {
+            return (false, f64::INFINITY);
+        }
+        let applied = c.apply(&case.input);
+        if applied.len() != target_dim {
+            return (false, f64::INFINITY);
+        }
+        let Some(error) = dist(&applied, &case.exact_output) else {
+            return (false, f64::INFINITY);
+        };
+        measured = measured.max(error);
+    }
+    (measured <= admitted_bound, measured)
 }
 
 /// Check tolerance honesty; returns `(honest, worst_measured_error)`.
@@ -157,39 +248,86 @@ pub fn check_tolerance_honesty(
     cases: &[ManufacturedCase],
     tol: f64,
 ) -> (bool, f64) {
-    let measured = cases
-        .iter()
-        .map(|m| dist(&c.apply(&m.input), &m.exact_output))
-        .fold(0.0_f64, f64::max);
-    (measured <= c.declared_error() + tol, measured)
+    check_tolerance_honesty_with_declared(c, cases, tol, c.declared_error())
 }
 
 /// Check functoriality: `after(self(x)) == direct(x)` on the probes.
 #[must_use]
 pub fn check_functoriality(c: &dyn Converter, comp: &Composition, tol: f64) -> bool {
+    if comp.probes.is_empty()
+        || !valid_tolerance(tol)
+        || c.target_dim() != comp.after.source_dim()
+        || c.source_dim() != comp.direct.source_dim()
+        || comp.after.target_dim() != comp.direct.target_dim()
+    {
+        return false;
+    }
+    let (source_dim, middle_dim, target_dim) =
+        (c.source_dim(), c.target_dim(), comp.after.target_dim());
     comp.probes.iter().all(|x| {
-        let composed = comp.after.apply(&c.apply(x));
+        if x.len() != source_dim || !finite_vector(x) {
+            return false;
+        }
+        let middle = c.apply(x);
+        if middle.len() != middle_dim || !finite_vector(&middle) {
+            return false;
+        }
+        let composed = comp.after.apply(&middle);
         let direct = comp.direct.apply(x);
-        composed.len() == direct.len() && dist(&composed, &direct) <= tol
+        if composed.len() != target_dim || direct.len() != target_dim {
+            return false;
+        }
+        dist(&composed, &direct).is_some_and(|distance| distance <= tol)
     })
 }
 
 /// Check that a converter claiming to be an identity acts as one.
 #[must_use]
 pub fn check_identity(c: &dyn Converter, probes: &[Vec<f64>], tol: f64) -> bool {
-    c.source_dim() == c.target_dim() && probes.iter().all(|x| dist(&c.apply(x), x) <= tol)
+    if probes.is_empty() || !valid_tolerance(tol) || c.source_dim() != c.target_dim() {
+        return false;
+    }
+    let dim = c.source_dim();
+    probes.iter().all(|x| {
+        if x.len() != dim || !finite_vector(x) {
+            return false;
+        }
+        let applied = c.apply(x);
+        applied.len() == dim && dist(&applied, x).is_some_and(|distance| distance <= tol)
+    })
 }
 
 /// Certify a converter against its suite. It reaches a tier ABOVE `Rejected`
 /// only by passing every supplied axiom; the tier level reflects how tight an
-/// (honestly met) error model it declares.
+/// (honestly met) error model it declares. Adjoint and manufactured evidence
+/// must be non-empty; any supplied composition or identity witness must carry
+/// at least one probe.
 #[must_use]
 pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport {
     let mut findings = Vec::new();
+    let declared_error = c.declared_error();
+    if !valid_tolerance(suite.tolerance) || !declared_error.is_finite() || declared_error < 0.0 {
+        findings.push(
+            "admission: tolerance and declared error must be finite and non-negative".to_string(),
+        );
+        return ConformanceReport {
+            converter: c.id().to_string(),
+            functoriality: false,
+            adjoint_consistent: false,
+            tolerance_honest: false,
+            measured_error: f64::INFINITY,
+            tier: Tier::Rejected,
+            findings,
+        };
+    }
 
     // Functoriality: composition agrees AND (if the converter claims to be an
     // identity) it acts as the identity.
     let composition_ok = match &suite.composition {
+        Some(comp) if comp.probes.is_empty() => {
+            findings.push("functoriality: supplied composition has no probes".to_string());
+            false
+        }
         Some(comp) => {
             let ok = check_functoriality(c, comp, suite.tolerance);
             if !ok {
@@ -204,6 +342,10 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
         None => true,
     };
     let identity_ok = match &suite.identity {
+        Some(probes) if probes.is_empty() => {
+            findings.push("identity: supplied identity witness has no probes".to_string());
+            false
+        }
         Some(probes) => {
             let ok = check_identity(c, probes, suite.tolerance);
             if !ok {
@@ -218,25 +360,40 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
     };
     let functoriality = composition_ok && identity_ok;
 
-    let adjoint_consistent = check_adjoint(c, &suite.adjoint_pairs, suite.tolerance);
+    let adjoint_consistent =
+        !suite.adjoint_pairs.is_empty() && check_adjoint(c, &suite.adjoint_pairs, suite.tolerance);
     if !adjoint_consistent {
-        findings.push(
+        findings.push(if suite.adjoint_pairs.is_empty() {
+            "adjoint consistency: no witness pairs supplied".to_string()
+        } else {
             "adjoint consistency: <Ax,y> != <x,Aᵀy> (declared transpose is not the adjoint)"
-                .to_string(),
-        );
+                .to_string()
+        });
     }
 
-    let (tolerance_honest, measured_error) =
-        check_tolerance_honesty(c, &suite.manufactured, suite.tolerance);
+    let (tolerance_honest, measured_error) = if suite.manufactured.is_empty() {
+        (false, f64::INFINITY)
+    } else {
+        check_tolerance_honesty_with_declared(
+            c,
+            &suite.manufactured,
+            suite.tolerance,
+            declared_error,
+        )
+    };
     if !tolerance_honest {
-        findings.push(format!(
-            "tolerance honesty: measured error {measured_error:.3e} exceeds declared {:.3e}",
-            c.declared_error()
-        ));
+        findings.push(if suite.manufactured.is_empty() {
+            "tolerance honesty: no manufactured cases supplied".to_string()
+        } else {
+            format!(
+                "tolerance honesty: measured error {measured_error:.3e} exceeds declared {:.3e}",
+                declared_error
+            )
+        });
     }
 
     let tier = if functoriality && adjoint_consistent && tolerance_honest {
-        tier_for_error(c.declared_error())
+        tier_for_error(declared_error)
     } else {
         Tier::Rejected
     };
@@ -254,7 +411,9 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
 
 /// The tier awarded to a converter that passed every axiom, by declared error.
 fn tier_for_error(declared: f64) -> Tier {
-    if declared <= 1e-6 {
+    if !declared.is_finite() || declared < 0.0 {
+        Tier::Rejected
+    } else if declared <= 1e-6 {
         Tier::Gold
     } else if declared <= 1e-3 {
         Tier::Silver

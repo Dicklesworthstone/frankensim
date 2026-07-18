@@ -172,6 +172,384 @@ fn full_suite<'a>() -> ConformanceSuite<'a> {
     }
 }
 
+struct EmptyOutput;
+
+impl Converter for EmptyOutput {
+    fn id(&self) -> &str {
+        "empty-output"
+    }
+    fn source_dim(&self) -> usize {
+        1
+    }
+    fn target_dim(&self) -> usize {
+        1
+    }
+    fn apply(&self, _x: &[f64]) -> Vec<f64> {
+        Vec::new()
+    }
+    fn adjoint(&self, _y: &[f64]) -> Vec<f64> {
+        Vec::new()
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+struct ConstantOutput {
+    value: f64,
+}
+
+impl Converter for ConstantOutput {
+    fn id(&self) -> &str {
+        "constant-output"
+    }
+    fn source_dim(&self) -> usize {
+        1
+    }
+    fn target_dim(&self) -> usize {
+        1
+    }
+    fn apply(&self, _x: &[f64]) -> Vec<f64> {
+        vec![self.value]
+    }
+    fn adjoint(&self, _y: &[f64]) -> Vec<f64> {
+        vec![self.value]
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+struct ZeroDim;
+
+impl Converter for ZeroDim {
+    fn id(&self) -> &str {
+        "zero-dimensional"
+    }
+    fn source_dim(&self) -> usize {
+        0
+    }
+    fn target_dim(&self) -> usize {
+        0
+    }
+    fn apply(&self, _x: &[f64]) -> Vec<f64> {
+        Vec::new()
+    }
+    fn adjoint(&self, _y: &[f64]) -> Vec<f64> {
+        Vec::new()
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+fn scalar_suite<'a>() -> ConformanceSuite<'a> {
+    ConformanceSuite {
+        adjoint_pairs: vec![(vec![1.0], vec![1.0])],
+        manufactured: vec![ManufacturedCase {
+            input: vec![1.0],
+            exact_output: vec![1.0],
+        }],
+        composition: None,
+        identity: Some(vec![vec![1.0]]),
+        tolerance: 0.0,
+    }
+}
+
+#[test]
+fn structurally_invalid_evidence_cannot_receive_gold() {
+    let broken = EmptyOutput;
+    let composition = Composition {
+        after: &broken,
+        direct: &broken,
+        probes: vec![vec![1.0]],
+    };
+    let mut suite = scalar_suite();
+    suite.composition = Some(composition);
+
+    let report = certify(&broken, &suite);
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.certified());
+    assert!(!report.functoriality);
+    assert!(!report.adjoint_consistent);
+    assert!(!report.tolerance_honest);
+    assert!(report.measured_error.is_infinite());
+
+    let identity = Mtx::honest("scalar-id", vec![vec![1.0]], 0.0);
+    assert!(!check_adjoint(&identity, &[(Vec::new(), Vec::new())], 0.0));
+    assert!(!check_identity(&identity, &[Vec::new()], 0.0));
+    let (honest, measured) = check_tolerance_honesty(
+        &identity,
+        &[ManufacturedCase {
+            input: Vec::new(),
+            exact_output: Vec::new(),
+        }],
+        0.0,
+    );
+    assert!(!honest && measured.is_infinite());
+}
+
+#[test]
+fn non_finite_evidence_and_policy_cannot_certify() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let report = certify(&ConstantOutput { value }, &scalar_suite());
+        assert_eq!(report.tier, Tier::Rejected);
+        assert!(!report.adjoint_consistent);
+        assert!(!report.tolerance_honest);
+        assert!(report.measured_error.is_infinite());
+
+        let invalid_declared = Mtx::honest("invalid-declared", vec![vec![1.0]], value);
+        let report = certify(&invalid_declared, &scalar_suite());
+        assert_eq!(report.tier, Tier::Rejected);
+        assert!(!report.tolerance_honest);
+        assert!(report.measured_error.is_infinite());
+
+        let valid = Mtx::honest("valid", vec![vec![1.0]], 0.0);
+        let mut suite = scalar_suite();
+        suite.tolerance = value;
+        let report = certify(&valid, &suite);
+        assert_eq!(report.tier, Tier::Rejected);
+        assert!(!report.adjoint_consistent);
+        assert!(!report.tolerance_honest);
+    }
+
+    let invalid_declared = Mtx::honest("negative-declared", vec![vec![1.0]], -1.0);
+    assert_eq!(
+        certify(&invalid_declared, &scalar_suite()).tier,
+        Tier::Rejected
+    );
+    let valid = Mtx::honest("valid", vec![vec![1.0]], 0.0);
+    let mut suite = scalar_suite();
+    suite.tolerance = -1.0;
+    assert_eq!(certify(&valid, &suite).tier, Tier::Rejected);
+
+    let overflow = Mtx::honest("overflow", vec![vec![f64::MAX]], 0.0);
+    let (honest, measured) = check_tolerance_honesty(
+        &overflow,
+        &[ManufacturedCase {
+            input: vec![f64::MAX],
+            exact_output: vec![0.0],
+        }],
+        0.0,
+    );
+    assert!(!honest && measured.is_infinite());
+}
+
+#[test]
+fn floating_point_underflow_cannot_erase_failed_evidence() {
+    let tiny = f64::MIN_POSITIVE;
+    let wrong_adjoint = Mtx::with_adjoint("underflow", vec![vec![tiny]], vec![vec![0.0]], 0.0);
+    assert!(!check_adjoint(
+        &wrong_adjoint,
+        &[(vec![1.0], vec![tiny])],
+        0.0
+    ));
+
+    let tiny_output = ConstantOutput { value: tiny };
+    assert!(!check_identity(&tiny_output, &[vec![0.0]], 0.0));
+    let manufactured = [ManufacturedCase {
+        input: vec![0.0],
+        exact_output: vec![0.0],
+    }];
+    let (honest, measured) = check_tolerance_honesty(&tiny_output, &manufactured, 0.0);
+    assert!(!honest && measured.is_infinite());
+
+    let report = certify(
+        &tiny_output,
+        &ConformanceSuite {
+            adjoint_pairs: vec![(vec![0.0], vec![0.0])],
+            manufactured: manufactured.into(),
+            composition: None,
+            identity: Some(vec![vec![0.0]]),
+            tolerance: 0.0,
+        },
+    );
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.functoriality);
+    assert!(!report.tolerance_honest);
+    assert!(report.measured_error.is_infinite());
+
+    let smallest = f64::from_bits(1);
+    let absorbed_adjoint = Mtx::with_adjoint(
+        "absorbed-adjoint",
+        vec![vec![1.0], vec![smallest], vec![-1.0]],
+        vec![vec![0.0, 0.0, 0.0]],
+        0.0,
+    );
+    assert!(!check_adjoint(
+        &absorbed_adjoint,
+        &[(vec![1.0], vec![1.0, 1.0, 1.0])],
+        0.0
+    ));
+    let reverse_absorbed_adjoint = Mtx::with_adjoint(
+        "reverse-absorbed-adjoint",
+        vec![vec![smallest], vec![1.0], vec![-1.0]],
+        vec![vec![0.0, 0.0, 0.0]],
+        0.0,
+    );
+    assert!(!check_adjoint(
+        &reverse_absorbed_adjoint,
+        &[(vec![1.0], vec![1.0, 1.0, 1.0])],
+        0.0
+    ));
+
+    let small = f64::from_bits(523_u64 << 52); // 2^-500; its square is finite.
+    let absorbed_distance = Mtx::honest("absorbed-distance", vec![vec![1.0], vec![small]], 1.0);
+    let manufactured = vec![ManufacturedCase {
+        input: vec![1.0],
+        exact_output: vec![0.0, 0.0],
+    }];
+    let (honest, measured) = check_tolerance_honesty(&absorbed_distance, &manufactured, 0.0);
+    assert!(!honest && measured.is_infinite());
+    let reverse_absorbed_distance = Mtx::honest(
+        "reverse-absorbed-distance",
+        vec![vec![small], vec![1.0]],
+        1.0,
+    );
+    let (honest, measured) =
+        check_tolerance_honesty(&reverse_absorbed_distance, &manufactured, 0.0);
+    assert!(!honest && measured.is_infinite());
+    let report = certify(
+        &absorbed_distance,
+        &ConformanceSuite {
+            adjoint_pairs: vec![(vec![1.0], vec![0.0, 0.0])],
+            manufactured,
+            composition: None,
+            identity: None,
+            tolerance: 0.0,
+        },
+    );
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.tolerance_honest);
+    assert!(report.measured_error.is_infinite());
+}
+
+#[test]
+fn dimension_topology_and_finite_overflow_fail_closed() {
+    let base = Mtx::honest("base", vec![vec![1.0, 0.0], vec![0.0, 1.0]], 0.0);
+    let scalar = Mtx::honest("scalar", vec![vec![1.0]], 0.0);
+    let two_to_one = Mtx::honest("two-to-one", vec![vec![1.0, 0.0]], 0.0);
+    let one_to_two = Mtx::honest("one-to-two", vec![vec![1.0], vec![0.0]], 0.0);
+    let probe = vec![vec![1.0, 0.0]];
+
+    for composition in [
+        Composition {
+            after: &scalar,
+            direct: &two_to_one,
+            probes: probe.clone(),
+        },
+        Composition {
+            after: &base,
+            direct: &one_to_two,
+            probes: probe.clone(),
+        },
+        Composition {
+            after: &two_to_one,
+            direct: &base,
+            probes: probe,
+        },
+    ] {
+        assert!(!check_functoriality(&base, &composition, 0.0));
+    }
+
+    let far = ConstantOutput { value: f64::MAX };
+    let (honest, measured) = check_tolerance_honesty(
+        &far,
+        &[ManufacturedCase {
+            input: vec![0.0],
+            exact_output: vec![-f64::MAX],
+        }],
+        0.0,
+    );
+    assert!(!honest && measured.is_infinite());
+
+    let overflowing_bound = Mtx::honest("overflowing-bound", vec![vec![1.0]], f64::MAX);
+    let mut suite = scalar_suite();
+    suite.tolerance = f64::MAX;
+    let report = certify(&overflowing_bound, &suite);
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.tolerance_honest);
+    assert!(report.measured_error.is_infinite());
+}
+
+#[test]
+fn evidence_free_suites_and_empty_optional_witnesses_cannot_certify() {
+    let identity = Mtx::honest("scalar-id", vec![vec![1.0]], 0.0);
+    assert!(!check_adjoint(&identity, &[], 0.0));
+    assert_eq!(
+        check_tolerance_honesty(&identity, &[], 0.0),
+        (false, f64::INFINITY)
+    );
+    assert!(!check_functoriality(
+        &identity,
+        &Composition {
+            after: &identity,
+            direct: &identity,
+            probes: Vec::new(),
+        },
+        0.0
+    ));
+    assert!(!check_identity(&identity, &[], 0.0));
+
+    let report = certify(&identity, &ConformanceSuite::new(0.0));
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.adjoint_consistent);
+    assert!(!report.tolerance_honest);
+
+    let mut empty_composition = scalar_suite();
+    empty_composition.composition = Some(Composition {
+        after: &identity,
+        direct: &identity,
+        probes: Vec::new(),
+    });
+    let report = certify(&identity, &empty_composition);
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.functoriality);
+
+    let mut empty_identity = scalar_suite();
+    empty_identity.identity = Some(Vec::new());
+    let report = certify(&identity, &empty_identity);
+    assert_eq!(report.tier, Tier::Rejected);
+    assert!(!report.functoriality);
+}
+
+#[test]
+fn nonempty_zero_dimensional_evidence_remains_valid() {
+    let zero = ZeroDim;
+    let pairs = vec![(Vec::new(), Vec::new())];
+    let manufactured = vec![ManufacturedCase {
+        input: Vec::new(),
+        exact_output: Vec::new(),
+    }];
+    let probes = vec![Vec::new()];
+    let composition = Composition {
+        after: &zero,
+        direct: &zero,
+        probes: probes.clone(),
+    };
+
+    assert!(check_adjoint(&zero, &pairs, 0.0));
+    assert_eq!(
+        check_tolerance_honesty(&zero, &manufactured, 0.0),
+        (true, 0.0)
+    );
+    assert!(check_functoriality(&zero, &composition, 0.0));
+    assert!(check_identity(&zero, &probes, 0.0));
+
+    let report = certify(
+        &zero,
+        &ConformanceSuite {
+            adjoint_pairs: pairs,
+            manufactured,
+            composition: Some(composition),
+            identity: Some(probes),
+            tolerance: 0.0,
+        },
+    );
+    assert_eq!(report.tier, Tier::Gold);
+    assert!(report.certified());
+}
+
 #[test]
 fn a_false_identity_claim_is_rejected_by_certify() {
     // a converter carrying an identity witness must actually be the identity.
