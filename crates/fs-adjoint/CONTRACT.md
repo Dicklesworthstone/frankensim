@@ -122,40 +122,62 @@ solver without a passing gradient check cannot merge.
 - `dwr_accept` module (addendum Proposal 9, bead lmp4.4; [F], behind
   `dwr-accept` → optional fs-verify dep): the GOAL-ORIENTED accept
   test. `dwr_integral_qoi` is the 1-D reference DWR (enriched dual on
-  the once-refined mesh, per-element indicators) and returns
+  the once-refined mesh, per-element fine-remainder indicators) for the
+  explicit functional
+  `J(u) = ∫_{[w_lo, w_hi] ∩ [0, 1]} u(x) dx` and returns
   `Result<DwrOutput, DwrError>`. The problem arrives as fs-verify's immutable,
   fallibly admitted `MmsProblem`: its canonical class identity binds the exact
-  solution and derived forcing, and DWR shares fs-verify's 1..=6 coefficient
-  envelope rather than advertising a divergent class. DWR admission validates
+  solution and derived forcing, its canonical domain is exactly `[0,1]`, and
+  DWR shares fs-verify's 1..=6 coefficient envelope rather than advertising a
+  divergent class. Finite strictly increasing raw windows may extend outside
+  that domain: partial overlap clips numerically to the intersection and a
+  disjoint window denotes the exact zero functional. The raw `w_lo`/`w_hi`
+  binary64 bits are nevertheless retained, identity-bound, and compared
+  bitwise, so equal clipped intersections (including two empty intersections
+  or `-0.0` versus `+0.0`) are not interchangeable replay claims.
+  `DwrQuery` schema 1 names this meaning as
+  `DomainClippedWindowedIntegral`, binds homogeneous canonical `+0.0`
+  Dirichlet endpoints, and carries six dimension exponents in fs-qty order.
+  The reference scalar API seals `[0; 6]`; callers cannot relabel its output as
+  dimensional. DWR admission validates
   2..=1,000,000 coarse mesh nodes through fs-verify's shared node cap,
   candidate shape/finite values and bit-canonical homogeneous `+0.0`
-  endpoints, strict finite cell geometry and representable midpoints/QoI window, and a conservative
-  mesh×polynomial aggregate budget of 100,000,000 work units before refined
-  allocation. The discontinuous QoI indicator is never sampled over a whole
-  cell: primal P1 values and dual P1 loads use the closed-form formula on each
-  cell/window intersection, so narrow non-mesh-aligned windows cannot alias to
-  zero. The formula is evaluated in binary64, not exact-expansion or interval
-  arithmetic. A computed-zero overlap is accepted only when the original P1
-  data prove an identically-zero field or an exact full-cell endpoint
-  cancellation; every other zero is refused until exact-expansion integration
-  can distinguish true cancellation from binary64 underflow/rounding.
-  Assembly, residual quadrature, forcing,
+  endpoints, strict finite cell geometry, representable midpoints, a finite
+  increasing raw QoI window, and a conservative mesh×polynomial aggregate
+  budget of 100,000,000 work units before refined allocation. The
+  discontinuous QoI indicator is never sampled over a whole cell: primal P1
+  values and dual P1 loads use the closed-form formula on each
+  cell/window/domain intersection, so narrow non-mesh-aligned windows cannot
+  alias to zero. The formula is evaluated in binary64, not exact-expansion or
+  interval arithmetic. A computed-zero nonempty overlap is accepted only when
+  the original P1 data prove an identically-zero field, or prove exact
+  cancellation from additive-inverse cell endpoints over a clipped interval
+  exactly symmetric about that cell's midpoint; every other such zero is
+  refused until
+  exact-expansion integration can distinguish true cancellation from binary64
+  underflow/rounding. Empty domain intersections are exactly zero by the
+  functional definition. Assembly, residual quadrature, forcing,
   elimination pivots, slopes, residuals, and outputs refuse on any non-finite
   derived value; zero-interior-DOF dual systems are handled explicitly rather
-  than indexed through an empty solver. `accept` encodes the color logic
-  MECHANICALLY: all v0 accepts carry ESTIMATED. `AcceptOutcome::refused` is true
-  only when malformed public inputs prevented an accept/reject decision; it is
-  false for both a valid acceptance and a valid over-tolerance rejection.
-  `Bracket` fields
+  than indexed through an empty solver. `DwrOutput` construction is sealed;
+  it retains its complete typed functional and v7 evidence identity, and
+  `accept` cross-checks the query schema, raw window bits, endpoint convention,
+  semantics, and dimensions against that retained binding before considering
+  the tolerance. `accept` encodes the color logic MECHANICALLY: all current
+  accepts carry ESTIMATED. `AcceptOutcome::refused` is true only when malformed
+  public inputs prevented an accept/reject decision; it is false for both a
+  valid acceptance and a valid over-tolerance rejection. `Bracket` fields
   are sealed and `Bracket::cauchy_schwarz` reruns the equilibrated verifier on
   bounded exact problem/candidate inputs, but the resulting energy-product is
-  diagnostic only: `DwrQuery` does not yet encode a typed proof that the dual
-  is the exact dual of that QoI. Consequently a bracket can neither promote nor
-  veto acceptance and a public/forged `VerifierReport` is never consumed as
-  authority. Non-finite/non-positive tolerances and non-finite/negative DWR
+  diagnostic only: the typed functional query does not yet carry a
+  re-verifiable proof that the independently supplied dual problem is the
+  exact dual of that functional. Consequently a bracket can neither promote
+  nor veto acceptance and a public/forged `VerifierReport` is never consumed
+  as authority. Non-finite/non-positive tolerances and non-finite/negative DWR
   estimates refuse with structurally valid infinite-dispersion colors. Machine
-  estimator ids remain separate from human QoI/audit labels. Refinement
-  indicators concentrate where the QoI error lives.
+  estimator ids remain separate from human QoI/audit labels. In the solved
+  G1 fixture, refinement indicators concentrate where the QoI error lives;
+  the broader algebraic-indicator limitation is stated below.
 
 - `explain` module (addendum Proposal B, bead knh1.5; [F], behind
   `explanation-objects`): explanation OBJECTS — a tree of
@@ -293,7 +315,9 @@ independent variable-length identity streams are separated by a checkpoint so
 the stride cannot be reissued across a seam. Cancellation returns typed phase
 and exact completed/planned work and publishes no partial authoritative
 object. The retained DWR execution identity binds work-plan version 2,
-poll-policy version 3, and evidence/schema version 4.
+poll-policy version 3, evidence identity version 7, typed-functional schema
+version 1, the canonical domain-clipped-windowed-integral semantics tag, and
+the unmodified window endpoint bits.
 
 ## Unsafe boundary
 
@@ -431,15 +455,27 @@ between the two policy passes.
 
 ## No-claim boundaries (dwr-accept)
 
-- The reference estimator is the 1-D elliptic class (fs-verify's v0
-  scope); the 2-D cutfem DWR lives in fs-dwr (tfz.23) and plugs into
+- The reference estimator is the current 1-D manufactured elliptic class;
+  the 2-D cutfem DWR lives in fs-dwr (tfz.23) and plugs into
   the same accept/color logic.
 - The Cauchy–Schwarz bracket is sharp only up to the product's
   pessimism; sharper goal-oriented equilibrated bounds are the
   verifier's growth path, not this module's claim.
-- No v0 DWR path emits `Verified`. Promotion requires a typed query carrying a
-  re-verifiable dual relation, not two reports (even two genuine reports for
-  unrelated problems) and not a caller-authored guarantee bit.
+- No current DWR path emits `Verified`. The schema-1 query now binds the exact
+  domain-clipped functional requested, but promotion additionally requires a
+  re-verifiable relation proving that the supplied dual problem is that
+  functional's mathematical dual—not two reports (even two genuine reports
+  for unrelated problems) and not a caller-authored guarantee bit.
+- The retained v7 identity provides exact local payload/execution identity; it
+  is not external authority. `accept` does not yet take separately trusted
+  expected problem, candidate, or execution-policy identities and reexecute
+  `dwr_integral_qoi` from those inputs before deciding.
+- The primal-equilibrium acceptance gate currently compares the maximum
+  interior assembled residual to an absolute `1e-9` threshold. This is not yet
+  a scale-safe componentwise/backward-error theorem. The global `eta` includes
+  the coarse algebraic residual contribution, but the per-cell refinement
+  indicators currently expose only the fine-remainder contributions and do
+  not localize that algebraic term.
 - `DwrError` is an execution refusal, not an Estimated answer. The aggregate
   work cap bounds the current scalar-work model; it is not a wall-time or
   memory certificate, and the reference estimator remains limited to the 1-D

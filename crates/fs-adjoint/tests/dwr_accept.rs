@@ -187,7 +187,7 @@ fn dw_001_g1_effectivity_and_estimated_accept() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: 1e-3,
     };
@@ -206,7 +206,7 @@ fn dw_001_g1_effectivity_and_estimated_accept() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: 1e-12,
         },
@@ -283,7 +283,7 @@ fn dw_002_reverified_energy_product_does_not_promote_without_a_typed_dual_relati
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: bracket.bound() * 1.5,
     };
@@ -327,7 +327,7 @@ fn forged_public_verifier_report_is_not_bracket_authority() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: 1.0,
         },
@@ -350,7 +350,7 @@ fn dw_003_laundering_fails_the_type_check() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: 1e-3,
         },
@@ -470,7 +470,7 @@ fn unrelated_over_tolerance_energy_product_cannot_veto_the_dwr_decision() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: estimate.eta().abs().max(1e-12) * 2.0,
     };
@@ -510,7 +510,7 @@ fn malformed_accept_inputs_fail_closed_without_minting_invalid_colors() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: 1e-3,
     };
@@ -572,7 +572,7 @@ fn typed_functional_binding_rejects_invalid_and_cross_semantic_replay() {
         tolerance: 1.0,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
     };
 
@@ -641,6 +641,110 @@ fn typed_functional_binding_rejects_invalid_and_cross_semantic_replay() {
     verdict(
         "typed-functional-binding",
         "invalid windows plus cross-window, dimensional, and schema relabeling refuse distinctly",
+    );
+}
+
+#[test]
+fn domain_clipped_window_estimator_obeys_partial_and_disjoint_intersections() {
+    let problem = quartic_problem(4);
+    let candidate = solve_p1(&problem).expect("domain-clipping fixture must solve");
+
+    let partial = dwr_integral_qoi(&problem, &candidate, -0.25, 0.25)
+        .expect("a window partially overlapping the canonical domain is admitted");
+    let canonical = dwr_integral_qoi(&problem, &candidate, 0.0, 0.25)
+        .expect("the explicitly clipped canonical window is admitted");
+
+    // The first coarse cell is exactly [0, 0.25], so this independently
+    // checks the P1 integral over [-0.25, 0.25] ∩ [0, 1] = [0, 0.25].
+    let expected = 0.125 * (candidate[0] + candidate[1]);
+    assert!(
+        (partial.j_primal() - expected).abs() <= 8.0 * f64::EPSILON * expected.abs().max(1.0),
+        "partially overlapping QoI integrated {}, expected {expected}",
+        partial.j_primal()
+    );
+    assert_eq!(
+        partial.j_primal().to_bits(),
+        canonical.j_primal().to_bits(),
+        "partial-domain integration must equal integration over the explicit intersection"
+    );
+    assert_eq!(partial.eta().to_bits(), canonical.eta().to_bits());
+    assert_eq!(partial.indicators().len(), canonical.indicators().len());
+    for (partial_indicator, canonical_indicator) in
+        partial.indicators().iter().zip(canonical.indicators())
+    {
+        assert_eq!(partial_indicator.to_bits(), canonical_indicator.to_bits());
+    }
+    assert_eq!(partial.window().0.to_bits(), (-0.25_f64).to_bits());
+    assert_eq!(partial.window().1.to_bits(), 0.25_f64.to_bits());
+    assert_ne!(
+        partial.evidence_identity(),
+        canonical.evidence_identity(),
+        "raw windows stay identity-bound even when their clipped functionals coincide"
+    );
+
+    let disjoint = dwr_integral_qoi(&problem, &candidate, 2.0, 3.0)
+        .expect("a finite increasing window disjoint from [0, 1] is the zero functional");
+    assert_eq!(disjoint.j_primal().to_bits(), 0.0_f64.to_bits());
+    assert_eq!(disjoint.eta().abs().to_bits(), 0.0_f64.to_bits());
+    assert!(
+        disjoint
+            .indicators()
+            .iter()
+            .all(|indicator| indicator.abs().to_bits() == 0.0_f64.to_bits()),
+        "the zero dual load must produce zero DWR indicators"
+    );
+    assert_eq!(disjoint.window().0.to_bits(), 2.0_f64.to_bits());
+    assert_eq!(disjoint.window().1.to_bits(), 3.0_f64.to_bits());
+}
+
+#[test]
+fn domain_clipped_window_acceptance_replay_binds_raw_endpoint_bits() {
+    let problem = quartic_problem(4);
+    let candidate = solve_p1(&problem).expect("domain-clipping fixture must solve");
+    let partial = dwr_integral_qoi(&problem, &candidate, -0.25, 0.25)
+        .expect("partially overlapping estimate");
+    let canonical = dwr_integral_qoi(&problem, &candidate, 0.0, 0.25).expect("canonical estimate");
+    let disjoint = dwr_integral_qoi(&problem, &candidate, 2.0, 3.0).expect("disjoint estimate");
+    let query = |window| DwrQuery {
+        qoi: "domain-clipped-window-replay".to_string(),
+        schema_version: DWR_QUERY_SCHEMA_VERSION,
+        tolerance: 1.0,
+        window,
+        endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
+        dims: [0; 6],
+    };
+
+    let exact_partial = accept(&query((-0.25, 0.25)), &partial, None);
+    assert!(exact_partial.accepted());
+    assert!(!exact_partial.refused());
+    assert!(matches!(exact_partial.color(), Color::Estimated { .. }));
+
+    let equivalent_intersection_replay = accept(&query((0.0, 0.25)), &partial, None);
+    assert!(!equivalent_intersection_replay.accepted());
+    assert!(equivalent_intersection_replay.refused());
+    assert!(
+        equivalent_intersection_replay
+            .audit()
+            .contains("does not match the sealed estimate's retained window")
+    );
+
+    // `-0.0 == +0.0` numerically, but the raw functional specification is
+    // deliberately bitwise: signed-zero relabeling cannot replay an estimate.
+    let signed_zero_replay = accept(&query((-0.0, 0.25)), &canonical, None);
+    assert!(!signed_zero_replay.accepted());
+    assert!(signed_zero_replay.refused());
+
+    let exact_disjoint = accept(&query((2.0, 3.0)), &disjoint, None);
+    assert!(exact_disjoint.accepted());
+    assert!(!exact_disjoint.refused());
+    let other_disjoint_replay = accept(&query((3.0, 4.0)), &disjoint, None);
+    assert!(!other_disjoint_replay.accepted());
+    assert!(other_disjoint_replay.refused());
+    assert_ne!(
+        exact_disjoint.evidence_identity(),
+        other_disjoint_replay.evidence_identity(),
+        "distinct raw disjoint windows must remain distinct replay claims"
     );
 }
 
@@ -794,7 +898,7 @@ fn dwr_refuses_invalid_windows_and_resource_counts_at_owner_boundaries() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: 1.0,
     };
@@ -805,7 +909,7 @@ fn dwr_refuses_invalid_windows_and_resource_counts_at_owner_boundaries() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: 1.0,
     };
@@ -1058,7 +1162,7 @@ fn g4_dwr_and_accept_cancellation_are_bounded_and_retryable() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: 1.0,
     };
@@ -1442,7 +1546,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
         schema_version: DWR_QUERY_SCHEMA_VERSION,
         window: (0.25, 0.75),
         endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-        semantics: QoiSemantics::WindowedIntegral,
+        semantics: QoiSemantics::DomainClippedWindowedIntegral,
         dims: [0; 6],
         tolerance: 1.0,
     };
@@ -1596,7 +1700,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: query.tolerance,
         },
@@ -1615,7 +1719,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: 2.0,
         },
@@ -1643,7 +1747,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: query.tolerance,
         },
@@ -1656,7 +1760,7 @@ fn g5_execution_identity_binds_mode_budget_stream_and_work_shape() {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             window: (0.25, 0.75),
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
             tolerance: query.tolerance,
         },

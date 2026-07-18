@@ -66,7 +66,7 @@ pub const DWR_OUTPUT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "domain_const=DWR_OUTPUT_IDENTITY_DOMAIN",
     "encoder=hash_execution_header",
     "encoder_helpers=DwrWorkPlan::identity_fields,hash_dwr_output_result_fields,hash_dwr_functional_identity_fields",
-    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_OUTPUT_IDENTITY_DOMAIN,DWR_OUTPUT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS,DWR_QUERY_SCHEMA_VERSION",
+    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_OUTPUT_IDENTITY_DOMAIN,DWR_OUTPUT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS,DWR_QUERY_SCHEMA_VERSION,DOMAIN_CLIPPED_WINDOWED_INTEGRAL_SEMANTICS_TAG",
     "schema_functions=dwr_integral_qoi",
     "schema_dependencies=fs-verify:fem1d-mms-problem",
     "digest=fs-blake3",
@@ -128,7 +128,7 @@ pub const DWR_ACCEPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "domain_const=DWR_ACCEPT_IDENTITY_DOMAIN",
     "encoder=hash_execution_header",
     "encoder_helpers=AcceptWorkPlan::identity_fields,hash_dwr_functional_identity_fields,hash_accept_estimate_identity_fields",
-    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_ACCEPT_IDENTITY_DOMAIN,DWR_ACCEPT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS,DWR_QUERY_SCHEMA_VERSION",
+    "schema_constants=DWR_EVIDENCE_IDENTITY_VERSION,DWR_ACCEPT_IDENTITY_DOMAIN,DWR_ACCEPT_IDENTITY_SCHEMA,DWR_WORK_PLAN_VERSION,DWR_POLL_POLICY_VERSION,DWR_POLL_STRIDE_IDENTITY,DWR_POLL_STRIDE_ITEMS,DWR_QUERY_SCHEMA_VERSION,DOMAIN_CLIPPED_WINDOWED_INTEGRAL_SEMANTICS_TAG",
     "schema_functions=accept",
     "schema_dependencies=fs-adjoint:dwr-bracket,fs-adjoint:dwr-output",
     "digest=fs-blake3",
@@ -494,14 +494,23 @@ fn hash_bracket_execution_header(
 /// [`DwrQuery`] (bead sj31i.1: the label-only query is replaced by a typed
 /// functional; bump on ANY field addition or semantic change).
 pub const DWR_QUERY_SCHEMA_VERSION: u32 = 1;
+/// Canonical retained tag for
+/// [`QoiSemantics::DomainClippedWindowedIntegral`]. This tag is part of the
+/// v7 output/accept identity preimage and must change if that variant's
+/// mathematical meaning changes after artifacts exist.
+const DOMAIN_CLIPPED_WINDOWED_INTEGRAL_SEMANTICS_TAG: u8 = 0;
 
 /// What kind of quantity of interest the caller is asking about — typed,
 /// never inferred from the human label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum QoiSemantics {
-    /// The windowed primal integral `J(u) = ∫_{w_lo}^{w_hi} u dx`.
-    WindowedIntegral,
+    /// The domain-clipped windowed primal integral
+    /// `J(u) = ∫_{[w_lo, w_hi] ∩ [0, 1]} u(x) dx`, where `[0, 1]` is
+    /// the canonical [`MmsProblem`] domain. A disjoint window has integral
+    /// zero. The caller's raw window endpoints remain part of the functional
+    /// identity even when two windows have the same clipped intersection.
+    DomainClippedWindowedIntegral,
 }
 
 /// The boundary convention the functional assumes of its candidates.
@@ -509,6 +518,8 @@ pub enum QoiSemantics {
 #[non_exhaustive]
 pub enum EndpointConvention {
     /// Homogeneous Dirichlet: candidate endpoints are canonical `+0.0`.
+    /// This boundary convention is independent of the domain-clipping rule
+    /// encoded by [`QoiSemantics::DomainClippedWindowedIntegral`].
     HomogeneousDirichletZero,
 }
 
@@ -531,13 +542,13 @@ struct DwrFunctionalBinding {
 }
 
 impl DwrFunctionalBinding {
-    const fn dimensionless_windowed_integral(w_lo: f64, w_hi: f64) -> Self {
+    const fn dimensionless_domain_clipped_windowed_integral(w_lo: f64, w_hi: f64) -> Self {
         Self {
             schema_version: DWR_QUERY_SCHEMA_VERSION,
             w_lo,
             w_hi,
             endpoint_convention: EndpointConvention::HomogeneousDirichletZero,
-            semantics: QoiSemantics::WindowedIntegral,
+            semantics: QoiSemantics::DomainClippedWindowedIntegral,
             dims: [0; 6],
         }
     }
@@ -552,7 +563,9 @@ impl DwrFunctionalBinding {
                 EndpointConvention::HomogeneousDirichletZero => 0,
             },
             semantics: match self.semantics {
-                QoiSemantics::WindowedIntegral => 0,
+                QoiSemantics::DomainClippedWindowedIntegral => {
+                    DOMAIN_CLIPPED_WINDOWED_INTEGRAL_SEMANTICS_TAG
+                }
             },
             dims: self.dims.map(i8::cast_unsigned),
         }
@@ -611,7 +624,7 @@ fn hash_accept_estimate_identity_fields(
 }
 
 /// A typed QoI query: what the caller actually asked, as a functional
-/// specification — domain window, endpoint convention, QoI semantics, and
+/// specification — raw window, endpoint convention, QoI semantics, and
 /// units — not a human label (bead sj31i.1). The label survives as
 /// provenance only; every typed field is hashed into the acceptance
 /// identity and every functional field is cross-checked against the sealed
@@ -625,8 +638,11 @@ pub struct DwrQuery {
     pub schema_version: u32,
     /// The tolerance the answer must meet.
     pub tolerance: f64,
-    /// The functional's domain window `[w_lo, w_hi]` — must match the
-    /// sealed estimate's retained window exactly (bitwise).
+    /// The functional's raw window `[w_lo, w_hi]`. Numerically, the reference
+    /// functional integrates over its intersection with the canonical
+    /// [`MmsProblem`] domain `[0, 1]`; identity and acceptance replay retain
+    /// and compare these raw endpoints exactly (bitwise), even for equal or
+    /// empty clipped intersections.
     pub window: (f64, f64),
     /// Boundary convention the functional assumes.
     pub endpoint_convention: EndpointConvention,
@@ -1714,7 +1730,7 @@ fn functional_binding_refusal(
     if query.semantics != sealed.semantics {
         return Some(malformed_refusal(
             "dwr-estimate-query-semantics-mismatch",
-            "REFUSED: query QoI semantics do not match the sealed estimate; the current reference estimator supports only a windowed primal integral"
+            "REFUSED: query QoI semantics do not match the sealed estimate; the current reference estimator supports only the domain-clipped windowed primal integral over [w_lo, w_hi] intersected with the canonical [0, 1] domain"
                 .to_string(),
         ));
     }
@@ -1927,18 +1943,26 @@ impl AcceptOutcome {
     }
 }
 
-/// The 1-D reference DWR estimator for integral QoIs
-/// `J(u) = ∫_{w_lo}^{w_hi} u dx` over an fs-verify problem: the dual
-/// `−z″ = 1_{[w_lo, w_hi]}` solves by P1 FEM on the ONCE-REFINED mesh
-/// (the enriched dual), and the estimate is the dual-weighted residual
-/// `η = r(z_f − I_h z_f)` with per-COARSE-element indicators.
+/// The 1-D reference DWR estimator for domain-clipped integral QoIs
+/// `J(u) = ∫_{[w_lo, w_hi] ∩ [0, 1]} u(x) dx` over an fs-verify
+/// [`MmsProblem`], whose canonical domain is `[0, 1]`. The dual load is the
+/// indicator of that intersection; a disjoint raw window therefore produces
+/// the exact zero functional. The dual is solved by P1 FEM on the
+/// ONCE-REFINED mesh (the enriched dual), and the estimate is the
+/// full dual-weighted residual
+/// `η = r(z_f) = r(z_f − I_h z_f) + r(I_h z_f)`. The per-COARSE-element
+/// indicators retain the absolute local contributions to the fine-remainder
+/// term only; they do not distribute the coarse algebraic term. Raw window
+/// endpoint bits remain sealed into the output and its evidence identity even
+/// when clipped numerical functionals coincide.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DwrOutput {
     /// `J(u_h)`.
     j_primal: f64,
     /// The signed estimate `η ≈ J(u) − J(u_h)`.
     eta: f64,
-    /// Per-coarse-element |indicator| (refinement guidance).
+    /// Per-coarse-element absolute fine-remainder contribution (refinement
+    /// guidance); the global coarse algebraic term is not localized here.
     indicators: Vec<f64>,
     /// Largest interior Galerkin-residual magnitude of the candidate — the
     /// retained primal-equilibrium receipt the acceptance gate consumes
@@ -1967,7 +1991,8 @@ impl DwrOutput {
         self.eta
     }
 
-    /// Per-coarse-element absolute indicators.
+    /// Per-coarse-element absolute fine-remainder indicators. These do not
+    /// localize the coarse algebraic contribution included in [`Self::eta`].
     #[must_use]
     pub fn indicators(&self) -> &[f64] {
         &self.indicators
@@ -1980,7 +2005,8 @@ impl DwrOutput {
         self.equilibrium_residual_max
     }
 
-    /// Retained functional window `[w_lo, w_hi]` of this estimate.
+    /// Retained raw functional window `[w_lo, w_hi]` of this estimate. Its
+    /// numerical support is the intersection with canonical domain `[0, 1]`.
     #[must_use]
     pub const fn window(&self) -> (f64, f64) {
         (self.functional_binding.w_lo, self.functional_binding.w_hi)
@@ -2114,7 +2140,9 @@ pub enum DwrError {
         /// `None` for the coarse cell, `Some(0|1)` for a refined half.
         refined_half: Option<u8>,
     },
-    /// The QoI integration window is non-finite or inverted.
+    /// The raw QoI window is non-finite or not strictly increasing. Finite
+    /// increasing windows outside `[0, 1]` are valid and denote the zero
+    /// domain-clipped functional when their intersection is empty.
     InvalidQoiWindow {
         /// Stable refusal reason.
         reason: &'static str,
@@ -2571,7 +2599,9 @@ fn thomas_solve(
 }
 
 /// P1 FEM solve of `−z″ = w` (zero Dirichlet BC) on `mesh`, with
-/// `w = 1` on `[w_lo, w_hi]` — deterministic Thomas solve.
+/// `w = 1` on `[w_lo, w_hi] ∩ [0, 1]` — deterministic Thomas solve. The
+/// mesh belongs to an admitted [`MmsProblem`] and therefore spans canonical
+/// domain `[0, 1]`.
 fn dual_solve(
     mesh: &[f64],
     w_lo: f64,
@@ -2741,7 +2771,14 @@ fn refine(
     Ok(out)
 }
 
-/// Run the 1-D goal-oriented estimate (see [`DwrOutput`]).
+/// Run the 1-D goal-oriented estimate (see [`DwrOutput`]) for the
+/// dimensionless functional
+/// `J(u) = ∫_{[w_lo, w_hi] ∩ [0, 1]} u(x) dx`.
+///
+/// `w_lo` and `w_hi` may extend outside the canonical [`MmsProblem`] domain;
+/// a disjoint finite increasing window denotes the exact zero functional.
+/// Their original binary64 bits, rather than canonicalized/clipped endpoints,
+/// are retained in the output identity and must match an acceptance query.
 ///
 /// # Errors
 /// [`DwrError`] when public inputs exceed the bounded execution envelope or any
@@ -2927,7 +2964,8 @@ pub fn dwr_integral_qoi(
     if !j_primal.is_finite() || !eta.is_finite() {
         return Err(non_finite_derived("DWR output", None));
     }
-    let functional_binding = DwrFunctionalBinding::dimensionless_windowed_integral(w_lo, w_hi);
+    let functional_binding =
+        DwrFunctionalBinding::dimensionless_domain_clipped_windowed_integral(w_lo, w_hi);
 
     dwr_checkpoint(DWR_OUTPUT_VALIDATE_PHASE, &mut progress, cx)?;
     for (index, indicator) in indicators.iter().enumerate() {
@@ -3157,13 +3195,19 @@ mod execution_tests {
                 problem_root: 0x00DD_00AA_00CC_00BB,
                 problem_canonical: b"output-canonical-fixture".to_vec(),
                 candidate_digest: fs_blake3::hash_domain("dwr-output-test", b"candidate"),
-                functional: DwrFunctionalBinding::dimensionless_windowed_integral(0.25, 0.75)
-                    .identity_fields(),
+                functional: DwrFunctionalBinding::dimensionless_domain_clipped_windowed_integral(
+                    0.25, 0.75,
+                )
+                .identity_fields(),
                 j_primal: 0.5,
                 eta: 1.0e-3,
                 equilibrium_residual_max: 2.0e-13,
                 indicators: vec![0.1, 0.2, 0.3],
             };
+            assert_eq!(
+                baseline_body.functional.semantics, DOMAIN_CLIPPED_WINDOWED_INTEGRAL_SEMANTICS_TAG,
+                "the output mutation replica must start from the exact public QoI semantics tag"
+            );
             let root = |plan_fields: &[u128; 21], body: &Body| {
                 let mut hasher = fs_blake3::Blake3::new();
                 hash_execution_header(&mut hasher, DWR_OUTPUT_IDENTITY_SCHEMA, plan_fields, cx);
@@ -3255,7 +3299,7 @@ mod execution_tests {
                     body.functional.endpoint_convention ^= 1;
                     body
                 }),
-                ("qoi-semantics", {
+                ("domain-clipped-windowed-integral-semantics-tag", {
                     let mut body = baseline_body.clone();
                     body.functional.semantics ^= 1;
                     body
@@ -3330,8 +3374,10 @@ mod execution_tests {
             let baseline_body = Body {
                 qoi: b"accept-qoi-fixture".to_vec(),
                 tolerance: 1.0e-2,
-                functional: DwrFunctionalBinding::dimensionless_windowed_integral(0.25, 0.75)
-                    .identity_fields(),
+                functional: DwrFunctionalBinding::dimensionless_domain_clipped_windowed_integral(
+                    0.25, 0.75,
+                )
+                .identity_fields(),
                 dwr_abs: 5.0e-3,
                 estimate_identity: DwrEvidenceIdentity(fs_blake3::hash_domain(
                     "dwr-accept-test",
@@ -3344,6 +3390,10 @@ mod execution_tests {
                 color: b"color-canonical-fixture".to_vec(),
                 audit: b"audit-fixture".to_vec(),
             };
+            assert_eq!(
+                baseline_body.functional.semantics, DOMAIN_CLIPPED_WINDOWED_INTEGRAL_SEMANTICS_TAG,
+                "the accept mutation replica must start from the exact public QoI semantics tag"
+            );
             let root = |body: &Body| {
                 let mut hasher = fs_blake3::Blake3::new();
                 hash_execution_header(&mut hasher, DWR_ACCEPT_IDENTITY_SCHEMA, &plan_fields, cx);
@@ -3410,7 +3460,7 @@ mod execution_tests {
                     body.functional.endpoint_convention ^= 1;
                     body
                 }),
-                ("qoi-semantics", {
+                ("domain-clipped-windowed-integral-semantics-tag", {
                     let mut body = baseline_body.clone();
                     body.functional.semantics ^= 1;
                     body
