@@ -558,7 +558,7 @@ fn grouped_allocation_refuses_one_term_erased_only_during_lse_reconstruction() {
         )
         .expect("fixture identity is canonical"),
         groups: vec![DependencyGroup {
-            key: "coherent-pair".into(),
+            key: "coherent-triple".into(),
         }],
         features: vec![
             GroupedFeature {
