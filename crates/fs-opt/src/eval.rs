@@ -20,7 +20,19 @@ const MANIFOLD_MEMBERSHIP_TOL: f64 = 1e-10;
 const MANIFOLD_TANGENCY_TOL: f64 = 64.0 * MANIFOLD_MEMBERSHIP_TOL;
 /// Bounded Richardson refinements for the near-identity Stiefel Sylvester
 /// equation used by the embedded-metric tangent projection.
-const STIEFEL_PROJECTION_REFINEMENT_LIMIT: usize = 4;
+///
+/// Admission gives `p <= n` and `n * p <= u32::MAX`, hence `p <= 65_535`.
+/// Every entry of `E = X^T X - I` is at most `1e-10`, so the exact-real
+/// max-entry residual recurrence
+///
+/// `R_next = -(E R + R E) / 2`
+///
+/// contracts by at most `p * 1e-10 < 2^-17`. One hundred twenty-eight
+/// contractions take even an initially finite `f64::MAX` residual below the
+/// minimum subnormal magnitude. Floating-point roundoff can still prevent that
+/// ideal contraction, so the measured compensated residual below remains the
+/// authority and the operation fails closed at this explicit bound.
+const STIEFEL_PROJECTION_REFINEMENT_LIMIT: usize = 128;
 /// Candidates below this squared norm are numerically rank-deficient;
 /// normalizing them would fabricate a direction.
 const RETRACTION_MIN_NORM_SQ: f64 = 1e-24;
@@ -1303,7 +1315,28 @@ impl Manifold {
             .ok_or_else(|| self.domain_error(rule, None, (left as f64) * (right as f64)))
     }
 
-    fn rescale_parameter_gradient(output: &mut [f64], ambient_scale: f64) -> Result<(), OptError> {
+    fn normalized_ambient_component(
+        &self,
+        value: f64,
+        ambient_scale: f64,
+        component: usize,
+    ) -> Result<f64, OptError> {
+        let normalized = value / ambient_scale;
+        if value != 0.0 && normalized == 0.0 {
+            return Err(self.domain_error(
+                "ambient gradient component is lost during max-abs normalization",
+                Some((component as u32, 0)),
+                value,
+            ));
+        }
+        Ok(normalized)
+    }
+
+    fn rescale_parameter_gradient(
+        &self,
+        output: &mut [f64],
+        ambient_scale: f64,
+    ) -> Result<(), OptError> {
         for (component, value) in output.iter_mut().enumerate() {
             let rescaled = *value * ambient_scale;
             if !rescaled.is_finite() {
@@ -1313,7 +1346,59 @@ impl Manifold {
                     bits: rescaled.to_bits(),
                 });
             }
+            if *value != 0.0 && rescaled == 0.0 {
+                return Err(self.domain_error(
+                    "parameter gradient component is lost while restoring caller scale",
+                    Some((component as u32, 0)),
+                    *value,
+                ));
+            }
             *value = rescaled;
+        }
+        Ok(())
+    }
+
+    fn reconstruct_sphere_tangent_pivot(
+        &self,
+        point: &[f64],
+        tangent: &mut [f64],
+    ) -> Result<(), OptError> {
+        let mut pivot = 0_usize;
+        for component in 1..point.len() {
+            if point[component].abs() > point[pivot].abs() {
+                pivot = component;
+            }
+        }
+        let pivot_coordinate = point[pivot];
+        if pivot_coordinate == 0.0 {
+            return Err(self.domain_error(
+                "Sphere tangent reconstruction requires a nonzero point pivot",
+                Some((pivot as u32, 0)),
+                pivot_coordinate,
+            ));
+        }
+        let other_contraction =
+            compensated_sum(point.iter().zip(tangent.iter()).enumerate().filter_map(
+                |(component, (coordinate, value))| {
+                    (component != pivot).then_some(coordinate * value)
+                },
+            ));
+        let reconstructed = -other_contraction / pivot_coordinate;
+        if !reconstructed.is_finite() {
+            return Err(self.domain_error(
+                "Sphere tangent pivot reconstruction must remain finite",
+                Some((pivot as u32, 0)),
+                reconstructed,
+            ));
+        }
+        tangent[pivot] = reconstructed;
+        let residual = self.parameter_tangency_residual(point, tangent);
+        if !residual.is_finite() || residual > MANIFOLD_TANGENCY_TOL {
+            return Err(self.domain_error(
+                "Sphere tangent pivot reconstruction did not reach the tangent space",
+                Some((pivot as u32, 0)),
+                residual,
+            ));
         }
         Ok(())
     }
@@ -1344,12 +1429,20 @@ impl Manifold {
         // membership tolerance entrywise. Starting from the usual
         // X-orthonormal formula, each update V <- V - X R/2 applies a
         // deterministic Richardson correction to the Sylvester equation
-        // M S + S M = X^T G + G^T X. The fixed bound keeps the work and
-        // operation order explicit; the checked residual below is the actual
-        // authority, not the iteration count.
+        // M S + S M = X^T G + G^T X. In exact arithmetic the residual obeys
+        // R_next = -(E R + R E)/2 for E=M-I. The descriptor constraints imply
+        // p^2 <= n*p <= u32::MAX, and therefore
+        // ||R_next||_max <= p*1e-10*||R||_max < 2^-17*||R||_max. The explicit
+        // 128-step bound is consequently enough to drive any initially finite
+        // f64 residual below the minimum subnormal in the ideal recurrence.
+        // Floating arithmetic is accepted only by the measured scale-free
+        // postcondition; stagnation or other unresolved roundoff fails closed.
         for _ in 0..STIEFEL_PROJECTION_REFINEMENT_LIMIT {
+            if projected.iter().all(|value| *value == 0.0) {
+                return Ok(());
+            }
             let tangency_residual = self.parameter_tangency_residual(point, projected);
-            if tangency_residual == 0.0 {
+            if tangency_residual <= MANIFOLD_TANGENCY_TOL {
                 return Ok(());
             }
 
@@ -1389,23 +1482,8 @@ impl Manifold {
                 projected,
                 &mut || Ok(()),
             )?;
-
-            let projected_scale = max_abs(projected);
             let relative_residual = self.parameter_tangency_residual(point, projected);
             if relative_residual <= MANIFOLD_TANGENCY_TOL {
-                return Ok(());
-            }
-            let absolute_residual = projected_scale * relative_residual;
-            if projected_scale <= MANIFOLD_TANGENCY_TOL
-                && absolute_residual.is_finite()
-                && absolute_residual <= MANIFOLD_TANGENCY_TOL
-            {
-                // The exact projection is numerically indistinguishable from
-                // zero at the declared scaled tangent resolution. This
-                // canonicalization occurs only after finite arithmetic and a
-                // bounded absolute constraint-defect check; it cannot hide an
-                // overflow or an unresolved large projection.
-                projected.fill(0.0);
                 return Ok(());
             }
         }
@@ -1487,7 +1565,13 @@ impl Manifold {
                 if ambient_scale == 0.0 {
                     output.resize(ambient_gradient.len(), 0.0);
                 } else {
-                    output.extend(ambient_gradient.iter().map(|value| value / ambient_scale));
+                    for (component, value) in ambient_gradient.iter().copied().enumerate() {
+                        output.push(self.normalized_ambient_component(
+                            value,
+                            ambient_scale,
+                            component,
+                        )?);
+                    }
                     let norm_sq =
                         compensated_sum(point.iter().map(|coordinate| coordinate * coordinate));
                     let normal = compensated_sum(
@@ -1518,23 +1602,15 @@ impl Manifold {
                             *gradient = (-residual).mul_add(*coordinate, *gradient);
                         }
                     }
-
-                    let output_scale = max_abs(&output);
-                    let relative_residual = self.parameter_tangency_residual(point, &output);
-                    let absolute_residual = output_scale * relative_residual;
-                    if relative_residual > MANIFOLD_TANGENCY_TOL
-                        && output_scale <= MANIFOLD_TANGENCY_TOL
-                        && absolute_residual.is_finite()
-                        && absolute_residual <= MANIFOLD_TANGENCY_TOL
-                    {
-                        // The scaled projection is below the declared tangent
-                        // resolution and has a bounded absolute defect. This
-                        // cannot mask overflow: all arithmetic above is scaled
-                        // and the rescale below is checked component by
-                        // component.
-                        output.fill(0.0);
-                    }
-                    Self::rescale_parameter_gradient(&mut output, ambient_scale)?;
+                    // Membership permits a small norm defect, so cancellation
+                    // in the normal correction need not make x.v bit-exact.
+                    // Reconstruct the lane with the largest |x_i| from all
+                    // others. That pivot minimizes division amplification,
+                    // preserves every non-pivot tangent component, and makes a
+                    // purely axial normal projection exactly zero without any
+                    // magnitude-based whole-vector canonicalization.
+                    self.reconstruct_sphere_tangent_pivot(point, &mut output)?;
+                    self.rescale_parameter_gradient(&mut output, ambient_scale)?;
                 }
             }
             Manifold::So3 => {
@@ -1544,17 +1620,17 @@ impl Manifold {
                     output.extend([0.0; 3]);
                 } else {
                     let [gw, gx, gy, gz] = [
-                        ambient_gradient[0] / ambient_scale,
-                        ambient_gradient[1] / ambient_scale,
-                        ambient_gradient[2] / ambient_scale,
-                        ambient_gradient[3] / ambient_scale,
+                        self.normalized_ambient_component(ambient_gradient[0], ambient_scale, 0)?,
+                        self.normalized_ambient_component(ambient_gradient[1], ambient_scale, 1)?,
+                        self.normalized_ambient_component(ambient_gradient[2], ambient_scale, 2)?,
+                        self.normalized_ambient_component(ambient_gradient[3], ambient_scale, 3)?,
                     ];
                     output.extend([
                         0.5 * compensated_sum([-x * gw, w * gx, z * gy, -y * gz]),
                         0.5 * compensated_sum([-y * gw, -z * gx, w * gy, x * gz]),
                         0.5 * compensated_sum([-z * gw, y * gx, -x * gy, w * gz]),
                     ]);
-                    Self::rescale_parameter_gradient(&mut output, ambient_scale)?;
+                    self.rescale_parameter_gradient(&mut output, ambient_scale)?;
                 }
             }
             Manifold::Stiefel { n, p } => {
@@ -1563,7 +1639,13 @@ impl Manifold {
                 if ambient_scale == 0.0 {
                     output.resize(ambient_gradient.len(), 0.0);
                 } else {
-                    output.extend(ambient_gradient.iter().map(|value| value / ambient_scale));
+                    for (component, value) in ambient_gradient.iter().copied().enumerate() {
+                        output.push(self.normalized_ambient_component(
+                            value,
+                            ambient_scale,
+                            component,
+                        )?);
+                    }
                     let gram_storage = self.checked_manifold_work_len(
                         p,
                         p,
@@ -1609,7 +1691,7 @@ impl Manifold {
                         &mut || Ok(()),
                     )?;
                     self.refine_stiefel_projection(point, &mut output)?;
-                    Self::rescale_parameter_gradient(&mut output, ambient_scale)?;
+                    self.rescale_parameter_gradient(&mut output, ambient_scale)?;
                 }
             }
         }

@@ -625,6 +625,216 @@ fn g0_extreme_finite_sphere_and_stiefel_gradients_project_without_intermediate_o
 }
 
 #[test]
+fn g0_extreme_scale_tangent_components_survive_near_manifold_projection() {
+    let accepted_scale = accepted_near_unit_scale();
+    let point = [accepted_scale, 0.0, 0.0];
+
+    let sphere = Manifold::Sphere { ambient: 3 };
+    let sphere_tangent = 1.0e-100 * f64::MAX;
+    let sphere_ambient = [f64::MAX, sphere_tangent, 0.0];
+    let sphere_projection = sphere
+        .parameter_gradient(&point, &sphere_ambient)
+        .expect("near-unit Sphere projection must retain a small relative tangent lane");
+    let sphere_repeat = sphere
+        .parameter_gradient(&point, &sphere_ambient)
+        .expect("repeated near-unit Sphere projection");
+    let sphere_relative_error = (sphere_projection[1] / sphere_tangent - 1.0).abs();
+    assert!(
+        sphere_projection[0] == 0.0
+            && sphere_projection[1].is_finite()
+            && sphere_projection[1] > 1.0e208
+            && sphere_relative_error <= 8.0 * f64::EPSILON,
+        "stable Sphere pivot reconstruction must remove only the normal lane and retain the representable orthogonal lane: point={point:?}; ambient={sphere_ambient:?}; output={sphere_projection:?}; output_bits={:?}; expected_tangent={sphere_tangent:.17e}; relative_error={sphere_relative_error:.17e}",
+        bits(&sphere_projection)
+    );
+    assert_eq!(
+        bits(&sphere_projection),
+        bits(&sphere_repeat),
+        "Sphere pivot selection and reconstruction must replay bitwise: first={sphere_projection:?}; second={sphere_repeat:?}"
+    );
+    sphere
+        .validate_parameter_tangent(&point, &sphere_projection)
+        .expect("retained Sphere lane must satisfy the public tangent postcondition");
+    let sphere_normal = sphere
+        .parameter_gradient(&point, &[f64::MAX, 0.0, 0.0])
+        .expect("pure Sphere normal must have an exact zero projection");
+    assert!(
+        sphere_normal.iter().all(|value| *value == 0.0),
+        "a pure normal may be zeroed only because pivot reconstruction proves every tangent lane is exactly zero: point={point:?}; output={sphere_normal:?}; output_bits={:?}",
+        bits(&sphere_normal)
+    );
+
+    let stiefel = Manifold::Stiefel { n: 3, p: 1 };
+    let stiefel_tangent = 1.0e-20 * f64::MAX;
+    let stiefel_ambient = [f64::MAX, stiefel_tangent, 0.0];
+    let stiefel_projection = stiefel
+        .parameter_gradient(&point, &stiefel_ambient)
+        .expect("near-frame Stiefel projection must retain a small relative tangent lane");
+    let stiefel_repeat = stiefel
+        .parameter_gradient(&point, &stiefel_ambient)
+        .expect("repeated near-frame Stiefel projection");
+    let stiefel_relative_error = (stiefel_projection[1] / stiefel_tangent - 1.0).abs();
+    assert!(
+        stiefel_projection[1].is_finite()
+            && stiefel_projection[1] > 1.0e288
+            && stiefel_relative_error <= 8.0 * f64::EPSILON,
+        "bounded Stiefel Richardson refinement must retain the representable tangent lane instead of canonicalizing the whole projection to zero: point={point:?}; ambient={stiefel_ambient:?}; output={stiefel_projection:?}; output_bits={:?}; expected_tangent={stiefel_tangent:.17e}; relative_error={stiefel_relative_error:.17e}",
+        bits(&stiefel_projection)
+    );
+    assert_eq!(
+        bits(&stiefel_projection),
+        bits(&stiefel_repeat),
+        "Stiefel refinement must replay bitwise: first={stiefel_projection:?}; second={stiefel_repeat:?}"
+    );
+    stiefel
+        .validate_parameter_tangent(&point, &stiefel_projection)
+        .expect("retained Stiefel lane must satisfy the public tangent postcondition");
+    let stiefel_normal = stiefel
+        .parameter_gradient(&point, &[f64::MAX, 0.0, 0.0])
+        .expect("bounded refinement must reduce a pure Stiefel normal to exact zero");
+    assert!(
+        stiefel_normal.iter().all(|value| *value == 0.0),
+        "a pure Stiefel normal must reach exact zero under the bounded contraction rather than use a magnitude threshold: point={point:?}; output={stiefel_normal:?}; output_bits={:?}",
+        bits(&stiefel_normal)
+    );
+}
+
+#[test]
+fn g0_parameter_gradient_refuses_lossy_max_abs_normalization_with_attribution() {
+    let min_subnormal = f64::from_bits(1);
+    let twice_min_subnormal = f64::from_bits(2);
+    let dynamic_range_ambient = [f64::MAX, min_subnormal];
+
+    let sphere = Manifold::Sphere { ambient: 2 };
+    let sphere_result = sphere.parameter_gradient(&[1.0, 0.0], &dynamic_range_ambient);
+    let sphere_repeat = sphere.parameter_gradient(&[1.0, 0.0], &dynamic_range_ambient);
+    assert_eq!(
+        sphere_result, sphere_repeat,
+        "Sphere normalization refusal must replay exactly"
+    );
+    assert!(
+        matches!(
+            sphere_result,
+            Err(OptError::RetractionDomain {
+                manifold: "Sphere",
+                what: "ambient gradient component is lost during max-abs normalization",
+                location: Some((1, 0)),
+                measurement_bits,
+            }) if measurement_bits == min_subnormal.to_bits()
+        ),
+        "Sphere must refuse instead of erasing a representable subnormal tangent lane during normalization: ambient={dynamic_range_ambient:?}; result={sphere_result:?}"
+    );
+
+    let stiefel = Manifold::Stiefel { n: 2, p: 1 };
+    let stiefel_result = stiefel.parameter_gradient(&[1.0, 0.0], &dynamic_range_ambient);
+    let stiefel_repeat = stiefel.parameter_gradient(&[1.0, 0.0], &dynamic_range_ambient);
+    assert_eq!(
+        stiefel_result, stiefel_repeat,
+        "Stiefel normalization refusal must replay exactly"
+    );
+    assert!(
+        matches!(
+            stiefel_result,
+            Err(OptError::RetractionDomain {
+                manifold: "Stiefel",
+                what: "ambient gradient component is lost during max-abs normalization",
+                location: Some((1, 0)),
+                measurement_bits,
+            }) if measurement_bits == min_subnormal.to_bits()
+        ),
+        "Stiefel must refuse instead of erasing a representable subnormal tangent lane during normalization: ambient={dynamic_range_ambient:?}; result={stiefel_result:?}"
+    );
+
+    let so3_ambient = [f64::MAX, twice_min_subnormal, 0.0, 0.0];
+    let so3_result = Manifold::So3.parameter_gradient(&[1.0, 0.0, 0.0, 0.0], &so3_ambient);
+    let so3_repeat = Manifold::So3.parameter_gradient(&[1.0, 0.0, 0.0, 0.0], &so3_ambient);
+    assert_eq!(
+        so3_result, so3_repeat,
+        "SO(3) normalization refusal must replay exactly"
+    );
+    assert!(
+        matches!(
+            so3_result,
+            Err(OptError::RetractionDomain {
+                manifold: "SO(3)",
+                what: "ambient gradient component is lost during max-abs normalization",
+                location: Some((1, 0)),
+                measurement_bits,
+            }) if measurement_bits == twice_min_subnormal.to_bits()
+        ),
+        "SO(3) must refuse before normalization erases a lane whose exact body pullback is the minimum subnormal: ambient={so3_ambient:?}; result={so3_result:?}"
+    );
+}
+
+#[test]
+fn g0_parameter_gradient_refuses_lossy_output_rescale_with_attribution() {
+    let min_subnormal = f64::from_bits(1);
+    let half_sqrt = 0.5_f64.sqrt();
+    let point = [half_sqrt, half_sqrt];
+    let tiny_ambient = [min_subnormal, 0.0];
+
+    let sphere = Manifold::Sphere { ambient: 2 };
+    let sphere_result = sphere.parameter_gradient(&point, &tiny_ambient);
+    let sphere_repeat = sphere.parameter_gradient(&point, &tiny_ambient);
+    assert_eq!(
+        sphere_result, sphere_repeat,
+        "Sphere rescale refusal must replay exactly"
+    );
+    assert!(
+        matches!(
+            sphere_result,
+            Err(OptError::RetractionDomain {
+                manifold: "Sphere",
+                what: "parameter gradient component is lost while restoring caller scale",
+                location: Some((0, 0)),
+                measurement_bits,
+            }) if f64::from_bits(measurement_bits) != 0.0
+        ),
+        "Sphere must refuse when a nonzero scaled tangent lane rounds to zero in caller units: point={point:?}; ambient={tiny_ambient:?}; result={sphere_result:?}"
+    );
+
+    let stiefel = Manifold::Stiefel { n: 2, p: 1 };
+    let stiefel_result = stiefel.parameter_gradient(&point, &tiny_ambient);
+    let stiefel_repeat = stiefel.parameter_gradient(&point, &tiny_ambient);
+    assert_eq!(
+        stiefel_result, stiefel_repeat,
+        "Stiefel rescale refusal must replay exactly"
+    );
+    assert!(
+        matches!(
+            stiefel_result,
+            Err(OptError::RetractionDomain {
+                manifold: "Stiefel",
+                what: "parameter gradient component is lost while restoring caller scale",
+                location: Some((0, 0)),
+                measurement_bits,
+            }) if f64::from_bits(measurement_bits) != 0.0
+        ),
+        "Stiefel must refuse when a nonzero scaled tangent lane rounds to zero in caller units: point={point:?}; ambient={tiny_ambient:?}; result={stiefel_result:?}"
+    );
+
+    let so3_ambient = [0.0, min_subnormal, 0.0, 0.0];
+    let so3_result = Manifold::So3.parameter_gradient(&[1.0, 0.0, 0.0, 0.0], &so3_ambient);
+    let so3_repeat = Manifold::So3.parameter_gradient(&[1.0, 0.0, 0.0, 0.0], &so3_ambient);
+    assert_eq!(
+        so3_result, so3_repeat,
+        "SO(3) rescale refusal must replay exactly"
+    );
+    assert!(
+        matches!(
+            so3_result,
+            Err(OptError::RetractionDomain {
+                manifold: "SO(3)",
+                what: "parameter gradient component is lost while restoring caller scale",
+                location: Some((0, 0)),
+                measurement_bits,
+            }) if f64::from_bits(measurement_bits) != 0.0
+        ),
+        "SO(3) must refuse when the half-angle pullback rounds a nonzero minimum-subnormal result to zero: ambient={so3_ambient:?}; result={so3_result:?}"
+    );
+}
+
+#[test]
 fn g0_compensated_tangency_reduction_accepts_high_dimensional_exact_cancellation() {
     // This 2^20 fixture is the smallest convenient power-of-two version of
     // the max-admission counterexample. It retains the same four-quarter

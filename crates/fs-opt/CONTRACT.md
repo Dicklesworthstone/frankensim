@@ -98,15 +98,27 @@ structure; FLUX/UQ execute it.
   Neumaier-compensated order. Every reduction-bearing gradient branch first
   divides a nonzero finite ambient gradient by its maximum absolute component
   (with exact zero handled directly), projects that scaled payload, and checks
-  every component while restoring caller scale; an output that cannot be
-  restored as finite `f64` refuses with the exact output component rather than
-  being zeroed or leaking an intermediate overflow.
+  every component while restoring caller scale. If either direction of that
+  scale transition would erase a nonzero lane, the operation conservatively
+  refuses through `RetractionDomain`; `(flattened_component, 0)` identifies the
+  exact lost lane. An output that overflows while restoring caller scale still
+  refuses through `RetractionNonFinite` with the exact output component rather
+  than being zeroed or leaking an intermediate overflow.
   Sphere gradient projection uses the admitted point's actual
   `x.x`, so points inside the membership envelope need not be bit-perfect unit
-  vectors. Stiefel gradient projection solves the corresponding near-identity
-  symmetric Sylvester tangent equation through a fixed, deterministic sequence
-  of at most four residual corrections; the measured compensated tangent
-  residual, rather than iteration count alone, is authoritative. SO(3)
+  vectors. After the normal corrections it deterministically reconstructs the
+  largest-absolute-point pivot lane from every other lane and revalidates the
+  tangent postcondition. This stable reconstruction can prove a pure axial
+  normal is exactly zero without erasing small representable orthogonal lanes.
+  Stiefel gradient projection solves the corresponding near-identity symmetric
+  Sylvester tangent equation through at most 128 deterministic residual
+  corrections. Descriptor admission implies `p^2 <= n*p <= u32::MAX`, hence
+  `p <= 65_535`; together with the entrywise `1e-10` Gram envelope, the
+  exact-real Richardson residual contracts by less than `2^-17` per correction.
+  The bound therefore spans the complete finite-`f64` exponent range, while the
+  measured compensated tangent residual, rather than iteration count alone,
+  remains authoritative and unresolved floating-point stagnation refuses.
+  SO(3)
   gradients are the scale-safe pullback of the declared right-composed
   quaternion exponential into three body-frame coordinates. Retraction curves
   return the exact public-retraction landing plus its optimizer-parameter
@@ -588,13 +600,17 @@ discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
   admission cap. Admitting points whose norm or Gram matrix is within `1e-10`
   is a deliberate numerical extension around the exact manifold, not a proof
   that those stored points satisfy the defining equations exactly. Bounded
-  Sylvester refinement may refuse unresolved conditioning. A scaled projection
-  is canonicalized to exact zero only after finite arithmetic proves both its
-  magnitude and its absolute tangent-constraint defect are below the declared
-  tangent resolution; checked output rescaling never uses zero as an overflow
-  fallback. This compensated `f64` path is not an exact-real or interval
+  Sylvester refinement may refuse unresolved conditioning. Projection never
+  canonicalizes an entire nonzero vector merely because its scaled magnitude is
+  small: Sphere uses an algebraic pivot reconstruction and Stiefel continues its
+  bounded contraction until the scale-free tangent postcondition passes or the
+  vector becomes exactly zero. The max-abs normalization and checked output
+  rescale conservatively refuse any nonzero-to-zero transition instead of
+  pretending that a large dynamic range is representable through one scale.
+  This compensated `f64` path is not an exact-real, multiscale, or interval
   certificate, and a finite ambient gradient does not imply that its projected
-  result is representable in finite `f64`. Sphere transport refuses the
+  result is representable without overflow or underflow in finite `f64`.
+  Sphere transport refuses the
   antipodal and membership/roundoff-conditioned near-antipodal region; Stiefel
   transport makes no metric-isometry or superlinear quasi-Newton claim; SO(3)
   makes no sign-seam or global-chart-smoothness claim.
