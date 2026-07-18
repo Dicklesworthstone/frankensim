@@ -5034,7 +5034,7 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "PrimaryExactReplay=1",
         "Corrected ReplayRouteLedgerBytesV3",
         "exactly 385 bytes",
-        "exactly 601 bytes",
+        "exactly 633 bytes",
         "FINAL_BRANCH_RETENTION_STORE_AND_CONTROL_LEDGER_CLOSURE_V3",
         "conjunctive at every multi-parent node except the names in `I13_FRESH_V2_AUTHORITY_TAGGED_SUM_NODES`",
         "ArmRetentionRequirementSetBytesV3",
@@ -5264,7 +5264,7 @@ fn i13_terminal_v2_authority_is_acyclic_closed_and_capacity_complete() {
         "DurablePrefixRecovery=4 with [1,10,11,4,5,6]",
         "outcome Exhausted=1,Inapplicable=2 or Succeeded=3",
         "exactly 385 bytes",
-        "exactly 601 bytes",
+        "exactly 633 bytes",
     ] {
         assert!(route_clause.contains(exact));
     }
@@ -6040,7 +6040,7 @@ fn i13_v4_finite_capacity_wal_and_closed_evidence_authority_is_exact() {
 
     for exact in [
         "new_generation=checked_add(old_generation,1),new_committed_transaction_count=checked_add(old_committed_transaction_count,1)",
-        "exact-key replay changes neither",
+        "Exact-key replay changes none; abort before CAS has no head/count authority",
         "CapacityTransactionWalRecordBytesV4 is therefore checked_add(676,proof_bytes)",
         "CapacityTransactionDurabilitySetBytesV4 is checked_add(3299,checked_add(primary_bytes,checked_add(checked_mul(component_count,138),proof_bytes)))",
         "Corrected normal maxima are20582 ReplayMetadata,20633 Generic,20648 Store,20624 ReplayArchive,20759 GlobalAdmission,20807 H2,20648 Expiry,20653 StagingInsertion and20547 StagingSeal; two-component GlobalClosure is29211",
