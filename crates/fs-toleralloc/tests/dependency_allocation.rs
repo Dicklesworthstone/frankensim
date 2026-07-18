@@ -528,14 +528,28 @@ fn grouped_allocation_refuses_one_masked_lse_term_despite_a_visible_aggregate_ta
 }
 
 #[test]
-fn grouped_allocation_refuses_tail_erased_only_during_lse_reconstruction() {
-    // At the scaled-sum stage this ratio is a full ULP and therefore visible.
-    // Reconstructing against ln(MAX), whose local ULP is hundreds of times
-    // larger, erases the positive logarithmic increment and must fail closed.
+fn grouped_allocation_refuses_one_term_erased_only_during_lse_reconstruction() {
+    // All three max-shifted contributions survive common-scale accumulation:
+    // the smallest term moves the sum from bit offset 512 to 513. At ln(MAX),
+    // however, both reconstructed sums occupy the same binary64 value one ULP
+    // above the dominant log. Thus the aggregate guard passes while the new
+    // per-term reconstructed leave-one-out guard must refuse.
+    let visible_scaled = 512.0 * f64::EPSILON;
+    let masked_scaled = f64::EPSILON;
+    let masked_leave_one_out_sum = 1.0 + visible_scaled;
+    let full_scaled_sum = masked_leave_one_out_sum + masked_scaled;
+    assert_eq!(masked_leave_one_out_sum.to_bits(), 1.0_f64.to_bits() + 512);
+    assert_eq!(full_scaled_sum.to_bits(), 1.0_f64.to_bits() + 513);
+
     let dominant = f64::MAX;
-    let visible_tail = dominant * f64::EPSILON;
-    assert!(visible_tail.is_finite() && visible_tail > 0.0);
-    assert_eq!((visible_tail / dominant).to_bits(), f64::EPSILON.to_bits());
+    let visible_tail = dominant * visible_scaled;
+    let masked_tail = dominant * masked_scaled;
+    assert!(visible_tail.is_finite() && masked_tail.is_finite());
+    assert_eq!(
+        (visible_tail / dominant).to_bits(),
+        visible_scaled.to_bits()
+    );
+    assert_eq!((masked_tail / dominant).to_bits(), masked_scaled.to_bits());
     let model = GroupedDependenceModel {
         identity: GroupedDependenceIdentity::try_new(
             "gear/reconstructed-positive-shape-tail",
@@ -553,6 +567,10 @@ fn grouped_allocation_refuses_tail_erased_only_during_lse_reconstruction() {
             },
             GroupedFeature {
                 feature: feature("visible-tail", visible_tail, visible_tail),
+                group: DependencyGroupId(0),
+            },
+            GroupedFeature {
+                feature: feature("masked-tail", masked_tail, masked_tail),
                 group: DependencyGroupId(0),
             },
         ],

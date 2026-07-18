@@ -1379,7 +1379,7 @@ pub fn allocate_grouped(
 mod tests {
     use super::{
         DependencyGroupId, GroupedAllocationError, GroupedDerivedQuantity, ScalarIssue,
-        validate_dependency_variance_delta,
+        compensated_sum, det, log_sum_exp, validate_dependency_variance_delta,
     };
 
     #[test]
@@ -1396,5 +1396,75 @@ mod tests {
             );
         }
         assert_eq!(validate_dependency_variance_delta(None, false, 0.0), Ok(()));
+    }
+
+    #[test]
+    fn per_term_reconstruction_guard_catches_a_visible_but_aliased_tail() {
+        let maximum = det::ln(f64::MAX);
+        let visible_scaled = 512.0 * f64::EPSILON;
+        let masked_scaled = f64::EPSILON;
+        let terms = [
+            maximum,
+            maximum + det::ln(visible_scaled),
+            maximum + det::ln(masked_scaled),
+        ];
+        let scaled = terms.map(|term| det::exp(term - maximum));
+        let full_sum = compensated_sum(scaled);
+        assert!(full_sum.is_finite());
+
+        // Every contribution is visible in the common-scale sum, and the
+        // aggregate reconstructed LSE is strictly above the dominant term.
+        for omitted_index in 0..scaled.len() {
+            let leave_one_out_sum = compensated_sum(
+                scaled
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted_index)
+                    .map(|(_, value)| *value),
+            );
+            assert!(full_sum > leave_one_out_sum);
+        }
+        let full_result = maximum + det::ln(full_sum);
+        assert!(full_result.is_finite() && full_result > maximum);
+
+        for omitted_index in 0..2 {
+            let leave_one_out_maximum = terms
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != omitted_index)
+                .map(|(_, term)| *term)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let leave_one_out_sum = compensated_sum(
+                terms
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted_index)
+                    .map(|(_, term)| det::exp(*term - leave_one_out_maximum)),
+            );
+            let leave_one_out_result = leave_one_out_maximum + det::ln(leave_one_out_sum);
+            assert!(leave_one_out_result.is_finite() && full_result > leave_one_out_result);
+        }
+
+        // Omitting only the smallest term leaves the independently
+        // reconstructed LSE unchanged, so only the per-term reconstruction
+        // guard can refuse this otherwise-admissible numeric boundary.
+        let masked_leave_one_out_sum = compensated_sum([scaled[0], scaled[1]]);
+        let masked_leave_one_out_result = maximum + det::ln(masked_leave_one_out_sum);
+        assert!(masked_leave_one_out_result.is_finite());
+        assert_eq!(full_result.to_bits(), maximum.to_bits() + 1);
+        assert_eq!(full_result.to_bits(), masked_leave_one_out_result.to_bits());
+        assert_eq!(
+            log_sum_exp(
+                &terms,
+                GroupedDerivedQuantity::GroupLogShape,
+                Some(DependencyGroupId(0)),
+            ),
+            Err(GroupedAllocationError::InvalidDerived {
+                quantity: GroupedDerivedQuantity::LogSumExpContribution,
+                feature_index: None,
+                group: Some(DependencyGroupId(0)),
+                issue: ScalarIssue::Underflow,
+            })
+        );
     }
 }
