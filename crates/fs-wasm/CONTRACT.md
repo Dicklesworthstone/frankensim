@@ -141,7 +141,9 @@ NeuroShape tests assert that the default closed-frame certificate serializes a
 lower bound of one but an unknown exact count, while an unenclosed case retains
 the same wire shape and claims neither an exact zero nor a positive lower
 bound. Both cases pin schema version 1 in slot `[22]` and retain zero in the
-remaining reserved slot `[23]`.
+remaining reserved slot `[23]`. A decoder-shaped conformance fixture accepts
+only the exact version-1 bit pattern and refuses legacy zero, future version 2,
+fractional, non-finite, and truncated headers before reading topology evidence.
 Current verification is native cargo test/clippy of the nested workspace plus
 any wasm32 build lane provided by DSR or site automation. The wasm32 browser
 surface itself remains a build/smoke lane rather than a browser-E2E test suite.

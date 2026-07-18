@@ -1755,6 +1755,19 @@ mod tests {
     use super::*;
     use fs_grammar_e2e::SimplificationCheckStatus;
 
+    fn require_supported_neuroshape_component_evidence_schema(
+        encoded: &[f64],
+    ) -> Result<(), &'static str> {
+        if encoded.len() < 24 {
+            return Err("NeuroShape payload is shorter than its 24-value header");
+        }
+        let version = encoded[22];
+        if version.to_bits() != f64::from(NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION).to_bits() {
+            return Err("unsupported NeuroShape component-evidence schema");
+        }
+        Ok(())
+    }
+
     #[test]
     fn proofrobust_defaults() {
         let v = proofrobust(0.9, 2.0, 41);
@@ -1913,6 +1926,10 @@ mod tests {
     #[test]
     fn neuroshape_defaults() {
         let v = neuroshape(6.5, 2.5, 0.3);
+        assert_eq!(
+            require_supported_neuroshape_component_evidence_schema(&v),
+            Ok(())
+        );
         assert_eq!(v[0], 64.0, "grid_n");
         assert!((v[3] - 18.0).abs() < 1e-6, "L {}", v[3]);
         assert_eq!(v[13], 1.0, "boundary_frame_certified");
@@ -1931,8 +1948,34 @@ mod tests {
     }
 
     #[test]
+    fn neuroshape_schema_reader_refuses_legacy_future_nonfinite_and_truncated_headers() {
+        let current = neuroshape(6.5, 2.5, 0.3);
+
+        for unsupported in [0.0, 2.0, 1.5, f64::NAN, f64::INFINITY] {
+            let mut mutated = current.clone();
+            mutated[22] = unsupported;
+            assert!(
+                require_supported_neuroshape_component_evidence_schema(&mutated).is_err(),
+                "accepted unsupported schema bits 0x{:016x}",
+                unsupported.to_bits()
+            );
+        }
+        for truncated_len in [0, 21, 22, 23] {
+            assert!(
+                require_supported_neuroshape_component_evidence_schema(&current[..truncated_len])
+                    .is_err(),
+                "accepted truncated header length {truncated_len}"
+            );
+        }
+    }
+
+    #[test]
     fn neuroshape_unenclosed_case_does_not_claim_exact_zero_components() {
         let v = neuroshape(12.0, 2.5, 0.3);
+        assert_eq!(
+            require_supported_neuroshape_component_evidence_schema(&v),
+            Ok(())
+        );
         assert_eq!(v[16], 0.0, "no enclosed-component certificate");
         assert_eq!(v[17], -1.0, "exact component count remains unknown");
         assert_eq!(v[20], 0.0, "component evidence is unknown");
