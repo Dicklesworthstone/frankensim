@@ -852,3 +852,161 @@ fn debit(
     *remaining = remaining.saturating_sub(units);
     Ok(())
 }
+
+#[cfg(test)]
+mod debit_schedule_tests {
+    use super::*;
+    use crate::cbc::{CbcBudget, CbcExecutionMode};
+
+    fn executor(n: u32, dimension: usize, mode: CbcExecutionMode) -> CbcExecutor {
+        let problem = CbcProblem::new(n, dimension).expect("debit fixture is structural");
+        let admission = problem
+            .admit_for(mode, CbcBudget::UNBOUNDED)
+            .expect("debit fixture admits");
+        let mut executor = CbcExecutor::new(admission).expect("fresh authority admits executor");
+        if mode == CbcExecutionMode::Certified {
+            executor
+                .enable_certificates()
+                .expect("certified fixture enables evidence before work");
+        }
+        executor
+    }
+
+    fn tile(candidate_block: u32, point_block: u32) -> CbcTileShape {
+        CbcTileShape::new(candidate_block, point_block).expect("test tile is nonzero")
+    }
+
+    fn execute_delta(executor: &mut CbcExecutor, tile: CbcTileShape) -> (CbcBoundary, u128) {
+        let before = executor.work_spent;
+        let mut remaining = u128::MAX;
+        let boundary = executor
+            .execute_tile(tile, &mut remaining)
+            .expect("isolated admitted debit class executes");
+        (
+            boundary,
+            executor
+                .work_spent
+                .checked_sub(before)
+                .expect("work debit is monotone"),
+        )
+    }
+
+    fn scan_phase(
+        candidate: u32,
+        accum: Option<ScanAccum>,
+        best: Option<(ExactNat, u32)>,
+        tie_class: Vec<u32>,
+    ) -> Phase {
+        Phase::Scan {
+            candidate,
+            accum,
+            best,
+            runner_up: None,
+            tie_class,
+        }
+    }
+
+    /// G0: hard-pinned runtime boundary deltas independently witness every
+    /// schema-v4 debit class. These values are intentionally literal rather
+    /// than recomputed through `CbcExecutionSchedule` or `CbcEstimate`, so a
+    /// compensating producer/consumer formula drift cannot self-certify by
+    /// preserving only the aggregate total.
+    #[test]
+    fn g0_runtime_boundary_deltas_pin_every_debit_class() {
+        // n=3,d=1: three initialization visits at 40 units apiece, with the
+        // final point followed by the one 9-unit prefix commit: 40+40+49=129.
+        let mut dimension_one = executor(3, 1, CbcExecutionMode::Construction);
+        assert_eq!(
+            execute_delta(&mut dimension_one, tile(1, 1)),
+            (CbcBoundary::PointBlock, 40)
+        );
+        assert_eq!(
+            execute_delta(&mut dimension_one, tile(1, 1)),
+            (CbcBoundary::PointBlock, 40)
+        );
+        assert_eq!(
+            execute_delta(&mut dimension_one, tile(1, 1)),
+            (CbcBoundary::Prefix, 49),
+            "the terminal tile is one 40-unit initialization plus 9-unit prefix control"
+        );
+        assert!(dimension_one.is_complete());
+        assert_eq!(dimension_one.work_spent(), 129);
+
+        // n=8,d=3 construction-mode class witnesses. Installing an already
+        // admitted in-flight phase isolates the exact production debit site;
+        // no schedule accessor participates in the expected constants.
+        let mut construction = executor(8, 3, CbcExecutionMode::Construction);
+        let mut score = ExactNat::zero();
+        score.reserve_exact_limbs(construction.score_capacity_limbs);
+        construction.phase = scan_phase(
+            1,
+            Some(ScanAccum {
+                score,
+                next_point: 0,
+            }),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            execute_delta(&mut construction, tile(1, 1)),
+            (CbcBoundary::PointBlock, 33),
+            "one candidate/point exact visit"
+        );
+
+        construction.phase = scan_phase(2, None, None, Vec::new());
+        assert_eq!(
+            execute_delta(&mut construction, tile(1, 1)),
+            (CbcBoundary::CandidateBlock, 44),
+            "non-coprime candidate isolates base candidate control"
+        );
+
+        construction.phase = Phase::Update {
+            chosen: 1,
+            next_point: 0,
+        };
+        assert_eq!(
+            execute_delta(&mut construction, tile(1, 1)),
+            (CbcBoundary::PointBlock, 39),
+            "one retained-product update"
+        );
+        construction.phase = Phase::Update {
+            chosen: 1,
+            next_point: 7,
+        };
+        assert_eq!(
+            execute_delta(&mut construction, tile(1, 1)),
+            (CbcBoundary::Prefix, 48),
+            "the final update point is 39 units plus 9-unit prefix control"
+        );
+
+        // Certified candidate control adds exactly one certificate unit.
+        let mut certified = executor(8, 3, CbcExecutionMode::Certified);
+        certified.phase = scan_phase(2, None, None, Vec::new());
+        assert_eq!(
+            execute_delta(&mut certified, tile(1, 1)),
+            (CbcBoundary::CandidateBlock, 45),
+            "certified non-coprime control is base 44 plus one evidence unit"
+        );
+
+        // Certificate publication is prefix-length sensitive: the first and
+        // second scanned components retain 2 and 3 prefix words, producing
+        // 14- and 15-unit emissions independently of candidate/update work.
+        let mut first_certificate = executor(8, 3, CbcExecutionMode::Certified);
+        first_certificate.z.push(1);
+        first_certificate.phase = scan_phase(8, None, Some((ExactNat::one(), 1)), vec![1]);
+        assert_eq!(
+            execute_delta(&mut first_certificate, tile(1, 1)),
+            (CbcBoundary::CandidateBlock, 14)
+        );
+        assert_eq!(first_certificate.certificates.len(), 1);
+
+        let mut second_certificate = executor(8, 3, CbcExecutionMode::Certified);
+        second_certificate.z.extend_from_slice(&[1, 1]);
+        second_certificate.phase = scan_phase(8, None, Some((ExactNat::one(), 1)), vec![1]);
+        assert_eq!(
+            execute_delta(&mut second_certificate, tile(1, 1)),
+            (CbcBoundary::CandidateBlock, 15)
+        );
+        assert_eq!(second_certificate.certificates.len(), 1);
+    }
+}

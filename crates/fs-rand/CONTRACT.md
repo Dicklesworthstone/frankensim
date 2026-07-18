@@ -64,8 +64,10 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   class (mirror symmetry `c ↔ n−c` makes real ties structural; the chosen
   candidate is always the class minimum), the exact runner-up or its
   absence, the `(6n²)^e` denominator derivation, and the tie/admissible
-  rule tokens. The INDEPENDENT checker recomputes from declared inputs
-  only, with two honestly named modes: `verify_consistency` (cheap
+  rule tokens. The checker is independent of executor STATE and recomputes
+  from declared inputs, but shares the crate exact-integer/kernel/residue/GCD
+  primitives and is not an independent arithmetic oracle. It has two honestly
+  named modes: `verify_consistency` (cheap
   `O(n·|claims|)`: the declared candidates score as claimed) and
   `audit_minimality` (full `O(n²)` rescan: minimality by exhaustion);
   tampering with any bound field refuses in a named error class. The admitted

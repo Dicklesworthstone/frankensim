@@ -10,9 +10,11 @@
 //! absence, the winning equality class, the tie rule, the admissible-set
 //! rule, and the common-denominator derivation the numerators drop.
 //!
-//! The checker is INDEPENDENT — it recomputes with its own arithmetic from
-//! the declared inputs and never trusts executor state — and has two
-//! honestly named modes:
+//! The checker is an independent STATE/RECOMPUTATION path: it rebuilds from
+//! the declared inputs and never trusts executor state. It deliberately shares
+//! the crate's `ExactNat`, kernel, residue, and GCD primitives, so it is not an
+//! independent arithmetic oracle; common-mode primitive defects require the
+//! separate oracle/theorem ratchets. The checker has two honestly named modes:
 //!
 //! - [`verify_consistency`] recomputes the winning, tie-class, and
 //!   runner-up scores from the declared prefix in `O(n · |claims|)` exact
