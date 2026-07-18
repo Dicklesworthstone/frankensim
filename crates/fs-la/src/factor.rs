@@ -28,6 +28,28 @@ use crate::gemm::gemm_f64;
 /// relevant only through GEMM's KC contract, which NB does not reach).
 const NB: usize = 32;
 
+/// Compute a row-major matrix extent without allowing release-mode wrapping to
+/// turn an impossible shape into an apparently valid slice length.
+#[track_caller]
+fn checked_matrix_entries(rows: usize, cols: usize, operation: &str) -> usize {
+    rows.checked_mul(cols).unwrap_or_else(|| {
+        panic!("{operation} matrix entry count overflows usize: {rows} * {cols}")
+    })
+}
+
+/// Admit the complete storage proposition shared by the dense factorization
+/// entry points before they read the matrix or allocate factor state.
+#[track_caller]
+fn admit_matrix_storage(a: &[f64], rows: usize, cols: usize, operation: &str) -> usize {
+    let entries = checked_matrix_entries(rows, cols, operation);
+    assert_eq!(
+        a.len(),
+        entries,
+        "{operation} storage length mismatch: expected {rows} * {cols} = {entries} entries"
+    );
+    entries
+}
+
 /// Typed factorization failure: which structural assumption broke, where.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactorError {
@@ -73,7 +95,7 @@ pub struct Cholesky {
 /// # Errors
 /// [`FactorError::NotSpd`] with the failing diagonal index.
 pub fn cholesky(a: &[f64], n: usize) -> Result<Cholesky, FactorError> {
-    assert_eq!(a.len(), n * n, "a must be n*n = {}", n * n);
+    admit_matrix_storage(a, n, n, "cholesky");
     let mut l = a.to_vec();
     let mut j = 0;
     while j < n {
@@ -182,7 +204,7 @@ pub struct Lu {
 /// # Errors
 /// [`FactorError::Singular`] if an entire pivot column is zero.
 pub fn lu(a: &[f64], n: usize) -> Result<Lu, FactorError> {
-    assert_eq!(a.len(), n * n, "a must be n*n = {}", n * n);
+    admit_matrix_storage(a, n, n, "lu");
     let mut m = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
     let max_a = m.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
@@ -380,7 +402,7 @@ pub struct Qr {
 #[must_use]
 pub fn qr(a: &[f64], m: usize, n: usize) -> Qr {
     assert!(m >= n, "qr requires m >= n (got {m} x {n})");
-    assert_eq!(a.len(), m * n, "a must be m*n = {}", m * n);
+    admit_matrix_storage(a, m, n, "qr");
     let mut q = a.to_vec();
     let mut tau = vec![0.0f64; n];
     let mut j0 = 0;
@@ -519,17 +541,22 @@ impl Qr {
 /// TSQR: the R factor of a tall-skinny A (m×n, m ≫ n), computed by leaf
 /// QRs over fixed row blocks and pairwise R-combines up a binary tree
 /// whose SHAPE is a pure function of the block count — the reduction-tree
-/// doctrine applied to orthogonalization. The result is canonicalized to
-/// a NON-NEGATIVE diagonal (the unique QR R), so any two conforming
-/// implementations agree.
+/// doctrine applied to orthogonalization. Strictly negative diagonal signs are
+/// normalized by row flips. For a finite, full-column-rank matrix, the
+/// exact-arithmetic QR theorem makes the resulting positive-diagonal R unique;
+/// the finite full-rank regression battery checks agreement across the covered
+/// tree shapes within tolerance. Rank-deficient inputs retain deterministic
+/// fixed-tree behavior, but this implementation makes no uniqueness or
+/// tree-independence claim for their R factors.
 #[must_use]
 pub fn tsqr_r(a: &[f64], m: usize, n: usize, row_block: usize) -> Vec<f64> {
     assert!(m >= n, "tsqr requires m >= n");
     assert!(row_block >= n, "row_block must be >= n");
-    assert_eq!(a.len(), m * n, "a must be m*n");
+    admit_matrix_storage(a, m, n, "tsqr");
     if n == 0 {
         return Vec::new();
     }
+    let r_entries = checked_matrix_entries(n, n, "tsqr R");
     // Leaf QRs. Block boundaries are a pure function of (m, row_block, n):
     // a final fragment shorter than n rows is absorbed into the previous
     // block (a leaf QR needs rows >= n).
@@ -541,17 +568,25 @@ pub fn tsqr_r(a: &[f64], m: usize, n: usize, row_block: usize) -> Vec<f64> {
     let mut rs: Vec<Vec<f64>> = Vec::new();
     for w in bounds.windows(2) {
         let (r0, r1) = (w[0], w[1]);
-        rs.push(r_of(&a[r0 * n..r1 * n], r1 - r0, n));
+        let start = checked_matrix_entries(r0, n, "tsqr leaf prefix");
+        let end = checked_matrix_entries(r1, n, "tsqr leaf prefix");
+        rs.push(r_of(&a[start..end], r1 - r0, n));
     }
     // Fixed binary combine tree over block indices: (0,1), (2,3), …
     while rs.len() > 1 {
         let mut next = Vec::with_capacity(rs.len().div_ceil(2));
         for pair in rs.chunks(2) {
             if pair.len() == 2 {
-                let mut stacked = vec![0.0f64; 2 * n * n];
-                stacked[..n * n].copy_from_slice(&pair[0]);
-                stacked[n * n..].copy_from_slice(&pair[1]);
-                next.push(r_of(&stacked, 2 * n, n));
+                let stacked_rows = n
+                    .checked_mul(2)
+                    .expect("tsqr stacked-row count overflows usize");
+                let stacked_entries = r_entries
+                    .checked_mul(2)
+                    .expect("tsqr stacked-R entry count overflows usize");
+                let mut stacked = vec![0.0f64; stacked_entries];
+                stacked[..r_entries].copy_from_slice(&pair[0]);
+                stacked[r_entries..].copy_from_slice(&pair[1]);
+                next.push(r_of(&stacked, stacked_rows, n));
             } else {
                 next.push(pair[0].clone());
             }
@@ -561,11 +596,11 @@ pub fn tsqr_r(a: &[f64], m: usize, n: usize, row_block: usize) -> Vec<f64> {
     rs.pop().unwrap()
 }
 
-/// The sign-canonicalized (non-negative diagonal) R of a QR factorization,
-/// returned dense n×n.
+/// The strictly-negative-sign-normalized R of a QR factorization, returned
+/// dense n×n. Zero diagonal sign bits are retained as produced by `qr`.
 fn r_of(block: &[f64], rows: usize, n: usize) -> Vec<f64> {
     let f = qr(block, rows, n);
-    let mut r = vec![0.0f64; n * n];
+    let mut r = vec![0.0f64; checked_matrix_entries(n, n, "tsqr R")];
     for i in 0..n {
         let flip = if f.r(i, i) < 0.0 { -1.0 } else { 1.0 };
         for j in i..n {
@@ -596,9 +631,10 @@ pub struct Svd {
 #[must_use]
 pub fn svd_jacobi(a: &[f64], m: usize, n: usize) -> Svd {
     assert!(m >= n, "svd requires m >= n");
-    assert_eq!(a.len(), m * n, "a must be m*n");
+    let matrix_entries = admit_matrix_storage(a, m, n, "svd");
+    let right_entries = checked_matrix_entries(n, n, "svd right-vector matrix");
     let mut u = a.to_vec();
-    let mut v = vec![0.0f64; n * n];
+    let mut v = vec![0.0f64; right_entries];
     for i in 0..n {
         v[i * n + i] = 1.0;
     }
@@ -658,8 +694,8 @@ pub fn svd_jacobi(a: &[f64], m: usize, n: usize) -> Svd {
         *s = nrm.sqrt();
     }
     order.sort_by(|&x, &y| sig[y].partial_cmp(&sig[x]).unwrap().then(x.cmp(&y)));
-    let mut u_out = vec![0.0f64; m * n];
-    let mut v_out = vec![0.0f64; n * n];
+    let mut u_out = vec![0.0f64; matrix_entries];
+    let mut v_out = vec![0.0f64; right_entries];
     let mut s_out = vec![0.0f64; n];
     for (slot, &src) in order.iter().enumerate() {
         s_out[slot] = sig[src];

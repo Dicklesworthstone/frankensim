@@ -34,6 +34,25 @@ fn frob(m: &[f64]) -> f64 {
     m.iter().map(|v| v * v).sum::<f64>().sqrt()
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic payload>")
+}
+
+fn assert_panics_with(needles: &[&str], f: impl FnOnce() + std::panic::UnwindSafe) {
+    let payload = std::panic::catch_unwind(f).expect_err("operation unexpectedly succeeded");
+    let message = panic_message(payload.as_ref());
+    for needle in needles {
+        assert!(
+            message.contains(needle),
+            "panic {message:?} did not contain {needle:?}"
+        );
+    }
+}
+
 /// Hilbert matrix H[i][j] = 1/(i+j+1) — the classic ill-conditioned case.
 fn hilbert(n: usize) -> Vec<f64> {
     (0..n * n)
@@ -233,7 +252,15 @@ fn qr_orthogonality_reconstruction_least_squares() {
 #[test]
 fn tsqr_matches_direct_qr_and_is_deterministic() {
     let (m, n) = (300usize, 6usize);
-    let a = rand_mat(m, n, 31);
+    let mut a = rand_mat(m, n, 31);
+    // The leading n×n identity block proves full column rank independently of
+    // the pseudorandom tail. This is the exact scope in which positive-
+    // diagonal R is mathematically unique.
+    for i in 0..n {
+        for j in 0..n {
+            a[i * n + j] = if i == j { 1.0 } else { 0.0 };
+        }
+    }
     let direct = {
         let f = qr(&a, m, n);
         let mut r = vec![0.0; n * n];
@@ -274,8 +301,28 @@ fn tsqr_matches_direct_qr_and_is_deterministic() {
             "Gram identity at {i}"
         );
     }
+
+    // Rank-deficient inputs retain deterministic fixed-tree execution. There
+    // is intentionally no cross-tree or unique-R assertion here: dependent
+    // columns leave orthogonal/null-space choices that diagonal sign flips do
+    // not canonically resolve.
+    let mut dependent = vec![0.0; 48 * 3];
+    for i in 0..48 {
+        let x = i as f64 - 17.0;
+        dependent[i * 3] = x;
+        dependent[i * 3 + 1] = 2.0 * x;
+        dependent[i * 3 + 2] = -x;
+    }
+    let dependent_r1 = tsqr_r(&dependent, 48, 3, 12);
+    let dependent_r2 = tsqr_r(&dependent, 48, 3, 12);
+    assert!(
+        dependent_r1
+            .iter()
+            .zip(&dependent_r2)
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+    );
     println!(
-        "{{\"suite\":\"fs-la\",\"case\":\"tsqr\",\"verdict\":\"pass\",\"detail\":\"3 tree shapes agree with direct QR; fixed tree bitwise stable\"}}"
+        "{{\"suite\":\"fs-la\",\"case\":\"tsqr\",\"verdict\":\"pass\",\"detail\":\"full-rank fixture: 3 trees agree with direct QR; full-rank and rank-deficient fixed trees bitwise stable\"}}"
     );
 }
 
@@ -363,9 +410,14 @@ fn degenerate_shapes() {
     assert!(lu(&[], 0).is_ok());
     let f = qr(&[], 0, 0);
     assert_eq!(f.r(0, 0).to_bits(), 0.0f64.to_bits());
+    let f = qr(&[], 7, 0);
+    assert!(f.solve_ls(&[1.0; 7]).is_empty());
     assert!(tsqr_r(&[], 0, 0, 0).is_empty());
     assert!(tsqr_r(&[], 0, 0, 1).is_empty());
+    assert!(tsqr_r(&[], 7, 0, 0).is_empty());
     assert!(tsqr_r(&[], 7, 0, 3).is_empty());
+    let s = svd_jacobi(&[], 7, 0);
+    assert!(s.u.is_empty() && s.sigma.is_empty() && s.v.is_empty());
     // 1×1.
     let c = cholesky(&[9.0], 1).unwrap();
     assert!((c.l(0, 0) - 3.0).abs() < 1e-15);
@@ -375,6 +427,52 @@ fn degenerate_shapes() {
     assert!((f.r(0, 0).abs() - 5.0).abs() < 1e-14);
     let x = f.solve_ls(&[3.0, 4.0]);
     assert!((x[0] - 1.0).abs() < 1e-14);
+}
+
+#[test]
+fn factor_storage_admission_refuses_payloads_and_overflow_before_execution() {
+    // A zero-column matrix has exactly zero entries even when m > 0. Do not
+    // silently ignore caller storage just because the numerical result is
+    // empty.
+    assert_panics_with(&["cholesky", "storage length mismatch"], || {
+        let _ = cholesky(&[1.0], 0);
+    });
+    assert_panics_with(&["lu", "storage length mismatch"], || {
+        let _ = lu(&[1.0], 0);
+    });
+    assert_panics_with(&["qr", "storage length mismatch"], || {
+        let _ = qr(&[1.0], 7, 0);
+    });
+    assert_panics_with(&["tsqr", "storage length mismatch"], || {
+        let _ = tsqr_r(&[1.0], 7, 0, 0);
+    });
+    assert_panics_with(&["svd", "storage length mismatch"], || {
+        let _ = svd_jacobi(&[1.0], 7, 0);
+    });
+
+    // These products are exactly 2^usize::BITS. In an unchecked release
+    // build they wrap to zero, allowing an empty slice through the old length
+    // assertion before a later incidental panic or impossible allocation.
+    let square_dim = 1usize << (usize::BITS / 2);
+    let rectangle_rows = usize::MAX / 2 + 1;
+    assert!(square_dim.checked_mul(square_dim).is_none());
+    assert!(rectangle_rows.checked_mul(2).is_none());
+
+    assert_panics_with(&["cholesky", "entry count overflows usize"], || {
+        let _ = cholesky(&[], square_dim);
+    });
+    assert_panics_with(&["lu", "entry count overflows usize"], || {
+        let _ = lu(&[], square_dim);
+    });
+    assert_panics_with(&["qr", "entry count overflows usize"], || {
+        let _ = qr(&[], rectangle_rows, 2);
+    });
+    assert_panics_with(&["tsqr", "entry count overflows usize"], || {
+        let _ = tsqr_r(&[], rectangle_rows, 2, 2);
+    });
+    assert_panics_with(&["svd", "entry count overflows usize"], || {
+        let _ = svd_jacobi(&[], rectangle_rows, 2);
+    });
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).

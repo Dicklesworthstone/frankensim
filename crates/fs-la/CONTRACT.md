@@ -129,12 +129,26 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
 - `factor::{cholesky, lu, qr, tsqr_r, svd_jacobi}` + `FactorError` —
   dense factorizations. Failure is DATA: `NotSpd{index}` /
   `Singular{index}` typed diagnostics, never panics for data conditions.
+  Every entry point checks the complete row-major entry count with
+  `usize::checked_mul` before it accepts a slice length, reads matrix storage,
+  or allocates factor state. The 0×0 Cholesky/LU and every m×0 QR/TSQR/SVD
+  shape have zero entries and return empty factor data; TSQR also admits
+  `row_block = 0` exactly when `n = 0`, because that path schedules no leaves.
+  Nonempty storage for any zero-entry shape is a programmer error and is
+  refused rather than ignored.
   `Cholesky::solve`, `Lu::{solve, solve_transpose, condition_1}` (Hager
   1-norm estimate), `Qr::{apply_q, apply_qt, solve_ls}` are the
   refinement/consumer hooks. LU pivot tie-break: LOWEST index under equal
-  magnitude (P2). `tsqr_r` computes the sign-canonicalized (non-negative
-  diagonal) R over a binary combine tree whose shape is a pure function
-  of (m, row_block, n). `svd_jacobi` is one-sided cyclic Jacobi (thin
+  magnitude (P2). `tsqr_r` flips rows whose computed diagonal is strictly
+  negative over a binary combine tree whose shape is a pure function of
+  (m, row_block, n). For finite full-column-rank matrices, the exact-arithmetic
+  QR theorem makes the positive-diagonal R unique; the current finite
+  full-rank battery verifies covered tree-shape agreement within tolerance.
+  For rank-deficient inputs, fixed input bits and a fixed tree remain
+  deterministic, but neither a mathematically unique R nor tree-independent
+  bits/values are claimed; zero diagonal sign bits are retained as produced.
+  A stronger canonical rank-profile theorem and implementation remain an
+  explicit ambition target. `svd_jacobi` is one-sided cyclic Jacobi (thin
   U·Σ·Vᵀ, σ descending, deterministic order and tie-breaks).
 - `mixed::{solve_adaptive, ResidualTarget, Ladder, RefineReport}` —
   precision-ladder solves with iterative refinement AS POLICY:
@@ -271,8 +285,9 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
    battery; both dot products must be finite.
 6. Factorization residuals (tested): ‖A−LLᵀ‖/‖A‖ ≤ n·1e-14 on SPD;
    LU solve round-trips at 1e-9 on random; A = QR reconstruction at
-   1e-12 with Q orthogonal to 1e-13; TSQR R equals direct QR's
-   canonicalized R (1e-10) for ANY tree shape and satisfies the Gram
+   1e-12 with Q orthogonal to 1e-13; on the covered finite full-column-rank
+   fixtures, TSQR R equals direct QR's sign-normalized R (1e-10) across the
+   tested tree shapes and satisfies the Gram
    identity; SVD reconstructs to 1e-13 with U, V orthogonal to 1e-13
    (Hilbert-8 spectral condition lands in the known ~1.5e10 band).
 7. Factorizations are bit-deterministic given the blocking constants
@@ -298,6 +313,11 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
 Legacy specialized slice-length/shape mismatches panic with structured
 messages (programmer errors). `gemm_scalar_checked` instead returns
 `GemmShapeError` and leaves C unchanged after any extent/length refusal.
+Dense factorization storage admission computes `rows*cols` with checked
+integer arithmetic before comparing slice length; an unrepresentable entry
+count panics deterministically before any matrix read or factor allocation,
+including in release builds. Zero-column rectangular matrices have exactly
+zero entries, so empty storage is accepted and nonempty storage is refused.
 The dense Jacobi exception to the legacy-only shape surface is the explicit
 preflight `admit_jacobi_eigh`: its non-exhaustive structured error distinguishes
 matrix-shape arithmetic overflow, aggregate-work arithmetic overflow, and a
@@ -613,6 +633,12 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   fused WY GEMM form joins the perf lane).
 - `tsqr_r` returns R only; implicit-Q tree factors (for applying Qᵀ in
   parallel TSQR) join the fs-exec driver work.
+- Rank-deficient TSQR currently has deterministic fixed-tree execution but no
+  unique-R or tree-independence theorem. Canonical signed-zero handling,
+  rank-revealing decisions, and a stronger tree-independent canonical
+  rank-profile construction remain a deliberately ambitious future proof and
+  implementation target rather than an inferred property of diagonal sign
+  normalization.
 - `condition_1` is an estimate (typically within a small factor; a lower
   bound in theory) — not a certified bound (fs-ivl owns certified claims).
 - Jacobi SVD targets small/medium n (O(n²·m) per sweep); no blocked
