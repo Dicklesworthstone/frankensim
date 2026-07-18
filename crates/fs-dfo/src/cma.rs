@@ -614,25 +614,26 @@ impl BipopReport {
                 return Err(BipopLedgerError::at(index, "generation-accounting"));
             }
             match record.stop_reason {
-                CmaStopReason::TargetReached if !record.report.converged => {
-                    return Err(BipopLedgerError::at(index, "terminal-reason"));
+                CmaStopReason::TargetReached => {
+                    if !record.report.converged {
+                        return Err(BipopLedgerError::at(index, "terminal-reason"));
+                    }
                 }
-                CmaStopReason::BudgetExhausted
-                    if record.report.converged
-                        || record.report.evals.checked_add(record.lambda).is_some_and(
-                            |next_generation| next_generation <= record.allocated_budget,
-                        ) =>
-                {
-                    return Err(BipopLedgerError::at(index, "terminal-reason"));
+                CmaStopReason::BudgetExhausted => {
+                    let next_generation = record
+                        .report
+                        .evals
+                        .checked_add(record.lambda)
+                        .ok_or_else(|| BipopLedgerError::at(index, "evaluation-overflow"))?;
+                    if record.report.converged || next_generation <= record.allocated_budget {
+                        return Err(BipopLedgerError::at(index, "terminal-reason"));
+                    }
                 }
-                CmaStopReason::Stagnated
-                    if record.report.converged || record.report.generations == 0 =>
-                {
-                    return Err(BipopLedgerError::at(index, "terminal-reason"));
+                CmaStopReason::Stagnated => {
+                    if record.report.converged || record.report.generations == 0 {
+                        return Err(BipopLedgerError::at(index, "terminal-reason"));
+                    }
                 }
-                CmaStopReason::TargetReached
-                | CmaStopReason::BudgetExhausted
-                | CmaStopReason::Stagnated => {}
             }
 
             cursor = expected_end;
@@ -795,5 +796,56 @@ pub fn bipop_cmaes<F: FnMut(&[f64]) -> f64>(
         total_evals,
         records,
         best_restart,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G0: an overflowing hypothetical next generation is not evidence that a
+    /// run exhausted its local budget. The validator must refuse the arithmetic
+    /// boundary instead of treating `checked_add(None)` as "no generation fits."
+    #[test]
+    fn ledger_refuses_wrapped_next_generation_accounting() {
+        let lambda = 6usize;
+        let evals = usize::MAX - 2;
+        let generations = (evals - 1) / lambda;
+        assert_eq!(generations * lambda + 1, evals);
+
+        let run = CmaReport {
+            x_best: vec![0.0, 0.0],
+            f_best: 0.0,
+            evals,
+            generations,
+            converged: false,
+            sigma: 1.0,
+        };
+        let record = BipopRestartRecord {
+            schema_version: BIPOP_RESTART_SCHEMA_VERSION,
+            ordinal: 0,
+            lane: BipopLane::Large,
+            lambda,
+            allocated_budget: usize::MAX,
+            seed: 7,
+            start: vec![0.0, 0.0],
+            trace_start: 0,
+            trace_end: evals,
+            stop_reason: CmaStopReason::BudgetExhausted,
+            report: run.clone(),
+        };
+        let report = BipopReport {
+            best: run,
+            schedule: vec![lambda],
+            total_evals: evals,
+            records: vec![record],
+            best_restart: 0,
+        };
+
+        let error = report
+            .validate_ledger()
+            .expect_err("overflowing next-generation accounting must fail closed");
+        assert_eq!(error.restart(), Some(0));
+        assert_eq!(error.invariant(), "evaluation-overflow");
     }
 }
