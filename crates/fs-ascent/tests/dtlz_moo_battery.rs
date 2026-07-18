@@ -16,8 +16,15 @@
 //! and for any (ε₁, ε₂) with ε₁² + ε₂² < 1 the constrained optimum has
 //! CLOSED FORM f = (ε₁, ε₂, √(1 − ε₁² − ε₂²)) — both ε constraints
 //! active — so conformance is exact per grid point.
+//!
+//! The analytic fixture routes every transcendental through `fs_math::det`.
+//! The former platform-libm seam coincided with a face-attached basin on
+//! x86-64 even though the same schedule reached 18/19 closed-form vertices on
+//! M4. Routing the oracle removes that architecture-dependent input from the
+//! solver it is judging; the central both-ISA rerun remains the causal proof.
 
 use fs_ascent::pareto::epsilon_constraint_sweep3;
+use fs_math::det;
 
 const SUITE: &str = "fs-ascent/dtlz-moo";
 
@@ -62,10 +69,14 @@ fn g_and_dg(x: &[f64]) -> (f64, Vec<f64>) {
     (g, dg)
 }
 
+fn deterministic_sin_cos(angle: f64) -> (f64, f64) {
+    (det::sin(angle), det::cos(angle))
+}
+
 fn dtlz2_f1(x: &[f64]) -> (f64, Vec<f64>) {
     let (g, dg) = g_and_dg(x);
-    let (c1, s1) = ((x[0] * HALF_PI).cos(), (x[0] * HALF_PI).sin());
-    let (c2, s2) = ((x[1] * HALF_PI).cos(), (x[1] * HALF_PI).sin());
+    let (s1, c1) = deterministic_sin_cos(x[0] * HALF_PI);
+    let (s2, c2) = deterministic_sin_cos(x[1] * HALF_PI);
     let f = (1.0 + g) * c1 * c2;
     let mut grad = vec![0.0; N];
     grad[0] = -(1.0 + g) * HALF_PI * s1 * c2;
@@ -78,8 +89,8 @@ fn dtlz2_f1(x: &[f64]) -> (f64, Vec<f64>) {
 
 fn dtlz2_f2(x: &[f64]) -> (f64, Vec<f64>) {
     let (g, dg) = g_and_dg(x);
-    let (c1, s1) = ((x[0] * HALF_PI).cos(), (x[0] * HALF_PI).sin());
-    let (c2, s2) = ((x[1] * HALF_PI).cos(), (x[1] * HALF_PI).sin());
+    let (s1, c1) = deterministic_sin_cos(x[0] * HALF_PI);
+    let (s2, c2) = deterministic_sin_cos(x[1] * HALF_PI);
     let f = (1.0 + g) * c1 * s2;
     let mut grad = vec![0.0; N];
     grad[0] = -(1.0 + g) * HALF_PI * s1 * s2;
@@ -92,7 +103,7 @@ fn dtlz2_f2(x: &[f64]) -> (f64, Vec<f64>) {
 
 fn dtlz2_f3(x: &[f64]) -> (f64, Vec<f64>) {
     let (g, dg) = g_and_dg(x);
-    let (c1, s1) = ((x[0] * HALF_PI).cos(), (x[0] * HALF_PI).sin());
+    let (s1, c1) = deterministic_sin_cos(x[0] * HALF_PI);
     let f = (1.0 + g) * s1;
     let mut grad = vec![0.0; N];
     grad[0] = (1.0 + g) * HALF_PI * c1;
@@ -153,7 +164,7 @@ fn dtlz2_sphere_octant_front_conformance() {
         let (g, _) = g_and_dg(&point.x);
         worst_g = worst_g.max(g);
         worst_kkt = worst_kkt.max(point.kkt.stationarity);
-        let expected3 = (1.0 - e1 * e1 - e2 * e2).sqrt();
+        let expected3 = det::sqrt(1.0 - e1 * e1 - e2 * e2);
         let dev = (f1 - e1)
             .abs()
             .max((f2 - e2).abs())
