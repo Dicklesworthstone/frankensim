@@ -2647,16 +2647,22 @@ fn casual_cfg_test_spans(
                 .iter()
                 .enumerate()
                 .filter(|(open, token)| {
-                    token.text == "{"
+                    matches!(token.text, "(" | "[" | "{")
                         && *open < index
                         && pairs[*open].is_some_and(|close| index < close)
                 })
-                .map(|(open, _)| (open, pairs[open].expect("filtered paired brace")))
+                .map(|(open, _)| (open, pairs[open].expect("filtered paired delimiter")))
                 .max_by_key(|(open, _)| *open);
-            if let Some(span) = containing {
-                spans.push(span);
-            } else {
-                file_test_only = true;
+            match containing {
+                Some((open, close)) if tokens[open].text == "{" => spans.push((open, close)),
+                None => file_test_only = true,
+                Some(_) => {
+                    // A `#![cfg(test)]` token inside a parenthesized or bracketed
+                    // macro input is not an inner attribute on the surrounding
+                    // function/module. Treating the nearest outer brace as its
+                    // owner would let inert macro input hide later production
+                    // output in that brace.
+                }
             }
             continue;
         }
@@ -4409,6 +4415,30 @@ mod tests {
         .collect();
         let violations = audit_casual_print_sources(&sources);
         assert_eq!(violations.len(), 1, "comment trivia cannot hide the bang");
+        assert!(violations[0].detail.contains("println!"));
+    }
+
+    #[test]
+    fn casual_print_scanner_does_not_promote_macro_tokens_to_enclosing_cfg() {
+        let sources = [(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "macro_rules! swallow { ($($tokens:tt)*) => {}; }\n",
+                "pub fn leak() {\n",
+                "    swallow!(#![cfg(test)]);\n",
+                "    println!(\"production output remains visible\");\n",
+                "}\n",
+            )
+            .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let violations = audit_casual_print_sources(&sources);
+        assert_eq!(
+            violations.len(),
+            1,
+            "macro token input cannot make the enclosing production function test-only"
+        );
         assert!(violations[0].detail.contains("println!"));
     }
 
