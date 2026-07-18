@@ -31,19 +31,23 @@ library builds.
   selector plus the complete canonical input frame. `case_replayable` derives
   the case digest from these bytes and emits a `ReplayRecord`; callers cannot
   independently supply a drifting digest.
-- `ReplayRecord::verify_and_decode` — canonical-lowercase hex reconstruction
-  followed by declared-length and FNV verification. `ReplayError` localizes
-  malformed or noncanonical hex, length drift, and digest drift.
+- `ReplayRecord::verify_and_decode` — schema/required-field admission followed
+  by canonical-lowercase hex reconstruction and declared-length/FNV
+  verification. `verify_and_decode_for` additionally checks the independently
+  selected suite and case identity. `ReplayError` localizes version, identity,
+  required-field, hex, length, and digest failures.
 - `DisagreementRecord::first` — exact-frame comparison returning `None` for
   equality or a record with complete lengths/digests and the first differing
   byte offset. A common-prefix length mismatch records `None` for the side that
-  ended first. `json_line()` renders deterministic bug-report-ready JSONL.
+  ended first. Its comparison evidence is immutable after construction and is
+  exposed through read-only accessors; `json_line()` renders deterministic
+  bug-report-ready JSONL.
 - `CaseRecord` — the typed per-case record; `json_line()` renders the
   one-line JSON form with deterministic field order and full escaping.
 - `SuiteReport { records, replay_records, disagreements }` — `all_passed()` (an
-  empty suite is NOT green), `failures()`, replay/disagreement lookup, and
-  `assert_green()` (panics carrying the failing case plus its replay and
-  disagreement rows).
+  empty suite is NOT green), `failures()`, unambiguous replay/disagreement
+  lookup, and `assert_green()` (panics carrying each failing registration plus
+  that exact registration's replay and disagreement rows).
 
 ## Invariants
 
@@ -54,16 +58,23 @@ library builds.
   bytes. Replay metadata is additive companion JSONL, never an in-place schema
   mutation of legacy case rows.
 - Every replayable-case digest is derived from its retained canonical bytes.
-  Decoding a replay record must reproduce those bytes, length, and digest or
-  fail closed with a typed `ReplayError`.
+  Decoding a replay record must admit its schema and required fields and
+  reproduce those bytes, length, and digest or fail closed with a typed
+  `ReplayError`; matching it to a selected case also requires exact suite/case
+  identity.
 - Disagreement localization reports the first unequal byte, or the first
   absent byte when equal prefixes have different lengths. It binds both full
   frames by length and FNV even though it retains only the localized bytes.
-- Attaching any disagreement forces its owning `CaseOutcome` red. The report
-  binds its suite/case identity to the owning registration, then emits replay
-  companions and disagreements in owning-case/discovery order.
+- Attaching any disagreement forces its owning `CaseOutcome` red. Private
+  registration/discovery ordinals bind every companion to the exact execution
+  that produced it without changing stable JSON bytes; the report admits only
+  ordered, in-bounds, identity-consistent companions and refuses a green record
+  carrying disagreement evidence.
 - Duplicate case ids and empty case ids are recorded as structural
-  FAILURES at run time (fail closed), never silently accepted.
+  FAILURES at run time (fail closed), never silently accepted. String lookup
+  for a duplicate id is intentionally ambiguous and returns no companion;
+  registration-indexed failure rendering still retains each duplicate's own
+  evidence.
 - An empty suite is not green: running nothing proves nothing.
 - `json_line()` output is exactly one line; all string content is escaped.
 - The case format is data-first: outcomes and reports are values, printing
@@ -74,7 +85,9 @@ library builds.
 
 Legacy registration remains infallible: static ids and closures; defects
 discovered at run time (duplicate/empty ids) become failing records rather
-than panics. Replay hex reconstruction returns typed `ReplayError` values.
+than panics. Replay admission returns typed `ReplayError` values for unsupported
+schemas, empty required fields, selected-identity mismatch, or frame-integrity
+failure.
 `assert_green` is the deliberate merge-gate panic point, used by test mains to
 fail the process with all relevant structured rows. `Suite::new` panics on an
 empty suite name and `ReplaySpec::new` on an empty command (programmer errors).
@@ -105,12 +118,15 @@ None.
 
 `tests/casebook.rs` — the demo suite (the copyable example of adding cases:
 exact-roundtrip, numeric-tolerance, structural-refusal); the intentionally
-failing self-test; fail-closed empty and duplicate-id suites; legacy JSON
-escaping and FNV constants; stable replay companion rows; canonical-frame hex
-round-trip plus length/digest tamper refusal; identical-frame no-disagreement;
-seeded first-byte corruption localization; common-prefix length-boundary
-localization; owning-case identity binding; companion JSON escaping; and
-`assert_green` retention of the bug-report-ready rows.
+failing self-test; fail-closed empty and duplicate-id suites with exact
+per-registration companion ownership; exact legacy `CaseRecord` JSON bytes,
+escaping, and FNV constants; stable replay companion rows; schema,
+required-field, selected-identity, canonical-frame, length, and digest tamper
+refusal; identical-frame no-disagreement; seeded first-byte corruption
+localization; common-prefix length-boundary localization; immutable
+disagreement evidence and owning-case identity binding; companion JSON
+escaping; report-integrity red controls; and `assert_green` retention of the
+bug-report-ready rows.
 
 ## No-claim boundaries
 
