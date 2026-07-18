@@ -889,11 +889,17 @@ admitted derived-geometry boundary.
   preload source/unit/SI bits, scheduled occurrence links, introduced bodies,
   and every canonical availability count and history-bound chain root. Its
   explicit 160 MiB field / 256 MiB aggregate envelope covers the independently
-  derived true maximum: an `ExecutionClaimed` `PreloadedBolt` with two clamped
-  members and 62 typed stack participants has a 33,741-byte occurrence row, a
-  138,235,912-byte 4,096-row occurrence field, and a 226,037,784-byte combined
-  maximum collection payload before fixed schema framing. Admission refuses raw
-  N+1 inputs before nested graph/canonical-row work;
+  derived true maximum occurrence row and field: an `ExecutionClaimed`
+  `PreloadedBolt` with two clamped members and 62 typed stack participants has a
+  33,741-byte row, and 4,096 such rows form the true 138,235,912-byte maximum
+  occurrence field. For conservative resource admission, 226,037,784 bytes is
+  the safe rectangular sum of the independent occurrence-field, step-field,
+  and initial-field maxima before fixed schema framing. That aggregate is not
+  claimed to be simultaneously realizable: exactly-once scheduling limits total
+  step references to at most 4,096 occurrences, so 4,096 steps cannot each
+  contain 64 references, and the Machine-graph owned-element cap prevents
+  maximum introductions in every step from coexisting with the maximum initial
+  set. Admission refuses raw N+1 inputs before nested graph/canonical-row work;
   duplicate identities, ordinals, references, or stack positions;
   family-cardinality/role defects; unknown or cross-owner selectors;
   conflicting declared bodies or exclusivity; unavailable or unused
@@ -909,7 +915,9 @@ admitted derived-geometry boundary.
   than calling production tag accessors or `CanonicalEncoder`. Reviewed literal
   semantic-ID, schema-ID, canonical-preimage, availability-root, byte and item
   goldens plus tag/order/framing mutations guard coordinated oracle drift. The
-  true maximum-grammar-width row and field arithmetic is independently pinned.
+  true occurrence-row and occurrence-field maxima, independently maximized
+  step-row and initial-field arithmetic, and nonattainable rectangular
+  step-field/aggregate envelopes are separately pinned.
 - This structural seed does not find or validate collision-free insertion
   paths, tool access, order optimality, inventory, occurrence/configuration or
   effectivity, mating/alignment, detached-subassembly connectivity, or actual or

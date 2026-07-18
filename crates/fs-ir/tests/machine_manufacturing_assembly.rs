@@ -3019,7 +3019,7 @@ fn maximum_width_graph_v2() -> (AdmittedMachineGraph, Vec<(String, String)>) {
 }
 
 #[test]
-fn mas2_016_true_maximum_execution_claimed_preloaded_bolt_envelope_is_pinned() {
+fn mas2_016_true_maximum_occurrence_field_and_safe_rectangular_envelope_are_pinned() {
     let (graph, pairs) = maximum_width_graph_v2();
     let clamped_members = pairs[..2]
         .iter()
@@ -3119,7 +3119,7 @@ fn mas2_016_true_maximum_execution_claimed_preloaded_bolt_envelope_is_pinned() {
         computed_max_occurrence_field <= MACHINE_ASSEMBLY_IDENTITY_LIMITS_V2.max_field_bytes(),
         "computed true maximum-width occurrence field must fit the declared canonical envelope"
     );
-    let computed_max_step_row = 136_u64
+    let computed_independent_max_step_row = 136_u64
         + 4
         + 8
         + u64::try_from(MAX_MACHINE_ASSEMBLY_INTRODUCTIONS_PER_STEP_V2)
@@ -3131,27 +3131,35 @@ fn mas2_016_true_maximum_execution_claimed_preloaded_bolt_envelope_is_pinned() {
             * (8 + 136)
         + 2 * (8 + 8 + 32);
     assert_eq!(
-        computed_max_step_row, 21_244,
-        "maximum step row must include 64 maximum-key introductions and references plus both count/root pairs"
+        computed_independent_max_step_row, 21_244,
+        "one independently maximized step row includes 64 maximum-key introductions and references plus both count/root pairs"
     );
-    let computed_max_step_field = 8_u64
+    let rectangular_step_field_envelope = 8_u64
         + u64::try_from(MAX_MACHINE_ASSEMBLY_STEPS_V2).expect("step cap fits u64")
-            * (8 + computed_max_step_row);
-    assert_eq!(computed_max_step_field, 87_048_200);
+            * (8 + computed_independent_max_step_row);
+    assert_eq!(rectangular_step_field_envelope, 87_048_200);
     assert!(
-        computed_max_step_field <= MACHINE_ASSEMBLY_IDENTITY_LIMITS_V2.max_field_bytes(),
-        "computed maximum-width step field must fit the declared field envelope"
+        rectangular_step_field_envelope <= MACHINE_ASSEMBLY_IDENTITY_LIMITS_V2.max_field_bytes(),
+        "the rectangular all-rows-at-independent-maximum step envelope must fit the field limit"
     );
-    let computed_max_initial_field = 8_u64
+    let computed_independent_max_initial_field = 8_u64
         + u64::try_from(MAX_MACHINE_ASSEMBLY_INITIAL_BODIES_V2).expect("initial-body cap fits u64")
             * (8 + 176);
-    assert_eq!(computed_max_initial_field, 753_672);
-    let computed_max_collection_payload =
-        computed_max_occurrence_field + computed_max_step_field + computed_max_initial_field;
-    assert_eq!(computed_max_collection_payload, 226_037_784);
+    assert_eq!(computed_independent_max_initial_field, 753_672);
+    // This is a deliberately conservative rectangular resource envelope, not
+    // a simultaneously realizable assembly. Exactly-once scheduling limits
+    // total step references to at most 4,096 occurrences, so 4,096 steps
+    // cannot each carry 64 references; the Machine-graph owned-element cap
+    // likewise prevents maximum introductions in every step from coexisting
+    // with the maximum initial set.
+    let safe_rectangular_independent_maxima_envelope = computed_max_occurrence_field
+        + rectangular_step_field_envelope
+        + computed_independent_max_initial_field;
+    assert_eq!(safe_rectangular_independent_maxima_envelope, 226_037_784);
     assert!(
-        computed_max_collection_payload < MACHINE_ASSEMBLY_IDENTITY_LIMITS_V2.max_canonical_bytes(),
-        "all three maximum-width collection fields must leave explicit room for schema framing and fixed fields"
+        safe_rectangular_independent_maxima_envelope
+            < MACHINE_ASSEMBLY_IDENTITY_LIMITS_V2.max_canonical_bytes(),
+        "the safe rectangular sum of independent collection maxima must leave room for fixed schema framing"
     );
     assert_eq!(
         admitted.identity_receipt().canonical_bytes(),
