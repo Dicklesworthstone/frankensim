@@ -116,6 +116,22 @@ telemetry/legacy correlation.
   standalone frames do not bind a value, QoI, units, checker, derivation,
   hypothesis, sample, method, or trust context, and they do not alter the
   existing inline `CertifiedF64EvidenceIdV1` v1 schema.
+- `identity` module (sj31i.52.2 discrepancy-input tranche) —
+  `FidelityPairIdV1` is a strong `SemanticId` for one exact, helper-admitted
+  two-fidelity observation. The opaque `IdentifiedFidelityPairV1` consumes and
+  retains a nonempty `BTreeMap` parameter point while binding sorted,
+  length-framed parameter names, exact finite coordinate bits, and exact finite
+  low/high QoI bits. Parameter names reuse the discrepancy fit's bounded
+  machine-readable identity grammar; parameter count is hard-capped at 1,024,
+  the ordered field at 1 MiB, and the complete frame and stream chunks obey
+  caller limits. `DiscrepancyBandIdV1` similarly retains and binds exact mean
+  and maximum relative-discrepancy bits after refusing NaN, negative values, or
+  mean greater than maximum. Positive infinity is explicit unbounded state and
+  accepted signed zero remains bit-distinct. These are local structural
+  projections only: the pair does not bind model/source/run/unit authority, and
+  the band does not bind its corpus, domain, pair count, query, metric, or
+  derivation. No `DiscrepancyModel` identity is claimed because the current
+  fitted state does not retain the exact training corpus or model provenance.
 - `identity` module (sj31i.52.2 tranche 3) —
   `CertifiedF64EvidenceIdV1` is a strong `SemanticId` for the helper-defined
   semantic projection of one opaque `Certified<f64>`. The helper consumes and
@@ -358,13 +374,24 @@ telemetry/legacy correlation.
     result. Ordered infinite numerical states are admitted only as structural,
     potentially vacuous declarations. Raw aliases remain schema-shaped framing
     and cannot manufacture the helper attachment.
+19. Opaque helper-built fidelity-pair and discrepancy-band identities
+    (sj31i.52.2, G0/G3/G4) retain exact admitted inputs and agree with
+    independent canonical frames. Parameter insertion order normalizes through
+    `BTreeMap`; every name, coordinate, or low/high QoI bit mutation moves the
+    pair root. Every mean/maximum bit mutation moves the band root, including
+    signed zero, while positive infinity remains explicit unbounded state.
+    Empty/oversized points, invalid names, non-finite coordinates/QoIs,
+    malformed bands, exact field/count/chunk/frame overflow, zero cancellation
+    stride, and entry, traversal, or late cancellation publish no opaque result.
+    Raw aliases remain schema-shaped framing and cannot manufacture retained
+    helper correspondence.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
 `OutOfDomain`, `FitError`, `FalsifyError`, and typed identity refusals including
 `ModelEvidenceIdentityError`, `ModelCardIdentityError`,
-`NumericalCertificateIdentityError`, and
-`StatisticalCertificateIdentityError` — all
+`NumericalCertificateIdentityError`, `StatisticalCertificateIdentityError`,
+`FidelityPairIdentityError`, and `DiscrepancyBandIdentityError` — all
 `core::error::Error` with actionable Display text. Constructors are total
 (enclosure bounds normalize by swapping); no panics cross the boundary.
 
@@ -377,9 +404,11 @@ divergence.
 
 ## Cancellation behavior
 Core certificate/color algebra is bounded small synchronous work. Typed color,
-validity-domain, standalone-certificate, model-evidence, certified-f64, and
-model-card identity helpers accept an explicit cancellation probe. Standalone
-certificate helpers poll at entry and through fixed-size canonical framing.
+validity-domain, standalone-certificate, fidelity/discrepancy, model-evidence,
+certified-f64, and model-card identity helpers accept an explicit cancellation
+probe. Standalone certificate and discrepancy-band helpers poll at entry and
+through fixed-size canonical framing. Fidelity-pair helpers additionally poll
+while preflighting parameters and streaming exact name/value rows.
 Color payload copies poll at the
 configured byte stride; validity and sensitivity rows poll at stream
 boundaries; set/row preflights poll while traversing caller data. Model-card
@@ -777,6 +806,23 @@ physical validation, process-standard conformance, or decision fitness.
   scientific authority. Existing certified-f64 v1 encodes certificate fields
   inline and does not child-bind either standalone ID, so these projections do
   not transitively upgrade `Evidence`, `Certified`, Color, or ledger identity.
+- `IdentifiedFidelityPairV1` proves only exact local structural framing of one
+  retained parameter point and two numeric observations. It binds no parameter
+  units, dimensions, coordinate frame, QoI definition or units, low/high model
+  name/version/content IDs, fidelity ordering, source/run/experiment identity,
+  seeds, hardware, solver settings, pairing authenticity, custody, provenance,
+  or truth of the high-fidelity value as a reference. Matching pair IDs do not
+  prove repeated or independent observations. The name grammar is structural
+  admission only and adds no parameter ontology.
+- `IdentifiedDiscrepancyBandV1` proves only exact local structural framing of
+  admitted mean/maximum bits. It binds no training corpus or typed pair
+  children, validity domain, pair count, query point, QoI/reference denominator,
+  discrepancy metric, weighting or aggregation algorithm/version, sampling
+  design, uncertainty/confidence, model identity, derivation, rigor, or trust.
+  Positive infinity is an honest unbounded declaration, not evidence quality.
+  Neither identity promotes Estimated evidence to Validated/Verified or binds
+  the other transitively. A durable `DiscrepancyModel` identity remains deferred
+  until exact corpus/model provenance and fit-algorithm identity can be bound.
 - `IdentifiedCertifiedF64EvidenceV1` proves only the helper-defined strong
   semantic projection of an already-local `Certified<f64>` and keeps that
   record attached. It does not add units, a quantity kind, source or model-card

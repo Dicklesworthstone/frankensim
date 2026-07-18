@@ -14,7 +14,9 @@ use fs_evidence::{
     ColorEvidenceCompositionOpV1, ColorEvidenceIdentityError, ColorEvidenceNodeIdV1,
     ColorEvidenceNodeIdentitySchemaV1, ColorEvidenceNodeKindV1, ColorEvidenceNodeV1,
     ColorEvidenceOperationV1, ColorEvidenceParentSemanticsV1, ColorEvidenceSourceIdV1,
-    ColorEvidenceSourceV1, Evidence, IdentifiedCertifiedF64EvidenceV1, IdentifiedModelCardV1,
+    ColorEvidenceSourceV1, DiscrepancyBand, DiscrepancyBandIdV1, DiscrepancyBandIdentityError,
+    DiscrepancyBandReceiptV1, Evidence, FidelityPair, FidelityPairIdV1, FidelityPairIdentityError,
+    FidelityPairReceiptV1, IdentifiedCertifiedF64EvidenceV1, IdentifiedModelCardV1,
     IdentifiedModelEvidenceV1, IdentifiedValidityDomainV1, ModelCard,
     ModelCardCalibrationSourceIdV1, ModelCardCalibrationSourceReceiptV1, ModelCardIdV1,
     ModelCardIdentityError, ModelCardReceiptV1, ModelEvidence, ModelEvidenceIdV1,
@@ -25,9 +27,9 @@ use fs_evidence::{
     StatisticalCertificateReceiptV1, ValidityDomain, ValidityDomainIdV1,
     ValidityDomainIdentityError, compose_color_evidence_nodes_v1,
     identify_certified_f64_evidence_v1, identify_color_evidence_source_node_v1,
-    identify_color_evidence_source_v1, identify_model_card_v1, identify_model_evidence_v1,
-    identify_numerical_certificate_v1, identify_statistical_certificate_v1,
-    identify_validity_domain_v1,
+    identify_color_evidence_source_v1, identify_discrepancy_band_v1, identify_fidelity_pair_v1,
+    identify_model_card_v1, identify_model_evidence_v1, identify_numerical_certificate_v1,
+    identify_statistical_certificate_v1, identify_validity_domain_v1,
 };
 
 const LIMITS: CanonicalLimits = CanonicalLimits::new(16_384, 8_192, 32, 64, 256);
@@ -137,6 +139,69 @@ fn manual_statistical_certificate_receipt(
         .expect("statistical certificate")
         .finish()
         .expect("manual statistical-certificate identity")
+}
+
+fn fidelity_pair_fixture() -> FidelityPair {
+    FidelityPair {
+        params: BTreeMap::from([("alpha".to_string(), -0.0), ("mach".to_string(), 0.7)]),
+        lo_fi: 4.0,
+        hi_fi: 5.0,
+    }
+}
+
+fn manual_fidelity_pair_receipt(pair: &FidelityPair) -> FidelityPairReceiptV1 {
+    let parameter_rows: Vec<Vec<u8>> = pair
+        .params
+        .iter()
+        .map(|(name, value)| {
+            let mut row = Vec::new();
+            row.extend_from_slice(
+                &u64::try_from(name.len())
+                    .expect("parameter-name length")
+                    .to_le_bytes(),
+            );
+            row.extend_from_slice(name.as_bytes());
+            row.extend_from_slice(&value.to_bits().to_le_bytes());
+            row
+        })
+        .collect();
+    CanonicalEncoder::<FidelityPairIdV1, _>::new(LIMITS, || false)
+        .expect("fidelity-pair schema")
+        .ordered_bytes(
+            Field::new(0, "parameters"),
+            u64::try_from(parameter_rows.len()).expect("parameter count"),
+            parameter_rows.iter().map(Vec::as_slice),
+        )
+        .expect("parameter point")
+        .u64(
+            Field::new(1, "lo-fi-qoi-ieee754-bits"),
+            pair.lo_fi.to_bits(),
+        )
+        .expect("low-fidelity QoI")
+        .u64(
+            Field::new(2, "hi-fi-qoi-ieee754-bits"),
+            pair.hi_fi.to_bits(),
+        )
+        .expect("high-fidelity QoI")
+        .finish()
+        .expect("manual fidelity-pair identity")
+}
+
+fn manual_discrepancy_band_receipt(band: DiscrepancyBand) -> DiscrepancyBandReceiptV1 {
+    CanonicalEncoder::<DiscrepancyBandIdV1, _>::new(LIMITS, || false)
+        .expect("discrepancy-band schema")
+        .u64(
+            Field::new(0, "mean-rel-ieee754-bits"),
+            band.mean_rel.to_bits(),
+        )
+        .expect("mean discrepancy")
+        .u64(
+            Field::new(1, "max-rel-ieee754-bits"),
+            band.max_rel.to_bits(),
+        )
+        .expect("maximum discrepancy")
+        .finish()
+        .expect("manual discrepancy-band identity")
 }
 
 fn model_evidence_fixture() -> ModelEvidence {
@@ -1034,6 +1099,586 @@ fn standalone_certificate_identities_enforce_resources_cancellation_and_no_trans
             .expect("second statistical projection")
             .id()
     );
+}
+
+#[test]
+fn fidelity_pair_and_discrepancy_band_identities_replay_and_retain_inputs() {
+    let pair = fidelity_pair_fixture();
+    let first =
+        identify_fidelity_pair_v1(pair.clone(), LIMITS, || false).expect("admitted fidelity pair");
+    let replay =
+        identify_fidelity_pair_v1(pair.clone(), LIMITS, || false).expect("replayed fidelity pair");
+    let manual = manual_fidelity_pair_receipt(&pair);
+    assert_eq!(first.id(), replay.id());
+    assert_eq!(first.id(), manual.id());
+    assert_eq!(
+        first.receipt().canonical_preimage(),
+        manual.canonical_preimage()
+    );
+    assert_eq!(first.pair(), &pair);
+    assert_eq!(first.id_bytes(), first.receipt().audit_record().id());
+    assert_eq!(first.trust_state(), TrustState::Unanchored);
+    assert_eq!(
+        first.receipt().audit_record().no_claim(),
+        NoClaimState::ExternalTrustRequired
+    );
+
+    let mut reverse_insertion = BTreeMap::new();
+    reverse_insertion.insert("mach".to_string(), 0.7);
+    reverse_insertion.insert("alpha".to_string(), -0.0);
+    let reordered = FidelityPair {
+        params: reverse_insertion,
+        lo_fi: pair.lo_fi,
+        hi_fi: pair.hi_fi,
+    };
+    assert_eq!(
+        first.id(),
+        identify_fidelity_pair_v1(reordered, LIMITS, || false)
+            .expect("BTreeMap-normalized pair")
+            .id()
+    );
+    assert_eq!(first.into_pair(), pair);
+
+    for band in [
+        DiscrepancyBand {
+            mean_rel: 0.1,
+            max_rel: 0.25,
+        },
+        DiscrepancyBand {
+            mean_rel: f64::INFINITY,
+            max_rel: f64::INFINITY,
+        },
+    ] {
+        let first = identify_discrepancy_band_v1(band, LIMITS, || false)
+            .expect("admitted discrepancy band");
+        let replay = identify_discrepancy_band_v1(band, LIMITS, || false)
+            .expect("replayed discrepancy band");
+        let manual = manual_discrepancy_band_receipt(band);
+        assert_eq!(first.id(), replay.id());
+        assert_eq!(first.id(), manual.id());
+        assert_eq!(
+            first.receipt().canonical_preimage(),
+            manual.canonical_preimage()
+        );
+        assert_eq!(first.band(), &band);
+        assert_eq!(first.id_bytes(), first.receipt().audit_record().id());
+        assert_eq!(first.trust_state(), TrustState::Unanchored);
+        assert_eq!(
+            first.receipt().audit_record().no_claim(),
+            NoClaimState::ExternalTrustRequired
+        );
+        assert_eq!(first.into_band(), band);
+    }
+}
+
+#[test]
+fn fidelity_pair_identity_binds_every_field_and_refuses_malformed_observations() {
+    let pair = fidelity_pair_fixture();
+    let base =
+        identify_fidelity_pair_v1(pair.clone(), LIMITS, || false).expect("baseline fidelity pair");
+
+    let mut coordinate = pair.clone();
+    coordinate
+        .params
+        .insert("mach".to_string(), 0.7_f64.next_up());
+    let mut renamed = pair.clone();
+    let alpha = renamed
+        .params
+        .remove("alpha")
+        .expect("fixture alpha coordinate");
+    renamed.params.insert("beta".to_string(), alpha);
+    let mut added = pair.clone();
+    added.params.insert("reynolds".to_string(), 1_000.0);
+    let mut lo_fi = pair.clone();
+    lo_fi.lo_fi = 4.0_f64.next_up();
+    let mut hi_fi = pair.clone();
+    hi_fi.hi_fi = 5.0_f64.next_down();
+    for (field, mutated) in [
+        ("coordinate", coordinate),
+        ("parameter-name", renamed),
+        ("parameter-count", added),
+        ("lo-fi-qoi", lo_fi),
+        ("hi-fi-qoi", hi_fi),
+    ] {
+        assert_ne!(
+            base.id(),
+            identify_fidelity_pair_v1(mutated, LIMITS, || false)
+                .expect("valid field mutation")
+                .id(),
+            "{field} must move the root"
+        );
+    }
+
+    let mut positive_coordinate = pair.clone();
+    positive_coordinate.params.insert("alpha".to_string(), 0.0);
+    assert_ne!(
+        base.id(),
+        identify_fidelity_pair_v1(positive_coordinate, LIMITS, || false)
+            .expect("positive-zero coordinate")
+            .id()
+    );
+    let positive_qoi = FidelityPair {
+        params: BTreeMap::from([("x".to_string(), 1.0)]),
+        lo_fi: 0.0,
+        hi_fi: 1.0,
+    };
+    let negative_qoi = FidelityPair {
+        lo_fi: -0.0,
+        ..positive_qoi.clone()
+    };
+    assert_ne!(
+        identify_fidelity_pair_v1(positive_qoi, LIMITS, || false)
+            .expect("positive-zero QoI")
+            .id(),
+        identify_fidelity_pair_v1(negative_qoi, LIMITS, || false)
+            .expect("negative-zero QoI")
+            .id()
+    );
+
+    assert_eq!(
+        identify_fidelity_pair_v1(
+            FidelityPair {
+                params: BTreeMap::new(),
+                lo_fi: 1.0,
+                hi_fi: 2.0,
+            },
+            LIMITS,
+            || false,
+        ),
+        Err(FidelityPairIdentityError::EmptyParameterPoint)
+    );
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            FidelityPair {
+                params: BTreeMap::from([("alpha beta".to_string(), 1.0)]),
+                lo_fi: 1.0,
+                hi_fi: 2.0,
+            },
+            LIMITS,
+            || false,
+        ),
+        Err(FidelityPairIdentityError::InvalidParameterName {
+            parameter_index: 0,
+            reason: "invalid-character",
+        })
+    ));
+    let coordinate_nan = f64::from_bits(0x7ff8_0000_0000_0042);
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            FidelityPair {
+                params: BTreeMap::from([("x".to_string(), coordinate_nan)]),
+                lo_fi: 1.0,
+                hi_fi: 2.0,
+            },
+            LIMITS,
+            || false,
+        ),
+        Err(FidelityPairIdentityError::NonFiniteParameter {
+            parameter_index: 0,
+            bits,
+        }) if bits == coordinate_nan.to_bits()
+    ));
+    for (field, lo_fi, hi_fi, bits) in [
+        ("lo_fi", f64::INFINITY, 2.0, f64::INFINITY.to_bits()),
+        ("hi_fi", 1.0, f64::NAN, f64::NAN.to_bits()),
+    ] {
+        assert!(matches!(
+            identify_fidelity_pair_v1(
+                FidelityPair {
+                    params: BTreeMap::from([("x".to_string(), 0.0)]),
+                    lo_fi,
+                    hi_fi,
+                },
+                LIMITS,
+                || false,
+            ),
+            Err(FidelityPairIdentityError::NonFiniteQoi {
+                field: actual_field,
+                bits: actual_bits,
+            }) if actual_field == field && actual_bits == bits
+        ));
+    }
+}
+
+#[test]
+fn discrepancy_band_identity_binds_bits_and_refuses_malformed_bands() {
+    let base_band = DiscrepancyBand {
+        mean_rel: 0.1,
+        max_rel: 0.25,
+    };
+    let base = identify_discrepancy_band_v1(base_band, LIMITS, || false)
+        .expect("baseline discrepancy band");
+    let mean = identify_discrepancy_band_v1(
+        DiscrepancyBand {
+            mean_rel: 0.1_f64.next_up(),
+            ..base_band
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("mutated mean");
+    let maximum = identify_discrepancy_band_v1(
+        DiscrepancyBand {
+            max_rel: 0.25_f64.next_up(),
+            ..base_band
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("mutated maximum");
+    assert_ne!(base.id(), mean.id());
+    assert_ne!(base.id(), maximum.id());
+
+    let positive_zero = identify_discrepancy_band_v1(
+        DiscrepancyBand {
+            mean_rel: 0.0,
+            max_rel: 0.0,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("positive-zero band");
+    let negative_zero = identify_discrepancy_band_v1(
+        DiscrepancyBand {
+            mean_rel: -0.0,
+            max_rel: 0.0,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("negative-zero mean");
+    assert_ne!(positive_zero.id(), negative_zero.id());
+    identify_discrepancy_band_v1(
+        DiscrepancyBand {
+            mean_rel: 1.0,
+            max_rel: f64::INFINITY,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("positive infinity is explicit unbounded state");
+
+    let invalid = [
+        (
+            DiscrepancyBand {
+                mean_rel: f64::NAN,
+                max_rel: 1.0,
+            },
+            "mean_rel",
+            f64::NAN,
+            "value must not be NaN",
+        ),
+        (
+            DiscrepancyBand {
+                mean_rel: 0.0,
+                max_rel: f64::NAN,
+            },
+            "max_rel",
+            f64::NAN,
+            "value must not be NaN",
+        ),
+        (
+            DiscrepancyBand {
+                mean_rel: -1.0,
+                max_rel: 1.0,
+            },
+            "mean_rel",
+            -1.0,
+            "value must be non-negative",
+        ),
+        (
+            DiscrepancyBand {
+                mean_rel: 0.0,
+                max_rel: -1.0,
+            },
+            "max_rel",
+            -1.0,
+            "value must be non-negative",
+        ),
+        (
+            DiscrepancyBand {
+                mean_rel: 0.5,
+                max_rel: 0.25,
+            },
+            "mean_rel",
+            0.5,
+            "mean_rel must not exceed max_rel",
+        ),
+    ];
+    for (band, expected_field, expected_value, expected_reason) in invalid {
+        assert!(matches!(
+            identify_discrepancy_band_v1(band, LIMITS, || false),
+            Err(DiscrepancyBandIdentityError::InvalidBand {
+                field,
+                bits,
+                reason,
+            }) if field == expected_field
+                && bits == expected_value.to_bits()
+                && reason == expected_reason
+        ));
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one resource matrix shares exact frame, field, and cancellation accounting"
+)]
+fn fidelity_pair_and_discrepancy_band_identities_enforce_resources_and_cancellation() {
+    let pair = fidelity_pair_fixture();
+    let pair_baseline =
+        identify_fidelity_pair_v1(pair.clone(), LIMITS, || false).expect("baseline fidelity pair");
+    let pair_frame = pair_baseline.receipt().canonical_bytes();
+    identify_fidelity_pair_v1(
+        pair.clone(),
+        CanonicalLimits::new(pair_frame, 8_192, 3, 64, 64),
+        || false,
+    )
+    .expect("exact fidelity-pair frame limit");
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            pair.clone(),
+            CanonicalLimits::new(pair_frame - 1, 8_192, 3, 64, 64),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == pair_frame - 1
+    ));
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            pair.clone(),
+            CanonicalLimits::new(16_384, 8_192, 2, 64, 64),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::Fields,
+                requested: 3,
+                limit: 2,
+            }
+        ))
+    ));
+
+    let longest_name = "a".repeat(256);
+    let longest_pair = FidelityPair {
+        params: BTreeMap::from([(longest_name, 1.0)]),
+        lo_fi: 1.0,
+        hi_fi: 2.0,
+    };
+    identify_fidelity_pair_v1(
+        longest_pair.clone(),
+        CanonicalLimits::new(16_384, 288, 3, 3, 64),
+        || false,
+    )
+    .expect("exact 288-byte parameter field");
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            longest_pair,
+            CanonicalLimits::new(16_384, 287, 3, 3, 64),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::FieldBytes,
+                requested: 288,
+                limit: 287,
+            }
+        ))
+    ));
+
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            pair.clone(),
+            CanonicalLimits::new(16_384, 8_192, 3, 1, 64),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 2,
+                limit: 1,
+            }
+        ))
+    ));
+    let one_parameter = FidelityPair {
+        params: BTreeMap::from([("x".to_string(), 1.0)]),
+        lo_fi: 1.0,
+        hi_fi: 2.0,
+    };
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            one_parameter,
+            CanonicalLimits::new(16_384, 8_192, 3, 2, 64),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::StreamChunks,
+                requested: 3,
+                limit: 2,
+            }
+        ))
+    ));
+    let oversized_params = (0..1_025)
+        .map(|index| (format!("p{index:04}"), index as f64))
+        .collect();
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            FidelityPair {
+                params: oversized_params,
+                lo_fi: 1.0,
+                hi_fi: 2.0,
+            },
+            CanonicalLimits::new(1 << 20, 1 << 20, 3, 4_000, 64),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CollectionItems,
+                requested: 1_025,
+                limit: 1_024,
+            }
+        ))
+    ));
+
+    let band = DiscrepancyBand {
+        mean_rel: 0.1,
+        max_rel: 0.25,
+    };
+    let band_baseline =
+        identify_discrepancy_band_v1(band, LIMITS, || false).expect("baseline discrepancy band");
+    let band_frame = band_baseline.receipt().canonical_bytes();
+    identify_discrepancy_band_v1(
+        band,
+        CanonicalLimits::new(band_frame, 8_192, 2, 64, 64),
+        || false,
+    )
+    .expect("exact discrepancy-band frame limit");
+    assert!(matches!(
+        identify_discrepancy_band_v1(
+            band,
+            CanonicalLimits::new(band_frame - 1, 8_192, 2, 64, 64),
+            || false,
+        ),
+        Err(DiscrepancyBandIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == band_frame - 1
+    ));
+    assert!(matches!(
+        identify_discrepancy_band_v1(band, CanonicalLimits::new(16_384, 8_192, 1, 64, 64), || {
+            false
+        },),
+        Err(DiscrepancyBandIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::Fields,
+                requested: 2,
+                limit: 1,
+            }
+        ))
+    ));
+
+    assert_eq!(
+        identify_fidelity_pair_v1(
+            pair.clone(),
+            CanonicalLimits::new(16_384, 8_192, 3, 64, 0),
+            || false,
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    );
+    assert_eq!(
+        identify_discrepancy_band_v1(band, CanonicalLimits::new(16_384, 8_192, 2, 64, 0), || {
+            false
+        },),
+        Err(DiscrepancyBandIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    );
+    assert!(matches!(
+        identify_fidelity_pair_v1(pair.clone(), LIMITS, || true),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+    assert!(matches!(
+        identify_discrepancy_band_v1(band, LIMITS, || true),
+        Err(DiscrepancyBandIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            pair.clone(),
+            LIMITS,
+            CancelAfter {
+                successful_polls: 1,
+            },
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+    let pair_polls = std::cell::Cell::new(0_usize);
+    identify_fidelity_pair_v1(pair.clone(), LIMITS, || {
+        pair_polls.set(pair_polls.get() + 1);
+        false
+    })
+    .expect("baseline fidelity-pair poll count");
+    assert!(matches!(
+        identify_fidelity_pair_v1(
+            pair,
+            LIMITS,
+            CancelAfter {
+                successful_polls: pair_polls.get() - 1,
+            },
+        ),
+        Err(FidelityPairIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
+    let band_polls = std::cell::Cell::new(0_usize);
+    identify_discrepancy_band_v1(band, LIMITS, || {
+        band_polls.set(band_polls.get() + 1);
+        false
+    })
+    .expect("baseline discrepancy-band poll count");
+    assert!(matches!(
+        identify_discrepancy_band_v1(
+            band,
+            LIMITS,
+            CancelAfter {
+                successful_polls: band_polls.get() - 1,
+            },
+        ),
+        Err(DiscrepancyBandIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
 }
 
 #[test]

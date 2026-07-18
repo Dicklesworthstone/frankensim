@@ -1,10 +1,11 @@
 //! Typed, canonical identities for evidence semantics.
 //!
 //! This module covers exact color-evidence graph replay, normalized validity
-//! domains, standalone numerical/statistical certificate declarations,
-//! model-form evidence slices, model-card declarations with exact calibration
-//! sources, and an opaque strong-identity projection of locally certified
-//! scalar evidence through separate schemas. It does not reinterpret
+//! domains, standalone numerical/statistical certificate declarations, exact
+//! two-fidelity observations and discrepancy-band declarations, model-form
+//! evidence slices, model-card declarations with exact calibration sources,
+//! and an opaque strong-identity projection of locally certified scalar
+//! evidence through separate schemas. It does not reinterpret
 //! [`crate::ProvenanceHash`], and it publishes only unanchored
 //! [`IdentityReceipt`] values. Origin verification, policy admission,
 //! structural [`crate::Certified`] consistency, and scientific color rank
@@ -24,9 +25,9 @@ use fs_blake3::identity::{
 };
 
 use crate::{
-    Ambition, COLOR_ALGEBRA_VERSION, Certified, Color, ColorPayloadError, IntervalOp, ModelCard,
-    ModelEvidence, NumericalKind, ProvenanceHash, StatisticalCertificate, ValidityDomain, compose,
-    validate_color_payload,
+    Ambition, COLOR_ALGEBRA_VERSION, Certified, Color, ColorPayloadError, DiscrepancyBand,
+    FidelityPair, IntervalOp, ModelCard, ModelEvidence, NumericalKind, ProvenanceHash,
+    StatisticalCertificate, ValidityDomain, color_identity_reason, compose, validate_color_payload,
 };
 
 /// Identity schema version for exact retained color-evidence sources.
@@ -41,6 +42,10 @@ pub const MODEL_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
 pub const NUMERICAL_CERTIFICATE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one standalone statistical-certificate declaration.
 pub const STATISTICAL_CERTIFICATE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one standalone two-fidelity observation.
+pub const FIDELITY_PAIR_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one standalone discrepancy-band declaration.
+pub const DISCREPANCY_BAND_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one locally certified scalar-evidence projection.
 pub const CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for exact model-card calibration source bytes.
@@ -59,10 +64,16 @@ pub const MAX_CERTIFIED_F64_EVIDENCE_FIELD_BYTES_V1: u64 = 1 << 20;
 pub const MAX_MODEL_CARD_IDENTITY_FIELD_BYTES_V1: u64 = 1 << 20;
 /// Hard retained-byte ceiling for one model-card calibration source.
 pub const MAX_MODEL_CARD_CALIBRATION_SOURCE_BYTES_V1: u64 = 1 << 20;
+/// Hard payload ceiling for the ordered parameter field of one fidelity pair.
+pub const MAX_FIDELITY_PAIR_PARAMETERS_FIELD_BYTES_V1: u64 = 1 << 20;
+/// Hard parameter-count ceiling matching discrepancy-fit v1 admission.
+pub const MAX_FIDELITY_PAIR_PARAMETERS_V1: u64 = 1_024;
 /// Non-semantic scatter/gather writes emitted for each streamed axis row.
 const VALIDITY_DOMAIN_STREAM_CHUNKS_PER_AXIS_V1: u64 = 4;
 /// Non-semantic scatter/gather writes emitted for each sensitivity row.
 const CERTIFIED_F64_SENSITIVITY_STREAM_CHUNKS_PER_ROW_V1: u64 = 3;
+/// Non-semantic scatter/gather writes emitted for each fidelity parameter row.
+const FIDELITY_PAIR_STREAM_CHUNKS_PER_PARAMETER_V1: u64 = 3;
 
 /// Canonical identity schema for one retained source that may root a color
 /// evidence graph. The resulting identity is content-bound but untrusted.
@@ -526,6 +537,145 @@ impl IdentifiedStatisticalCertificateV1 {
     #[must_use]
     pub const fn into_certificate(self) -> StatisticalCertificate {
         self.certificate
+    }
+}
+
+/// Canonical semantic schema for one exact two-fidelity observation.
+pub enum FidelityPairIdentitySchemaV1 {}
+
+impl CanonicalSchema for FidelityPairIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.fidelity-pair.v1";
+    const NAME: &'static str = "fidelity-pair";
+    const VERSION: u32 = FIDELITY_PAIR_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "sorted exact parameter-name and finite IEEE-754 coordinate rows plus finite low/high QoI bits; no units, model identity, run, source, pairing authenticity, reference truth, origin, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("parameters", WireType::OrderedBytes),
+        FieldSpec::required("lo-fi-qoi-ieee754-bits", WireType::U64),
+        FieldSpec::required("hi-fi-qoi-ieee754-bits", WireType::U64),
+    ];
+}
+
+/// Low-level schema-shaped identity for one two-fidelity observation frame.
+///
+/// Only [`IdentifiedFidelityPairV1`] proves correspondence with a retained pair
+/// whose names and numeric fields passed local structural admission.
+pub type FidelityPairIdV1 = SemanticId<FidelityPairIdentitySchemaV1>;
+
+/// Low-level producer receipt for one two-fidelity observation frame.
+pub type FidelityPairReceiptV1 = IdentityReceipt<FidelityPairIdV1>;
+
+/// A structurally admitted two-fidelity observation kept attached to its
+/// unanchored semantic identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentifiedFidelityPairV1 {
+    pair: FidelityPair,
+    receipt: FidelityPairReceiptV1,
+}
+
+impl IdentifiedFidelityPairV1 {
+    /// Read-only fidelity pair committed by this identity.
+    #[must_use]
+    pub const fn pair(&self) -> &FidelityPair {
+        &self.pair
+    }
+
+    /// Typed structural identity.
+    #[must_use]
+    pub const fn id(&self) -> FidelityPairIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> FidelityPairReceiptV1 {
+        self.receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment and recover the plain fidelity pair.
+    #[must_use]
+    pub fn into_pair(self) -> FidelityPair {
+        self.pair
+    }
+}
+
+/// Canonical semantic schema for one standalone discrepancy-band declaration.
+pub enum DiscrepancyBandIdentitySchemaV1 {}
+
+impl CanonicalSchema for DiscrepancyBandIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.discrepancy-band.v1";
+    const NAME: &'static str = "discrepancy-band";
+    const VERSION: u32 = DISCREPANCY_BAND_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "exact admitted mean and maximum relative-discrepancy IEEE-754 bits; no corpus, domain, pair count, query point, metric, denominator, aggregation, confidence, derivation, rigor, origin, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("mean-rel-ieee754-bits", WireType::U64),
+        FieldSpec::required("max-rel-ieee754-bits", WireType::U64),
+    ];
+}
+
+/// Low-level schema-shaped identity for one discrepancy-band frame.
+///
+/// Only [`IdentifiedDiscrepancyBandV1`] proves correspondence with a retained
+/// band that passed this module's structural admission.
+pub type DiscrepancyBandIdV1 = SemanticId<DiscrepancyBandIdentitySchemaV1>;
+
+/// Low-level producer receipt for one discrepancy-band frame.
+pub type DiscrepancyBandReceiptV1 = IdentityReceipt<DiscrepancyBandIdV1>;
+
+/// A structurally admitted discrepancy band kept attached to its unanchored
+/// semantic identity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IdentifiedDiscrepancyBandV1 {
+    band: DiscrepancyBand,
+    receipt: DiscrepancyBandReceiptV1,
+}
+
+impl IdentifiedDiscrepancyBandV1 {
+    /// Read-only discrepancy band committed by this identity.
+    #[must_use]
+    pub const fn band(&self) -> &DiscrepancyBand {
+        &self.band
+    }
+
+    /// Typed structural identity.
+    #[must_use]
+    pub const fn id(&self) -> DiscrepancyBandIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> DiscrepancyBandReceiptV1 {
+        self.receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment and recover the plain band.
+    #[must_use]
+    pub const fn into_band(self) -> DiscrepancyBand {
+        self.band
     }
 }
 
@@ -1056,6 +1206,134 @@ impl std::error::Error for StatisticalCertificateIdentityError {
 }
 
 impl From<CanonicalError> for StatisticalCertificateIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+/// Fail-closed refusal from standalone fidelity-pair identity construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FidelityPairIdentityError {
+    /// A fit observation must locate the paired QoIs at a nonempty point.
+    EmptyParameterPoint,
+    /// One parameter name cannot enter the discrepancy-fit identity grammar.
+    InvalidParameterName {
+        /// Zero-based position in deterministic `BTreeMap` order.
+        parameter_index: u64,
+        /// Shared identity-grammar rejection reason.
+        reason: &'static str,
+    },
+    /// One parameter coordinate is NaN or infinite.
+    NonFiniteParameter {
+        /// Zero-based position in deterministic `BTreeMap` order.
+        parameter_index: u64,
+        /// Exact refused IEEE-754 bits.
+        bits: u64,
+    },
+    /// A low- or high-fidelity QoI is NaN or infinite.
+    NonFiniteQoi {
+        /// Stable field name: `lo_fi` or `hi_fi`.
+        field: &'static str,
+        /// Exact refused IEEE-754 bits.
+        bits: u64,
+    },
+    /// Canonical framing, resource admission, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for FidelityPairIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyParameterPoint => {
+                formatter.write_str("fidelity-pair identity refused an empty parameter point")
+            }
+            Self::InvalidParameterName {
+                parameter_index,
+                reason,
+            } => write!(
+                formatter,
+                "fidelity-pair identity refused parameter {parameter_index}: invalid name ({reason})"
+            ),
+            Self::NonFiniteParameter {
+                parameter_index,
+                bits,
+            } => write!(
+                formatter,
+                "fidelity-pair identity refused parameter {parameter_index} value bits 0x{bits:016x}: coordinate must be finite"
+            ),
+            Self::NonFiniteQoi { field, bits } => write!(
+                formatter,
+                "fidelity-pair identity refused {field} QoI bits 0x{bits:016x}: QoI must be finite"
+            ),
+            Self::Canonical(error) => {
+                write!(formatter, "fidelity-pair identity refused: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FidelityPairIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::EmptyParameterPoint
+            | Self::InvalidParameterName { .. }
+            | Self::NonFiniteParameter { .. }
+            | Self::NonFiniteQoi { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for FidelityPairIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+/// Fail-closed refusal from standalone discrepancy-band identity construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscrepancyBandIdentityError {
+    /// A public band field is NaN, negative, or violates mean <= maximum.
+    InvalidBand {
+        /// Stable public field name.
+        field: &'static str,
+        /// Exact refused IEEE-754 bits.
+        bits: u64,
+        /// Structural requirement that was violated.
+        reason: &'static str,
+    },
+    /// Canonical framing, resource admission, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for DiscrepancyBandIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBand {
+                field,
+                bits,
+                reason,
+            } => write!(
+                formatter,
+                "discrepancy-band identity refused {field} bits 0x{bits:016x}: {reason}"
+            ),
+            Self::Canonical(error) => {
+                write!(formatter, "discrepancy-band identity refused: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DiscrepancyBandIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::InvalidBand { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for DiscrepancyBandIdentityError {
     fn from(error: CanonicalError) -> Self {
         Self::Canonical(error)
     }
@@ -1662,6 +1940,248 @@ where
         certificate,
         receipt,
     })
+}
+
+fn preflight_fidelity_pair_parameters_v1<C>(
+    pair: &FidelityPair,
+    limits: EvidenceIdentityLimits,
+    cancellation: &mut C,
+) -> Result<u64, FidelityPairIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    let parameter_count = bounded_len(pair.params.len())?;
+    if parameter_count == 0 {
+        return Err(FidelityPairIdentityError::EmptyParameterPoint);
+    }
+    let parameter_limit = limits
+        .max_collection_items()
+        .min(MAX_FIDELITY_PAIR_PARAMETERS_V1);
+    if parameter_count > parameter_limit {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::CollectionItems,
+            requested: parameter_count,
+            limit: parameter_limit,
+        }
+        .into());
+    }
+
+    let field_limit = limits
+        .max_field_bytes()
+        .min(MAX_FIDELITY_PAIR_PARAMETERS_FIELD_BYTES_V1);
+    let mut field_payload_bytes = u64::from(u64::BITS / 8);
+    if field_payload_bytes > field_limit {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::FieldBytes,
+            requested: field_payload_bytes,
+            limit: field_limit,
+        }
+        .into());
+    }
+    for (parameter_index, (name, value)) in pair.params.iter().enumerate() {
+        poll_identity_cancellation(cancellation)?;
+        let parameter_index = bounded_len(parameter_index)?;
+        if let Some(reason) = color_identity_reason(name) {
+            return Err(FidelityPairIdentityError::InvalidParameterName {
+                parameter_index,
+                reason,
+            });
+        }
+        if !value.is_finite() {
+            return Err(FidelityPairIdentityError::NonFiniteParameter {
+                parameter_index,
+                bits: value.to_bits(),
+            });
+        }
+        let row_bytes = 16_u64
+            .checked_add(bounded_len(name.len())?)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        let framed_row_bytes = u64::from(u64::BITS / 8)
+            .checked_add(row_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        field_payload_bytes = field_payload_bytes
+            .checked_add(framed_row_bytes)
+            .ok_or(CanonicalError::LengthOverflow)?;
+        if field_payload_bytes > field_limit {
+            return Err(CanonicalError::LimitExceeded {
+                kind: LimitKind::FieldBytes,
+                requested: field_payload_bytes,
+                limit: field_limit,
+            }
+            .into());
+        }
+    }
+    let required_stream_chunks = parameter_count
+        .checked_mul(FIDELITY_PAIR_STREAM_CHUNKS_PER_PARAMETER_V1)
+        .ok_or(CanonicalError::LengthOverflow)?;
+    if required_stream_chunks > limits.max_collection_items() {
+        return Err(CanonicalError::LimitExceeded {
+            kind: LimitKind::StreamChunks,
+            requested: required_stream_chunks,
+            limit: limits.max_collection_items(),
+        }
+        .into());
+    }
+    Ok(parameter_count)
+}
+
+/// Identify one exact, structurally admitted two-fidelity observation.
+///
+/// The helper consumes and retains the public pair while binding its
+/// nonempty, `BTreeMap`-ordered parameter point and exact low/high QoI bits.
+/// Parameter names follow the discrepancy fit's machine-readable identity
+/// grammar. Every coordinate and QoI must be finite; accepted signed zero is
+/// preserved without normalization.
+///
+/// # Errors
+/// Refuses an empty or oversized point, an invalid parameter name, non-finite
+/// coordinates or QoIs, invalid limits, resource overflow, or cancellation.
+/// No partial identity is published.
+pub fn identify_fidelity_pair_v1<C>(
+    pair: FidelityPair,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedFidelityPairV1, FidelityPairIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+    if !pair.lo_fi.is_finite() {
+        return Err(FidelityPairIdentityError::NonFiniteQoi {
+            field: "lo_fi",
+            bits: pair.lo_fi.to_bits(),
+        });
+    }
+    if !pair.hi_fi.is_finite() {
+        return Err(FidelityPairIdentityError::NonFiniteQoi {
+            field: "hi_fi",
+            bits: pair.hi_fi.to_bits(),
+        });
+    }
+    let parameter_count = preflight_fidelity_pair_parameters_v1(&pair, limits, &mut cancellation)?;
+    let receipt = {
+        let row_lengths = pair.params.keys().map(|name| {
+            bounded_len(name.len()).and_then(|name_bytes| {
+                16_u64
+                    .checked_add(name_bytes)
+                    .ok_or(CanonicalError::LengthOverflow)
+            })
+        });
+        let mut rows = pair.params.iter();
+        CanonicalEncoder::<FidelityPairIdV1, _>::new(limits, cancellation)?
+            .ordered_bytes_stream(
+                Field::new(0, "parameters"),
+                parameter_count,
+                row_lengths,
+                |row_index, mut sink| -> Result<(), CanonicalError> {
+                    let Some((name, value)) = rows.next() else {
+                        return Err(CanonicalError::DeclaredLengthMismatch {
+                            declared: parameter_count,
+                            observed: row_index,
+                        });
+                    };
+                    sink.write(&bounded_len(name.len())?.to_le_bytes())?;
+                    sink.write(name.as_bytes())?;
+                    sink.write(&value.to_bits().to_le_bytes())?;
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                OrderedBytesStreamError::Canonical { source, .. }
+                | OrderedBytesStreamError::Producer { source, .. } => {
+                    FidelityPairIdentityError::Canonical(source)
+                }
+            })?
+            .u64(
+                Field::new(1, "lo-fi-qoi-ieee754-bits"),
+                pair.lo_fi.to_bits(),
+            )?
+            .u64(
+                Field::new(2, "hi-fi-qoi-ieee754-bits"),
+                pair.hi_fi.to_bits(),
+            )?
+            .finish()?
+    };
+    Ok(IdentifiedFidelityPairV1 { pair, receipt })
+}
+
+fn validate_discrepancy_band_v1(band: DiscrepancyBand) -> Result<(), DiscrepancyBandIdentityError> {
+    let invalid = |field, value: f64, reason| DiscrepancyBandIdentityError::InvalidBand {
+        field,
+        bits: value.to_bits(),
+        reason,
+    };
+    if band.mean_rel.is_nan() {
+        return Err(invalid("mean_rel", band.mean_rel, "value must not be NaN"));
+    }
+    if band.max_rel.is_nan() {
+        return Err(invalid("max_rel", band.max_rel, "value must not be NaN"));
+    }
+    if band.mean_rel < 0.0 {
+        return Err(invalid(
+            "mean_rel",
+            band.mean_rel,
+            "value must be non-negative",
+        ));
+    }
+    if band.max_rel < 0.0 {
+        return Err(invalid(
+            "max_rel",
+            band.max_rel,
+            "value must be non-negative",
+        ));
+    }
+    if band.mean_rel > band.max_rel {
+        return Err(invalid(
+            "mean_rel",
+            band.mean_rel,
+            "mean_rel must not exceed max_rel",
+        ));
+    }
+    Ok(())
+}
+
+/// Identify the exact admitted structural state of one discrepancy band.
+///
+/// The helper consumes and retains both raw relative-discrepancy values without
+/// normalization. Positive infinity is an explicit unbounded state and signed
+/// zero remains bit-distinct. This frame carries no training corpus, validity
+/// domain, pair count, query point, discrepancy definition, or derivation.
+///
+/// # Errors
+/// Refuses NaN, negative values, mean greater than maximum, invalid limits,
+/// resource overflow, or cancellation. No partial identity is published.
+pub fn identify_discrepancy_band_v1<C>(
+    band: DiscrepancyBand,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedDiscrepancyBandV1, DiscrepancyBandIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+    validate_discrepancy_band_v1(band)?;
+    let receipt = CanonicalEncoder::<DiscrepancyBandIdV1, _>::new(limits, cancellation)?
+        .u64(
+            Field::new(0, "mean-rel-ieee754-bits"),
+            band.mean_rel.to_bits(),
+        )?
+        .u64(
+            Field::new(1, "max-rel-ieee754-bits"),
+            band.max_rel.to_bits(),
+        )?
+        .finish()?;
+    Ok(IdentifiedDiscrepancyBandV1 { band, receipt })
 }
 
 fn preflight_bounded_field_bytes_v1(
