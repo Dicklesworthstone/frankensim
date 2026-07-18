@@ -5,10 +5,17 @@
 //! subset with escaped quotes) are supported.
 
 use crate::IoError;
+use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
 /// Version of the sealed catalog-schema admission contract.
 pub const CATALOG_SCHEMA_VERSION: &str = "fs-io/catalog-schema/v1";
+/// Version of the bounded CSV parser and projection semantics.
+pub const CATALOG_CSV_PARSER_VERSION: &str = "fs-io/catalog-csv/v1";
+/// Version of the strict bounded JSON parser and projection semantics.
+pub const CATALOG_JSON_PARSER_VERSION: &str = "fs-io/catalog-json/v1";
+/// Version of the catalog read receipt schema.
+pub const CATALOG_READ_RECEIPT_VERSION: &str = "fs-io/catalog-read-receipt/v1";
 
 /// Resource envelope for admitting a catalog schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +214,65 @@ pub struct Catalog {
     pub numbers: Vec<BTreeMap<String, f64>>,
 }
 
+/// Exact source-byte identity presented by the caller at the catalog boundary.
+///
+/// The reader binds this value into a successful receipt but does not recompute
+/// it. [`Self::Unavailable`] is explicit so legacy callers cannot accidentally
+/// turn a local parse into a content-addressed authority claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogInputIdentity {
+    /// No collision-resistant source identity was supplied.
+    Unavailable,
+    /// Caller-presented plain BLAKE3-256 digest of the exact input bytes.
+    Blake3([u8; 32]),
+}
+
+impl CatalogInputIdentity {
+    /// Present a plain BLAKE3-256 digest computed by an upstream byte owner.
+    #[must_use]
+    pub const fn blake3_256(digest: [u8; 32]) -> Self {
+        Self::Blake3(digest)
+    }
+
+    /// Digest bytes when a BLAKE3-256 identity was presented.
+    #[must_use]
+    pub const fn digest(self) -> Option<[u8; 32]> {
+        match self {
+            Self::Unavailable => None,
+            Self::Blake3(digest) => Some(digest),
+        }
+    }
+}
+
+/// Catalog wire format whose parser semantics are bound into a receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogFormat {
+    /// Bounded RFC-4180-subset CSV.
+    Csv,
+    /// Strict bounded flat-object RFC 8259 JSON.
+    Json,
+}
+
+impl CatalogFormat {
+    /// Stable receipt label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+        }
+    }
+
+    /// Versioned parser/projection semantics for this format.
+    #[must_use]
+    pub const fn parser_version(self) -> &'static str {
+        match self {
+            Self::Csv => CATALOG_CSV_PARSER_VERSION,
+            Self::Json => CATALOG_JSON_PARSER_VERSION,
+        }
+    }
+}
+
 /// Shared validation/projection/output envelope for CSV and JSON catalogs.
 ///
 /// Counts are logical retained payload and deterministic work, not allocator
@@ -327,6 +393,321 @@ impl CatalogJsonLimits {
 impl Default for CatalogJsonLimits {
     fn default() -> Self {
         Self::DEFAULT
+    }
+}
+
+/// Exact format-specific limits bound into one catalog read receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogReadLimits {
+    /// CSV syntax plus common projection limits.
+    Csv(CatalogCsvLimits),
+    /// JSON syntax plus common projection limits.
+    Json(CatalogJsonLimits),
+}
+
+/// Authority boundary carried by every successful catalog read receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogReadAuthority {
+    /// Schema and document validation succeeded, but ledger promotion is not
+    /// claimed because the strong identity hook is not recomputed and
+    /// cancellation plus complete allocator accounting are not yet part of
+    /// this boundary.
+    ValidatedNoLedgerClaim,
+}
+
+impl CatalogReadAuthority {
+    /// Stable receipt label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ValidatedNoLedgerClaim => "validated-no-ledger-claim",
+        }
+    }
+}
+
+/// Exact logical counters consumed by a successful catalog operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogReadCounters {
+    input_bytes: usize,
+    rows: usize,
+    document_fields: usize,
+    decoded_bytes: usize,
+    validation_visits: usize,
+    numeric_entries: usize,
+    numeric_key_bytes: usize,
+    logical_output_bytes: usize,
+}
+
+impl CatalogReadCounters {
+    /// Exact raw input bytes.
+    #[must_use]
+    pub const fn input_bytes(&self) -> usize {
+        self.input_bytes
+    }
+
+    /// Published catalog rows.
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// CSV fields including the header, or JSON object members.
+    #[must_use]
+    pub const fn document_fields(&self) -> usize {
+        self.document_fields
+    }
+
+    /// Decoded CSV field bytes including the header, or decoded JSON
+    /// key/value/number bytes.
+    #[must_use]
+    pub const fn decoded_bytes(&self) -> usize {
+        self.decoded_bytes
+    }
+
+    /// `(row, schema-column)` validation visits.
+    #[must_use]
+    pub const fn validation_visits(&self) -> usize {
+        self.validation_visits
+    }
+
+    /// Successfully projected numeric entries.
+    #[must_use]
+    pub const fn numeric_entries(&self) -> usize {
+        self.numeric_entries
+    }
+
+    /// UTF-8 bytes cloned into numeric projection keys.
+    #[must_use]
+    pub const fn numeric_key_bytes(&self) -> usize {
+        self.numeric_key_bytes
+    }
+
+    /// Logical retained row key/value bytes plus numeric key bytes.
+    #[must_use]
+    pub const fn logical_output_bytes(&self) -> usize {
+        self.logical_output_bytes
+    }
+}
+
+/// Success-only, source-bound evidence for one catalog read operation.
+///
+/// No receipt is constructed or returned on syntax, schema, resource, or
+/// allocation refusal. A presented input digest is retained but not recomputed;
+/// [`CatalogReadAuthority::ValidatedNoLedgerClaim`] prevents callers from
+/// mistaking this evidence for a promoted ledger artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogReadReceipt {
+    receipt_version: &'static str,
+    crate_version: &'static str,
+    format: CatalogFormat,
+    parser_version: &'static str,
+    input_identity: CatalogInputIdentity,
+    local_input_fnv1a64: u64,
+    schema: CatalogSchemaReceipt,
+    limits: CatalogReadLimits,
+    consumed: CatalogReadCounters,
+    authority: CatalogReadAuthority,
+}
+
+impl CatalogReadReceipt {
+    /// Receipt schema version.
+    #[must_use]
+    pub const fn receipt_version(&self) -> &'static str {
+        self.receipt_version
+    }
+
+    /// fs-io crate version that produced the receipt.
+    #[must_use]
+    pub const fn crate_version(&self) -> &'static str {
+        self.crate_version
+    }
+
+    /// Parsed wire format.
+    #[must_use]
+    pub const fn format(&self) -> CatalogFormat {
+        self.format
+    }
+
+    /// Versioned parser/projection semantics.
+    #[must_use]
+    pub const fn parser_version(&self) -> &'static str {
+        self.parser_version
+    }
+
+    /// Caller-presented exact-source identity hook.
+    #[must_use]
+    pub const fn input_identity(&self) -> CatalogInputIdentity {
+        self.input_identity
+    }
+
+    /// Internally recomputed non-cryptographic replay fingerprint of the exact
+    /// input bytes. This detects ordinary hook/input mismatches but is not a
+    /// collision-resistant authority identity.
+    #[must_use]
+    pub const fn local_input_fnv1a64(&self) -> u64 {
+        self.local_input_fnv1a64
+    }
+
+    /// Sealed schema admission evidence used by the operation.
+    #[must_use]
+    pub const fn schema(&self) -> &CatalogSchemaReceipt {
+        &self.schema
+    }
+
+    /// Exact caller-selected operation limits.
+    #[must_use]
+    pub const fn limits(&self) -> &CatalogReadLimits {
+        &self.limits
+    }
+
+    /// Exact successful-operation counters.
+    #[must_use]
+    pub const fn consumed(&self) -> &CatalogReadCounters {
+        &self.consumed
+    }
+
+    /// Explicit promotion boundary.
+    #[must_use]
+    pub const fn authority(&self) -> CatalogReadAuthority {
+        self.authority
+    }
+
+    /// Deterministic JSON for HELM ingestion. The caller-presented digest is
+    /// labelled as unverified and the no-claim boundary is encoded in-band.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut output = String::from("{\"kind\":\"catalog-read-receipt\",");
+        let _ = write!(
+            output,
+            "\"receipt_version\":\"{}\",\"crate_version\":\"{}\",\
+             \"result\":\"validated-catalog\",\"authority\":\"{}\",\
+             \"format\":\"{}\",\"parser_version\":\"{}\",\"input_identity\":",
+            self.receipt_version,
+            self.crate_version,
+            self.authority.as_str(),
+            self.format.as_str(),
+            self.parser_version,
+        );
+        match self.input_identity {
+            CatalogInputIdentity::Unavailable => output.push_str("null"),
+            CatalogInputIdentity::Blake3(digest) => {
+                output.push_str(
+                    "{\"algorithm\":\"blake3-256\",\"verification\":\"caller-presented-not-recomputed\",\"digest\":\"",
+                );
+                for byte in digest {
+                    let _ = write!(output, "{byte:02x}");
+                }
+                output.push_str("\"}");
+            }
+        }
+        let _ = write!(
+            output,
+            ",\"local_input_fnv1a64\":\"{:016x}\",\"schema\":{{\"version\":\"{}\",\
+             \"local_identity_fnv1a64\":\"{:016x}\",\
+             \"columns\":{},\"total_name_bytes\":{},\"limits\":{{\"columns\":{},\
+             \"name_bytes\":{},\"total_name_bytes\":{}}}}},\"limits\":",
+            self.local_input_fnv1a64,
+            self.schema.schema_version,
+            self.schema.local_identity_fnv1a64,
+            self.schema.column_count,
+            self.schema.total_name_bytes,
+            self.schema.limits.max_columns,
+            self.schema.limits.max_name_bytes,
+            self.schema.limits.max_total_name_bytes,
+        );
+        match &self.limits {
+            CatalogReadLimits::Csv(limits) => {
+                let _ = write!(
+                    output,
+                    "{{\"input_bytes\":{},\"rows\":{},\"fields_per_record\":{},\
+                     \"total_fields\":{},\"field_bytes\":{},\"header_bytes\":{},\
+                     \"decoded_bytes\":{},",
+                    limits.max_input_bytes,
+                    limits.max_rows,
+                    limits.max_fields_per_record,
+                    limits.max_total_fields,
+                    limits.max_field_bytes,
+                    limits.max_header_bytes,
+                    limits.max_decoded_bytes,
+                );
+                push_projection_limits_json(&mut output, limits.projection);
+            }
+            CatalogReadLimits::Json(limits) => {
+                let _ = write!(
+                    output,
+                    "{{\"input_bytes\":{},\"rows\":{},\"members_per_object\":{},\
+                     \"total_members\":{},\"string_bytes\":{},\"number_bytes\":{},\
+                     \"decoded_bytes\":{},",
+                    limits.max_input_bytes,
+                    limits.max_rows,
+                    limits.max_members_per_object,
+                    limits.max_total_members,
+                    limits.max_string_bytes,
+                    limits.max_number_bytes,
+                    limits.max_decoded_bytes,
+                );
+                push_projection_limits_json(&mut output, limits.projection);
+            }
+        }
+        let _ = write!(
+            output,
+            ",\"consumed\":{{\"input_bytes\":{},\"rows\":{},\"document_fields\":{},\
+             \"decoded_bytes\":{},\"validation_visits\":{},\"numeric_entries\":{},\
+             \"numeric_key_bytes\":{},\"logical_output_bytes\":{}}},\
+             \"no_claim\":\"caller-presented input identity is not recomputed and local input/schema fingerprints are non-cryptographic; no cancellation latency, allocator metadata, BTreeMap node allocation, complete live-byte, or ledger-promotion claim\"}}",
+            self.consumed.input_bytes,
+            self.consumed.rows,
+            self.consumed.document_fields,
+            self.consumed.decoded_bytes,
+            self.consumed.validation_visits,
+            self.consumed.numeric_entries,
+            self.consumed.numeric_key_bytes,
+            self.consumed.logical_output_bytes,
+        );
+        output
+    }
+}
+
+fn push_projection_limits_json(output: &mut String, limits: CatalogProjectionLimits) {
+    let _ = write!(
+        output,
+        "\"projection\":{{\"validation_visits\":{},\"numeric_entries\":{},\
+         \"numeric_key_bytes\":{},\"logical_output_bytes\":{}}}}}",
+        limits.max_validation_visits,
+        limits.max_numeric_entries,
+        limits.max_numeric_key_bytes,
+        limits.max_output_bytes,
+    );
+}
+
+/// A validated catalog paired atomically with its success receipt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogRead {
+    catalog: Catalog,
+    receipt: CatalogReadReceipt,
+}
+
+impl CatalogRead {
+    /// Borrow the validated catalog.
+    #[must_use]
+    pub const fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Borrow the success receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &CatalogReadReceipt {
+        &self.receipt
+    }
+
+    /// Consume the pair into its two publication artifacts.
+    #[must_use]
+    pub fn into_parts(self) -> (Catalog, CatalogReadReceipt) {
+        (self.catalog, self.receipt)
+    }
+
+    fn into_catalog(self) -> Catalog {
+        self.catalog
     }
 }
 
@@ -1031,6 +1412,23 @@ impl Schema {
         self.parse_csv_with_limits(text, CatalogCsvLimits::DEFAULT)
     }
 
+    /// Parse with default CSV limits and atomically publish a success receipt.
+    ///
+    /// The input identity is caller-presented and retained without
+    /// recomputation. Use [`CatalogInputIdentity::Unavailable`] explicitly
+    /// when only local validation evidence is available.
+    ///
+    /// # Errors
+    /// Returns the same structured refusals as [`Self::parse_csv`]. No
+    /// [`CatalogRead`] or partial receipt is returned on failure.
+    pub fn parse_csv_with_receipt(
+        &self,
+        text: &str,
+        input_identity: CatalogInputIdentity,
+    ) -> Result<CatalogRead, IoError> {
+        self.parse_csv_with_limits_and_receipt(text, CatalogCsvLimits::DEFAULT, input_identity)
+    }
+
     /// Parse + validate a CSV catalog under one syntax/decoded/projection
     /// envelope shared with the JSON projection path.
     ///
@@ -1043,6 +1441,22 @@ impl Schema {
         text: &str,
         limits: CatalogCsvLimits,
     ) -> Result<Catalog, IoError> {
+        self.parse_csv_with_limits_and_receipt(text, limits, CatalogInputIdentity::Unavailable)
+            .map(CatalogRead::into_catalog)
+    }
+
+    /// Parse with caller-selected CSV limits and atomically publish the exact
+    /// successful-operation counters and no-claim authority boundary.
+    ///
+    /// # Errors
+    /// Returns before publication on input, syntax, schema, resource, or
+    /// exposed allocation refusal. No success receipt escapes a failed read.
+    pub fn parse_csv_with_limits_and_receipt(
+        &self,
+        text: &str,
+        limits: CatalogCsvLimits,
+        input_identity: CatalogInputIdentity,
+    ) -> Result<CatalogRead, IoError> {
         if text.len() > limits.max_input_bytes {
             return Err(csv_cap_refusal("input-byte", limits.max_input_bytes, 0));
         }
@@ -1136,7 +1550,32 @@ impl Schema {
             rows.push(row);
             numbers.push(nums);
         }
-        Ok(Catalog { rows, numbers })
+        let consumed = CatalogReadCounters {
+            input_bytes: text.len(),
+            rows: rows.len(),
+            document_fields: counters.total_fields,
+            decoded_bytes: counters.decoded_bytes,
+            validation_visits: projection.validation_visits,
+            numeric_entries: projection.numeric_entries,
+            numeric_key_bytes: projection.numeric_key_bytes,
+            logical_output_bytes: projection.output_bytes,
+        };
+        let receipt = CatalogReadReceipt {
+            receipt_version: CATALOG_READ_RECEIPT_VERSION,
+            crate_version: crate::VERSION,
+            format: CatalogFormat::Csv,
+            parser_version: CatalogFormat::Csv.parser_version(),
+            input_identity,
+            local_input_fnv1a64: fs_obs::fnv1a64(text.as_bytes()),
+            schema: self.receipt,
+            limits: CatalogReadLimits::Csv(limits),
+            consumed,
+            authority: CatalogReadAuthority::ValidatedNoLedgerClaim,
+        };
+        Ok(CatalogRead {
+            catalog: Catalog { rows, numbers },
+            receipt,
+        })
     }
 
     /// Parse + validate a JSON catalog: an array of flat objects
@@ -1147,6 +1586,19 @@ impl Schema {
     /// [`IoError`] for JSON structure or schema violations.
     pub fn parse_json(&self, text: &str) -> Result<Catalog, IoError> {
         self.parse_json_with_limits(text, CatalogJsonLimits::DEFAULT)
+    }
+
+    /// Parse with default JSON limits and atomically publish a success receipt.
+    ///
+    /// # Errors
+    /// Returns the same structured refusals as [`Self::parse_json`]. No
+    /// [`CatalogRead`] or partial receipt is returned on failure.
+    pub fn parse_json_with_receipt(
+        &self,
+        text: &str,
+        input_identity: CatalogInputIdentity,
+    ) -> Result<CatalogRead, IoError> {
+        self.parse_json_with_limits_and_receipt(text, CatalogJsonLimits::DEFAULT, input_identity)
     }
 
     /// Parse + validate a JSON catalog under a caller-explicit resource
@@ -1162,6 +1614,22 @@ impl Schema {
         text: &str,
         limits: CatalogJsonLimits,
     ) -> Result<Catalog, IoError> {
+        self.parse_json_with_limits_and_receipt(text, limits, CatalogInputIdentity::Unavailable)
+            .map(CatalogRead::into_catalog)
+    }
+
+    /// Parse with caller-selected JSON limits and atomically publish the exact
+    /// successful-operation counters and no-claim authority boundary.
+    ///
+    /// # Errors
+    /// Returns before publication on input, syntax, schema, resource, or
+    /// exposed allocation refusal. No success receipt escapes a failed read.
+    pub fn parse_json_with_limits_and_receipt(
+        &self,
+        text: &str,
+        limits: CatalogJsonLimits,
+        input_identity: CatalogInputIdentity,
+    ) -> Result<CatalogRead, IoError> {
         if text.len() > limits.max_input_bytes {
             return Err(cap_refusal(
                 "input-byte",
@@ -1200,7 +1668,32 @@ impl Schema {
             }
             numbers.push(nums);
         }
-        Ok(Catalog { rows, numbers })
+        let consumed = CatalogReadCounters {
+            input_bytes: text.len(),
+            rows: rows.len(),
+            document_fields: parsed.total_members,
+            decoded_bytes: parsed.decoded_bytes,
+            validation_visits: projection.validation_visits,
+            numeric_entries: projection.numeric_entries,
+            numeric_key_bytes: projection.numeric_key_bytes,
+            logical_output_bytes: projection.output_bytes,
+        };
+        let receipt = CatalogReadReceipt {
+            receipt_version: CATALOG_READ_RECEIPT_VERSION,
+            crate_version: crate::VERSION,
+            format: CatalogFormat::Json,
+            parser_version: CatalogFormat::Json.parser_version(),
+            input_identity,
+            local_input_fnv1a64: fs_obs::fnv1a64(text.as_bytes()),
+            schema: self.receipt,
+            limits: CatalogReadLimits::Json(limits),
+            consumed,
+            authority: CatalogReadAuthority::ValidatedNoLedgerClaim,
+        };
+        Ok(CatalogRead {
+            catalog: Catalog { rows, numbers },
+            receipt,
+        })
     }
 }
 
@@ -1234,6 +1727,7 @@ fn mini_json_array_of_objects(
 
 struct ParsedJsonCatalog {
     rows: Vec<BTreeMap<String, String>>,
+    total_members: usize,
     decoded_bytes: usize,
 }
 
@@ -1278,6 +1772,7 @@ impl JsonCatalogParser<'_> {
             self.finish_document()?;
             return Ok(ParsedJsonCatalog {
                 rows,
+                total_members: self.total_members,
                 decoded_bytes: self.decoded_bytes,
             });
         }
@@ -1306,6 +1801,7 @@ impl JsonCatalogParser<'_> {
                     self.finish_document()?;
                     return Ok(ParsedJsonCatalog {
                         rows,
+                        total_members: self.total_members,
                         decoded_bytes: self.decoded_bytes,
                     });
                 }
@@ -2257,6 +2753,151 @@ mod tests {
             .parse_csv_with_limits(csv_text, overflow)
             .expect_err("checked operation overflow must refuse before row projection");
         assert_catalog_resource(error, "arithmetic overflow", "checked preflight overflow");
+    }
+
+    /// G3/G5: a success receipt binds exact source identity, parser semantics,
+    /// schema admission, limits, and consumed counters. Identical retries are
+    /// byte-stable, while format or source-identity changes remain visible.
+    #[test]
+    fn g3_g5_catalog_read_receipt_is_exact_deterministic_and_no_claim() {
+        let schema = Schema::admit(vec![text_column("id", true), number_column("n", 0.0, 9.0)])
+            .expect("valid receipt schema");
+        let projection = CatalogProjectionLimits {
+            max_validation_visits: 2,
+            max_numeric_entries: 1,
+            max_numeric_key_bytes: 1,
+            max_output_bytes: 6,
+        };
+        let csv_text = "id,n\n\"A\",1\n";
+        let csv_limits = CatalogCsvLimits {
+            max_input_bytes: csv_text.len(),
+            max_rows: 1,
+            max_fields_per_record: 2,
+            max_total_fields: 4,
+            max_field_bytes: 2,
+            max_header_bytes: 3,
+            max_decoded_bytes: 5,
+            projection,
+        };
+        let json_text = r#"[{"id":"A","n":1}]"#;
+        let json_limits = CatalogJsonLimits {
+            max_input_bytes: json_text.len(),
+            max_rows: 1,
+            max_members_per_object: 2,
+            max_total_members: 2,
+            max_string_bytes: 2,
+            max_number_bytes: 1,
+            max_decoded_bytes: 5,
+            projection,
+        };
+        let input_identity = CatalogInputIdentity::blake3_256([0xab; 32]);
+
+        let csv_read = schema
+            .parse_csv_with_limits_and_receipt(csv_text, csv_limits, input_identity)
+            .expect("CSV receipt boundary");
+        let csv_retry = schema
+            .parse_csv_with_limits_and_receipt(csv_text, csv_limits, input_identity)
+            .expect("identical CSV receipt retry");
+        let json_read = schema
+            .parse_json_with_limits_and_receipt(json_text, json_limits, input_identity)
+            .expect("JSON receipt boundary");
+        assert_eq!(csv_read.catalog(), json_read.catalog());
+
+        let csv_receipt = csv_read.receipt();
+        assert_eq!(csv_receipt.receipt_version(), CATALOG_READ_RECEIPT_VERSION);
+        assert_eq!(csv_receipt.crate_version(), crate::VERSION);
+        assert_eq!(csv_receipt.format(), CatalogFormat::Csv);
+        assert_eq!(csv_receipt.parser_version(), CATALOG_CSV_PARSER_VERSION);
+        assert_eq!(csv_receipt.input_identity(), input_identity);
+        assert_eq!(csv_receipt.input_identity().digest(), Some([0xab; 32]));
+        assert_eq!(
+            csv_receipt.local_input_fnv1a64(),
+            fs_obs::fnv1a64(csv_text.as_bytes())
+        );
+        assert_eq!(csv_receipt.schema(), schema.receipt());
+        assert_eq!(csv_receipt.limits(), &CatalogReadLimits::Csv(csv_limits));
+        assert_eq!(
+            csv_receipt.authority(),
+            CatalogReadAuthority::ValidatedNoLedgerClaim
+        );
+        let csv_consumed = csv_receipt.consumed();
+        assert_eq!(csv_consumed.input_bytes(), csv_text.len());
+        assert_eq!(csv_consumed.rows(), 1);
+        assert_eq!(csv_consumed.document_fields(), 4);
+        assert_eq!(csv_consumed.decoded_bytes(), 5);
+        assert_eq!(csv_consumed.validation_visits(), 2);
+        assert_eq!(csv_consumed.numeric_entries(), 1);
+        assert_eq!(csv_consumed.numeric_key_bytes(), 1);
+        assert_eq!(csv_consumed.logical_output_bytes(), 6);
+
+        let json_receipt = json_read.receipt();
+        assert_eq!(json_receipt.format(), CatalogFormat::Json);
+        assert_eq!(json_receipt.parser_version(), CATALOG_JSON_PARSER_VERSION);
+        assert_eq!(json_receipt.limits(), &CatalogReadLimits::Json(json_limits));
+        let json_consumed = json_receipt.consumed();
+        assert_eq!(json_consumed.input_bytes(), json_text.len());
+        assert_eq!(json_consumed.rows(), 1);
+        assert_eq!(json_consumed.document_fields(), 2);
+        assert_eq!(json_consumed.decoded_bytes(), 5);
+        assert_eq!(json_consumed.validation_visits(), 2);
+        assert_eq!(json_consumed.numeric_entries(), 1);
+        assert_eq!(json_consumed.numeric_key_bytes(), 1);
+        assert_eq!(json_consumed.logical_output_bytes(), 6);
+
+        let csv_json = csv_receipt.to_json();
+        assert_eq!(csv_json, csv_retry.receipt().to_json());
+        assert!(csv_json.starts_with("{\"kind\":\"catalog-read-receipt\","));
+        assert!(csv_json.contains(&format!("\"digest\":\"{}\"", "ab".repeat(32))));
+        assert!(csv_json.contains("\"verification\":\"caller-presented-not-recomputed\""));
+        assert!(csv_json.contains(&format!(
+            "\"local_input_fnv1a64\":\"{:016x}\"",
+            fs_obs::fnv1a64(csv_text.as_bytes())
+        )));
+        assert!(csv_json.contains("\"document_fields\":4"));
+        assert!(csv_json.contains("\"authority\":\"validated-no-ledger-claim\""));
+        assert!(csv_json.contains("\"no_claim\":"));
+        assert_ne!(csv_json, json_receipt.to_json());
+
+        let unavailable = schema
+            .parse_csv_with_limits_and_receipt(
+                csv_text,
+                csv_limits,
+                CatalogInputIdentity::Unavailable,
+            )
+            .expect("explicit identity-unavailable receipt")
+            .into_parts()
+            .1;
+        assert!(unavailable.to_json().contains("\"input_identity\":null"));
+        let changed_identity = schema
+            .parse_csv_with_limits_and_receipt(
+                csv_text,
+                csv_limits,
+                CatalogInputIdentity::blake3_256([0xac; 32]),
+            )
+            .expect("changed identity receipt")
+            .into_parts()
+            .1;
+        assert_ne!(csv_receipt, &changed_identity);
+
+        assert!(
+            schema
+                .parse_csv_with_limits_and_receipt(
+                    "id,n\nA,not-a-number\n",
+                    CatalogCsvLimits {
+                        max_input_bytes: 64,
+                        max_field_bytes: 32,
+                        max_decoded_bytes: 64,
+                        projection: CatalogProjectionLimits {
+                            max_output_bytes: 128,
+                            ..projection
+                        },
+                        ..csv_limits
+                    },
+                    input_identity,
+                )
+                .is_err(),
+            "schema refusal cannot publish a CatalogRead or receipt"
+        );
     }
 
     /// G0: every RFC 8259 string escape, BMP escape, surrogate pair, and raw

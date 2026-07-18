@@ -77,6 +77,15 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   default while `parse_json_with_limits` admits a caller-selected envelope.
   `parse_csv` similarly uses `CatalogCsvLimits::DEFAULT`, while
   `parse_csv_with_limits` admits an explicit composed envelope.
+  Receipt-producing variants atomically return `CatalogRead`: the validated
+  catalog plus a versioned `CatalogReadReceipt` binding fs-io and format/parser
+  versions, sealed schema evidence, exact limits, consumed counters, and an
+  explicit `validated-no-ledger-claim` authority state. `CatalogInputIdentity`
+  accepts a caller-presented plain BLAKE3-256 exact-byte digest or explicit `Unavailable`;
+  the reader retains but does not recompute the presented digest. It separately
+  recomputes an FNV-1a exact-input replay fingerprint, and canonical receipt JSON
+  labels both the strong-hook verification limitation and non-authority boundary
+  in-band.
   Violations name the 1-based data row, column, offending text, and the
   expectation; missing header columns list what WAS found.
 - **STEP structure** (`step` module): bounded, ASCII-only parsing of the
@@ -177,7 +186,10 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
    `try_reserve` is used where `Vec`/`String` expose it. `BTreeMap` has no
    fallible node reservation; its insertions occur only after structural and
    payload admission. Parsed maps move into `Catalog` without a second cloned
-   row set.
+   row set. A success receipt records exact input bytes, published rows,
+   CSV-fields/JSON-members, decoded bytes, validation visits, numeric entries,
+   numeric key bytes, and logical output bytes. Failure returns no `CatalogRead`
+   and therefore cannot leak a partial success receipt.
 7. **Part-21 graph integrity**: instance IDs are positive and unique;
    forward references are permitted but every reference must resolve by
    end of DATA; mandatory header records occur exactly once and in the
@@ -267,6 +279,9 @@ ambiguous, over-limit, or numerically invalid schema declarations. `IoError`:
 column, what }`. Catalog-JSON syntax errors use byte offsets; CSV resource
 refusals use record positions; common projection refusals name the operation
 dimension and declared limit. Catalog resource refusals remain deterministic.
+Receipt-producing APIs use the same refusal variants and are success-only; the
+receipt's authority and no-claim fields are not substitutes for an error
+receipt.
 `PromotionRefusal` carries blocking
 defects + fixes + the refused receipt. The STEP syntax kernel uses
 `Malformed` for grammar/graph failures, `Unsupported` for staged encoded
@@ -294,6 +309,11 @@ Catalog schema identity uses a versioned canonical FNV-1a byte stream over
 limits, policies, ordered names, required flags, kind tags, and exact f64 bound
 bits. Identical admission retries are stable; this local fingerprint is not a
 collision-resistant authority identifier.
+Catalog read receipt JSON has fixed field order and lowercase digest spelling;
+identical format, input-identity hook, schema, limits, input, and successful
+counters yield byte-identical JSON. Format, parser version, limits, schema,
+presented input identity, and recomputed local input fingerprint remain
+explicit sensitivity dimensions.
 Native faceted decoding sorts schema-defined `SET` members and materializes
 points/faces by numeric instance ID. The STEP tessellation handoff rejects
 `ExecMode::Fast`; its receipt and provenance explicitly bind deterministic mode.
@@ -365,7 +385,10 @@ policy-sensitive schema identity; normalized duplicate CSV headers; optional
 and unknown-column parity across CSV/JSON; document-column permutation; bounded
 value-error witnesses; exact common CSV/JSON projection boundaries; every CSV
 input/row/field/header/decoded boundary; checked operation-overflow refusal;
-quoted-CSV equivalence; all raw C0 bytes; all one-byte unknown ASCII escapes;
+quoted-CSV equivalence; exact CSV/JSON consumed counters; success-only receipt
+publication; source-identity and format sensitivity; byte-stable receipt JSON;
+explicit identity-unavailable and no-ledger-claim states; all raw C0 bytes; all
+one-byte unknown ASCII escapes;
 malformed/lone surrogate forms with exact offsets; valid and invalid number
 productions; comma/colon and
 decoded-duplicate-key cases, semantic-preserving whitespace/member/escape
@@ -463,10 +486,12 @@ import identically in both ASCII and binary (conformance-tested).
   the receipt schema).
 - **Catalog operation promotion is still incomplete**: the sealed schema,
   duplicate-header gate, shared projection envelope, and bounded CSV/JSON
-  syntax paths remove the known unchecked work/payload dimensions, but no
-  operation receipt yet binds input identity, exact limits and consumed
-  counters, parser version, or result/no-claim status. There is no `Cx` or
-  allocation-failure injection, and allocator metadata plus `BTreeMap` node
-  allocation remain unmeasured. No cancellation, complete live-byte, or
-  ledger-promotion claim is made until those proof-pending portions of
-  `frankensim-svlo8` land.
+  syntax paths remove the known unchecked work/payload dimensions. The
+  success-only operation receipt now binds a caller-presented input identity,
+  parser/receipt versions, exact limits and consumed counters, schema evidence,
+  a recomputed non-cryptographic input replay fingerprint, and result/no-claim
+  status. The collision-resistant digest hook is deliberately not recomputed;
+  there is still no `Cx` or allocation-failure injection, and allocator
+  metadata plus `BTreeMap` node allocation remain unmeasured. No source-custody,
+  cancellation, complete live-byte, or ledger-promotion claim is made until
+  those proof-pending portions of `frankensim-svlo8` land.

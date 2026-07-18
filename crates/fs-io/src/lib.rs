@@ -23,9 +23,11 @@ pub mod step_import;
 pub mod stl;
 
 pub use catalog::{
-    CATALOG_SCHEMA_VERSION, Catalog, CatalogCsvLimits, CatalogJsonLimits, CatalogProjectionLimits,
-    CatalogSchemaLimits, CatalogSchemaReceipt, ColumnKind, ColumnSpec, Schema,
-    SchemaDefinitionRefusal,
+    CATALOG_CSV_PARSER_VERSION, CATALOG_JSON_PARSER_VERSION, CATALOG_READ_RECEIPT_VERSION,
+    CATALOG_SCHEMA_VERSION, Catalog, CatalogCsvLimits, CatalogFormat, CatalogInputIdentity,
+    CatalogJsonLimits, CatalogProjectionLimits, CatalogRead, CatalogReadAuthority,
+    CatalogReadCounters, CatalogReadLimits, CatalogReadReceipt, CatalogSchemaLimits,
+    CatalogSchemaReceipt, ColumnKind, ColumnSpec, Schema, SchemaDefinitionRefusal,
 };
 pub use export::{export_3mf, export_glb, export_vtk};
 pub use quarantine::{ImportDefect, ImportReceipt, PromotionRefusal, Quarantined, promote};
