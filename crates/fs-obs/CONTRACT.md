@@ -49,7 +49,8 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   — deterministic, I/O-free process-stream admission with critical,
   diagnostic, and telemetry loss classes; bounded frame/gap queues;
   cancellation-aware backpressure; committed-artifact spill pointers; exact
-  drop/range/policy accounting; and final-receipt reconciliation.
+  drop/range/policy accounting; canonical typed `process_frame`/`process_gap`
+  event projection; and final-receipt reconciliation.
 - `privacy::{LabeledField, FieldPolicy, ShareRequest, ShareManifest}` —
   field-level sensitivity, license, export, and retention policy; bounded
   deterministic reveal/redact/omit decisions; explicit correlation-token
@@ -87,6 +88,11 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
   returns incomplete evidence, unchecked integrity, and demoted promotion.
   Diagnostic/telemetry loss is consumed only after a quantified gap is
   retained; a full gap ledger applies backpressure.
+- `ProcessFrame::into_event` preserves the frame's severity in the canonical
+  event envelope and hex-encodes opaque inline bytes only for display; typed
+  event identity binds the original bytes. `ProcessGap::into_event` preserves
+  the full ordinal range, u128 counts, reason, policy version, and optional
+  committed artifact pointer. Malformed ranges/counts fail the event lint.
 - A `DurableArtifactPointer` can be constructed only through the committed
   pointer constructor. Inline omission without that token remains explicit
   loss; process exit (including code zero) without a final typed receipt
@@ -208,10 +214,10 @@ privilege downgrade.
 - `process` is the deterministic policy/state layer, not a pipe reader,
   artifact store, async executor, CLI renderer, or source print-macro scanner.
   The repository scanner is `xtask check-casual-print`; runtime owners must
-  project process decisions into canonical events and independently
-  authenticate committed artifacts. `DurableArtifactPointer` records
-  constructor-level admission; it cannot prove an external store truthful by
-  itself.
+  drain and persist the canonical events produced by the projection APIs and
+  independently authenticate committed artifacts. `DurableArtifactPointer`
+  records constructor-level admission; it cannot prove an external store
+  truthful by itself.
 - `privacy` is a labeled-data policy core, not a secret detector, cryptographic
   implementation, access-control service, jurisdiction engine, or artifact
   scanner. External salted/keyed tokens remain caller assertions until an

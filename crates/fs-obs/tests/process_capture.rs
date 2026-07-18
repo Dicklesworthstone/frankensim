@@ -8,9 +8,9 @@ use fs_obs::process::{
     SinkAvailability, SinkFailure,
 };
 use fs_obs::{
-    DomainApplicability, EpistemicGrade, EvidenceCompleteness, EvidenceIntegrity,
-    ExecutionDisposition, OperationalSupport, PredicateOutcome, PromotionEffect, ReceiptScope,
-    ScopedReceiptOutcome, Severity,
+    DomainApplicability, Emitter, EpistemicGrade, EventKind, EvidenceCompleteness,
+    EvidenceIntegrity, ExecutionDisposition, OperationalSupport, PredicateOutcome, PromotionEffect,
+    ReceiptScope, ScopedReceiptOutcome, Severity, lint_failure_record, validate_line,
 };
 
 fn process() -> ProcessId {
@@ -409,6 +409,126 @@ fn hostile_binary_payloads_are_opaque_and_stream_ordinals_are_independent() {
         panic!("duplicate ordinal must refuse");
     };
     assert_eq!((error.previous, error.received), (1, 1));
+}
+
+#[test]
+fn captured_binary_frame_projects_to_one_typed_canonical_event() {
+    let pointer = DurableArtifactPointer::committed(
+        "artifact://process/worker-7/stderr/1",
+        "0123456789abcdef0123456789abcdef",
+    )
+    .expect("committed fixture pointer");
+    let frame = ProcessFrame::new(
+        process(),
+        ProcessStream::Stderr,
+        1,
+        ProcessEventClass::Critical,
+        Severity::Error,
+        vec![0, 0xff, b'\n'],
+    )
+    .expect("valid binary frame")
+    .with_committed_artifact(pointer);
+    let mut emitter = Emitter::new("capture-session", "worker-7");
+    let event = frame.into_event(&mut emitter, Some(99));
+
+    assert_eq!(event.severity, Severity::Error);
+    assert!(matches!(&event.kind, EventKind::ProcessFrame { .. }));
+    assert_eq!(event.kind.kind_name(), "process_frame");
+    lint_failure_record(&event).expect("typed frame stays lint-valid");
+    let line = event.to_jsonl();
+    validate_line(&line).expect("typed frame stays schema-valid");
+    assert_eq!(
+        line,
+        "{\"v\":1,\"session\":\"capture-session\",\"scope\":\"worker-7\",\"seq\":0,\
+         \"severity\":\"error\",\"kind\":\"process_frame\",\"payload\":{\
+         \"process\":\"worker-7\",\"stream\":\"stderr\",\"ordinal\":1,\"class\":\"critical\",\
+         \"payload_hex\":\"00ff0a\",\"original_bytes\":3,\
+         \"artifact\":\"artifact://process/worker-7/stderr/1\",\
+         \"artifact_content_hash\":\"0123456789abcdef0123456789abcdef\"},\"wall_ns\":99}"
+    );
+}
+
+#[test]
+fn quantified_gap_projects_counts_policy_and_explicit_absent_artifact() {
+    let mut capture = ProcessCapture::new(policy(2, 2, 3, 1));
+    let decision = capture.offer(
+        frame(
+            ProcessStream::Stdout,
+            1,
+            ProcessEventClass::Diagnostic,
+            b"abcdef",
+        ),
+        CaptureCancellation::Running,
+        SinkAvailability::Ready,
+    );
+    assert!(matches!(decision, CaptureDecision::Enqueued { .. }));
+    let gap = capture.pop_gap().expect("inline truncation gap");
+    let mut emitter = Emitter::new("capture-session", "worker-7");
+    let event = gap.into_event(&mut emitter, None);
+
+    assert_eq!(event.severity, Severity::Warn);
+    assert!(matches!(&event.kind, EventKind::ProcessGap { .. }));
+    assert_eq!(event.kind.kind_name(), "process_gap");
+    lint_failure_record(&event).expect("balanced gap stays lint-valid");
+    let line = event.to_jsonl();
+    validate_line(&line).expect("typed gap stays schema-valid");
+    assert_eq!(
+        line,
+        "{\"v\":1,\"session\":\"capture-session\",\"scope\":\"worker-7\",\"seq\":0,\
+         \"severity\":\"warn\",\"kind\":\"process_gap\",\"payload\":{\
+         \"process\":\"worker-7\",\"stream\":\"stdout\",\"class\":\"diagnostic\",\
+         \"first_ordinal\":1,\"last_ordinal\":1,\"original_count\":1,\
+         \"emitted_count\":1,\"dropped_count\":0,\"omitted_inline_bytes\":3,\
+         \"reason\":\"inline_limit\",\"policy_version\":7,\"artifact\":null,\
+         \"artifact_content_hash\":null}}"
+    );
+}
+
+#[test]
+fn malformed_typed_process_records_fail_the_event_lint() {
+    let mut emitter = Emitter::new("capture-session", "worker-7");
+    let gap = |original_count, emitted_count, dropped_count, reason, policy_version| {
+        EventKind::ProcessGap {
+            process: process(),
+            stream: ProcessStream::Stdout,
+            class: ProcessEventClass::Diagnostic,
+            first_ordinal: 1,
+            last_ordinal: 2,
+            original_count,
+            emitted_count,
+            dropped_count,
+            omitted_inline_bytes: 3,
+            reason,
+            policy_version,
+            artifact: None,
+        }
+    };
+    for kind in [
+        gap(1, 1, 0, LossReason::InlineLimit, 7),
+        gap(2, 1, 1, LossReason::InlineLimit, 0),
+        gap(2, 2, 0, LossReason::DurableSpill, 7),
+    ] {
+        let event = emitter.emit(Severity::Warn, kind, None);
+        assert!(
+            lint_failure_record(&event).is_err(),
+            "malformed typed process evidence must fail closed: {event:?}"
+        );
+    }
+
+    let frame = emitter.emit(
+        Severity::Info,
+        EventKind::ProcessFrame {
+            process: process(),
+            stream: ProcessStream::Stderr,
+            ordinal: 1,
+            class: ProcessEventClass::Diagnostic,
+            payload: b"four".to_vec(),
+            original_bytes: 3,
+            artifact: None,
+        },
+        None,
+    );
+    assert!(lint_failure_record(&frame).is_err());
 }
 
 #[test]

@@ -287,6 +287,38 @@ impl ProcessFrame {
     pub fn artifact(&self) -> Option<&DurableArtifactPointer> {
         self.artifact.as_ref()
     }
+
+    /// Consume this captured frame into the canonical typed fs-obs event
+    /// stream. The frame's severity becomes the event-envelope severity so a
+    /// runtime owner cannot accidentally stamp a conflicting level.
+    #[must_use]
+    pub fn into_event(self, emitter: &mut crate::Emitter, wall_ns: Option<u64>) -> crate::Event {
+        let Self {
+            process,
+            stream,
+            ordinal,
+            class,
+            severity,
+            payload,
+            original_bytes,
+            artifact,
+        } = self;
+        let original_bytes = u64::try_from(original_bytes)
+            .expect("supported Rust targets represent usize within u64");
+        emitter.emit(
+            severity,
+            crate::EventKind::ProcessFrame {
+                process,
+                stream,
+                ordinal,
+                class,
+                payload,
+                original_bytes,
+                artifact,
+            },
+            wall_ns,
+        )
+    }
 }
 
 /// Refusal for an invalid process frame.
@@ -534,6 +566,46 @@ impl ProcessGap {
         } else {
             self.omitted_inline_bytes
         }
+    }
+
+    /// Consume this quantified omission into the canonical typed fs-obs event
+    /// stream. Gaps are warnings: proof-critical loss takes the separate
+    /// fail-closed [`CaptureDecision::CriticalFailure`] path and is never
+    /// laundered into an ordinary gap.
+    #[must_use]
+    pub fn into_event(self, emitter: &mut crate::Emitter, wall_ns: Option<u64>) -> crate::Event {
+        let Self {
+            process,
+            stream,
+            class,
+            first_ordinal,
+            last_ordinal,
+            original_count,
+            emitted_count,
+            dropped_count,
+            omitted_inline_bytes,
+            reason,
+            policy_version,
+            artifact,
+        } = self;
+        emitter.emit(
+            Severity::Warn,
+            crate::EventKind::ProcessGap {
+                process,
+                stream,
+                class,
+                first_ordinal,
+                last_ordinal,
+                original_count,
+                emitted_count,
+                dropped_count,
+                omitted_inline_bytes,
+                reason,
+                policy_version,
+                artifact,
+            },
+            wall_ns,
+        )
     }
 
     fn can_coalesce(&self, next: &Self) -> bool {
