@@ -12,15 +12,15 @@ use std::fmt;
 /// Canonical binary envelope magic.
 pub const ADMISSION_MAGIC: &[u8; 8] = b"FSADM\0\0\0";
 /// Canonical schema name retained by human and ledger adapters.
-pub const ADMISSION_SCHEMA: &str = "frankensim-constellation-admission-v1";
+pub const ADMISSION_SCHEMA: &str = "frankensim-constellation-admission-v2";
 /// Domain separating this protocol from every other identity surface.
-pub const ADMISSION_DOMAIN: &str = "org.frankensim.xtask.constellation-admission.v1";
+pub const ADMISSION_DOMAIN: &str = "org.frankensim.xtask.constellation-admission.v2";
 /// Canonical schema version.
-pub const ADMISSION_VERSION: u16 = 1;
+pub const ADMISSION_VERSION: u16 = 2;
 /// Maximum path-capability slots retained by one request.
-pub const MAX_PATH_CAPABILITIES: usize = 16;
+pub const MAX_PATH_CAPABILITIES: usize = 5;
 /// Maximum executable-capability slots retained by one request.
-pub const MAX_EXECUTABLE_CAPABILITIES: usize = 16;
+pub const MAX_EXECUTABLE_CAPABILITIES: usize = 2;
 /// Maximum accepted transition count, including retries and terminal steps.
 pub const MAX_ADMISSION_EVENTS: usize = 1_024;
 /// Hard envelope bound checked before decoder allocation.
@@ -194,6 +194,17 @@ impl CommandClass {
 
     fn executable_is_allowed(self, slot: ExecutableSlot) -> bool {
         self.required_executables().contains(&slot)
+    }
+
+    fn admits_read_only_completion(self) -> bool {
+        matches!(
+            self,
+            Self::Diagnostic
+                | Self::VerifyOnly
+                | Self::Snapshot
+                | Self::ShellVerifyOnly
+                | Self::ShellSnapshot
+        )
     }
 }
 
@@ -751,16 +762,18 @@ fn validate_path_capabilities(
     publication: PublicationAuthority,
     capabilities: &[PathCapability],
 ) -> Result<(), AdmissionError> {
-    for (index, left) in capabilities.iter().enumerate() {
-        if capabilities[index + 1..]
+    if capabilities.iter().enumerate().any(|(index, left)| {
+        capabilities[index + 1..]
             .iter()
             .any(|right| right.slot == left.slot)
-        {
-            return Err(AdmissionError::new(AdmissionRule::DuplicatePathCapability));
-        }
-        if !command.path_is_allowed(left.slot, publication) {
-            return Err(AdmissionError::new(AdmissionRule::UnexpectedPathCapability));
-        }
+    }) {
+        return Err(AdmissionError::new(AdmissionRule::DuplicatePathCapability));
+    }
+    if capabilities
+        .iter()
+        .any(|capability| !command.path_is_allowed(capability.slot, publication))
+    {
+        return Err(AdmissionError::new(AdmissionRule::UnexpectedPathCapability));
     }
     for required in command.required_paths() {
         if !capabilities
@@ -784,20 +797,22 @@ fn validate_executable_capabilities(
     command: CommandClass,
     capabilities: &[ExecutableCapability],
 ) -> Result<(), AdmissionError> {
-    for (index, left) in capabilities.iter().enumerate() {
-        if capabilities[index + 1..]
+    if capabilities.iter().enumerate().any(|(index, left)| {
+        capabilities[index + 1..]
             .iter()
             .any(|right| right.slot == left.slot)
-        {
-            return Err(AdmissionError::new(
-                AdmissionRule::DuplicateExecutableCapability,
-            ));
-        }
-        if !command.executable_is_allowed(left.slot) {
-            return Err(AdmissionError::new(
-                AdmissionRule::UnexpectedExecutableCapability,
-            ));
-        }
+    }) {
+        return Err(AdmissionError::new(
+            AdmissionRule::DuplicateExecutableCapability,
+        ));
+    }
+    if capabilities
+        .iter()
+        .any(|capability| !command.executable_is_allowed(capability.slot))
+    {
+        return Err(AdmissionError::new(
+            AdmissionRule::UnexpectedExecutableCapability,
+        ));
     }
     for required in command.required_executables() {
         if !capabilities
@@ -857,6 +872,22 @@ pub enum AdmittedPhase {
         anchor: AuthorityId,
         /// Stable admitted generation.
         generation: u64,
+    },
+    /// Read-only work is quiescent and awaits an exact post-work recheck.
+    CompletionPending {
+        /// Snapshot admitted before work.
+        snapshot: AuthorityId,
+        /// Trust anchor admitted before work.
+        anchor: AuthorityId,
+        /// Stable admitted generation.
+        generation: u64,
+        /// Evidence that read-only workers and retained outputs are quiescent.
+        quiescence: AuthorityId,
+    },
+    /// Publication-prohibited work completed under a stable post-work recheck.
+    Completed {
+        /// Inert identity of the finalized read-only result receipt.
+        receipt: AuthorityId,
     },
     /// Work is closed and publication awaits a final stability recheck.
     PublicationPending {
@@ -988,7 +1019,7 @@ impl AdmissionState {
                     phase: TerminalPhase::Finalized,
                     ..
                 }
-                | Self::Admitted(AdmittedPhase::Published { .. })
+                | Self::Admitted(AdmittedPhase::Completed { .. } | AdmittedPhase::Published { .. })
         )
     }
 }
@@ -1101,6 +1132,137 @@ impl CancellationCause {
     }
 }
 
+/// Closed reasons for a definitive refusal before any uncertain effect exists.
+///
+/// These tags are deliberately disjoint from indeterminate and publication
+/// failure tags. An adapter cannot inject an arbitrary internal codec or state
+/// machine rule into a canonical refusal receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum RefusalReason {
+    /// A bounded external input failed its adapter contract.
+    InputRejected = 0,
+    /// A source artifact failed validation before mutation.
+    SourceRejected = 1,
+    /// A required live capability could not be established.
+    CapabilityRejected = 2,
+    /// A required executable failed pre-effect admission.
+    ExecutableRejected = 3,
+    /// Declared work cannot fit the explicit budget envelope.
+    BudgetInfeasible = 4,
+    /// The inclusive deadline elapsed before an effect began.
+    DeadlineElapsed = 5,
+    /// Closed command policy denied the requested pre-effect operation.
+    PolicyDenied = 6,
+}
+
+impl RefusalReason {
+    const fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            0 => Self::InputRejected,
+            1 => Self::SourceRejected,
+            2 => Self::CapabilityRejected,
+            3 => Self::ExecutableRejected,
+            4 => Self::BudgetInfeasible,
+            5 => Self::DeadlineElapsed,
+            6 => Self::PolicyDenied,
+            _ => return None,
+        })
+    }
+
+    /// Stable terminal rule exposed by states and events.
+    #[must_use]
+    pub const fn rule(self) -> AdmissionRule {
+        match self {
+            Self::InputRejected => AdmissionRule::InputRejected,
+            Self::SourceRejected => AdmissionRule::SourceRejected,
+            Self::CapabilityRejected => AdmissionRule::CapabilityRejected,
+            Self::ExecutableRejected => AdmissionRule::ExecutableRejected,
+            Self::BudgetInfeasible => AdmissionRule::BudgetInfeasible,
+            Self::DeadlineElapsed => AdmissionRule::DeadlineExceeded,
+            Self::PolicyDenied => AdmissionRule::PolicyDenied,
+        }
+    }
+}
+
+/// Closed reasons for uncertainty after an effect may have occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum IndeterminateReason {
+    /// The adapter cannot prove whether an external effect occurred.
+    EffectOutcomeUnknown = 16,
+    /// Known drain obligations did not complete.
+    DrainIncomplete = 17,
+    /// The adapter could not obtain a trustworthy drain observation.
+    DrainObservationUnavailable = 18,
+    /// Terminal-record finalization may have partially occurred.
+    FinalizationOutcomeUnknown = 19,
+    /// Source or anchor moved after admitted work began.
+    PostEffectStabilityChanged = 20,
+}
+
+impl IndeterminateReason {
+    const fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            16 => Self::EffectOutcomeUnknown,
+            17 => Self::DrainIncomplete,
+            18 => Self::DrainObservationUnavailable,
+            19 => Self::FinalizationOutcomeUnknown,
+            20 => Self::PostEffectStabilityChanged,
+            _ => return None,
+        })
+    }
+
+    /// Stable terminal rule exposed by states and events.
+    #[must_use]
+    pub const fn rule(self) -> AdmissionRule {
+        match self {
+            Self::EffectOutcomeUnknown => AdmissionRule::EffectOutcomeUnknown,
+            Self::DrainIncomplete => AdmissionRule::DrainIncomplete,
+            Self::DrainObservationUnavailable => AdmissionRule::DrainObservationUnavailable,
+            Self::FinalizationOutcomeUnknown => AdmissionRule::FinalizationOutcomeUnknown,
+            Self::PostEffectStabilityChanged => AdmissionRule::PostEffectStabilityChanged,
+        }
+    }
+}
+
+/// Closed reasons for uncertainty after a publication receipt was authorized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum PublicationFailureReason {
+    /// The external commit reported failure after authorization.
+    CommitFailed = 32,
+    /// The adapter cannot determine whether the commit occurred.
+    CommitOutcomeUnknown = 33,
+    /// Commit visibility is known but durability is not.
+    DurabilityUnknown = 34,
+    /// Durable content exists but receipt finalization is uncertain.
+    ReceiptFinalizationUnknown = 35,
+}
+
+impl PublicationFailureReason {
+    const fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            32 => Self::CommitFailed,
+            33 => Self::CommitOutcomeUnknown,
+            34 => Self::DurabilityUnknown,
+            35 => Self::ReceiptFinalizationUnknown,
+            _ => return None,
+        })
+    }
+
+    /// Stable terminal rule exposed by states and events.
+    #[must_use]
+    pub const fn rule(self) -> AdmissionRule {
+        match self {
+            Self::CommitFailed => AdmissionRule::PublicationCommitFailed,
+            Self::CommitOutcomeUnknown => AdmissionRule::PublicationOutcomeUnknown,
+            Self::DurabilityUnknown => AdmissionRule::PublicationDurabilityUnknown,
+            Self::ReceiptFinalizationUnknown => AdmissionRule::PublicationFinalizationUnknown,
+        }
+    }
+}
+
 /// Runtime/replay action classes used by the exhaustive transition table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -1135,6 +1297,10 @@ pub enum TransitionKind {
     AuthorizePublication = 13,
     /// Record an external publication failure as indeterminate.
     PublicationFailed = 14,
+    /// Close publication-prohibited work before its post-work stability check.
+    BeginReadOnlyCompletion = 15,
+    /// Recheck and finalize one publication-prohibited result receipt.
+    CompleteReadOnly = 16,
 }
 
 impl TransitionKind {
@@ -1155,6 +1321,8 @@ impl TransitionKind {
             12 => Self::PollCancellation,
             13 => Self::AuthorizePublication,
             14 => Self::PublicationFailed,
+            15 => Self::BeginReadOnlyCompletion,
+            16 => Self::CompleteReadOnly,
             _ => return None,
         })
     }
@@ -1190,8 +1358,10 @@ pub enum AdmissionTransition {
     },
     /// Definitive refusal before an uncertain effect exists.
     Refuse {
-        /// Deterministic refusal rule.
-        rule: AdmissionRule,
+        /// Closed deterministic pre-effect reason.
+        reason: RefusalReason,
+        /// Identity of the bounded observation establishing the refusal.
+        observation: AuthorityId,
     },
     /// Close new work and fix drain obligations.
     RequestCancellation {
@@ -1216,8 +1386,10 @@ pub enum AdmissionTransition {
     },
     /// Declare that mutation or cleanup cannot be proven.
     DeclareIndeterminate {
-        /// Deterministic uncertainty rule.
-        rule: AdmissionRule,
+        /// Closed deterministic post-effect uncertainty reason.
+        reason: IndeterminateReason,
+        /// Identity of the observation establishing uncertainty.
+        observation: AuthorityId,
     },
     /// Close work before the publication stability barrier.
     BeginPublication {
@@ -1248,8 +1420,28 @@ pub enum AdmissionTransition {
     FinalizePublication,
     /// Preserve uncertainty when the authorized external commit fails or is ambiguous.
     PublicationFailed {
-        /// Deterministic failure or uncertainty rule.
-        rule: AdmissionRule,
+        /// Closed publication failure or uncertainty reason.
+        reason: PublicationFailureReason,
+        /// Identity of the external commit/durability observation.
+        observation: AuthorityId,
+    },
+    /// Close publication-prohibited work before its final stability check.
+    BeginReadOnlyCompletion {
+        /// Evidence that read-only workers and retained outputs are quiescent.
+        quiescence: AuthorityId,
+        /// Caller-supplied monotonic tick.
+        at_tick: u64,
+    },
+    /// Reobserve and finalize a publication-prohibited result.
+    CompleteReadOnly {
+        /// Reobserved source snapshot.
+        snapshot: AuthorityId,
+        /// Reobserved trust anchor.
+        anchor: AnchorObservation,
+        /// Exact result receipt identity.
+        receipt: AuthorityId,
+        /// Caller-supplied monotonic tick.
+        at_tick: u64,
     },
     /// Retry under the same idempotency identity without replenishing budgets.
     Retry {
@@ -1285,6 +1477,8 @@ impl AdmissionTransition {
             Self::AuthorizePublication { .. } => TransitionKind::AuthorizePublication,
             Self::FinalizePublication => TransitionKind::FinalizePublication,
             Self::PublicationFailed { .. } => TransitionKind::PublicationFailed,
+            Self::BeginReadOnlyCompletion { .. } => TransitionKind::BeginReadOnlyCompletion,
+            Self::CompleteReadOnly { .. } => TransitionKind::CompleteReadOnly,
             Self::Retry { .. } => TransitionKind::Retry,
             Self::PollCancellation { .. } => TransitionKind::PollCancellation,
         }
@@ -1298,6 +1492,8 @@ impl AdmissionTransition {
             | Self::BeginPublication { at_tick, .. }
             | Self::PublicationRecheck { at_tick, .. }
             | Self::AuthorizePublication { at_tick, .. }
+            | Self::BeginReadOnlyCompletion { at_tick, .. }
+            | Self::CompleteReadOnly { at_tick, .. }
             | Self::Retry { at_tick, .. }
             | Self::PollCancellation { at_tick, .. } => Some(at_tick),
             Self::Refuse { .. }
@@ -1327,8 +1523,6 @@ pub const fn transition_kind_may_apply(from: StateKind, action: TransitionKind) 
                 | TransitionKind::Charge
                 | TransitionKind::PollCancellation
                 | TransitionKind::Refuse
-                | TransitionKind::RequestCancellation
-                | TransitionKind::DeclareIndeterminate
         ),
         StateKind::Unanchored => matches!(
             action,
@@ -1341,6 +1535,8 @@ pub const fn transition_kind_may_apply(from: StateKind, action: TransitionKind) 
                 | TransitionKind::RequestCancellation
                 | TransitionKind::DeclareIndeterminate
                 | TransitionKind::BeginPublication
+                | TransitionKind::BeginReadOnlyCompletion
+                | TransitionKind::CompleteReadOnly
                 | TransitionKind::PublicationRecheck
                 | TransitionKind::AuthorizePublication
                 | TransitionKind::FinalizePublication
@@ -1547,7 +1743,9 @@ impl AdmissionMachine {
         }
         if matches!(
             self.state,
-            AdmissionState::Admitted(AdmittedPhase::Published { .. })
+            AdmissionState::Admitted(
+                AdmittedPhase::Completed { .. } | AdmittedPhase::Published { .. }
+            )
         ) {
             return Err(AdmissionError::new(AdmissionRule::IllegalTransition));
         }
@@ -1707,14 +1905,21 @@ impl AdmissionMachine {
                     return Err(AdmissionError::new(AdmissionRule::PollIntervalExceeded));
                 }
             }
-            (AdmissionState::Diagnostic(_), AdmissionTransition::Refuse { rule }) => {
+            (
+                AdmissionState::Diagnostic(_),
+                AdmissionTransition::Refuse {
+                    reason,
+                    observation: _,
+                },
+            ) => {
+                let rule = reason.rule();
                 evaluated.state = refused(rule);
                 evaluated.terminal_rule = Some(rule);
             }
             (
-                AdmissionState::Diagnostic(_)
-                | AdmissionState::Admitted(
+                AdmissionState::Admitted(
                     AdmittedPhase::Active { .. }
+                    | AdmittedPhase::CompletionPending { .. }
                     | AdmittedPhase::PublicationPending { .. }
                     | AdmittedPhase::PublicationReady { .. },
                 ),
@@ -1805,9 +2010,9 @@ impl AdmissionMachine {
                 AdmissionTransition::FinalizeTerminal { .. },
             ) => return Err(AdmissionError::new(AdmissionRule::DrainIncomplete)),
             (
-                AdmissionState::Diagnostic(_)
-                | AdmissionState::Admitted(
+                AdmissionState::Admitted(
                     AdmittedPhase::Active { .. }
+                    | AdmittedPhase::CompletionPending { .. }
                     | AdmittedPhase::PublicationPending { .. }
                     | AdmittedPhase::PublicationReady { .. }
                     | AdmittedPhase::PublicationCommitting { .. },
@@ -1816,8 +2021,68 @@ impl AdmissionMachine {
                     phase: CancellationPhase::Requested | CancellationPhase::Draining,
                     ..
                 },
-                AdmissionTransition::DeclareIndeterminate { rule },
+                AdmissionTransition::DeclareIndeterminate {
+                    reason,
+                    observation: _,
+                },
             ) => {
+                let rule = reason.rule();
+                evaluated.state = AdmissionState::Indeterminate {
+                    rule,
+                    phase: TerminalPhase::Pending,
+                };
+                evaluated.terminal_rule = Some(rule);
+            }
+            (
+                AdmissionState::Admitted(AdmittedPhase::Active {
+                    snapshot,
+                    anchor,
+                    generation,
+                }),
+                AdmissionTransition::BeginReadOnlyCompletion { quiescence, .. },
+            ) => {
+                if !self.context.command.admits_read_only_completion()
+                    || !self.context.publication.is_prohibited()
+                {
+                    return Err(AdmissionError::new(
+                        AdmissionRule::ReadOnlyCompletionForbidden,
+                    ));
+                }
+                evaluated.state = AdmissionState::Admitted(AdmittedPhase::CompletionPending {
+                    snapshot,
+                    anchor,
+                    generation,
+                    quiescence,
+                });
+            }
+            (
+                AdmissionState::Admitted(AdmittedPhase::CompletionPending {
+                    snapshot: expected_snapshot,
+                    anchor: expected_anchor,
+                    generation: expected_generation,
+                    ..
+                }),
+                AdmissionTransition::CompleteReadOnly {
+                    snapshot,
+                    anchor:
+                        AnchorObservation::Observed {
+                            identity,
+                            generation,
+                        },
+                    receipt,
+                    ..
+                },
+            ) if snapshot == expected_snapshot
+                && identity == expected_anchor
+                && generation == expected_generation =>
+            {
+                evaluated.state = AdmissionState::Admitted(AdmittedPhase::Completed { receipt });
+            }
+            (
+                AdmissionState::Admitted(AdmittedPhase::CompletionPending { .. }),
+                AdmissionTransition::CompleteReadOnly { .. },
+            ) => {
+                let rule = IndeterminateReason::PostEffectStabilityChanged.rule();
                 evaluated.state = AdmissionState::Indeterminate {
                     rule,
                     phase: TerminalPhase::Pending,
@@ -1903,8 +2168,12 @@ impl AdmissionMachine {
             }
             (
                 AdmissionState::Admitted(AdmittedPhase::PublicationCommitting { .. }),
-                AdmissionTransition::PublicationFailed { rule },
+                AdmissionTransition::PublicationFailed {
+                    reason,
+                    observation: _,
+                },
             ) => {
+                let rule = reason.rule();
                 evaluated.state = AdmissionState::Indeterminate {
                     rule,
                     phase: TerminalPhase::Pending,
@@ -2075,7 +2344,8 @@ struct Evaluated {
 const fn minimum_terminal_events(state: AdmissionState) -> usize {
     match state {
         AdmissionState::Diagnostic(_) | AdmissionState::Admitted(AdmittedPhase::Active { .. }) => 2,
-        AdmissionState::Admitted(AdmittedPhase::PublicationPending { .. })
+        AdmissionState::Admitted(AdmittedPhase::CompletionPending { .. })
+        | AdmissionState::Admitted(AdmittedPhase::PublicationPending { .. })
         | AdmissionState::Admitted(AdmittedPhase::PublicationReady { .. })
         | AdmissionState::Admitted(AdmittedPhase::PublicationCommitting { .. }) => 2,
         AdmissionState::Unanchored(TerminalPhase::Pending)
@@ -2115,7 +2385,9 @@ const fn minimum_terminal_events(state: AdmissionState) -> usize {
             phase: TerminalPhase::Finalized,
             ..
         }
-        | AdmissionState::Admitted(AdmittedPhase::Published { .. }) => 0,
+        | AdmissionState::Admitted(
+            AdmittedPhase::Completed { .. } | AdmittedPhase::Published { .. },
+        ) => 0,
     }
 }
 
@@ -2365,61 +2637,39 @@ pub enum AdmissionRule {
     RetryCxNotFresh = 44,
     /// Cx, cancellation, and clock roles reused one identity.
     CxIdentityAliasing = 45,
+    /// A bounded adapter input was definitively rejected before effect.
+    InputRejected = 46,
+    /// A source artifact was definitively rejected before effect.
+    SourceRejected = 47,
+    /// A required live capability could not be established.
+    CapabilityRejected = 48,
+    /// A required executable failed pre-effect admission.
+    ExecutableRejected = 49,
+    /// Declared work cannot fit the explicit budget envelope.
+    BudgetInfeasible = 50,
+    /// Closed command policy denied the requested pre-effect operation.
+    PolicyDenied = 51,
+    /// The adapter cannot prove whether an external effect occurred.
+    EffectOutcomeUnknown = 52,
+    /// A trustworthy drain observation could not be obtained.
+    DrainObservationUnavailable = 53,
+    /// Terminal-record finalization may have partially occurred.
+    FinalizationOutcomeUnknown = 54,
+    /// Source or anchor moved after admitted work began.
+    PostEffectStabilityChanged = 55,
+    /// An authorized external publication commit reported failure.
+    PublicationCommitFailed = 56,
+    /// The outcome of an authorized publication commit is unknown.
+    PublicationOutcomeUnknown = 57,
+    /// Publication visibility is known but durability is not.
+    PublicationDurabilityUnknown = 58,
+    /// Durable publication exists but receipt finalization is uncertain.
+    PublicationFinalizationUnknown = 59,
+    /// The command or publication policy cannot complete through read-only success.
+    ReadOnlyCompletionForbidden = 60,
 }
 
 impl AdmissionRule {
-    fn from_tag(tag: u8) -> Option<Self> {
-        Some(match tag {
-            0 => Self::ZeroIdentity,
-            1 => Self::ZeroPollInterval,
-            2 => Self::ClockBindingMismatch,
-            3 => Self::TooManyPathCapabilities,
-            4 => Self::TooManyExecutableCapabilities,
-            5 => Self::DuplicatePathCapability,
-            6 => Self::MissingPathCapability,
-            7 => Self::DuplicateExecutableCapability,
-            8 => Self::MissingExecutableCapability,
-            9 => Self::OfflineNetworkBudgetConflict,
-            10 => Self::FetchAuthorityWithoutBudget,
-            11 => Self::PublicationForbiddenForCommand,
-            12 => Self::PublicationWithoutOutputBudget,
-            13 => Self::IllegalTransition,
-            14 => Self::DeadlineExceeded,
-            15 => Self::BudgetExceeded,
-            16 => Self::BudgetOverflow,
-            17 => Self::NetworkAuthorityDenied,
-            18 => Self::PublicationAuthorityDenied,
-            19 => Self::TrustAnchorUnavailable,
-            20 => Self::TrustAnchorMismatch,
-            21 => Self::StabilityChanged,
-            22 => Self::PublicationStabilityChanged,
-            23 => Self::DrainOverrun,
-            24 => Self::DrainIncomplete,
-            25 => Self::RetryBudgetExceeded,
-            26 => Self::IndeterminateRetryForbidden,
-            27 => Self::EventLimitExceeded,
-            28 => Self::AllocationFailed,
-            29 => Self::EncodedInputTooLarge,
-            30 => Self::UnknownMagic,
-            31 => Self::UnknownSchema,
-            32 => Self::TruncatedEncoding,
-            33 => Self::UnknownTag,
-            34 => Self::TrailingBytes,
-            35 => Self::ImpossibleHistory,
-            36 => Self::NonCanonicalEncoding,
-            37 => Self::NetworkForbiddenForCommand,
-            38 => Self::PublicationCapabilityMismatch,
-            39 => Self::UnexpectedPathCapability,
-            40 => Self::UnexpectedExecutableCapability,
-            41 => Self::ClockRegression,
-            42 => Self::TerminalHeadroomRequired,
-            43 => Self::PollIntervalExceeded,
-            44 => Self::RetryCxNotFresh,
-            45 => Self::CxIdentityAliasing,
-            _ => return None,
-        })
-    }
-
     /// Stable machine-readable rule code.
     #[must_use]
     pub const fn code(self) -> &'static str {
@@ -2470,6 +2720,21 @@ impl AdmissionRule {
             Self::PollIntervalExceeded => "admission-poll-interval-exceeded",
             Self::RetryCxNotFresh => "admission-retry-cx-not-fresh",
             Self::CxIdentityAliasing => "admission-cx-identity-aliasing",
+            Self::InputRejected => "admission-input-rejected",
+            Self::SourceRejected => "admission-source-rejected",
+            Self::CapabilityRejected => "admission-capability-rejected",
+            Self::ExecutableRejected => "admission-executable-rejected",
+            Self::BudgetInfeasible => "admission-budget-infeasible",
+            Self::PolicyDenied => "admission-policy-denied",
+            Self::EffectOutcomeUnknown => "admission-effect-outcome-unknown",
+            Self::DrainObservationUnavailable => "admission-drain-observation-unavailable",
+            Self::FinalizationOutcomeUnknown => "admission-finalization-outcome-unknown",
+            Self::PostEffectStabilityChanged => "admission-post-effect-stability-changed",
+            Self::PublicationCommitFailed => "admission-publication-commit-failed",
+            Self::PublicationOutcomeUnknown => "admission-publication-outcome-unknown",
+            Self::PublicationDurabilityUnknown => "admission-publication-durability-unknown",
+            Self::PublicationFinalizationUnknown => "admission-publication-finalization-unknown",
+            Self::ReadOnlyCompletionForbidden => "admission-read-only-completion-forbidden",
         }
     }
 
@@ -2520,6 +2785,27 @@ impl AdmissionRule {
             Self::RetryBudgetExceeded | Self::IndeterminateRetryForbidden => {
                 &[Remedy::StartNewRequest, Remedy::InspectPriorAttempt]
             }
+            Self::InputRejected => &[Remedy::InspectDiagnostic, Remedy::UseSupportedSchema],
+            Self::SourceRejected => &[Remedy::RestartPreflight, Remedy::InspectDiagnostic],
+            Self::CapabilityRejected | Self::ExecutableRejected => {
+                &[Remedy::BindRequiredCapability, Remedy::InspectDiagnostic]
+            }
+            Self::BudgetInfeasible => &[Remedy::ReduceWork, Remedy::IncreaseExplicitBudget],
+            Self::PolicyDenied | Self::ReadOnlyCompletionForbidden => {
+                &[Remedy::UseDiagnosticMode, Remedy::InspectDiagnostic]
+            }
+            Self::EffectOutcomeUnknown
+            | Self::FinalizationOutcomeUnknown
+            | Self::PublicationCommitFailed
+            | Self::PublicationOutcomeUnknown
+            | Self::PublicationDurabilityUnknown
+            | Self::PublicationFinalizationUnknown => {
+                &[Remedy::MarkIndeterminate, Remedy::InspectDiagnostic]
+            }
+            Self::DrainObservationUnavailable => {
+                &[Remedy::CompleteDrain, Remedy::MarkIndeterminate]
+            }
+            Self::PostEffectStabilityChanged => &[Remedy::RestartPreflight, Remedy::QuiesceWriters],
             Self::UnknownMagic
             | Self::UnknownSchema
             | Self::TruncatedEncoding
@@ -3000,8 +3286,20 @@ fn encode_transition(encoder: &mut Encoder, transition: AdmissionTransition) {
             }
             encoder.u64(at_tick);
         }
-        AdmissionTransition::Refuse { rule }
-        | AdmissionTransition::DeclareIndeterminate { rule } => encoder.u8(rule as u8),
+        AdmissionTransition::Refuse {
+            reason,
+            observation,
+        } => {
+            encoder.u8(reason as u8);
+            encoder.id(observation);
+        }
+        AdmissionTransition::DeclareIndeterminate {
+            reason,
+            observation,
+        } => {
+            encoder.u8(reason as u8);
+            encoder.id(observation);
+        }
         AdmissionTransition::RequestCancellation {
             cause,
             obligations,
@@ -3030,8 +3328,32 @@ fn encode_transition(encoder: &mut Encoder, transition: AdmissionTransition) {
             encoder.id(receipt);
             encoder.u64(at_tick);
         }
+        AdmissionTransition::BeginReadOnlyCompletion {
+            quiescence,
+            at_tick,
+        } => {
+            encoder.id(quiescence);
+            encoder.u64(at_tick);
+        }
+        AdmissionTransition::CompleteReadOnly {
+            snapshot,
+            anchor,
+            receipt,
+            at_tick,
+        } => {
+            encoder.id(snapshot);
+            encode_anchor(encoder, anchor);
+            encoder.id(receipt);
+            encoder.u64(at_tick);
+        }
         AdmissionTransition::FinalizePublication => {}
-        AdmissionTransition::PublicationFailed { rule } => encoder.u8(rule as u8),
+        AdmissionTransition::PublicationFailed {
+            reason,
+            observation,
+        } => {
+            encoder.u8(reason as u8);
+            encoder.id(observation);
+        }
         AdmissionTransition::Retry { next_cx, at_tick } => {
             encode_cx(encoder, next_cx);
             encoder.u64(at_tick);
@@ -3079,7 +3401,9 @@ fn decode_transition(decoder: &mut Decoder<'_>) -> Result<AdmissionTransition, A
             }
         }
         TransitionKind::Refuse => AdmissionTransition::Refuse {
-            rule: decode_rule(decoder)?,
+            reason: RefusalReason::from_tag(decoder.u8()?)
+                .ok_or_else(|| AdmissionError::new(AdmissionRule::UnknownTag))?,
+            observation: decoder.id()?,
         },
         TransitionKind::RequestCancellation => AdmissionTransition::RequestCancellation {
             cause: CancellationCause::from_tag(decoder.u8()?)
@@ -3095,7 +3419,9 @@ fn decode_transition(decoder: &mut Decoder<'_>) -> Result<AdmissionTransition, A
             receipt: decoder.id()?,
         },
         TransitionKind::DeclareIndeterminate => AdmissionTransition::DeclareIndeterminate {
-            rule: decode_rule(decoder)?,
+            reason: IndeterminateReason::from_tag(decoder.u8()?)
+                .ok_or_else(|| AdmissionError::new(AdmissionRule::UnknownTag))?,
+            observation: decoder.id()?,
         },
         TransitionKind::BeginPublication => AdmissionTransition::BeginPublication {
             quiescence: decoder.id()?,
@@ -3111,9 +3437,21 @@ fn decode_transition(decoder: &mut Decoder<'_>) -> Result<AdmissionTransition, A
             receipt: decoder.id()?,
             at_tick: decoder.u64()?,
         },
+        TransitionKind::BeginReadOnlyCompletion => AdmissionTransition::BeginReadOnlyCompletion {
+            quiescence: decoder.id()?,
+            at_tick: decoder.u64()?,
+        },
+        TransitionKind::CompleteReadOnly => AdmissionTransition::CompleteReadOnly {
+            snapshot: decoder.id()?,
+            anchor: decode_anchor(decoder)?,
+            receipt: decoder.id()?,
+            at_tick: decoder.u64()?,
+        },
         TransitionKind::FinalizePublication => AdmissionTransition::FinalizePublication,
         TransitionKind::PublicationFailed => AdmissionTransition::PublicationFailed {
-            rule: decode_rule(decoder)?,
+            reason: PublicationFailureReason::from_tag(decoder.u8()?)
+                .ok_or_else(|| AdmissionError::new(AdmissionRule::UnknownTag))?,
+            observation: decoder.id()?,
         },
         TransitionKind::Retry => AdmissionTransition::Retry {
             next_cx: decode_cx(decoder)?,
@@ -3124,9 +3462,4 @@ fn decode_transition(decoder: &mut Decoder<'_>) -> Result<AdmissionTransition, A
             at_tick: decoder.u64()?,
         },
     })
-}
-
-fn decode_rule(decoder: &mut Decoder<'_>) -> Result<AdmissionRule, AdmissionError> {
-    AdmissionRule::from_tag(decoder.u8()?)
-        .ok_or_else(|| AdmissionError::new(AdmissionRule::UnknownTag))
 }
