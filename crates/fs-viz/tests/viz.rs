@@ -4,10 +4,11 @@
 //! type, and a circle-SDF isocontour lies on the circle.
 
 use fs_viz::{
-    CriticalKind, Grid2, Grid3, Grid3Error, IsoSurfaceError, SCALAR_FIELD3_ARTIFACT_KIND,
-    SCALAR_FIELD3_SCHEMA_VERSION, ScalarField3, ScalarField3Error, ScalarFieldSemantics,
-    ScalarLayout3, classify_hessian, streamline,
+    CriticalKind, Grid2, Grid2Error, Grid3, Grid3Error, IsoContourError, IsoSurfaceError,
+    SCALAR_FIELD3_ARTIFACT_KIND, SCALAR_FIELD3_SCHEMA_VERSION, ScalarField3, ScalarField3Error,
+    ScalarFieldSemantics, ScalarLayout3, classify_hessian, streamline,
 };
+use std::cell::Cell;
 
 fn radius(p: [f64; 2]) -> f64 {
     (p[0] * p[0] + p[1] * p[1]).sqrt()
@@ -90,8 +91,14 @@ fn hessian_classification_recovers_the_morse_type() {
 #[test]
 fn a_circle_sdf_isocontour_lies_on_the_circle() {
     // f(x,y) = sqrt(x²+y²) - 1, zero level set is the unit circle.
-    let grid = Grid2::from_fn(41, 41, [-2.0, -2.0], [2.0, 2.0], |p| radius(p) - 1.0);
-    let crossings = grid.isocontour_crossings(0.0);
+    let grid = Grid2::from_fn(41, 41, [-2.0, -2.0], [2.0, 2.0], 41 * 41, |p| {
+        radius(p) - 1.0
+    })
+    .expect("finite circle grid within its exact node budget");
+    let crossing_limit = 2 * 41 * 40;
+    let crossings = grid
+        .isocontour_crossings(0.0, crossing_limit)
+        .expect("finite non-coincident circle crossings within edge budget");
     assert!(!crossings.is_empty());
     for c in &crossings {
         assert!(
@@ -101,16 +108,208 @@ fn a_circle_sdf_isocontour_lies_on_the_circle() {
         );
     }
     // a level set outside the field's range has no crossings.
-    assert!(grid.isocontour_crossings(100.0).is_empty());
+    assert!(
+        grid.isocontour_crossings(100.0, crossing_limit)
+            .expect("finite out-of-range levels are valid")
+            .is_empty()
+    );
 }
 
 #[test]
 fn the_grid_samples_and_addresses_correctly() {
-    let grid = Grid2::from_fn(3, 3, [0.0, 0.0], [2.0, 2.0], |p| p[0] + p[1]);
+    let grid = Grid2::from_fn(3, 3, [-0.0, 0.0], [2.0, 2.0], 9, |p| p[0] + p[1])
+        .expect("finite 3x3 grid within its exact node budget");
     let (p00, p22) = (grid.point(0, 0), grid.point(2, 2));
+    assert_eq!(p00[0].to_bits(), (-0.0_f64).to_bits());
     assert!(p00[0].abs() < 1e-12 && p00[1].abs() < 1e-12);
     assert!((p22[0] - 2.0).abs() < 1e-12 && (p22[1] - 2.0).abs() < 1e-12);
     assert!((grid.at(1, 1) - 2.0).abs() < 1e-12); // (1,1) -> value 1+1
+}
+
+#[test]
+fn grid2_layout_admission_precedes_sampling() {
+    let calls = Cell::new(0usize);
+    let mut sample = |_| {
+        calls.set(calls.get() + 1);
+        0.0
+    };
+    assert!(matches!(
+        Grid2::from_fn(1, 2, [0.0; 2], [1.0; 2], 2, &mut sample),
+        Err(Grid2Error::InvalidDimensions { dimensions: [1, 2] })
+    ));
+    assert!(matches!(
+        Grid2::from_fn(2, 1, [0.0; 2], [1.0; 2], 2, &mut sample),
+        Err(Grid2Error::InvalidDimensions { dimensions: [2, 1] })
+    ));
+    assert!(matches!(
+        Grid2::from_fn(usize::MAX, 2, [0.0; 2], [1.0; 2], usize::MAX, &mut sample),
+        Err(Grid2Error::NodeCountOverflow { .. })
+    ));
+    assert!(matches!(
+        Grid2::from_fn(2, 2, [0.0; 2], [1.0; 2], 3, &mut sample),
+        Err(Grid2Error::NodeBudgetExceeded {
+            required: 4,
+            limit: 3
+        })
+    ));
+
+    let invalid_bounds = [
+        ([f64::NAN, 0.0], [1.0, 1.0]),
+        ([0.0, 0.0], [f64::INFINITY, 1.0]),
+        ([0.0, 0.0], [0.0, 1.0]),
+        ([1.0, 0.0], [0.0, 1.0]),
+        ([-f64::MAX, 0.0], [f64::MAX, 1.0]),
+    ];
+    for (lo, hi) in invalid_bounds {
+        assert!(matches!(
+            Grid2::from_fn(2, 2, lo, hi, 4, &mut sample),
+            Err(Grid2Error::InvalidBounds { axis: 0, .. })
+        ));
+    }
+    let adjacent_to_one = 1.0_f64.next_up();
+    assert!(matches!(
+        Grid2::from_fn(3, 2, [1.0, 0.0], [adjacent_to_one, 1.0], 6, &mut sample),
+        Err(Grid2Error::UnrepresentableCoordinates {
+            axis: 0,
+            first_index: 0,
+            first,
+            second_index: 1,
+            second
+        }) if first.to_bits() == 1.0_f64.to_bits()
+            && second.to_bits() == 1.0_f64.to_bits()
+    ));
+    assert_eq!(calls.get(), 0, "invalid layouts must not invoke the field");
+}
+
+#[test]
+fn grid2_rejects_the_first_nonfinite_sample() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let index = Cell::new(0usize);
+        let result = Grid2::from_fn(3, 2, [0.0; 2], [1.0; 2], 6, |_| {
+            let current = index.get();
+            index.set(current + 1);
+            if current == 4 { bad } else { current as f64 }
+        });
+        assert!(matches!(
+            result,
+            Err(Grid2Error::NonFiniteValue {
+                index: 4,
+                value
+            }) if value.to_bits() == bad.to_bits()
+        ));
+        assert_eq!(index.get(), 5, "sampling stops at the first bad value");
+    }
+}
+
+#[test]
+fn isocontour_admission_distinguishes_invalid_from_empty() {
+    let grid = Grid2::from_fn(2, 2, [-1.0; 2], [1.0; 2], 4, |p| p[0]).expect("finite affine grid");
+    for iso in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            grid.isocontour_crossings(iso, 4),
+            Err(IsoContourError::NonFiniteIso { iso: rejected })
+                if rejected.to_bits() == iso.to_bits()
+        ));
+    }
+    assert_eq!(
+        grid.isocontour_crossings(0.0, 0),
+        Err(IsoContourError::ZeroCrossingLimit)
+    );
+    assert_eq!(
+        grid.isocontour_crossings(0.0, 1),
+        Err(IsoContourError::CrossingBudgetExceeded { limit: 1 })
+    );
+    assert!(
+        grid.isocontour_crossings(2.0, 1)
+            .expect("a finite absent level is valid")
+            .is_empty()
+    );
+}
+
+#[test]
+fn exact_level_nodes_are_unique_and_coincident_edges_are_refused() {
+    let grid = Grid2::from_fn(3, 3, [-1.0; 2], [1.0; 2], 9, |p| p[0] + 2.0 * p[1])
+        .expect("finite affine grid");
+    let crossings = grid
+        .isocontour_crossings(0.0, 16)
+        .expect("isolated exact nodes have unique point intersections");
+    assert_eq!(
+        crossings
+            .iter()
+            .filter(|point| point[0] == 0.0 && point[1] == 0.0)
+            .count(),
+        1,
+        "the exact center is shared by incident edges but emitted once"
+    );
+
+    let signed_zero = Grid2::from_fn(3, 2, [0.0; 2], [2.0, 1.0], 6, |p| {
+        if p[0] == 1.0 && p[1] == 0.0 {
+            -0.0
+        } else {
+            p[0] + p[1] - 1.0
+        }
+    })
+    .expect("finite signed-zero grid");
+    let signed_crossings = signed_zero
+        .isocontour_crossings(0.0, 8)
+        .expect("signed zero is one exact level node");
+    assert_eq!(
+        signed_crossings
+            .iter()
+            .filter(|point| point[0] == 1.0 && point[1] == 0.0)
+            .count(),
+        1
+    );
+
+    let plateau = Grid2::from_fn(3, 2, [-1.0, 0.0], [1.0, 1.0], 6, |p| p[0])
+        .expect("finite grid containing a level-coincident vertical edge");
+    assert_eq!(
+        plateau.isocontour_crossings(0.0, 8),
+        Err(IsoContourError::CoincidentLevelEdge {
+            first: [1, 0],
+            second: [1, 1]
+        })
+    );
+}
+
+#[test]
+fn isocontour_interpolation_handles_extreme_finite_values() {
+    for magnitude in [f64::MAX, f64::from_bits(1)] {
+        let grid = Grid2::from_fn(2, 2, [0.0; 2], [1.0; 2], 4, |p| {
+            if p[0] == 0.0 { -magnitude } else { magnitude }
+        })
+        .expect("finite extreme samples are admissible");
+        let crossings = grid
+            .isocontour_crossings(0.0, 2)
+            .expect("scaled interpolation remains finite");
+        assert_eq!(crossings, vec![[0.5, 0.0], [0.5, 1.0]]);
+    }
+}
+
+#[test]
+fn g3_isocontour_value_transformations_preserve_crossings() {
+    let base = Grid2::from_fn(4, 4, [-1.0; 2], [1.0; 2], 16, |p| p[0] + 0.5 * p[1])
+        .expect("finite affine base grid");
+    let inverted = Grid2::from_fn(4, 4, [-1.0; 2], [1.0; 2], 16, |p| -(p[0] + 0.5 * p[1]))
+        .expect("finite sign-inverted grid");
+    let scaled = Grid2::from_fn(4, 4, [-1.0; 2], [1.0; 2], 16, |p| 8.0 * (p[0] + 0.5 * p[1]))
+        .expect("finite power-of-two-scaled grid");
+
+    let expected = base
+        .isocontour_crossings(0.1, 24)
+        .expect("base affine contour");
+    assert_eq!(
+        inverted
+            .isocontour_crossings(-0.1, 24)
+            .expect("sign inversion contour"),
+        expected
+    );
+    assert_eq!(
+        scaled
+            .isocontour_crossings(0.8, 24)
+            .expect("positive scaling contour"),
+        expected
+    );
 }
 
 #[test]

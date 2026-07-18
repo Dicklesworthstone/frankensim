@@ -1176,9 +1176,16 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
 
     let win_lo = -(ring_r + 0.5);
     let win_hi = ring_r + 0.5;
-    let field = Grid2::from_fn(grid_n, grid_n, [win_lo, win_lo], [win_hi, win_hi], |p| {
-        net.eval(&[p[0], p[1]])
-    });
+    let Ok(field) = Grid2::from_fn(
+        grid_n,
+        grid_n,
+        [win_lo, win_lo],
+        [win_hi, win_hi],
+        grid_n * grid_n,
+        |p| net.eval(&[p[0], p[1]]),
+    ) else {
+        return Vec::new();
+    };
 
     let mut out = Vec::with_capacity(24 + grid_n * grid_n);
     out.push(grid_n as f64);

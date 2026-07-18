@@ -79,11 +79,17 @@ pub struct NeuroShapeReport {
     /// Morse: does the field have a single interior minimum?
     pub single_minimum: bool,
     /// Number of zero-set crossings found on the visualization grid.
+    /// Zero can also accompany rejected localization evidence; in that case
+    /// both reported crossing radii are `NaN` rather than the valid-empty
+    /// sentinels `0` and `+inf`.
     pub surface_crossings: usize,
-    /// The largest radius at which a crossing was found (must be inside the ring).
+    /// The largest radius at which a crossing was found (must be inside the
+    /// ring), `0` for a valid empty result, or `NaN` when localization was
+    /// rejected.
     pub max_crossing_radius: f64,
     /// The smallest radius at which a crossing was found — the NEAREST surface
     /// point; the safe step radius must under-estimate it (no-tunnel soundness).
+    /// A valid empty result is `+inf`; rejected localization evidence is `NaN`.
     pub nearest_surface_radius: f64,
     /// The topology certificate color (`Verified` — IBP is sound).
     pub topology_color: Color,
@@ -139,20 +145,35 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
     let single_minimum = crit.kind == CriticalKind::Minimum;
 
     // Localize the zero set on a visualization grid.
-    let grid = Grid2::from_fn(
-        81,
-        81,
+    const GRID_N: usize = 81;
+    const CROSSING_LIMIT: usize = 2 * GRID_N * (GRID_N - 1);
+    let crossings = Grid2::from_fn(
+        GRID_N,
+        GRID_N,
         [-ring_r - 0.5, -ring_r - 0.5],
         [ring_r + 0.5, ring_r + 0.5],
+        GRID_N * GRID_N,
         |p| net.eval(&[p[0], p[1]]),
-    );
-    let crossings = grid.isocontour_crossings(0.0);
-    let max_crossing_radius = crossings.iter().copied().map(radius).fold(0.0, f64::max);
-    let nearest_surface_radius = crossings
-        .iter()
-        .copied()
-        .map(radius)
-        .fold(f64::INFINITY, f64::min);
+    )
+    .ok()
+    .and_then(|grid| grid.isocontour_crossings(0.0, CROSSING_LIMIT).ok());
+    let (surface_crossings, max_crossing_radius, nearest_surface_radius) =
+        if let Some(crossings) = crossings {
+            (
+                crossings.len(),
+                crossings.iter().copied().map(radius).fold(0.0, f64::max),
+                crossings
+                    .iter()
+                    .copied()
+                    .map(radius)
+                    .fold(f64::INFINITY, f64::min),
+            )
+        } else {
+            // The interval topology certificate below is independent of this
+            // sampled visualization. NaN radii distinguish rejected contour
+            // evidence from a valid grid with no crossings (0 / +inf).
+            (0, f64::NAN, f64::NAN)
+        };
 
     // The topology claim is Verified iff the interval certificate closed: a
     // non-empty interior enclosed by the certified-positive boundary frame. The
@@ -180,7 +201,7 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
         boundary_segments,
         bounded,
         single_minimum,
-        surface_crossings: crossings.len(),
+        surface_crossings,
         max_crossing_radius,
         nearest_surface_radius,
         topology_color,
