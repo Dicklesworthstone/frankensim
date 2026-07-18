@@ -144,7 +144,14 @@ pub fn probe_adjacent(
     let mean = if per_subdomain.is_empty() {
         0.0
     } else {
-        per_subdomain.iter().sum::<f64>() / per_subdomain.len() as f64
+        let count = per_subdomain.len() as f64;
+        let sum = per_subdomain.iter().sum::<f64>();
+        if sum.is_finite() || !l_inf.is_finite() {
+            sum / count
+        } else {
+            let normalized_sum = per_subdomain.iter().map(|value| value / l_inf).sum::<f64>();
+            l_inf * (normalized_sum / count)
+        }
     };
     let color = Color::Estimated {
         estimator: format!(

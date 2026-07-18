@@ -68,6 +68,23 @@ fn localized_discrepancy_is_measured_and_estimated_color() {
 }
 
 #[test]
+fn finite_discrepancy_mean_does_not_overflow() {
+    let l = ladder();
+    let coarse = [0.0, 0.0];
+    let fine = [f64::MAX; 3];
+    let field = probe_adjacent(&l, 0, &coarse, &fine).expect("finite discrepancy probe");
+    let expected = f64::MAX.to_bits();
+    assert!(
+        field
+            .per_subdomain
+            .iter()
+            .all(|value| value.to_bits() == expected)
+    );
+    assert_eq!(field.l_inf.to_bits(), expected);
+    assert_eq!(field.mean.to_bits(), expected);
+}
+
+#[test]
 fn dim_mismatch_is_a_structured_error() {
     let l = ladder();
     let coarse = vec![0.0, 2.0, 4.0]; // prolongates to 5 points
