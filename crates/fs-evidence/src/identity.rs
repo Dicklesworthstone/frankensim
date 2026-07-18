@@ -1,9 +1,10 @@
 //! Typed, canonical identities for evidence semantics.
 //!
 //! This module covers exact color-evidence graph replay, normalized validity
-//! domains, model-form evidence slices, model-card declarations with exact
-//! calibration sources, and an opaque strong-identity projection of locally
-//! certified scalar evidence through separate schemas. It does not reinterpret
+//! domains, standalone numerical/statistical certificate declarations,
+//! model-form evidence slices, model-card declarations with exact calibration
+//! sources, and an opaque strong-identity projection of locally certified
+//! scalar evidence through separate schemas. It does not reinterpret
 //! [`crate::ProvenanceHash`], and it publishes only unanchored
 //! [`IdentityReceipt`] values. Origin verification, policy admission,
 //! structural [`crate::Certified`] consistency, and scientific color rank
@@ -36,6 +37,10 @@ pub const COLOR_EVIDENCE_NODE_IDENTITY_VERSION_V1: u32 = 1;
 pub const VALIDITY_DOMAIN_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one model-evidence semantic slice.
 pub const MODEL_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one standalone numerical-certificate declaration.
+pub const NUMERICAL_CERTIFICATE_IDENTITY_VERSION_V1: u32 = 1;
+/// Identity schema version for one standalone statistical-certificate declaration.
+pub const STATISTICAL_CERTIFICATE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for one locally certified scalar-evidence projection.
 pub const CERTIFIED_F64_EVIDENCE_IDENTITY_VERSION_V1: u32 = 1;
 /// Identity schema version for exact model-card calibration source bytes.
@@ -383,6 +388,144 @@ impl IdentifiedModelCardV1 {
     #[must_use]
     pub fn into_parts(self) -> (ModelCard, Option<Vec<u8>>) {
         (self.card, self.calibration_bytes)
+    }
+}
+
+/// Canonical semantic schema for the exact structural state of one standalone
+/// numerical-certificate declaration.
+pub enum NumericalCertificateIdentitySchemaV1 {}
+
+impl CanonicalSchema for NumericalCertificateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.numerical-certificate.v1";
+    const NAME: &'static str = "numerical-certificate";
+    const VERSION: u32 = NUMERICAL_CERTIFICATE_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "exact admitted numerical-certificate kind and IEEE-754 bound bits; no QoI, value, units, containment, rigor, derivation, origin, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("kind", WireType::Variant),
+        FieldSpec::required("lo-ieee754-bits", WireType::U64),
+        FieldSpec::required("hi-ieee754-bits", WireType::U64),
+    ];
+}
+
+/// Low-level schema-shaped identity for one numerical-certificate frame.
+///
+/// Only [`IdentifiedNumericalCertificateV1`] proves correspondence with a
+/// retained certificate that passed this module's structural admission.
+pub type NumericalCertificateIdV1 = SemanticId<NumericalCertificateIdentitySchemaV1>;
+
+/// Low-level producer receipt for one numerical-certificate frame.
+pub type NumericalCertificateReceiptV1 = IdentityReceipt<NumericalCertificateIdV1>;
+
+/// A structurally admitted numerical-certificate declaration kept attached to
+/// its unanchored semantic identity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IdentifiedNumericalCertificateV1 {
+    certificate: crate::NumericalCertificate,
+    receipt: NumericalCertificateReceiptV1,
+}
+
+impl IdentifiedNumericalCertificateV1 {
+    /// Read-only certificate declaration committed by this identity.
+    #[must_use]
+    pub const fn certificate(&self) -> &crate::NumericalCertificate {
+        &self.certificate
+    }
+
+    /// Typed structural identity.
+    #[must_use]
+    pub const fn id(&self) -> NumericalCertificateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> NumericalCertificateReceiptV1 {
+        self.receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment and recover the plain certificate.
+    #[must_use]
+    pub const fn into_certificate(self) -> crate::NumericalCertificate {
+        self.certificate
+    }
+}
+
+/// Canonical semantic schema for the exact structural state of one standalone
+/// statistical-certificate declaration.
+pub enum StatisticalCertificateIdentitySchemaV1 {}
+
+impl CanonicalSchema for StatisticalCertificateIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-evidence.statistical-certificate.v1";
+    const NAME: &'static str = "statistical-certificate";
+    const VERSION: u32 = STATISTICAL_CERTIFICATE_IDENTITY_VERSION_V1;
+    const CONTEXT: &'static str = "exact admitted statistical-certificate variant and IEEE-754 payload bits; no hypothesis, estimand, method, sample, stopping or dependence context, coverage, origin, scientific authority, or trust";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("certificate", WireType::Variant)];
+}
+
+/// Low-level schema-shaped identity for one statistical-certificate frame.
+///
+/// Only [`IdentifiedStatisticalCertificateV1`] proves correspondence with a
+/// retained certificate whose numeric parameters passed local shape checks.
+pub type StatisticalCertificateIdV1 = SemanticId<StatisticalCertificateIdentitySchemaV1>;
+
+/// Low-level producer receipt for one statistical-certificate frame.
+pub type StatisticalCertificateReceiptV1 = IdentityReceipt<StatisticalCertificateIdV1>;
+
+/// A structurally admitted statistical-certificate declaration kept attached
+/// to its unanchored semantic identity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IdentifiedStatisticalCertificateV1 {
+    certificate: StatisticalCertificate,
+    receipt: StatisticalCertificateReceiptV1,
+}
+
+impl IdentifiedStatisticalCertificateV1 {
+    /// Read-only certificate declaration committed by this identity.
+    #[must_use]
+    pub const fn certificate(&self) -> &StatisticalCertificate {
+        &self.certificate
+    }
+
+    /// Typed structural identity.
+    #[must_use]
+    pub const fn id(&self) -> StatisticalCertificateIdV1 {
+        self.receipt.id()
+    }
+
+    /// Complete unanchored producer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> StatisticalCertificateReceiptV1 {
+        self.receipt
+    }
+
+    /// Fixed-size typed digest bytes.
+    #[must_use]
+    pub fn id_bytes(&self) -> [u8; 32] {
+        *self.id().as_bytes()
+    }
+
+    /// Identity state of a producer receipt. This is always unanchored.
+    #[must_use]
+    pub fn trust_state(&self) -> EvidenceIdentityTrustState {
+        self.receipt.audit_record().trust()
+    }
+
+    /// Surrender the identity attachment and recover the plain certificate.
+    #[must_use]
+    pub const fn into_certificate(self) -> StatisticalCertificate {
+        self.certificate
     }
 }
 
@@ -806,6 +949,113 @@ impl From<ValidityDomainIdentityError> for ModelEvidenceIdentityError {
 }
 
 impl From<CanonicalError> for ModelEvidenceIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+/// Fail-closed refusal from standalone numerical-certificate identity
+/// construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumericalCertificateIdentityError {
+    /// The public certificate does not have the canonical structural shape for
+    /// its declared kind.
+    InvalidShape {
+        /// Caller-carried certificate kind.
+        kind: NumericalKind,
+        /// Exact refused lower-bound bits.
+        lo_bits: u64,
+        /// Exact refused upper-bound bits.
+        hi_bits: u64,
+        /// Structural requirement that was violated.
+        reason: &'static str,
+    },
+    /// Canonical framing, resource admission, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for NumericalCertificateIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidShape {
+                kind,
+                lo_bits,
+                hi_bits,
+                reason,
+            } => write!(
+                formatter,
+                "numerical-certificate identity refused {kind:?} bounds 0x{lo_bits:016x}..0x{hi_bits:016x}: {reason}"
+            ),
+            Self::Canonical(error) => {
+                write!(formatter, "numerical-certificate identity refused: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NumericalCertificateIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::InvalidShape { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for NumericalCertificateIdentityError {
+    fn from(error: CanonicalError) -> Self {
+        Self::Canonical(error)
+    }
+}
+
+/// Fail-closed refusal from standalone statistical-certificate identity
+/// construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatisticalCertificateIdentityError {
+    /// One public numeric parameter falls outside the local structural domain.
+    InvalidParameter {
+        /// Stable parameter name from `StatisticalCertificate` validation.
+        field: &'static str,
+        /// Exact refused IEEE-754 bits.
+        bits: u64,
+        /// Structural requirement that was violated.
+        reason: &'static str,
+    },
+    /// Canonical framing, resource admission, or cancellation refused.
+    Canonical(CanonicalError),
+}
+
+impl fmt::Display for StatisticalCertificateIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidParameter {
+                field,
+                bits,
+                reason,
+            } => write!(
+                formatter,
+                "statistical-certificate identity refused {field} bits 0x{bits:016x}: {reason}"
+            ),
+            Self::Canonical(error) => {
+                write!(
+                    formatter,
+                    "statistical-certificate identity refused: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StatisticalCertificateIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::InvalidParameter { .. } => None,
+        }
+    }
+}
+
+impl From<CanonicalError> for StatisticalCertificateIdentityError {
     fn from(error: CanonicalError) -> Self {
         Self::Canonical(error)
     }
@@ -1268,13 +1518,150 @@ where
     Ok(receipt)
 }
 
-const fn certified_f64_numerical_kind_tag_v1(kind: NumericalKind) -> u32 {
+const fn numerical_certificate_kind_tag_v1(kind: NumericalKind) -> u32 {
     match kind {
         NumericalKind::Exact => 1,
         NumericalKind::Enclosure => 2,
         NumericalKind::Estimate => 3,
         NumericalKind::NoClaim => 4,
     }
+}
+
+fn validate_numerical_certificate_shape_v1(
+    certificate: &crate::NumericalCertificate,
+) -> Result<(), NumericalCertificateIdentityError> {
+    let invalid = |reason| NumericalCertificateIdentityError::InvalidShape {
+        kind: certificate.kind,
+        lo_bits: certificate.lo.to_bits(),
+        hi_bits: certificate.hi.to_bits(),
+        reason,
+    };
+    if certificate.lo.is_nan() || certificate.hi.is_nan() {
+        return Err(invalid("bounds must not be NaN"));
+    }
+    match certificate.kind {
+        NumericalKind::Exact if certificate.lo.to_bits() != certificate.hi.to_bits() => {
+            Err(invalid("Exact bounds must be bit-identical"))
+        }
+        NumericalKind::Enclosure | NumericalKind::Estimate if certificate.lo > certificate.hi => {
+            Err(invalid("lower bound must not exceed upper bound"))
+        }
+        NumericalKind::NoClaim
+            if certificate.lo.to_bits() != f64::NEG_INFINITY.to_bits()
+                || certificate.hi.to_bits() != f64::INFINITY.to_bits() =>
+        {
+            Err(invalid(
+                "NoClaim must use the canonical negative-infinity to positive-infinity bounds",
+            ))
+        }
+        NumericalKind::Exact
+        | NumericalKind::Enclosure
+        | NumericalKind::Estimate
+        | NumericalKind::NoClaim => Ok(()),
+    }
+}
+
+/// Identify the exact admitted structural state of one standalone numerical
+/// certificate.
+///
+/// The helper consumes and retains the public/mutable certificate without
+/// normalization. It binds the stable kind tag and exact endpoint bits.
+/// Enclosure and estimate declarations may use ordered infinite bounds, and an
+/// exact declaration may use matching infinite bits; those are structural
+/// states only, not local certification. `NoClaim` has one canonical
+/// negative-infinity to positive-infinity representation.
+///
+/// # Errors
+/// Refuses NaN, inverted bounds, non-identical exact endpoints, a forged
+/// `NoClaim` shape, invalid limits, resource overflow, or cancellation. No
+/// partial identity is published.
+pub fn identify_numerical_certificate_v1<C>(
+    certificate: crate::NumericalCertificate,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedNumericalCertificateV1, NumericalCertificateIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+    validate_numerical_certificate_shape_v1(&certificate)?;
+    let receipt = CanonicalEncoder::<NumericalCertificateIdV1, _>::new(limits, cancellation)?
+        .variant(
+            Field::new(0, "kind"),
+            numerical_certificate_kind_tag_v1(certificate.kind),
+            &[],
+        )?
+        .u64(Field::new(1, "lo-ieee754-bits"), certificate.lo.to_bits())?
+        .u64(Field::new(2, "hi-ieee754-bits"), certificate.hi.to_bits())?
+        .finish()?;
+    Ok(IdentifiedNumericalCertificateV1 {
+        certificate,
+        receipt,
+    })
+}
+
+/// Identify the exact admitted structural state of one standalone statistical
+/// certificate.
+///
+/// The stable variant tag and exact accepted numeric bits are retained without
+/// normalization. This is a local shape check only: the frame carries no null,
+/// estimand, method, sample, stopping rule, dependence context, or coverage
+/// proof. `None` binds only the caller's local no-stochastic-component state.
+///
+/// # Errors
+/// Refuses a malformed public numeric parameter, invalid limits, resource
+/// overflow, or cancellation. No partial identity is published.
+pub fn identify_statistical_certificate_v1<C>(
+    certificate: StatisticalCertificate,
+    limits: EvidenceIdentityLimits,
+    mut cancellation: C,
+) -> Result<IdentifiedStatisticalCertificateV1, StatisticalCertificateIdentityError>
+where
+    C: EvidenceIdentityCancellationProbe,
+{
+    if limits.cancellation_poll_bytes() == 0 {
+        return Err(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive").into(),
+        );
+    }
+    poll_identity_cancellation(&mut cancellation)?;
+    if let Some((field, value, reason)) = certificate.validation_issue() {
+        return Err(StatisticalCertificateIdentityError::InvalidParameter {
+            field,
+            bits: value.to_bits(),
+            reason,
+        });
+    }
+
+    let mut payload = [0_u8; 16];
+    let (tag, payload_len) = match certificate {
+        StatisticalCertificate::None => (1, 0),
+        StatisticalCertificate::EValue { e, alpha } => {
+            payload[..8].copy_from_slice(&e.to_bits().to_le_bytes());
+            payload[8..].copy_from_slice(&alpha.to_bits().to_le_bytes());
+            (2, payload.len())
+        }
+        StatisticalCertificate::HalfWidth {
+            half_width,
+            confidence,
+        } => {
+            payload[..8].copy_from_slice(&half_width.to_bits().to_le_bytes());
+            payload[8..].copy_from_slice(&confidence.to_bits().to_le_bytes());
+            (3, payload.len())
+        }
+    };
+    let receipt = CanonicalEncoder::<StatisticalCertificateIdV1, _>::new(limits, cancellation)?
+        .variant(Field::new(0, "certificate"), tag, &payload[..payload_len])?
+        .finish()?;
+    Ok(IdentifiedStatisticalCertificateV1 {
+        certificate,
+        receipt,
+    })
 }
 
 fn preflight_bounded_field_bytes_v1(
@@ -1769,7 +2156,7 @@ where
             .finite_f64(Field::new(1, "qoi"), evidence.qoi)?
             .variant(
                 Field::new(2, "numerical-kind"),
-                certified_f64_numerical_kind_tag_v1(evidence.numerical.kind),
+                numerical_certificate_kind_tag_v1(evidence.numerical.kind),
                 &[],
             )?
             .finite_f64(Field::new(3, "numerical-lo"), evidence.numerical.lo)?

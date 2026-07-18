@@ -18,11 +18,15 @@ use fs_evidence::{
     IdentifiedModelEvidenceV1, IdentifiedValidityDomainV1, ModelCard,
     ModelCardCalibrationSourceIdV1, ModelCardCalibrationSourceReceiptV1, ModelCardIdV1,
     ModelCardIdentityError, ModelCardReceiptV1, ModelEvidence, ModelEvidenceIdV1,
-    ModelEvidenceIdentityError, ModelEvidenceReceiptV1, NumericalKind, ProvenanceHash,
-    SensitivitySummary, StatisticalCertificate, ValidityDomain, ValidityDomainIdV1,
+    ModelEvidenceIdentityError, ModelEvidenceReceiptV1, NumericalCertificate,
+    NumericalCertificateIdV1, NumericalCertificateIdentityError, NumericalCertificateReceiptV1,
+    NumericalKind, ProvenanceHash, SensitivitySummary, StatisticalCertificate,
+    StatisticalCertificateIdV1, StatisticalCertificateIdentityError,
+    StatisticalCertificateReceiptV1, ValidityDomain, ValidityDomainIdV1,
     ValidityDomainIdentityError, compose_color_evidence_nodes_v1,
     identify_certified_f64_evidence_v1, identify_color_evidence_source_node_v1,
     identify_color_evidence_source_v1, identify_model_card_v1, identify_model_evidence_v1,
+    identify_numerical_certificate_v1, identify_statistical_certificate_v1,
     identify_validity_domain_v1,
 };
 
@@ -77,6 +81,62 @@ fn parent_reference_bytes(parent: ColorEvidenceNodeIdV1) -> [u8; 65] {
 
 fn identified_domain(domain: ValidityDomain) -> IdentifiedValidityDomainV1 {
     identify_validity_domain_v1(domain, LIMITS, || false).expect("valid normalized domain")
+}
+
+fn numerical_kind_tag(kind: NumericalKind) -> u32 {
+    match kind {
+        NumericalKind::Exact => 1,
+        NumericalKind::Enclosure => 2,
+        NumericalKind::Estimate => 3,
+        NumericalKind::NoClaim => 4,
+    }
+}
+
+fn manual_numerical_certificate_receipt(
+    certificate: NumericalCertificate,
+) -> NumericalCertificateReceiptV1 {
+    CanonicalEncoder::<NumericalCertificateIdV1, _>::new(LIMITS, || false)
+        .expect("numerical-certificate schema")
+        .variant(
+            Field::new(0, "kind"),
+            numerical_kind_tag(certificate.kind),
+            &[],
+        )
+        .expect("numerical kind")
+        .u64(Field::new(1, "lo-ieee754-bits"), certificate.lo.to_bits())
+        .expect("numerical lower bits")
+        .u64(Field::new(2, "hi-ieee754-bits"), certificate.hi.to_bits())
+        .expect("numerical upper bits")
+        .finish()
+        .expect("manual numerical-certificate identity")
+}
+
+fn manual_statistical_certificate_receipt(
+    certificate: StatisticalCertificate,
+) -> StatisticalCertificateReceiptV1 {
+    let mut payload = [0_u8; 16];
+    let (tag, payload_len) = match certificate {
+        StatisticalCertificate::None => (1, 0),
+        StatisticalCertificate::EValue { e, alpha } => {
+            payload[..8].copy_from_slice(&e.to_bits().to_le_bytes());
+            payload[8..].copy_from_slice(&alpha.to_bits().to_le_bytes());
+            (2, payload.len())
+        }
+        StatisticalCertificate::HalfWidth {
+            half_width,
+            confidence,
+        } => {
+            payload[..8].copy_from_slice(&half_width.to_bits().to_le_bytes());
+            payload[8..].copy_from_slice(&confidence.to_bits().to_le_bytes());
+            (3, payload.len())
+        }
+    };
+    CanonicalEncoder::<StatisticalCertificateIdV1, _>::new(LIMITS, || false)
+        .expect("statistical-certificate schema")
+        .variant(Field::new(0, "certificate"), tag, &payload[..payload_len])
+        .expect("statistical certificate")
+        .finish()
+        .expect("manual statistical-certificate identity")
 }
 
 fn model_evidence_fixture() -> ModelEvidence {
@@ -355,6 +415,625 @@ fn manual_model_card_receipts(
         .finish()
         .expect("manual model-card identity");
     (calibration, card_receipt)
+}
+
+#[test]
+fn standalone_certificate_identities_replay_manual_frames_and_retain_inputs() {
+    let numerical_certificates = [
+        NumericalCertificate::exact(-0.0),
+        NumericalCertificate::exact(f64::INFINITY),
+        NumericalCertificate::enclosure(f64::NEG_INFINITY, 4.0),
+        NumericalCertificate::estimate(-2.0, f64::INFINITY),
+        NumericalCertificate::no_claim(),
+    ];
+    for certificate in numerical_certificates {
+        let first = identify_numerical_certificate_v1(certificate, LIMITS, || false)
+            .expect("admitted numerical certificate");
+        let replay = identify_numerical_certificate_v1(certificate, LIMITS, || false)
+            .expect("replayed numerical certificate");
+        let manual = manual_numerical_certificate_receipt(certificate);
+        assert_eq!(first.id(), replay.id());
+        assert_eq!(first.id(), manual.id());
+        assert_eq!(
+            first.receipt().canonical_preimage(),
+            manual.canonical_preimage()
+        );
+        assert_eq!(first.certificate(), &certificate);
+        assert_eq!(first.id_bytes(), first.receipt().audit_record().id());
+        assert_eq!(first.trust_state(), TrustState::Unanchored);
+        assert_eq!(
+            first.receipt().audit_record().no_claim(),
+            NoClaimState::ExternalTrustRequired
+        );
+        assert_eq!(first.into_certificate(), certificate);
+    }
+
+    let statistical_certificates = [
+        StatisticalCertificate::None,
+        StatisticalCertificate::EValue {
+            e: -0.0,
+            alpha: 0.05,
+        },
+        StatisticalCertificate::HalfWidth {
+            half_width: -0.0,
+            confidence: 0.95,
+        },
+    ];
+    for certificate in statistical_certificates {
+        let first = identify_statistical_certificate_v1(certificate, LIMITS, || false)
+            .expect("admitted statistical certificate");
+        let replay = identify_statistical_certificate_v1(certificate, LIMITS, || false)
+            .expect("replayed statistical certificate");
+        let manual = manual_statistical_certificate_receipt(certificate);
+        assert_eq!(first.id(), replay.id());
+        assert_eq!(first.id(), manual.id());
+        assert_eq!(
+            first.receipt().canonical_preimage(),
+            manual.canonical_preimage()
+        );
+        assert_eq!(first.certificate(), &certificate);
+        assert_eq!(first.id_bytes(), first.receipt().audit_record().id());
+        assert_eq!(first.trust_state(), TrustState::Unanchored);
+        assert_eq!(
+            first.receipt().audit_record().no_claim(),
+            NoClaimState::ExternalTrustRequired
+        );
+        assert_eq!(first.into_certificate(), certificate);
+    }
+}
+
+#[test]
+fn numerical_certificate_identity_binds_bits_and_refuses_malformed_shapes() {
+    let enclosure = NumericalCertificate::enclosure(1.0, 2.0);
+    let base =
+        identify_numerical_certificate_v1(enclosure, LIMITS, || false).expect("baseline enclosure");
+    let estimate = identify_numerical_certificate_v1(
+        NumericalCertificate {
+            kind: NumericalKind::Estimate,
+            ..enclosure
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("same bounds with estimate tag");
+    let lower = identify_numerical_certificate_v1(
+        NumericalCertificate::enclosure(1.0_f64.next_down(), 2.0),
+        LIMITS,
+        || false,
+    )
+    .expect("mutated lower bound");
+    let upper = identify_numerical_certificate_v1(
+        NumericalCertificate::enclosure(1.0, 2.0_f64.next_up()),
+        LIMITS,
+        || false,
+    )
+    .expect("mutated upper bound");
+    assert_ne!(base.id(), estimate.id());
+    assert_ne!(base.id(), lower.id());
+    assert_ne!(base.id(), upper.id());
+
+    let positive_zero =
+        identify_numerical_certificate_v1(NumericalCertificate::exact(0.0), LIMITS, || false)
+            .expect("positive-zero exact");
+    let negative_zero =
+        identify_numerical_certificate_v1(NumericalCertificate::exact(-0.0), LIMITS, || false)
+            .expect("negative-zero exact");
+    assert_ne!(positive_zero.id(), negative_zero.id());
+
+    let normalized = identify_numerical_certificate_v1(
+        NumericalCertificate::enclosure(2.0, 1.0),
+        LIMITS,
+        || false,
+    )
+    .expect("constructor normalizes before identity admission");
+    assert_eq!(normalized.id(), base.id());
+
+    for certificate in [
+        NumericalCertificate::exact(f64::NEG_INFINITY),
+        NumericalCertificate::enclosure(f64::NEG_INFINITY, f64::INFINITY),
+        NumericalCertificate::estimate(f64::NEG_INFINITY, f64::INFINITY),
+    ] {
+        identify_numerical_certificate_v1(certificate, LIMITS, || false)
+            .expect("ordered infinite structural state is admitted");
+    }
+
+    let nan_bits = 0x7ff8_0000_0000_0042;
+    let nan = f64::from_bits(nan_bits);
+    let malformed = [
+        (
+            NumericalCertificate {
+                kind: NumericalKind::Estimate,
+                lo: nan,
+                hi: 1.0,
+            },
+            "bounds must not be NaN",
+        ),
+        (
+            NumericalCertificate {
+                kind: NumericalKind::Enclosure,
+                lo: 2.0,
+                hi: 1.0,
+            },
+            "lower bound must not exceed upper bound",
+        ),
+        (
+            NumericalCertificate {
+                kind: NumericalKind::Exact,
+                lo: 1.0,
+                hi: 1.0_f64.next_up(),
+            },
+            "Exact bounds must be bit-identical",
+        ),
+        (
+            NumericalCertificate {
+                kind: NumericalKind::Exact,
+                lo: -0.0,
+                hi: 0.0,
+            },
+            "Exact bounds must be bit-identical",
+        ),
+        (
+            NumericalCertificate {
+                kind: NumericalKind::NoClaim,
+                lo: -1.0,
+                hi: 1.0,
+            },
+            "NoClaim must use the canonical negative-infinity to positive-infinity bounds",
+        ),
+    ];
+    for (certificate, expected_reason) in malformed {
+        assert!(matches!(
+            identify_numerical_certificate_v1(certificate, LIMITS, || false),
+            Err(NumericalCertificateIdentityError::InvalidShape {
+                kind,
+                lo_bits,
+                hi_bits,
+                reason,
+            }) if kind == certificate.kind
+                && lo_bits == certificate.lo.to_bits()
+                && hi_bits == certificate.hi.to_bits()
+                && reason == expected_reason
+        ));
+    }
+}
+
+#[test]
+fn statistical_certificate_identity_binds_bits_and_refuses_invalid_parameters() {
+    let none = identify_statistical_certificate_v1(StatisticalCertificate::None, LIMITS, || false)
+        .expect("none state");
+    let e_value = StatisticalCertificate::EValue {
+        e: 8.0,
+        alpha: 0.05,
+    };
+    let e_base =
+        identify_statistical_certificate_v1(e_value, LIMITS, || false).expect("baseline e-value");
+    let e_mutated = identify_statistical_certificate_v1(
+        StatisticalCertificate::EValue {
+            e: 8.0_f64.next_up(),
+            alpha: 0.05,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("mutated e-value");
+    let alpha_mutated = identify_statistical_certificate_v1(
+        StatisticalCertificate::EValue {
+            e: 8.0,
+            alpha: 0.05_f64.next_up(),
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("mutated alpha");
+    let half_base = identify_statistical_certificate_v1(
+        StatisticalCertificate::HalfWidth {
+            half_width: 0.25,
+            confidence: 0.95,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("baseline half-width");
+    let half_mutated = identify_statistical_certificate_v1(
+        StatisticalCertificate::HalfWidth {
+            half_width: 0.25_f64.next_up(),
+            confidence: 0.95,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("mutated half-width");
+    let confidence_mutated = identify_statistical_certificate_v1(
+        StatisticalCertificate::HalfWidth {
+            half_width: 0.25,
+            confidence: 0.95_f64.next_down(),
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("mutated confidence");
+    for mutated in [
+        e_base.id(),
+        e_mutated.id(),
+        alpha_mutated.id(),
+        half_base.id(),
+        half_mutated.id(),
+        confidence_mutated.id(),
+    ] {
+        assert_ne!(none.id(), mutated);
+    }
+    assert_ne!(e_base.id(), e_mutated.id());
+    assert_ne!(e_base.id(), alpha_mutated.id());
+    assert_ne!(half_base.id(), half_mutated.id());
+    assert_ne!(half_base.id(), confidence_mutated.id());
+
+    let positive_e = identify_statistical_certificate_v1(
+        StatisticalCertificate::EValue {
+            e: 0.0,
+            alpha: 0.05,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("positive-zero e-value");
+    let negative_e = identify_statistical_certificate_v1(
+        StatisticalCertificate::EValue {
+            e: -0.0,
+            alpha: 0.05,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("negative-zero e-value");
+    assert_ne!(positive_e.id(), negative_e.id());
+
+    let positive_width = identify_statistical_certificate_v1(
+        StatisticalCertificate::HalfWidth {
+            half_width: 0.0,
+            confidence: 0.95,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("positive-zero width");
+    let negative_width = identify_statistical_certificate_v1(
+        StatisticalCertificate::HalfWidth {
+            half_width: -0.0,
+            confidence: 0.95,
+        },
+        LIMITS,
+        || false,
+    )
+    .expect("negative-zero width");
+    assert_ne!(positive_width.id(), negative_width.id());
+
+    let invalid = [
+        (
+            StatisticalCertificate::EValue {
+                e: -1.0,
+                alpha: 0.05,
+            },
+            "e",
+            -1.0_f64,
+        ),
+        (
+            StatisticalCertificate::EValue {
+                e: f64::INFINITY,
+                alpha: 0.05,
+            },
+            "e",
+            f64::INFINITY,
+        ),
+        (
+            StatisticalCertificate::EValue {
+                e: f64::NAN,
+                alpha: 0.05,
+            },
+            "e",
+            f64::NAN,
+        ),
+        (
+            StatisticalCertificate::EValue { e: 1.0, alpha: 0.0 },
+            "alpha",
+            0.0,
+        ),
+        (
+            StatisticalCertificate::EValue {
+                e: 1.0,
+                alpha: -0.0,
+            },
+            "alpha",
+            -0.0,
+        ),
+        (
+            StatisticalCertificate::EValue { e: 1.0, alpha: 1.0 },
+            "alpha",
+            1.0,
+        ),
+        (
+            StatisticalCertificate::EValue {
+                e: 1.0,
+                alpha: f64::INFINITY,
+            },
+            "alpha",
+            f64::INFINITY,
+        ),
+        (
+            StatisticalCertificate::EValue {
+                e: 1.0,
+                alpha: f64::NAN,
+            },
+            "alpha",
+            f64::NAN,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: -1.0,
+                confidence: 0.95,
+            },
+            "half_width",
+            -1.0,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: f64::NAN,
+                confidence: 0.95,
+            },
+            "half_width",
+            f64::NAN,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: f64::INFINITY,
+                confidence: 0.95,
+            },
+            "half_width",
+            f64::INFINITY,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: 1.0,
+                confidence: 0.0,
+            },
+            "confidence",
+            0.0,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: 1.0,
+                confidence: -0.0,
+            },
+            "confidence",
+            -0.0,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: 1.0,
+                confidence: f64::INFINITY,
+            },
+            "confidence",
+            f64::INFINITY,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: 1.0,
+                confidence: 1.0,
+            },
+            "confidence",
+            1.0,
+        ),
+        (
+            StatisticalCertificate::HalfWidth {
+                half_width: 1.0,
+                confidence: f64::NAN,
+            },
+            "confidence",
+            f64::NAN,
+        ),
+    ];
+    for (certificate, expected_field, expected_value) in invalid {
+        assert!(matches!(
+            identify_statistical_certificate_v1(certificate, LIMITS, || false),
+            Err(StatisticalCertificateIdentityError::InvalidParameter {
+                field,
+                bits,
+                ..
+            }) if field == expected_field && bits == expected_value.to_bits()
+        ));
+    }
+}
+
+#[test]
+fn standalone_certificate_identities_enforce_resources_cancellation_and_no_transitivity() {
+    let numerical = NumericalCertificate::enclosure(-1.0, 2.0);
+    let numerical_baseline =
+        identify_numerical_certificate_v1(numerical, LIMITS, || false).expect("baseline numerical");
+    let numerical_frame = numerical_baseline.receipt().canonical_bytes();
+    identify_numerical_certificate_v1(
+        numerical,
+        CanonicalLimits::new(numerical_frame, 8_192, 3, 64, 64),
+        || false,
+    )
+    .expect("exact numerical frame limit");
+    assert!(matches!(
+        identify_numerical_certificate_v1(
+            numerical,
+            CanonicalLimits::new(numerical_frame - 1, 8_192, 3, 64, 64),
+            || false,
+        ),
+        Err(NumericalCertificateIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == numerical_frame - 1
+    ));
+    assert!(matches!(
+        identify_numerical_certificate_v1(
+            numerical,
+            CanonicalLimits::new(16_384, 8_192, 2, 64, 64),
+            || false,
+        ),
+        Err(NumericalCertificateIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::Fields,
+                requested: 3,
+                limit: 2,
+            }
+        ))
+    ));
+
+    let statistical = StatisticalCertificate::EValue {
+        e: 4.0,
+        alpha: 0.05,
+    };
+    let statistical_baseline = identify_statistical_certificate_v1(statistical, LIMITS, || false)
+        .expect("baseline statistical");
+    let statistical_frame = statistical_baseline.receipt().canonical_bytes();
+    identify_statistical_certificate_v1(
+        statistical,
+        CanonicalLimits::new(statistical_frame, 8_192, 1, 64, 64),
+        || false,
+    )
+    .expect("exact statistical frame limit");
+    assert!(matches!(
+        identify_statistical_certificate_v1(
+            statistical,
+            CanonicalLimits::new(statistical_frame - 1, 8_192, 1, 64, 64),
+            || false,
+        ),
+        Err(StatisticalCertificateIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::CanonicalBytes,
+                requested,
+                limit,
+            }
+        )) if requested > limit && limit == statistical_frame - 1
+    ));
+    assert!(matches!(
+        identify_statistical_certificate_v1(
+            statistical,
+            CanonicalLimits::new(16_384, 8_192, 0, 64, 64),
+            || false,
+        ),
+        Err(StatisticalCertificateIdentityError::Canonical(
+            CanonicalError::LimitExceeded {
+                kind: fs_blake3::identity::LimitKind::Fields,
+                requested: 1,
+                limit: 0,
+            }
+        ))
+    ));
+
+    assert_eq!(
+        identify_numerical_certificate_v1(
+            numerical,
+            CanonicalLimits::new(16_384, 8_192, 3, 64, 0),
+            || false,
+        ),
+        Err(NumericalCertificateIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    );
+    assert_eq!(
+        identify_statistical_certificate_v1(
+            statistical,
+            CanonicalLimits::new(16_384, 8_192, 1, 64, 0),
+            || false,
+        ),
+        Err(StatisticalCertificateIdentityError::Canonical(
+            CanonicalError::InvalidLimits("cancellation_poll_bytes must be positive")
+        ))
+    );
+    assert!(matches!(
+        identify_numerical_certificate_v1(numerical, LIMITS, || true),
+        Err(NumericalCertificateIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+    assert!(matches!(
+        identify_statistical_certificate_v1(statistical, LIMITS, || true),
+        Err(StatisticalCertificateIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes: 0 }
+        ))
+    ));
+
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
+    let numerical_polls = std::cell::Cell::new(0_usize);
+    identify_numerical_certificate_v1(numerical, LIMITS, || {
+        numerical_polls.set(numerical_polls.get() + 1);
+        false
+    })
+    .expect("baseline numerical poll count");
+    assert!(matches!(
+        identify_numerical_certificate_v1(
+            numerical,
+            LIMITS,
+            CancelAfter {
+                successful_polls: numerical_polls.get() - 1,
+            },
+        ),
+        Err(NumericalCertificateIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
+
+    let statistical_polls = std::cell::Cell::new(0_usize);
+    identify_statistical_certificate_v1(statistical, LIMITS, || {
+        statistical_polls.set(statistical_polls.get() + 1);
+        false
+    })
+    .expect("baseline statistical poll count");
+    assert!(matches!(
+        identify_statistical_certificate_v1(
+            statistical,
+            LIMITS,
+            CancelAfter {
+                successful_polls: statistical_polls.get() - 1,
+            },
+        ),
+        Err(StatisticalCertificateIdentityError::Canonical(
+            CanonicalError::Cancelled { absorbed_bytes }
+        )) if absorbed_bytes > 0
+    ));
+
+    let mut first_evidence = Evidence::exact(1.0, ProvenanceHash(1));
+    first_evidence.numerical = numerical;
+    first_evidence.statistical = statistical;
+    let mut second_evidence = Evidence::exact(9.0, ProvenanceHash(2));
+    second_evidence.numerical = numerical;
+    second_evidence.statistical = statistical;
+    assert_ne!(first_evidence.qoi.to_bits(), second_evidence.qoi.to_bits());
+    assert_eq!(
+        identify_numerical_certificate_v1(first_evidence.numerical, LIMITS, || false)
+            .expect("first structural projection")
+            .id(),
+        identify_numerical_certificate_v1(second_evidence.numerical, LIMITS, || false)
+            .expect("second structural projection")
+            .id()
+    );
+    assert_eq!(
+        identify_statistical_certificate_v1(first_evidence.statistical, LIMITS, || false)
+            .expect("first statistical projection")
+            .id(),
+        identify_statistical_certificate_v1(second_evidence.statistical, LIMITS, || false)
+            .expect("second statistical projection")
+            .id()
+    );
 }
 
 #[test]

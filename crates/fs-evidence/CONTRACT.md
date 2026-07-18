@@ -102,6 +102,20 @@ telemetry/legacy correlation.
   children because `ModelEvidence` currently carries no card content or typed
   card receipts. Raw aliases prove schema-shaped framing only, not
   correspondence with an attached slice.
+- `identity` module (sj31i.52.2 standalone-certificate tranche) —
+  `NumericalCertificateIdV1` and `StatisticalCertificateIdV1` are strong
+  `SemanticId` roles for exact, helper-admitted structural declarations. The
+  opaque `IdentifiedNumericalCertificateV1` retains the public certificate and
+  binds its stable kind tag plus both raw IEEE-754 endpoint bit patterns. NaN,
+  inversion, non-bit-identical Exact endpoints, and noncanonical NoClaim bounds
+  refuse without normalization; ordered infinite Enclosure/Estimate bounds and
+  matching infinite Exact bounds remain explicit structural states. The opaque
+  `IdentifiedStatisticalCertificateV1` binds the stable variant tag and exact
+  raw payload bits after applying the existing finite/domain checks. Accepted
+  negative-zero e-values and widths remain distinct from positive zero. These
+  standalone frames do not bind a value, QoI, units, checker, derivation,
+  hypothesis, sample, method, or trust context, and they do not alter the
+  existing inline `CertifiedF64EvidenceIdV1` v1 schema.
 - `identity` module (sj31i.52.2 tranche 3) —
   `CertifiedF64EvidenceIdV1` is a strong `SemanticId` for the helper-defined
   semantic projection of one opaque `Certified<f64>`. The helper consumes and
@@ -333,11 +347,24 @@ telemetry/legacy correlation.
     is accepted as explicit unbounded discrepancy; signed zero remains
     bit-distinct. Empty card sets cannot erase nonzero discrepancy, restricted
     validity, assumptions, or out-of-domain state.
+18. Opaque helper-built standalone certificate identities (sj31i.52.2,
+    G0/G3/G4) retain exact admitted declarations and agree with independent
+    canonical frames. Every kind/variant or accepted payload-bit mutation moves
+    its typed root, including signed-zero e-value, width, and numerical-bound
+    changes. Numerical NaN, inverted bounds, inconsistent Exact endpoints, and
+    forged NoClaim shapes refuse; statistical non-finite, negative, or invalid
+    level/confidence parameters refuse. Exact frame/field-count limits, zero
+    cancellation stride, and entry or late cancellation publish no opaque
+    result. Ordered infinite numerical states are admitted only as structural,
+    potentially vacuous declarations. Raw aliases remain schema-shaped framing
+    and cannot manufacture the helper attachment.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
 `OutOfDomain`, `FitError`, `FalsifyError`, and typed identity refusals including
-`ModelEvidenceIdentityError` and `ModelCardIdentityError` — all
+`ModelEvidenceIdentityError`, `ModelCardIdentityError`,
+`NumericalCertificateIdentityError`, and
+`StatisticalCertificateIdentityError` — all
 `core::error::Error` with actionable Display text. Constructors are total
 (enclosure bounds normalize by swapping); no panics cross the boundary.
 
@@ -350,8 +377,10 @@ divergence.
 
 ## Cancellation behavior
 Core certificate/color algebra is bounded small synchronous work. Typed color,
-validity-domain, model-evidence, certified-f64, and model-card identity helpers
-accept an explicit cancellation probe. Color payload copies poll at the
+validity-domain, standalone-certificate, model-evidence, certified-f64, and
+model-card identity helpers accept an explicit cancellation probe. Standalone
+certificate helpers poll at entry and through fixed-size canonical framing.
+Color payload copies poll at the
 configured byte stride; validity and sensitivity rows poll at stream
 boundaries; set/row preflights poll while traversing caller data. Model-card
 calibration crosswalks recompute legacy FNV incrementally with entry, exact
@@ -727,6 +756,27 @@ physical validation, process-standard conformance, or decision fitness.
   directly rather than binding `ModelEvidenceIdV1`, so this additive helper is
   not a transitive authority upgrade. Raw IDs/receipts remain schema-shaped
   framing without attached-value consistency or external trust.
+- `IdentifiedNumericalCertificateV1` proves only exact local structural framing
+  of the retained kind and bound bits. It binds no carried scalar or QoI, units,
+  quantity kind, checker or algorithm, rounding method, operation, operands,
+  derivation, error model, source, or trust. An Exact tag does not prove exact
+  computation; Enclosure does not prove containment or outward rounding;
+  Estimate does not prove calibration; canonical NoClaim is a caller-carried
+  refusal state rather than proof that no computation occurred. Ordered
+  infinity may be vacuous. Identical output certificates from different
+  operations intentionally share this standalone identity and prove no replay
+  history or composition correctness.
+- `IdentifiedStatisticalCertificateV1` proves only exact local structural
+  framing of a retained, numerically well-shaped variant. It binds no null or
+  alternative, estimand, reference QoI, units, test/interval method, sample or
+  dataset, sample size, filtration, stopping rule, dependence or
+  multiple-testing context, population, sidedness, coverage, or type-I-error
+  authority. `None` states only the local declaration of no stochastic
+  component; it does not prove determinism. Both standalone certificate
+  receipts are unanchored and add no signature, origin, ledger admission, or
+  scientific authority. Existing certified-f64 v1 encodes certificate fields
+  inline and does not child-bind either standalone ID, so these projections do
+  not transitively upgrade `Evidence`, `Certified`, Color, or ledger identity.
 - `IdentifiedCertifiedF64EvidenceV1` proves only the helper-defined strong
   semantic projection of an already-local `Certified<f64>` and keeps that
   record attached. It does not add units, a quantity kind, source or model-card
