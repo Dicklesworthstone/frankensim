@@ -752,14 +752,8 @@ pub fn consume_structured_backlash(
             GearBacklashNumericQuantityV1::Support(index),
             false,
         )?;
-        if let Some(previous) = published_support.last()
-            && previous.value().metres().total_cmp(&value.metres()) == Ordering::Equal
-        {
-            return Err(GearBacklashConsumptionErrorV1::SiSupportAliasing {
-                lower_source_bits: previous.value().source_value().to_bits(),
-                upper_source_bits: value.source_value().to_bits(),
-                metres_bits: value.metres().to_bits(),
-            });
+        if let Some(previous) = published_support.last() {
+            ensure_nonaliased_si_support(previous.value(), value)?;
         }
         published_support.push(GearBacklashSupportPointV1 {
             value,
@@ -968,6 +962,20 @@ fn convert_variance(
     })
 }
 
+fn ensure_nonaliased_si_support(
+    lower: GearBacklashValueV1,
+    upper: GearBacklashValueV1,
+) -> Result<(), GearBacklashConsumptionErrorV1> {
+    if lower.metres().total_cmp(&upper.metres()) == Ordering::Equal {
+        return Err(GearBacklashConsumptionErrorV1::SiSupportAliasing {
+            lower_source_bits: lower.source_value().to_bits(),
+            upper_source_bits: upper.source_value().to_bits(),
+            metres_bits: upper.metres().to_bits(),
+        });
+    }
+    Ok(())
+}
+
 const fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
     while right != 0 {
         let remainder = left % right;
@@ -975,4 +983,110 @@ const fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
         right = remainder;
     }
     if left == 0 { 1 } else { left }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GearBacklashConsumptionErrorV1, GearBacklashLengthUnitV1, GearBacklashNumericIssueV1,
+        GearBacklashNumericQuantityV1, convert_value, convert_variance,
+        ensure_nonaliased_si_support,
+    };
+
+    #[test]
+    fn conversion_seams_refuse_invalid_or_unrepresentable_evidence() {
+        assert_eq!(
+            convert_value(
+                f64::NAN,
+                GearBacklashLengthUnitV1::Metre,
+                GearBacklashNumericQuantityV1::Mean,
+                false,
+            ),
+            Err(GearBacklashConsumptionErrorV1::Numeric {
+                quantity: GearBacklashNumericQuantityV1::Mean,
+                issue: GearBacklashNumericIssueV1::NonFinite,
+            })
+        );
+        assert_eq!(
+            convert_value(
+                -1.0,
+                GearBacklashLengthUnitV1::Metre,
+                GearBacklashNumericQuantityV1::StandardDeviation,
+                true,
+            ),
+            Err(GearBacklashConsumptionErrorV1::Numeric {
+                quantity: GearBacklashNumericQuantityV1::StandardDeviation,
+                issue: GearBacklashNumericIssueV1::Negative,
+            })
+        );
+        assert_eq!(
+            convert_value(
+                f64::from_bits(1),
+                GearBacklashLengthUnitV1::Nanometre,
+                GearBacklashNumericQuantityV1::Support(0),
+                false,
+            ),
+            Err(GearBacklashConsumptionErrorV1::Numeric {
+                quantity: GearBacklashNumericQuantityV1::Support(0),
+                issue: GearBacklashNumericIssueV1::SiUnderflow,
+            })
+        );
+        assert_eq!(
+            convert_variance(-f64::EPSILON, GearBacklashLengthUnitV1::Metre),
+            Err(GearBacklashConsumptionErrorV1::Numeric {
+                quantity: GearBacklashNumericQuantityV1::Variance,
+                issue: GearBacklashNumericIssueV1::Negative,
+            })
+        );
+        assert_eq!(
+            convert_variance(f64::INFINITY, GearBacklashLengthUnitV1::Metre),
+            Err(GearBacklashConsumptionErrorV1::Numeric {
+                quantity: GearBacklashNumericQuantityV1::Variance,
+                issue: GearBacklashNumericIssueV1::NonFinite,
+            })
+        );
+        assert_eq!(
+            convert_variance(f64::MIN_POSITIVE, GearBacklashLengthUnitV1::Nanometre),
+            Err(GearBacklashConsumptionErrorV1::Numeric {
+                quantity: GearBacklashNumericQuantityV1::Variance,
+                issue: GearBacklashNumericIssueV1::SiUnderflow,
+            })
+        );
+    }
+
+    #[test]
+    fn distinct_source_support_that_collapses_in_si_is_refused() {
+        let convert = |offset: u64| {
+            let source = f64::from_bits(f64::MIN_POSITIVE.to_bits() + offset);
+            convert_value(
+                source,
+                GearBacklashLengthUnitV1::Nanometre,
+                GearBacklashNumericQuantityV1::Support(
+                    usize::try_from(offset).expect("the search is bounded"),
+                ),
+                false,
+            )
+            .expect("every searched conversion remains nonzero")
+        };
+        let mut lower = convert(0);
+        let mut alias = None;
+        for offset in 1_u64..1_024 {
+            let upper = convert(offset);
+            if lower.metres().to_bits() == upper.metres().to_bits() {
+                alias = Some((lower, upper));
+                break;
+            }
+            lower = upper;
+        }
+        let (lower, upper) =
+            alias.expect("subnormal source spacing must collapse under nanometre conversion");
+        assert_eq!(
+            ensure_nonaliased_si_support(lower, upper),
+            Err(GearBacklashConsumptionErrorV1::SiSupportAliasing {
+                lower_source_bits: lower.source_value().to_bits(),
+                upper_source_bits: upper.source_value().to_bits(),
+                metres_bits: upper.metres().to_bits(),
+            })
+        );
+    }
 }

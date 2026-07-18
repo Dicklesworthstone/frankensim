@@ -28,12 +28,22 @@ fn branch(key: &str, parent: Option<u32>) -> StructuredNodeSpec {
 }
 
 fn leaf(key: &str, parent: u32, weight: u64, raw_clearance: f64) -> StructuredNodeSpec {
+    leaf_with_law(key, parent, weight, raw_clearance, StructuredLawId(0))
+}
+
+fn leaf_with_law(
+    key: &str,
+    parent: u32,
+    weight: u64,
+    raw_clearance: f64,
+    law: StructuredLawId,
+) -> StructuredNodeSpec {
     StructuredNodeSpec::Leaf {
         key: key.into(),
         parent: StructuredNodeId(parent),
         relative_weight: nz(weight),
         raw_clearance,
-        law: StructuredLawId(0),
+        law,
     }
 }
 
@@ -256,6 +266,106 @@ fn g5_request_order_and_equivalent_fraction_spellings_are_nonsemantic() {
     .expect("equivalent reordered request evaluates");
 
     assert_eq!(canonical, reordered);
+}
+
+#[test]
+fn g0_multiple_laws_retain_unobserved_zero_weight_modes() {
+    let secondary_law = PiecewiseQuadraticLaw {
+        key: "secondary-response".into(),
+        lower_bound: -2.0,
+        upper_bound: 2.0,
+        knots: vec![-2.0, 0.0, 2.0],
+        interior_knot_owners: vec![InteriorKnotOwner::UpperPiece],
+        pieces: vec![
+            QuadraticResponsePiece {
+                mode_key: "secondary-negative".into(),
+                a: 0.0,
+                b: 1.0,
+                c: 0.0,
+            },
+            QuadraticResponsePiece {
+                mode_key: "secondary-nonnegative".into(),
+                a: 0.0,
+                b: 1.0,
+                c: 0.0,
+            },
+        ],
+    };
+    let model = StructuredPopulationModel {
+        identity: StructuredModelIdentity::try_new(
+            "gear/backlash-multiple-laws",
+            nz(1),
+            [0xa7; 32],
+        )
+        .expect("fixture identity is canonical"),
+        nodes: vec![
+            branch("population", None),
+            leaf_with_law("primary-lash", 0, 3, 0.0, StructuredLawId(0)),
+            leaf_with_law("secondary-negative", 0, 5, -1.0, StructuredLawId(1)),
+        ],
+        laws: vec![backlash_law(), secondary_law],
+    };
+    let structured = propagate_structured_population(&model).expect("multi-law fixture evaluates");
+    let report = GearBacklashConsumerDraftV1 {
+        output_unit: GearBacklashLengthUnitV1::Micrometre,
+        quantiles: vec![probability(1, 2)],
+    }
+    .consume(&structured)
+    .expect("multi-law receipt is consumable");
+
+    let actual = report
+        .modes()
+        .iter()
+        .map(|mode| {
+            (
+                mode.law(),
+                mode.law_key(),
+                mode.piece(),
+                mode.mode_key(),
+                mode.relative_weight(),
+                mode.leaf_count(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            (
+                StructuredLawId(0),
+                "backlash-clearance",
+                0,
+                "drive-negative",
+                0,
+                0,
+            ),
+            (StructuredLawId(0), "backlash-clearance", 1, "lash", 3, 1),
+            (
+                StructuredLawId(0),
+                "backlash-clearance",
+                2,
+                "drive-positive",
+                0,
+                0,
+            ),
+            (
+                StructuredLawId(1),
+                "secondary-response",
+                0,
+                "secondary-negative",
+                5,
+                1,
+            ),
+            (
+                StructuredLawId(1),
+                "secondary-response",
+                1,
+                "secondary-nonnegative",
+                0,
+                0,
+            ),
+        ]
+    );
+    assert_eq!(report.total_weight(), 8);
 }
 
 #[test]

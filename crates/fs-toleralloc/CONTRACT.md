@@ -297,11 +297,12 @@ bounded downstream consumer for the structured gear-backlash fixture. It
 accepts only `STRUCTURED_PROPAGATION_SCHEMA_V1` and does not reevaluate or
 refit the admitted model. The output-length unit is an explicit caller
 declaration over otherwise untyped structured outputs. Version one admits only
-metres, millimetres, micrometres, and nanometres. Signed support, mean, and
-standard deviation are converted in the fixed binary64 order `source * scale`;
-variance is converted as `source * scale * scale`. Both submitted-unit and SI
-bits are retained. Non-finite conversions, nonzero-to-zero underflow, and two
-distinct source support values collapsing to one SI value are atomic refusals.
+metres, millimetres, micrometres, and nanometres. Support and mean are signed;
+standard deviation and variance must be nonnegative. Support, mean, and standard
+deviation are converted in the fixed binary64 order `source * scale`; variance
+is converted as `source * scale * scale`. Both submitted-unit and SI bits are
+retained. Non-finite conversions, nonzero-to-zero underflow, and two distinct
+source support values collapsing to one SI value are atomic refusals.
 
 Each request level is an independently reduced exact rational `n/d` in the
 closed unit interval; the vector is not a probability mass function and need
@@ -332,7 +333,10 @@ duplicate and 128/N+1 request admission, and exact rank selection at the
 upstream `2^53` multiplicity cap. A structural-receipt test changes hierarchy
 content while deliberately reusing the same external identity, proving that
 complete model retention—not the unauthenticated caller digest alone—carries
-the semantic difference.
+the semantic difference. A multi-law fixture retains every declared mode,
+including law-local pieces with zero weight and zero observed leaves. Private
+conversion-seam tests pin negative/non-finite refusal, source-to-SI underflow,
+and distinct source support that rounds onto one nonzero SI value.
 
 This consumer publishes signed descriptive response evidence for the supplied
 finite population. Multiplicities are not calibrated probabilities. “Backlash”
