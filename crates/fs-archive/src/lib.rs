@@ -280,19 +280,23 @@ impl CvtArchive {
 
 /// The NOVELTY of a descriptor relative to a set of others: the mean Euclidean
 /// distance to its `k` nearest neighbours (exploration pressure). An empty
-/// neighbour set is maximally novel (`+∞`).
+/// neighbour set or a request for zero neighbours is maximally novel (`+∞`).
+/// A nonempty neighbour set is validated even when `k == 0`.
 ///
 /// # Panics
 /// If `others` is non-empty and descriptor dimensions disagree, are zero, or
 /// contain non-finite values.
 #[must_use]
 pub fn novelty(descriptor: &[f64], others: &[Vec<f64>], k: usize) -> f64 {
-    if others.is_empty() || k == 0 {
+    if others.is_empty() {
         return f64::INFINITY;
     }
     assert_descriptor("descriptor", descriptor, descriptor.len());
     for other in others {
         assert_descriptor("neighbour descriptor", other, descriptor.len());
+    }
+    if k == 0 {
+        return f64::INFINITY;
     }
     let mut dists: Vec<f64> = others.iter().map(|o| dist2(o, descriptor).sqrt()).collect();
     dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

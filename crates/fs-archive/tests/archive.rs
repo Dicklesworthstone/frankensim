@@ -85,6 +85,8 @@ fn novelty_rewards_distance_from_the_archive() {
     assert!(far > near, "far {far} should exceed near {near}");
     // an empty archive is maximally novel.
     assert!(novelty(&[0.0], &[], 3).is_infinite());
+    // Asking for no neighbours is also maximally novel after validation.
+    assert!(novelty(&[0.0], &[vec![0.0]], 0).is_infinite());
 }
 
 #[test]
@@ -105,6 +107,19 @@ fn malformed_dimensions_and_fitness_are_rejected() {
     }));
     assert!(panics(|| {
         let _ = novelty(&[0.0, 0.0], &[vec![0.0]], 1);
+    }));
+    // k=0 is an output policy, not a validation bypass for a nonempty archive.
+    assert!(panics(|| {
+        let _ = novelty(&[], &[vec![0.0]], 0);
+    }));
+    assert!(panics(|| {
+        let _ = novelty(&[f64::NAN], &[vec![0.0]], 0);
+    }));
+    assert!(panics(|| {
+        let _ = novelty(&[0.0], &[vec![f64::INFINITY]], 0);
+    }));
+    assert!(panics(|| {
+        let _ = novelty(&[0.0, 0.0], &[vec![0.0]], 0);
     }));
 }
 
