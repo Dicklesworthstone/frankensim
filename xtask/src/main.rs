@@ -51,7 +51,7 @@ use constellation_cleanliness::{
     sanitized_git_command, verify_two_complete_passes,
 };
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -2359,13 +2359,11 @@ fn workspace_rust_sources(root: &Path) -> Result<BTreeMap<String, String>, Strin
     let mut sources = BTreeMap::new();
     let mut total_bytes = 0usize;
     for path in paths {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| format!("{} escaped workspace root: {error}", path.display()))?
-            .display()
-            .to_string()
-            .replace('\\', "/");
-        let source = std::fs::read_to_string(&path)
+        let relative = casual_inventory_relative(root, &path)?;
+        let remaining = CASUAL_MAX_SOURCE_BYTES
+            .checked_sub(total_bytes)
+            .ok_or_else(|| "Rust-source inventory byte count overflowed".to_string())?;
+        let source = casual_read_bounded_utf8(&path, remaining, "Rust source")
             .map_err(|error| format!("cannot read Rust source {relative}: {error}"))?;
         total_bytes = total_bytes
             .checked_add(source.len())
@@ -2375,9 +2373,93 @@ fn workspace_rust_sources(root: &Path) -> Result<BTreeMap<String, String>, Strin
                 "Rust-source inventory exceeds the {CASUAL_MAX_SOURCE_BYTES}-byte audit cap"
             ));
         }
-        sources.insert(relative, source);
+        if sources.insert(relative.clone(), source).is_some() {
+            return Err(format!(
+                "multiple filesystem paths collapse to Rust-source inventory key {relative}"
+            ));
+        }
     }
     Ok(sources)
+}
+
+fn casual_inventory_relative(root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|error| format!("{} escaped workspace root: {error}", path.display()))?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(component) => {
+                let component = component.to_str().ok_or_else(|| {
+                    format!(
+                        "refusing non-UTF-8 inventory path component in {}",
+                        path.display()
+                    )
+                })?;
+                if component.contains('\\') {
+                    return Err(format!(
+                        "refusing backslash-bearing inventory path component {component:?} in {}; portable graph identity would be ambiguous",
+                        path.display()
+                    ));
+                }
+                components.push(component);
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "{} is not a normalized workspace-relative inventory path",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(format!(
+            "{} does not name an entry below the workspace root",
+            path.display()
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn casual_read_bounded_utf8(path: &Path, limit: usize, kind: &str) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let advertised = usize::try_from(metadata.len()).map_err(|_| {
+        format!(
+            "{kind} {} length does not fit the host address space",
+            path.display()
+        )
+    })?;
+    if advertised > limit {
+        return Err(format!(
+            "{kind} {} exceeds the remaining {limit}-byte audit budget",
+            path.display()
+        ));
+    }
+
+    // Metadata is only a preflight: the file may grow between stat and read.
+    // Limit the reader itself to one byte beyond the remaining budget so that
+    // a concurrent replacement/growth race still refuses before unbounded
+    // allocation or I/O.
+    let read_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut source = String::with_capacity(advertised);
+    file.take(read_limit)
+        .read_to_string(&mut source)
+        .map_err(|error| format!("cannot read {} as UTF-8: {error}", path.display()))?;
+    if source.len() > limit {
+        return Err(format!(
+            "{kind} {} grew beyond the remaining {limit}-byte audit budget while being read",
+            path.display()
+        ));
+    }
+    Ok(source)
 }
 
 fn check_citable_producers(root: &Path) -> Vec<Violation> {
@@ -2399,10 +2481,13 @@ fn check_citable_producers(root: &Path) -> Vec<Violation> {
 const CASUAL_PRINT_CHECK: &str = "casual-print";
 const CASUAL_MAX_SOURCE_FILES: usize = 8_192;
 const CASUAL_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+const CASUAL_MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const CASUAL_MAX_TOKENS_PER_SOURCE: usize = 2_000_000;
 const CASUAL_MAX_TOTAL_TOKENS: usize = 32_000_000;
 const CASUAL_MAX_REACHABLE_SOURCES: usize = 16_384;
 const CASUAL_MAX_MODULE_EDGES: usize = 65_536;
+const CASUAL_MAX_MODULE_DEPTH: usize = 1_024;
+const CASUAL_MAX_PORTABLE_PATH_BYTES: usize = 16 * 1_024;
 const CASUAL_MAX_DIAGNOSTICS: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
@@ -2487,6 +2572,11 @@ fn casual_path_literal(token: &str) -> Result<String, String> {
         if bytes.get(close) != Some(&b'"') || !bytes[close + 1..].iter().all(|byte| *byte == b'#') {
             return Err("malformed raw #[path] literal".to_string());
         }
+        if close.saturating_sub(quote + 1) > CASUAL_MAX_PORTABLE_PATH_BYTES {
+            return Err(format!(
+                "#[path] literal exceeds the {CASUAL_MAX_PORTABLE_PATH_BYTES}-byte portable-path cap"
+            ));
+        }
         return Ok(token[quote + 1..close].to_string());
     }
     if bytes.first() != Some(&b'"') || bytes.last() != Some(&b'"') {
@@ -2498,6 +2588,11 @@ fn casual_path_literal(token: &str) -> Result<String, String> {
     while let Some(character) = characters.next() {
         if character != '\\' {
             output.push(character);
+            if output.len() > CASUAL_MAX_PORTABLE_PATH_BYTES {
+                return Err(format!(
+                    "#[path] literal exceeds the {CASUAL_MAX_PORTABLE_PATH_BYTES}-byte portable-path cap"
+                ));
+            }
             continue;
         }
         let escaped = characters
@@ -2563,32 +2658,48 @@ fn casual_path_literal(token: &str) -> Result<String, String> {
                 return Err(format!("unsupported escape \\{escaped} in #[path] literal"));
             }
         }
+        if output.len() > CASUAL_MAX_PORTABLE_PATH_BYTES {
+            return Err(format!(
+                "#[path] literal exceeds the {CASUAL_MAX_PORTABLE_PATH_BYTES}-byte portable-path cap"
+            ));
+        }
     }
     Ok(output)
 }
 
 fn casual_normalized_inclusion(source_path: &str, literal: &str) -> Result<String, String> {
-    let portable = literal.replace('\\', "/");
-    let joined = Path::new(source_path)
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join(portable);
-    let mut normalized = PathBuf::new();
-    for component in joined.components() {
+    if literal.contains('\\') {
+        return Err(format!(
+            "#[path] `{literal}` contains a backslash; portable source identity requires `/` separators"
+        ));
+    }
+    if literal.starts_with('/') {
+        return Err(format!("#[path] `{literal}` must be workspace-relative"));
+    }
+
+    let mut normalized = source_path
+        .rsplit_once('/')
+        .map_or_else(Vec::new, |(parent, _)| {
+            parent.split('/').map(str::to_string).collect()
+        });
+    for component in literal.split('/') {
         match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
+            "" | "." => {}
+            ".." => {
+                if normalized.pop().is_none() {
                     return Err(format!("#[path] `{literal}` escapes the workspace root"));
                 }
             }
-            Component::Normal(component) => normalized.push(component),
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("#[path] `{literal}` must be workspace-relative"));
-            }
+            component => normalized.push(component.to_string()),
         }
     }
-    Ok(normalized.display().to_string().replace('\\', "/"))
+    let normalized = normalized.join("/");
+    if normalized.len() > CASUAL_MAX_PORTABLE_PATH_BYTES {
+        return Err(format!(
+            "#[path] `{literal}` resolves beyond the {CASUAL_MAX_PORTABLE_PATH_BYTES}-byte portable-path cap"
+        ));
+    }
+    Ok(normalized)
 }
 
 fn casual_identifier_start(character: char) -> bool {
@@ -2614,6 +2725,22 @@ fn casual_token_is_identifier(token: &str) -> bool {
     let mut characters = token.chars();
     characters.next().is_some_and(casual_identifier_start)
         && characters.all(casual_identifier_continue)
+}
+
+fn casual_identifier_at<'source>(
+    tokens: &[CasualRustToken<'source>],
+    index: usize,
+) -> Option<(&'source str, usize)> {
+    if tokens.get(index)?.text == "r"
+        && tokens.get(index + 1).is_some_and(|token| token.text == "#")
+        && tokens
+            .get(index + 2)
+            .is_some_and(|token| casual_token_is_identifier(token.text))
+    {
+        Some((tokens[index + 2].text, index + 3))
+    } else {
+        casual_token_is_identifier(tokens[index].text).then_some((tokens[index].text, index + 1))
+    }
 }
 
 #[allow(clippy::too_many_lines)] // one fail-closed lexer keeps every trivia/string boundary aligned
@@ -2944,11 +3071,13 @@ fn casual_cfg_test_attribute(
         return None;
     }
     let close = pairs.get(bracket).copied().flatten()?;
-    (close == bracket + 5
-        && tokens[bracket + 1].text == "cfg"
-        && tokens[bracket + 2].text == "("
-        && tokens[bracket + 3].text == "test"
-        && tokens[bracket + 4].text == ")")
+    let (name, cursor) = casual_identifier_at(tokens, bracket + 1)?;
+    let (predicate, predicate_end) = casual_identifier_at(tokens, cursor + 1)?;
+    (name == "cfg"
+        && tokens.get(cursor)?.text == "("
+        && predicate == "test"
+        && tokens.get(predicate_end)?.text == ")"
+        && close == predicate_end + 1)
         .then_some((close, inner))
 }
 
@@ -2961,7 +3090,11 @@ fn casual_cfg_test_spans(
 ) -> Result<(bool, Vec<(usize, usize)>), String> {
     let mut file_test_only = false;
     let mut spans = Vec::new();
+    let mut covered_until = 0usize;
     for index in 0..tokens.len() {
+        if index < covered_until {
+            continue;
+        }
         // Macro inputs/bodies and every arbitrary attribute interior are token
         // data, not structural Rust syntax. Only the outer shell of this exact
         // recognized cfg attribute is permitted to confer authority.
@@ -2973,11 +3106,15 @@ fn casual_cfg_test_spans(
         };
         if inner {
             match containers[index] {
-                Some(open) if tokens[open].text == "{" => spans.push((
-                    open,
-                    pairs[open].expect("validated containing brace has a close"),
-                )),
-                None => file_test_only = true,
+                Some(open) if tokens[open].text == "{" => {
+                    let close = pairs[open].expect("validated containing brace has a close");
+                    spans.push((open, close));
+                    covered_until = close.saturating_add(1);
+                }
+                None => {
+                    file_test_only = true;
+                    break;
+                }
                 Some(_) => {
                     // A `#![cfg(test)]` token inside a parenthesized or bracketed
                     // macro input is not an inner attribute on the surrounding
@@ -3044,6 +3181,10 @@ fn casual_cfg_test_spans(
             span_start = previous_hash;
         }
         spans.push((span_start, span_end));
+        // Multiple contiguous cfg(test) attributes all govern the same item.
+        // The first recognized shell covers the complete item, so revisiting
+        // later shells would only rescan the same suffix quadratically.
+        covered_until = span_end.saturating_add(1);
     }
     Ok((file_test_only, spans))
 }
@@ -3174,7 +3315,12 @@ struct CasualModuleContext {
     path: String,
     package_root: String,
     module_dir: String,
-    ancestry: Vec<String>,
+    depth: usize,
+}
+
+struct CasualModuleFrame {
+    context: CasualModuleContext,
+    edges: Vec<CasualModuleEdge>,
 }
 
 #[derive(Debug)]
@@ -3263,7 +3409,7 @@ fn casual_module_path_attribute(
 ) -> Result<Option<String>, String> {
     let bracket = hash + 1;
     let close = pairs[bracket].ok_or_else(|| format!("unpaired attribute in {path}"))?;
-    let Some(name) = tokens.get(bracket + 1).map(|token| token.text) else {
+    let Some((name, cursor)) = casual_identifier_at(tokens, bracket + 1) else {
         return Ok(None);
     };
     if name == "cfg_attr"
@@ -3278,10 +3424,10 @@ fn casual_module_path_attribute(
     if name != "path" {
         return Ok(None);
     }
-    if close != bracket + 4 || tokens[bracket + 2].text != "=" {
+    if close != cursor + 2 || tokens.get(cursor).is_none_or(|token| token.text != "=") {
         return Err(format!("malformed #[path] module attribute in {path}"));
     }
-    casual_path_literal(tokens[bracket + 3].text)
+    casual_path_literal(tokens[cursor + 1].text)
         .map(Some)
         .map_err(|error| format!("cannot decode #[path] in {path}: {error}"))
 }
@@ -3349,6 +3495,16 @@ fn casual_module_edges(
         let current_dir = inline_modules
             .last()
             .map_or(module_dir, |(_, directory)| directory.as_str());
+        let child_identity_bytes = current_dir
+            .len()
+            .checked_add(if current_dir.is_empty() { 0 } else { 1 })
+            .and_then(|length| length.checked_add(name.len()))
+            .ok_or_else(|| format!("module identity length overflowed in {path}"))?;
+        if child_identity_bytes > CASUAL_MAX_PORTABLE_PATH_BYTES {
+            return Err(format!(
+                "module {name} in {path} exceeds the {CASUAL_MAX_PORTABLE_PATH_BYTES}-byte portable-path cap"
+            ));
+        }
         let child_module_dir = casual_join_portable(current_dir, &name);
         if direct_path.is_some() && !inline_modules.is_empty() {
             return Err(format!(
@@ -3421,7 +3577,7 @@ fn casual_core_graph(
 ) -> Result<CasualCoreGraph, String> {
     let mut paths = BTreeSet::new();
     let mut owners = BTreeMap::<String, String>::new();
-    let mut queue = VecDeque::new();
+    let mut root_contexts = Vec::new();
     for (path, package_root) in roots {
         if !sources.contains_key(path) {
             return Err(format!(
@@ -3437,62 +3593,60 @@ fn casual_core_graph(
         {
             return Err(format!("library root {path} is declared more than once"));
         }
-        queue.push_back(CasualModuleContext {
+        root_contexts.push(CasualModuleContext {
             path: path.clone(),
             package_root: package_root.clone(),
-            module_dir: Path::new(path)
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .display()
-                .to_string()
-                .replace('\\', "/"),
-            ancestry: vec![path.clone()],
+            module_dir: path
+                .rsplit_once('/')
+                .map_or_else(String::new, |(parent, _)| parent.to_string()),
+            depth: 0,
         });
     }
 
     let mut total_tokens = 0usize;
     let mut edge_count = 0usize;
-    while let Some(context) = queue.pop_front() {
-        if !paths.insert(context.path.clone()) {
-            continue;
-        }
-        if paths.len() > CASUAL_MAX_REACHABLE_SOURCES {
-            return Err(format!(
-                "library graph exceeds the {CASUAL_MAX_REACHABLE_SOURCES}-source reachability cap"
-            ));
-        }
-        let source = sources
-            .get(&context.path)
-            .expect("queued module targets were inventory-checked");
-        let (edges, token_count) = casual_module_edges(
-            &context.path,
-            &context.package_root,
-            &context.module_dir,
-            source,
+    let mut active = BTreeMap::<String, bool>::new();
+    let mut frames = Vec::<CasualModuleFrame>::new();
+    for root in root_contexts {
+        active.insert(root.path.clone(), true);
+        frames.push(casual_module_frame(
+            root,
             sources,
-        )?;
-        total_tokens = total_tokens
-            .checked_add(token_count)
-            .ok_or_else(|| "library token count overflowed".to_string())?;
-        if total_tokens > CASUAL_MAX_TOTAL_TOKENS {
-            return Err(format!(
-                "library graph exceeds the {CASUAL_MAX_TOTAL_TOKENS}-token audit cap"
-            ));
-        }
-        edge_count = edge_count
-            .checked_add(edges.len())
-            .ok_or_else(|| "module edge count overflowed".to_string())?;
-        if edge_count > CASUAL_MAX_MODULE_EDGES {
-            return Err(format!(
-                "library graph exceeds the {CASUAL_MAX_MODULE_EDGES}-edge audit cap"
-            ));
-        }
-        for edge in edges {
-            if context.ancestry.contains(&edge.target) {
-                return Err(format!(
-                    "cyclic module inclusion through {} reaches ancestor {}",
-                    edge.declaration, edge.target
-                ));
+            &mut paths,
+            &mut total_tokens,
+            &mut edge_count,
+        )?);
+
+        while !frames.is_empty() {
+            let edge = frames
+                .last_mut()
+                .expect("non-empty graph stack has a current frame")
+                .edges
+                .pop();
+            let Some(edge) = edge else {
+                let completed = frames
+                    .pop()
+                    .expect("the observed graph frame remains present");
+                active.insert(completed.context.path, false);
+                continue;
+            };
+            match active.get(&edge.target).copied() {
+                Some(true) => {
+                    return Err(format!(
+                        "cyclic module inclusion through {} reaches active ancestor {}",
+                        edge.declaration, edge.target
+                    ));
+                }
+                Some(false) => {
+                    let previous = owners
+                        .get(&edge.target)
+                        .expect("completed module targets retain their owner");
+                    return Err(format!(
+                        "aliased module target {} is owned by both {previous} and {}",
+                        edge.target, edge.declaration
+                    ));
+                }
+                None => {}
             }
             if let Some(previous) = owners.insert(edge.target.clone(), edge.declaration.clone()) {
                 return Err(format!(
@@ -3500,17 +3654,87 @@ fn casual_core_graph(
                     edge.target, edge.declaration
                 ));
             }
-            let mut ancestry = context.ancestry.clone();
-            ancestry.push(edge.target.clone());
-            queue.push_back(CasualModuleContext {
+            let parent = frames
+                .last()
+                .expect("an outgoing edge retains its parent graph frame");
+            let child = CasualModuleContext {
                 path: edge.target,
-                package_root: context.package_root.clone(),
+                package_root: parent.context.package_root.clone(),
                 module_dir: edge.module_dir,
-                ancestry,
-            });
+                depth: parent.context.depth.saturating_add(1),
+            };
+            active.insert(child.path.clone(), true);
+            frames.push(casual_module_frame(
+                child,
+                sources,
+                &mut paths,
+                &mut total_tokens,
+                &mut edge_count,
+            )?);
         }
     }
     Ok(CasualCoreGraph { paths })
+}
+
+fn casual_module_frame(
+    context: CasualModuleContext,
+    sources: &BTreeMap<String, String>,
+    paths: &mut BTreeSet<String>,
+    total_tokens: &mut usize,
+    edge_count: &mut usize,
+) -> Result<CasualModuleFrame, String> {
+    if context.depth > CASUAL_MAX_MODULE_DEPTH {
+        return Err(format!(
+            "library graph exceeds the {CASUAL_MAX_MODULE_DEPTH}-level module-depth cap at {}",
+            context.path
+        ));
+    }
+    if context.path.len() > CASUAL_MAX_PORTABLE_PATH_BYTES
+        || context.module_dir.len() > CASUAL_MAX_PORTABLE_PATH_BYTES
+    {
+        return Err(format!(
+            "module identity for {} exceeds the {CASUAL_MAX_PORTABLE_PATH_BYTES}-byte portable-path cap",
+            context.path
+        ));
+    }
+    if !paths.insert(context.path.clone()) {
+        return Err(format!(
+            "module target {} entered the reachability walk more than once",
+            context.path
+        ));
+    }
+    if paths.len() > CASUAL_MAX_REACHABLE_SOURCES {
+        return Err(format!(
+            "library graph exceeds the {CASUAL_MAX_REACHABLE_SOURCES}-source reachability cap"
+        ));
+    }
+    let source = sources
+        .get(&context.path)
+        .expect("module targets were inventory-checked before graph entry");
+    let (edges, token_count) = casual_module_edges(
+        &context.path,
+        &context.package_root,
+        &context.module_dir,
+        source,
+        sources,
+    )?;
+    *total_tokens = total_tokens
+        .checked_add(token_count)
+        .ok_or_else(|| "library token count overflowed".to_string())?;
+    if *total_tokens > CASUAL_MAX_TOTAL_TOKENS {
+        return Err(format!(
+            "library graph exceeds the {CASUAL_MAX_TOTAL_TOKENS}-token audit cap"
+        ));
+    }
+    *edge_count = edge_count
+        .checked_add(edges.len())
+        .ok_or_else(|| "module edge count overflowed".to_string())?;
+    if *edge_count > CASUAL_MAX_MODULE_EDGES {
+        return Err(format!(
+            "library graph exceeds the {CASUAL_MAX_MODULE_EDGES}-edge audit cap"
+        ));
+    }
+    Ok(CasualModuleFrame { context, edges })
 }
 
 fn casual_manifest_string(value: &str) -> Result<String, String> {
@@ -3552,12 +3776,169 @@ fn casual_manifest_string(value: &str) -> Result<String, String> {
     casual_path_literal(&value[..=close])
 }
 
+fn casual_manifest_key_path(input: &str) -> Result<Vec<String>, String> {
+    let mut cursor = 0usize;
+    let bytes = input.as_bytes();
+    let mut keys = Vec::new();
+    loop {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        let Some(first) = bytes.get(cursor).copied() else {
+            return Err("empty TOML key path".to_string());
+        };
+        let key = if matches!(first, b'\'' | b'"') {
+            let delimiter = first;
+            let start = cursor;
+            cursor += 1;
+            let mut escaped = false;
+            let close = loop {
+                let Some(byte) = bytes.get(cursor).copied() else {
+                    return Err("unterminated quoted TOML key".to_string());
+                };
+                if delimiter == b'"' && escaped {
+                    escaped = false;
+                } else if delimiter == b'"' && byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    break cursor;
+                }
+                cursor += 1;
+            };
+            cursor += 1;
+            if delimiter == b'\'' {
+                input[start + 1..close].to_string()
+            } else {
+                casual_path_literal(&input[start..cursor])
+                    .map_err(|error| format!("invalid quoted TOML key: {error}"))?
+            }
+        } else {
+            let start = cursor;
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                cursor += 1;
+            }
+            if cursor == start {
+                return Err(format!(
+                    "unsupported TOML key token starting at {:?}",
+                    &input[start..]
+                ));
+            }
+            input[start..cursor].to_string()
+        };
+        keys.push(key);
+
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        match bytes.get(cursor) {
+            None => return Ok(keys),
+            Some(b'.') => cursor += 1,
+            Some(_) => {
+                return Err(format!(
+                    "unexpected TOML key-path suffix {:?}",
+                    &input[cursor..]
+                ));
+            }
+        }
+    }
+}
+
+fn casual_manifest_key_is(actual: &[String], expected: &[&str]) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.as_str() == *expected)
+}
+
+fn casual_manifest_comment_free(input: &str) -> Result<&str, String> {
+    let bytes = input.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(b'"') if escaped => escaped = false,
+            Some(b'"') if byte == b'\\' => escaped = true,
+            Some(delimiter) if byte == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b'#' => return Ok(&input[..index]),
+            None => {}
+        }
+    }
+    if quote.is_some() {
+        return Err("unterminated quote in TOML key/table syntax".to_string());
+    }
+    Ok(input)
+}
+
+fn casual_manifest_table_path(line: &str) -> Result<Option<Vec<String>>, String> {
+    let header = casual_manifest_comment_free(line)?.trim();
+    if !header.starts_with('[') {
+        return Ok(None);
+    }
+    let (inner, array) = if header.starts_with("[[") {
+        if !header.ends_with("]]") {
+            return Err("unterminated TOML array-table header".to_string());
+        }
+        (&header[2..header.len() - 2], true)
+    } else {
+        if !header.ends_with(']') {
+            return Err("unterminated TOML table header".to_string());
+        }
+        (&header[1..header.len() - 1], false)
+    };
+    let path = casual_manifest_key_path(inner)?;
+    if array
+        && path
+            .first()
+            .is_some_and(|key| matches!(key.as_str(), "package" | "lib"))
+    {
+        return Err("package/lib must be TOML tables, not arrays of tables".to_string());
+    }
+    Ok(Some(path))
+}
+
+fn casual_manifest_assignment(line: &str) -> Result<Option<(Vec<String>, &str)>, String> {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(b'"') if escaped => escaped = false,
+            Some(b'"') if byte == b'\\' => escaped = true,
+            Some(delimiter) if byte == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b'#' => return Ok(None),
+            None if byte == b'=' => {
+                let keys = casual_manifest_key_path(line[..index].trim())?;
+                return Ok(Some((keys, &line[index + 1..])));
+            }
+            None => {}
+        }
+    }
+    if quote.is_some() {
+        return Err("unterminated quote in TOML assignment key".to_string());
+    }
+    Ok(None)
+}
+
 fn casual_manifest_library_root(
     package_root: &str,
     manifest: &str,
     sources: &BTreeMap<String, String>,
 ) -> Result<Option<String>, String> {
-    let mut section = "";
+    let mut section = Vec::<String>::new();
     let mut package_seen = false;
     let mut autolib = true;
     let mut lib_seen = false;
@@ -3567,21 +3948,16 @@ fn casual_manifest_library_root(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if line.starts_with('[') {
-            let header = line
-                .split_once('#')
-                .map_or(line, |(header, _)| header)
-                .trim();
-            if !header.ends_with(']') {
-                return Err(format!(
-                    "{package_root}/Cargo.toml:{} has an unsupported table header",
-                    line_number + 1
-                ));
-            }
-            section = &header[1..header.len() - 1];
-            if section == "package" {
+        if let Some(table) = casual_manifest_table_path(line).map_err(|error| {
+            format!(
+                "cannot parse {package_root}/Cargo.toml:{} table: {error}",
+                line_number + 1
+            )
+        })? {
+            section = table;
+            if casual_manifest_key_is(&section, &["package"]) {
                 package_seen = true;
-            } else if section == "lib" {
+            } else if casual_manifest_key_is(&section, &["lib"]) {
                 if lib_seen {
                     return Err(format!(
                         "{package_root}/Cargo.toml declares [lib] more than once"
@@ -3591,11 +3967,32 @@ fn casual_manifest_library_root(
             }
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((key, value)) = casual_manifest_assignment(line).map_err(|error| {
+            format!(
+                "cannot parse {package_root}/Cargo.toml:{} assignment: {error}",
+                line_number + 1
+            )
+        })?
+        else {
             continue;
         };
-        let key = key.trim();
-        if section == "package" && key == "autolib" {
+        let mut full_key = section.clone();
+        full_key.extend(key);
+        if full_key.first().is_some_and(|key| key == "package") {
+            package_seen = true;
+        }
+        if full_key.first().is_some_and(|key| key == "lib") {
+            lib_seen = true;
+        }
+        if casual_manifest_key_is(&full_key, &["package"])
+            || casual_manifest_key_is(&full_key, &["lib"])
+        {
+            return Err(format!(
+                "{package_root}/Cargo.toml:{} uses an inline package/lib table; this audit requires an explicit or dotted table so target authority stays reviewable",
+                line_number + 1
+            ));
+        }
+        if casual_manifest_key_is(&full_key, &["package", "autolib"]) {
             autolib = match value
                 .split_once('#')
                 .map_or(value, |(value, _)| value)
@@ -3610,7 +4007,7 @@ fn casual_manifest_library_root(
                     ));
                 }
             };
-        } else if section == "lib" && key == "path" {
+        } else if casual_manifest_key_is(&full_key, &["lib", "path"]) {
             if lib_path.is_some() {
                 return Err(format!(
                     "{package_root}/Cargo.toml declares lib.path more than once"
@@ -3672,14 +4069,11 @@ fn casual_workspace_library_roots(
         if !package.is_dir() || !package.join("Cargo.toml").is_file() {
             continue;
         }
-        let package_root = package
-            .strip_prefix(root)
-            .map_err(|error| format!("{} escaped workspace: {error}", package.display()))?
-            .display()
-            .to_string()
-            .replace('\\', "/");
-        let manifest = std::fs::read_to_string(package.join("Cargo.toml"))
-            .map_err(|error| format!("cannot read {package_root}/Cargo.toml: {error}"))?;
+        let package_root = casual_inventory_relative(root, &package)?;
+        let manifest_path = package.join("Cargo.toml");
+        let manifest =
+            casual_read_bounded_utf8(&manifest_path, CASUAL_MAX_MANIFEST_BYTES, "Cargo manifest")
+                .map_err(|error| format!("cannot read {package_root}/Cargo.toml: {error}"))?;
         if let Some(target) = casual_manifest_library_root(&package_root, &manifest, sources)? {
             roots.push((target, package_root));
         }
@@ -3795,27 +4189,43 @@ fn casual_macro_authority_hazards(
 ) -> Result<Vec<(usize, String)>, String> {
     let mut hazards = Vec::new();
     for attribute in attributes {
-        if attribute.inner || structural_mask[attribute.hash] || test_mask[attribute.hash] {
+        if structural_mask[attribute.hash] || test_mask[attribute.hash] {
             continue;
         }
         let interior = &tokens[attribute.bracket + 1..attribute.close];
-        let imports_macros = interior
-            .first()
-            .is_some_and(|token| token.text == "macro_use")
-            || (interior
-                .first()
-                .is_some_and(|token| token.text == "cfg_attr")
+        let attribute_name = casual_identifier_at(interior, 0).map(|(name, _)| name);
+        if attribute.inner {
+            let can_remove_std = attribute_name
+                .is_some_and(|name| matches!(name, "no_std" | "no_core"))
+                || (attribute_name == Some("cfg_attr")
+                    && interior
+                        .iter()
+                        .any(|token| matches!(token.text, "no_std" | "no_core")));
+            if can_remove_std {
+                casual_push_authority_hazard(
+                    &mut hazards,
+                    casual_line_for_byte(line_starts, tokens[attribute.hash].start),
+                    "an allowlisted absolute ::std macro requires the compiler-provided std extern-prelude binding; no_std/no_core can rebind that authority".to_string(),
+                )?;
+            }
+            continue;
+        }
+        let imports_macros = attribute_name == Some("macro_use")
+            || (attribute_name == Some("cfg_attr")
                 && interior.iter().any(|token| token.text == "macro_use"));
         if imports_macros {
-            hazards.push((
+            casual_push_authority_hazard(
+                &mut hazards,
                 casual_line_for_byte(line_starts, tokens[attribute.hash].start),
                 "legacy or conditional #[macro_use] can inject a protected macro name".to_string(),
-            ));
+            )?;
         }
     }
 
-    for index in 0..tokens.len() {
+    let mut index = 0usize;
+    while index < tokens.len() {
         if structural_mask[index] || test_mask[index] || tokens[index].text != "use" {
+            index += 1;
             continue;
         }
         let mut cursor = index + 1;
@@ -3834,24 +4244,36 @@ fn casual_macro_authority_hazards(
             ));
         }
         if !has_glob {
+            index = cursor + 1;
             continue;
         }
         let local_root = tokens
             .get(index + 1)
             .is_some_and(|token| matches!(token.text, "crate" | "self" | "super"));
         if !local_root {
-            hazards.push((
+            casual_push_authority_hazard(
+                &mut hazards,
                 casual_line_for_byte(line_starts, tokens[index].start),
                 "potentially external glob import can inject a protected macro name".to_string(),
-            ));
+            )?;
         }
-        if hazards.len() > CASUAL_MAX_DIAGNOSTICS {
-            return Err(format!(
-                "macro authority analysis exceeds the {CASUAL_MAX_DIAGNOSTICS}-hazard cap"
-            ));
-        }
+        index = cursor + 1;
     }
     Ok(hazards)
+}
+
+fn casual_push_authority_hazard(
+    hazards: &mut Vec<(usize, String)>,
+    line: usize,
+    detail: String,
+) -> Result<(), String> {
+    if hazards.len() == CASUAL_MAX_DIAGNOSTICS {
+        return Err(format!(
+            "macro authority analysis exceeds the {CASUAL_MAX_DIAGNOSTICS}-hazard cap"
+        ));
+    }
+    hazards.push((line, detail));
+    Ok(())
 }
 
 fn scan_casual_print_source(
@@ -5972,8 +6394,39 @@ mod tests {
         .collect();
         assert!(
             audit_casual_print_sources(&exhaustively_local_glob).is_empty(),
-            "a crate-rooted glob is admitted only because the complete local module graph and protected-name declarations are scanned"
+            "a crate-rooted glob cannot change the explicitly pinned ::std macro path"
         );
+
+        for crate_attribute in ["#![no_std]", "#![cfg_attr(all(), no_std)]"] {
+            let rebound_std = [(
+                "crates/fs-propcheck/src/lib.rs".to_string(),
+                format!(
+                    "{crate_attribute}\nextern crate evil as std;\nfn check_structured() {{ ::std::println!(\"{{failure_row}}\"); }}\n"
+                ),
+            )]
+            .into_iter()
+            .collect();
+            let rebound_std_violations = audit_casual_print_sources(&rebound_std);
+            assert!(rebound_std_violations.iter().any(|violation| {
+                violation.detail.contains("compiler-provided std")
+                    || violation.detail.contains("macro-authority hazard")
+            }));
+        }
+    }
+
+    #[test]
+    fn casual_print_macro_authority_hazards_are_strictly_capped() {
+        let mut source = String::new();
+        for index in 0..=CASUAL_MAX_DIAGNOSTICS {
+            let _ = writeln!(source, "#[macro_use] mod imported_{index} {{}}");
+        }
+        source.push_str("fn check_structured() { ::std::println!(\"{failure_row}\"); }");
+        let sources = [("crates/fs-propcheck/src/lib.rs".to_string(), source)]
+            .into_iter()
+            .collect();
+        let violations = audit_casual_print_sources(&sources);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].detail.contains("hazard cap"));
     }
 
     #[test]
@@ -6045,6 +6498,36 @@ mod tests {
         assert!(sources.contains_key("crates/mini/target/generated.rs"));
         assert!(!sources.contains_key("target/generated.rs"));
         assert_eq!(audit_casual_print_sources(&sources).len(), 1);
+    }
+
+    #[test]
+    fn casual_print_inventory_enforces_bytes_before_unbounded_reading() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "xtask-casual-print-byte-cap-{}-{nonce}.rs",
+            std::process::id()
+        ));
+        std::fs::write(&path, "123456789").expect("bounded-read fixture");
+        let error = casual_read_bounded_utf8(&path, 8, "fixture source")
+            .expect_err("metadata must refuse the oversized file before reading it");
+        assert!(error.contains("exceeds the remaining 8-byte"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn casual_print_inventory_refuses_lossy_backslash_path_identity() {
+        let root = Path::new("/repo");
+        let error =
+            casual_inventory_relative(root, Path::new("/repo/crates/fs-new/src/decoy\\name.rs"))
+                .expect_err("a Unix filename backslash must not collapse into a separator");
+        assert!(error.contains("backslash-bearing"), "{error}");
+        assert!(
+            casual_normalized_inclusion("crates/fs-new/src/lib.rs", "decoy\\name.rs").is_err(),
+            "module literals use slash-only portable identity"
+        );
     }
 
     #[cfg(unix)]
@@ -6154,6 +6637,42 @@ mod tests {
         let path_violations = audit_casual_print_sources(&direct_and_transitive);
         assert_eq!(path_violations.len(), 1, "{path_violations:?}");
         assert!(path_violations[0].detail.contains("real/second.rs"));
+    }
+
+    #[test]
+    fn casual_print_scanner_walks_deep_graphs_without_ancestry_cloning() {
+        const DEPTH: usize = 512;
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "crates/fs-new/src/lib.rs".to_string(),
+            "#[path = \"node-0.rs\"] mod node_0;".to_string(),
+        );
+        for index in 0..DEPTH {
+            let source = if index + 1 == DEPTH {
+                String::new()
+            } else {
+                format!(
+                    "#[path = \"node-{}.rs\"] mod node_{};",
+                    index + 1,
+                    index + 1
+                )
+            };
+            sources.insert(format!("crates/fs-new/src/node-{index}.rs"), source);
+        }
+        assert!(
+            audit_casual_print_sources(&sources).is_empty(),
+            "the iterative active/done walk must admit a deep acyclic graph"
+        );
+    }
+
+    #[test]
+    fn casual_print_cfg_span_sweep_coalesces_repeated_test_attributes() {
+        let mut source = "#[cfg(test)]\n".repeat(512);
+        source.push_str("fn diagnostics() { println!(\"test only\"); }");
+        let sources = [("crates/fs-new/src/lib.rs".to_string(), source)]
+            .into_iter()
+            .collect();
+        assert!(audit_casual_print_sources(&sources).is_empty());
     }
 
     #[test]
@@ -6272,6 +6791,38 @@ mod tests {
             audit_casual_print_sources_with_roots(&sources, &[(root, "crates/fs-new".to_string())]);
         assert_eq!(violations.len(), 1, "{violations:?}");
         assert!(violations[0].detail.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn casual_print_manifest_normalizes_quoted_and_dotted_target_keys() {
+        let sources = [(
+            "crates/fs-new/src/hidden.rs".to_string(),
+            "fn library_entry() { println!(\"not a CLI target\"); }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        for manifest in [
+            "['package']\nname = 'fs-new'\n['lib']\n'path' = 'src/hidden.rs'\n",
+            "package.name = 'fs-new'\nlib.path = 'src/hidden.rs'\n",
+        ] {
+            let root = casual_manifest_library_root("crates/fs-new", manifest, &sources)
+                .expect("Cargo-equivalent key spelling must parse")
+                .expect("explicit library root");
+            assert_eq!(root, "crates/fs-new/src/hidden.rs");
+            let violations = audit_casual_print_sources_with_roots(
+                &sources,
+                &[(root, "crates/fs-new".to_string())],
+            );
+            assert_eq!(violations.len(), 1, "{manifest:?}: {violations:?}");
+        }
+
+        let inline = casual_manifest_library_root(
+            "crates/fs-new",
+            "package = { name = 'fs-new' }\nlib = { path = 'src/hidden.rs' }\n",
+            &sources,
+        )
+        .expect_err("unsupported inline authority tables must refuse, not disappear");
+        assert!(inline.contains("inline package/lib table"), "{inline}");
     }
 
     #[test]
