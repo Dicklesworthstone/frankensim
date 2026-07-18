@@ -23,6 +23,7 @@ pub mod admission;
 #[cfg(feature = "ladder-planner")]
 pub mod anytime;
 pub mod ast;
+pub mod campaign;
 pub mod catalog;
 pub mod conformance;
 pub mod cross_contract;

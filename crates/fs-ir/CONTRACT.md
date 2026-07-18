@@ -77,6 +77,29 @@ admitted derived-geometry boundary.
   versions, a raw geometry ID that does not name the supplied sealed object,
   and every redundant selector mismatch. The token is structural lineage only:
   it does not bind or inspect an admitted Machine-IR graph.
+- campaign (I11.1 baseline, [S]) compiles one exact fs-evidence ContextOfUse
+  plus typed claims, hypotheses, QoIs, evidence gaps, specimens, assemblies,
+  factors, resources, measurement channels, runs, calibration/validation/blind
+  partitions, preregistered analyses, evidence dependencies, budgets, and
+  stop/abort rules into immutable ExperimentCampaignIr. All caller collections
+  are bounded and canonically ordered before publication. Every run names
+  claims and channels; every channel names one declared claim, an exact
+  ContextOfUse QoI, its matching unit, and a decision consequence. Duplicate or
+  dangling identities, specimen partition leakage, undeclared factor levels,
+  budget conflicts, missing analysis partitions, and cyclic calibration/
+  validation evidence flow refuse before a strong identity is minted.
+- ExperimentCampaignIr retains the unique current canonical bytes, a
+  domain-separated wire hash, and a typed canonical identity receipt.
+  from_canonical_bytes decodes through the same admission boundary and requires
+  a byte-identical fixed point. Run and declaration input order is
+  nonsemantic; identities, partition assignments, budgets, randomization slots,
+  blind-assignment commitment, analysis commitments, rules, and complete
+  ContextOfUse bytes are semantic. Unused measurement channels remain visible
+  as typed warnings rather than being assigned invented uses.
+- CampaignHistoryAnchor separately binds an older source-schema coordinate and
+  its declared-intent coordinate. It preserves inputs needed by a future
+  explicit migration, but does not claim cross-version equivalence or silently
+  reinterpret predecessor bytes.
 - `machine` (Machine-IR E0 PR-1 through PR-5, [S]) — six nominally distinct durable entity
   types (`BodyId`, `SurfacePatchId`, `ContactFeatureId`, `TerminalId`,
   `PortId`, `StateSlotId`) use `fs-blake3::identity::EntityId` under six
@@ -851,6 +874,10 @@ admitted derived-geometry boundary.
    artifacts from the sealed derived geometry: geometry identity, subject,
    immutable model version, frame, and unit system must all match the supplied
    admitted object exactly, and every retained field is identity-semantic.
+7. Experiment-campaign admission fixes stable identities and exclusive evidence
+   partitions before publication. A specimen occurrence cannot cross
+   calibration, validation, or blind-holdout partitions; blind-holdout runs
+   must declare blinding; claim-dependency cycles cannot publish an identity.
 
 - Admission determinism: same study + context → byte-identical
   `diagnosis()`; findings sorted (check, span).
@@ -946,6 +973,11 @@ Workflow and foreign-output admission are likewise synchronous bounded
 metadata operations: ten workflow stages and at most 4,096 opaque output
 bindings. They execute no adapter or FMU and make no cancellation-latency claim
 beyond these fixed public envelopes.
+Experiment-campaign compilation is also synchronous bounded metadata work. It
+caps each collection at 4,096 rows, text at 4,096 bytes, keys at 128 bytes, and
+the complete canonical transport at 16 MiB. It performs no acquisition,
+analysis, scheduling, or laboratory operation and makes no sub-operation
+cancellation-latency claim beyond that fixed envelope.
 
 ## Unsafe boundary
 
@@ -1024,6 +1056,13 @@ regressions prove callback order, actual rung/spend receipts, contemporaneous
 hints without future telemetry, verifier-family/flux identity retention, and
 that `Stop` prevents later work telemetry and cache insertion while retaining
 telemetry for a completed speculative transition.
+
+`tests/campaign.rs` (I11.1 baseline, G0/G3): exact canonical decode/readmit,
+caller run/specimen/assembly/factor/resource reordering invariance,
+calibration-validation specimen leakage refusal, undeclared QoI/acceptance
+refusal, orphan measurement warning, duplicate specimen refusal, explicit
+budget conflict, preregistration identity movement, circular calibration/
+validation dependency refusal, and predecessor intent-anchor retention.
 
 `derived_crosswalk` unit tests (`derived-crosswalk`, G0/G3/G4/G5): schema and
 receipt replay, exact accessors, independent identity movement for every
@@ -1183,6 +1222,15 @@ boundary without widening it.
 
 ## No-claim boundaries
 
+- ExperimentCampaignIr is a bounded structural proposal, not laboratory
+  authority. Admission does not prove experiment-design adequacy,
+  identifiability, statistical power, safe instrumentation, calibration truth,
+  physical validity, randomization execution, blinding against out-of-band
+  leakage, resource availability, or compliance with a safety/regulatory
+  standard. It does not execute a run, evaluate acceptance criteria, read blind
+  labels, or authorize an abort actuator. Opaque content hashes are bound but
+  not authenticated. A CampaignHistoryAnchor preserves coordinates only and
+  is not a semantic migration theorem.
 - I02.1 defines and locally validates the current candidate equation-variable
   graph and receipt runtime grammars. Peak-memory/resource closure, complete
   identity-family migration, and recursive schema governance remain explicitly
