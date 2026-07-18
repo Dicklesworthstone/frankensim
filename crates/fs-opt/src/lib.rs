@@ -48,9 +48,10 @@ pub use guard::{
     GuardReport, GuardStatus, StepOutcome, StepReport, converged_and_guard_cleared,
 };
 pub use ir::{
-    BilevelRef, Class, Constraint, ConstraintKind, EvalBudget, EvalLimit, Expr, Manifold, NodeId,
-    Objective, ObjectiveEvalSite, OptError, OptimizerFamily, ProbeDirection, Problem,
-    ProblemBuilder, ProblemTag, Sense, Shape, VarId, Variable, children,
+    BilevelRef, Class, Constraint, ConstraintKind, EvalBudget, EvalLimit, Expr,
+    MANIFOLD_LAYOUT_SCHEMA_VERSION, Manifold, ManifoldLayout, ManifoldLayoutError, NodeId,
+    Objective, ObjectiveEvalSite, OptError, OptimizerFamily, ParamDim, PointDim, ProbeDirection,
+    Problem, ProblemBuilder, ProblemTag, Sense, Shape, TangentDim, VarId, Variable, children,
 };
 pub use serial::{
     ContentHash, DimensionCrosswalkReceipt, FiveToSixRule, LegacyProblemHash, ParsedProblem,

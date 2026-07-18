@@ -20,6 +20,49 @@ pub struct VarId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
 
+/// Schema version for the typed manifold-layout value.
+pub const MANIFOLD_LAYOUT_SCHEMA_VERSION: u32 = 1;
+
+/// Descriptor-domain-valid storage dimension of one manifold point.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PointDim(u32);
+
+impl PointDim {
+    /// Underlying number of stored scalar coordinates.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Descriptor-domain-valid dimension of the optimization-coordinate step
+/// consumed by a retraction.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ParamDim(u32);
+
+impl ParamDim {
+    /// Underlying number of scalar optimization coordinates.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Descriptor-domain-valid intrinsic dimension of a manifold tangent space.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TangentDim(u32);
+
+impl TangentDim {
+    /// Underlying intrinsic tangent dimension.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// The manifold a variable lives on — with the retraction metadata the
 /// gradient stack consumes ("optimize an orientation" never becomes
 /// "optimize 9 numbers and renormalize when it explodes").
@@ -46,7 +89,178 @@ pub enum Manifold {
     },
 }
 
+/// Typed, versioned dimension authority for one descriptor-domain-valid
+/// [`Manifold`].
+///
+/// Point storage, optimization coordinates, and intrinsic tangent dimension
+/// are deliberately distinct types. Sphere and Stiefel retractions currently
+/// consume ambient-coordinate steps, while SO(3) consumes a three-coordinate
+/// body-frame Lie increment even though its points are stored as four
+/// quaternion coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifoldLayout {
+    schema_version: u32,
+    manifold: Manifold,
+    point_dim: PointDim,
+    param_dim: ParamDim,
+    tangent_dim: TangentDim,
+}
+
+impl ManifoldLayout {
+    /// Layout schema used to interpret this value.
+    #[must_use]
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    /// Exact descriptor whose dimension formulas were validated.
+    #[must_use]
+    pub const fn manifold(self) -> Manifold {
+        self.manifold
+    }
+
+    /// Number of scalar coordinates retained for one point.
+    #[must_use]
+    pub const fn point_dim(self) -> PointDim {
+        self.point_dim
+    }
+
+    /// Number of scalar coordinates accepted by the current retraction.
+    #[must_use]
+    pub const fn param_dim(self) -> ParamDim {
+        self.param_dim
+    }
+
+    /// Intrinsic tangent-space dimension.
+    #[must_use]
+    pub const fn tangent_dim(self) -> TangentDim {
+        self.tangent_dim
+    }
+}
+
+/// Allocation-free refusal from [`Manifold::layout`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifoldLayoutError {
+    /// Euclidean variables need at least one stored coordinate.
+    ZeroEuclideanDimension,
+    /// A unit sphere needs at least two ambient coordinates.
+    DegenerateSphere {
+        /// Supplied ambient dimension.
+        ambient: u32,
+    },
+    /// Stiefel descriptors require `1 <= p <= n`.
+    InvalidStiefelFrame {
+        /// Ambient row count.
+        n: u32,
+        /// Orthonormal frame column count.
+        p: u32,
+    },
+    /// Stiefel point/parameter storage `n * p` left the u32 domain.
+    StiefelPointDimensionOverflow {
+        /// Ambient row count.
+        n: u32,
+        /// Orthonormal frame column count.
+        p: u32,
+    },
+    /// The intrinsic Stiefel tangent formula left the u32 domain.
+    ///
+    /// This is a defensive fail-closed variant for future formula changes.
+    /// Under the current formula, a valid frame with representable `n * p`
+    /// also has a representable tangent dimension.
+    StiefelTangentDimensionOverflow {
+        /// Ambient row count.
+        n: u32,
+        /// Orthonormal frame column count.
+        p: u32,
+    },
+}
+
+impl core::fmt::Display for ManifoldLayoutError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::ZeroEuclideanDimension => {
+                formatter.write_str("Rn layout needs at least one coordinate")
+            }
+            Self::DegenerateSphere { ambient } => write!(
+                formatter,
+                "Sphere layout needs ambient >= 2, received {ambient}"
+            ),
+            Self::InvalidStiefelFrame { n, p } => write!(
+                formatter,
+                "Stiefel layout needs 1 <= p <= n, received n={n}, p={p}"
+            ),
+            Self::StiefelPointDimensionOverflow { n, p } => write!(
+                formatter,
+                "Stiefel point dimension n*p leaves the u32 domain for n={n}, p={p}"
+            ),
+            Self::StiefelTangentDimensionOverflow { n, p } => write!(
+                formatter,
+                "Stiefel tangent dimension leaves the u32 domain for n={n}, p={p}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ManifoldLayoutError {}
+
 impl Manifold {
+    /// Construct the typed dimension authority for this raw descriptor.
+    ///
+    /// This validates descriptor-domain rules and every dimension formula, but
+    /// does not apply deployment-specific [`AdmissionCaps`]. The existing raw
+    /// `Option<u32>` accessors remain compatibility projections for callers
+    /// that inspect unadmitted descriptors.
+    ///
+    /// # Errors
+    /// Returns [`ManifoldLayoutError`] for an invalid descriptor or a formula
+    /// outside the u32 dimension domain.
+    pub fn layout(&self) -> Result<ManifoldLayout, ManifoldLayoutError> {
+        match *self {
+            Manifold::Rn { dim: 0 } => {
+                return Err(ManifoldLayoutError::ZeroEuclideanDimension);
+            }
+            Manifold::Sphere { ambient } if ambient < 2 => {
+                return Err(ManifoldLayoutError::DegenerateSphere { ambient });
+            }
+            Manifold::Stiefel { n, p } if p == 0 || p > n => {
+                return Err(ManifoldLayoutError::InvalidStiefelFrame { n, p });
+            }
+            _ => {}
+        }
+
+        let point_dim = match *self {
+            Manifold::Rn { dim } => dim,
+            Manifold::Sphere { ambient } => ambient,
+            Manifold::So3 => 4,
+            Manifold::Stiefel { n, p } => n
+                .checked_mul(p)
+                .ok_or(ManifoldLayoutError::StiefelPointDimensionOverflow { n, p })?,
+        };
+        let tangent_dim = match *self {
+            Manifold::Rn { dim } => dim,
+            Manifold::Sphere { ambient } => ambient
+                .checked_sub(1)
+                .ok_or(ManifoldLayoutError::DegenerateSphere { ambient })?,
+            Manifold::So3 => 3,
+            Manifold::Stiefel { n, p } => self
+                .tangent_dim()
+                .ok_or(ManifoldLayoutError::StiefelTangentDimensionOverflow { n, p })?,
+        };
+        let param_dim = match self {
+            Manifold::So3 => 3,
+            Manifold::Rn { .. } | Manifold::Sphere { .. } | Manifold::Stiefel { .. } => point_dim,
+        };
+
+        Ok(ManifoldLayout {
+            schema_version: MANIFOLD_LAYOUT_SCHEMA_VERSION,
+            manifold: *self,
+            point_dim: PointDim(point_dim),
+            param_dim: ParamDim(param_dim),
+            tangent_dim: TangentDim(tangent_dim),
+        })
+    }
+
     /// Storage length of one point, computed with CHECKED arithmetic.
     /// `None` means the descriptor's formulas leave the `u32` domain
     /// (e.g. `Stiefel` with `n * p` overflow) — such a descriptor can
