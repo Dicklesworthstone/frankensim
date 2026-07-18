@@ -721,6 +721,279 @@ impl Wfg9 {
     }
 }
 
+/// Canonical member of the WFG1-WFG9 benchmark family.
+///
+/// [`Self::ALL`] is stable canonical family order, so study manifests do not
+/// need to encode a private numeric discriminator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)] // Canonical benchmark names are the public vocabulary.
+pub enum WfgVariant {
+    /// WFG1: separable, biased, convex, and mixed.
+    Wfg1,
+    /// WFG2: nonseparable, convex, and disconnected.
+    Wfg2,
+    /// WFG3: nonseparable, linear, and degenerate.
+    Wfg3,
+    /// WFG4: separable, multimodal, and concave.
+    Wfg4,
+    /// WFG5: separable, deceptive, and concave.
+    Wfg5,
+    /// WFG6: nonseparable and concave.
+    Wfg6,
+    /// WFG7: parameter-biased, separable, and concave.
+    Wfg7,
+    /// WFG8: parameter-biased, nonseparable, and concave.
+    Wfg8,
+    /// WFG9: parameter-biased, deceptive, multimodal, nonseparable, and concave.
+    Wfg9,
+}
+
+impl WfgVariant {
+    /// Every canonical variant in stable WFG1-WFG9 order.
+    pub const ALL: [Self; 9] = [
+        Self::Wfg1,
+        Self::Wfg2,
+        Self::Wfg3,
+        Self::Wfg4,
+        Self::Wfg5,
+        Self::Wfg6,
+        Self::Wfg7,
+        Self::Wfg8,
+        Self::Wfg9,
+    ];
+
+    /// Stable canonical display name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Wfg1 => "WFG1",
+            Self::Wfg2 => "WFG2",
+            Self::Wfg3 => "WFG3",
+            Self::Wfg4 => "WFG4",
+            Self::Wfg5 => "WFG5",
+            Self::Wfg6 => "WFG6",
+            Self::Wfg7 => "WFG7",
+            Self::Wfg8 => "WFG8",
+            Self::Wfg9 => "WFG9",
+        }
+    }
+}
+
+impl core::fmt::Display for WfgVariant {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+/// Validated dynamically selected WFG family problem.
+///
+/// This dispatcher retains the typed problem internally and delegates without
+/// changing admission, arithmetic order, trace visibility, or error semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // Preserve exact WFG1-WFG9 dispatch names.
+pub enum WfgProblem {
+    /// Validated WFG1 problem.
+    Wfg1(Wfg1),
+    /// Validated WFG2 problem.
+    Wfg2(Wfg2),
+    /// Validated WFG3 problem.
+    Wfg3(Wfg3),
+    /// Validated WFG4 problem.
+    Wfg4(Wfg4),
+    /// Validated WFG5 problem.
+    Wfg5(Wfg5),
+    /// Validated WFG6 problem.
+    Wfg6(Wfg6),
+    /// Validated WFG7 problem.
+    Wfg7(Wfg7),
+    /// Validated WFG8 problem.
+    Wfg8(Wfg8),
+    /// Validated WFG9 problem.
+    Wfg9(Wfg9),
+}
+
+impl WfgProblem {
+    /// Validate one dynamically selected WFG problem definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected typed evaluator's structured dimension refusal.
+    pub fn new(
+        variant: WfgVariant,
+        objectives: usize,
+        position_parameters: usize,
+        distance_parameters: usize,
+    ) -> Result<Self, WfgError> {
+        match variant {
+            WfgVariant::Wfg1 => Ok(Self::Wfg1(Wfg1::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg2 => Ok(Self::Wfg2(Wfg2::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg3 => Ok(Self::Wfg3(Wfg3::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg4 => Ok(Self::Wfg4(Wfg4::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg5 => Ok(Self::Wfg5(Wfg5::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg6 => Ok(Self::Wfg6(Wfg6::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg7 => Ok(Self::Wfg7(Wfg7::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg8 => Ok(Self::Wfg8(Wfg8::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+            WfgVariant::Wfg9 => Ok(Self::Wfg9(Wfg9::new(
+                objectives,
+                position_parameters,
+                distance_parameters,
+            )?)),
+        }
+    }
+
+    /// Selected canonical family member.
+    #[must_use]
+    pub const fn variant(self) -> WfgVariant {
+        match self {
+            Self::Wfg1(_) => WfgVariant::Wfg1,
+            Self::Wfg2(_) => WfgVariant::Wfg2,
+            Self::Wfg3(_) => WfgVariant::Wfg3,
+            Self::Wfg4(_) => WfgVariant::Wfg4,
+            Self::Wfg5(_) => WfgVariant::Wfg5,
+            Self::Wfg6(_) => WfgVariant::Wfg6,
+            Self::Wfg7(_) => WfgVariant::Wfg7,
+            Self::Wfg8(_) => WfgVariant::Wfg8,
+            Self::Wfg9(_) => WfgVariant::Wfg9,
+        }
+    }
+
+    /// Number of objective values produced by each evaluation.
+    #[must_use]
+    pub const fn objectives(self) -> usize {
+        match self {
+            Self::Wfg1(problem) => problem.objectives(),
+            Self::Wfg2(problem) => problem.objectives(),
+            Self::Wfg3(problem) => problem.objectives(),
+            Self::Wfg4(problem) => problem.objectives(),
+            Self::Wfg5(problem) => problem.objectives(),
+            Self::Wfg6(problem) => problem.objectives(),
+            Self::Wfg7(problem) => problem.objectives(),
+            Self::Wfg8(problem) => problem.objectives(),
+            Self::Wfg9(problem) => problem.objectives(),
+        }
+    }
+
+    /// Number of position-related decision parameters.
+    #[must_use]
+    pub const fn position_parameters(self) -> usize {
+        match self {
+            Self::Wfg1(problem) => problem.position_parameters(),
+            Self::Wfg2(problem) => problem.position_parameters(),
+            Self::Wfg3(problem) => problem.position_parameters(),
+            Self::Wfg4(problem) => problem.position_parameters(),
+            Self::Wfg5(problem) => problem.position_parameters(),
+            Self::Wfg6(problem) => problem.position_parameters(),
+            Self::Wfg7(problem) => problem.position_parameters(),
+            Self::Wfg8(problem) => problem.position_parameters(),
+            Self::Wfg9(problem) => problem.position_parameters(),
+        }
+    }
+
+    /// Number of distance-related decision parameters.
+    #[must_use]
+    pub const fn distance_parameters(self) -> usize {
+        match self {
+            Self::Wfg1(problem) => problem.distance_parameters(),
+            Self::Wfg2(problem) => problem.distance_parameters(),
+            Self::Wfg3(problem) => problem.distance_parameters(),
+            Self::Wfg4(problem) => problem.distance_parameters(),
+            Self::Wfg5(problem) => problem.distance_parameters(),
+            Self::Wfg6(problem) => problem.distance_parameters(),
+            Self::Wfg7(problem) => problem.distance_parameters(),
+            Self::Wfg8(problem) => problem.distance_parameters(),
+            Self::Wfg9(problem) => problem.distance_parameters(),
+        }
+    }
+
+    /// Total decision dimension, `k + l`.
+    #[must_use]
+    pub const fn dimension(self) -> usize {
+        match self {
+            Self::Wfg1(problem) => problem.dimension(),
+            Self::Wfg2(problem) => problem.dimension(),
+            Self::Wfg3(problem) => problem.dimension(),
+            Self::Wfg4(problem) => problem.dimension(),
+            Self::Wfg5(problem) => problem.dimension(),
+            Self::Wfg6(problem) => problem.dimension(),
+            Self::Wfg7(problem) => problem.dimension(),
+            Self::Wfg8(problem) => problem.dimension(),
+            Self::Wfg9(problem) => problem.dimension(),
+        }
+    }
+
+    /// Evaluate one normalized decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected typed evaluator's structured input or allocation
+    /// refusal.
+    pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        match self {
+            Self::Wfg1(problem) => problem.evaluate_normalized(input),
+            Self::Wfg2(problem) => problem.evaluate_normalized(input),
+            Self::Wfg3(problem) => problem.evaluate_normalized(input),
+            Self::Wfg4(problem) => problem.evaluate_normalized(input),
+            Self::Wfg5(problem) => problem.evaluate_normalized(input),
+            Self::Wfg6(problem) => problem.evaluate_normalized(input),
+            Self::Wfg7(problem) => problem.evaluate_normalized(input),
+            Self::Wfg8(problem) => problem.evaluate_normalized(input),
+            Self::Wfg9(problem) => problem.evaluate_normalized(input),
+        }
+    }
+
+    /// Evaluate one canonical heterogeneous-domain decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected typed evaluator's structured input or allocation
+    /// refusal.
+    pub fn evaluate_canonical(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        match self {
+            Self::Wfg1(problem) => problem.evaluate_canonical(input),
+            Self::Wfg2(problem) => problem.evaluate_canonical(input),
+            Self::Wfg3(problem) => problem.evaluate_canonical(input),
+            Self::Wfg4(problem) => problem.evaluate_canonical(input),
+            Self::Wfg5(problem) => problem.evaluate_canonical(input),
+            Self::Wfg6(problem) => problem.evaluate_canonical(input),
+            Self::Wfg7(problem) => problem.evaluate_canonical(input),
+            Self::Wfg8(problem) => problem.evaluate_canonical(input),
+            Self::Wfg9(problem) => problem.evaluate_canonical(input),
+        }
+    }
+}
+
 /// One WFG evaluation with replay-relevant normalized intermediates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WfgEvaluation {
