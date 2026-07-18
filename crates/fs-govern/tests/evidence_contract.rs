@@ -5,7 +5,8 @@ use fs_govern::{
     LaneCharter,
     evidence_contract::{
         ADJUDICATION_IDENTITY_DOMAIN, ASSUMPTION_SET_IDENTITY_DOMAIN, ATTACK_EDGE_IDENTITY_DOMAIN,
-        AUTHORITY_ALGEBRA_VERSION, AUTHORITY_CATALOG_ROWS, AUTHORITY_HEAD_IDENTITY_DOMAIN,
+        AUTHORITY_ALGEBRA_VERSION, AUTHORITY_CATALOG_ROWS, AUTHORITY_CATALOG_SCHEMA_VERSION,
+        AUTHORITY_HEAD_IDENTITY_DOMAIN, AUTHORITY_IDENTITY_SCHEMA_VERSION,
         AUTHORITY_MIGRATION_IDENTITY_DOMAIN, AuthorityBudget, AuthorityError, AuthorityState,
         CapabilityBinding, CapabilityPolicy, CheckerDecisionCandidate, CheckerVerdict,
         ClaimInstance, ClaimLaneBinding, ClaimStatement, CounterexampleAdjudication,
@@ -14,14 +15,16 @@ use fs_govern::{
         ExactInstanceDecisionCandidate, ExactInstanceVerdict, FiveExplicits, InferenceRule,
         InvalidationState, KernelState, LEGACY_AUTHORITY_SCHEMA_VERSION, LegacyAuthorityRankV0,
         LegacyAuthorityV0, MAX_AUTHORITY_LOG_BYTES, NONVACUOUS_EVIDENCE_IDENTITY_DOMAIN,
-        NoClaimBoundary, NonvacuityState, NonvacuityStrength, NonvacuousEvidence, QuantifiedDomain,
-        Quantifier, QuantifierBlock, REPRODUCED_EVIDENCE_IDENTITY_DOMAIN,
+        NoClaimBoundary, NonvacuityState, NonvacuityStrength, NonvacuousEvidence,
+        PROOF_LANE_IDENTITY_SCHEMA_VERSION, QuantifiedDomain, Quantifier, QuantifierBlock,
+        REPRODUCED_EVIDENCE_IDENTITY_DOMAIN, REPRODUCTION_FAILED_EVIDENCE_IDENTITY_DOMAIN,
         RETIRED_AUTHORITY_SCHEMA_VERSION, ReproducedEvidence, ReproductionFailedEvidence,
         ReproductionState, SATISFIABLE_EVIDENCE_IDENTITY_DOMAIN, SEMANTIC_CLAIM_IDENTITY_DOMAIN,
         SatisfiabilityState, SatisfiableEvidence, ScaleState, TruthRequirement, TruthState,
-        UnitFactor, UnitSystem, UnsatisfiableEvidence, VACUOUS_EVIDENCE_IDENTITY_DOMAIN,
-        VacuousEvidence, VersionBinding, assess_runtime_candidate, authority_catalog_json,
-        authority_catalog_markdown_rows, authority_log_json, migrate_legacy_v0,
+        UNSATISFIABLE_EVIDENCE_IDENTITY_DOMAIN, UnitFactor, UnitSystem, UnsatisfiableEvidence,
+        VACUOUS_EVIDENCE_IDENTITY_DOMAIN, VacuousEvidence, VersionBinding,
+        assess_runtime_candidate, authority_catalog_json, authority_catalog_markdown_rows,
+        authority_log_json, migrate_legacy_v0,
     },
 };
 
@@ -30,6 +33,38 @@ fn hash(label: &str) -> ContentHash {
         "frankensim.fs-govern.test-evidence-contract.v2",
         label.as_bytes(),
     )
+}
+
+fn push_identity_field(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+    out.push(tag);
+    out.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .expect("bounded test identity field fits u64")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(bytes);
+}
+
+fn expected_conclusion_wrapper(domain: &str, evidence: EvidenceRef) -> ContentHash {
+    let mut preimage = Vec::new();
+    push_identity_field(&mut preimage, 1, &2_u32.to_le_bytes());
+    push_identity_field(&mut preimage, 2, evidence.identity().as_hash().as_bytes());
+    fs_blake3::hash_domain(domain, &preimage)
+}
+
+fn expected_strength_wrapper(
+    domain: &str,
+    evidence: EvidenceRef,
+    strength_tag: u8,
+    strength: NonvacuityStrength,
+) -> ContentHash {
+    let mut preimage = Vec::new();
+    push_identity_field(&mut preimage, 1, &2_u32.to_le_bytes());
+    push_identity_field(&mut preimage, 2, evidence.identity().as_hash().as_bytes());
+    push_identity_field(&mut preimage, 3, &[strength_tag]);
+    push_identity_field(&mut preimage, 4, strength.context().as_bytes());
+    push_identity_field(&mut preimage, 5, strength.fibre().as_bytes());
+    fs_blake3::hash_domain(domain, &preimage)
 }
 
 fn scale_family_strength() -> NonvacuityStrength {
@@ -427,6 +462,153 @@ fn g0_quantifier_blocks_preserve_logic_and_only_declared_products_commute() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Isolated logical mutations keep every identity source explicit.
+fn g3_quantified_domain_identity_is_sensitive_to_each_logical_preimage_field() {
+    let variable = |name, domain| DomainVariable::new(name, domain).expect("domain variable");
+    let joined = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("joined ordered block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("reference quantified domain");
+
+    let commutative_flag = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::commutative(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("commutative block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("commutativity mutation");
+    let quantifier = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::Exists,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("quantifier-mutated block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("quantifier mutation");
+    let variable_domain = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y-prime")],
+            )
+            .expect("domain-mutated block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("variable-domain mutation");
+    let predicate_payload = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("predicate-mutated block"),
+        ],
+        &["Q(x,y)"],
+    )
+    .expect("predicate-payload mutation");
+    let predicate_count = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("predicate-count block"),
+        ],
+        &["P(x,y)", "Q(y)"],
+    )
+    .expect("predicate-count mutation");
+    let variable_order = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("y", "Y"), variable("x", "X")],
+            )
+            .expect("variable-reordered block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("variable-order mutation");
+    let split = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(Quantifier::ForAll, vec![variable("x", "X")])
+                .expect("first split block"),
+            QuantifierBlock::ordered(Quantifier::ForAll, vec![variable("y", "Y")])
+                .expect("second split block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("split-block mutation");
+
+    let commutative_identity = commutative_flag.identity();
+    for mutation in [
+        commutative_flag,
+        quantifier,
+        variable_domain,
+        predicate_payload,
+        predicate_count,
+        variable_order,
+        split,
+    ] {
+        assert_ne!(joined.identity(), mutation.identity());
+    }
+
+    let commutative_reversed = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::commutative(
+                Quantifier::ForAll,
+                vec![variable("y", "Y"), variable("x", "X")],
+            )
+            .expect("reversed commutative block"),
+        ],
+        &["P(x,y)"],
+    )
+    .expect("commutative-variable permutation");
+    assert_eq!(commutative_identity, commutative_reversed.identity());
+
+    let predicates_forward = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("predicate-order block"),
+        ],
+        &["P(x,y)", "Q(y)"],
+    )
+    .expect("forward predicate order");
+    let predicates_reversed = QuantifiedDomain::new(
+        vec![
+            QuantifierBlock::ordered(
+                Quantifier::ForAll,
+                vec![variable("x", "X"), variable("y", "Y")],
+            )
+            .expect("predicate-order block"),
+        ],
+        &["Q(y)", "P(x,y)"],
+    )
+    .expect("reversed predicate order");
+    assert_eq!(
+        predicates_forward.identity(),
+        predicates_reversed.identity()
+    );
+}
+
+#[test]
 fn g3_unit_factor_permutations_cannot_change_acceptance() {
     let first = UnitSystem::new(
         1,
@@ -543,7 +725,9 @@ fn g0_satisfiability_and_nonvacuity_are_distinct_axes_and_typed_evidence() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Six polarity wrappers are independently schema-locked.
 fn g0_every_conclusion_polarity_has_a_distinct_kind_type_and_identity_domain() {
+    assert_eq!(AUTHORITY_ALGEBRA_VERSION, 2);
     let claim = basic_claim();
     let artifact = hash("shared-conclusion-artifact");
     let checker = hash("shared-conclusion-checker");
@@ -578,17 +762,76 @@ fn g0_every_conclusion_polarity_has_a_distinct_kind_type_and_identity_domain() {
     assert_eq!(vacuous.evidence().kind(), EvidenceKind::Vacuous);
     assert_eq!(failed.evidence().kind(), EvidenceKind::ReproductionFailed);
     assert_eq!(reproduced.evidence().kind(), EvidenceKind::Reproduced);
-    assert_ne!(
+    assert_eq!(
         SATISFIABLE_EVIDENCE_IDENTITY_DOMAIN,
-        VACUOUS_EVIDENCE_IDENTITY_DOMAIN
+        "frankensim.fs-govern.satisfiable-evidence.v2"
     );
-    assert_ne!(
+    assert_eq!(
+        UNSATISFIABLE_EVIDENCE_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.unsatisfiable-evidence.v2"
+    );
+    assert_eq!(
         NONVACUOUS_EVIDENCE_IDENTITY_DOMAIN,
-        VACUOUS_EVIDENCE_IDENTITY_DOMAIN
+        "frankensim.fs-govern.nonvacuous-evidence.v2"
     );
-    assert_ne!(
+    assert_eq!(
+        VACUOUS_EVIDENCE_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.vacuous-evidence.v2"
+    );
+    assert_eq!(
+        REPRODUCTION_FAILED_EVIDENCE_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.reproduction-failed-evidence.v2"
+    );
+    assert_eq!(
         REPRODUCED_EVIDENCE_IDENTITY_DOMAIN,
-        VACUOUS_EVIDENCE_IDENTITY_DOMAIN
+        "frankensim.fs-govern.reproduced-evidence.v2"
+    );
+
+    assert_eq!(
+        satisfiable.identity().as_hash(),
+        &expected_conclusion_wrapper(
+            "frankensim.fs-govern.satisfiable-evidence.v2",
+            satisfiable.evidence(),
+        )
+    );
+    assert_eq!(
+        unsatisfiable.identity().as_hash(),
+        &expected_conclusion_wrapper(
+            "frankensim.fs-govern.unsatisfiable-evidence.v2",
+            unsatisfiable.evidence(),
+        )
+    );
+    assert_eq!(
+        nonvacuous.identity().as_hash(),
+        &expected_strength_wrapper(
+            "frankensim.fs-govern.nonvacuous-evidence.v2",
+            nonvacuous.evidence(),
+            4,
+            strength,
+        )
+    );
+    assert_eq!(
+        vacuous.identity().as_hash(),
+        &expected_strength_wrapper(
+            "frankensim.fs-govern.vacuous-evidence.v2",
+            vacuous.evidence(),
+            4,
+            strength,
+        )
+    );
+    assert_eq!(
+        failed.identity().as_hash(),
+        &expected_conclusion_wrapper(
+            "frankensim.fs-govern.reproduction-failed-evidence.v2",
+            failed.evidence(),
+        )
+    );
+    assert_eq!(
+        reproduced.identity().as_hash(),
+        &expected_conclusion_wrapper(
+            "frankensim.fs-govern.reproduced-evidence.v2",
+            reproduced.evidence(),
+        )
     );
 }
 
@@ -2066,14 +2309,32 @@ fn g0_catalog_is_code_derived_unique_and_contract_drift_checked() {
     let second = authority_catalog_json();
     assert_eq!(first, second);
     assert!(first.contains("frankensim-authority-catalog-v2"));
+    assert!(first.contains("\"catalog_schema_version\":2"));
+    assert_eq!(AUTHORITY_CATALOG_SCHEMA_VERSION, 2);
+    assert_eq!(AUTHORITY_IDENTITY_SCHEMA_VERSION, 2);
+    assert_eq!(PROOF_LANE_IDENTITY_SCHEMA_VERSION, 1);
     assert_eq!(
         first.matches("\"object_kind\":").count(),
         AUTHORITY_CATALOG_ROWS.len()
     );
+    assert_eq!(
+        first.matches("\"algebra_version\":").count(),
+        AUTHORITY_CATALOG_ROWS.len() + 1,
+        "the root and every row must render their algebra version"
+    );
+    assert_eq!(
+        first.matches("\"identity_schema_version\":").count(),
+        AUTHORITY_CATALOG_ROWS.len(),
+        "every row must render its own identity schema version"
+    );
     for row in AUTHORITY_CATALOG_ROWS {
         for exact_field in [
             format!("\"object_kind\":\"{}\"", row.object_kind),
-            format!("\"schema_version\":{}", row.schema_version),
+            format!("\"algebra_version\":{}", row.algebra_version),
+            format!(
+                "\"identity_schema_version\":{}",
+                row.identity_schema_version
+            ),
             format!("\"identity_domain\":\"{}\"", row.identity_domain),
             format!("\"identity_sources\":\"{}\"", row.identity_sources),
             format!("\"binding\":\"{}\"", row.binding),
@@ -2090,6 +2351,12 @@ fn g0_catalog_is_code_derived_unique_and_contract_drift_checked() {
     let mut domains = std::collections::BTreeSet::new();
     let contract = include_str!("../CONTRACT.md");
     for row in AUTHORITY_CATALOG_ROWS {
+        assert!(
+            row.identity_domain
+                .ends_with(&format!(".v{}", row.identity_schema_version)),
+            "{} identity domain/version mismatch",
+            row.object_kind
+        );
         assert!(
             kinds.insert(row.object_kind),
             "duplicate kind {}",
@@ -2218,8 +2485,19 @@ fn g0_catalog_is_code_derived_unique_and_contract_drift_checked() {
     assert!(
         AUTHORITY_CATALOG_ROWS
             .iter()
-            .all(|row| row.schema_version == AUTHORITY_ALGEBRA_VERSION),
-        "every v2 catalog row must bind the current algebra version"
+            .all(|row| row.algebra_version == AUTHORITY_ALGEBRA_VERSION),
+        "every catalog row must bind the current authority algebra"
+    );
+    assert!(
+        AUTHORITY_CATALOG_ROWS.iter().all(|row| {
+            row.identity_schema_version
+                == if row.object_kind == "proof-lane" {
+                    PROOF_LANE_IDENTITY_SCHEMA_VERSION
+                } else {
+                    AUTHORITY_IDENTITY_SCHEMA_VERSION
+                }
+        }),
+        "the proof-lane identity remains v1 while v2 authority objects bind identity schema v2"
     );
 }
 

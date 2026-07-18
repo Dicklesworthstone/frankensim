@@ -21,6 +21,9 @@ use fs_blake3::ContentHash;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const EVIDENCE_GRAPH_VERSION: u32 = 2;
+/// Canonical field tag binding graph nodes and snapshots to the authority
+/// algebra they interpret. This tag is part of the v2 identity schema.
+pub const EVIDENCE_GRAPH_AUTHORITY_ALGEBRA_TAG: u8 = 250;
 pub const FIXED_RATE_SCALE: u32 = 1_000_000;
 pub const MAX_GRAPH_NODES: usize = 1_024;
 pub const MAX_GRAPH_EDGES: usize = 4_096;
@@ -364,7 +367,7 @@ impl GraphNode {
         push_field(&mut canonical, 0, &EVIDENCE_GRAPH_VERSION.to_le_bytes());
         push_field(
             &mut canonical,
-            250,
+            EVIDENCE_GRAPH_AUTHORITY_ALGEBRA_TAG,
             &AUTHORITY_ALGEBRA_VERSION.to_le_bytes(),
         );
         kind.encode(&mut canonical);
@@ -765,7 +768,7 @@ impl GraphSnapshot {
         push_field(&mut canonical, 0, &EVIDENCE_GRAPH_VERSION.to_le_bytes());
         push_field(
             &mut canonical,
-            250,
+            EVIDENCE_GRAPH_AUTHORITY_ALGEBRA_TAG,
             &AUTHORITY_ALGEBRA_VERSION.to_le_bytes(),
         );
         for node in &nodes {

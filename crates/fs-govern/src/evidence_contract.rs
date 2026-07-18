@@ -3057,7 +3057,7 @@ impl LegacyAuthorityV0 {
 
 /// Monotone historical migration result.  V0 positive booleans are retained
 /// in the migration identity but demoted to orthogonal Unknown/NotEvaluated
-/// axes because they lack the exact evidence bindings required by v1.
+/// axes because they lack the exact evidence bindings required by v2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityMigration {
     source_schema: u32,
@@ -3151,22 +3151,30 @@ pub fn migrate_legacy_v0(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorityCatalogRow {
     pub object_kind: &'static str,
-    pub schema_version: u32,
+    /// Authority algebra under which this object is interpreted.
+    pub algebra_version: u32,
+    /// Version of the object's own content-identity preimage/domain contract.
+    pub identity_schema_version: u32,
     pub identity_domain: &'static str,
     pub identity_sources: &'static str,
     pub binding: &'static str,
     pub no_claim: &'static str,
 }
 
+/// Serialization schema for the catalog artifact itself. Catalog format,
+/// authority algebra, and per-object identity schema are separate dimensions.
+pub const AUTHORITY_CATALOG_SCHEMA_VERSION: u32 = 2;
+pub const AUTHORITY_IDENTITY_SCHEMA_VERSION: u32 = 2;
+pub const PROOF_LANE_IDENTITY_SCHEMA_VERSION: u32 = 1;
+
 /// Closed v2 catalog. It is generated from this code table, never hand-built
 /// by a dashboard. Contract tests compare every row and every descriptive
 /// column against the generated Markdown embedded in `fs-govern/CONTRACT.md`.
-pub const AUTHORITY_CATALOG_SCHEMA_VERSION: u32 = AUTHORITY_ALGEBRA_VERSION;
-
 pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     AuthorityCatalogRow {
         object_kind: "claim-statement",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: CLAIM_STATEMENT_IDENTITY_DOMAIN,
         identity_sources: "canonical conjunction clauses",
         binding: "clause-order invariant; clause mutation moves identity",
@@ -3174,7 +3182,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "quantified-domain",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: QUANTIFIED_DOMAIN_IDENTITY_DOMAIN,
         identity_sources: "ordered quantifier blocks, explicit block commutativity, domain predicates",
         binding: "block order is semantic; only declared-commutative intra-block variables sort",
@@ -3182,7 +3191,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "assumption-set",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: ASSUMPTION_SET_IDENTITY_DOMAIN,
         identity_sources: "canonical assumption conjunction",
         binding: "assumption-order invariant; semantic mutation moves identity",
@@ -3190,7 +3200,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "semantic-claim",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: SEMANTIC_CLAIM_IDENTITY_DOMAIN,
         identity_sources: "statement, domain, assumptions, exact units, no-claim",
         binding: "semantic root excludes execution budget/seed/version/capability context",
@@ -3198,7 +3209,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "claim-lane-binding",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: CLAIM_LANE_BINDING_IDENTITY_DOMAIN,
         identity_sources: "statement/domain/assumption roots, validated lane, binder, artifact",
         binding: "claim instances reject a binding minted for another structured claim",
@@ -3206,7 +3218,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "claim-instance",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: CLAIM_INSTANCE_IDENTITY_DOMAIN,
         identity_sources: "semantic claim, claim-lane binding, Five Explicits",
         binding: "semantic and exact-instance roots are distinct",
@@ -3214,7 +3227,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "proof-lane",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: PROOF_LANE_IDENTITY_SCHEMA_VERSION,
         identity_domain: PROOF_LANE_IDENTITY_DOMAIN,
         identity_sources: "validated LaneCharter",
         binding: "reuses non-forgeable lanes::ProofLaneId",
@@ -3222,7 +3236,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "evidence-ref",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: EVIDENCE_REF_IDENTITY_DOMAIN,
         identity_sources: "kind, exact claim, artifact, checker, schema",
         binding: "conclusion polarity is encoded before typed wrapper construction",
@@ -3230,7 +3245,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "satisfiable-evidence",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: SATISFIABLE_EVIDENCE_IDENTITY_DOMAIN,
         identity_sources: "satisfiable evidence reference",
         binding: "type and identity both bind positive satisfiability polarity",
@@ -3238,7 +3254,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "unsatisfiable-evidence",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: UNSATISFIABLE_EVIDENCE_IDENTITY_DOMAIN,
         identity_sources: "unsatisfiable evidence reference",
         binding: "type and identity both bind negative satisfiability polarity",
@@ -3246,7 +3263,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "nonvacuous-evidence",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: NONVACUOUS_EVIDENCE_IDENTITY_DOMAIN,
         identity_sources: "nonvacuous evidence reference, strength kind, context, fibre",
         binding: "positive polarity and exact strength are type- and identity-bound",
@@ -3254,7 +3272,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "vacuous-evidence",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: VACUOUS_EVIDENCE_IDENTITY_DOMAIN,
         identity_sources: "vacuous evidence reference, strength kind, context, fibre",
         binding: "negative polarity and exact strength are type- and identity-bound",
@@ -3262,7 +3281,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "reproduction-failed-evidence",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: REPRODUCTION_FAILED_EVIDENCE_IDENTITY_DOMAIN,
         identity_sources: "reproduction-failed evidence reference",
         binding: "type and identity both bind failed-reproduction polarity",
@@ -3270,7 +3290,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "reproduced-evidence",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: REPRODUCED_EVIDENCE_IDENTITY_DOMAIN,
         identity_sources: "reproduced evidence reference",
         binding: "type and identity both bind successful-reproduction polarity",
@@ -3278,7 +3299,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "evidence-state",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: EVIDENCE_STATE_IDENTITY_DOMAIN,
         identity_sources: "exact evidence reference, predecessor, lifecycle/cancellation fields",
         binding: "exclusive transitions replace the token; terminal states cannot revive",
@@ -3286,7 +3308,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "authority-state",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: AUTHORITY_STATE_IDENTITY_DOMAIN,
         identity_sources: "exact claim and all orthogonal authority axes",
         binding: "split scientific/exact refinement, clear runtime substitution, deny-biased meet",
@@ -3294,7 +3317,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "exact-instance-decision",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: EXACT_INSTANCE_DECISION_IDENTITY_DOMAIN,
         identity_sources: "claim, policy, checker, verdict, artifact, schema",
         binding: "runtime validation requires admitted polarity and exact field agreement",
@@ -3302,7 +3326,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "invalidation-binding",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: INVALIDATION_BINDING_IDENTITY_DOMAIN,
         identity_sources: "target claim/state/head/generation and verified tombstone",
         binding: "private constructor binds the exact live predecessor atomically",
@@ -3310,7 +3335,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "inference-rule",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: INFERENCE_RULE_IDENTITY_DOMAIN,
         identity_sources: "name, version, definition artifact",
         binding: "default rule set is empty",
@@ -3318,7 +3344,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "support-edge",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: SUPPORT_EDGE_IDENTITY_DOMAIN,
         identity_sources: "source state, target claim/lane, rule, evidence",
         binding: "exact endpoint and rule identities",
@@ -3326,7 +3353,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "attack-edge",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: ATTACK_EDGE_IDENTITY_DOMAIN,
         identity_sources: "candidate, target claim/lane, evidence",
         binding: "candidate target/domain must match",
@@ -3334,7 +3362,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "counterexample-candidate",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: COUNTEREXAMPLE_IDENTITY_DOMAIN,
         identity_sources: "target claim/domain and counterexample evidence",
         binding: "exact candidate-to-domain identity",
@@ -3342,7 +3371,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "counterexample-adjudication",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: ADJUDICATION_IDENTITY_DOMAIN,
         identity_sources: "candidate, target, verdict, adjudication evidence",
         binding: "only genuine verdict can derive a tombstone candidate",
@@ -3350,7 +3380,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "revocation-tombstone",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: REVOCATION_IDENTITY_DOMAIN,
         identity_sources: "target state, genuine adjudication, reason, evidence",
         binding: "permanent exact-state invalidation",
@@ -3358,7 +3389,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "verified-revocation-tombstone",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: VERIFIED_REVOCATION_IDENTITY_DOMAIN,
         identity_sources: "authenticated tombstone candidate, target head and generation",
         binding: "opaque wrapper has no public minting constructor",
@@ -3366,7 +3398,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "capability-policy",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: CAPABILITY_POLICY_IDENTITY_DOMAIN,
         identity_sources: "axis/strength requirements, capabilities, accepted assumptions/no-claims",
         binding: "every guard changes policy identity",
@@ -3374,7 +3407,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "checker-decision",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: CHECKER_DECISION_IDENTITY_DOMAIN,
         identity_sources: "claim, authority, policy, checker, verdict, artifact, cancellation",
         binding: "public candidate is exact data; opaque decision has no public Phase 0B-A mint",
@@ -3382,7 +3416,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "authority-head",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: AUTHORITY_HEAD_IDENTITY_DOMAIN,
         identity_sources: "claim, exact state, invalidation, generation, predecessor head",
         binding: "atomic advancement preserves permanent invalidation and replaces the head token",
@@ -3390,7 +3425,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "runtime-admission",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: RUNTIME_ADMISSION_IDENTITY_DOMAIN,
         identity_sources: "claim, authority, policy, checker decision, current head identity/generation",
         binding: "positive typestate plus exact product-policy and live-head validation",
@@ -3398,7 +3434,8 @@ pub const AUTHORITY_CATALOG_ROWS: &[AuthorityCatalogRow] = &[
     },
     AuthorityCatalogRow {
         object_kind: "authority-migration",
-        schema_version: AUTHORITY_CATALOG_SCHEMA_VERSION,
+        algebra_version: AUTHORITY_ALGEBRA_VERSION,
+        identity_schema_version: AUTHORITY_IDENTITY_SCHEMA_VERSION,
         identity_domain: AUTHORITY_MIGRATION_IDENTITY_DOMAIN,
         identity_sources: "legacy schema/record/rank/booleans and explicit demotions",
         binding: "v0 ambiguity demotes to v2 Unknown axes; persisted v1 is refused",
@@ -3421,9 +3458,10 @@ pub fn authority_catalog_markdown_rows() -> String {
     for row in AUTHORITY_CATALOG_ROWS {
         writeln!(
             out,
-            "| `{}` | `{}` | `{}` | {} | {} | {} |",
+            "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} |",
             row.object_kind,
-            row.schema_version,
+            row.algebra_version,
+            row.identity_schema_version,
             row.identity_domain,
             row.identity_sources,
             row.binding,
@@ -3439,8 +3477,9 @@ pub fn authority_catalog_markdown_rows() -> String {
 pub fn authority_catalog_json() -> String {
     use core::fmt::Write as _;
 
-    let mut out =
-        String::from("{\"schema\":\"frankensim-authority-catalog-v2\",\"algebra_version\":");
+    let mut out = format!(
+        "{{\"schema\":\"frankensim-authority-catalog-v{AUTHORITY_CATALOG_SCHEMA_VERSION}\",\"catalog_schema_version\":{AUTHORITY_CATALOG_SCHEMA_VERSION},\"algebra_version\":"
+    );
     write!(out, "{AUTHORITY_ALGEBRA_VERSION},\"rows\":[")
         .expect("writing to a String is infallible");
     for (index, row) in AUTHORITY_CATALOG_ROWS.iter().enumerate() {
@@ -3449,9 +3488,10 @@ pub fn authority_catalog_json() -> String {
         }
         write!(
             out,
-            "{{\"object_kind\":\"{}\",\"schema_version\":{},\"identity_domain\":\"{}\",\"identity_sources\":\"{}\",\"binding\":\"{}\",\"no_claim\":\"{}\"}}",
+            "{{\"object_kind\":\"{}\",\"algebra_version\":{},\"identity_schema_version\":{},\"identity_domain\":\"{}\",\"identity_sources\":\"{}\",\"binding\":\"{}\",\"no_claim\":\"{}\"}}",
             json_escape(row.object_kind),
-            row.schema_version,
+            row.algebra_version,
+            row.identity_schema_version,
             json_escape(row.identity_domain),
             json_escape(row.identity_sources),
             json_escape(row.binding),

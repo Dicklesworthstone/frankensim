@@ -17,20 +17,38 @@ use fs_govern::{
         SatisfiabilityState, ScaleState, SupportEdge, TruthState, UnitSystem, VersionBinding,
     },
     evidence_graph::{
-        AllocationCandidate, AllocationFloors, AllocationPolicy, AnytimeAccountingCandidate,
-        DoubtProfile, FIXED_RATE_SCALE, FixedRate, GraphError, GraphNode, GraphNodeKind,
-        GraphSnapshot, MAX_ALLOCATION_CANDIDATES, MAX_ALLOCATION_SELECTIONS, MAX_GRAPH_NODES,
-        MAX_GRAPH_TEXT_BYTES, PlanningPass, WorkKind, plan_allocations,
+        ALLOCATION_CANDIDATE_IDENTITY_DOMAIN, ALLOCATION_DECISION_IDENTITY_DOMAIN,
+        ALLOCATION_POLICY_IDENTITY_DOMAIN, ANYTIME_ACCOUNTING_IDENTITY_DOMAIN, AllocationCandidate,
+        AllocationFloors, AllocationPolicy, AnytimeAccountingCandidate, DoubtProfile,
+        EVIDENCE_GRAPH_AUTHORITY_ALGEBRA_TAG, EVIDENCE_GRAPH_VERSION, FIXED_RATE_SCALE, FixedRate,
+        GRAPH_NODE_IDENTITY_DOMAIN, GRAPH_SNAPSHOT_IDENTITY_DOMAIN, GraphError, GraphNode,
+        GraphNodeKind, GraphSnapshot, MAX_ALLOCATION_CANDIDATES, MAX_ALLOCATION_SELECTIONS,
+        MAX_GRAPH_NODES, MAX_GRAPH_TEXT_BYTES, PlanningPass, WorkKind, plan_allocations,
         plan_allocations_with_cancel,
     },
 };
 use std::collections::BTreeSet;
 
+/// Fixture-input namespace only; production graph identities use the public
+/// v2 domains asserted independently below.
+const TEST_EVIDENCE_GRAPH_FIXTURE_IDENTITY_DOMAIN: &str =
+    "frankensim.fs-govern.test-evidence-graph.v2";
+
 fn hash(label: &str) -> ContentHash {
     fs_blake3::hash_domain(
-        "frankensim.fs-govern.test-evidence-graph.v1",
+        TEST_EVIDENCE_GRAPH_FIXTURE_IDENTITY_DOMAIN,
         label.as_bytes(),
     )
+}
+
+fn push_graph_identity_field(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+    out.push(tag);
+    out.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .expect("bounded graph identity fixture fits u64")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(bytes);
 }
 
 fn lane(statement: &str, independence_class: &str) -> LaneCharter {
@@ -82,7 +100,7 @@ fn claim(statement_text: &str, independence_class: &str) -> ClaimInstance {
             wall_time_millis: 1_000,
             reviewer_slots: 1,
         },
-        vec![VersionBinding::new("graph-fixture", "1").expect("version")],
+        vec![VersionBinding::new("graph-fixture", "2").expect("version")],
         vec![CapabilityBinding::new("descriptive-planning", 1).expect("capability")],
     )
     .expect("Five Explicits");
@@ -355,6 +373,123 @@ fn representative_orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
         orders.push(rotated);
     }
     orders
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Independent v2 node and snapshot preimages are intentionally explicit.
+fn g0_graph_v2_domains_and_node_snapshot_preimages_are_schema_locked() {
+    assert_eq!(EVIDENCE_GRAPH_VERSION, 2);
+    assert_eq!(EVIDENCE_GRAPH_AUTHORITY_ALGEBRA_TAG, 250);
+    assert_eq!(
+        GRAPH_NODE_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.evidence-graph-node.v2"
+    );
+    assert_eq!(
+        GRAPH_SNAPSHOT_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.evidence-graph-snapshot.v2"
+    );
+    assert_eq!(
+        ANYTIME_ACCOUNTING_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.anytime-accounting-candidate.v2"
+    );
+    assert_eq!(
+        ALLOCATION_CANDIDATE_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.evidence-allocation-candidate.v2"
+    );
+    assert_eq!(
+        ALLOCATION_POLICY_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.evidence-allocation-policy.v2"
+    );
+    assert_eq!(
+        ALLOCATION_DECISION_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.evidence-allocation-decision.v2"
+    );
+    assert_eq!(
+        TEST_EVIDENCE_GRAPH_FIXTURE_IDENTITY_DOMAIN,
+        "frankensim.fs-govern.test-evidence-graph.v2"
+    );
+
+    let claim = claim("graph v2 preimage lock", "graph-v2-preimage/class");
+    let claim_node = GraphNode::claim(&claim);
+    let mut claim_preimage = Vec::new();
+    push_graph_identity_field(&mut claim_preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut claim_preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut claim_preimage, 1, &[1]);
+    push_graph_identity_field(
+        &mut claim_preimage,
+        2,
+        claim.identity().as_hash().as_bytes(),
+    );
+    push_graph_identity_field(
+        &mut claim_preimage,
+        3,
+        claim.proof_lane().as_hash().as_bytes(),
+    );
+    assert_eq!(
+        claim_node.identity().as_hash(),
+        &fs_blake3::hash_domain(
+            "frankensim.fs-govern.evidence-graph-node.v2",
+            &claim_preimage,
+        )
+    );
+
+    let state = unknown_state(&claim);
+    let authority_node =
+        GraphNode::authority_with_consequence(&state, 7).expect("nonzero authority consequence");
+    let claim_node_identity = claim_node.identity();
+    let authority_node_identity = authority_node.identity();
+    let mut authority_preimage = Vec::new();
+    push_graph_identity_field(&mut authority_preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut authority_preimage, 250, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut authority_preimage, 1, &[2]);
+    push_graph_identity_field(
+        &mut authority_preimage,
+        2,
+        claim.identity().as_hash().as_bytes(),
+    );
+    push_graph_identity_field(
+        &mut authority_preimage,
+        3,
+        state.identity().as_hash().as_bytes(),
+    );
+    push_graph_identity_field(&mut authority_preimage, 4, &7_u64.to_le_bytes());
+    assert_eq!(
+        authority_node.identity().as_hash(),
+        &fs_blake3::hash_domain(
+            "frankensim.fs-govern.evidence-graph-node.v2",
+            &authority_preimage,
+        )
+    );
+
+    let snapshot = GraphSnapshot::new(vec![authority_node, claim_node], vec![], vec![])
+        .expect("edge-free schema-lock snapshot");
+    let mut canonical_node_identities = [claim_node_identity, authority_node_identity];
+    canonical_node_identities.sort_unstable();
+    assert_eq!(
+        snapshot
+            .nodes()
+            .iter()
+            .map(GraphNode::identity)
+            .collect::<Vec<_>>(),
+        canonical_node_identities.to_vec()
+    );
+    let mut snapshot_preimage = Vec::new();
+    push_graph_identity_field(&mut snapshot_preimage, 0, &2_u32.to_le_bytes());
+    push_graph_identity_field(&mut snapshot_preimage, 250, &2_u32.to_le_bytes());
+    for node_identity in canonical_node_identities {
+        push_graph_identity_field(
+            &mut snapshot_preimage,
+            1,
+            node_identity.as_hash().as_bytes(),
+        );
+    }
+    assert_eq!(
+        snapshot.identity(),
+        fs_blake3::hash_domain(
+            "frankensim.fs-govern.evidence-graph-snapshot.v2",
+            &snapshot_preimage,
+        )
+    );
 }
 
 #[test]
