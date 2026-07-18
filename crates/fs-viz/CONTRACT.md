@@ -218,7 +218,8 @@ receipts, request overflow/invalidity, every one-short operation resource,
 negative-time, coordinate-scaling, RK4-refinement, and polling-chunk
 metamorphisms, boundary/stagnation policy,
 pre-requested and injected cancellation, ambient deadline/cost/poll refusal, callback
-panic/non-finite results, arithmetic overflow, allocation fault, and identical
+panic/non-finite results, callback-requested cancellation observed at the next
+indivisible complete-step boundary, arithmetic overflow, allocation fault, and identical
 retry; Hessian classification recovers the
 Morse type; a circle-SDF isocontour lies on the circle (+ empty out-of-range);
 2-D grid sampling/addressing; fail-before-sampling dimension, budget, bounds,

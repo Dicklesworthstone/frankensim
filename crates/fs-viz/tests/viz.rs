@@ -591,6 +591,68 @@ fn g4_streamline_cancellation_budget_and_callback_faults_are_atomic() {
 }
 
 #[test]
+fn g4_streamline_callback_requested_cancellation_stops_at_the_next_step_boundary() {
+    let request = StreamlineRequest::dimensionless_rk4([0.0; 2], 0.125, 8, 1);
+    let budget = required_streamline_budget(request).expect("finite cancellable plan");
+    let gate = CancelGate::new();
+    let calls = Cell::new(0usize);
+
+    let cancellation = with_contour_cx(&gate, Budget::INFINITE, |cx| {
+        streamline_with_cx(
+            cx,
+            |_| {
+                let call = calls.get() + 1;
+                calls.set(call);
+                if call == 2 {
+                    // The request arrives during K2. One RK4 step is the
+                    // documented indivisible tile, so K3/K4 finish before the
+                    // next complete-step checkpoint observes cancellation.
+                    gate.request();
+                }
+                [1.0, -0.5]
+            },
+            request,
+            budget,
+        )
+        .expect_err("callback-requested cancellation must prevent publication")
+    });
+
+    assert_eq!(
+        calls.get(),
+        4,
+        "the in-flight RK4 tile must drain exactly once"
+    );
+    assert!(matches!(
+        cancellation.error,
+        StreamlineError::ExecutionBudgetRefused {
+            refusal: BudgetRefusal::Cancelled { .. }
+        }
+    ));
+    assert_eq!(cancellation.report.completed_steps, 1);
+    assert_eq!(cancellation.report.field_evaluations, 4);
+    assert_eq!(cancellation.report.output_points, 2);
+    assert_eq!(
+        cancellation.report.disposition,
+        StreamlineDisposition::Cancelled
+    );
+    assert!(cancellation.report.terminal);
+    assert!(!cancellation.report.published);
+    assert!(cancellation.report.artifact_identity.is_none());
+
+    let retry_gate = CancelGate::new();
+    let retry = with_contour_cx(&retry_gate, Budget::INFINITE, |cx| {
+        streamline_with_cx(cx, |_| [1.0, -0.5], request, budget)
+            .expect("fresh-context retry after callback cancellation")
+    });
+    let direct_gate = CancelGate::new();
+    let direct = with_contour_cx(&direct_gate, Budget::INFINITE, |cx| {
+        streamline_with_cx(cx, |_| [1.0, -0.5], request, budget)
+            .expect("independent direct execution")
+    });
+    assert_eq!(retry, direct);
+}
+
+#[test]
 fn hessian_classification_recovers_the_morse_type() {
     let t = 1e-9;
     // f = x² + y²  -> minimum, index 0.
