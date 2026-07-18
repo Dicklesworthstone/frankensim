@@ -35,10 +35,11 @@ use fs_eproc::{BettingEProcess, GaussianMixtureCs};
 use fs_evidence::{Color, ColorRank};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_fab::min_feature_size;
+use fs_grammar_e2e::{SimplificationSummary, assess_simplification};
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_rep_neural::{Layer, MlpSdf};
 use fs_schedule_e2e::{ScheduleDisposition, Study};
-use fs_shapeprog::{max_sdf_discrepancy, simplify};
+use fs_shapeprog::max_sdf_discrepancy;
 use fs_sparse::{Coo, Csr};
 use fs_truss::{LayoutCertificateLimits, LayoutCertificateProblem, PdhgSettings};
 use fs_truss_e2e::{
@@ -1252,10 +1253,13 @@ fn grammar_sample_points() -> Vec<[f64; 3]> {
 /// be drawn.
 ///
 /// `match_tol` — SDF-discrepancy match threshold (clamped `0.01..=1.0`,
-/// default 0.2); `simplify_tol` — dropped-offset tolerance (clamped `0.0..=0.2`,
-/// default 0.03; the live knob — at 0.03 the `o = 0` offsets drop 108→99).
+/// default 0.2); `simplify_radius_threshold` — strict local dropped-offset
+/// radius threshold (clamped `0.0..=0.2`, default 0.03; the live knob — at 0.03
+/// the admitted offsets drop 108→99). It is not the returned global error
+/// envelope: an admitted radius `0.02` has certificate `0.04`. NaN is preserved
+/// as a fail-closed typed simplifier refusal.
 ///
-/// Output layout (length `21 + 24 + 4096`):
+/// Output layout (length `32 + 24 + 4096`):
 /// - `[0]`,`[1]` — `r_bins` (6), `d_bins` (4).
 /// - `[2]` — `num_elites`.
 /// - `[3]` — `capacity` (24).
@@ -1267,18 +1271,29 @@ fn grammar_sample_points() -> Vec<[f64; 3]> {
 /// - `[12]` — `size_after`.
 /// - `[13]` — `simplified_count`.
 /// - `[14]` — `max_certified_error`.
-/// - `[15]` — `simplification_sound` (0/1).
+/// - `[15]` — complete-all-elites `simplification_sound` (0/1).
 /// - `[16]` — `fab_satisfied`.
 /// - `[17]` — `headline_verified` (0/1).
 /// - `[18]` — `repr_grid_n` (64).
 /// - `[19]`,`[20]` — `repr_lo` (-2), `repr_hi` (2).
+/// - `[21]` — clamped local simplification radius threshold.
+/// - `[22]` — maximum admitted outward finite-sample simplification check.
+/// - `[23]` — aggregate [`fs_grammar_e2e::SimplificationCheckStatus::wire_code`].
+/// - `[24]` — observed simplification-assessment count (must equal `[2]`).
+/// - `[25]` — transactional simplifier-refusal count.
+/// - `[26]` — non-finite certificate count.
+/// - `[27]` — invalid finite-negative certificate count.
+/// - `[28]` — discrepancy-evidence refusal count.
+/// - `[29]` — admitted structural-empty agreement count.
+/// - `[30]` — conservative certificate-check-exceedance count.
+/// - `[31]` — mixed-threshold mismatch count.
 /// - then `6·4` niche fitness grid row-major (r-bin outer, d-bin inner;
 ///   `-1` = empty niche).
 /// - then `64·64` SDF slice (`z = 0`) of the best program over `[-2,2]²`,
 ///   row-major (`j` outer / y, `i` inner / x).
-pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
+pub fn grammarforge(match_tol: f64, simplify_radius_threshold: f64) -> Vec<f64> {
     let match_tol = match_tol.clamp(0.01, 1.0);
-    let simplify_tol = simplify_tol.clamp(0.0, 0.2);
+    let simplify_radius_threshold = simplify_radius_threshold.clamp(0.0, 0.2);
 
     let target = fs_grammar_e2e::target();
     let samples = grammar_sample_points();
@@ -1312,10 +1327,9 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
         grid[rb * 4 + db] = e.fitness;
     }
 
-    // Post-process the elites: simplification soundness + fabrication tally.
-    let (mut simplified_count, mut size_before, mut size_after, mut fab_satisfied) = (0, 0, 0, 0);
-    let mut max_certified_error = 0.0_f64;
-    let mut simplification_sound = true;
+    // Post-process through the same typed assessment/summary used natively.
+    let mut simplification = SimplificationSummary::new(simplify_radius_threshold);
+    let mut fab_satisfied = 0;
     for e in archive.elites() {
         let prog = fs_grammar_e2e::build_program(
             e.solution[0],
@@ -1323,19 +1337,8 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
             e.solution[2],
             e.solution[3],
         );
-        let before = prog.size();
-        let simp = simplify(&prog, simplify_tol);
-        let after = simp.program.size();
-        size_before += before;
-        size_after += after;
-        if after < before {
-            simplified_count += 1;
-        }
-        max_certified_error = max_certified_error.max(simp.max_error);
-        let actual = max_sdf_discrepancy(&prog, &simp.program, &samples);
-        if actual > simp.max_error + 1e-9 {
-            simplification_sound = false;
-        }
+        let assessment = assess_simplification(&prog, simplify_radius_threshold, &samples);
+        simplification.observe(&assessment);
         if fab.satisfied(e.solution[0].min(e.solution[1])) {
             fab_satisfied += 1;
         }
@@ -1358,6 +1361,7 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
         }
         None => (f64::NAN, [f64::NAN; 4], false),
     };
+    let simplification_sound = simplification.is_complete_and_sound(archive.num_elites());
     let headline_verified = best_disc <= match_tol && best_fab_ok && simplification_sound;
 
     // Representative shape: best program z=0 slice, 64×64 over [-2,2]².
@@ -1369,7 +1373,7 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
         best_params[3],
     );
 
-    let mut out = Vec::with_capacity(21 + 24 + repr_n * repr_n);
+    let mut out = Vec::with_capacity(32 + 24 + repr_n * repr_n);
     out.push(6.0);
     out.push(4.0);
     out.push(archive.num_elites() as f64);
@@ -1378,16 +1382,27 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
     out.push(fon(archive.qd_score()));
     out.push(fon(best_disc));
     out.extend_from_slice(&best_params);
-    out.push(size_before as f64);
-    out.push(size_after as f64);
-    out.push(simplified_count as f64);
-    out.push(fon(max_certified_error));
+    out.push(simplification.size_before() as f64);
+    out.push(simplification.size_after() as f64);
+    out.push(simplification.simplified_count() as f64);
+    out.push(fon(simplification.max_certified_error()));
     out.push(if simplification_sound { 1.0 } else { 0.0 });
     out.push(fab_satisfied as f64);
     out.push(if headline_verified { 1.0 } else { 0.0 });
     out.push(repr_n as f64);
     out.push(-2.0);
     out.push(2.0);
+    out.push(fon(simplification.radius_threshold()));
+    out.push(fon(simplification.max_sampled_discrepancy()));
+    out.push(f64::from(simplification.status().wire_code()));
+    out.push(simplification.assessments() as f64);
+    out.push(simplification.simplifier_refusals() as f64);
+    out.push(simplification.non_finite_certificates() as f64);
+    out.push(simplification.negative_certificates() as f64);
+    out.push(simplification.discrepancy_evidence_refusals() as f64);
+    out.push(simplification.structural_empty_agreements() as f64);
+    out.push(simplification.certificate_check_exceedances() as f64);
+    out.push(simplification.threshold_mismatches() as f64);
     out.extend_from_slice(&grid);
     for j in 0..repr_n {
         let y = -2.0 + 4.0 * j as f64 / (repr_n as f64 - 1.0);
@@ -1707,6 +1722,7 @@ pub fn flowcert(steps: usize, tol: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_grammar_e2e::SimplificationCheckStatus;
 
     #[test]
     fn proofrobust_defaults() {
@@ -1876,13 +1892,76 @@ mod tests {
     #[test]
     fn grammarforge_defaults() {
         let v = grammarforge(0.2, 0.03);
+        let native = fs_grammar_e2e::run_campaign(0.2, 0.03);
+        let summary = native.simplification;
         assert_eq!(v[2], 18.0, "num_elites");
         assert_eq!(v[3], 24.0, "capacity");
         assert_eq!(v[11], 108.0, "size_before");
         assert_eq!(v[12], 99.0, "size_after");
+        assert_eq!(v[14].to_bits(), 0.04_f64.to_bits(), "max certificate");
         assert_eq!(v[15], 1.0, "simplification_sound");
         assert_eq!(v[17], 1.0, "headline_verified");
-        assert_eq!(v.len(), 21 + 24 + 64 * 64, "total length");
+        assert_eq!(v[21].to_bits(), 0.03_f64.to_bits(), "local threshold");
+        assert!(v[14] > v[21], "certificate is not the local threshold");
+        assert_eq!(v[23], 0.0, "certified status code");
+        assert_eq!(v[24], v[2], "every elite has one assessment");
+        assert_eq!(&v[25..32], &[0.0; 7], "all exceptional counts");
+
+        // Native and browser transcriptions share the same typed assessment
+        // accumulator, so every status/envelope field must agree exactly.
+        assert_eq!(v[2], summary.assessments() as f64);
+        assert_eq!(v[11], summary.size_before() as f64);
+        assert_eq!(v[12], summary.size_after() as f64);
+        assert_eq!(v[13], summary.simplified_count() as f64);
+        assert_eq!(v[14].to_bits(), summary.max_certified_error().to_bits());
+        assert_eq!(
+            v[15],
+            if summary.is_complete_and_sound(native.num_elites) {
+                1.0
+            } else {
+                0.0
+            }
+        );
+        assert_eq!(v[21].to_bits(), summary.radius_threshold().to_bits());
+        assert_eq!(v[22].to_bits(), summary.max_sampled_discrepancy().to_bits());
+        assert_eq!(v[23], f64::from(summary.status().wire_code()));
+        assert_eq!(v[24], summary.assessments() as f64);
+        assert_eq!(v[25], summary.simplifier_refusals() as f64);
+        assert_eq!(v[26], summary.non_finite_certificates() as f64);
+        assert_eq!(v[27], summary.negative_certificates() as f64);
+        assert_eq!(v[28], summary.discrepancy_evidence_refusals() as f64);
+        assert_eq!(v[29], summary.structural_empty_agreements() as f64);
+        assert_eq!(v[30], summary.certificate_check_exceedances() as f64);
+        assert_eq!(v[31], summary.threshold_mismatches() as f64);
+        assert_eq!(v.len(), 32 + 24 + 64 * 64, "total length");
+    }
+
+    #[test]
+    fn grammarforge_serializes_invalid_threshold_as_typed_refusal() {
+        let v = grammarforge(0.2, f64::NAN);
+        let native = fs_grammar_e2e::run_campaign(0.2, f64::NAN).simplification;
+        assert_eq!(v[15], 0.0, "refusal is not simplification soundness");
+        assert_eq!(v[17], 0.0, "refusal cannot promote the headline");
+        assert!(v[21].is_nan(), "invalid threshold sentinel");
+        assert_eq!(
+            v[23],
+            f64::from(SimplificationCheckStatus::SimplifierRefused.wire_code()),
+            "typed refusal status"
+        );
+        assert_eq!(v[24], v[2], "every elite was assessed");
+        assert_eq!(v[25], v[2], "every elite refused simplification");
+        assert_eq!(v[26], 0.0, "no non-finite certificate was published");
+        assert_eq!(v[27], 0.0, "no negative certificate was published");
+        assert_eq!(v[28], 0.0, "refusal precedes discrepancy checking");
+        assert_eq!(v[2], native.assessments() as f64, "native assessment count");
+        assert_eq!(v[21].to_bits(), native.radius_threshold().to_bits());
+        assert_eq!(v[23], f64::from(native.status().wire_code()));
+        assert_eq!(v[24], native.assessments() as f64);
+        assert_eq!(v[25], native.simplifier_refusals() as f64);
+        assert_eq!(v[26], native.non_finite_certificates() as f64);
+        assert_eq!(v[27], native.negative_certificates() as f64);
+        assert_eq!(v[28], native.discrepancy_evidence_refusals() as f64);
+        assert!(!native.is_sound());
     }
 
     #[test]

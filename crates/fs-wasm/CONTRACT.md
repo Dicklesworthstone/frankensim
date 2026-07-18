@@ -55,6 +55,17 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
 7. The browser isosurface is a serialization adapter, not a second polygonizer:
    each indexed `fs-viz` triangle is expanded to three positions plus three
    analytic gradient normals in the documented 18-value block.
+8. GrammarForge uses the exact shared `fs-grammar-e2e` simplification assessment
+   and summary, not a browser-local interpretation of ShapeProg certificates.
+   Its soundness bit additionally requires one assessment per serialized elite;
+   a sound strict subset cannot promote the browser headline.
+   Its 32-value header preserves the historical fields at `[0..=20]` and adds:
+   local radius threshold `[21]`, maximum admitted outward finite-sample check `[22]`,
+   typed aggregate status code `[23]`, observed assessment count `[24]`, and
+   refusal/non-finite/finite-negative/evidence-refusal/structural-empty/
+   conservative-check-exceedance/threshold-mismatch counts `[25..=31]`. The
+   `0.02` offset admitted at local threshold `0.03` serializes the sound global
+   certificate `0.04`; status remains independently explicit.
 
 ## Error model
 
@@ -65,6 +76,11 @@ crates when called outside the clamped public surface.
 `marching_cubes` maps non-finite input, sampling/allocation refusal, or a
 surface exceeding 60,000 triangles to the one-value `[0]` sentinel; it never
 serializes a silently truncated/open prefix.
+GrammarForge clamps infinite local radius thresholds to the documented public
+range. A NaN threshold remains a `NaN` numeric sentinel while separately
+serializing `SimplifierRefused` and its count. Non-finite and finite-negative
+nominal certificates have distinct typed counts. A transactional core rollback
+therefore cannot be laundered as a zero-error successful simplification.
 
 ## Determinism class
 
@@ -103,6 +119,9 @@ comparison against the native campaign; it is not browser execution or
 cross-target bit-identity evidence.
 The geometry module additionally checks the shared isosurface's triangle-count
 wire length, finite unit normals, exact replay, and non-finite sentinel.
+GrammarForge tests compare every native/WASM simplification-summary value and
+status bit, assert the exact `0.02/0.03 -> 0.04` envelope, and verify that a NaN
+threshold serializes typed refusals and cannot promote the headline.
 Current verification is native cargo test/clippy of the nested workspace plus
 any wasm32 build lane provided by DSR or site automation. The wasm32 browser
 surface itself remains a build/smoke lane rather than a browser-E2E test suite.
@@ -114,6 +133,12 @@ surface itself remains a build/smoke lane rather than a browser-E2E test suite.
   visualizable traces from lower crates. TrussPath's serialized optimum and
   material-volume path intervals are narrow exceptions and carry only their
   lower-layer receipts' declared graph/LP claims.
+- GrammarForge's radius threshold controls local rewrite admission only. It is
+  not a global error budget, and no browser consumer may infer
+  `max_certified_error <= radius_threshold`. The sampled discrepancy field is a
+  conservative outward finite-grid admission check, not a continuum proof or a
+  downward-rounded lower bound; the compositional ShapeProg certificate carries
+  the declared global algebraic authority.
 - The shared promotion gate gives native and browser code the same claim-strength
   rules, but cross-target endpoint bit identity remains unclaimed until a retained
   browser runner or WASM golden exists.

@@ -931,8 +931,8 @@ mod wasm {
     }
 
     #[wasm_bindgen]
-    pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
-        super::grammarforge(match_tol, simplify_tol)
+    pub fn grammarforge(match_tol: f64, simplify_radius_threshold: f64) -> Vec<f64> {
+        super::grammarforge(match_tol, simplify_radius_threshold)
     }
 
     #[wasm_bindgen]
