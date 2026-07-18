@@ -19,7 +19,7 @@ use fs_dfo::{NsgaParams, das_dennis, nsga3};
 use fs_rand::StreamKey;
 use std::panic::catch_unwind;
 
-const SUITE: &str = "fs-dfo/nsga3-study-replay-v1";
+const SUITE: &str = "fs-dfo/nsga3-study-replay-v2";
 const CASE: &str = "short-three-objective-complete-callback-and-front";
 const RED_CASE: &str = "seeded-returned-objective-corruption";
 
@@ -61,7 +61,7 @@ struct StudyRecord {
 
 impl StudyRecord {
     fn canonical_bytes(&self, config_digest: u64) -> Vec<u8> {
-        let mut bytes = b"fs-dfo-nsga3-study-output-v1".to_vec();
+        let mut bytes = b"fs-dfo-nsga3-study-output-v2".to_vec();
         push_u64(&mut bytes, config_digest);
         push_len(&mut bytes, self.evaluations.len());
         for evaluation in &self.evaluations {
@@ -266,6 +266,25 @@ fn push_u64_slice(bytes: &mut Vec<u8>, values: &[u64]) {
     }
 }
 
+fn push_normalization_policy(bytes: &mut Vec<u8>) {
+    let policy = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY;
+    push_u64(bytes, u64::from(policy.schema_version));
+    push_str(bytes, policy.variant);
+    push_u64(bytes, policy.asf_epsilon.to_bits());
+    push_u64(bytes, policy.span_floor.to_bits());
+    push_u64(bytes, policy.pivot_ratio_floor.to_bits());
+    push_u64(bytes, policy.condition_error_limit.to_bits());
+    push_u64(bytes, policy.residual_epsilon_multiplier.to_bits());
+    push_len(bytes, policy.max_objectives);
+    push_str(bytes, policy.candidate_scope);
+    push_str(bytes, policy.ideal_policy);
+    push_str(bytes, policy.extreme_policy);
+    push_str(bytes, policy.hyperplane_policy);
+    push_str(bytes, policy.fallback_policy);
+    push_str(bytes, policy.retention_policy);
+    push_str(bytes, policy.nonfinite_policy);
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
@@ -293,9 +312,10 @@ fn directions() -> Vec<Vec<f64>> {
 fn config_bytes() -> Vec<u8> {
     let directions = directions();
     assert_eq!(directions.len(), EXPECTED_DIRECTIONS);
-    let mut bytes = b"fs-dfo-nsga3-study-config-v1".to_vec();
+    let mut bytes = b"fs-dfo-nsga3-study-config-v2".to_vec();
     push_str(&mut bytes, CASE);
     push_str(&mut bytes, "fs_dfo::nsga3");
+    push_normalization_policy(&mut bytes);
     push_str(&mut bytes, "three-objective-polynomial-tradeoff-v1");
     push_str(&mut bytes, "dimensionless");
     push_len(&mut bytes, DIMENSION);

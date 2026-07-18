@@ -43,8 +43,9 @@ const EXPECTED_EVALUATIONS: usize = POPULATION * (GENERATIONS + 1);
 
 // Coarse conformance gates, deliberately separated from performance claims.
 // The quarter-scale mean-distance ceiling was calibrated from the first
-// retained central run (0.23171459361058497 at the fixed 36,892-evaluation
-// budget), leaving 0.01828540638941503 absolute headroom.
+// pre-extension central run (0.23171459361058497 at the fixed
+// 36,892-evaluation budget). The v2, policy-bound campaign intentionally makes
+// no current headroom claim until central batch verification emits its metrics.
 const MAX_MEAN_DISTANCE: f64 = 0.25;
 const MAX_WORST_DISTANCE: f64 = 0.50;
 const MIN_DIRECTION_COVERAGE: f64 = 0.25;
@@ -266,7 +267,7 @@ fn metrics(front: &[Individual], directions: &[Vec<f64>]) -> Metrics {
 }
 
 fn front_identity(campaign: &ReplayIdentity, front: &[Individual]) -> ReplayIdentity {
-    let mut builder = IdentityBuilder::new("fs-dfo-wfg4-nsga3-front-v1")
+    let mut builder = IdentityBuilder::new("fs-dfo-wfg4-nsga3-front-v2")
         .child("campaign", campaign)
         .u64("front-size", usize_u64(front.len()));
     for (front_index, individual) in front.iter().enumerate() {
@@ -326,7 +327,8 @@ fn first_front_mismatch(left: &[Individual], right: &[Individual]) -> Option<Str
 }
 
 fn campaign_identity(direction_count: usize) -> ReplayIdentity {
-    IdentityBuilder::new("fs-dfo-wfg4-nsga3-config-v1")
+    let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY;
+    IdentityBuilder::new("fs-dfo-wfg4-nsga3-config-v2")
         .str("problem", "WFG4-normalized")
         .str("source", "Huband-et-al-EMO-2005-corrected-WFG-toolkit")
         .str(
@@ -358,6 +360,51 @@ fn campaign_identity(direction_count: usize) -> ReplayIdentity {
         .str("distance-reduction", "equal-rSum-over-4..24")
         .str("shape", "WFG-concave-M3")
         .str("optimizer", "fs-dfo-nsga3")
+        .u64(
+            "normalization-policy-schema-version",
+            u64::from(normalization.schema_version),
+        )
+        .str("normalization-variant", normalization.variant)
+        .f64_bits("normalization-asf-epsilon", normalization.asf_epsilon)
+        .f64_bits("normalization-span-floor", normalization.span_floor)
+        .f64_bits(
+            "normalization-pivot-ratio-floor",
+            normalization.pivot_ratio_floor,
+        )
+        .f64_bits(
+            "normalization-condition-error-limit",
+            normalization.condition_error_limit,
+        )
+        .f64_bits(
+            "normalization-residual-epsilon-multiplier",
+            normalization.residual_epsilon_multiplier,
+        )
+        .u64(
+            "normalization-maximum-objectives",
+            usize_u64(normalization.max_objectives),
+        )
+        .str(
+            "normalization-candidate-scope",
+            normalization.candidate_scope,
+        )
+        .str("normalization-ideal-policy", normalization.ideal_policy)
+        .str("normalization-extreme-policy", normalization.extreme_policy)
+        .str(
+            "normalization-hyperplane-policy",
+            normalization.hyperplane_policy,
+        )
+        .str(
+            "normalization-fallback-policy",
+            normalization.fallback_policy,
+        )
+        .str(
+            "normalization-retention-policy",
+            normalization.retention_policy,
+        )
+        .str(
+            "normalization-nonfinite-policy",
+            normalization.nonfinite_policy,
+        )
         .u64("input-seed", INPUT_SEED)
         .u64("optimizer-stream-kernel", u64::from(NSGA3_STREAM_KERNEL))
         .u64("optimizer-stream-tile", u64::from(NSGA3_STREAM_TILE))
@@ -421,7 +468,7 @@ fn result_identity(
     replay_mismatch: Option<&str>,
     verdicts: Verdicts,
 ) -> ReplayIdentity {
-    let mut builder = IdentityBuilder::new("fs-dfo-wfg4-nsga3-result-v1")
+    let mut builder = IdentityBuilder::new("fs-dfo-wfg4-nsga3-result-v2")
         .child("campaign", campaign)
         .child("front", front_identity)
         .child("replay-front", replay_front_identity)

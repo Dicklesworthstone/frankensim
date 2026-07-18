@@ -627,13 +627,79 @@ fn perp_distance(f: &[f64], dir: &[f64]) -> f64 {
         .sqrt()
 }
 
+/// Versioned semantic descriptor for FrankenSim's NSGA-III normalization.
+///
+/// This is deliberately public so retained study/campaign identities can bind
+/// every policy choice that can change environmental selection even when a
+/// particular fixture does not exercise its refusal path. The variant is a
+/// FrankenSim extension: it is inspired by Deb--Jain ASF/intercept
+/// normalization, but equilibrates translated objectives by a current-front
+/// span before ASF selection and retains no ideal/extreme state across
+/// generations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Nsga3NormalizationPolicy {
+    /// Identity schema for this descriptor.
+    pub schema_version: u32,
+    /// Stable algorithm-variant name.
+    pub variant: &'static str,
+    /// Off-axis ASF weight (the Deb--Jain-style epsilon).
+    pub asf_epsilon: f64,
+    /// Floor for legacy fallback spans and final association divisors.
+    pub span_floor: f64,
+    /// Refuse when the smallest selected LU pivot is no larger than this
+    /// fraction of the largest selected pivot.
+    pub pivot_ratio_floor: f64,
+    /// Refuse when `cond_1(A) * EPSILON * objective_count` exceeds this limit.
+    pub condition_error_limit: f64,
+    /// Multiplier in the scale-relative residual threshold
+    /// `factor * EPSILON * objective_count * (1 + row_magnitude)`.
+    pub residual_epsilon_multiplier: f64,
+    /// Largest objective count admitted to the cubic intercept solve.
+    pub max_objectives: usize,
+    /// Population slice over which the current ideal/extremes are computed.
+    pub candidate_scope: &'static str,
+    /// Exact ideal-point rule.
+    pub ideal_policy: &'static str,
+    /// Exact extreme-point and equilibration rule.
+    pub extreme_policy: &'static str,
+    /// Hyperplane orientation, scaling, and solve rule.
+    pub hyperplane_policy: &'static str,
+    /// Exact fallback and trigger rule.
+    pub fallback_policy: &'static str,
+    /// Cross-generation state-retention rule.
+    pub retention_policy: &'static str,
+    /// Non-finite-input behavior and no-claim boundary.
+    pub nonfinite_policy: &'static str,
+}
+
+/// The normalization policy used by [`nsga3`].
+pub const NSGA3_NORMALIZATION_POLICY: Nsga3NormalizationPolicy = Nsga3NormalizationPolicy {
+    schema_version: 1,
+    variant: "frankensim-scale-equilibrated-current-generation-asf-intercepts-v1",
+    asf_epsilon: 1e-6,
+    span_floor: 1e-30,
+    pivot_ratio_floor: 1e-12,
+    condition_error_limit: 1e-8,
+    residual_epsilon_multiplier: 512.0,
+    max_objectives: 64,
+    candidate_scope: "current-environmental-selection-accepted-plus-splitting-front",
+    ideal_policy: "componentwise-minimum-over-current-considered-set",
+    extreme_policy: "fallback-span-equilibrated-asf-over-current-considered-set-with-lowest-population-index-ties",
+    hyperplane_policy: "extreme-rows-objective-columns-column-scaled-partial-pivot-lu",
+    fallback_policy: "current-considered-rank-zero-max-translated-span-with-floor-on-any-intercept-refusal",
+    retention_policy: "no-cross-generation-ideal-extreme-or-intercept-retention",
+    nonfinite_policy: "refuse-intercept-and-return-legacy-fallback-with-no-finite-association-claim",
+};
+
 /// NSGA-III for many-objective minimization: reference-direction
 /// niching replaces crowding distance. Normalization uses
-/// achievement-scalarizing-function extreme points and the resulting
-/// hyperplane intercepts, with the legacy floored first-front maxima as
-/// a deterministic fail-closed fallback. Deterministic throughout
-/// (index tie-breaks). The cubic intercept solve is bounded to 64
-/// objectives; larger objective vectors retain the legacy normalization.
+/// FrankenSim's versioned scale-equilibrated/current-generation ASF
+/// extreme points and the resulting hyperplane intercepts, with the
+/// legacy floored first-front maxima as a deterministic refusal fallback.
+/// This is not canonical Deb--Jain normalization and does not retain ideal or
+/// extreme points across generations. Deterministic throughout (index
+/// tie-breaks). See [`NSGA3_NORMALIZATION_POLICY`] for identity-bearing
+/// constants and exact no-claim boundaries.
 pub fn nsga3(
     objectives: &mut dyn FnMut(&[f64]) -> Vec<f64>,
     dim: usize,
@@ -731,7 +797,7 @@ fn nsga3_select(pop: &[Individual], directions: &[Vec<f64>], target: usize) -> V
     }
     // Normalize over accepted ∪ partial: ideal point plus ASF extreme
     // points and hyperplane intercepts, with the legacy floored-maxima
-    // behavior as the fail-closed fallback.
+    // behavior as the deterministic refusal fallback.
     let considered: Vec<usize> = accepted.iter().chain(&partial).copied().collect();
     let (ideal, span) = nsga3_normalization(pop, &fronts, &considered, m);
     let associate = |i: usize| nsga3_association(pop, directions, &ideal, &span, i);
@@ -793,16 +859,16 @@ fn nsga3_normalization(
     considered: &[usize],
     m: usize,
 ) -> (Vec<f64>, Vec<f64>) {
-    const MIN_SPAN: f64 = 1e-30;
-    const MAX_HYPERPLANE_ENTRIES: usize = 4_096;
-
     let mut ideal = vec![f64::INFINITY; m];
+    let intercept_inputs_finite = considered
+        .iter()
+        .all(|&i| pop[i].f.iter().take(m).all(|value| value.is_finite()));
     for &i in considered {
         for (d, v) in ideal.iter_mut().zip(&pop[i].f) {
             *d = d.min(*v);
         }
     }
-    let mut fallback_span = vec![MIN_SPAN; m];
+    let mut fallback_span = vec![NSGA3_NORMALIZATION_POLICY.span_floor; m];
     for &i in considered {
         if fronts[i] == 0 {
             for (d, (v, id)) in fallback_span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
@@ -811,11 +877,11 @@ fn nsga3_normalization(
         }
     }
 
-    let matrix_entries = match m.checked_mul(m) {
-        Some(entries) if entries <= MAX_HYPERPLANE_ENTRIES => entries,
-        _ => return (ideal, fallback_span),
-    };
-    if matrix_entries == 0 {
+    if !intercept_inputs_finite
+        || m == 0
+        || m > NSGA3_NORMALIZATION_POLICY.max_objectives
+        || m.checked_mul(m).is_none()
+    {
         return (ideal, fallback_span);
     }
     let Some(extreme_indices) = nsga3_extreme_indices(pop, considered, &ideal, &fallback_span, m)
@@ -828,15 +894,15 @@ fn nsga3_normalization(
     (ideal, span)
 }
 
-/// Select one considered extreme per objective with a scale-equilibrated
-/// Deb-Jain-style ASF.
+/// Select one considered extreme per objective with FrankenSim's
+/// scale-equilibrated, Deb--Jain-inspired ASF extension.
 /// Translated objectives are first divided by the legacy floored
 /// first-front-max fallback
 /// spans. Algebraically this is equivariant under positive objective
 /// scaling above the documented span floor; rounding and ASF tie
 /// boundaries remain explicit no-claim cases. Off-axis objectives
-/// receive a `1e-6` weight. Iteration and explicit index tie-breaking
-/// make equal ASF values replayable.
+/// receive [`NSGA3_NORMALIZATION_POLICY`]'s `asf_epsilon` weight. Iteration
+/// and explicit index tie-breaking make equal ASF values replayable.
 fn nsga3_extreme_indices(
     pop: &[Individual],
     considered: &[usize],
@@ -844,8 +910,6 @@ fn nsga3_extreme_indices(
     fallback_span: &[f64],
     m: usize,
 ) -> Option<Vec<usize>> {
-    const OFF_AXIS_WEIGHT: f64 = 1e-6;
-
     if considered.len() < m
         || fallback_span.len() != m
         || fallback_span
@@ -863,7 +927,7 @@ fn nsga3_extreme_indices(
             ideal,
             fallback_span,
             axis,
-            OFF_AXIS_WEIGHT,
+            NSGA3_NORMALIZATION_POLICY.asf_epsilon,
         )?);
     }
 
@@ -931,8 +995,6 @@ fn nsga3_hyperplane_span(
     ideal: &[f64],
     fallback_span: &[f64],
 ) -> Option<Vec<f64>> {
-    const MAX_HYPERPLANE_ENTRIES: usize = 4_096;
-
     let m = ideal.len();
     if extreme_indices.len() != m
         || fallback_span.len() != m
@@ -942,9 +1004,8 @@ fn nsga3_hyperplane_span(
     {
         return None;
     }
-    match m.checked_mul(m) {
-        Some(1..=MAX_HYPERPLANE_ENTRIES) => {}
-        _ => return None,
+    if m == 0 || m > NSGA3_NORMALIZATION_POLICY.max_objectives || m.checked_mul(m).is_none() {
+        return None;
     }
 
     let mut matrix = vec![vec![0.0; m]; m];
@@ -960,7 +1021,14 @@ fn nsga3_hyperplane_span(
     }
 
     let coefficients = nsga3_solve_hyperplane(&matrix)?;
-    let mut span = Vec::with_capacity(m);
+    nsga3_spans_from_coefficients(fallback_span, &coefficients)
+}
+
+fn nsga3_spans_from_coefficients(fallback_span: &[f64], coefficients: &[f64]) -> Option<Vec<f64>> {
+    if fallback_span.len() != coefficients.len() {
+        return None;
+    }
+    let mut span = Vec::with_capacity(fallback_span.len());
     for (fallback, coefficient) in fallback_span.iter().zip(coefficients) {
         if !coefficient.is_finite() || coefficient <= 0.0 {
             return None;
@@ -980,9 +1048,30 @@ fn nsga3_hyperplane_span(
 /// scale-relative residual refuse the intercept path so the caller can
 /// use its exact legacy fallback.
 fn nsga3_solve_hyperplane(matrix: &[Vec<f64>]) -> Option<Vec<f64>> {
-    const PIVOT_RATIO_TOLERANCE: f64 = 1e-12;
-    const CONDITION_ERROR_LIMIT: f64 = 1e-8;
+    let factorization = nsga3_factor_hyperplane(matrix)?;
+    if factorization.pivot_ratio <= NSGA3_NORMALIZATION_POLICY.pivot_ratio_floor {
+        return None;
+    }
+    let condition_error = nsga3_condition_error(matrix, &factorization)?;
+    if condition_error > NSGA3_NORMALIZATION_POLICY.condition_error_limit {
+        return None;
+    }
+    let solution = nsga3_lu_solve(
+        &factorization.lu,
+        &factorization.swaps,
+        &vec![1.0; matrix.len()],
+    )?;
+    nsga3_admit_hyperplane_solution(matrix, solution)
+}
 
+#[derive(Debug)]
+struct Nsga3LuFactorization {
+    lu: Vec<Vec<f64>>,
+    swaps: Vec<usize>,
+    pivot_ratio: f64,
+}
+
+fn nsga3_factor_hyperplane(matrix: &[Vec<f64>]) -> Option<Nsga3LuFactorization> {
     let n = matrix.len();
     if n == 0 || matrix.iter().any(|row| row.len() != n) {
         return None;
@@ -996,8 +1085,7 @@ fn nsga3_solve_hyperplane(matrix: &[Vec<f64>]) -> Option<Vec<f64>> {
         return None;
     }
 
-    let original = matrix.to_vec();
-    let mut lu = original.clone();
+    let mut lu = matrix.to_vec();
     let mut swaps = vec![0usize; n];
     let mut smallest_pivot = f64::INFINITY;
     let mut largest_pivot = 0.0f64;
@@ -1035,28 +1123,49 @@ fn nsga3_solve_hyperplane(matrix: &[Vec<f64>]) -> Option<Vec<f64>> {
         }
     }
 
-    if smallest_pivot <= largest_pivot * PIVOT_RATIO_TOLERANCE {
+    let pivot_ratio = smallest_pivot / largest_pivot;
+    if !pivot_ratio.is_finite() {
         return None;
     }
 
+    Some(Nsga3LuFactorization {
+        lu,
+        swaps,
+        pivot_ratio,
+    })
+}
+
+fn nsga3_condition_error(matrix: &[Vec<f64>], factorization: &Nsga3LuFactorization) -> Option<f64> {
+    let n = matrix.len();
+    if n == 0 || matrix.iter().any(|row| row.len() != n) {
+        return None;
+    }
     let matrix_norm_1 = (0..n)
-        .map(|column| original.iter().map(|row| row[column].abs()).sum::<f64>())
+        .map(|column| matrix.iter().map(|row| row[column].abs()).sum::<f64>())
         .fold(0.0f64, f64::max);
     let mut inverse_norm_1 = 0.0f64;
     for column in 0..n {
         let mut basis = vec![0.0; n];
         basis[column] = 1.0;
-        let inverse_column = nsga3_lu_solve(&lu, &swaps, &basis)?;
+        let inverse_column = nsga3_lu_solve(&factorization.lu, &factorization.swaps, &basis)?;
         inverse_norm_1 = inverse_norm_1.max(inverse_column.iter().map(|v| v.abs()).sum());
     }
     let condition_1 = matrix_norm_1 * inverse_norm_1;
-    if !condition_1.is_finite() || condition_1 * f64::EPSILON * n as f64 > CONDITION_ERROR_LIMIT {
+    let condition_error = condition_1 * f64::EPSILON * n as f64;
+    if !condition_error.is_finite() {
         return None;
     }
+    Some(condition_error)
+}
 
-    let solution = nsga3_lu_solve(&lu, &swaps, &vec![1.0; n])?;
-    let residual_tolerance = 512.0 * f64::EPSILON * n as f64;
-    for row in &original {
+fn nsga3_admit_hyperplane_solution(matrix: &[Vec<f64>], solution: Vec<f64>) -> Option<Vec<f64>> {
+    let n = matrix.len();
+    if solution.len() != n || matrix.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    let residual_tolerance =
+        NSGA3_NORMALIZATION_POLICY.residual_epsilon_multiplier * f64::EPSILON * n as f64;
+    for row in matrix {
         let projected: f64 = row
             .iter()
             .zip(&solution)
@@ -1122,7 +1231,7 @@ fn nsga3_association(
         .f
         .iter()
         .zip(ideal.iter().zip(span))
-        .map(|(v, (id, sp))| (v - id) / sp.max(1e-30))
+        .map(|(v, (id, sp))| (v - id) / sp.max(NSGA3_NORMALIZATION_POLICY.span_floor))
         .collect();
     let mut best = (0usize, f64::INFINITY);
     for (k, dir) in directions.iter().enumerate() {
@@ -1495,7 +1604,14 @@ mod tests {
         let (ideal, fallback_span) = legacy_normalization(&pop, &fronts, &considered);
 
         assert_eq!(
-            nsga3_asf_extreme_index(&pop, &considered, &ideal, &fallback_span, 0, 1e-6,),
+            nsga3_asf_extreme_index(
+                &pop,
+                &considered,
+                &ideal,
+                &fallback_span,
+                0,
+                NSGA3_NORMALIZATION_POLICY.asf_epsilon,
+            ),
             Some(0)
         );
     }
@@ -1536,13 +1652,88 @@ mod tests {
     }
 
     #[test]
-    fn nsga3_normalization_tiny_pivot_hyperplane_is_refused() {
-        let delta = 2.0f64.powi(-48);
+    fn nsga3_normalization_one_row_swap_runs_through_intercept_production_path() {
+        let matrix = vec![vec![0.5, 1.0], vec![1.0, 0.5]];
+        let factorization = nsga3_factor_hyperplane(&matrix).expect("matrix is nonsingular");
+        assert_eq!(factorization.swaps, vec![1, 1]);
+
+        let coefficients = nsga3_solve_hyperplane(&matrix).expect("admissible solve");
+        for coefficient in &coefficients {
+            assert!((*coefficient - 2.0 / 3.0).abs() <= 8.0 * f64::EPSILON);
+        }
+        let pop: Vec<Individual> = matrix
+            .iter()
+            .map(|row| Individual {
+                x: Vec::new(),
+                f: row.clone(),
+            })
+            .collect();
+        let span = nsga3_hyperplane_span(&pop, &[0, 1], &[0.0, 0.0], &[1.0, 1.0])
+            .expect("row-swapped production intercept");
+        for value in span {
+            assert!((value - 1.5).abs() <= 8.0 * f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn nsga3_normalization_multiple_row_swaps_run_through_intercept_production_path() {
         let matrix = vec![
-            vec![1.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-            vec![1.0, 1.0, delta],
+            vec![0.1, 0.2, 1.0],
+            vec![1.0, 0.1, 0.2],
+            vec![0.2, 1.0, 0.1],
         ];
+        let factorization = nsga3_factor_hyperplane(&matrix).expect("matrix is nonsingular");
+        assert_eq!(factorization.swaps, vec![1, 2, 2]);
+
+        let coefficients = nsga3_solve_hyperplane(&matrix).expect("admissible solve");
+        for coefficient in &coefficients {
+            assert!((*coefficient - 10.0 / 13.0).abs() <= 8.0 * f64::EPSILON);
+        }
+        let pop: Vec<Individual> = matrix
+            .iter()
+            .map(|row| Individual {
+                x: Vec::new(),
+                f: row.clone(),
+            })
+            .collect();
+        let span = nsga3_hyperplane_span(&pop, &[0, 1, 2], &[0.0, 0.0, 0.0], &[1.0, 1.0, 1.0])
+            .expect("multi-row-swapped production intercept");
+        for value in span {
+            assert!((value - 1.3).abs() <= 16.0 * f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn nsga3_normalization_pivot_ratio_gate_isolated_from_condition_and_residual_gates() {
+        // Wilkinson's growth matrix is well-conditioned here, but deterministic
+        // tie-preserving partial pivoting grows its last pivot to 2^40. Thus the
+        // pivot ratio alone crosses the declared floor; the independently
+        // computed condition and residual gates remain green.
+        let n = 41;
+        let mut matrix = vec![vec![0.0; n]; n];
+        for (row, entries) in matrix.iter_mut().enumerate() {
+            for entry in &mut entries[..row] {
+                *entry = -1.0;
+            }
+            entries[row] = 1.0;
+            entries[n - 1] = 1.0;
+        }
+        let factorization = nsga3_factor_hyperplane(&matrix).expect("matrix is nonsingular");
+        assert!(
+            factorization.pivot_ratio <= NSGA3_NORMALIZATION_POLICY.pivot_ratio_floor,
+            "fixture must isolate the pivot-ratio refusal"
+        );
+        assert!(
+            nsga3_condition_error(&matrix, &factorization).expect("finite condition estimate")
+                <= NSGA3_NORMALIZATION_POLICY.condition_error_limit,
+            "condition gate must remain independently green"
+        );
+        let solution = nsga3_lu_solve(&factorization.lu, &factorization.swaps, &vec![1.0; n])
+            .expect("finite solve");
+        assert!(
+            nsga3_admit_hyperplane_solution(&matrix, solution).is_some(),
+            "residual gate must remain independently green"
+        );
         assert_eq!(nsga3_solve_hyperplane(&matrix), None);
     }
 
@@ -1554,22 +1745,104 @@ mod tests {
             vec![0.0, 1.0, 0.0],
             vec![1.0, 1.0, delta],
         ];
+        let factorization = nsga3_factor_hyperplane(&matrix).expect("matrix is nonsingular");
+        assert!(
+            factorization.pivot_ratio > NSGA3_NORMALIZATION_POLICY.pivot_ratio_floor,
+            "pivot gate must remain independently green"
+        );
+        assert!(
+            nsga3_condition_error(&matrix, &factorization).expect("finite condition estimate")
+                > NSGA3_NORMALIZATION_POLICY.condition_error_limit,
+            "fixture must isolate the condition refusal"
+        );
         assert_eq!(nsga3_solve_hyperplane(&matrix), None);
     }
 
     #[test]
-    fn nsga3_normalization_lu_applies_row_permutation_to_nonuniform_rhs() {
-        let lu = vec![vec![1.0, 3.0], vec![0.0, 2.0]];
-        let solution = nsga3_lu_solve(&lu, &[1, 1], &[5.0, 7.0]).expect("LU is valid");
+    fn nsga3_normalization_residual_gate_refuses_a_mutated_solution() {
+        let matrix = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+        let accepted = nsga3_solve_hyperplane(&matrix).expect("identity solve is exact");
+        let mut corrupted = accepted.clone();
+        corrupted[1] += 2.0f64.powi(-30);
         assert_eq!(
-            solution
+            nsga3_admit_hyperplane_solution(&matrix, corrupted),
+            None,
+            "a residual-gate mutant must not inherit the exact solve's authority"
+        );
+        assert_eq!(
+            nsga3_admit_hyperplane_solution(&matrix, accepted),
+            Some(vec![1.0, 1.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_negative_coefficient_and_intercept_are_refused() {
+        let matrix = vec![vec![1.0 / 3.0, 0.5], vec![1.0, 1.0]];
+        let coefficients = nsga3_solve_hyperplane(&matrix).expect("matrix solve is admissible");
+        assert!(coefficients[0] < 0.0 && coefficients[1] > 0.0);
+        assert_eq!(
+            nsga3_spans_from_coefficients(&[3.0, 4.0], &coefficients),
+            None
+        );
+
+        let pop: Vec<Individual> = vec![
+            Individual {
+                x: Vec::new(),
+                f: vec![1.0, 2.0],
+            },
+            Individual {
+                x: Vec::new(),
+                f: vec![3.0, 4.0],
+            },
+        ];
+        assert_eq!(
+            nsga3_hyperplane_span(&pop, &[0, 1], &[0.0, 0.0], &[3.0, 4.0]),
+            None,
+            "negative intercepts must be rejected on the production conversion path"
+        );
+    }
+
+    #[test]
+    fn nsga3_normalization_nonfinite_considered_input_refuses_intercepts_exactly() {
+        let (mut pop, mut fronts, mut considered) = intercept_fixture();
+        pop.push(individual([f64::NAN, 1.0, 1.0]));
+        fronts.push(1);
+        considered.push(pop.len() - 1);
+        let (legacy_ideal, legacy_span) = legacy_normalization(&pop, &fronts, &considered);
+        let (ideal, span) = nsga3_normalization(&pop, &fronts, &considered, 3);
+
+        assert_eq!(
+            ideal
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>(),
-            [-0.5f64, 2.5]
+            legacy_ideal
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            span.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            legacy_span
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            nsga3_extreme_indices(&pop, &considered, &ideal, &legacy_span, 3),
+            None
+        );
+        assert_eq!(
+            nsga3_solve_hyperplane(&[
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, f64::INFINITY, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ]),
+            None
         );
     }
 

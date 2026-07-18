@@ -17,6 +17,18 @@ the fs-opt problem IR is a wiring bead once that crate stabilizes
 (deliberate collision avoidance, bead 7tv.4 trail).
 
 ## Public types and semantics
+- `nsga3(...)` uses the versioned
+  `NSGA3_NORMALIZATION_POLICY` variant
+  `frankensim-scale-equilibrated-current-generation-asf-intercepts-v1`.
+  This is a FrankenSim extension, not canonical Deb--Jain normalization:
+  translated objectives are equilibrated by current considered-set rank-zero
+  maxima before ASF extreme selection, and ideal/extreme/intercept state is not
+  retained across generations. The public descriptor binds the ASF epsilon
+  (`1e-6`), span floor (`1e-30`), pivot-ratio floor (`1e-12`),
+  condition-error limit (`1e-8`), residual multiplier (`512`), 64-objective
+  intercept cap, current-generation candidate/ideal/extreme policies,
+  row-oriented column-scaled LU policy, exact fallback, retention, and
+  non-finite-input no-claim strings for downstream configuration identities.
 - `cmaes(f, x0, CmaParams, seed) -> CmaReport` — full-covariance CMA-ES
   with the standard Hansen couplings (log-rank weights, rank-µ + rank-1
   covariance updates, cumulative step-size adaptation): the natural-
@@ -300,16 +312,15 @@ Das–Dennis counts
 (C(p+m−1, m−1) exact: 91 at (3,12), 70 at (5,4)) and on-simplex
 membership; public guards reject zero-division directions, invalid
 NSGA-III reference directions, empty MOEA/D weights, and zero
-neighborhoods at the API boundary; DTLZ2(m=3) at standard budgets —
-worst | ‖f‖−1 | = 0.0238 against the unit-sphere-octant front with
-98% reference-direction coverage; the MANY-OBJECTIVE claim at m = 5:
-NSGA-III beats NSGA-II 6.51 vs 4.39 on MC-estimated hypervolume at
-matched budget (the classic motivation, measured by composition with
-mc_hypervolume) plus bitwise replay; MOEA/D converges on ZDT1 and is
-competitive with NSGA-III on DTLZ2(m=3) at matched budget (2.7457 vs
-2.7775 hypervolume in the current deterministic battery) plus bitwise
-replay; NSGA-III golden
-`0xd912_6c49_f1b1_6897`.
+neighborhoods at the API boundary; DTLZ2(m=3), the m=5 matched-budget
+NSGA-III/NSGA-II comparison, the matched-budget MOEA/D comparison, and bitwise
+replay remain executable gates. The earlier `0.0238`/98%, `6.51` vs `4.39`, and
+`2.7457` vs `2.7775` observations belong to the pre-extension maxima-normalized
+lane; they are historical context, not measurements of the named
+scale-equilibrated v1 variant. Its policy-bound golden schema is v2 and
+deliberately retains `GOLDEN_HASH_V2=None` until the central runtime selector
+emits and reviewers approve the actual hash; the former
+`0xd912_6c49_f1b1_6897` hash is not relabeled as current evidence.
 tests/wfg4_battery.rs adds the canonical normalized WFG4 fixture at
 `M=3, k=4, l=20`, following the corrected WFG toolkit's `s_multi(30,10,0.35)`,
 equal-weight `r_sum`, and concave shape construction. It composes that evaluator
@@ -318,9 +329,10 @@ objective evaluations per run. The battery checks the analytic `[0,0,6]`
 front extreme, the output-reconstructed scaled-sphere identity over deterministic
 probes, a wrong-center transformation mutant, exact evaluation accounting, front
 distance, Das-Dennis direction coverage, exact 3D hypervolume, and complete
-ordered-front bitwise replay. A canonical configuration identity binds units,
-seed plus stream kernel/tile, algorithm constants, budgets, gates, versions, and
-capabilities. Separate original/replay front children bind every retained decision
+ordered-front bitwise replay. Its v2 canonical configuration identity binds units,
+seed plus stream kernel/tile, algorithm constants, every field of
+`NSGA3_NORMALIZATION_POLICY`, budgets, gates, versions, and capabilities.
+Separate original/replay front children bind every retained decision
 and objective bit; the result child binds both roots, actual transform samples,
 all metrics and verdicts, and the first differing component/bit when replay fails.
 The validated object receipt and four `ConformanceCase` rows retain those roots,
@@ -328,13 +340,14 @@ while machine-neutral `BenchmarkResult` rows expose hypervolume and mean front
 distance for later trend wiring. The formula source is Huband et al., *A Scalable
 Multi-objective Test Problem Toolkit* (corrected EMO 2005 version), cross-read
 against jMetal revision `ea7e882f6b8f94b99535921674e62cda7986f20e`.
-At the retained seed and fixed 36,892-evaluation budget, the first central run
-measured mean front distance `0.23171459361058497`; the coarse conformance ceiling
-is `0.25`, leaving `0.01828540638941503` absolute (7.3% of the ceiling) headroom.
-This is a fixed-fixture acceptance band, not a convergence-rate or
-optimizer-performance claim. The budget, returned front, and orthogonal gates
-remain unchanged; any passing rerun receipt supersedes rather than relabels the
-original red receipt.
+At the retained seed and fixed 36,892-evaluation budget, the first
+pre-extension central run measured mean front distance
+`0.23171459361058497`; that observation is not a measurement of the v2 campaign
+identity. The coarse conformance ceiling remains `0.25`, but current headroom is
+intentionally unreported until the central v2 run emits it. This is a
+fixed-fixture acceptance band, not a convergence-rate or optimizer-performance
+claim. The budget and orthogonal gates remain unchanged; a passing v2 receipt
+supersedes rather than relabels the earlier receipt.
 As in the older fs-dfo aggregate batteries, impossible public-API structural
 failures such as an empty front remain ordinary Rust diagnostics before aggregate
 emission; gate failures after a front exists retain structured red evidence.
@@ -640,9 +653,19 @@ remain assertion-only and silent.
   front-quality, hypervolume, coverage, diversity, optimizer-superiority,
   all-objective/dimension/configuration/seed, refreshed cross-ISA, `Cx`, checkpoint,
   parallelism, authenticated-ledger, external-oracle, or performance claim.
-- NSGA-III normalization uses the ideal point with FIRST-front
-  per-objective maxima as the nadir estimate; the full ASF
-  extreme-point construction is the recorded refinement.
+- NSGA-III ordinary normalization is the named FrankenSim
+  scale-equilibrated/current-generation extension: the ideal is the
+  componentwise minimum over the current environmental-selection considered
+  set, current rank-zero translated maxima equilibrate the ASF, distinct ASF
+  extremes form the rows of a column-scaled hyperplane system, and positive
+  finite intercepts become association spans. FIRST-front maxima floored at
+  `1e-30` are only the exact refusal fallback for duplicate extremes, unsupported
+  objective count, non-finite inputs, singular/ill-conditioned/tiny-pivot/high-
+  residual solves, or invalid coefficients/intercepts. This is not canonical
+  Deb--Jain normalization and makes no cross-generation ideal/extreme retention
+  claim. On non-finite objective input the fallback is a deterministic return
+  path, not authority that its spans or downstream distances are finite or
+  usable.
 - The WFG4 battery claims only the normalized tri-objective `k=4, l=20`
   in-repository fixture and its recorded seed/budget. It does not claim the
   complete WFG suite, external COCO parity, optimizer performance, refreshed

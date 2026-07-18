@@ -305,21 +305,61 @@ fn many_objective_m5_beats_nsga2_on_hv() {
     );
 }
 
-const GOLDEN_HASH: u64 = 0xd912_6c49_f1b1_6897; // recorded at vcia NSGA-III lane, frozen
+// The v1 hash named the pre-extension maxima-normalized lane. The v2 policy
+// changes selection semantics and must be measured by the central runtime lane;
+// `None` is an intentional fail-loud sentinel, never a guessed replacement.
+const GOLDEN_HASH_V2: Option<u64> = None;
+
+fn golden_feed_bytes(accumulator: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        *accumulator ^= u64::from(byte);
+        *accumulator = accumulator.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+fn golden_feed_u64(accumulator: &mut u64, value: u64) {
+    golden_feed_bytes(accumulator, &value.to_le_bytes());
+}
+
+fn golden_feed_str(accumulator: &mut u64, value: &str) {
+    golden_feed_u64(
+        accumulator,
+        u64::try_from(value.len()).expect("policy string length fits u64"),
+    );
+    golden_feed_bytes(accumulator, value.as_bytes());
+}
+
+fn golden_feed_normalization_policy(accumulator: &mut u64) {
+    let policy = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY;
+    golden_feed_str(accumulator, "fs-dfo-nsga3-golden-v2");
+    golden_feed_u64(accumulator, u64::from(policy.schema_version));
+    golden_feed_str(accumulator, policy.variant);
+    golden_feed_u64(accumulator, policy.asf_epsilon.to_bits());
+    golden_feed_u64(accumulator, policy.span_floor.to_bits());
+    golden_feed_u64(accumulator, policy.pivot_ratio_floor.to_bits());
+    golden_feed_u64(accumulator, policy.condition_error_limit.to_bits());
+    golden_feed_u64(accumulator, policy.residual_epsilon_multiplier.to_bits());
+    golden_feed_u64(
+        accumulator,
+        u64::try_from(policy.max_objectives).expect("objective cap fits u64"),
+    );
+    golden_feed_str(accumulator, policy.candidate_scope);
+    golden_feed_str(accumulator, policy.ideal_policy);
+    golden_feed_str(accumulator, policy.extreme_policy);
+    golden_feed_str(accumulator, policy.hyperplane_policy);
+    golden_feed_str(accumulator, policy.fallback_policy);
+    golden_feed_str(accumulator, policy.retention_policy);
+    golden_feed_str(accumulator, policy.nonfinite_policy);
+}
 
 #[test]
 fn nsga3_golden_hash() {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |v: f64| {
-        for byte in v.to_bits().to_le_bytes() {
-            acc ^= u64::from(byte);
-            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    golden_feed_normalization_policy(&mut acc);
     let dirs = das_dennis(3, 6);
     for d in dirs.iter().step_by(5) {
         for v in d {
-            feed(*v);
+            golden_feed_u64(&mut acc, v.to_bits());
         }
     }
     let params = NsgaParams {
@@ -334,19 +374,32 @@ fn nsga3_golden_hash() {
     let front = nsga3(&mut f, 5, (0.0, 1.0), &dirs, &params);
     for ind in front.iter().take(10) {
         for v in &ind.f {
-            feed(*v);
+            golden_feed_u64(&mut acc, v.to_bits());
         }
     }
+    let expected = GOLDEN_HASH_V2
+        .map(|hash| format!("{hash:#018x}"))
+        .unwrap_or_else(|| "pending-central-refresh".to_string());
+    let normalization = fs_dfo::moo::NSGA3_NORMALIZATION_POLICY;
     measurement(
         "nsga3-golden",
         format!(
-            "{{\"actual\":\"{acc:#018x}\",\"expected\":\"{GOLDEN_HASH:#018x}\",\
-             \"input_seed\":{GOLDEN_INPUT_SEED}}}"
+            "{{\"identity_schema\":2,\"actual\":\"{acc:#018x}\",\"expected\":\"{expected}\",\
+             \"input_seed\":{GOLDEN_INPUT_SEED},\"normalization_variant\":\"{}\",\
+             \"normalization_policy_schema\":{}}}",
+            normalization.variant, normalization.schema_version,
         ),
     );
+    let Some(golden_hash) = GOLDEN_HASH_V2 else {
+        panic!(
+            "NSGA-III v2 golden is intentionally pending central measurement; observed \
+             {acc:#018x}. Review the complete central selector output before replacing \
+             GOLDEN_HASH_V2=None"
+        );
+    };
     assert_eq!(
-        acc, GOLDEN_HASH,
-        "nsga3 bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
+        acc, golden_hash,
+        "nsga3 bits changed: {acc:#018x} vs {golden_hash:#018x} — bump only with semantic \
          justification (golden-evidence policy)"
     );
 }
