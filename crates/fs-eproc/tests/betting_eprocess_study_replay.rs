@@ -1,10 +1,14 @@
 //! G0/G3/G5 full-trajectory replay for [`fs_eproc::BettingEProcess`].
 //!
 //! The production process consumes one fixed bounded trajectory while a
-//! test-local shadow independently reconstructs its predictable bets,
-//! sufficient statistics, strict-log wealth, complete public surface, and a
-//! fixed alpha lattice. The fixture also exercises clone/resume and verifies
-//! that refused observations leave cloned public state untouched. A separately
+//! test-local shadow independently reconstructs reference-model predictable
+//! bets, sufficient statistics, strict-log wealth, and a fixed alpha lattice.
+//! Every pre-observation production state is also cloned and fed a non-null
+//! probe, making the otherwise wealth-neutral observation at the null unable
+//! to conceal a production-bet change. Shadow-only fields are annotations, not
+//! claims of production private-state introspection. The fixture exercises
+//! clone/resume and verifies that refused observations leave cloned public
+//! state untouched. A separately
 //! seeded one-bit checkpoint corruption is retained as stable red evidence.
 //! Its `StreamKey` is evidence-generator provenance only; it does not randomize
 //! the statistical fixture or strengthen any validity claim.
@@ -23,13 +27,14 @@ use fs_obs::{Emitter, Event, EventKind, Severity};
 use fs_rand::StreamKey;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-const SUITE: &str = "fs-eproc/betting-eprocess-study-replay-v1";
+const SUITE: &str = "fs-eproc/betting-eprocess-study-replay-v2";
 const CASE: &str = "predictable-bet-full-trajectory";
 const RED_CASE: &str = "seeded-checkpoint-log-e-corruption";
 
 const NULL_MEAN: f64 = 0.5;
 const AGGRESSIVENESS: f64 = 0.5;
 const VARIANCE_FLOOR: f64 = 1.0e-4;
+const PROBE_OBSERVATION: f64 = 1.0;
 const PREFIX: [f64; 7] = [1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0];
 const ONES: usize = 24;
 const SUFFIX: [f64; 3] = [0.5, 0.0, 1.0];
@@ -84,31 +89,45 @@ struct InitialPublicState {
 struct Checkpoint {
     ordinal: u64,
     observation_bits: u64,
-    n_before: u64,
-    sum_before_bits: u64,
-    sum_sq_before_bits: u64,
-    regularized_mean_bits: u64,
-    regularized_second_moment_bits: u64,
-    unfloored_variance_bits: u64,
-    variance_bits: u64,
-    raw_lambda_bits: u64,
-    lambda_cap_bits: u64,
-    clipped_lambda_bits: u64,
-    bet_class: BetClass,
-    wealth_factor_bits: u64,
-    log_increment_bits: u64,
-    log_wealth_before_bits: u64,
-    n_after: u64,
-    sum_after_bits: u64,
-    sum_sq_after_bits: u64,
+    /// Independent reference-model annotations, never production introspection.
+    shadow: ShadowStep,
+    /// Public outputs from the production trajectory observation.
+    production: PublicStep,
+    /// Public outputs from a clone of the pre-observation production state
+    /// after feeding [`PROBE_OBSERVATION`]. This makes its next bet observable.
+    production_probe: PublicStep,
+    first_crossing_ordinals: [Option<u64>; ALPHAS.len()],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PublicStep {
     returned_log_e_bits: u64,
     accessor_log_e_bits: u64,
     e_value_bits: u64,
     len: u64,
     is_empty: bool,
     rejection_decisions: [bool; ALPHAS.len()],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetainedGolden {
+    config_root: u64,
+    result_root: u64,
+    mutant_root: u64,
+    red_event_content_hash: u64,
     first_crossing_ordinals: [Option<u64>; ALPHAS.len()],
 }
+
+// Re-pinned from the first centralized v2 runtime after this static repair.
+// The all-sentinel value deliberately keeps the code-first snapshot from being
+// mistaken for retained semantic proof before that batch run occurs.
+const EXPECTED_RETAINED_GOLDEN: RetainedGolden = RetainedGolden {
+    config_root: u64::MAX,
+    result_root: u64::MAX,
+    mutant_root: u64::MAX,
+    red_event_content_hash: u64::MAX,
+    first_crossing_ordinals: [None; ALPHAS.len()],
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StudyRecord {
@@ -342,7 +361,7 @@ fn mutation_coordinates() -> MutationCoordinates {
 }
 
 fn config_identity(coordinates: MutationCoordinates) -> ReplayIdentity {
-    let mut builder = IdentityBuilder::new("fs-eproc-betting-eprocess-config-v1")
+    let mut builder = IdentityBuilder::new("fs-eproc-betting-eprocess-config-v2")
         .str("statistical-object", "one-sided-predictable-betting-e-process")
         .str("observation-units", "dimensionless-bounded-score")
         .f64_bits("support-lower", 0.0)
@@ -350,6 +369,7 @@ fn config_identity(coordinates: MutationCoordinates) -> ReplayIdentity {
         .f64_bits("null-mean", NULL_MEAN)
         .f64_bits("aggressiveness", AGGRESSIVENESS)
         .f64_bits("variance-floor", VARIANCE_FLOOR)
+        .f64_bits("production-probe-observation", PROBE_OBSERVATION)
         .str("regularization", "one-pseudo-observation-at-null")
         .str("lambda-policy", "raw=(regularized-mean-null)/floored-variance")
         .str("lambda-clamp", "zero-to-aggressiveness-over-max-null-complement")
@@ -392,7 +412,7 @@ fn config_identity(coordinates: MutationCoordinates) -> ReplayIdentity {
 }
 
 fn result_identity(config: &ReplayIdentity, record: &StudyRecord) -> ReplayIdentity {
-    let mut builder = IdentityBuilder::new("fs-eproc-betting-eprocess-result-v1")
+    let mut builder = IdentityBuilder::new("fs-eproc-betting-eprocess-result-v2")
         .child("config", config)
         .u64("observation-count", usize_u64(record.observations.len()))
         .u64("checkpoint-count", usize_u64(record.checkpoints.len()))
@@ -411,60 +431,99 @@ fn result_identity(config: &ReplayIdentity, record: &StudyRecord) -> ReplayIdent
         builder = builder
             .u64("checkpoint-ordinal", checkpoint.ordinal)
             .u64("checkpoint-observation-bits", checkpoint.observation_bits)
-            .u64("checkpoint-n-before", checkpoint.n_before)
-            .u64("checkpoint-sum-before-bits", checkpoint.sum_before_bits)
+            .u64("shadow-n-before", checkpoint.shadow.n_before)
+            .u64("shadow-sum-before-bits", checkpoint.shadow.sum_before_bits)
             .u64(
-                "checkpoint-sum-sq-before-bits",
-                checkpoint.sum_sq_before_bits,
+                "shadow-sum-sq-before-bits",
+                checkpoint.shadow.sum_sq_before_bits,
             )
             .u64(
-                "checkpoint-regularized-mean-bits",
-                checkpoint.regularized_mean_bits,
+                "shadow-regularized-mean-bits",
+                checkpoint.shadow.regularized_mean_bits,
             )
             .u64(
-                "checkpoint-regularized-second-moment-bits",
-                checkpoint.regularized_second_moment_bits,
+                "shadow-regularized-second-moment-bits",
+                checkpoint.shadow.regularized_second_moment_bits,
             )
             .u64(
-                "checkpoint-unfloored-variance-bits",
-                checkpoint.unfloored_variance_bits,
+                "shadow-unfloored-variance-bits",
+                checkpoint.shadow.unfloored_variance_bits,
             )
-            .u64("checkpoint-variance-bits", checkpoint.variance_bits)
-            .u64("checkpoint-raw-lambda-bits", checkpoint.raw_lambda_bits)
-            .u64("checkpoint-lambda-cap-bits", checkpoint.lambda_cap_bits)
+            .u64("shadow-variance-bits", checkpoint.shadow.variance_bits)
+            .u64("shadow-raw-lambda-bits", checkpoint.shadow.raw_lambda_bits)
+            .u64("shadow-lambda-cap-bits", checkpoint.shadow.lambda_cap_bits)
             .u64(
-                "checkpoint-clipped-lambda-bits",
-                checkpoint.clipped_lambda_bits,
+                "shadow-clipped-lambda-bits",
+                checkpoint.shadow.clipped_lambda_bits,
             )
-            .str("checkpoint-bet-class", checkpoint.bet_class.label())
+            .str("shadow-bet-class", checkpoint.shadow.bet_class.label())
             .u64(
-                "checkpoint-wealth-factor-bits",
-                checkpoint.wealth_factor_bits,
-            )
-            .u64(
-                "checkpoint-log-increment-bits",
-                checkpoint.log_increment_bits,
+                "shadow-wealth-factor-bits",
+                checkpoint.shadow.wealth_factor_bits,
             )
             .u64(
-                "checkpoint-log-wealth-before-bits",
-                checkpoint.log_wealth_before_bits,
-            )
-            .u64("checkpoint-n-after", checkpoint.n_after)
-            .u64("checkpoint-sum-after-bits", checkpoint.sum_after_bits)
-            .u64("checkpoint-sum-sq-after-bits", checkpoint.sum_sq_after_bits)
-            .u64(
-                "checkpoint-returned-log-e-bits",
-                checkpoint.returned_log_e_bits,
+                "shadow-log-increment-bits",
+                checkpoint.shadow.log_increment_bits,
             )
             .u64(
-                "checkpoint-accessor-log-e-bits",
-                checkpoint.accessor_log_e_bits,
+                "shadow-log-wealth-before-bits",
+                checkpoint.shadow.log_wealth_before_bits,
             )
-            .u64("checkpoint-e-value-bits", checkpoint.e_value_bits)
-            .u64("checkpoint-len", checkpoint.len)
-            .flag("checkpoint-is-empty", checkpoint.is_empty);
-        for decision in checkpoint.rejection_decisions {
-            builder = builder.flag("checkpoint-rejection-decision", decision);
+            .u64("shadow-n-after", checkpoint.shadow.n_after)
+            .u64("shadow-sum-after-bits", checkpoint.shadow.sum_after_bits)
+            .u64(
+                "shadow-sum-sq-after-bits",
+                checkpoint.shadow.sum_sq_after_bits,
+            )
+            .u64(
+                "shadow-log-wealth-after-bits",
+                checkpoint.shadow.log_wealth_after_bits,
+            )
+            .u64("shadow-e-value-bits", checkpoint.shadow.e_value_bits)
+            .u64(
+                "production-returned-log-e-bits",
+                checkpoint.production.returned_log_e_bits,
+            )
+            .u64(
+                "production-accessor-log-e-bits",
+                checkpoint.production.accessor_log_e_bits,
+            )
+            .u64(
+                "production-e-value-bits",
+                checkpoint.production.e_value_bits,
+            )
+            .u64("production-len", checkpoint.production.len)
+            .flag("production-is-empty", checkpoint.production.is_empty)
+            .u64(
+                "production-probe-returned-log-e-bits",
+                checkpoint.production_probe.returned_log_e_bits,
+            )
+            .u64(
+                "production-probe-accessor-log-e-bits",
+                checkpoint.production_probe.accessor_log_e_bits,
+            )
+            .u64(
+                "production-probe-e-value-bits",
+                checkpoint.production_probe.e_value_bits,
+            )
+            .u64("production-probe-len", checkpoint.production_probe.len)
+            .flag(
+                "production-probe-is-empty",
+                checkpoint.production_probe.is_empty,
+            );
+        for decision in checkpoint.shadow.rejection_decisions {
+            builder = builder.flag("shadow-rejection-decision", decision);
+        }
+        for crossing in checkpoint.shadow.first_crossing_ordinals {
+            builder = builder
+                .flag("shadow-first-crossing-present", crossing.is_some())
+                .u64("shadow-first-crossing-ordinal", crossing.unwrap_or(0));
+        }
+        for decision in checkpoint.production.rejection_decisions {
+            builder = builder.flag("production-rejection-decision", decision);
+        }
+        for decision in checkpoint.production_probe.rejection_decisions {
+            builder = builder.flag("production-probe-rejection-decision", decision);
         }
         for crossing in checkpoint.first_crossing_ordinals {
             builder = builder
@@ -517,6 +576,29 @@ impl SealedStudy {
     }
 }
 
+fn public_step(process: &mut BettingEProcess, observation: f64) -> PublicStep {
+    let returned_log_e = process.observe(observation);
+    PublicStep {
+        returned_log_e_bits: returned_log_e.to_bits(),
+        accessor_log_e_bits: process.log_e_value().to_bits(),
+        e_value_bits: process.e_value().to_bits(),
+        len: process.len(),
+        is_empty: process.is_empty(),
+        rejection_decisions: ALPHAS.map(|alpha| process.rejects_at(alpha)),
+    }
+}
+
+fn shadow_public_step(step: ShadowStep) -> PublicStep {
+    PublicStep {
+        returned_log_e_bits: step.log_wealth_after_bits,
+        accessor_log_e_bits: step.log_wealth_after_bits,
+        e_value_bits: step.e_value_bits,
+        len: step.n_after,
+        is_empty: false,
+        rejection_decisions: step.rejection_decisions,
+    }
+}
+
 fn observe_checkpoint(
     process: &mut BettingEProcess,
     shadow: &mut ShadowEProcess,
@@ -524,53 +606,38 @@ fn observe_checkpoint(
     observation: f64,
     first_crossings: &mut [Option<u64>; ALPHAS.len()],
 ) -> Checkpoint {
+    let mut shadow_probe = shadow.clone();
+    let expected_probe = shadow_probe.observe(PROBE_OBSERVATION);
+    let mut process_probe = process.clone();
+    let production_probe = public_step(&mut process_probe, PROBE_OBSERVATION);
+    assert_eq!(
+        production_probe,
+        shadow_public_step(expected_probe),
+        "non-null clone probe must expose the production next bet",
+    );
+
     let expected = shadow.observe(observation);
-    let returned_log_e = process.observe(observation);
-    let rejection_decisions = ALPHAS.map(|alpha| process.rejects_at(alpha));
+    let production = public_step(process, observation);
+    assert_eq!(
+        production,
+        shadow_public_step(expected),
+        "production public trajectory must match the shadow reference",
+    );
     let ordinal_u64 = usize_u64(ordinal);
-    for (index, &rejects) in rejection_decisions.iter().enumerate() {
+    for (index, &rejects) in production.rejection_decisions.iter().enumerate() {
         if rejects && first_crossings[index].is_none() {
             first_crossings[index] = Some(ordinal_u64);
         }
     }
 
-    assert_eq!(returned_log_e.to_bits(), expected.log_wealth_after_bits);
-    assert_eq!(
-        process.log_e_value().to_bits(),
-        expected.log_wealth_after_bits
-    );
-    assert_eq!(process.e_value().to_bits(), expected.e_value_bits);
-    assert_eq!(process.len(), expected.n_after);
-    assert_eq!(process.is_empty(), expected.n_after == 0);
-    assert_eq!(rejection_decisions, expected.rejection_decisions);
     assert_eq!(*first_crossings, expected.first_crossing_ordinals);
 
     Checkpoint {
         ordinal: ordinal_u64,
         observation_bits: observation.to_bits(),
-        n_before: expected.n_before,
-        sum_before_bits: expected.sum_before_bits,
-        sum_sq_before_bits: expected.sum_sq_before_bits,
-        regularized_mean_bits: expected.regularized_mean_bits,
-        regularized_second_moment_bits: expected.regularized_second_moment_bits,
-        unfloored_variance_bits: expected.unfloored_variance_bits,
-        variance_bits: expected.variance_bits,
-        raw_lambda_bits: expected.raw_lambda_bits,
-        lambda_cap_bits: expected.lambda_cap_bits,
-        clipped_lambda_bits: expected.clipped_lambda_bits,
-        bet_class: expected.bet_class,
-        wealth_factor_bits: expected.wealth_factor_bits,
-        log_increment_bits: expected.log_increment_bits,
-        log_wealth_before_bits: expected.log_wealth_before_bits,
-        n_after: expected.n_after,
-        sum_after_bits: expected.sum_after_bits,
-        sum_sq_after_bits: expected.sum_sq_after_bits,
-        returned_log_e_bits: returned_log_e.to_bits(),
-        accessor_log_e_bits: process.log_e_value().to_bits(),
-        e_value_bits: process.e_value().to_bits(),
-        len: process.len(),
-        is_empty: process.is_empty(),
-        rejection_decisions,
+        shadow: expected,
+        production,
+        production_probe,
         first_crossing_ordinals: *first_crossings,
     }
 }
@@ -617,39 +684,70 @@ fn run_study(config: &ReplayIdentity) -> SealedStudy {
 }
 
 fn checkpoint_mismatch(index: usize, actual: &Checkpoint, expected: &Checkpoint) -> Option<String> {
-    macro_rules! check {
+    macro_rules! check_top {
         ($field:ident) => {
             if actual.$field != expected.$field {
                 return Some(format!("checkpoints[{index}].{}", stringify!($field)));
             }
         };
     }
-    check!(ordinal);
-    check!(observation_bits);
-    check!(n_before);
-    check!(sum_before_bits);
-    check!(sum_sq_before_bits);
-    check!(regularized_mean_bits);
-    check!(regularized_second_moment_bits);
-    check!(unfloored_variance_bits);
-    check!(variance_bits);
-    check!(raw_lambda_bits);
-    check!(lambda_cap_bits);
-    check!(clipped_lambda_bits);
-    check!(bet_class);
-    check!(wealth_factor_bits);
-    check!(log_increment_bits);
-    check!(log_wealth_before_bits);
-    check!(n_after);
-    check!(sum_after_bits);
-    check!(sum_sq_after_bits);
-    check!(returned_log_e_bits);
-    check!(accessor_log_e_bits);
-    check!(e_value_bits);
-    check!(len);
-    check!(is_empty);
-    check!(rejection_decisions);
-    check!(first_crossing_ordinals);
+    macro_rules! check_shadow {
+        ($field:ident) => {
+            if actual.shadow.$field != expected.shadow.$field {
+                return Some(format!(
+                    "checkpoints[{index}].shadow.{}",
+                    stringify!($field),
+                ));
+            }
+        };
+    }
+    macro_rules! check_public {
+        ($which:ident, $field:ident) => {
+            if actual.$which.$field != expected.$which.$field {
+                return Some(format!(
+                    "checkpoints[{index}].{}.{}",
+                    stringify!($which),
+                    stringify!($field),
+                ));
+            }
+        };
+    }
+    check_top!(ordinal);
+    check_top!(observation_bits);
+    check_shadow!(n_before);
+    check_shadow!(sum_before_bits);
+    check_shadow!(sum_sq_before_bits);
+    check_shadow!(regularized_mean_bits);
+    check_shadow!(regularized_second_moment_bits);
+    check_shadow!(unfloored_variance_bits);
+    check_shadow!(variance_bits);
+    check_shadow!(raw_lambda_bits);
+    check_shadow!(lambda_cap_bits);
+    check_shadow!(clipped_lambda_bits);
+    check_shadow!(bet_class);
+    check_shadow!(wealth_factor_bits);
+    check_shadow!(log_increment_bits);
+    check_shadow!(log_wealth_before_bits);
+    check_shadow!(n_after);
+    check_shadow!(sum_after_bits);
+    check_shadow!(sum_sq_after_bits);
+    check_shadow!(log_wealth_after_bits);
+    check_shadow!(e_value_bits);
+    check_shadow!(rejection_decisions);
+    check_shadow!(first_crossing_ordinals);
+    check_public!(production, returned_log_e_bits);
+    check_public!(production, accessor_log_e_bits);
+    check_public!(production, e_value_bits);
+    check_public!(production, len);
+    check_public!(production, is_empty);
+    check_public!(production, rejection_decisions);
+    check_public!(production_probe, returned_log_e_bits);
+    check_public!(production_probe, accessor_log_e_bits);
+    check_public!(production_probe, e_value_bits);
+    check_public!(production_probe, len);
+    check_public!(production_probe, is_empty);
+    check_public!(production_probe, rejection_decisions);
+    check_top!(first_crossing_ordinals);
     None
 }
 
@@ -683,33 +781,15 @@ fn semantic_mismatch(record: &StudyRecord) -> Option<String> {
         .zip(&record.checkpoints)
         .enumerate()
     {
+        let mut shadow_probe = shadow.clone();
+        let expected_probe = shadow_probe.observe(PROBE_OBSERVATION);
         let expected_step = shadow.observe(observation);
         let expected = Checkpoint {
             ordinal: usize_u64(index + 1),
             observation_bits: observation.to_bits(),
-            n_before: expected_step.n_before,
-            sum_before_bits: expected_step.sum_before_bits,
-            sum_sq_before_bits: expected_step.sum_sq_before_bits,
-            regularized_mean_bits: expected_step.regularized_mean_bits,
-            regularized_second_moment_bits: expected_step.regularized_second_moment_bits,
-            unfloored_variance_bits: expected_step.unfloored_variance_bits,
-            variance_bits: expected_step.variance_bits,
-            raw_lambda_bits: expected_step.raw_lambda_bits,
-            lambda_cap_bits: expected_step.lambda_cap_bits,
-            clipped_lambda_bits: expected_step.clipped_lambda_bits,
-            bet_class: expected_step.bet_class,
-            wealth_factor_bits: expected_step.wealth_factor_bits,
-            log_increment_bits: expected_step.log_increment_bits,
-            log_wealth_before_bits: expected_step.log_wealth_before_bits,
-            n_after: expected_step.n_after,
-            sum_after_bits: expected_step.sum_after_bits,
-            sum_sq_after_bits: expected_step.sum_sq_after_bits,
-            returned_log_e_bits: expected_step.log_wealth_after_bits,
-            accessor_log_e_bits: expected_step.log_wealth_after_bits,
-            e_value_bits: expected_step.e_value_bits,
-            len: expected_step.n_after,
-            is_empty: false,
-            rejection_decisions: expected_step.rejection_decisions,
+            shadow: expected_step,
+            production: shadow_public_step(expected_step),
+            production_probe: shadow_public_step(expected_probe),
             first_crossing_ordinals: expected_step.first_crossing_ordinals,
         };
         if let Some(mismatch) = checkpoint_mismatch(index, actual, &expected) {
@@ -793,51 +873,57 @@ fn assert_trajectory_semantics(record: &StudyRecord) {
     let classes: Vec<_> = record
         .checkpoints
         .iter()
-        .map(|checkpoint| checkpoint.bet_class)
+        .map(|checkpoint| checkpoint.shadow.bet_class)
         .collect();
     assert!(classes.contains(&BetClass::ZeroClamped));
     assert!(classes.contains(&BetClass::Interior));
     assert!(classes.contains(&BetClass::CapClamped));
-    assert_eq!(record.checkpoints[0].bet_class, BetClass::ZeroClamped);
-    assert_eq!(record.checkpoints[1].bet_class, BetClass::CapClamped);
-    assert_eq!(record.checkpoints[3].bet_class, BetClass::Interior);
     assert_eq!(
-        record.checkpoints[0].unfloored_variance_bits,
+        record.checkpoints[0].shadow.bet_class,
+        BetClass::ZeroClamped
+    );
+    assert_eq!(record.checkpoints[1].shadow.bet_class, BetClass::CapClamped);
+    assert_eq!(record.checkpoints[3].shadow.bet_class, BetClass::Interior);
+    assert_eq!(
+        record.checkpoints[0].shadow.unfloored_variance_bits,
         0.0f64.to_bits()
     );
     assert_eq!(
-        record.checkpoints[0].variance_bits,
+        record.checkpoints[0].shadow.variance_bits,
         VARIANCE_FLOOR.to_bits()
     );
-    assert_eq!(record.checkpoints[0].lambda_cap_bits, 1.0f64.to_bits());
+    assert_eq!(
+        record.checkpoints[0].shadow.lambda_cap_bits,
+        1.0f64.to_bits()
+    );
 
     // After [1, 1, 0, 0], the regularized mean lands exactly on the null:
     // this is the exact-zero boundary, not the negative one-sided branch.
     let exact_zero = record.checkpoints[4];
-    assert_eq!(exact_zero.raw_lambda_bits, 0.0f64.to_bits());
-    assert_eq!(exact_zero.clipped_lambda_bits, 0.0f64.to_bits());
-    assert_eq!(exact_zero.bet_class, BetClass::ZeroClamped);
+    assert_eq!(exact_zero.shadow.raw_lambda_bits, 0.0f64.to_bits());
+    assert_eq!(exact_zero.shadow.clipped_lambda_bits, 0.0f64.to_bits());
+    assert_eq!(exact_zero.shadow.bet_class, BetClass::ZeroClamped);
     // After the fifth observation (another zero), the raw predictable bet is
     // strictly negative and the one-sided policy must clamp it to positive 0.
     let negative_raw = record.checkpoints[5];
-    assert!(f64::from_bits(negative_raw.raw_lambda_bits) < 0.0);
-    assert_eq!(negative_raw.clipped_lambda_bits, 0.0f64.to_bits());
-    assert_eq!(negative_raw.bet_class, BetClass::ZeroClamped);
+    assert!(f64::from_bits(negative_raw.shadow.raw_lambda_bits) < 0.0);
+    assert_eq!(negative_raw.shadow.clipped_lambda_bits, 0.0f64.to_bits());
+    assert_eq!(negative_raw.shadow.bet_class, BetClass::ZeroClamped);
 
     // The post-prefix run first recovers through a genuine interior bet, then
     // reaches and stays at the configured cap as evidence accumulates.
     let interior_recovery = record.checkpoints[PREFIX.len()];
-    assert_eq!(interior_recovery.bet_class, BetClass::Interior);
-    assert!(f64::from_bits(interior_recovery.clipped_lambda_bits) > 0.0);
+    assert_eq!(interior_recovery.shadow.bet_class, BetClass::Interior);
+    assert!(f64::from_bits(interior_recovery.shadow.clipped_lambda_bits) > 0.0);
     assert!(
-        f64::from_bits(interior_recovery.clipped_lambda_bits)
-            < f64::from_bits(interior_recovery.lambda_cap_bits)
+        f64::from_bits(interior_recovery.shadow.clipped_lambda_bits)
+            < f64::from_bits(interior_recovery.shadow.lambda_cap_bits)
     );
     let cap_recovery = record.checkpoints[PREFIX.len() + 4];
-    assert_eq!(cap_recovery.bet_class, BetClass::CapClamped);
+    assert_eq!(cap_recovery.shadow.bet_class, BetClass::CapClamped);
     assert_eq!(
-        cap_recovery.clipped_lambda_bits,
-        cap_recovery.lambda_cap_bits
+        cap_recovery.shadow.clipped_lambda_bits,
+        cap_recovery.shadow.lambda_cap_bits
     );
 
     let neutral = PREFIX.len() + ONES;
@@ -846,20 +932,25 @@ fn assert_trajectory_semantics(record: &StudyRecord) {
     let after_loss = record.checkpoints[neutral + 1];
     let after_recovery = record.checkpoints[neutral + 2];
     assert_eq!(after_neutral.observation_bits, 0.5f64.to_bits());
-    assert_eq!(after_neutral.wealth_factor_bits, 1.0f64.to_bits());
-    assert_eq!(after_neutral.log_increment_bits, 0.0f64.to_bits());
+    assert_eq!(after_neutral.shadow.wealth_factor_bits, 1.0f64.to_bits());
+    assert_eq!(after_neutral.shadow.log_increment_bits, 0.0f64.to_bits());
     assert_eq!(
-        after_neutral.returned_log_e_bits, before_neutral.returned_log_e_bits,
+        after_neutral.production.returned_log_e_bits, before_neutral.production.returned_log_e_bits,
         "the null-centered observation must be wealth-neutral",
     );
+    assert_ne!(
+        after_neutral.production_probe.returned_log_e_bits,
+        after_neutral.production.returned_log_e_bits,
+        "the non-null clone probe must make the neutral checkpoint bet observable",
+    );
     assert!(
-        f64::from_bits(after_loss.returned_log_e_bits)
-            < f64::from_bits(after_neutral.returned_log_e_bits),
+        f64::from_bits(after_loss.production.returned_log_e_bits)
+            < f64::from_bits(after_neutral.production.returned_log_e_bits),
         "zero outcome must decrease cap-bet wealth",
     );
     assert!(
-        f64::from_bits(after_recovery.returned_log_e_bits)
-            > f64::from_bits(after_loss.returned_log_e_bits),
+        f64::from_bits(after_recovery.production.returned_log_e_bits)
+            > f64::from_bits(after_loss.production.returned_log_e_bits),
         "final one outcome must recover wealth after the loss",
     );
 
@@ -873,9 +964,17 @@ fn assert_trajectory_semantics(record: &StudyRecord) {
     for (alpha_index, crossing) in record.first_crossing_ordinals.iter().enumerate() {
         let ordinal = usize::try_from(crossing.expect("all thresholds cross"))
             .expect("crossing ordinal fits usize");
-        assert!(record.checkpoints[ordinal - 1].rejection_decisions[alpha_index]);
+        assert!(
+            record.checkpoints[ordinal - 1]
+                .production
+                .rejection_decisions[alpha_index]
+        );
         if ordinal > 1 {
-            assert!(!record.checkpoints[ordinal - 2].rejection_decisions[alpha_index]);
+            assert!(
+                !record.checkpoints[ordinal - 2]
+                    .production
+                    .rejection_decisions[alpha_index]
+            );
         }
     }
 }
@@ -895,10 +994,10 @@ fn exact_one_checkpoint_bit_delta(
     else {
         return false;
     };
-    if checkpoint.returned_log_e_bits != mutation.before {
+    if checkpoint.production.returned_log_e_bits != mutation.before {
         return false;
     }
-    checkpoint.returned_log_e_bits = mutation.after;
+    checkpoint.production.returned_log_e_bits = mutation.after;
     expected == mutant.record
 }
 
@@ -908,7 +1007,9 @@ fn seeded_corruption(
     coordinates: MutationCoordinates,
 ) -> Corruption {
     assert_eq!(coordinates, mutation_coordinates());
-    let before = reference.record.checkpoints[coordinates.checkpoint].returned_log_e_bits;
+    let before = reference.record.checkpoints[coordinates.checkpoint]
+        .production
+        .returned_log_e_bits;
     let before_value = f64::from_bits(before);
     assert!(before_value.is_finite() && before_value != 0.0);
     let after = before ^ (1u64 << coordinates.mantissa_bit);
@@ -921,7 +1022,9 @@ fn seeded_corruption(
     };
 
     let mut stale = reference.clone();
-    stale.record.checkpoints[coordinates.checkpoint].returned_log_e_bits = after;
+    stale.record.checkpoints[coordinates.checkpoint]
+        .production
+        .returned_log_e_bits = after;
     let stale_error = stale
         .validate_payload(config)
         .expect_err("unsealed log-e corruption must fail payload identity");
@@ -946,7 +1049,7 @@ fn red_event(reference: &SealedStudy, corruption: &Corruption) -> Event {
     let detail = format!(
         "corruption_seed=0x{MUTATION_SEED:016x}; kernel=0x{MUTATION_KERNEL:04x}; \
          tile={MUTATION_TILE}; selector_word=0x{:016x}; bit_selector_word=0x{:016x}; \
-         draws={}; target=checkpoints[{}].returned_log_e_bits; mantissa_bit={}; \
+         draws={}; target=checkpoints[{}].production.returned_log_e_bits; mantissa_bit={}; \
          before=0x{:016x}; after=0x{:016x}; reference={}; mutant={}; \
          stale_gate={:?}; reference_gate={:?}; first_semantic_mismatch={}",
         coordinates.selector_word,
@@ -1038,7 +1141,7 @@ fn emit_receipt(
                  \"mutation_bit\":{},\"mutation_before\":\"0x{:016x}\",\
                  \"mutation_after\":\"0x{:016x}\",\"mutant_identity\":\"{}\",\
                  \"red_event_identity\":\"0x{:016x}\",\
-                 \"scope\":\"finite complete-public-surface fixture\"}}",
+                 \"scope\":\"finite production-public trajectory plus non-null clone probes with explicitly shadow-only internal annotations\"}}",
                 config.hex(),
                 study.identity.hex(),
                 study.record.observations.len(),
@@ -1061,7 +1164,7 @@ fn emit_receipt(
         &mut emitter,
         "predictable-bet-shadow-oracle",
         format!(
-            "{} checkpoints matched independent moments, bets, strict-log wealth, public outputs, and alpha crossings",
+            "{} checkpoints matched production public outputs and non-null clone probes against shadow-only reference moments, bets, strict-log wealth, and alpha crossings",
             study.record.checkpoints.len(),
         ),
     );
@@ -1133,6 +1236,27 @@ fn betting_eprocess_full_trajectory_replays_and_seeded_failure_is_refused() {
         "result identity must distinguish absent crossings from ordinal zero",
     );
 
+    // The checkpoint at the null has no trajectory wealth sensitivity to its
+    // bet. Its pre-state clone probe must therefore be both identity-bound and
+    // independently replay-checked as production output.
+    let neutral_checkpoint = PREFIX.len() + ONES;
+    let mut probe_mutant = original.record.clone();
+    probe_mutant.checkpoints[neutral_checkpoint]
+        .production_probe
+        .returned_log_e_bits ^= 1;
+    assert_ne!(
+        result_identity(&config, &probe_mutant),
+        original.identity,
+        "production probe output must participate in result identity",
+    );
+    assert_eq!(
+        semantic_mismatch(&probe_mutant),
+        Some(format!(
+            "checkpoints[{neutral_checkpoint}].production_probe.returned_log_e_bits"
+        )),
+        "shadow replay must localize production-probe drift at the neutral checkpoint",
+    );
+
     let first = seeded_corruption(&config, &original, coordinates);
     let second = seeded_corruption(&replayed_config, &replay, mutation_coordinates());
     assert_eq!(first, second, "seeded corruption must replay exactly");
@@ -1144,7 +1268,7 @@ fn betting_eprocess_full_trajectory_replays_and_seeded_failure_is_refused() {
     assert_eq!(
         first.semantic_mismatch,
         format!(
-            "checkpoints[{}].returned_log_e_bits",
+            "checkpoints[{}].production.returned_log_e_bits",
             coordinates.checkpoint,
         ),
         "sufficient statistics must remain green until the corrupted wealth field",
@@ -1191,6 +1315,18 @@ fn betting_eprocess_full_trajectory_replays_and_seeded_failure_is_refused() {
     assert!(merge_message.contains("PayloadIdentityMismatch"));
     assert!(merge_message.contains("ReferenceIdentityMismatch"));
     assert!(merge_message.contains(&first.semantic_mismatch));
+
+    let retained = RetainedGolden {
+        config_root: config.root(),
+        result_root: original.identity.root(),
+        mutant_root: first.mutant.identity.root(),
+        red_event_content_hash: first_red.content_hash(),
+        first_crossing_ordinals: original.record.first_crossing_ordinals,
+    };
+    assert_eq!(
+        retained, EXPECTED_RETAINED_GOLDEN,
+        "v2 retained semantic golden must be explicitly re-pinned from the centralized runtime; actual={retained:#?}",
+    );
 
     emit_receipt(&config, &original, &first, &first_red);
 }
