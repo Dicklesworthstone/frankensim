@@ -2507,6 +2507,65 @@ impl Ledger {
         Ok(Some(stored))
     }
 
+    /// Reconcile one operation inserted by a compatible pre-v18 writer with
+    /// its exact typed raw-content sidecar.
+    ///
+    /// The operation is re-read through the bounded storage envelope and each
+    /// frozen field is independently hashed. A missing sidecar is inserted in
+    /// the same transaction; an existing sidecar must already agree exactly
+    /// and is never rewritten. This assigns no IR schema, semantic identity,
+    /// or authority. Absence means the compatibility operation does not exist.
+    ///
+    /// When the caller has an open transaction, reconciliation participates in
+    /// it. Otherwise this method owns one transaction and rolls it back on any
+    /// refusal, so a partial sidecar is never published.
+    ///
+    /// # Errors
+    /// [`LedgerError::OpCorrupt`] when the operation is malformed or an
+    /// existing sidecar is partial, future-versioned, or divergent; storage
+    /// failures otherwise.
+    pub fn reconcile_op_content_identity(
+        &self,
+        op: i64,
+    ) -> Result<Option<OpContentIdentity>, LedgerError> {
+        let owns_transaction = !self.in_transaction();
+        if owns_transaction {
+            self.begin()?;
+        }
+        let reconciled = (|| {
+            let Some(source) = self.op(op)? else {
+                return Ok(None);
+            };
+            let explicits = FiveExplicits {
+                seed: &source.seed,
+                versions: &source.versions,
+                budget: &source.budget,
+                capability: &source.capability,
+            };
+            self.write_op_content_identity(
+                op,
+                source.session.as_deref(),
+                &source.ir,
+                &explicits,
+                true,
+            )?;
+            self.op_content_identity(op)
+        })();
+        match (&reconciled, owns_transaction) {
+            (Ok(_), true) => {
+                if let Err(error) = self.commit() {
+                    let _ = self.rollback();
+                    return Err(error);
+                }
+            }
+            (Err(_), true) => {
+                let _ = self.rollback();
+            }
+            _ => {}
+        }
+        reconciled
+    }
+
     /// Backfill and authenticate v18 operation content identities before the
     /// schema marker commits. Work is paged by 64 fixed-size row IDs and only
     /// one bounded operation payload is retained at a time.
@@ -2737,6 +2796,64 @@ impl Ledger {
     ) -> Result<Option<TuneContentIdentity>, LedgerError> {
         self.note_read_query();
         self.tune_content_identity_inner(kernel, shape_class, machine)
+    }
+
+    /// Reconcile one autotuner row written by a compatible pre-v19 writer with
+    /// its exact typed raw-content sidecar.
+    ///
+    /// The complete bounded source row is re-read and independently hashed. A
+    /// missing sidecar is inserted; for an existing sidecar only the mutable
+    /// params/measured content IDs may move. The immutable kernel, shape,
+    /// machine, and row-schema projection must still verify exactly. This does
+    /// not assign cache-key semantics, freshness, scientific validity, or
+    /// authority. Absence means the compatibility cache row does not exist.
+    ///
+    /// When the caller has an open transaction, reconciliation participates in
+    /// it. Otherwise this method owns one transaction and rolls it back on any
+    /// refusal, so source and sidecar cannot be partially published by this
+    /// path.
+    ///
+    /// # Errors
+    /// [`LedgerError::TuneCorrupt`] when the source row or immutable sidecar
+    /// projection is malformed, future-versioned, or divergent; invalid lookup
+    /// keys and storage failures otherwise.
+    pub fn reconcile_tune_content_identity(
+        &self,
+        kernel: &str,
+        shape_class: &str,
+        machine: &[u8],
+    ) -> Result<Option<TuneContentIdentity>, LedgerError> {
+        let owns_transaction = !self.in_transaction();
+        if owns_transaction {
+            self.begin()?;
+        }
+        let reconciled = (|| {
+            let Some(source) = self.tune_get_inner(kernel, shape_class, machine)? else {
+                return Ok(None);
+            };
+            self.write_tune_content_identity(
+                &source.kernel,
+                &source.shape_class,
+                &source.machine,
+                &source.params,
+                &source.measured,
+                false,
+            )
+            .map(Some)
+        })();
+        match (&reconciled, owns_transaction) {
+            (Ok(_), true) => {
+                if let Err(error) = self.commit() {
+                    let _ = self.rollback();
+                    return Err(error);
+                }
+            }
+            (Err(_), true) => {
+                let _ = self.rollback();
+            }
+            _ => {}
+        }
+        reconciled
     }
 
     fn tune_content_identity_inner(
@@ -4495,6 +4612,193 @@ mod tests {
             assert_eq!(ledger.schema_version().unwrap(), SCHEMA_VERSION);
             assert_eq!(ledger.table_count("evidence_semantic_bindings").unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn pre_v18_operation_writer_can_be_reconciled_without_rewriting_existing_identity() {
+        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        ledger
+            .conn
+            .prepare(
+                "INSERT INTO ops(
+                     session, ir, seed, versions, budget, capability, t_start, branch, exec_mode
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 'deterministic')",
+            )
+            .expect("prepare old-writer operation")
+            .execute_with_params(&[
+                blob_param(b"old-writer-session"),
+                text_param(r#"{"op":"old-writer"}"#),
+                blob_param(b"old-writer-seed"),
+                text_param(r#"{"version":17}"#),
+                text_param(r#"{"memory":1024}"#),
+                text_param(r#"{"cores":1}"#),
+                SqliteValue::Integer(1),
+            ])
+            .expect("insert compatibility operation without v18 sidecar");
+        let op = ledger.conn.last_insert_rowid();
+        assert!(matches!(
+            ledger.op_content_identity(op),
+            Err(LedgerError::OpCorrupt { op: rejected, detail })
+                if rejected == op && detail.contains("no typed content-identity sidecar")
+        ));
+
+        let reconciled = ledger
+            .reconcile_op_content_identity(op)
+            .expect("reconcile exact bounded operation")
+            .expect("compatibility operation exists");
+        assert_eq!(
+            reconciled.session_content_id(),
+            Some(ContentId::of_bytes(b"old-writer-session"))
+        );
+        assert_eq!(
+            reconciled.ir_content_id(),
+            ContentId::of_bytes(br#"{"op":"old-writer"}"#)
+        );
+        assert_eq!(
+            ledger
+                .reconcile_op_content_identity(op)
+                .expect("exact retry")
+                .expect("operation remains present"),
+            reconciled,
+            "an exact retry must retain the immutable sidecar"
+        );
+
+        ledger
+            .begin()
+            .expect("caller-owned reconciliation transaction");
+        ledger
+            .conn
+            .prepare(
+                "INSERT INTO ops(
+                     session, ir, seed, versions, budget, capability, t_start, branch, exec_mode
+                 ) VALUES (NULL, '{}', ?1, '{}', '{}', '{}', 2, 1, 'deterministic')",
+            )
+            .expect("prepare transactional old-writer operation")
+            .execute_with_params(&[blob_param(b"transactional-old-writer-seed")])
+            .expect("insert transactional compatibility operation");
+        let rolled_back = ledger.conn.last_insert_rowid();
+        assert!(
+            ledger
+                .reconcile_op_content_identity(rolled_back)
+                .expect("reconcile inside caller transaction")
+                .is_some()
+        );
+        ledger
+            .rollback()
+            .expect("roll back source and sidecar together");
+        assert_eq!(ledger.op(rolled_back).unwrap(), None);
+        assert_eq!(ledger.op_content_identity(rolled_back).unwrap(), None);
+    }
+
+    #[test]
+    fn pre_v19_tune_writer_insert_and_value_update_reconcile_atomically() {
+        let ledger = Ledger::open(":memory:").expect("fresh v19 ledger");
+        let kernel = "old-writer-kernel";
+        let shape = "old-writer-shape";
+        let machine = b"old-writer-machine";
+        ledger
+            .conn
+            .prepare(
+                "INSERT INTO tune(kernel, shape_class, machine, params, measured)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .expect("prepare old-writer cache insert")
+            .execute_with_params(&[
+                text_param(kernel),
+                text_param(shape),
+                blob_param(machine),
+                text_param(r#"{"tile":64}"#),
+                text_param(r#"{"gflops":90}"#),
+            ])
+            .expect("insert compatibility cache row without v19 sidecar");
+        assert!(matches!(
+            ledger.tune_content_identity(kernel, shape, machine),
+            Err(LedgerError::TuneCorrupt { detail, .. })
+                if detail.contains("no typed content-identity sidecar")
+        ));
+
+        let inserted = ledger
+            .reconcile_tune_content_identity(kernel, shape, machine)
+            .expect("reconcile old-writer cache insert")
+            .expect("compatibility cache row exists");
+        assert_eq!(
+            inserted.params_content_id(),
+            ContentId::of_bytes(br#"{"tile":64}"#)
+        );
+
+        ledger
+            .conn
+            .prepare(
+                "UPDATE tune SET params = ?1, measured = ?2
+                 WHERE kernel = ?3 AND shape_class = ?4 AND machine = ?5",
+            )
+            .expect("prepare old-writer cache value update")
+            .execute_with_params(&[
+                text_param(r#"{"tile":96}"#),
+                text_param(r#"{"gflops":103}"#),
+                text_param(kernel),
+                text_param(shape),
+                blob_param(machine),
+            ])
+            .expect("update compatibility cache values without v19 sidecar update");
+        assert!(matches!(
+            ledger.tune_content_identity(kernel, shape, machine),
+            Err(LedgerError::TuneCorrupt { detail, .. })
+                if detail.contains("independently re-hashed source bytes")
+        ));
+        let updated = ledger
+            .reconcile_tune_content_identity(kernel, shape, machine)
+            .expect("reconcile old-writer cache value update")
+            .expect("compatibility cache row remains present");
+        assert_eq!(updated.kernel_content_id(), inserted.kernel_content_id());
+        assert_eq!(updated.machine_content_id(), inserted.machine_content_id());
+        assert_eq!(
+            updated.params_content_id(),
+            ContentId::of_bytes(br#"{"tile":96}"#)
+        );
+        assert_ne!(updated.params_content_id(), inserted.params_content_id());
+
+        ledger
+            .begin()
+            .expect("caller-owned cache reconciliation transaction");
+        ledger
+            .conn
+            .prepare(
+                "UPDATE tune SET params = ?1, measured = ?2
+                 WHERE kernel = ?3 AND shape_class = ?4 AND machine = ?5",
+            )
+            .expect("prepare transactional old-writer cache update")
+            .execute_with_params(&[
+                text_param(r#"{"tile":128}"#),
+                text_param(r#"{"gflops":111}"#),
+                text_param(kernel),
+                text_param(shape),
+                blob_param(machine),
+            ])
+            .expect("update compatibility values inside caller transaction");
+        assert_ne!(
+            ledger
+                .reconcile_tune_content_identity(kernel, shape, machine)
+                .expect("reconcile inside caller transaction")
+                .expect("cache row remains present")
+                .params_content_id(),
+            updated.params_content_id()
+        );
+        ledger
+            .rollback()
+            .expect("roll back source and sidecar update together");
+        assert_eq!(
+            ledger
+                .tune_content_identity(kernel, shape, machine)
+                .unwrap(),
+            Some(updated)
+        );
+        assert_eq!(
+            ledger
+                .reconcile_tune_content_identity(kernel, shape, machine)
+                .expect("exact cache reconciliation retry"),
+            Some(updated)
+        );
     }
 
     #[test]

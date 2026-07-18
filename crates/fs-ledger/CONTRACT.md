@@ -329,9 +329,11 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   transaction. Operation row ID, branch/mode, clocks, terminal state,
   diagnostic, lineage, semantic identity, and authority remain separate. No
   IR schema or meaning is inferred. An already-open pre-v18 writer cannot
-  compute BLAKE3 in a SQLite trigger; its post-migration insert is therefore
-  outside the declared compatibility proof and fails closed at typed reads
-  until an explicit authenticated backfill is provided.
+  compute BLAKE3 in a SQLite trigger; its post-migration insert fails closed at
+  typed reads until `reconcile_op_content_identity` re-reads the bounded
+  frozen fields and transactionally installs the missing exact sidecar. An
+  existing sidecar is immutable and must already verify; reconciliation never
+  rewrites it or infers an IR schema.
 - Autotuner typed-content sidecars (`identity_migration`, schema v19): every
   bounded `tune` row receives one `tune_content_identities` row with distinct
   plain `ContentId` values for exact kernel, shape-class, machine, params JSON,
@@ -343,8 +345,10 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   mutable params/measured IDs move atomically with an upsert. Sidecar presence
   assigns no owner-defined cache-key schema, scientific validity, freshness,
   or authority. Already-open pre-v19 writers cannot compute BLAKE3 in SQLite;
-  their post-migration inserts or updates remain outside compatibility proof
-  and fail closed through `tune_content_identity` until authenticated repair.
+  their post-migration inserts or value updates fail closed through
+  `tune_content_identity` until `reconcile_tune_content_identity` re-reads the
+  bounded source row and transactionally inserts or refreshes only the raw
+  value IDs. Immutable key IDs and the row schema must still verify exactly.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -856,6 +860,13 @@ V17 coverage proves exact evidence-byte binding and response-loss retry,
 wrong-schema projection refusal, bounded ambiguity, source-body immutability,
 JSON-reformat refusal, missing-evidence rollback, empty no-inference migration,
 and exact stale-marker replay.
+V18/V19 coverage proves exact field separation, bounded backfill and
+stale-marker replay, malformed-source rollback, current-writer atomicity, and
+caller-owned transaction rollback. Inline compatibility regressions also
+simulate pre-v18 operation inserts and pre-v19 cache inserts/value updates
+after the schema is current, prove typed reads fail closed before
+reconciliation, and prove exact reconciliation is idempotent and rolls back
+with its source write.
 These code-first tests require the central batch-proof pass before their results
 may be cited as green evidence.
 `tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
@@ -1076,16 +1087,20 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   only exact raw-content identities for frozen operation bytes; it does not
   identify their semantic schema or authority. Schema v19 independently does
   the same for bounded autotuner key/value bytes while leaving cache-key
-  semantics, validity, freshness, and authority unclaimed. The v1
+  semantics, validity, freshness, and authority unclaimed. Explicit per-row
+  reconciliation covers compatible pre-v18 operation inserts and pre-v19
+  cache inserts/value updates without rewriting immutable operation IDs or
+  cache-key IDs. It does not continuously mirror an old writer, choose an
+  owner schema, or make an authority claim; another old-writer mutation makes
+  the next typed read fail closed until reconciliation runs again. The v1
   migration-receipt wire transport now
   preserves every receipt field and fails closed on truncation, extension,
   unknown versions, forged IDs, malformed lengths, and content divergence, but
   package integration and end-to-end database-wire-package parity remain open;
-  resumable fleet backfill, a declared multi-version compatibility window
-  covering pre-v18 operation writers and pre-v19 cache writers beyond the
-  artifact/edge triggers,
-  coverage, cancellation/crash fault injection, and rollback views remain
-  required before the parent persistence bead can close.
+  resumable fleet backfill and automatic multi-version writer coordination
+  beyond the explicit per-row compatibility window, package parity,
+  cancellation/crash fault injection, and rollback views remain required
+  before the parent persistence bead can close.
 - Safe std-only identity generation is implemented through `/dev/urandom` on
   Unix. Fresh identity creation on non-Unix targets is explicitly refused;
   existing v4+ ledgers remain readable when their persisted identity and
