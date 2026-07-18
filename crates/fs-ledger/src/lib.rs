@@ -42,14 +42,16 @@ pub use hash::{Blake3, ContentHash, hash_bytes};
 pub use identity_migration::{
     ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, ArtifactContentIdentity, ArtifactSemanticBinding,
     ArtifactSemanticBindingCandidates, ArtifactSemanticBindingWrite,
-    EDGE_CONTENT_IDENTITY_ROW_VERSION, EdgeContentIdentity, IDENTITY_MIGRATION_RECEIPT_DOMAIN,
-    IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION, IDENTITY_MIGRATION_RECEIPT_VERSION,
-    IdentityMigrationCandidates, IdentityMigrationClaim, IdentityMigrationReceipt,
-    IdentityMigrationReceiptId, IdentityMigrationReceiptSchemaV1, IdentityMigrationWrite,
-    MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES, MAX_IDENTITY_MIGRATION_CANDIDATES,
-    MAX_IDENTITY_MIGRATION_CONTEXT_BYTES, MAX_IDENTITY_MIGRATION_DOMAIN_BYTES,
-    MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES, MAX_IDENTITY_MIGRATION_RULE_BYTES,
-    MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
+    EDGE_CONTENT_IDENTITY_ROW_VERSION, EdgeContentIdentity, EvidenceSemanticBinding,
+    EvidenceSemanticBindingCandidates, EvidenceSemanticBindingWrite,
+    IDENTITY_MIGRATION_RECEIPT_DOMAIN, IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION,
+    IDENTITY_MIGRATION_RECEIPT_VERSION, IdentityMigrationCandidates, IdentityMigrationClaim,
+    IdentityMigrationReceipt, IdentityMigrationReceiptId, IdentityMigrationReceiptSchemaV1,
+    IdentityMigrationWrite, MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES,
+    MAX_EVIDENCE_SEMANTIC_BINDING_CANDIDATES, MAX_EVIDENCE_SEMANTIC_BINDING_NAME_BYTES,
+    MAX_IDENTITY_MIGRATION_CANDIDATES, MAX_IDENTITY_MIGRATION_CONTEXT_BYTES,
+    MAX_IDENTITY_MIGRATION_DOMAIN_BYTES, MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
+    MAX_IDENTITY_MIGRATION_RULE_BYTES, MAX_IDENTITY_MIGRATION_SCHEMA_NAME_BYTES,
 };
 pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
 pub use state_checkpoint::{
@@ -3432,7 +3434,7 @@ impl Ledger {
                 }
                 self.seed_instance_id_if_missing()?;
                 let _ = self.read_current_instance_id()?;
-                self.verify_artifact_semantic_bindings()?;
+                self.verify_evidence_semantic_bindings()?;
                 self.conn
                     .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
                     .map_err(|error| sql_err("init: set user_version", &error))?;
@@ -3511,6 +3513,12 @@ impl Ledger {
                     // present ahead of a stale marker and every prerequisite
                     // identity layer before committing the marker.
                     self.verify_artifact_semantic_bindings()?;
+                }
+                if target == 17 {
+                    // V17 infers no evidence semantics. Authenticate exact
+                    // preapplied bindings and every prerequisite layer before
+                    // committing a stale marker.
+                    self.verify_evidence_semantic_bindings()?;
                 }
                 self.conn
                     .execute(&format!("PRAGMA user_version = {target}"))

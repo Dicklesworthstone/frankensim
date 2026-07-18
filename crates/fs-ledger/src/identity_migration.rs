@@ -30,6 +30,10 @@ pub const ARTIFACT_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
 pub const EDGE_CONTENT_IDENTITY_ROW_VERSION: u32 = 1;
 /// Maximum receipt IDs exposed by one artifact-semantic candidate lookup.
 pub const MAX_ARTIFACT_SEMANTIC_BINDING_CANDIDATES: usize = 256;
+/// Maximum UTF-8 bytes in an evidence name admitted to a semantic binding.
+pub const MAX_EVIDENCE_SEMANTIC_BINDING_NAME_BYTES: usize = 64 * 1024;
+/// Maximum receipt IDs exposed by one evidence-semantic candidate lookup.
+pub const MAX_EVIDENCE_SEMANTIC_BINDING_CANDIDATES: usize = 256;
 
 /// Identity schema version for immutable migration receipts.
 pub const IDENTITY_MIGRATION_RECEIPT_VERSION: u32 = 1;
@@ -116,7 +120,7 @@ pub const IDENTITY_MIGRATION_RECEIPT_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=receipt-schema-domain,receipt-schema-version,canonical-field-order",
     "semantic_fields=receipt-schema-domain,receipt-schema-version,canonical-field-order,legacy-content-id,legacy-byte-count,legacy-fnv-le-u64,canonical-content-id,canonical-byte-count,semantic-rule,identity-role,semantic-id,identity-domain,identity-schema-name,identity-schema-id,identity-schema-version,identity-context,canonical-preimage-content-id,canonical-frame-bytes,field-count,collection-items,max-canonical-bytes,max-field-bytes,max-fields,max-collection-items,cancellation-poll-bytes,trust-state,anchor-content-id,verifier-id,key-policy-id,no-claim-state",
     "excluded_fields=exact-legacy-bytes:bound-by-content-id,exact-canonical-bytes:bound-by-content-id,created-at:provenance-envelope-only",
-    "consumers=Ledger::record_identity_migration,Ledger::identity_migration_receipt,Ledger::identity_migration_candidates,IdentityMigrationReceipt::typed_semantic_id",
+    "consumers=Ledger::record_identity_migration,Ledger::identity_migration_receipt,Ledger::identity_migration_candidates,IdentityMigrationReceipt::typed_semantic_id,Ledger::bind_artifact_semantic_identity,Ledger::artifact_semantic_binding,Ledger::bind_evidence_semantic_identity,Ledger::evidence_semantic_binding",
     "mutations=receipt-schema-domain:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,receipt-schema-version:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-field-order:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,legacy-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,legacy-byte-count:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,legacy-fnv-le-u64:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-byte-count:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,semantic-rule:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-role:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,semantic-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-domain:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-schema-name:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-schema-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-schema-version:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,identity-context:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-preimage-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,canonical-frame-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,field-count:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,collection-items:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-canonical-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-field-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-fields:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,max-collection-items:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,cancellation-poll-bytes:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,trust-state:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,anchor-content-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,verifier-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,key-policy-id:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state,no-claim-state:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state",
     "nonsemantic_mutations=created-at:crates/fs-ledger/tests/identity_migration.rs#receipt_identity_binds_exact_bytes_schema_and_audit_state",
     "field_guard=classify_identity_migration_receipt_fields",
@@ -600,6 +604,106 @@ impl ArtifactSemanticBindingCandidates {
     }
 }
 
+/// One immutable, independently reverified evidence-to-semantic binding.
+///
+/// The exact retained evidence JSON bytes must equal the receipt canonical
+/// bytes. JSON equivalence, evidence names, and row presence never establish
+/// semantic equivalence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceSemanticBinding {
+    evidence_name: Box<str>,
+    receipt: IdentityMigrationReceipt,
+}
+
+impl EvidenceSemanticBinding {
+    /// Exact retained evidence record name.
+    #[must_use]
+    pub fn evidence_name(&self) -> &str {
+        &self.evidence_name
+    }
+
+    /// Typed raw-byte identity of the exact retained evidence JSON.
+    #[must_use]
+    pub const fn content_id(&self) -> ContentId {
+        self.receipt.canonical_content_id()
+    }
+
+    /// Exact immutable migration receipt authorizing the semantic tuple.
+    #[must_use]
+    pub const fn receipt_id(&self) -> IdentityMigrationReceiptId {
+        self.receipt.receipt_id()
+    }
+
+    /// Complete independently reverified migration receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &IdentityMigrationReceipt {
+        &self.receipt
+    }
+
+    /// Project the semantic digest only for the caller's exact nominal type.
+    #[must_use]
+    pub fn typed_semantic_id<I: StrongIdentity>(&self) -> Option<I> {
+        self.receipt.typed_semantic_id::<I>()
+    }
+}
+
+/// Result of one idempotent evidence-semantic binding write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceSemanticBindingWrite {
+    evidence_name: Box<str>,
+    receipt_id: IdentityMigrationReceiptId,
+    content_id: ContentId,
+    deduped: bool,
+}
+
+impl EvidenceSemanticBindingWrite {
+    /// Exact retained evidence record name.
+    #[must_use]
+    pub fn evidence_name(&self) -> &str {
+        &self.evidence_name
+    }
+
+    /// Exact immutable migration receipt authorizing the semantic tuple.
+    #[must_use]
+    pub const fn receipt_id(&self) -> IdentityMigrationReceiptId {
+        self.receipt_id
+    }
+
+    /// Typed raw-byte identity of the exact retained evidence JSON.
+    #[must_use]
+    pub const fn content_id(&self) -> ContentId {
+        self.content_id
+    }
+
+    /// Whether an identical independently verified binding already existed.
+    #[must_use]
+    pub const fn deduped(&self) -> bool {
+        self.deduped
+    }
+}
+
+/// Bounded, deterministic, non-authoritative receipt candidates for one
+/// evidence record. Multiple candidates are preserved and never ranked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceSemanticBindingCandidates {
+    receipt_ids: Vec<IdentityMigrationReceiptId>,
+    truncated: bool,
+}
+
+impl EvidenceSemanticBindingCandidates {
+    /// Deterministic receipt-ID prefix in bytewise order.
+    #[must_use]
+    pub fn receipt_ids(&self) -> &[IdentityMigrationReceiptId] {
+        &self.receipt_ids
+    }
+
+    /// Whether at least one additional candidate exists beyond the caller cap.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
 impl IdentityMigrationCandidates {
     /// Deterministic receipt-ID prefix in bytewise order.
     #[must_use]
@@ -647,6 +751,30 @@ fn artifact_semantic_binding_corrupt(
         hash_hex: artifact_hash.to_hex(),
         detail: format!("artifact semantic binding {receipt_id}: {}", detail.into()),
     }
+}
+
+fn evidence_semantic_binding_corrupt(
+    evidence_name: &str,
+    receipt_id: IdentityMigrationReceiptId,
+    detail: impl Into<String>,
+) -> LedgerError {
+    LedgerError::Corrupt {
+        hash_hex: ContentId::of_bytes(evidence_name.as_bytes()).to_hex(),
+        detail: format!("evidence semantic binding {receipt_id}: {}", detail.into()),
+    }
+}
+
+fn validate_evidence_semantic_binding_name(evidence_name: &str) -> Result<(), LedgerError> {
+    let len = evidence_name.len();
+    if len == 0 || len > MAX_EVIDENCE_SEMANTIC_BINDING_NAME_BYTES {
+        return Err(invalid(
+            "evidence_semantic_binding.evidence_name",
+            format!(
+                "evidence name must contain 1..={MAX_EVIDENCE_SEMANTIC_BINDING_NAME_BYTES} UTF-8 bytes, found {len}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn stored_corrupt(
@@ -1642,6 +1770,10 @@ impl Ledger {
     }
 
     /// Read and independently reverify one exact artifact-semantic binding.
+    ///
+    /// # Errors
+    /// Refuses malformed projections, missing retained prerequisites,
+    /// content-identity disagreement, and database failures.
     pub fn artifact_semantic_binding(
         &self,
         artifact_hash: &ContentHash,
@@ -1652,6 +1784,10 @@ impl Ledger {
 
     /// Return a bounded deterministic receipt-ID prefix for one artifact.
     /// This lookup never chooses or promotes a semantic interpretation.
+    ///
+    /// # Errors
+    /// Refuses caps outside the public bound, malformed candidate keys, and
+    /// database failures.
     pub fn artifact_semantic_binding_candidates(
         &self,
         artifact_hash: &ContentHash,
@@ -1746,6 +1882,463 @@ impl Ledger {
             {
                 return Err(artifact_semantic_binding_corrupt(
                     &artifact_hash,
+                    receipt_id,
+                    "binding disappeared during migration verification",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn evidence_body_for_semantic_binding(
+        &self,
+        evidence_name: &str,
+        receipt_id: IdentityMigrationReceiptId,
+        binding_exists: bool,
+    ) -> Result<Option<String>, LedgerError> {
+        if let Err(error) = validate_evidence_semantic_binding_name(evidence_name) {
+            return if binding_exists {
+                Err(evidence_semantic_binding_corrupt(
+                    evidence_name,
+                    receipt_id,
+                    format!("stored evidence name violates the binding envelope: {error}"),
+                ))
+            } else {
+                Err(error)
+            };
+        }
+        let refuse = |detail: String| {
+            if binding_exists {
+                evidence_semantic_binding_corrupt(evidence_name, receipt_id, detail)
+            } else {
+                invalid("evidence_semantic_binding.body", detail)
+            }
+        };
+        let metadata_sql = format!(
+            "SELECT typeof(body), length(CAST(body AS BLOB)), \
+                    CASE WHEN typeof(body) = 'text' THEN \
+                        CASE WHEN length(CAST(body AS BLOB)) BETWEEN 1 AND {MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES} \
+                            THEN json_valid(body) ELSE 0 END \
+                    ELSE 0 END \
+             FROM evidence WHERE name = ?1 LIMIT 2"
+        );
+        let metadata = self
+            .conn
+            .query_with_params(&metadata_sql, &[SqliteValue::Text(evidence_name.into())])
+            .map_err(|error| sql_err("evidence semantic binding metadata read", &error))?;
+        if metadata.is_empty() {
+            return Ok(None);
+        }
+        if metadata.len() != 1 {
+            return Err(refuse(
+                "one evidence name selected multiple source rows".to_string(),
+            ));
+        }
+        let row = metadata
+            .first()
+            .ok_or_else(|| refuse("evidence metadata row disappeared".to_string()))?;
+        if !matches!(row.first(), Some(SqliteValue::Text(kind)) if kind.as_str() == "text") {
+            return Err(refuse("evidence body is not stored as TEXT".to_string()));
+        }
+        let body_len = match row.get(1) {
+            Some(SqliteValue::Integer(len)) => usize::try_from(*len).ok(),
+            _ => None,
+        }
+        .ok_or_else(|| refuse("evidence body length is not a nonnegative usize".to_string()))?;
+        if body_len == 0 || body_len > MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES {
+            return Err(refuse(format!(
+                "evidence body must contain 1..={MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES} bytes for exact receipt binding, found {body_len}"
+            )));
+        }
+        if !matches!(row.get(2), Some(SqliteValue::Integer(1))) {
+            return Err(refuse(
+                "evidence body is not valid JSON inside the binding envelope".to_string(),
+            ));
+        }
+
+        let guarded_sql = format!(
+            "SELECT body FROM evidence \
+             WHERE name = ?1 \
+               AND typeof(body) = 'text' \
+               AND length(CAST(body AS BLOB)) BETWEEN 1 AND {MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES} \
+               AND CASE WHEN typeof(body) = 'text' THEN \
+                       CASE WHEN length(CAST(body AS BLOB)) BETWEEN 1 AND {MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES} \
+                           THEN json_valid(body) ELSE 0 END \
+                   ELSE 0 END = 1 \
+             LIMIT 2"
+        );
+        let guarded = self
+            .conn
+            .query_with_params(&guarded_sql, &[SqliteValue::Text(evidence_name.into())])
+            .map_err(|error| sql_err("evidence semantic binding guarded read", &error))?;
+        if guarded.len() != 1 {
+            return Err(LedgerError::Busy {
+                context: "evidence semantic binding guarded read".to_string(),
+                detail: "evidence row changed after bounded metadata preflight".to_string(),
+            });
+        }
+        match guarded.first().and_then(|row| row.first()) {
+            Some(SqliteValue::Text(body)) => Ok(Some(body.as_str().to_string())),
+            _ => Err(refuse(
+                "guarded evidence body is not stored as TEXT".to_string(),
+            )),
+        }
+    }
+
+    fn stored_evidence_semantic_binding(
+        &self,
+        evidence_name: &str,
+        receipt_id: IdentityMigrationReceiptId,
+    ) -> Result<Option<EvidenceSemanticBinding>, LedgerError> {
+        validate_evidence_semantic_binding_name(evidence_name)?;
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT evidence_name, receipt_id, content_id, semantic_id, identity_role, \
+                        identity_schema_id, identity_schema_version, trust_state, no_claim_state \
+                 FROM evidence_semantic_bindings \
+                 WHERE evidence_name = ?1 AND receipt_id = ?2 LIMIT 2",
+                &[
+                    SqliteValue::Text(evidence_name.into()),
+                    blob_param(receipt_id.as_bytes()),
+                ],
+            )
+            .map_err(|error| sql_err("evidence semantic binding read", &error))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != 1 {
+            return Err(evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "one evidence/receipt key selected multiple rows",
+            ));
+        }
+        let row = rows.first().ok_or_else(|| {
+            evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "binding row disappeared after selection",
+            )
+        })?;
+        let stored_name = match row.first() {
+            Some(SqliteValue::Text(name)) => name.as_str(),
+            _ => {
+                return Err(evidence_semantic_binding_corrupt(
+                    evidence_name,
+                    receipt_id,
+                    "evidence_name is not stored as TEXT",
+                ));
+            }
+        };
+        if stored_name != evidence_name {
+            return Err(evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "stored evidence name differs from the requested key",
+            ));
+        }
+        let stored_receipt_bytes = fixed_bytes::<32>(row.get(1), receipt_id, "receipt_id")?;
+        let stored_receipt = IdentityMigrationReceiptId::parse_slice(&stored_receipt_bytes)
+            .ok_or_else(|| {
+                evidence_semantic_binding_corrupt(
+                    evidence_name,
+                    receipt_id,
+                    "receipt_id is not a typed 32-byte identity",
+                )
+            })?;
+        if stored_receipt != receipt_id {
+            return Err(evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "stored receipt ID differs from the requested key",
+            ));
+        }
+        let content_id = match row.get(2) {
+            Some(SqliteValue::Blob(bytes)) => ContentId::parse_slice(bytes),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "content_id is not a typed 32-byte raw content identity",
+            )
+        })?;
+        let receipt = self.stored_identity_migration(receipt_id)?.ok_or_else(|| {
+            evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "referenced migration receipt is missing",
+            )
+        })?;
+        let semantic_id = fixed_bytes::<32>(row.get(3), receipt_id, "semantic_id")?;
+        let role_tag = integer(row.get(4), receipt_id, "identity_role")?;
+        let schema_id = fixed_bytes::<32>(row.get(5), receipt_id, "identity_schema_id")?;
+        let schema_version = u32_integer(row.get(6), receipt_id, "identity_schema_version")?;
+        let trust_tag = integer(row.get(7), receipt_id, "trust_state")?;
+        let no_claim_tag = integer(row.get(8), receipt_id, "no_claim_state")?;
+        if content_id != receipt.canonical_content_id()
+            || semantic_id != receipt.semantic_id_bytes()
+            || role_tag != i64::from(receipt.identity_role().tag())
+            || schema_id != receipt.identity_schema_id()
+            || schema_version != receipt.identity_schema_version()
+            || trust_tag != i64::from(trust_state_tag(receipt.trust_state()))
+            || no_claim_tag != i64::from(no_claim_state_tag(receipt.no_claim_state()))
+        {
+            return Err(evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "stored content/semantic/schema/authority projection differs from the exact receipt",
+            ));
+        }
+        let body = self
+            .evidence_body_for_semantic_binding(evidence_name, receipt_id, true)?
+            .ok_or_else(|| {
+                evidence_semantic_binding_corrupt(
+                    evidence_name,
+                    receipt_id,
+                    "bound evidence row is missing",
+                )
+            })?;
+        if body.as_bytes() != receipt.canonical_bytes() {
+            return Err(evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "retained evidence JSON bytes differ from the exact receipt canonical bytes",
+            ));
+        }
+        if ContentId::of_bytes(body.as_bytes()) != content_id {
+            return Err(evidence_semantic_binding_corrupt(
+                evidence_name,
+                receipt_id,
+                "retained evidence JSON does not re-hash to the stored typed content ID",
+            ));
+        }
+        Ok(Some(EvidenceSemanticBinding {
+            evidence_name: evidence_name.into(),
+            receipt,
+        }))
+    }
+
+    /// Bind one exact retained evidence JSON body to one independently
+    /// verified migration receipt. Exact retries dedupe; distinct receipts
+    /// remain visible without ranking. A successful binding makes the exact
+    /// evidence name/body pair immutable.
+    ///
+    /// # Errors
+    /// Refuses caller-owned transactions, missing or oversized evidence,
+    /// non-identical canonical bytes, malformed stored rows, and database
+    /// failures.
+    pub fn bind_evidence_semantic_identity(
+        &self,
+        evidence_name: &str,
+        receipt_id: IdentityMigrationReceiptId,
+    ) -> Result<EvidenceSemanticBindingWrite, LedgerError> {
+        validate_evidence_semantic_binding_name(evidence_name)?;
+        if self.in_transaction() {
+            return Err(invalid(
+                "evidence_semantic_binding.transaction",
+                "evidence semantic binding must own its transaction",
+            ));
+        }
+        self.begin()?;
+        let result = (|| {
+            let receipt = self.stored_identity_migration(receipt_id)?.ok_or_else(|| {
+                LedgerError::NotFound {
+                    what: format!("identity migration receipt {receipt_id}"),
+                }
+            })?;
+            let body = self
+                .evidence_body_for_semantic_binding(evidence_name, receipt_id, false)?
+                .ok_or_else(|| LedgerError::NotFound {
+                    what: format!("evidence record {evidence_name:?}"),
+                })?;
+            if body.as_bytes() != receipt.canonical_bytes() {
+                return Err(invalid(
+                    "evidence_semantic_binding.canonical_bytes",
+                    "retained evidence JSON must equal the receipt canonical bytes exactly; semantic JSON equivalence is insufficient",
+                ));
+            }
+            let content_id = ContentId::of_bytes(body.as_bytes());
+            if content_id != receipt.canonical_content_id() {
+                return Err(evidence_semantic_binding_corrupt(
+                    evidence_name,
+                    receipt_id,
+                    "exact evidence bytes do not re-hash to the receipt canonical content ID",
+                ));
+            }
+            if self
+                .stored_evidence_semantic_binding(evidence_name, receipt_id)?
+                .is_some()
+            {
+                return Ok(EvidenceSemanticBindingWrite {
+                    evidence_name: evidence_name.into(),
+                    receipt_id,
+                    content_id,
+                    deduped: true,
+                });
+            }
+            self.conn
+                .prepare(
+                    "INSERT INTO evidence_semantic_bindings(\
+                        evidence_name, receipt_id, content_id, semantic_id, identity_role, \
+                        identity_schema_id, identity_schema_version, trust_state, \
+                        no_claim_state, created_at\
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                )
+                .map_err(|error| sql_err("evidence semantic binding insert prepare", &error))?
+                .execute_with_params(&[
+                    SqliteValue::Text(evidence_name.into()),
+                    blob_param(receipt_id.as_bytes()),
+                    blob_param(content_id.as_bytes()),
+                    blob_param(&receipt.semantic_id_bytes()),
+                    SqliteValue::Integer(i64::from(receipt.identity_role().tag())),
+                    blob_param(&receipt.identity_schema_id()),
+                    SqliteValue::Integer(i64::from(receipt.identity_schema_version())),
+                    SqliteValue::Integer(i64::from(trust_state_tag(receipt.trust_state()))),
+                    SqliteValue::Integer(i64::from(no_claim_state_tag(receipt.no_claim_state()))),
+                    SqliteValue::Integer(now_wall_ns()),
+                ])
+                .map_err(|error| sql_err("evidence semantic binding insert", &error))?;
+            Ok(EvidenceSemanticBindingWrite {
+                evidence_name: evidence_name.into(),
+                receipt_id,
+                content_id,
+                deduped: false,
+            })
+        })();
+        match result {
+            Ok(write) => {
+                if let Err(error) = self.commit() {
+                    let _ = self.rollback();
+                    return Err(error);
+                }
+                Ok(write)
+            }
+            Err(error) => {
+                let _ = self.rollback();
+                Err(error)
+            }
+        }
+    }
+
+    /// Read and independently reverify one exact evidence-semantic binding.
+    ///
+    /// # Errors
+    /// Refuses malformed projections, missing or changed source evidence,
+    /// content-identity disagreement, and database failures.
+    pub fn evidence_semantic_binding(
+        &self,
+        evidence_name: &str,
+        receipt_id: IdentityMigrationReceiptId,
+    ) -> Result<Option<EvidenceSemanticBinding>, LedgerError> {
+        self.stored_evidence_semantic_binding(evidence_name, receipt_id)
+    }
+
+    /// Return a bounded deterministic receipt-ID prefix for one evidence row.
+    /// This lookup never chooses or promotes a semantic interpretation.
+    ///
+    /// # Errors
+    /// Refuses names or caps outside their public bounds, malformed candidate
+    /// keys, and database failures.
+    pub fn evidence_semantic_binding_candidates(
+        &self,
+        evidence_name: &str,
+        cap: usize,
+    ) -> Result<EvidenceSemanticBindingCandidates, LedgerError> {
+        validate_evidence_semantic_binding_name(evidence_name)?;
+        if cap > MAX_EVIDENCE_SEMANTIC_BINDING_CANDIDATES {
+            return Err(invalid(
+                "evidence_semantic_binding.cap",
+                format!("candidate cap {cap} exceeds {MAX_EVIDENCE_SEMANTIC_BINDING_CANDIDATES}"),
+            ));
+        }
+        let probe = cap.checked_add(1).ok_or_else(|| {
+            invalid(
+                "evidence_semantic_binding.cap",
+                "candidate cap overflows the bounded probe",
+            )
+        })?;
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT CASE \
+                            WHEN typeof(receipt_id) = 'blob' AND length(receipt_id) = 32 \
+                            THEN receipt_id ELSE NULL \
+                        END \
+                 FROM evidence_semantic_bindings \
+                 WHERE evidence_name = ?1 \
+                 ORDER BY receipt_id LIMIT ?2",
+                &[
+                    SqliteValue::Text(evidence_name.into()),
+                    SqliteValue::Integer(i64::try_from(probe).unwrap_or(i64::MAX)),
+                ],
+            )
+            .map_err(|error| sql_err("evidence semantic candidate scan", &error))?;
+        let truncated = rows.len() > cap;
+        let mut receipt_ids = Vec::with_capacity(rows.len().min(cap));
+        for row in rows.iter().take(cap) {
+            let Some(SqliteValue::Blob(bytes)) = row.first() else {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: ContentId::of_bytes(evidence_name.as_bytes()).to_hex(),
+                    detail: "evidence semantic candidate has malformed receipt ID".to_string(),
+                });
+            };
+            let receipt_id = IdentityMigrationReceiptId::parse_slice(bytes).ok_or_else(|| {
+                LedgerError::Corrupt {
+                    hash_hex: ContentId::of_bytes(evidence_name.as_bytes()).to_hex(),
+                    detail: "evidence semantic candidate is not a typed 32-byte receipt ID"
+                        .to_string(),
+                }
+            })?;
+            receipt_ids.push(receipt_id);
+        }
+        Ok(EvidenceSemanticBindingCandidates {
+            receipt_ids,
+            truncated,
+        })
+    }
+
+    /// Authenticate every pre-marker v17 evidence binding plus all prior
+    /// identity layers before initialization or migration commits.
+    pub(crate) fn verify_evidence_semantic_bindings(&self) -> Result<(), LedgerError> {
+        self.verify_artifact_semantic_bindings()?;
+        let rows = self
+            .conn
+            .query(
+                "SELECT evidence_name, receipt_id \
+                 FROM evidence_semantic_bindings ORDER BY evidence_name, receipt_id",
+            )
+            .map_err(|error| sql_err("verify evidence semantic bindings", &error))?;
+        for row in &rows {
+            let evidence_name = match row.first() {
+                Some(SqliteValue::Text(name)) => name.as_str(),
+                _ => {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: "evidence:<malformed>".to_string(),
+                        detail: "evidence semantic binding has a malformed evidence name"
+                            .to_string(),
+                    });
+                }
+            };
+            let receipt_bytes = match row.get(1) {
+                Some(SqliteValue::Blob(bytes)) => bytes.as_slice(),
+                _ => &[],
+            };
+            let receipt_id =
+                IdentityMigrationReceiptId::parse_slice(receipt_bytes).ok_or_else(|| {
+                    LedgerError::Corrupt {
+                        hash_hex: ContentId::of_bytes(evidence_name.as_bytes()).to_hex(),
+                        detail: "evidence semantic binding has a malformed receipt ID".to_string(),
+                    }
+                })?;
+            if self
+                .stored_evidence_semantic_binding(evidence_name, receipt_id)?
+                .is_none()
+            {
+                return Err(evidence_semantic_binding_corrupt(
+                    evidence_name,
                     receipt_id,
                     "binding disappeared during migration verification",
                 ));
@@ -2214,6 +2807,22 @@ mod tests {
         }
     }
 
+    fn drop_v17_objects(ledger: &Ledger) {
+        for ddl in [
+            "DROP TRIGGER IF EXISTS trg_evidence_semantic_binding_guard_source_delete",
+            "DROP TRIGGER IF EXISTS trg_evidence_semantic_binding_guard_source_update",
+            "DROP TRIGGER IF EXISTS trg_evidence_semantic_binding_immutable_reinsert",
+            "DROP TRIGGER IF EXISTS trg_evidence_semantic_binding_immutable_delete",
+            "DROP TRIGGER IF EXISTS trg_evidence_semantic_binding_immutable_update",
+            "DROP INDEX IF EXISTS idx_evidence_semantic_binding_semantic",
+            "DROP INDEX IF EXISTS idx_evidence_semantic_binding_receipt",
+            "DROP INDEX IF EXISTS idx_evidence_semantic_binding_content",
+            "DROP TABLE IF EXISTS evidence_semantic_bindings",
+        ] {
+            ledger.conn.execute(ddl).expect("remove v17 fixture object");
+        }
+    }
+
     fn v14_edge_fixture(ledger: &Ledger) -> (i64, ContentHash) {
         let artifact = ledger
             .put_artifact("v14-edge-artifact", b"exact v14 edge bytes", None)
@@ -2234,8 +2843,8 @@ mod tests {
     }
 
     #[test]
-    fn genuine_v12_and_stale_v13_markers_migrate_through_v16() {
-        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    fn genuine_v12_and_stale_v13_markers_migrate_through_v17() {
+        let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -2266,7 +2875,7 @@ mod tests {
 
     #[test]
     fn divergent_early_v13_object_refuses_before_marker_advances() {
-        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
         drop_v13_objects(&ledger);
         ledger
             .conn
@@ -2289,7 +2898,7 @@ mod tests {
     #[test]
     fn v14_backfills_v13_artifacts_and_replays_a_stale_marker() {
         for preapply_v14 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
             drop_v14_objects(&ledger);
             ledger
                 .conn
@@ -2329,7 +2938,7 @@ mod tests {
 
     #[test]
     fn v14_corrupt_source_rolls_back_rows_objects_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
         drop_v14_objects(&ledger);
         ledger
             .conn
@@ -2360,7 +2969,7 @@ mod tests {
     #[test]
     fn v15_backfills_v14_edges_and_replays_a_stale_marker() {
         for preapply_v15 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
             drop_v15_objects(&ledger);
             ledger
                 .conn
@@ -2396,7 +3005,7 @@ mod tests {
 
     #[test]
     fn v15_missing_artifact_sidecar_rolls_back_objects_rows_and_marker() {
-        let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+        let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
         drop_v15_objects(&ledger);
         ledger
             .conn
@@ -2436,7 +3045,7 @@ mod tests {
     #[test]
     fn v16_empty_migration_and_exact_stale_marker_replay_infer_no_meaning() {
         for preapply_v16 in [false, true] {
-            let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+            let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
             drop_v16_objects(&ledger);
             ledger
                 .conn
@@ -2459,7 +3068,32 @@ mod tests {
     }
 
     #[test]
-    fn migration_ladder_ends_with_v16() {
+    fn v17_empty_migration_and_exact_stale_marker_replay_infer_no_evidence_meaning() {
+        for preapply_v17 in [false, true] {
+            let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
+            drop_v17_objects(&ledger);
+            ledger
+                .conn
+                .execute("PRAGMA user_version = 16")
+                .expect("mark genuine v16 fixture");
+            if preapply_v17 {
+                for ddl in schema::V17 {
+                    ledger
+                        .conn
+                        .execute(ddl)
+                        .expect("preapply exact v17 migration batch");
+                }
+            }
+            ledger
+                .migrate_from_observed_version(16)
+                .expect("migrate v16 without inferring evidence semantic bindings");
+            assert_eq!(ledger.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(ledger.table_count("evidence_semantic_bindings").unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn migration_ladder_ends_with_v17() {
         assert_eq!(
             schema::MIGRATIONS.len(),
             usize::try_from(SCHEMA_VERSION).unwrap()
@@ -2467,6 +3101,7 @@ mod tests {
         assert_eq!(schema::MIGRATIONS.get(12), Some(&schema::V13));
         assert_eq!(schema::MIGRATIONS.get(13), Some(&schema::V14));
         assert_eq!(schema::MIGRATIONS.get(14), Some(&schema::V15));
-        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V16));
+        assert_eq!(schema::MIGRATIONS.get(15), Some(&schema::V16));
+        assert_eq!(schema::MIGRATIONS.last(), Some(&schema::V17));
     }
 }

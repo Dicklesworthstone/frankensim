@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v16). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v17). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -291,6 +291,17 @@ and the lower-layer Franken crates declared in `Cargo.toml`, including
   deterministic candidates and are never ranked or selected. Migration creates
   no rows and infers no meaning from kind, metadata, lineage, legacy FNV, or
   extension payloads. A binding is a retained-evidence GC root.
+- Explicit evidence semantic bindings (`identity_migration`, schema v17):
+  `bind_evidence_semantic_identity` accepts one bounded evidence name only when
+  its retained JSON body is valid, at most 1 MiB, and byte-for-byte identical
+  to the canonical bytes of a fully reverified v13 receipt. It stores separate
+  typed raw-content, semantic, exact nominal-schema, and authority/no-claim
+  projections and compares all of them back to the complete receipt and source
+  bytes on every authoritative read. Equivalent JSON with different whitespace
+  is not identical. Multiple exact receipts remain bounded non-authoritative
+  candidates. A successful binding makes that exact evidence name/body pair
+  immutable; an exact source or binding retry remains idempotent. Migration
+  creates no rows and infers nothing from evidence names or JSON structure.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -378,6 +389,14 @@ the complete receipt, exact canonical content ID, v14 sidecar, and retained
 artifact bytes before returning it. Multiple bindings remain non-unique by
 design. Migration creates an empty table, authenticates any exactly preapplied
 rows before advancing a stale marker, and never infers semantic meaning.
+Schema v17 adds immutable `evidence_semantic_bindings`, keyed by bounded
+evidence name and v13 migration-receipt ID. The stored typed content ID and
+semantic/schema/authority projection are query aids, not independent truth:
+reads reverify the complete receipt and exact retained JSON bytes. Named source
+guards refuse body/name reinterpretation once any binding exists while exact
+same-body retries remain legal. Migration creates no bindings, authenticates
+any exact preapplied rows before stale-marker advancement, and does not treat
+JSON equivalence as byte identity.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -601,7 +620,14 @@ refusal, or verifier panic).
     retained, independently re-hashed artifact. Binding lookup never chooses
     among multiple receipts, upgrades trust, or projects into a different
     nominal schema; migration infers no bindings.
-19. The nightly writer publishes op + metric + benchmark event + terminal
+19. An evidence semantic binding is valid only when the retained, bounded JSON
+    body equals the complete receipt canonical bytes exactly and independently
+    re-hashes to the separately indexed stored typed content ID. Cached
+    semantic, role, nominal schema, trust, and no-claim fields must equal that
+    receipt. JSON
+    equivalence, record names, and row presence cannot mint meaning; competing
+    receipts remain explicit, and a bound source cannot be reinterpreted.
+20. The nightly writer publishes op + metric + benchmark event + terminal
     outcome in one explicit transaction. A write or commit failure is primary;
     rollback is always attempted, and a rollback failure is retained after the
     primary failure in a deterministic combined diagnostic. Cleanup failure
@@ -773,6 +799,10 @@ V16 coverage proves empty no-inference migration, exact stale-marker replay,
 explicit retained-artifact binding and response-loss dedupe, wrong-schema
 projection refusal, bounded ambiguity preservation, missing-artifact refusal,
 and semantic-binding GC rooting.
+V17 coverage proves exact evidence-byte binding and response-loss retry,
+wrong-schema projection refusal, bounded ambiguity, source-body immutability,
+JSON-reformat refusal, missing-evidence rollback, empty no-inference migration,
+and exact stale-marker replay.
 These code-first tests require the central batch-proof pass before their results
 may be cited as green evidence.
 `tests/color_battery.rs` `col-018` freezes exact canonical-byte sentinels for
@@ -987,8 +1017,10 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   the exact raw content identity of artifact rows and v15 carries that same
   typed content ID through lineage edges. Schema v16 can preserve an explicit
   artifact-to-receipt binding but never invents one, chooses among competing
-  receipts, or strengthens the receipt's authority state. Historical
-  evidence/op/cache/package rows remain untouched;
+  receipts, or strengthens the receipt's authority state. Schema v17 does the
+  same only for explicitly bound exact evidence JSON bytes; it neither
+  canonicalizes historical JSON nor infers semantics from it. Historical
+  op/cache/package rows remain untouched;
   cross-surface database-wire-package parity, resumable fleet backfill, a
   declared multi-version compatibility window beyond already-open trigger
   coverage, cancellation/crash fault injection, and rollback views remain

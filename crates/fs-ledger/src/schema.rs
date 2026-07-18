@@ -40,9 +40,11 @@
 //! identity across every role-qualified operation/artifact lineage edge.
 //! Schema v16 adds explicit, receipt-backed artifact semantic bindings while
 //! leaving all unknown historical meanings unbound.
+//! Schema v17 adds the same explicit receipt boundary for exact retained
+//! evidence JSON bytes and makes a bound evidence body immutable.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -52,7 +54,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
 pub(crate) const MIGRATIONS: &[&[&str]] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
 ];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
@@ -1169,7 +1171,80 @@ pub const V16: &[&str] = &[
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 through v16 additions); the
+/// v17: explicit semantic bindings for exact retained evidence JSON bytes.
+///
+/// Binding is opt-in and receipt-backed. Migration creates no rows because an
+/// evidence name or JSON shape cannot establish a nominal schema or authority.
+/// Once a binding exists, the exact evidence name/body pair is retained; exact
+/// response-loss retries remain legal while reinterpretation is refused.
+pub const V17: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS evidence_semantic_bindings(
+        evidence_name TEXT NOT NULL
+            CHECK(length(CAST(evidence_name AS BLOB)) BETWEEN 1 AND 65536),
+        receipt_id BLOB NOT NULL CHECK(length(receipt_id) = 32),
+        content_id BLOB NOT NULL CHECK(length(content_id) = 32),
+        semantic_id BLOB NOT NULL CHECK(length(semantic_id) = 32),
+        identity_role INTEGER NOT NULL CHECK(identity_role BETWEEN 1 AND 12),
+        identity_schema_id BLOB NOT NULL CHECK(length(identity_schema_id) = 32),
+        identity_schema_version INTEGER NOT NULL
+            CHECK(identity_schema_version BETWEEN 1 AND 4294967295),
+        trust_state INTEGER NOT NULL CHECK(trust_state BETWEEN 0 AND 3),
+        no_claim_state INTEGER NOT NULL CHECK(no_claim_state BETWEEN 0 AND 1),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(evidence_name, receipt_id),
+        FOREIGN KEY(evidence_name) REFERENCES evidence(name),
+        FOREIGN KEY(receipt_id)
+            REFERENCES identity_migration_receipts(receipt_id)
+    ) STRICT",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_semantic_binding_content
+     ON evidence_semantic_bindings(content_id, evidence_name, receipt_id)",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_semantic_binding_receipt
+     ON evidence_semantic_bindings(receipt_id, evidence_name)",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_semantic_binding_semantic
+     ON evidence_semantic_bindings(
+         identity_role, identity_schema_id, identity_schema_version,
+         semantic_id, evidence_name, receipt_id
+     )",
+    "CREATE TRIGGER IF NOT EXISTS trg_evidence_semantic_binding_immutable_update
+     BEFORE UPDATE ON evidence_semantic_bindings
+     BEGIN
+       SELECT RAISE(ABORT, 'evidence semantic binding is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_evidence_semantic_binding_immutable_delete
+     BEFORE DELETE ON evidence_semantic_bindings
+     BEGIN
+       SELECT RAISE(ABORT, 'evidence semantic binding is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_evidence_semantic_binding_immutable_reinsert
+     BEFORE INSERT ON evidence_semantic_bindings
+     WHEN EXISTS(
+         SELECT 1 FROM evidence_semantic_bindings
+         WHERE evidence_name = NEW.evidence_name AND receipt_id = NEW.receipt_id
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'evidence semantic binding is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_evidence_semantic_binding_guard_source_update
+     BEFORE UPDATE ON evidence
+     WHEN EXISTS(
+         SELECT 1 FROM evidence_semantic_bindings
+         WHERE evidence_name = OLD.name
+     ) AND (NEW.name != OLD.name OR CAST(NEW.body AS BLOB) != CAST(OLD.body AS BLOB))
+     BEGIN
+       SELECT RAISE(ABORT, 'bound evidence identity is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_evidence_semantic_binding_guard_source_delete
+     BEFORE DELETE ON evidence
+     WHEN EXISTS(
+         SELECT 1 FROM evidence_semantic_bindings
+         WHERE evidence_name = OLD.name
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'bound evidence identity is retained');
+     END",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 through v17 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -1205,4 +1280,5 @@ pub const ALL_TABLES: &[&str] = &[
     "artifact_content_identities",
     "edge_content_identities",
     "artifact_semantic_bindings",
+    "evidence_semantic_bindings",
 ];

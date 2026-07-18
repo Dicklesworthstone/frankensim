@@ -4,7 +4,7 @@ use fs_blake3::identity::{
 };
 use fs_ledger::{
     ARTIFACT_CONTENT_IDENTITY_ROW_VERSION, EDGE_CONTENT_IDENTITY_ROW_VERSION, EdgeRole,
-    FiveExplicits, IdentityMigrationClaim, Ledger, LedgerError,
+    ExtensionTable, FiveExplicits, IdentityMigrationClaim, Ledger, LedgerError,
     MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES,
 };
 
@@ -61,7 +61,7 @@ fn claim<'a>(
 
 #[test]
 fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let legacy = br#"{"legacy":"shape-a","provenance":1}"#;
     let canonical = br#"{"schema":1,"shape":"a"}"#;
     let semantic = semantic_receipt(b"shape-a");
@@ -136,7 +136,7 @@ fn receipt_identity_binds_exact_bytes_schema_and_audit_state() {
 
 #[test]
 fn typed_projection_refuses_a_different_schema() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let semantic = semantic_receipt(b"typed-subject");
     let write = ledger
         .record_identity_migration(claim(semantic, b"legacy", b"canonical", "demo-v0-to-v1"))
@@ -154,7 +154,7 @@ fn typed_projection_refuses_a_different_schema() {
 
 #[test]
 fn ambiguous_legacy_candidates_are_bounded_and_never_selected() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let legacy = b"same-legacy-source";
     let semantic = semantic_receipt(b"same-subject");
     let first = ledger
@@ -186,7 +186,7 @@ fn ambiguous_legacy_candidates_are_bounded_and_never_selected() {
 
 #[test]
 fn payload_limit_refuses_before_any_row_is_published() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let oversized = vec![0xA5; MAX_IDENTITY_MIGRATION_PAYLOAD_BYTES + 1];
     let semantic = semantic_receipt(b"bounded-subject");
     assert!(matches!(
@@ -206,7 +206,7 @@ fn payload_limit_refuses_before_any_row_is_published() {
 
 #[test]
 fn artifact_writes_dual_write_an_exact_typed_content_identity() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let bytes = b"artifact identity dual-write fixture";
     let write = ledger
         .put_artifact("identity-fixture", bytes, None)
@@ -240,7 +240,7 @@ fn artifact_writes_dual_write_an_exact_typed_content_identity() {
 
 #[test]
 fn lineage_edges_dual_write_the_linked_artifact_content_identity() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let artifact = ledger
         .put_artifact("edge-identity-fixture", b"lineage payload", None)
         .expect("store linked artifact");
@@ -284,7 +284,7 @@ fn lineage_edges_dual_write_the_linked_artifact_content_identity() {
 
 #[test]
 fn explicit_receipt_binding_projects_only_the_exact_nominal_schema_and_roots_gc() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let bytes = b"semantic artifact bytes";
     let artifact = ledger
         .put_artifact("semantic-fixture", bytes, None)
@@ -329,7 +329,7 @@ fn explicit_receipt_binding_projects_only_the_exact_nominal_schema_and_roots_gc(
 
 #[test]
 fn artifact_semantic_candidates_preserve_ambiguity_and_missing_artifacts_refuse() {
-    let ledger = Ledger::open(":memory:").expect("fresh v16 ledger");
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
     let bytes = b"shared semantic artifact";
     let artifact = ledger
         .put_artifact("semantic-fixture", bytes, None)
@@ -377,4 +377,133 @@ fn artifact_semantic_candidates_preserve_ambiguity_and_missing_artifacts_refuse(
         Err(LedgerError::NotFound { .. })
     ));
     assert_eq!(ledger.table_count("artifact_semantic_bindings").unwrap(), 2);
+}
+
+#[test]
+fn exact_evidence_binding_freezes_bytes_and_preserves_receipt_ambiguity() {
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
+    let evidence_name = "gauntlet/exact-evidence";
+    let body = r#"{"claim":"exact","value":17}"#;
+    ledger
+        .put_extension(ExtensionTable::Evidence, evidence_name, body)
+        .expect("store exact evidence JSON");
+    let semantic = semantic_receipt(b"exact-evidence");
+    let first_receipt = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"legacy evidence v0",
+            body.as_bytes(),
+            "evidence-v0-to-v1",
+        ))
+        .expect("record exact evidence receipt");
+
+    let first = ledger
+        .bind_evidence_semantic_identity(evidence_name, first_receipt.receipt_id())
+        .expect("bind exact evidence bytes");
+    assert_eq!(first.evidence_name(), evidence_name);
+    assert_eq!(first.content_id(), ContentId::of_bytes(body.as_bytes()));
+    assert!(!first.deduped());
+    let retry = ledger
+        .bind_evidence_semantic_identity(evidence_name, first_receipt.receipt_id())
+        .expect("dedupe exact evidence binding");
+    assert!(retry.deduped());
+
+    let stored = ledger
+        .evidence_semantic_binding(evidence_name, first_receipt.receipt_id())
+        .expect("reverify evidence binding")
+        .expect("evidence binding exists");
+    assert_eq!(stored.evidence_name(), evidence_name);
+    assert_eq!(stored.receipt_id(), first_receipt.receipt_id());
+    assert_eq!(stored.content_id(), ContentId::of_bytes(body.as_bytes()));
+    assert_eq!(
+        stored.typed_semantic_id::<DemoSemanticId>(),
+        Some(semantic.id())
+    );
+    assert_eq!(stored.typed_semantic_id::<OtherSemanticId>(), None);
+
+    ledger
+        .put_extension(ExtensionTable::Evidence, evidence_name, body)
+        .expect("exact response-loss source retry remains legal");
+    assert!(
+        ledger
+            .put_extension(
+                ExtensionTable::Evidence,
+                evidence_name,
+                r#"{"claim":"reinterpreted","value":17}"#,
+            )
+            .is_err(),
+        "a bound evidence body must not be silently reinterpreted"
+    );
+    assert_eq!(
+        ledger
+            .get_extension(ExtensionTable::Evidence, evidence_name)
+            .unwrap()
+            .as_deref(),
+        Some(body)
+    );
+
+    let second_receipt = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"different legacy evidence",
+            body.as_bytes(),
+            "independent-evidence-rule",
+        ))
+        .expect("record a second exact receipt");
+    ledger
+        .bind_evidence_semantic_identity(evidence_name, second_receipt.receipt_id())
+        .expect("preserve a second exact interpretation");
+    let existence = ledger
+        .evidence_semantic_binding_candidates(evidence_name, 0)
+        .unwrap();
+    assert!(existence.receipt_ids().is_empty());
+    assert!(existence.truncated());
+    let one = ledger
+        .evidence_semantic_binding_candidates(evidence_name, 1)
+        .unwrap();
+    assert_eq!(one.receipt_ids().len(), 1);
+    assert!(one.truncated());
+    let both = ledger
+        .evidence_semantic_binding_candidates(evidence_name, 2)
+        .unwrap();
+    assert_eq!(both.receipt_ids().len(), 2);
+    assert!(!both.truncated());
+}
+
+#[test]
+fn evidence_binding_refuses_json_reformatting_missing_rows_and_partial_publication() {
+    let ledger = Ledger::open(":memory:").expect("fresh v17 ledger");
+    let evidence_name = "gauntlet/byte-sensitive";
+    let compact = r#"{"a":1}"#;
+    ledger
+        .put_extension(ExtensionTable::Evidence, evidence_name, compact)
+        .expect("store compact evidence JSON");
+    let semantic = semantic_receipt(b"byte-sensitive-evidence");
+    let reformatted = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"legacy reformatted evidence",
+            br#"{"a": 1}"#,
+            "json-reformat-is-not-identity",
+        ))
+        .expect("record independently valid reformatted receipt");
+    assert!(matches!(
+        ledger.bind_evidence_semantic_identity(evidence_name, reformatted.receipt_id()),
+        Err(LedgerError::Invalid { .. })
+    ));
+    assert_eq!(ledger.table_count("evidence_semantic_bindings").unwrap(), 0);
+
+    let missing = ledger
+        .record_identity_migration(claim(
+            semantic,
+            b"legacy missing evidence",
+            compact.as_bytes(),
+            "missing-evidence-rule",
+        ))
+        .expect("record receipt whose evidence row is absent");
+    assert!(matches!(
+        ledger.bind_evidence_semantic_identity("gauntlet/missing", missing.receipt_id()),
+        Err(LedgerError::NotFound { .. })
+    ));
+    assert_eq!(ledger.table_count("evidence_semantic_bindings").unwrap(), 0);
 }
