@@ -833,6 +833,7 @@ dependencies = [
  "fs-ad",
  "fs-adjoint",
  "fs-alloc",
+ "fs-casebook",
  "fs-eproc",
  "fs-exec",
  "fs-feec",
