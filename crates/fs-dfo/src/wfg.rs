@@ -1,6 +1,6 @@
 //! Typed kernels for the Walking Fish Group benchmark family.
 //!
-//! The production kernel currently implements normalized WFG1 through WFG4
+//! The production kernel currently implements normalized WFG1 through WFG7
 //! compositions for arbitrary valid objective, position-parameter, and
 //! distance-parameter counts.  Its transformations and shapes follow the
 //! corrected WFG toolkit as represented by jMetal revision
@@ -10,9 +10,11 @@
 //!
 //! Determinism is structural within the evaluator: reductions have a fixed
 //! left-to-right order and transcendental calls use [`fs_math::det`].  This
-//! module does not yet claim the complete WFG5-WFG9 suite, executable parity
+//! module does not yet claim the complete WFG8-WFG9 suite, executable parity
 //! with an external oracle, optimizer convergence, cancellation coverage,
 //! cross-ISA bit stability, or performance evidence.
+//! Direct WFG6 nonseparable reductions and WFG7 suffix conditioning retain
+//! canonical fixed-order arithmetic; no subquadratic complexity claim is made.
 
 #![deny(unsafe_code)]
 
@@ -20,6 +22,12 @@ const CORRECTION_EPSILON: f64 = 1.0e-10;
 const S_MULTI_A: f64 = 30.0;
 const S_MULTI_B: f64 = 10.0;
 const S_MULTI_CENTER: f64 = 0.35;
+const S_DECEPT_CENTER: f64 = 0.35;
+const S_DECEPT_RADIUS: f64 = 0.001;
+const S_DECEPT_FLOOR: f64 = 0.05;
+const B_PARAM_A: f64 = 0.98 / 49.98;
+const B_PARAM_B: f64 = 0.02;
+const B_PARAM_C: f64 = 50.0;
 
 /// Structured refusal from a typed normalized WFG evaluator.
 #[non_exhaustive]
@@ -418,6 +426,129 @@ impl Wfg4 {
     }
 }
 
+/// A validated normalized WFG5 problem definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wfg5 {
+    spec: WfgSpec,
+}
+
+impl Wfg5 {
+    /// Validate a normalized WFG5 problem definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for an invalid objective count, position
+    /// partition, distance count, or checked total dimension.
+    pub fn new(
+        objectives: usize,
+        position_parameters: usize,
+        distance_parameters: usize,
+    ) -> Result<Self, WfgError> {
+        Ok(Self {
+            spec: WfgSpec::new(objectives, position_parameters, distance_parameters)?,
+        })
+    }
+
+    wfg_accessors!();
+
+    /// Evaluate one normalized decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for invalid input or failed intermediate
+    /// storage admission. No transformation runs before input validation.
+    pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        self.spec.validate_input(input)?;
+        let transformed = wfg5_transform(input)?;
+        let reduced = equal_group_reduce(&transformed, self.spec)?;
+        let positioned = identity_positioned(&reduced)?;
+        let shape = concave_shape(&positioned)?;
+        finish_evaluation(transformed, reduced, positioned, shape)
+    }
+}
+
+/// A validated normalized WFG6 problem definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wfg6 {
+    spec: WfgSpec,
+}
+
+impl Wfg6 {
+    /// Validate a normalized WFG6 problem definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for an invalid objective count, position
+    /// partition, distance count, or checked total dimension.
+    pub fn new(
+        objectives: usize,
+        position_parameters: usize,
+        distance_parameters: usize,
+    ) -> Result<Self, WfgError> {
+        Ok(Self {
+            spec: WfgSpec::new(objectives, position_parameters, distance_parameters)?,
+        })
+    }
+
+    wfg_accessors!();
+
+    /// Evaluate one normalized decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for invalid input or failed intermediate
+    /// storage admission. No transformation runs before input validation.
+    pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        self.spec.validate_input(input)?;
+        let transformed = wfg6_transform(input, self.spec.position_parameters)?;
+        let reduced = wfg6_reduce(&transformed, self.spec)?;
+        let positioned = identity_positioned(&reduced)?;
+        let shape = concave_shape(&positioned)?;
+        finish_evaluation(transformed, reduced, positioned, shape)
+    }
+}
+
+/// A validated normalized WFG7 problem definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wfg7 {
+    spec: WfgSpec,
+}
+
+impl Wfg7 {
+    /// Validate a normalized WFG7 problem definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for an invalid objective count, position
+    /// partition, distance count, or checked total dimension.
+    pub fn new(
+        objectives: usize,
+        position_parameters: usize,
+        distance_parameters: usize,
+    ) -> Result<Self, WfgError> {
+        Ok(Self {
+            spec: WfgSpec::new(objectives, position_parameters, distance_parameters)?,
+        })
+    }
+
+    wfg_accessors!();
+
+    /// Evaluate one normalized decision vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured refusal for invalid input or failed intermediate
+    /// storage admission. No transformation runs before input validation.
+    pub fn evaluate_normalized(&self, input: &[f64]) -> Result<WfgEvaluation, WfgError> {
+        self.spec.validate_input(input)?;
+        let transformed = wfg7_transform(input, self.spec.position_parameters)?;
+        let reduced = equal_group_reduce(&transformed, self.spec)?;
+        let positioned = identity_positioned(&reduced)?;
+        let shape = concave_shape(&positioned)?;
+        finish_evaluation(transformed, reduced, positioned, shape)
+    }
+}
+
 /// One normalized WFG evaluation with replay-relevant intermediates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WfgEvaluation {
@@ -566,6 +697,46 @@ fn wfg4_transform(input: &[f64]) -> Result<Vec<f64>, WfgError> {
     Ok(transformed)
 }
 
+fn wfg5_transform(input: &[f64]) -> Result<Vec<f64>, WfgError> {
+    let mut transformed = reserved_vec("WFG5 transformed coordinates", input.len())?;
+    for &value in input {
+        transformed.push(s_decept(
+            value,
+            S_DECEPT_CENTER,
+            S_DECEPT_RADIUS,
+            S_DECEPT_FLOOR,
+        ));
+    }
+    Ok(transformed)
+}
+
+fn wfg6_transform(input: &[f64], position_parameters: usize) -> Result<Vec<f64>, WfgError> {
+    let mut transformed = reserved_vec("WFG6 transformed coordinates", input.len())?;
+    transformed.extend_from_slice(&input[..position_parameters]);
+    for &value in &input[position_parameters..] {
+        transformed.push(s_linear(value, 0.35));
+    }
+    Ok(transformed)
+}
+
+fn wfg7_transform(input: &[f64], position_parameters: usize) -> Result<Vec<f64>, WfgError> {
+    let mut transformed = reserved_vec("WFG7 transformed coordinates", input.len())?;
+    for (index, &value) in input[..position_parameters].iter().enumerate() {
+        let conditioning = equal_weight_reduction(&input[index + 1..]);
+        transformed.push(b_param(
+            value,
+            conditioning,
+            B_PARAM_A,
+            B_PARAM_B,
+            B_PARAM_C,
+        ));
+    }
+    for &value in &input[position_parameters..] {
+        transformed.push(s_linear(value, 0.35));
+    }
+    Ok(transformed)
+}
+
 fn wfg1_reduce(transformed: &[f64], spec: WfgSpec) -> Result<Vec<f64>, WfgError> {
     let mut reduced = reserved_vec("WFG1 reduced coordinates", spec.objectives)?;
     for group in 0..spec.objectives - 1 {
@@ -589,6 +760,20 @@ fn equal_group_reduce(transformed: &[f64], spec: WfgSpec) -> Result<Vec<f64>, Wf
     }
     reduced.push(equal_weight_reduction(
         &transformed[spec.position_parameters..],
+    ));
+    Ok(reduced)
+}
+
+fn wfg6_reduce(transformed: &[f64], spec: WfgSpec) -> Result<Vec<f64>, WfgError> {
+    let mut reduced = reserved_vec("WFG6 reduced coordinates", spec.objectives)?;
+    for group in 0..spec.objectives - 1 {
+        let start = group * spec.position_group_size;
+        let end = start + spec.position_group_size;
+        reduced.push(r_nonsep(&transformed[start..end], spec.position_group_size));
+    }
+    reduced.push(r_nonsep(
+        &transformed[spec.position_parameters..],
+        spec.distance_parameters,
     ));
     Ok(reduced)
 }
@@ -638,6 +823,30 @@ fn b_flat(value: f64, height: f64, lower: f64, upper: f64) -> f64 {
         0.0
     };
     correct_to_01(height + below - above)
+}
+
+fn b_param(value: f64, conditioning: f64, a: f64, b: f64, c: f64) -> f64 {
+    debug_assert!((0.0..=1.0).contains(&value));
+    debug_assert!((0.0..=1.0).contains(&conditioning));
+    debug_assert!(0.0 < a && a < 1.0);
+    debug_assert!(0.0 < b && b < c);
+    let exponent_coordinate =
+        a - (1.0 - 2.0 * conditioning) * ((0.5 - conditioning).floor() + a).abs();
+    let exponent = (c - b).mul_add(exponent_coordinate, b);
+    correct_to_01(fs_math::det::pow(value, exponent))
+}
+
+fn s_decept(value: f64, center: f64, radius: f64, floor_value: f64) -> f64 {
+    debug_assert!((0.0..=1.0).contains(&value));
+    debug_assert!(0.0 < center - radius && center + radius < 1.0);
+    debug_assert!((0.0..=1.0).contains(&floor_value));
+    let below = (value - center + radius).floor()
+        * (1.0 - floor_value + (center - radius) / radius)
+        / (center - radius);
+    let above = (center + radius - value).floor()
+        * (1.0 - floor_value + (1.0 - center - radius) / radius)
+        / (1.0 - center - radius);
+    correct_to_01(1.0 + ((value - center).abs() - radius) * (below + above + 1.0 / radius))
 }
 
 fn s_linear(value: f64, zero: f64) -> f64 {
@@ -871,6 +1080,9 @@ mod tests {
             Wfg1::new(1, 1, 2).unwrap_err(),
             Wfg2::new(1, 1, 2).unwrap_err(),
             Wfg3::new(1, 1, 2).unwrap_err(),
+            Wfg5::new(1, 1, 2).unwrap_err(),
+            Wfg6::new(1, 1, 2).unwrap_err(),
+            Wfg7::new(1, 1, 2).unwrap_err(),
         ] {
             assert_eq!(error, WfgError::TooFewObjectives { objectives: 1 });
         }
@@ -878,6 +1090,9 @@ mod tests {
             Wfg1::new(4, 4, 2).unwrap_err(),
             Wfg2::new(4, 4, 2).unwrap_err(),
             Wfg3::new(4, 4, 2).unwrap_err(),
+            Wfg5::new(4, 4, 2).unwrap_err(),
+            Wfg6::new(4, 4, 2).unwrap_err(),
+            Wfg7::new(4, 4, 2).unwrap_err(),
         ] {
             assert_eq!(
                 error,
@@ -891,6 +1106,9 @@ mod tests {
             Wfg1::new(3, 4, 0).unwrap_err(),
             Wfg2::new(3, 4, 0).unwrap_err(),
             Wfg3::new(3, 4, 0).unwrap_err(),
+            Wfg5::new(3, 4, 0).unwrap_err(),
+            Wfg6::new(3, 4, 0).unwrap_err(),
+            Wfg7::new(3, 4, 0).unwrap_err(),
         ] {
             assert_eq!(error, WfgError::NoDistanceParameters);
         }
@@ -937,6 +1155,9 @@ mod tests {
             }
         );
         assert!(Wfg1::new(3, 4, 3).is_ok());
+        assert!(Wfg5::new(3, 4, 3).is_ok());
+        assert!(Wfg6::new(3, 4, 3).is_ok());
+        assert!(Wfg7::new(3, 4, 3).is_ok());
     }
 
     #[test]
@@ -958,6 +1179,24 @@ mod tests {
         assert_eq!(wfg3.position_parameters(), 8);
         assert_eq!(wfg3.distance_parameters(), 4);
         assert_eq!(wfg3.dimension(), 12);
+
+        let wfg5 = Wfg5::new(3, 4, 3).unwrap();
+        assert_eq!(wfg5.objectives(), 3);
+        assert_eq!(wfg5.position_parameters(), 4);
+        assert_eq!(wfg5.distance_parameters(), 3);
+        assert_eq!(wfg5.dimension(), 7);
+
+        let wfg6 = Wfg6::new(4, 6, 2).unwrap();
+        assert_eq!(wfg6.objectives(), 4);
+        assert_eq!(wfg6.position_parameters(), 6);
+        assert_eq!(wfg6.distance_parameters(), 2);
+        assert_eq!(wfg6.dimension(), 8);
+
+        let wfg7 = Wfg7::new(5, 8, 4).unwrap();
+        assert_eq!(wfg7.objectives(), 5);
+        assert_eq!(wfg7.position_parameters(), 8);
+        assert_eq!(wfg7.distance_parameters(), 4);
+        assert_eq!(wfg7.dimension(), 12);
     }
 
     #[test]
@@ -966,11 +1205,17 @@ mod tests {
         let wfg2 = Wfg2::new(3, 4, 2).unwrap();
         let wfg3 = Wfg3::new(3, 4, 2).unwrap();
         let wfg4 = Wfg4::new(3, 4, 2).unwrap();
+        let wfg5 = Wfg5::new(3, 4, 2).unwrap();
+        let wfg6 = Wfg6::new(3, 4, 2).unwrap();
+        let wfg7 = Wfg7::new(3, 4, 2).unwrap();
 
         assert_common_input_refusals(|input| wfg1.evaluate_normalized(input));
         assert_common_input_refusals(|input| wfg2.evaluate_normalized(input));
         assert_common_input_refusals(|input| wfg3.evaluate_normalized(input));
         assert_common_input_refusals(|input| wfg4.evaluate_normalized(input));
+        assert_common_input_refusals(|input| wfg5.evaluate_normalized(input));
+        assert_common_input_refusals(|input| wfg6.evaluate_normalized(input));
+        assert_common_input_refusals(|input| wfg7.evaluate_normalized(input));
     }
 
     #[test]
@@ -1020,6 +1265,73 @@ mod tests {
         );
         assert_close(mixed_shape(&positioned, 5, 1.0), 0.8);
         assert_close(disc_shape(&positioned, 5, 1.0, 1.0), 0.8);
+    }
+
+    #[test]
+    fn canonical_wfg5_through_wfg7_bias_anchors_match_the_toolkit() {
+        assert_close(
+            s_decept(
+                S_DECEPT_CENTER,
+                S_DECEPT_CENTER,
+                S_DECEPT_RADIUS,
+                S_DECEPT_FLOOR,
+            ),
+            0.0,
+        );
+        assert_close(
+            s_decept(
+                S_DECEPT_CENTER - S_DECEPT_RADIUS,
+                S_DECEPT_CENTER,
+                S_DECEPT_RADIUS,
+                S_DECEPT_FLOOR,
+            ),
+            1.0,
+        );
+        assert_close(
+            s_decept(
+                S_DECEPT_CENTER + S_DECEPT_RADIUS,
+                S_DECEPT_CENTER,
+                S_DECEPT_RADIUS,
+                S_DECEPT_FLOOR,
+            ),
+            1.0,
+        );
+        assert_close(
+            s_decept(
+                S_DECEPT_CENTER - S_DECEPT_RADIUS / 2.0,
+                S_DECEPT_CENTER,
+                S_DECEPT_RADIUS,
+                S_DECEPT_FLOOR,
+            ),
+            0.5,
+        );
+        assert_close(
+            s_decept(
+                S_DECEPT_CENTER + S_DECEPT_RADIUS / 2.0,
+                S_DECEPT_CENTER,
+                S_DECEPT_RADIUS,
+                S_DECEPT_FLOOR,
+            ),
+            0.5,
+        );
+        assert_close(s_decept(0.0, 0.35, 0.001, 0.05), 0.050_000_000_000_029_354);
+        assert_close(s_decept(1.0, 0.35, 0.001, 0.05), 0.049_999_999_999_958_63);
+
+        assert_close(
+            b_param(0.25, 0.0, B_PARAM_A, B_PARAM_B, B_PARAM_C),
+            0.972_654_947_412_285_5,
+        );
+        assert_close(b_param(0.25, 0.5, B_PARAM_A, B_PARAM_B, B_PARAM_C), 0.25);
+        assert_close(
+            b_param(0.25, 1.0, B_PARAM_A, B_PARAM_B, B_PARAM_C),
+            7.888_609_052_210_118e-31,
+        );
+        assert_close(r_nonsep(&[0.37], 1), 0.37);
+        assert_close(r_nonsep(&[0.1, 0.4, 0.9], 3), 0.766_666_666_666_666_7);
+        assert_close(
+            r_nonsep(&[0.1, 0.2, 0.4, 0.7, 0.9], 5),
+            0.713_333_333_333_333_3,
+        );
     }
 
     #[test]
@@ -1230,6 +1542,279 @@ mod tests {
         assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
 
         let problem = Wfg3::new(4, 6, 4).unwrap();
+        let first = problem.evaluate_normalized(&input).unwrap();
+        let second = problem.evaluate_normalized(&input).unwrap();
+        assert_evaluation_bits_eq(&first, &second);
+        assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
+    }
+
+    #[test]
+    fn pinned_reference_probe_matches_wfg5_full_pipeline() {
+        // Frozen from an independent direct f64 port of the corrected
+        // normalized equations. Every coordinate is an interior deceptive
+        // probe and every objective group is asymmetric.
+        let evaluation = Wfg5::new(4, 6, 4)
+            .unwrap()
+            .evaluate_normalized(&[0.12, 0.25, 0.38, 0.51, 0.64, 0.77, 0.09, 0.31, 0.53, 0.75])
+            .unwrap();
+
+        assert_slice_close(
+            evaluation.transformed(),
+            &[
+                0.376_647_564_469_933_3,
+                0.730_515_759_312_329_3,
+                0.957_550_077_041_600_6,
+                0.767_257_318_952_224,
+                0.576_964_560_862_847_5,
+                0.386_671_802_773_470_9,
+                0.294_985_673_352_457_3,
+                0.893_839_541_547_281_3,
+                0.737_981_510_015_396_8,
+                0.415_947_611_710_298_15,
+            ],
+        );
+        assert_slice_close(
+            evaluation.reduced(),
+            &[
+                0.553_581_661_891_131_3,
+                0.862_403_697_996_912_3,
+                0.481_818_181_818_159_2,
+                0.585_688_584_156_358_4,
+            ],
+        );
+        assert_slice_close(evaluation.positioned(), evaluation.reduced());
+        assert_slice_close(
+            evaluation.shape(),
+            &[
+                0.512_409_246_208_475,
+                0.542_546_918_388_73,
+                0.163_855_316_365_618_98,
+                0.645_159_701_969_735_5,
+            ],
+        );
+        assert_slice_close(
+            evaluation.objectives(),
+            &[
+                1.610_507_076_573_308_5,
+                2.755_876_257_711_278_8,
+                1.568_820_482_350_072_2,
+                5.746_966_199_914_242,
+            ],
+        );
+    }
+
+    #[test]
+    fn pinned_reference_probe_matches_wfg6_full_pipeline() {
+        // M=4, k=9, l=5 forces A=3 in each position reduction and odd A=5
+        // in the distinct distance reduction, exposing pair/even/fixed-A
+        // mutants in the same frozen trace.
+        let evaluation = Wfg6::new(4, 9, 5)
+            .unwrap()
+            .evaluate_normalized(&[
+                0.07, 0.19, 0.31, 0.46, 0.58, 0.73, 0.14, 0.67, 0.92, 0.02, 0.27, 0.44, 0.69, 0.96,
+            ])
+            .unwrap();
+
+        assert_slice_close(
+            evaluation.transformed(),
+            &[
+                0.07,
+                0.19,
+                0.31,
+                0.46,
+                0.58,
+                0.73,
+                0.14,
+                0.67,
+                0.92,
+                0.942_857_142_857_142_8,
+                0.228_571_428_571_428_48,
+                0.138_461_538_461_538_5,
+                0.523_076_923_076_923,
+                0.938_461_538_461_538_5,
+            ],
+        );
+        assert_slice_close(
+            evaluation.reduced(),
+            &[
+                0.254_999_999_999_999_95,
+                0.474_999_999_999_999_9,
+                0.808_333_333_333_333_5,
+                0.803_076_923_076_923_1,
+            ],
+        );
+        assert_slice_close(evaluation.positioned(), evaluation.reduced());
+        assert_slice_close(
+            evaluation.shape(),
+            &[
+                0.252_777_739_904_556_76,
+                0.078_489_574_532_045_62,
+                0.286_332_678_195_076_85,
+                0.920_845_480_141_026_3,
+            ],
+        );
+        assert_slice_close(
+            evaluation.objectives(),
+            &[
+                1.308_632_402_886_036_8,
+                1.117_035_221_205_105_6,
+                2.521_072_992_247_384_5,
+                8.169_840_764_205_134,
+            ],
+        );
+    }
+
+    #[test]
+    fn pinned_reference_probe_matches_wfg7_full_pipeline() {
+        // Suffix means straddle 0.5 so both b_param exponent branches remain
+        // interior and every conditioned position coordinate is observable.
+        let evaluation = Wfg7::new(4, 6, 4)
+            .unwrap()
+            .evaluate_normalized(&[0.12, 0.25, 0.38, 0.51, 0.64, 0.77, 0.09, 0.31, 0.53, 0.75])
+            .unwrap();
+
+        assert_slice_close(
+            evaluation.transformed(),
+            &[
+                0.135_933_152_438_588_94,
+                0.251_703_991_513_018_6,
+                0.098_057_458_291_359_09,
+                0.189_538_890_886_922_36,
+                0.645_622_781_437_027_8,
+                0.802_211_677_331_793_9,
+                0.742_857_142_857_142_9,
+                0.114_285_714_285_714_24,
+                0.276_923_076_923_077,
+                0.615_384_615_384_615_4,
+            ],
+        );
+        assert_slice_close(
+            evaluation.reduced(),
+            &[
+                0.193_818_571_975_803_77,
+                0.143_798_174_589_140_74,
+                0.723_917_229_384_410_8,
+                0.437_362_637_362_637_36,
+            ],
+        );
+        assert_slice_close(evaluation.positioned(), evaluation.reduced());
+        assert_slice_close(
+            evaluation.shape(),
+            &[
+                0.060_921_741_434_431_45,
+                0.028_211_043_903_512_478,
+                0.292_153_307_271_704_35,
+                0.954_012_119_143_502,
+            ],
+        );
+        assert_slice_close(
+            evaluation.objectives(),
+            &[
+                0.559_206_120_231_500_3,
+                0.550_206_812_976_687_3,
+                2.190_282_480_992_863,
+                8.069_459_590_510_654,
+            ],
+        );
+    }
+
+    #[test]
+    fn wfg7_conditioning_uses_original_strict_suffixes() {
+        let problem = Wfg7::new(4, 6, 4).unwrap();
+        let input = [0.12, 0.25, 0.38, 0.51, 0.64, 0.77, 0.09, 0.31, 0.53, 0.75];
+        let baseline = problem.evaluate_normalized(&input).unwrap();
+
+        let mut second_changed = input;
+        second_changed[1] = 0.35;
+        let second_changed = problem.evaluate_normalized(&second_changed).unwrap();
+        assert!(
+            second_changed.transformed()[0] < baseline.transformed()[0],
+            "the first conditioner must include the changed second coordinate"
+        );
+        assert!(
+            second_changed.transformed()[1] > baseline.transformed()[1],
+            "the changed base must retain its original strict-suffix conditioner"
+        );
+        assert_slice_bits_eq(
+            &baseline.transformed()[2..],
+            &second_changed.transformed()[2..],
+        );
+
+        let mut last_changed = input;
+        last_changed[9] = 0.65;
+        let last_changed = problem.evaluate_normalized(&last_changed).unwrap();
+        for (index, (&baseline_value, &changed_value)) in baseline.transformed()
+            [..problem.position_parameters()]
+            .iter()
+            .zip(&last_changed.transformed()[..problem.position_parameters()])
+            .enumerate()
+        {
+            assert_ne!(
+                baseline_value.to_bits(),
+                changed_value.to_bits(),
+                "position coordinate {index} ignored the final suffix member"
+            );
+        }
+        assert_slice_bits_eq(
+            &baseline.transformed()[6..9],
+            &last_changed.transformed()[6..9],
+        );
+        assert_ne!(
+            baseline.transformed()[9].to_bits(),
+            last_changed.transformed()[9].to_bits()
+        );
+    }
+
+    #[test]
+    fn wfg5_through_wfg7_admit_the_smallest_valid_dimension() {
+        let input = [0.2, 0.7];
+        let evaluations = [
+            Wfg5::new(2, 1, 1)
+                .unwrap()
+                .evaluate_normalized(&input)
+                .unwrap(),
+            Wfg6::new(2, 1, 1)
+                .unwrap()
+                .evaluate_normalized(&input)
+                .unwrap(),
+            Wfg7::new(2, 1, 1)
+                .unwrap()
+                .evaluate_normalized(&input)
+                .unwrap(),
+        ];
+
+        for evaluation in evaluations {
+            assert_eq!(evaluation.transformed().len(), 2);
+            assert_eq!(evaluation.reduced().len(), 2);
+            assert_slice_close(evaluation.positioned(), evaluation.reduced());
+            assert_eq!(evaluation.shape().len(), 2);
+            assert_eq!(evaluation.objectives().len(), 2);
+            assert!(
+                evaluation
+                    .objectives()
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+        }
+    }
+
+    #[test]
+    fn wfg5_through_wfg7_repeated_evaluations_are_bitwise_identical() {
+        let input = [0.12, 0.25, 0.38, 0.51, 0.64, 0.77, 0.09, 0.31, 0.53, 0.75];
+
+        let problem = Wfg5::new(4, 6, 4).unwrap();
+        let first = problem.evaluate_normalized(&input).unwrap();
+        let second = problem.evaluate_normalized(&input).unwrap();
+        assert_evaluation_bits_eq(&first, &second);
+        assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
+
+        let problem = Wfg6::new(4, 6, 4).unwrap();
+        let first = problem.evaluate_normalized(&input).unwrap();
+        let second = problem.evaluate_normalized(&input).unwrap();
+        assert_evaluation_bits_eq(&first, &second);
+        assert_slice_bits_eq(&first.clone().into_objectives(), second.objectives());
+
+        let problem = Wfg7::new(4, 6, 4).unwrap();
         let first = problem.evaluate_normalized(&input).unwrap();
         let second = problem.evaluate_normalized(&input).unwrap();
         assert_evaluation_bits_eq(&first, &second);
