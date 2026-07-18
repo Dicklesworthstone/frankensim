@@ -148,10 +148,26 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   full residual trajectory) — a precision decision is EVIDENCE, never a
   silent downgrade. Run-dry is reported honestly (converged = false,
   best-achieved recorded), never panicked.
-- `eigen::{jacobi_eigh, lanczos_run/LanczosState,
+- `eigen::{admit_jacobi_eigh, JacobiEighAdmission,
+  JacobiEighAdmissionError, jacobi_eigh, lanczos_run/LanczosState,
   lobpcg_run/LobpcgState, EigenPair}` — symmetric eigensolvers.
-  `jacobi_eigh`: dense cyclic Jacobi (ascending eigenvalues, orthonormal
-  columns, lowest-index tie-break). Lanczos (full reorthogonalization)
+  `admit_jacobi_eigh(n)` is the public, allocation-free and callback-free
+  authority for the dense Jacobi shape/work proposition. It deterministically
+  checks `n*n`, then the exact aggregate envelope `4*n*n + 3*n`, then the
+  practical `MAX_EIGEN_WORK_ELEMENTS = 64*1024*1024 = 67,108,864`-element cap;
+  shape overflow, aggregate overflow, and representable cap exceedance are
+  distinct `JacobiEighAdmissionError` variants. A successful sealed
+  schema-v1 (`JACOBI_EIGH_ADMISSION_SCHEMA_VERSION = 1`)
+  `JacobiEighAdmission` records the schema version, dimension, square entry
+  count, exact aggregate element count, and governing cap.
+  For a fixed target width and `n`, admission is a pure checked-integer
+  decision with no allocator, matrix read, mutable state, callback, RNG, or
+  scheduling dependence. `jacobi_eigh` calls this SAME authority before its
+  input-length assertion or any allocation and uses the receipt's square
+  count; its established infallible surface remains a legacy panic projection
+  of typed refusal. The live dense cyclic Jacobi kernel returns ascending
+  eigenvalues and orthonormal columns with the lowest-index tie-break.
+  Lanczos (full reorthogonalization)
   and LOBPCG (X−X_prev conjugate direction, optional preconditioner) are
   MATRIX-FREE (operator = `Fn(&[f64], &mut [f64])` closure — fs-sparse
   SpMV or stencils plug in without format coupling) and RESUMABLE
@@ -281,8 +297,15 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
 ## Error model
 Legacy specialized slice-length/shape mismatches panic with structured
 messages (programmer errors). `gemm_scalar_checked` instead returns
-`GemmShapeError` and leaves C unchanged after any extent/length refusal. DATA
-conditions in factorizations return `FactorError` with the
+`GemmShapeError` and leaves C unchanged after any extent/length refusal.
+The dense Jacobi exception to the legacy-only shape surface is the explicit
+preflight `admit_jacobi_eigh`: its non-exhaustive structured error distinguishes
+matrix-shape arithmetic overflow, aggregate-work arithmetic overflow, and a
+representable aggregate above the practical cap without allocating or
+inspecting a matrix. `jacobi_eigh` deliberately preserves compatibility by
+projecting that same error as a panic, then separately panics on disagreement
+between `a.len()` and the receipt's `n*n` entries.
+DATA conditions in factorizations return `FactorError` with the
 offending index: non-SPD pivots, exactly-singular columns. LU `growth`
 exposes the pivot-growth statistic for ledgering. Pool GEMM returns
 `GemmRunError::MemoryRefused` when its checked plan exceeds the caller envelope
@@ -361,6 +384,11 @@ job.
 `gemm_scalar_checked` is likewise a synchronous, allocation-free reference
 loop with no poll points; callers must keep each invocation within their tile
 work bound.
+`admit_jacobi_eigh` performs only a fixed number of checked integer operations,
+has no callback or allocation boundary, and therefore needs no cancellation
+poll. The admitted `jacobi_eigh` kernel itself remains a synchronous O(n³)
+trusted leaf with no `Cx`; callers requiring bounded cancellation latency must
+route it through an admitted higher-level tile/service boundary.
 
 ## Unsafe boundary
 None. `unsafe_code` is denied workspace-wide; any future capsule must be
@@ -442,6 +470,15 @@ the output together. The exponent remains jointly shrinkable with the operator
 input without admitting the identity transform. The fixed shape/oracle/golden
 pins and the separate transpose-adjoint property above remain authoritative
 and independent.
+`tests/eigen_admission.rs` is the allocation-free G0 conformance selector
+(`cargo test -p fs-la --test eigen_admission`). It pins the exact largest
+admitted boundary `n=4095`, including every schema-v1 receipt field; proves
+that `n=4096` is the first typed cap refusal; distinguishes portable square
+shape overflow from later aggregate-formula overflow; and invokes the live
+kernel with an empty slice at the refused boundary to prove that the shared
+authority fires before length checking or any huge allocation. The legacy
+panic must retain the exact typed refusal in its diagnostic, so an independent
+or reordered kernel guard cannot silently drift from public admission.
 Batched battery (tests/batched_battery.rs): GEMM vs scalar oracle
 across size classes + β-accumulate path; batch-membership bitwise
 invariance for Cholesky and pivoted LU; L·Lᵀ reconstruction and solve
@@ -494,6 +531,16 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   no-claim run. Successor design notes remain in bead 9ekv.
 
 ## No-claim boundaries
+- `JacobiEighAdmission` proves exactly the target-width checked arithmetic and
+  schema-v1 practical element-cap proposition it records. It is not a memory
+  reservation or allocator-success guarantee, does not count allocator
+  metadata, concurrent retained state, or process RSS, and does not authenticate
+  `a.len()`, matrix contents, symmetry, finiteness, or provenance. It makes no
+  accuracy, convergence, conditioning, scientific-certificate, throughput,
+  cancellation-latency, or cubic-work-budget claim. The receipt does not turn
+  `jacobi_eigh` into a fallible kernel: that compatibility surface still panics
+  on admission or length refusal, and higher layers must retain the typed
+  preflight result before calling it.
 - The Philox-to-GEMM Casebook proves exact input-generation replay and
   worker-count bit identity only for its disclosed finite fixture in the
   executing build. It is not fresh cross-ISA execution evidence and makes no

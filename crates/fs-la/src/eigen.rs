@@ -90,6 +90,7 @@ impl JacobiEighAdmission {
 }
 
 /// Allocation-free refusal from [`admit_jacobi_eigh`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JacobiEighAdmissionError {
     /// The square matrix shape `n * n` left the target's `usize` domain.
