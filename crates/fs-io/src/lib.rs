@@ -23,11 +23,12 @@ pub mod step_import;
 pub mod stl;
 
 pub use catalog::{
-    CATALOG_CSV_PARSER_VERSION, CATALOG_JSON_PARSER_VERSION, CATALOG_READ_RECEIPT_VERSION,
-    CATALOG_SCHEMA_VERSION, Catalog, CatalogCsvLimits, CatalogFormat, CatalogInputIdentity,
-    CatalogJsonLimits, CatalogProjectionLimits, CatalogRead, CatalogReadAuthority,
-    CatalogReadCounters, CatalogReadLimits, CatalogReadReceipt, CatalogSchemaLimits,
-    CatalogSchemaReceipt, ColumnKind, ColumnSpec, Schema, SchemaDefinitionRefusal,
+    CATALOG_CANCELLATION_POLL_STRIDE, CATALOG_CSV_PARSER_VERSION, CATALOG_JSON_PARSER_VERSION,
+    CATALOG_READ_RECEIPT_VERSION, CATALOG_SCHEMA_VERSION, Catalog, CatalogCancellationEvidence,
+    CatalogCsvLimits, CatalogFormat, CatalogInputIdentity, CatalogJsonLimits,
+    CatalogProjectionLimits, CatalogRead, CatalogReadAuthority, CatalogReadCounters,
+    CatalogReadLimits, CatalogReadReceipt, CatalogSchemaLimits, CatalogSchemaReceipt, ColumnKind,
+    ColumnSpec, Schema, SchemaDefinitionRefusal,
 };
 pub use export::{export_3mf, export_glb, export_vtk};
 pub use quarantine::{ImportDefect, ImportReceipt, PromotionRefusal, Quarantined, promote};
@@ -93,6 +94,13 @@ pub enum IoError {
         /// Diagnosis with the offending text.
         what: String,
     },
+    /// An fs-exec cancellation request was observed before publication.
+    Cancelled {
+        /// Stable catalog stage that observed the request.
+        stage: &'static str,
+        /// Deterministic byte, row, field, or schema position within the stage.
+        at: usize,
+    },
 }
 
 impl fmt::Display for IoError {
@@ -106,6 +114,9 @@ impl fmt::Display for IoError {
                     f,
                     "schema violation at row {row}, column {column:?}: {what}"
                 )
+            }
+            IoError::Cancelled { stage, at } => {
+                write!(f, "catalog operation cancelled at {stage} position {at}")
             }
         }
     }

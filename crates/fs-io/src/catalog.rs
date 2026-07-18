@@ -6,6 +6,7 @@
 
 use crate::IoError;
 use core::fmt::Write as _;
+use fs_exec::Cx;
 use std::collections::BTreeMap;
 
 /// Version of the sealed catalog-schema admission contract.
@@ -15,7 +16,9 @@ pub const CATALOG_CSV_PARSER_VERSION: &str = "fs-io/catalog-csv/v1";
 /// Version of the strict bounded JSON parser and projection semantics.
 pub const CATALOG_JSON_PARSER_VERSION: &str = "fs-io/catalog-json/v1";
 /// Version of the catalog read receipt schema.
-pub const CATALOG_READ_RECEIPT_VERSION: &str = "fs-io/catalog-read-receipt/v1";
+pub const CATALOG_READ_RECEIPT_VERSION: &str = "fs-io/catalog-read-receipt/v2";
+/// Maximum explicit parser/projection work units between fs-exec polls.
+pub const CATALOG_CANCELLATION_POLL_STRIDE: usize = 4_096;
 
 /// Resource envelope for admitting a catalog schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,13 +408,31 @@ pub enum CatalogReadLimits {
     Json(CatalogJsonLimits),
 }
 
+/// Cancellation boundary exercised by one successful catalog read.
+///
+/// `CxPolled` means the reader checked the supplied fs-exec context at entry,
+/// throughout its explicit parser/projection/fingerprint loops, before owned
+/// growth boundaries, and immediately before publication. It does not claim
+/// interruptibility inside allocator calls, `BTreeMap` internals, or the
+/// standard-library floating-point parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogCancellationEvidence {
+    /// A legacy non-cancellable entry point was used.
+    NotPolled,
+    /// A caller-supplied fs-exec context was polled.
+    CxPolled {
+        /// Maximum stride used by explicit long-running loops.
+        explicit_poll_stride: usize,
+    },
+}
+
 /// Authority boundary carried by every successful catalog read receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogReadAuthority {
     /// Schema and document validation succeeded, but ledger promotion is not
-    /// claimed because the strong identity hook is not recomputed and
-    /// cancellation plus complete allocator accounting are not yet part of
-    /// this boundary.
+    /// claimed because the strong identity hook is not recomputed and complete
+    /// allocator accounting is not part of this boundary. The receipt states
+    /// separately whether the cancellable or legacy entry point was used.
     ValidatedNoLedgerClaim,
 }
 
@@ -491,8 +512,8 @@ impl CatalogReadCounters {
 
 /// Success-only, source-bound evidence for one catalog read operation.
 ///
-/// No receipt is constructed or returned on syntax, schema, resource, or
-/// allocation refusal. A presented input digest is retained but not recomputed;
+/// No receipt is returned on syntax, schema, resource, allocation, or
+/// cancellation refusal. A presented input digest is retained but not recomputed;
 /// [`CatalogReadAuthority::ValidatedNoLedgerClaim`] prevents callers from
 /// mistaking this evidence for a promoted ledger artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,6 +527,7 @@ pub struct CatalogReadReceipt {
     schema: CatalogSchemaReceipt,
     limits: CatalogReadLimits,
     consumed: CatalogReadCounters,
+    cancellation: CatalogCancellationEvidence,
     authority: CatalogReadAuthority,
 }
 
@@ -564,6 +586,12 @@ impl CatalogReadReceipt {
     #[must_use]
     pub const fn consumed(&self) -> &CatalogReadCounters {
         &self.consumed
+    }
+
+    /// Whether this operation enforced the fs-exec cancellation boundary.
+    #[must_use]
+    pub const fn cancellation(&self) -> CatalogCancellationEvidence {
+        self.cancellation
     }
 
     /// Explicit promotion boundary.
@@ -653,8 +681,7 @@ impl CatalogReadReceipt {
             output,
             ",\"consumed\":{{\"input_bytes\":{},\"rows\":{},\"document_fields\":{},\
              \"decoded_bytes\":{},\"validation_visits\":{},\"numeric_entries\":{},\
-             \"numeric_key_bytes\":{},\"logical_output_bytes\":{}}},\
-             \"no_claim\":\"caller-presented input identity is not recomputed and local input/schema fingerprints are non-cryptographic; no cancellation latency, allocator metadata, BTreeMap node allocation, complete live-byte, or ledger-promotion claim\"}}",
+             \"numeric_key_bytes\":{},\"logical_output_bytes\":{}}},\"cancellation\":",
             self.consumed.input_bytes,
             self.consumed.rows,
             self.consumed.document_fields,
@@ -663,6 +690,20 @@ impl CatalogReadReceipt {
             self.consumed.numeric_entries,
             self.consumed.numeric_key_bytes,
             self.consumed.logical_output_bytes,
+        );
+        match self.cancellation {
+            CatalogCancellationEvidence::NotPolled => output.push_str("null"),
+            CatalogCancellationEvidence::CxPolled {
+                explicit_poll_stride,
+            } => {
+                let _ = write!(
+                    output,
+                    "{{\"mode\":\"fs-exec-cx\",\"explicit_poll_stride\":{explicit_poll_stride}}}"
+                );
+            }
+        }
+        output.push_str(
+            ",\"no_claim\":\"caller-presented input identity is not recomputed and local input/schema fingerprints are non-cryptographic; allocator calls, BTreeMap internals, standard floating-point parsing, allocator metadata, BTreeMap node allocation, and complete live bytes are not cancellation-latency or ledger-promotion claims\"}",
         );
         output
     }
@@ -718,6 +759,53 @@ struct CsvCounters {
     header_decoded_bytes: usize,
 }
 
+trait CatalogCancellation {
+    fn checkpoint(&self, stage: &'static str, at: usize) -> Result<(), IoError>;
+}
+
+impl CatalogCancellation for Cx<'_> {
+    fn checkpoint(&self, stage: &'static str, at: usize) -> Result<(), IoError> {
+        Cx::checkpoint(self).map_err(|_| IoError::Cancelled { stage, at })
+    }
+}
+
+fn catalog_checkpoint(
+    cancellation: Option<&dyn CatalogCancellation>,
+    stage: &'static str,
+    at: usize,
+) -> Result<(), IoError> {
+    if let Some(cancellation) = cancellation {
+        cancellation.checkpoint(stage, at)?;
+    }
+    Ok(())
+}
+
+fn catalog_poll(
+    cancellation: Option<&dyn CatalogCancellation>,
+    stage: &'static str,
+    work_index: usize,
+    at: usize,
+) -> Result<(), IoError> {
+    if let Some(cancellation) = cancellation
+        && work_index % CATALOG_CANCELLATION_POLL_STRIDE == 0
+    {
+        cancellation.checkpoint(stage, at)?;
+    }
+    Ok(())
+}
+
+fn cancellation_evidence(
+    cancellation: Option<&dyn CatalogCancellation>,
+) -> CatalogCancellationEvidence {
+    if cancellation.is_some() {
+        CatalogCancellationEvidence::CxPolled {
+            explicit_poll_stride: CATALOG_CANCELLATION_POLL_STRIDE,
+        }
+    } else {
+        CatalogCancellationEvidence::NotPolled
+    }
+}
+
 fn csv_cap_refusal(cap: &str, limit: usize, row: usize) -> IoError {
     IoError::ResourceBound {
         what: format!("catalog CSV {cap} cap {limit} exceeded at record {row}"),
@@ -755,6 +843,7 @@ fn finish_csv_field(
     row: usize,
     limits: CatalogCsvLimits,
     counters: &mut CsvCounters,
+    cancellation: Option<&dyn CatalogCancellation>,
 ) -> Result<(), IoError> {
     if fields.len() >= limits.max_fields_per_record {
         return Err(csv_cap_refusal(
@@ -780,6 +869,11 @@ fn finish_csv_field(
             .filter(|total| *total <= limits.max_header_bytes)
             .ok_or_else(|| csv_cap_refusal("header decoded-byte", limits.max_header_bytes, row))?;
     }
+    catalog_checkpoint(
+        cancellation,
+        "catalog-csv-field-publication",
+        counters.total_fields,
+    )?;
     fields
         .try_reserve(1)
         .map_err(|_| allocation_refusal("CSV field index", row))?;
@@ -793,17 +887,22 @@ fn split_csv(
     row: usize,
     limits: CatalogCsvLimits,
     counters: &mut CsvCounters,
+    cancellation: Option<&dyn CatalogCancellation>,
 ) -> Result<Vec<String>, IoError> {
     let mut fields = Vec::new();
     let mut cur = String::new();
-    let mut chars = line.chars().peekable();
+    let mut chars = line.char_indices().peekable();
     let mut quoted = false;
-    while let Some(c) = chars.next() {
+    let mut work_index = 0usize;
+    while let Some((offset, c)) = chars.next() {
+        catalog_poll(cancellation, "catalog-csv-field-decode", work_index, offset)?;
+        work_index += 1;
         if quoted {
             match c {
-                '"' if chars.peek() == Some(&'"') => {
+                '"' if chars.peek().is_some_and(|(_, next)| *next == '"') => {
                     push_csv_char(&mut cur, '"', row, limits)?;
                     chars.next();
+                    work_index += 1;
                 }
                 '"' => quoted = false,
                 other => push_csv_char(&mut cur, other, row, limits)?,
@@ -811,7 +910,9 @@ fn split_csv(
         } else {
             match c {
                 '"' if cur.is_empty() => quoted = true,
-                ',' => finish_csv_field(&mut fields, &mut cur, row, limits, counters)?,
+                ',' => {
+                    finish_csv_field(&mut fields, &mut cur, row, limits, counters, cancellation)?
+                }
                 other => push_csv_char(&mut cur, other, row, limits)?,
             }
         }
@@ -822,8 +923,81 @@ fn split_csv(
             what: "unterminated quoted CSV field".to_string(),
         });
     }
-    finish_csv_field(&mut fields, &mut cur, row, limits, counters)?;
+    finish_csv_field(&mut fields, &mut cur, row, limits, counters, cancellation)?;
     Ok(fields)
+}
+
+struct CsvLines<'a> {
+    text: &'a str,
+    next_byte: usize,
+    physical_line: usize,
+}
+
+impl<'a> CsvLines<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            next_byte: 0,
+            physical_line: 0,
+        }
+    }
+
+    fn next(
+        &mut self,
+        cancellation: Option<&dyn CatalogCancellation>,
+    ) -> Result<Option<(usize, &'a str)>, IoError> {
+        if self.next_byte >= self.text.len() {
+            return Ok(None);
+        }
+        let start = self.next_byte;
+        let bytes = self.text.as_bytes();
+        let mut end = bytes.len();
+        let mut terminated = false;
+        for (scanned, byte) in bytes[start..].iter().enumerate() {
+            let absolute = start + scanned;
+            catalog_poll(cancellation, "catalog-csv-line-scan", scanned, absolute)?;
+            if *byte == b'\n' {
+                end = absolute;
+                self.next_byte = absolute + 1;
+                terminated = true;
+                break;
+            }
+        }
+        if end == bytes.len() {
+            self.next_byte = bytes.len();
+        }
+        if terminated && end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        let physical_line = self.physical_line;
+        self.physical_line += 1;
+        Ok(Some((physical_line, &self.text[start..end])))
+    }
+
+    fn next_nonempty(
+        &mut self,
+        cancellation: Option<&dyn CatalogCancellation>,
+    ) -> Result<Option<(usize, &'a str)>, IoError> {
+        while let Some((line, text)) = self.next(cancellation)? {
+            let mut blank = true;
+            for (work_index, (offset, character)) in text.char_indices().enumerate() {
+                catalog_poll(
+                    cancellation,
+                    "catalog-csv-blank-line-scan",
+                    work_index,
+                    offset,
+                )?;
+                if !character.is_whitespace() {
+                    blank = false;
+                    break;
+                }
+            }
+            if !blank {
+                return Ok(Some((line, text)));
+            }
+        }
+        Ok(None)
+    }
 }
 
 const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -834,6 +1008,20 @@ fn schema_hash_bytes(state: &mut u64, bytes: &[u8]) {
         *state ^= u64::from(*byte);
         *state = state.wrapping_mul(FNV1A64_PRIME);
     }
+}
+
+fn catalog_input_fingerprint(
+    bytes: &[u8],
+    stage: &'static str,
+    cancellation: Option<&dyn CatalogCancellation>,
+) -> Result<u64, IoError> {
+    let mut state = FNV1A64_OFFSET;
+    for (index, byte) in bytes.iter().enumerate() {
+        catalog_poll(cancellation, stage, index, index)?;
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(FNV1A64_PRIME);
+    }
+    Ok(state)
 }
 
 fn schema_hash_usize(state: &mut u64, mut value: usize) {
@@ -879,6 +1067,34 @@ fn schema_identity(columns: &[ColumnSpec], limits: CatalogSchemaLimits) -> u64 {
 const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 96;
 const MAX_DIAGNOSTIC_HEADER_NAMES: usize = 8;
 
+fn trim_catalog_text<'a>(
+    text: &'a str,
+    cancellation: Option<&dyn CatalogCancellation>,
+    stage: &'static str,
+    at: usize,
+) -> Result<&'a str, IoError> {
+    let mut start = text.len();
+    for (work_index, (offset, character)) in text.char_indices().enumerate() {
+        catalog_poll(cancellation, stage, work_index, at)?;
+        if !character.is_whitespace() {
+            start = offset;
+            break;
+        }
+    }
+    if start == text.len() {
+        return Ok("");
+    }
+    let mut end = text.len();
+    for (work_index, (offset, character)) in text.char_indices().rev().enumerate() {
+        catalog_poll(cancellation, stage, work_index, at)?;
+        if !character.is_whitespace() {
+            end = offset + character.len_utf8();
+            break;
+        }
+    }
+    Ok(&text[start..end])
+}
+
 fn bounded_diagnostic_text(text: &str) -> String {
     if text.len() <= MAX_DIAGNOSTIC_TEXT_BYTES {
         return text.to_owned();
@@ -915,13 +1131,23 @@ fn fallible_copy(text: &str, payload: &str, at: usize) -> Result<String, IoError
     Ok(copy)
 }
 
-fn normalize_csv_header(raw_header: Vec<String>) -> Result<Vec<String>, IoError> {
+fn normalize_csv_header(
+    raw_header: Vec<String>,
+    cancellation: Option<&dyn CatalogCancellation>,
+) -> Result<Vec<String>, IoError> {
     let mut header = Vec::new();
+    catalog_checkpoint(cancellation, "catalog-csv-header-index", 0)?;
     header
         .try_reserve_exact(raw_header.len())
         .map_err(|_| allocation_refusal("normalized CSV header", 0))?;
     for (index, raw_name) in raw_header.into_iter().enumerate() {
-        let name = raw_name.trim();
+        catalog_poll(
+            cancellation,
+            "catalog-csv-header-normalization",
+            index,
+            index,
+        )?;
+        let name = trim_catalog_text(&raw_name, cancellation, "catalog-csv-header-trim", index)?;
         if name.is_empty() {
             return Err(IoError::Schema {
                 row: 0,
@@ -934,6 +1160,7 @@ fn normalize_csv_header(raw_header: Vec<String>) -> Result<Vec<String>, IoError>
 
     let mut first_positions = BTreeMap::<&str, usize>::new();
     for (index, name) in header.iter().enumerate() {
+        catalog_poll(cancellation, "catalog-csv-header-uniqueness", index, index)?;
         if let Some(first_index) = first_positions.insert(name, index) {
             return Err(IoError::Schema {
                 row: 0,
@@ -1212,6 +1439,7 @@ impl Schema {
         max_total_fields: usize,
         csv_header: Option<&[String]>,
         limits: CatalogProjectionLimits,
+        cancellation: Option<&dyn CatalogCancellation>,
     ) -> Result<ProjectionPlan, IoError> {
         let required_columns = self.columns.iter().filter(|column| column.required).count();
         ensure_operation_cap(
@@ -1255,9 +1483,34 @@ impl Schema {
 
         let mut numeric_columns = 0usize;
         let mut numeric_name_bytes = 0usize;
-        for column in &self.columns {
-            let present =
-                csv_header.is_none_or(|header| header.iter().any(|name| name == column.name));
+        for (column_index, column) in self.columns.iter().enumerate() {
+            catalog_poll(
+                cancellation,
+                "catalog-projection-preflight",
+                column_index,
+                column_index,
+            )?;
+            let present = if let Some(header) = csv_header {
+                let mut found = false;
+                for (header_index, name) in header.iter().enumerate() {
+                    let work_index = column_index
+                        .saturating_mul(header.len())
+                        .saturating_add(header_index);
+                    catalog_poll(
+                        cancellation,
+                        "catalog-csv-preflight-header-lookup",
+                        work_index,
+                        header_index,
+                    )?;
+                    if name == column.name {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            } else {
+                true
+            };
             if present && matches!(column.kind, ColumnKind::Number { .. }) {
                 numeric_columns =
                     checked_operation_add(numeric_columns, 1, format, "numeric schema columns")?;
@@ -1324,9 +1577,11 @@ impl Schema {
         counters: &CsvCounters,
         limits: CatalogCsvLimits,
         plan: ProjectionPlan,
+        cancellation: Option<&dyn CatalogCancellation>,
     ) -> Result<(), IoError> {
         let mut normalized_header_bytes = 0usize;
-        for name in header {
+        for (index, name) in header.iter().enumerate() {
+            catalog_poll(cancellation, "catalog-csv-output-preflight", index, index)?;
             normalized_header_bytes = checked_operation_add(
                 normalized_header_bytes,
                 name.len(),
@@ -1370,8 +1625,13 @@ impl Schema {
     }
 
     /// Validate one cell against its spec.
-    fn check_cell(spec: &ColumnSpec, text: &str, row: usize) -> Result<Option<f64>, IoError> {
-        let trimmed = text.trim();
+    fn check_cell(
+        spec: &ColumnSpec,
+        text: &str,
+        row: usize,
+        cancellation: Option<&dyn CatalogCancellation>,
+    ) -> Result<Option<f64>, IoError> {
+        let trimmed = trim_catalog_text(text, cancellation, "catalog-cell-trim", row)?;
         if trimmed.is_empty() {
             if spec.required {
                 return Err(IoError::Schema {
@@ -1457,6 +1717,38 @@ impl Schema {
         limits: CatalogCsvLimits,
         input_identity: CatalogInputIdentity,
     ) -> Result<CatalogRead, IoError> {
+        self.parse_csv_operation(text, limits, input_identity, None)
+    }
+
+    /// Parse CSV under explicit limits with fs-exec cancellation and publish
+    /// the catalog and receipt atomically only after a final checkpoint.
+    ///
+    /// # Errors
+    /// Returns [`IoError::Cancelled`] with the first observed stable stage and
+    /// deterministic position. No partial catalog or success receipt escapes.
+    pub fn parse_csv_cancellable(
+        &self,
+        text: &str,
+        limits: CatalogCsvLimits,
+        input_identity: CatalogInputIdentity,
+        cx: &Cx<'_>,
+    ) -> Result<CatalogRead, IoError> {
+        self.parse_csv_operation(
+            text,
+            limits,
+            input_identity,
+            Some(cx as &dyn CatalogCancellation),
+        )
+    }
+
+    fn parse_csv_operation(
+        &self,
+        text: &str,
+        limits: CatalogCsvLimits,
+        input_identity: CatalogInputIdentity,
+        cancellation: Option<&dyn CatalogCancellation>,
+    ) -> Result<CatalogRead, IoError> {
+        catalog_checkpoint(cancellation, "catalog-csv-entry", 0)?;
         if text.len() > limits.max_input_bytes {
             return Err(csv_cap_refusal("input-byte", limits.max_input_bytes, 0));
         }
@@ -1474,17 +1766,38 @@ impl Schema {
             "minimum header fields",
         )?;
         let mut counters = CsvCounters::default();
-        let mut lines = text
-            .lines()
-            .enumerate()
-            .filter(|(_, l)| !l.trim().is_empty());
-        let (_, header_line) = lines.next().ok_or(IoError::Malformed {
-            at: 0,
-            what: "empty catalog".to_string(),
-        })?;
-        let header = normalize_csv_header(split_csv(header_line, 0, limits, &mut counters)?)?;
-        for spec in &self.columns {
-            if spec.required && !header.iter().any(|name| name == spec.name) {
+        let mut lines = CsvLines::new(text);
+        let (_, header_line) = lines
+            .next_nonempty(cancellation)?
+            .ok_or(IoError::Malformed {
+                at: 0,
+                what: "empty catalog".to_string(),
+            })?;
+        let header = normalize_csv_header(
+            split_csv(header_line, 0, limits, &mut counters, cancellation)?,
+            cancellation,
+        )?;
+        for (index, spec) in self.columns.iter().enumerate() {
+            catalog_poll(cancellation, "catalog-csv-header-schema", index, index)?;
+            let mut present = false;
+            if spec.required {
+                for (header_index, name) in header.iter().enumerate() {
+                    let work_index = index
+                        .saturating_mul(header.len())
+                        .saturating_add(header_index);
+                    catalog_poll(
+                        cancellation,
+                        "catalog-csv-required-header-lookup",
+                        work_index,
+                        header_index,
+                    )?;
+                    if name == spec.name {
+                        present = true;
+                        break;
+                    }
+                }
+            }
+            if spec.required && !present {
                 return Err(IoError::Schema {
                     row: 0,
                     column: spec.name.to_string(),
@@ -1502,17 +1815,20 @@ impl Schema {
             limits.max_total_fields,
             Some(&header),
             limits.projection,
+            cancellation,
         )?;
-        Self::preflight_csv_output(&header, &counters, limits, plan)?;
+        Self::preflight_csv_output(&header, &counters, limits, plan, cancellation)?;
         let mut rows = Vec::new();
         let mut numbers = Vec::new();
         let mut projection = ProjectionUse::new("CSV", limits.projection, 0)?;
-        for (data_row, (ln, line)) in lines.enumerate() {
+        let mut data_row = 0usize;
+        while let Some((ln, line)) = lines.next_nonempty(cancellation)? {
             let row_no = data_row + 1; // 1-based, header excluded
             if data_row >= limits.max_rows {
                 return Err(csv_cap_refusal("row", limits.max_rows, row_no));
             }
-            let fields = split_csv(line, row_no, limits, &mut counters)?;
+            catalog_poll(cancellation, "catalog-csv-row", data_row, row_no)?;
+            let fields = split_csv(line, row_no, limits, &mut counters, cancellation)?;
             if fields.len() != header.len() {
                 return Err(IoError::Malformed {
                     at: ln + 1,
@@ -1523,6 +1839,7 @@ impl Schema {
                     ),
                 });
             }
+            catalog_checkpoint(cancellation, "catalog-csv-row-index", row_no)?;
             rows.try_reserve(1)
                 .map_err(|_| allocation_refusal("CSV output row index", row_no))?;
             numbers
@@ -1530,17 +1847,34 @@ impl Schema {
                 .map_err(|_| allocation_refusal("CSV numeric-row index", row_no))?;
             let mut row = BTreeMap::new();
             let mut nums = BTreeMap::new();
-            for (name, cell) in header.iter().zip(fields) {
+            for (field_index, (name, cell)) in header.iter().zip(fields).enumerate() {
+                catalog_poll(
+                    cancellation,
+                    "catalog-csv-row-projection",
+                    field_index,
+                    field_index,
+                )?;
                 let retained_bytes =
                     checked_operation_add(name.len(), cell.len(), "CSV", "row key/value bytes")?;
                 projection.output(retained_bytes)?;
                 row.insert(fallible_copy(name, "CSV output column key", row_no)?, cell);
             }
-            for spec in &self.columns {
+            for (column_index, spec) in self.columns.iter().enumerate() {
+                catalog_poll(
+                    cancellation,
+                    "catalog-csv-schema-validation",
+                    column_index,
+                    column_index,
+                )?;
                 projection.validation_visit()?;
                 let cell = row.get(spec.name).map(String::as_str).unwrap_or_default();
-                if let Some(v) = Self::check_cell(spec, cell, row_no)? {
+                if let Some(v) = Self::check_cell(spec, cell, row_no, cancellation)? {
                     projection.numeric_entry(spec.name.len())?;
+                    catalog_checkpoint(
+                        cancellation,
+                        "catalog-csv-numeric-projection",
+                        column_index,
+                    )?;
                     nums.insert(
                         fallible_copy(spec.name, "CSV numeric projection key", row_no)?,
                         v,
@@ -1549,6 +1883,7 @@ impl Schema {
             }
             rows.push(row);
             numbers.push(nums);
+            data_row += 1;
         }
         let consumed = CatalogReadCounters {
             input_bytes: text.len(),
@@ -1566,12 +1901,18 @@ impl Schema {
             format: CatalogFormat::Csv,
             parser_version: CatalogFormat::Csv.parser_version(),
             input_identity,
-            local_input_fnv1a64: fs_obs::fnv1a64(text.as_bytes()),
+            local_input_fnv1a64: catalog_input_fingerprint(
+                text.as_bytes(),
+                "catalog-csv-input-fingerprint",
+                cancellation,
+            )?,
             schema: self.receipt,
             limits: CatalogReadLimits::Csv(limits),
             consumed,
+            cancellation: cancellation_evidence(cancellation),
             authority: CatalogReadAuthority::ValidatedNoLedgerClaim,
         };
+        catalog_checkpoint(cancellation, "catalog-csv-publication", rows.len())?;
         Ok(CatalogRead {
             catalog: Catalog { rows, numbers },
             receipt,
@@ -1630,6 +1971,38 @@ impl Schema {
         limits: CatalogJsonLimits,
         input_identity: CatalogInputIdentity,
     ) -> Result<CatalogRead, IoError> {
+        self.parse_json_operation(text, limits, input_identity, None)
+    }
+
+    /// Parse JSON under explicit limits with fs-exec cancellation and publish
+    /// the catalog and receipt atomically only after a final checkpoint.
+    ///
+    /// # Errors
+    /// Returns [`IoError::Cancelled`] with the first observed stable stage and
+    /// deterministic position. No partial catalog or success receipt escapes.
+    pub fn parse_json_cancellable(
+        &self,
+        text: &str,
+        limits: CatalogJsonLimits,
+        input_identity: CatalogInputIdentity,
+        cx: &Cx<'_>,
+    ) -> Result<CatalogRead, IoError> {
+        self.parse_json_operation(
+            text,
+            limits,
+            input_identity,
+            Some(cx as &dyn CatalogCancellation),
+        )
+    }
+
+    fn parse_json_operation(
+        &self,
+        text: &str,
+        limits: CatalogJsonLimits,
+        input_identity: CatalogInputIdentity,
+        cancellation: Option<&dyn CatalogCancellation>,
+    ) -> Result<CatalogRead, IoError> {
+        catalog_checkpoint(cancellation, "catalog-json-entry", 0)?;
         if text.len() > limits.max_input_bytes {
             return Err(cap_refusal(
                 "input-byte",
@@ -1644,22 +2017,36 @@ impl Schema {
             limits.max_total_members,
             None,
             limits.projection,
+            cancellation,
         )?;
         Self::preflight_json_output(limits.max_decoded_bytes, plan, limits.projection)?;
-        let parsed = parse_json_catalog_document(text, limits)?;
+        let parsed = parse_json_catalog_document(text, limits, cancellation)?;
         let mut projection = ProjectionUse::new("JSON", limits.projection, parsed.decoded_bytes)?;
         let rows = parsed.rows;
         let mut numbers = Vec::new();
+        catalog_checkpoint(cancellation, "catalog-json-numeric-row-index", 0)?;
         numbers
             .try_reserve_exact(rows.len())
             .map_err(|_| allocation_refusal("catalog numeric-row index", 0))?;
         for (i, obj) in rows.iter().enumerate() {
+            catalog_poll(cancellation, "catalog-json-row-projection", i, i + 1)?;
             let mut nums = BTreeMap::new();
-            for spec in &self.columns {
+            for (column_index, spec) in self.columns.iter().enumerate() {
+                catalog_poll(
+                    cancellation,
+                    "catalog-json-schema-validation",
+                    column_index,
+                    column_index,
+                )?;
                 projection.validation_visit()?;
                 let cell = obj.get(spec.name).map(String::as_str).unwrap_or_default();
-                if let Some(v) = Self::check_cell(spec, cell, i + 1)? {
+                if let Some(v) = Self::check_cell(spec, cell, i + 1, cancellation)? {
                     projection.numeric_entry(spec.name.len())?;
+                    catalog_checkpoint(
+                        cancellation,
+                        "catalog-json-numeric-projection",
+                        column_index,
+                    )?;
                     nums.insert(
                         fallible_copy(spec.name, "JSON numeric projection key", i + 1)?,
                         v,
@@ -1684,12 +2071,18 @@ impl Schema {
             format: CatalogFormat::Json,
             parser_version: CatalogFormat::Json.parser_version(),
             input_identity,
-            local_input_fnv1a64: fs_obs::fnv1a64(text.as_bytes()),
+            local_input_fnv1a64: catalog_input_fingerprint(
+                text.as_bytes(),
+                "catalog-json-input-fingerprint",
+                cancellation,
+            )?,
             schema: self.receipt,
             limits: CatalogReadLimits::Json(limits),
             consumed,
+            cancellation: cancellation_evidence(cancellation),
             authority: CatalogReadAuthority::ValidatedNoLedgerClaim,
         };
+        catalog_checkpoint(cancellation, "catalog-json-publication", rows.len())?;
         Ok(CatalogRead {
             catalog: Catalog { rows, numbers },
             receipt,
@@ -1722,7 +2115,7 @@ fn mini_json_array_of_objects(
     text: &str,
     limits: CatalogJsonLimits,
 ) -> Result<Vec<BTreeMap<String, String>>, IoError> {
-    parse_json_catalog_document(text, limits).map(|parsed| parsed.rows)
+    parse_json_catalog_document(text, limits, None).map(|parsed| parsed.rows)
 }
 
 struct ParsedJsonCatalog {
@@ -1734,6 +2127,7 @@ struct ParsedJsonCatalog {
 fn parse_json_catalog_document(
     text: &str,
     limits: CatalogJsonLimits,
+    cancellation: Option<&dyn CatalogCancellation>,
 ) -> Result<ParsedJsonCatalog, IoError> {
     if text.len() > limits.max_input_bytes {
         return Err(cap_refusal(
@@ -1748,23 +2142,26 @@ fn parse_json_catalog_document(
         limits,
         total_members: 0,
         decoded_bytes: 0,
+        cancellation,
     }
     .parse()
 }
 
-struct JsonCatalogParser<'a> {
+struct JsonCatalogParser<'a, 'c> {
     bytes: &'a [u8],
     pos: usize,
     limits: CatalogJsonLimits,
     total_members: usize,
     decoded_bytes: usize,
+    cancellation: Option<&'c dyn CatalogCancellation>,
 }
 
-impl JsonCatalogParser<'_> {
+impl JsonCatalogParser<'_, '_> {
     fn parse(mut self) -> Result<ParsedJsonCatalog, IoError> {
-        self.skip_ws();
+        catalog_checkpoint(self.cancellation, "catalog-json-parser-entry", self.pos)?;
+        self.skip_ws()?;
         self.expect(b'[', "expected a JSON array")?;
-        self.skip_ws();
+        self.skip_ws()?;
 
         let mut rows = Vec::new();
         if self.peek() == Some(b']') {
@@ -1778,20 +2175,22 @@ impl JsonCatalogParser<'_> {
         }
 
         loop {
+            catalog_poll(self.cancellation, "catalog-json-row", rows.len(), self.pos)?;
             if self.peek() != Some(b'{') {
                 return Err(malformed(self.pos, "expected a JSON object"));
             }
             if rows.len() >= self.limits.max_rows {
                 return Err(cap_refusal("row", self.limits.max_rows, self.pos));
             }
+            catalog_checkpoint(self.cancellation, "catalog-json-row-index", self.pos)?;
             rows.try_reserve(1)
                 .map_err(|_| allocation_refusal("catalog row index", self.pos))?;
             rows.push(self.parse_object()?);
-            self.skip_ws();
+            self.skip_ws()?;
             match self.peek() {
                 Some(b',') => {
                     self.pos += 1;
-                    self.skip_ws();
+                    self.skip_ws()?;
                     if self.peek() == Some(b']') {
                         return Err(malformed(self.pos, "trailing comma in JSON array"));
                     }
@@ -1814,7 +2213,7 @@ impl JsonCatalogParser<'_> {
 
     fn parse_object(&mut self) -> Result<BTreeMap<String, String>, IoError> {
         self.expect(b'{', "expected a JSON object")?;
-        self.skip_ws();
+        self.skip_ws()?;
         let mut object = BTreeMap::new();
         let mut object_members = 0usize;
         if self.peek() == Some(b'}') {
@@ -1823,6 +2222,12 @@ impl JsonCatalogParser<'_> {
         }
 
         loop {
+            catalog_poll(
+                self.cancellation,
+                "catalog-json-object-member",
+                object_members,
+                self.pos,
+            )?;
             let key_at = self.pos;
             if self.peek() != Some(b'"') {
                 return Err(malformed(self.pos, "expected a quoted JSON object key"));
@@ -1853,9 +2258,9 @@ impl JsonCatalogParser<'_> {
             }
             self.charge_decoded(key.len(), key_at)?;
 
-            self.skip_ws();
+            self.skip_ws()?;
             self.expect(b':', "expected ':' after JSON object key")?;
-            self.skip_ws();
+            self.skip_ws()?;
             let value_at = self.pos;
             let value = match self.peek() {
                 Some(b'"') => self.read_string()?,
@@ -1869,15 +2274,20 @@ impl JsonCatalogParser<'_> {
             };
             self.charge_decoded(value.len(), value_at)?;
 
+            catalog_checkpoint(
+                self.cancellation,
+                "catalog-json-object-publication",
+                self.total_members,
+            )?;
             object.insert(key, value);
             object_members += 1;
             self.total_members += 1;
 
-            self.skip_ws();
+            self.skip_ws()?;
             match self.peek() {
                 Some(b',') => {
                     self.pos += 1;
-                    self.skip_ws();
+                    self.skip_ws()?;
                     if self.peek() == Some(b'}') {
                         return Err(malformed(self.pos, "trailing comma in JSON object"));
                     }
@@ -1918,6 +2328,12 @@ impl JsonCatalogParser<'_> {
                 .saturating_sub(aggregate_prefix);
             let raw_remaining = string_remaining.min(aggregate_remaining);
             while let Some(byte) = self.peek() {
+                catalog_poll(
+                    self.cancellation,
+                    "catalog-json-string-decode",
+                    self.pos - chunk_start,
+                    self.pos,
+                )?;
                 if byte == b'"' || byte == b'\\' || byte < 0x20 {
                     break;
                 }
@@ -2039,6 +2455,7 @@ impl JsonCatalogParser<'_> {
     }
 
     fn read_hex_quad(&mut self) -> Result<u16, IoError> {
+        catalog_checkpoint(self.cancellation, "catalog-json-unicode-decode", self.pos)?;
         if self.peek() != Some(b'\\') || self.bytes.get(self.pos + 1) != Some(&b'u') {
             return Err(malformed(self.pos, "expected a Unicode escape"));
         }
@@ -2135,6 +2552,7 @@ impl JsonCatalogParser<'_> {
             ));
         }
         let mut output = String::new();
+        catalog_checkpoint(self.cancellation, "catalog-json-number-growth", start)?;
         output
             .try_reserve_exact(token.len())
             .map_err(|_| allocation_refusal("JSON number token", start))?;
@@ -2145,6 +2563,12 @@ impl JsonCatalogParser<'_> {
     }
 
     fn advance_number_byte(&mut self, start: usize) -> Result<(), IoError> {
+        catalog_poll(
+            self.cancellation,
+            "catalog-json-number-decode",
+            self.pos - start,
+            self.pos,
+        )?;
         if self.pos - start >= self.limits.max_number_bytes {
             return Err(cap_refusal(
                 "number-token byte",
@@ -2184,6 +2608,7 @@ impl JsonCatalogParser<'_> {
                 at,
             ));
         }
+        catalog_checkpoint(self.cancellation, "catalog-json-string-growth", at)?;
         output
             .try_reserve(text.len())
             .map_err(|_| allocation_refusal("decoded JSON string", at))?;
@@ -2203,7 +2628,7 @@ impl JsonCatalogParser<'_> {
     }
 
     fn finish_document(&mut self) -> Result<(), IoError> {
-        self.skip_ws();
+        self.skip_ws()?;
         if self.pos == self.bytes.len() {
             Ok(())
         } else {
@@ -2212,6 +2637,7 @@ impl JsonCatalogParser<'_> {
     }
 
     fn expect(&mut self, expected: u8, what: &str) -> Result<(), IoError> {
+        catalog_checkpoint(self.cancellation, "catalog-json-syntax", self.pos)?;
         if self.peek() == Some(expected) {
             self.pos += 1;
             Ok(())
@@ -2220,10 +2646,18 @@ impl JsonCatalogParser<'_> {
         }
     }
 
-    fn skip_ws(&mut self) {
+    fn skip_ws(&mut self) -> Result<(), IoError> {
+        let start = self.pos;
         while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            catalog_poll(
+                self.cancellation,
+                "catalog-json-whitespace-scan",
+                self.pos - start,
+                self.pos,
+            )?;
             self.pos += 1;
         }
+        Ok(())
     }
 
     fn peek(&self) -> Option<u8> {
@@ -2234,6 +2668,38 @@ impl JsonCatalogParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    fn with_catalog_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                gate,
+                arena,
+                StreamKey {
+                    seed: 0xca_7a_10_6,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
+    }
+
+    struct RejectCatalogStage(&'static str);
+
+    impl CatalogCancellation for RejectCatalogStage {
+        fn checkpoint(&self, stage: &'static str, at: usize) -> Result<(), IoError> {
+            if stage == self.0 {
+                Err(IoError::Cancelled { stage, at })
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn text_column(name: &'static str, required: bool) -> ColumnSpec {
         ColumnSpec {
@@ -2820,6 +3286,10 @@ mod tests {
             csv_receipt.authority(),
             CatalogReadAuthority::ValidatedNoLedgerClaim
         );
+        assert_eq!(
+            csv_receipt.cancellation(),
+            CatalogCancellationEvidence::NotPolled
+        );
         let csv_consumed = csv_receipt.consumed();
         assert_eq!(csv_consumed.input_bytes(), csv_text.len());
         assert_eq!(csv_consumed.rows(), 1);
@@ -2855,6 +3325,7 @@ mod tests {
         )));
         assert!(csv_json.contains("\"document_fields\":4"));
         assert!(csv_json.contains("\"authority\":\"validated-no-ledger-claim\""));
+        assert!(csv_json.contains("\"cancellation\":null"));
         assert!(csv_json.contains("\"no_claim\":"));
         assert_ne!(csv_json, json_receipt.to_json());
 
@@ -2898,6 +3369,141 @@ mod tests {
                 .is_err(),
             "schema refusal cannot publish a CatalogRead or receipt"
         );
+    }
+
+    /// G4/G5: the public Cx boundary refuses pre-requested work before any
+    /// publication. Deterministic stage injection covers each explicit CSV and
+    /// JSON growth/projection/publication checkpoint, and an uncancelled retry
+    /// is byte-identical while receipt-binding the enforced poll policy.
+    #[test]
+    fn g4_g5_catalog_cancellation_is_atomic_bounded_and_receipt_bound() {
+        let schema = Schema::admit(vec![text_column("id", true), number_column("n", 0.0, 9.0)])
+            .expect("valid cancellation schema");
+        let csv = "id,n\nA,1\n";
+        let json = "[ {\"id\":\"\\u0041\", \"n\":1} ]";
+        let identity = CatalogInputIdentity::blake3_256([0xc4; 32]);
+
+        let csv_cancelled = CancelGate::new_clock_free();
+        csv_cancelled.request();
+        with_catalog_cx(&csv_cancelled, |cx| {
+            assert_eq!(
+                schema.parse_csv_cancellable(csv, CatalogCsvLimits::DEFAULT, identity, cx),
+                Err(IoError::Cancelled {
+                    stage: "catalog-csv-entry",
+                    at: 0,
+                }),
+                "pre-requested CSV work must publish nothing"
+            );
+        });
+        let json_cancelled = CancelGate::new_clock_free();
+        json_cancelled.request();
+        with_catalog_cx(&json_cancelled, |cx| {
+            assert_eq!(
+                schema.parse_json_cancellable(json, CatalogJsonLimits::DEFAULT, identity, cx),
+                Err(IoError::Cancelled {
+                    stage: "catalog-json-entry",
+                    at: 0,
+                }),
+                "pre-requested JSON work must publish nothing"
+            );
+        });
+
+        let csv_stages = [
+            "catalog-csv-line-scan",
+            "catalog-csv-blank-line-scan",
+            "catalog-csv-field-decode",
+            "catalog-csv-field-publication",
+            "catalog-csv-header-index",
+            "catalog-csv-header-normalization",
+            "catalog-csv-header-trim",
+            "catalog-csv-header-uniqueness",
+            "catalog-csv-header-schema",
+            "catalog-csv-required-header-lookup",
+            "catalog-projection-preflight",
+            "catalog-csv-preflight-header-lookup",
+            "catalog-csv-output-preflight",
+            "catalog-csv-row",
+            "catalog-csv-row-index",
+            "catalog-csv-row-projection",
+            "catalog-csv-schema-validation",
+            "catalog-cell-trim",
+            "catalog-csv-numeric-projection",
+            "catalog-csv-input-fingerprint",
+            "catalog-csv-publication",
+        ];
+        for stage in csv_stages {
+            let rejection = RejectCatalogStage(stage);
+            let error = schema
+                .parse_csv_operation(
+                    csv,
+                    CatalogCsvLimits::DEFAULT,
+                    identity,
+                    Some(&rejection as &dyn CatalogCancellation),
+                )
+                .expect_err("injected CSV checkpoint must publish nothing");
+            assert!(
+                matches!(&error, IoError::Cancelled { stage: found, .. } if *found == stage),
+                "CSV stage {stage} was not wired: {error:?}"
+            );
+        }
+
+        let json_stages = [
+            "catalog-json-parser-entry",
+            "catalog-json-whitespace-scan",
+            "catalog-json-syntax",
+            "catalog-json-row",
+            "catalog-json-row-index",
+            "catalog-json-object-member",
+            "catalog-json-string-decode",
+            "catalog-json-string-growth",
+            "catalog-json-unicode-decode",
+            "catalog-json-object-publication",
+            "catalog-json-number-decode",
+            "catalog-json-number-growth",
+            "catalog-projection-preflight",
+            "catalog-json-numeric-row-index",
+            "catalog-json-row-projection",
+            "catalog-json-schema-validation",
+            "catalog-cell-trim",
+            "catalog-json-numeric-projection",
+            "catalog-json-input-fingerprint",
+            "catalog-json-publication",
+        ];
+        for stage in json_stages {
+            let rejection = RejectCatalogStage(stage);
+            let error = schema
+                .parse_json_operation(
+                    json,
+                    CatalogJsonLimits::DEFAULT,
+                    identity,
+                    Some(&rejection as &dyn CatalogCancellation),
+                )
+                .expect_err("injected JSON checkpoint must publish nothing");
+            assert!(
+                matches!(&error, IoError::Cancelled { stage: found, .. } if *found == stage),
+                "JSON stage {stage} was not wired: {error:?}"
+            );
+        }
+
+        let live = CancelGate::new_clock_free();
+        with_catalog_cx(&live, |cx| {
+            let first = schema
+                .parse_csv_cancellable(csv, CatalogCsvLimits::DEFAULT, identity, cx)
+                .expect("uncancelled CSV retry");
+            let second = schema
+                .parse_csv_cancellable(csv, CatalogCsvLimits::DEFAULT, identity, cx)
+                .expect("byte-identical CSV retry");
+            assert_eq!(first, second);
+            assert_eq!(
+                first.receipt().cancellation(),
+                CatalogCancellationEvidence::CxPolled {
+                    explicit_poll_stride: CATALOG_CANCELLATION_POLL_STRIDE,
+                }
+            );
+            assert!(first.receipt().to_json().contains(
+                "\"cancellation\":{\"mode\":\"fs-exec-cx\",\"explicit_poll_stride\":4096}"
+            ));
+        });
     }
 
     /// G0: every RFC 8259 string escape, BMP escape, surrogate pair, and raw

@@ -77,10 +77,16 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
   default while `parse_json_with_limits` admits a caller-selected envelope.
   `parse_csv` similarly uses `CatalogCsvLimits::DEFAULT`, while
   `parse_csv_with_limits` admits an explicit composed envelope.
+  `parse_csv_cancellable` and `parse_json_cancellable` require a caller-owned
+  `fs_exec::Cx`, retain the same explicit format limits and input-identity hook,
+  and refuse atomically with a stable stage/position when cancellation is
+  observed. Legacy entry points remain source-compatible and explicitly bind
+  `NotPolled` rather than implying a cancellation guarantee.
   Receipt-producing variants atomically return `CatalogRead`: the validated
   catalog plus a versioned `CatalogReadReceipt` binding fs-io and format/parser
-  versions, sealed schema evidence, exact limits, consumed counters, and an
-  explicit `validated-no-ledger-claim` authority state. `CatalogInputIdentity`
+  versions, sealed schema evidence, exact limits, consumed counters, the actual
+  cancellation boundary (`NotPolled` or `CxPolled { explicit_poll_stride }`),
+  and an explicit `validated-no-ledger-claim` authority state. `CatalogInputIdentity`
   accepts a caller-presented plain BLAKE3-256 exact-byte digest or explicit `Unavailable`;
   the reader retains but does not recompute the presented digest. It separately
   recomputes an FNV-1a exact-input replay fingerprint, and canonical receipt JSON
@@ -327,7 +333,17 @@ and nested receipts on one target.
 Legacy mesh parsers are single-pass and element-capped. The catalog CSV and JSON
 readers are single-pass state machines under explicit syntax, decoded-payload,
 validation-work, and projection/output caps; schema validation then walks the
-admitted rows. They have no `Cx` and make no cancellation-latency claim. The STEP
+admitted rows. Their cancellable entry points poll a caller-supplied `Cx` at
+entry and final publication, at no more than 4096 explicit parser, projection,
+line-scan, and input-fingerprint work units, and immediately before the owned
+field-index, row, member, string, and number growth/publication boundaries
+represented by stable refusal stages. Cancellation publishes neither a partial
+`Catalog` nor a success receipt, and a fresh uncancelled retry is deterministic.
+The legacy entry points
+have no `Cx` and their receipts say `NotPolled`. Allocator calls, `BTreeMap`
+internals and comparisons, and standard-library floating-point parsing remain
+separately cap-bounded but internally unpolled, so this slice does not claim
+latency inside those opaque calls. The STEP
 kernel is deliberately multi-pass (parse, shape/graph validation,
 canonical-layout serialization) and cap-bounded, but it has no `Cx` and
 makes no cancellation-latency claim. Native faceted decoding polls at entry,
@@ -491,7 +507,11 @@ import identically in both ASCII and binary (conformance-tested).
   parser/receipt versions, exact limits and consumed counters, schema evidence,
   a recomputed non-cryptographic input replay fingerprint, and result/no-claim
   status. The collision-resistant digest hook is deliberately not recomputed;
-  there is still no `Cx` or allocation-failure injection, and allocator
-  metadata plus `BTreeMap` node allocation remain unmeasured. No source-custody,
-  cancellation, complete live-byte, or ledger-promotion claim is made until
-  those proof-pending portions of `frankensim-svlo8` land.
+  cancellable CSV/JSON entry points now poll `Cx` across owned long loops,
+  growth boundaries, input fingerprinting, and final publication, while legacy
+  receipts remain explicitly `NotPolled`. There is still no deterministic
+  allocation-failure injection; allocator metadata and `BTreeMap` node
+  allocation remain unmeasured, and opaque allocator/map/float-parser calls
+  have no internal cancellation-latency claim. No source-custody, complete
+  live-byte, or ledger-promotion claim is made until those proof-pending
+  portions of `frankensim-svlo8` land.
