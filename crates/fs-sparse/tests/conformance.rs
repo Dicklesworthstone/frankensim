@@ -347,9 +347,42 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
     assert_eq!(ragged_compact.numa_localized(usize::MAX), ragged_compact);
 }
 
+/// Chunk-major SELL must not execute physical padding as extra arithmetic:
+/// even a zero-valued pad can change a live row's signed-zero result.
+#[test]
+fn sell_chunked_skips_signed_zero_padding() {
+    let tiny = f64::from_bits(1);
+    let a = Csr::from_parts(2, 2, vec![0, 1, 3], vec![0, 0, 1], vec![-tiny, -tiny, 0.0]);
+    let x = [0.25, 1.0];
+    let sell = Sell::from_csr(&a, 2, 2);
+    assert_eq!(sell.physical_slots(), a.nnz() + 1);
+
+    let mut y_csr = [f64::NAN; 2];
+    a.spmv(&x, &mut y_csr);
+    assert_eq!(y_csr[0].to_bits(), (-0.0f64).to_bits());
+    assert_eq!(y_csr[1].to_bits(), 0.0f64.to_bits());
+
+    let mut y_row = [f64::NAN; 2];
+    sell.spmv(&x, &mut y_row);
+    assert!(bitwise_equal(&y_csr, &y_row));
+
+    let mut y_chunked = [f64::NAN; 2];
+    sell.spmv_chunked(&x, &mut y_chunked);
+    assert!(bitwise_equal(&y_csr, &y_chunked));
+
+    for threads in [1, 2, 3] {
+        let mut y_sharded = [f64::NAN; 2];
+        sell.spmv_chunked_sharded(&x, &mut y_sharded, threads);
+        assert!(
+            bitwise_equal(&y_csr, &y_sharded),
+            "sharded chunked SELL diverged with {threads} threads"
+        );
+    }
+}
+
 /// wsbf segment 2: the chunk-major SELL kernels and the blocked SpMM
-/// are bitwise-equal to their reference twins (pads read, signed-zero
-/// argument inherited; every thread count; every rhs block width).
+/// are bitwise-equal to their reference twins (pads skipped; every
+/// thread count; every rhs block width).
 #[test]
 fn wsbf_segment2_bitwise_twins() {
     let (nrows, ncols) = (203usize, 157usize);

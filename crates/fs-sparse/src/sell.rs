@@ -183,13 +183,11 @@ impl Sell {
     /// bound the roofline lane measured on the CSR kernels.
     ///
     /// DETERMINISM: per-lane accumulation is k-ascending `mul_add`
-    /// from +0.0 — the same order as [`Sell::spmv`] — and lanes
-    /// shorter than the chunk read their PAD slots (col 0, val +0.0):
-    /// `mul_add(+0.0, x[0], acc)` is exactly `acc` when `acc` is not
-    /// −0.0, and acc starts +0.0 and can only stay +0.0 under
-    /// (+0.0) + (±0.0) — the sell.rs signed-zero argument, inherited
-    /// here because the kernel reads pads. Bitwise equality with the
-    /// row-major kernel is GATED in conformance.
+    /// from +0.0 — the same order as [`Sell::spmv`] — and each lane
+    /// stops at its stored logical row length. Physical pad slots are
+    /// never read, including after an accumulation has produced −0.0.
+    /// Bitwise equality with the row-major kernel is GATED in
+    /// conformance.
     pub fn spmv_chunked(&self, x: &[f64], y: &mut [f64]) {
         assert_eq!(x.len(), self.ncols, "spmv: x length");
         assert_eq!(y.len(), self.nrows, "spmv: y length");
@@ -207,21 +205,20 @@ impl Sell {
         for ch in 0..nchunks {
             let base = self.chunk_ptr[ch];
             let kmax = (self.chunk_ptr[ch + 1] - base) / c;
+            let row0 = ch * c;
+            let live = self.nrows.saturating_sub(row0).min(c);
             acc.fill(0.0);
             for k in 0..kmax {
                 let off = base + k * c;
                 let cols = &self.col_idx[off..off + c];
                 let vals = &self.vals[off..off + c];
-                for l in 0..c {
-                    acc[l] = vals[l].mul_add(x[cols[l]], acc[l]);
+                for l in 0..live {
+                    if k < self.row_len[row0 + l] {
+                        acc[l] = vals[l].mul_add(x[cols[l]], acc[l]);
+                    }
                 }
             }
-            let row0 = ch * c;
-            for (l, &a) in acc
-                .iter()
-                .enumerate()
-                .take(self.nrows.saturating_sub(row0).min(c))
-            {
+            for (l, &a) in acc.iter().enumerate().take(live) {
                 y[self.perm[row0 + l]] = a;
             }
         }
@@ -239,17 +236,19 @@ impl Sell {
         for ch in lo..hi {
             let base = self.chunk_ptr[ch];
             let kmax = (self.chunk_ptr[ch + 1] - base) / c;
+            let row0 = ch * c;
+            let live = self.nrows.saturating_sub(row0).min(c);
             acc.fill(0.0);
             for k in 0..kmax {
                 let off = base + k * c;
                 let cols = &self.col_idx[off..off + c];
                 let vals = &self.vals[off..off + c];
-                for l in 0..c {
-                    acc[l] = vals[l].mul_add(x[cols[l]], acc[l]);
+                for l in 0..live {
+                    if k < self.row_len[row0 + l] {
+                        acc[l] = vals[l].mul_add(x[cols[l]], acc[l]);
+                    }
                 }
             }
-            let row0 = ch * c;
-            let live = self.nrows.saturating_sub(row0).min(c);
             for (l, &a) in acc.iter().enumerate().take(live) {
                 out.push((self.perm[row0 + l], a));
             }
