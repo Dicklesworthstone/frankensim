@@ -513,6 +513,13 @@ fn identity_marker_lines(text: &str) -> BTreeSet<usize> {
                 line: start_line,
             } => {
                 if escaped {
+                    // An escaped byte may BE the newline of a string
+                    // continuation (`\` at end of line): count it, or every
+                    // marker after it maps one line early (the fs-blake3 x20
+                    // false-violation cluster, 2026-07-18).
+                    if byte == b'\n' {
+                        line += 1;
+                    }
                     state = State::Quoted {
                         escaped: false,
                         start,
@@ -11316,6 +11323,35 @@ impl Verifier for DenyAll {
         assert!(declarations.is_empty());
         assert!(violations.is_empty());
         assert!(identity_marker_lines(&owner_source("", "a", "none")).contains(&4));
+    }
+
+    #[test]
+    fn string_continuations_do_not_shift_marker_lines() {
+        // A backslash-newline continuation inside an ORDINARY string used to
+        // be consumed in the escaped state without counting its newline, so
+        // every marker AFTER the continuation mapped one line early and the
+        // declaration parser scanned from the wrong line (the fs-blake3 x20
+        // false-violation cluster, 2026-07-18: exactly four continuations
+        // before the charter declarations produced a four-line desync).
+        // The fixture is assembled at runtime so this file's own self-scan
+        // sees neither a literal marker nor the continuation bytes.
+        let continuation = format!(
+            "const MSG: &str = \"split {}\n    over {}\n    lines\";\n",
+            '\\', '\\'
+        );
+        let source =
+            format!("{continuation}const D: &[&str] = &[\n    \"{DECLARATION_MARKER}\",\n];\n");
+        let marker_line = source
+            .lines()
+            .position(|line| line.contains(DECLARATION_MARKER))
+            .expect("fixture contains the marker");
+        assert_eq!(
+            identity_marker_lines(&source)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![marker_line],
+            "marker line must match the source line exactly, continuations included"
+        );
     }
 
     #[test]
